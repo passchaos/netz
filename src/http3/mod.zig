@@ -7,6 +7,11 @@ pub const Error = wire.Error || error{
     InvalidFrame,
     InvalidSetting,
     InvalidStreamType,
+    ExpectedHeadersFrame,
+    MissingMethod,
+    MissingPath,
+    MissingStatus,
+    InvalidStatus,
     IntegerOverflow,
     QpackDynamicTableUnsupported,
 } || std.mem.Allocator.Error;
@@ -164,6 +169,183 @@ pub const Qpack = struct {
     }
 };
 
+pub const Request = struct {
+    method: []const u8,
+    path: []const u8,
+    scheme: []const u8 = "https",
+    authority: ?[]const u8 = null,
+    headers: []const Qpack.HeaderField = &.{},
+    body: []const u8 = &.{},
+
+    pub fn headerFields(self: Request, out: []Qpack.HeaderField) Error![]Qpack.HeaderField {
+        var count: usize = 0;
+        try appendHeaderField(out, &count, .{ .name = ":method", .value = self.method });
+        try appendHeaderField(out, &count, .{ .name = ":path", .value = self.path });
+        try appendHeaderField(out, &count, .{ .name = ":scheme", .value = self.scheme });
+        if (self.authority) |authority| try appendHeaderField(out, &count, .{ .name = ":authority", .value = authority });
+        for (self.headers) |header| try appendHeaderField(out, &count, header);
+        return out[0..count];
+    }
+
+    pub fn write(self: Request, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        var fields_buf: [64]Qpack.HeaderField = undefined;
+        const fields = try self.headerFields(&fields_buf);
+        try writeHeadersAndData(list, allocator, fields, self.body);
+    }
+};
+
+pub const Response = struct {
+    status: u16,
+    headers: []const Qpack.HeaderField = &.{},
+    body: []const u8 = &.{},
+
+    pub fn successful(self: Response) bool {
+        return self.status >= 200 and self.status < 300;
+    }
+
+    pub fn headerFields(self: Response, out: []Qpack.HeaderField) Error![]Qpack.HeaderField {
+        var count: usize = 0;
+        var status_buf: [3]u8 = undefined;
+        if (self.status < 100 or self.status > 999) return error.InvalidStatus;
+        const status = std.fmt.bufPrint(&status_buf, "{d}", .{self.status}) catch return error.InvalidStatus;
+        try appendHeaderField(out, &count, .{ .name = ":status", .value = status });
+        for (self.headers) |header| try appendHeaderField(out, &count, header);
+        return out[0..count];
+    }
+
+    pub fn write(self: Response, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        var fields_buf: [64]Qpack.HeaderField = undefined;
+        const fields = try self.headerFields(&fields_buf);
+        try writeHeadersAndData(list, allocator, fields, self.body);
+    }
+};
+
+pub const DecodedRequest = struct {
+    method: []const u8,
+    path: []const u8,
+    scheme: []const u8,
+    authority: ?[]const u8,
+    headers: []Qpack.HeaderField,
+    body: []const u8,
+    consumed: usize,
+
+    pub fn deinit(self: *DecodedRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.headers);
+        self.* = undefined;
+    }
+};
+
+pub const DecodedResponse = struct {
+    status: u16,
+    headers: []Qpack.HeaderField,
+    body: []const u8,
+    consumed: usize,
+
+    pub fn successful(self: DecodedResponse) bool {
+        return self.status >= 200 and self.status < 300;
+    }
+
+    pub fn deinit(self: *DecodedResponse, allocator: std.mem.Allocator) void {
+        allocator.free(self.headers);
+        self.* = undefined;
+    }
+};
+
+pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedRequest {
+    var message = try decodeMessage(allocator, bytes);
+    errdefer message.deinit(allocator);
+
+    var method: ?[]const u8 = null;
+    var path: ?[]const u8 = null;
+    var scheme: []const u8 = "https";
+    var authority: ?[]const u8 = null;
+    for (message.headers) |header| {
+        if (std.mem.eql(u8, header.name, ":method")) method = header.value else if (std.mem.eql(u8, header.name, ":path")) path = header.value else if (std.mem.eql(u8, header.name, ":scheme")) scheme = header.value else if (std.mem.eql(u8, header.name, ":authority")) authority = header.value;
+    }
+
+    return .{
+        .method = method orelse return error.MissingMethod,
+        .path = path orelse return error.MissingPath,
+        .scheme = scheme,
+        .authority = authority,
+        .headers = message.headers,
+        .body = message.body,
+        .consumed = message.consumed,
+    };
+}
+
+pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedResponse {
+    var message = try decodeMessage(allocator, bytes);
+    errdefer message.deinit(allocator);
+
+    var status: ?u16 = null;
+    for (message.headers) |header| {
+        if (std.mem.eql(u8, header.name, ":status")) {
+            status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
+        }
+    }
+
+    return .{
+        .status = status orelse return error.MissingStatus,
+        .headers = message.headers,
+        .body = message.body,
+        .consumed = message.consumed,
+    };
+}
+
+const DecodedMessage = struct {
+    headers: []Qpack.HeaderField,
+    body: []const u8,
+    consumed: usize,
+
+    fn deinit(self: *DecodedMessage, allocator: std.mem.Allocator) void {
+        allocator.free(self.headers);
+        self.* = undefined;
+    }
+};
+
+fn writeHeadersAndData(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    fields: []const Qpack.HeaderField,
+    body: []const u8,
+) Error!void {
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&block, allocator, fields);
+    try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, allocator);
+    if (body.len > 0) {
+        try (Frame{ .frame_type = FrameType.data, .payload = body, .consumed = 0 }).write(list, allocator);
+    }
+}
+
+fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedMessage {
+    const headers_frame = try Frame.parse(bytes);
+    if (headers_frame.frame_type != FrameType.headers) return error.ExpectedHeadersFrame;
+    const headers = try Qpack.decodeLiteralBlock(allocator, headers_frame.payload);
+    errdefer allocator.free(headers);
+
+    var consumed = headers_frame.consumed;
+    var body: []const u8 = &.{};
+    while (consumed < bytes.len) {
+        const frame = try Frame.parse(bytes[consumed..]);
+        consumed += frame.consumed;
+        switch (frame.frame_type) {
+            FrameType.data => body = frame.payload,
+            FrameType.headers => break,
+            else => {},
+        }
+    }
+
+    return .{ .headers = headers, .body = body, .consumed = consumed };
+}
+
+fn appendHeaderField(out: []Qpack.HeaderField, count: *usize, field: Qpack.HeaderField) Error!void {
+    if (count.* >= out.len) return error.InvalidFrame;
+    out[count.*] = field;
+    count.* += 1;
+}
+
 pub const Datagram = struct {
     quarter_stream_id: u64,
     payload: []const u8,
@@ -216,4 +398,45 @@ test "HTTP/3 datagram" {
     const parsed = try Datagram.parse(encoded.items);
     try std.testing.expectEqual(@as(u64, 4), parsed.quarter_stream_id);
     try std.testing.expectEqualStrings("capsule", parsed.payload);
+}
+
+test "HTTP/3 request encode decode" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try (Request{
+        .method = "POST",
+        .path = "/submit",
+        .authority = "example.com",
+        .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        .body = "hello",
+    }).write(&encoded, allocator);
+
+    var decoded = try decodeRequest(allocator, encoded.items);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("POST", decoded.method);
+    try std.testing.expectEqualStrings("/submit", decoded.path);
+    try std.testing.expectEqualStrings("example.com", decoded.authority.?);
+    try std.testing.expectEqualStrings("hello", decoded.body);
+}
+
+test "HTTP/3 response encode decode" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    const response = Response{
+        .status = 201,
+        .headers = &.{.{ .name = "server", .value = "netz" }},
+        .body = "created",
+    };
+    try std.testing.expect(response.successful());
+    try response.write(&encoded, allocator);
+
+    var decoded = try decodeResponse(allocator, encoded.items);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 201), decoded.status);
+    try std.testing.expect(decoded.successful());
+    try std.testing.expectEqualStrings("created", decoded.body);
 }
