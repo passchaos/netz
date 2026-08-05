@@ -631,6 +631,9 @@ pub const Connection = struct {
     fn readHeaderBlock(self: *Connection, first: http2.Frame) Error![]http2.Hpack.HeaderField {
         if (first.header.frame_type != .headers) return error.UnexpectedFrame;
         const first_headers = try http2.HeadersPayload.parse(first);
+        if (first_headers.priority) |priority| {
+            if (priority.stream_dependency == first.header.stream_id) return error.InvalidFrame;
+        }
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
         try block.appendSlice(self.allocator, first_headers.header_block);
@@ -1565,6 +1568,75 @@ test "HTTP/2 runtime decodes padded priority HEADERS payloads" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HTTP/2 runtime rejects HEADERS priority self dependency" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            var request = connection.readRequest() catch |err| {
+                if (err == error.InvalidFrame) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            request.deinit(shared.server.allocator);
+            shared.err = error.UnexpectedFrame;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/self-priority" },
+        .{ .name = ":scheme", .value = "https" },
+    });
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try payload.appendSlice(allocator, &.{ 0, 0, 0, 1, 16 }); // PRIORITY depends on stream 1 itself.
+    try payload.appendSlice(allocator, block.items);
+    const flags = flag_end_headers | @as(u8, (@as(http2.Flags, .{ .priority = true })).byte());
+    try writeFrame(allocator, io, client.stream, .headers, flags, 1, payload.items);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
 }
 
 test "HTTP/2 runtime answers PING while reading request body" {

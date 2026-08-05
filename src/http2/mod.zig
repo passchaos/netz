@@ -176,6 +176,7 @@ pub const PriorityPayload = struct {
         if (frame.header.frame_type != .priority) return error.InvalidFrameSize;
         if (frame.header.stream_id == 0) return error.InvalidStreamId;
         const priority = try Priority.parse(frame.payload);
+        if (priority.stream_dependency == frame.header.stream_id) return error.InvalidStreamId;
         return .{
             .stream_id = frame.header.stream_id,
             .exclusive = priority.exclusive,
@@ -193,6 +194,7 @@ pub const PriorityPayload = struct {
         weight: u8,
     ) Error!void {
         if (stream_id == 0) return error.InvalidStreamId;
+        if (stream_dependency == stream_id) return error.InvalidStreamId;
         var payload: [5]u8 = undefined;
         var dep = @as(u32, stream_dependency);
         if (exclusive) dep |= 0x8000_0000;
@@ -681,9 +683,14 @@ test "HTTP/2 PRIORITY payload helper" {
     try std.testing.expectEqual(@as(u8, 200), priority.weight);
 
     try std.testing.expectError(error.InvalidStreamId, PriorityPayload.write(&encoded, allocator, 0, false, 0, 1));
+    try std.testing.expectError(error.InvalidStreamId, PriorityPayload.write(&encoded, allocator, 5, false, 5, 1));
     try std.testing.expectError(error.InvalidFrameSize, PriorityPayload.parse(.{
         .header = .{ .length = 4, .frame_type = .priority, .flags = 0, .stream_id = 1 },
         .payload = &.{ 0, 0, 0, 0 },
+    }));
+    try std.testing.expectError(error.InvalidStreamId, PriorityPayload.parse(.{
+        .header = .{ .length = 5, .frame_type = .priority, .flags = 0, .stream_id = 5 },
+        .payload = &.{ 0, 0, 0, 5, 1 },
     }));
 }
 
