@@ -7,6 +7,9 @@ pub const Error = wire.Error || error{
     BufferTooShort,
     InvalidStunMessage,
     InvalidStunAttribute,
+    MissingStunAttribute,
+    BadMessageIntegrity,
+    BadFingerprint,
     InvalidIceCandidate,
     InvalidSdp,
     InvalidDtlsRecord,
@@ -54,6 +57,9 @@ pub const stun = struct {
         attr_type: AttributeType,
         value: []const u8,
     };
+
+    pub const message_integrity_len: usize = 20;
+    pub const fingerprint_len: usize = 4;
 
     pub const XorMappedAddress = struct {
         family: AddressFamily,
@@ -149,6 +155,107 @@ pub const stun = struct {
         try list.appendSlice(allocator, payload.items);
     }
 
+    pub const IceRole = enum {
+        controlling,
+        controlled,
+    };
+
+    pub const BindingRequestOptions = struct {
+        transaction_id: [12]u8,
+        username: []const u8,
+        password: []const u8,
+        priority: u32,
+        role: IceRole,
+        tie_breaker: u64,
+        use_candidate: bool = false,
+    };
+
+    pub fn writeIceBindingRequest(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: BindingRequestOptions) Error!void {
+        var priority_value: [4]u8 = undefined;
+        std.mem.writeInt(u32, &priority_value, options.priority, .big);
+        var tie_breaker_value: [8]u8 = undefined;
+        std.mem.writeInt(u64, &tie_breaker_value, options.tie_breaker, .big);
+
+        var attrs_buf: [4]Attribute = undefined;
+        var attr_count: usize = 0;
+        attrs_buf[attr_count] = .{ .attr_type = .username, .value = options.username };
+        attr_count += 1;
+        attrs_buf[attr_count] = .{ .attr_type = .priority, .value = &priority_value };
+        attr_count += 1;
+        if (options.use_candidate) {
+            attrs_buf[attr_count] = .{ .attr_type = .use_candidate, .value = &.{} };
+            attr_count += 1;
+        }
+        attrs_buf[attr_count] = .{
+            .attr_type = switch (options.role) {
+                .controlling => .ice_controlling,
+                .controlled => .ice_controlled,
+            },
+            .value = &tie_breaker_value,
+        };
+        attr_count += 1;
+
+        try writeAuthenticated(list, allocator, .request, .binding, options.transaction_id, attrs_buf[0..attr_count], options.password);
+    }
+
+    pub fn writeAuthenticatedBindingSuccess(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        transaction_id: [12]u8,
+        xor_mapped_value: []const u8,
+        password: []const u8,
+    ) Error!void {
+        const attrs = [_]Attribute{.{ .attr_type = .xor_mapped_address, .value = xor_mapped_value }};
+        try writeAuthenticated(list, allocator, .success_response, .binding, transaction_id, &attrs, password);
+    }
+
+    pub fn validateFingerprint(bytes: []const u8) Error!void {
+        const located = (try findAttributeBytes(bytes, .fingerprint)) orelse return error.MissingStunAttribute;
+        if (located.value.len != fingerprint_len) return error.InvalidStunAttribute;
+        const expected = fingerprint(bytes[0..located.attribute_start]);
+        const actual = std.mem.readInt(u32, located.value[0..4], .big);
+        if (actual != expected) return error.BadFingerprint;
+    }
+
+    pub fn validateMessageIntegrity(bytes: []const u8, password: []const u8) Error!void {
+        const located = (try findAttributeBytes(bytes, .message_integrity)) orelse return error.MissingStunAttribute;
+        if (located.value.len != message_integrity_len) return error.InvalidStunAttribute;
+
+        const integrity_end = located.value_start + message_integrity_len;
+        const length_with_integrity = std.math.cast(u16, integrity_end - 20) orelse return error.InvalidStunMessage;
+        var length_bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &length_bytes, length_with_integrity, .big);
+
+        var expected: [message_integrity_len]u8 = undefined;
+        var hmac = std.crypto.auth.hmac.HmacSha1.init(password);
+        hmac.update(bytes[0..2]);
+        hmac.update(&length_bytes);
+        hmac.update(bytes[4..located.attribute_start]);
+        hmac.final(&expected);
+        if (!std.crypto.timing_safe.eql([message_integrity_len]u8, expected, located.value[0..message_integrity_len].*)) {
+            return error.BadMessageIntegrity;
+        }
+    }
+
+    pub fn attrValue(message: Message, attr_type: AttributeType) ?[]const u8 {
+        for (message.attributes) |attr| {
+            if (attr.attr_type == attr_type) return attr.value;
+        }
+        return null;
+    }
+
+    pub fn attrU32(message: Message, attr_type: AttributeType) Error!u32 {
+        const value = attrValue(message, attr_type) orelse return error.MissingStunAttribute;
+        if (value.len != 4) return error.InvalidStunAttribute;
+        return std.mem.readInt(u32, value[0..4], .big);
+    }
+
+    pub fn attrU64(message: Message, attr_type: AttributeType) Error!u64 {
+        const value = attrValue(message, attr_type) orelse return error.MissingStunAttribute;
+        if (value.len != 8) return error.InvalidStunAttribute;
+        return std.mem.readInt(u64, value[0..8], .big);
+    }
+
     pub fn fingerprint(bytes: []const u8) u32 {
         return std.hash.Crc32.hash(bytes) ^ 0x5354554e;
     }
@@ -216,6 +323,98 @@ pub const stun = struct {
                 for (address, key) |byte, k| try list.append(allocator, byte ^ k);
             },
         }
+    }
+
+    fn writeAuthenticated(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        class: Class,
+        method: Method,
+        transaction_id: [12]u8,
+        attrs: []const Attribute,
+        password: []const u8,
+    ) Error!void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        for (attrs) |attr| try appendAttribute(&payload, allocator, attr);
+
+        const integrity_payload_len = payload.items.len + 4 + message_integrity_len;
+        var integrity_input: std.ArrayList(u8) = .empty;
+        defer integrity_input.deinit(allocator);
+        try writeHeaderAndPayload(&integrity_input, allocator, class, method, transaction_id, integrity_payload_len, payload.items);
+
+        var integrity: [message_integrity_len]u8 = undefined;
+        std.crypto.auth.hmac.HmacSha1.create(&integrity, integrity_input.items, password);
+        try appendAttribute(&payload, allocator, .{ .attr_type = .message_integrity, .value = &integrity });
+
+        const fingerprint_payload_len = payload.items.len + 4 + fingerprint_len;
+        var fingerprint_input: std.ArrayList(u8) = .empty;
+        defer fingerprint_input.deinit(allocator);
+        try writeHeaderAndPayload(&fingerprint_input, allocator, class, method, transaction_id, fingerprint_payload_len, payload.items);
+        const fingerprint_value = fingerprint(fingerprint_input.items);
+        var fingerprint_bytes: [fingerprint_len]u8 = undefined;
+        std.mem.writeInt(u32, &fingerprint_bytes, fingerprint_value, .big);
+        try appendAttribute(&payload, allocator, .{ .attr_type = .fingerprint, .value = &fingerprint_bytes });
+
+        try writeHeaderAndPayload(list, allocator, class, method, transaction_id, payload.items.len, payload.items);
+    }
+
+    fn writeHeaderAndPayload(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        class: Class,
+        method: Method,
+        transaction_id: [12]u8,
+        payload_len: usize,
+        payload: []const u8,
+    ) Error!void {
+        if (payload_len > std.math.maxInt(u16)) return error.InvalidStunMessage;
+        try wire.appendInt(list, allocator, u16, encodeType(method, class), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(payload_len), .big);
+        try wire.appendInt(list, allocator, u32, @This().magic_cookie, .big);
+        try list.appendSlice(allocator, &transaction_id);
+        try list.appendSlice(allocator, payload);
+    }
+
+    fn appendAttribute(list: *std.ArrayList(u8), allocator: std.mem.Allocator, attr: Attribute) Error!void {
+        if (attr.value.len > std.math.maxInt(u16)) return error.InvalidStunAttribute;
+        try wire.appendInt(list, allocator, u16, @intFromEnum(attr.attr_type), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(attr.value.len), .big);
+        try list.appendSlice(allocator, attr.value);
+        try list.appendNTimes(allocator, 0, (4 - (attr.value.len % 4)) % 4);
+    }
+
+    const LocatedAttribute = struct {
+        attribute_start: usize,
+        value_start: usize,
+        value: []const u8,
+    };
+
+    fn findAttributeBytes(bytes: []const u8, wanted: AttributeType) Error!?LocatedAttribute {
+        if (bytes.len < 20) return error.BufferTooShort;
+        const payload_len = std.mem.readInt(u16, bytes[2..4], .big);
+        if (bytes.len < 20 + @as(usize, payload_len)) return error.BufferTooShort;
+        var pos: usize = 20;
+        const end = 20 + @as(usize, payload_len);
+        while (pos < end) {
+            if (end - pos < 4) return error.InvalidStunAttribute;
+            const attribute_start = pos;
+            const attr_type: AttributeType = @enumFromInt(std.mem.readInt(u16, bytes[pos..][0..2], .big));
+            const attr_len = std.mem.readInt(u16, bytes[pos + 2 ..][0..2], .big);
+            pos += 4;
+            if (pos + attr_len > end) return error.InvalidStunAttribute;
+            const value_start = pos;
+            const value = bytes[pos .. pos + attr_len];
+            pos += attr_len;
+            pos += (@as(usize, 4) - (attr_len % 4)) % 4;
+            if (pos > end) return error.InvalidStunAttribute;
+            if (attr_type == wanted) return .{
+                .attribute_start = attribute_start,
+                .value_start = value_start,
+                .value = value,
+            };
+        }
+        return null;
     }
 };
 
@@ -972,6 +1171,37 @@ test "STUN XOR-MAPPED-ADDRESS helper" {
     const decoded = try stun.parseXorMappedAddress(value.items, tid);
     try std.testing.expectEqual(@as(u16, 54321), decoded.port);
     try std.testing.expectEqualStrings(&.{ 192, 0, 2, 99 }, decoded.bytes());
+}
+
+test "STUN ICE binding request authenticates integrity and fingerprint" {
+    const allocator = std.testing.allocator;
+    const tid: [12]u8 = .{ 0xaa, 0xbb, 0xcc, 0xdd, 1, 2, 3, 4, 5, 6, 7, 8 };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try stun.writeIceBindingRequest(&encoded, allocator, .{
+        .transaction_id = tid,
+        .username = "remote:local",
+        .password = "ice-password",
+        .priority = stun.priority(126, 65_535, 1),
+        .role = .controlling,
+        .tie_breaker = 0x0102030405060708,
+        .use_candidate = true,
+    });
+
+    try stun.validateFingerprint(encoded.items);
+    try stun.validateMessageIntegrity(encoded.items, "ice-password");
+    try std.testing.expectError(error.BadMessageIntegrity, stun.validateMessageIntegrity(encoded.items, "wrong-password"));
+
+    var parsed = try stun.parse(allocator, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(stun.Class.request, parsed.class);
+    try std.testing.expectEqualStrings("remote:local", stun.attrValue(parsed, .username).?);
+    try std.testing.expectEqual(@as(u32, stun.priority(126, 65_535, 1)), try stun.attrU32(parsed, .priority));
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), try stun.attrU64(parsed, .ice_controlling));
+    try std.testing.expect(stun.attrValue(parsed, .use_candidate) != null);
+
+    encoded.items[encoded.items.len - 1] ^= 0xff;
+    try std.testing.expectError(error.BadFingerprint, stun.validateFingerprint(encoded.items));
 }
 
 test "ICE candidate parser and SDP parser" {

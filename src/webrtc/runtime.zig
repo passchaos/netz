@@ -9,6 +9,7 @@ pub const Error = webrtc.Error || error{
     DatagramTooLarge,
     UnexpectedStunMessage,
     MissingXorMappedAddress,
+    MissingIceAttribute,
 } || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError || std.Io.Cancelable;
 
 pub const Limits = struct {
@@ -35,12 +36,20 @@ pub const Peer = struct {
         return self.endpoint.bindingRequest(to);
     }
 
+    pub fn iceBindingRequest(self: *Peer, to: net.IpAddress, options: stun.BindingRequestOptions) Error!BindingResponse {
+        return self.endpoint.iceBindingRequest(to, options);
+    }
+
     pub fn receiveBindingRequest(self: *Peer) Error!StunDatagram {
         return self.endpoint.receiveBindingRequest();
     }
 
     pub fn respondBindingSuccess(self: *Peer, request: StunDatagram) Error!void {
         try self.endpoint.respondBindingSuccess(request);
+    }
+
+    pub fn respondIceBindingSuccess(self: *Peer, request: StunDatagram, password: []const u8) Error!void {
+        try self.endpoint.respondIceBindingSuccess(request, password);
     }
 
     pub fn sendRtpPacket(self: *Peer, to: net.IpAddress, options: webrtc.rtp.WriteOptions, payload: []const u8) Error!void {
@@ -130,6 +139,33 @@ pub const PeerEndpoint = struct {
         }
     }
 
+    pub fn iceBindingRequest(self: *PeerEndpoint, to: net.IpAddress, options: stun.BindingRequestOptions) Error!BindingResponse {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try stun.writeIceBindingRequest(&encoded, self.allocator, options);
+        try self.sendBytes(to, encoded.items);
+
+        while (true) {
+            var datagram = try self.receiveStunDatagram();
+            errdefer datagram.deinit(self.allocator);
+            if (!datagram.from.eql(&to)) {
+                datagram.deinit(self.allocator);
+                continue;
+            }
+            if (!std.mem.eql(u8, &datagram.message.transaction_id, &options.transaction_id)) {
+                datagram.deinit(self.allocator);
+                continue;
+            }
+            if (datagram.message.method != .binding or datagram.message.class != .success_response) {
+                return error.UnexpectedStunMessage;
+            }
+            try stun.validateFingerprint(datagram.bytes);
+            try stun.validateMessageIntegrity(datagram.bytes, options.password);
+            const mapped = try findXorMappedAddress(datagram.message);
+            return .{ .datagram = datagram, .mapped_address = mapped };
+        }
+    }
+
     pub fn receiveBindingRequest(self: *PeerEndpoint) Error!StunDatagram {
         while (true) {
             var datagram = try self.receiveStunDatagram();
@@ -141,6 +177,10 @@ pub const PeerEndpoint = struct {
 
     pub fn respondBindingSuccess(self: *PeerEndpoint, request: StunDatagram) Error!void {
         try writeBindingSuccess(self, request);
+    }
+
+    pub fn respondIceBindingSuccess(self: *PeerEndpoint, request: StunDatagram, password: []const u8) Error!void {
+        try writeAuthenticatedBindingSuccess(self, request, password);
     }
 
     pub fn sendRtpPacket(self: *PeerEndpoint, to: net.IpAddress, options: webrtc.rtp.WriteOptions, payload: []const u8) Error!void {
@@ -513,6 +553,10 @@ pub const StunServer = struct {
     pub fn respondBindingSuccess(self: *StunServer, request: StunDatagram) Error!void {
         try writeBindingSuccess(&self.endpoint, request);
     }
+
+    pub fn respondIceBindingSuccess(self: *StunServer, request: StunDatagram, password: []const u8) Error!void {
+        try writeAuthenticatedBindingSuccess(&self.endpoint, request, password);
+    }
 };
 
 pub const StunClient = struct {
@@ -558,6 +602,33 @@ pub const StunClient = struct {
             if (datagram.message.method != .binding or datagram.message.class != .success_response) {
                 return error.UnexpectedStunMessage;
             }
+            const mapped = try findXorMappedAddress(datagram.message);
+            return .{ .datagram = datagram, .mapped_address = mapped };
+        }
+    }
+
+    pub fn iceBindingRequest(self: *StunClient, options: stun.BindingRequestOptions) Error!BindingResponse {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.endpoint.allocator);
+        try stun.writeIceBindingRequest(&encoded, self.endpoint.allocator, options);
+        try self.endpoint.sendBytes(self.server, encoded.items);
+
+        while (true) {
+            var datagram = try self.endpoint.receive();
+            errdefer datagram.deinit(self.endpoint.allocator);
+            if (!datagram.from.eql(&self.server)) {
+                datagram.deinit(self.endpoint.allocator);
+                continue;
+            }
+            if (!std.mem.eql(u8, &datagram.message.transaction_id, &options.transaction_id)) {
+                datagram.deinit(self.endpoint.allocator);
+                continue;
+            }
+            if (datagram.message.method != .binding or datagram.message.class != .success_response) {
+                return error.UnexpectedStunMessage;
+            }
+            try stun.validateFingerprint(datagram.bytes);
+            try stun.validateMessageIntegrity(datagram.bytes, options.password);
             const mapped = try findXorMappedAddress(datagram.message);
             return .{ .datagram = datagram, .mapped_address = mapped };
         }
@@ -651,6 +722,17 @@ fn writeBindingSuccess(endpoint: anytype, request: StunDatagram) Error!void {
     try endpoint.sendBytes(request.from, encoded.items);
 }
 
+fn writeAuthenticatedBindingSuccess(endpoint: anytype, request: StunDatagram, password: []const u8) Error!void {
+    var value: std.ArrayList(u8) = .empty;
+    defer value.deinit(endpoint.allocator);
+    const family, const addr_bytes, const port = ipAddressParts(request.from) orelse return error.UnsupportedAddressFamily;
+    try stun.writeXorMappedAddress(&value, endpoint.allocator, family, port, addr_bytes, request.message.transaction_id);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(endpoint.allocator);
+    try stun.writeAuthenticatedBindingSuccess(&encoded, endpoint.allocator, request.message.transaction_id, value.items, password);
+    try endpoint.sendBytes(request.from, encoded.items);
+}
+
 fn findXorMappedAddress(message: stun.Message) Error!stun.XorMappedAddress {
     for (message.attributes) |attribute| {
         if (attribute.attr_type == .xor_mapped_address) {
@@ -734,6 +816,71 @@ test "WebRTC STUN runtime binding request over UDP" {
     try std.testing.expectEqual(stun.AddressFamily.ipv4, response.mapped_address.family);
     try std.testing.expectEqual(client_ip4.port, response.mapped_address.port);
     try std.testing.expectEqualStrings(&client_ip4.bytes, response.mapped_address.bytes());
+}
+
+test "WebRTC STUN runtime authenticated ICE binding request" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try StunServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+
+    const password = "shared-ice-password";
+    const transaction_id: [12]u8 = .{ 0x10, 0x20, 0x30, 0x40, 1, 2, 3, 4, 5, 6, 7, 8 };
+    const expected_priority = stun.priority(126, 65_535, 1);
+
+    const Shared = struct {
+        server: *StunServer,
+        password: []const u8,
+        expected_priority: u32,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server, shared.password, shared.expected_priority) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *StunServer, password_bytes: []const u8, expected: u32) !void {
+            var request = try server_ptr.receiveBindingRequest();
+            defer request.deinit(server_ptr.endpoint.allocator);
+            try stun.validateFingerprint(request.bytes);
+            try stun.validateMessageIntegrity(request.bytes, password_bytes);
+            try std.testing.expectEqualStrings("remote:local", stun.attrValue(request.message, .username).?);
+            try std.testing.expectEqual(expected, try stun.attrU32(request.message, .priority));
+            try std.testing.expectEqual(@as(u64, 0x0102030405060708), try stun.attrU64(request.message, .ice_controlling));
+            try std.testing.expect(stun.attrValue(request.message, .use_candidate) != null);
+            try server_ptr.respondIceBindingSuccess(request, password_bytes);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .password = password, .expected_priority = expected_priority };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try StunClient.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{});
+    defer client.deinit();
+    var response = try client.iceBindingRequest(.{
+        .transaction_id = transaction_id,
+        .username = "remote:local",
+        .password = password,
+        .priority = expected_priority,
+        .role = .controlling,
+        .tie_breaker = 0x0102030405060708,
+        .use_candidate = true,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    const client_ip4 = client.address().ip4;
+    try std.testing.expectEqual(stun.AddressFamily.ipv4, response.mapped_address.family);
+    try std.testing.expectEqual(client_ip4.port, response.mapped_address.port);
+    try stun.validateFingerprint(response.datagram.bytes);
+    try stun.validateMessageIntegrity(response.datagram.bytes, password);
 }
 
 test "WebRTC RTP runtime sends and receives packets over UDP" {

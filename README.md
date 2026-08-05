@@ -68,8 +68,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   development runtime over the HTTP/3 dev transport, a protected QUIC 1-RTT
   runtime over protected HTTP/3, and a handshake-backed protected runtime with
   a `std.Io.async` datagram receive helper
-- WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
-  SDP, DTLS record headers, RTP packets/extensions/padding, RTCP
+- WebRTC building blocks: STUN, ICE connectivity-check helpers with
+  USERNAME/PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE plus
+  MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
+  XOR-MAPPED-ADDRESS helpers, ICE candidates, SDP, DTLS record headers, RTP packets/extensions/padding, RTCP
   sender/receiver reports plus PLI/NACK feedback, and SCTP common headers, plus
   blocking UDP STUN binding, RTP/RTCP packet, and same-socket STUN/DTLS/RTP/RTCP
   peer runtimes with a `std.Io.async` concurrent receive helper
