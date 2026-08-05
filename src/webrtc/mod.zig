@@ -9,6 +9,7 @@ pub const Error = wire.Error || error{
     InvalidSdp,
     InvalidDtlsRecord,
     InvalidRtpPacket,
+    UnsupportedAddressFamily,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
 
@@ -50,6 +51,19 @@ pub const stun = struct {
         attr_type: AttributeType,
         value: []const u8,
     };
+
+    pub const XorMappedAddress = struct {
+        family: AddressFamily,
+        port: u16,
+        address: [16]u8,
+        address_len: u8,
+
+        pub fn bytes(self: XorMappedAddress) []const u8 {
+            return self.address[0..self.address_len];
+        }
+    };
+
+    pub const AddressFamily = enum { ipv4, ipv6 };
 
     pub const Message = struct {
         class: Class,
@@ -140,6 +154,65 @@ pub const stun = struct {
         return (@as(u32, type_preference) << 24) |
             (@as(u32, local_preference) << 8) |
             (@as(u32, 256) - component_id);
+    }
+
+    pub fn parseXorMappedAddress(value: []const u8, transaction_id: [12]u8) Error!XorMappedAddress {
+        if (value.len < 4 or value[0] != 0) return error.InvalidStunAttribute;
+        const family = value[1];
+        const port = std.mem.readInt(u16, value[2..4], .big) ^ @as(u16, @truncate(@This().magic_cookie >> 16));
+        switch (family) {
+            0x01 => {
+                if (value.len != 8) return error.InvalidStunAttribute;
+                var decoded: [16]u8 = undefined;
+                @memset(&decoded, 0);
+                @memcpy(decoded[0..4], value[4..8]);
+                var cookie_bytes: [4]u8 = undefined;
+                std.mem.writeInt(u32, &cookie_bytes, @This().magic_cookie, .big);
+                for (decoded[0..4], cookie_bytes) |*byte, key| byte.* ^= key;
+                return .{ .family = .ipv4, .port = port, .address = decoded, .address_len = 4 };
+            },
+            0x02 => {
+                if (value.len != 20) return error.InvalidStunAttribute;
+                var decoded: [16]u8 = value[4..20].*;
+                var key: [16]u8 = undefined;
+                std.mem.writeInt(u32, key[0..4], @This().magic_cookie, .big);
+                @memcpy(key[4..], &transaction_id);
+                for (&decoded, key) |*byte, k| byte.* ^= k;
+                return .{ .family = .ipv6, .port = port, .address = decoded, .address_len = 16 };
+            },
+            else => return error.UnsupportedAddressFamily,
+        }
+    }
+
+    pub fn writeXorMappedAddress(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        family: AddressFamily,
+        port: u16,
+        address: []const u8,
+        transaction_id: [12]u8,
+    ) Error!void {
+        try list.append(allocator, 0);
+        try list.append(allocator, switch (family) {
+            .ipv4 => 0x01,
+            .ipv6 => 0x02,
+        });
+        try wire.appendInt(list, allocator, u16, port ^ @as(u16, @truncate(@This().magic_cookie >> 16)), .big);
+        switch (family) {
+            .ipv4 => {
+                if (address.len != 4) return error.UnsupportedAddressFamily;
+                var cookie_bytes: [4]u8 = undefined;
+                std.mem.writeInt(u32, &cookie_bytes, @This().magic_cookie, .big);
+                for (address, cookie_bytes) |byte, key| try list.append(allocator, byte ^ key);
+            },
+            .ipv6 => {
+                if (address.len != 16) return error.UnsupportedAddressFamily;
+                var key: [16]u8 = undefined;
+                std.mem.writeInt(u32, key[0..4], @This().magic_cookie, .big);
+                @memcpy(key[4..], &transaction_id);
+                for (address, key) |byte, k| try list.append(allocator, byte ^ k);
+            },
+        }
     }
 };
 
@@ -386,6 +459,11 @@ pub const dtls = struct {
 };
 
 pub const rtp = struct {
+    pub const Extension = struct {
+        profile: u16,
+        data: []const u8,
+    };
+
     pub const Header = struct {
         version: u2,
         padding: bool,
@@ -432,6 +510,93 @@ pub const rtp = struct {
             self.* = undefined;
         }
     };
+
+    pub const Packet = struct {
+        header: Header,
+        extension: ?Extension,
+        payload: []const u8,
+        padding_len: u8,
+
+        pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) Error!Packet {
+            var header = try Header.parse(allocator, bytes);
+            errdefer header.deinit(allocator);
+            if (header.version != 2) return error.InvalidRtpPacket;
+
+            var pos = header.payload_offset;
+            var extension: ?Extension = null;
+            if (header.extension) {
+                if (bytes.len < pos + 4) return error.BufferTooShort;
+                const profile = std.mem.readInt(u16, bytes[pos..][0..2], .big);
+                const words = std.mem.readInt(u16, bytes[pos + 2 ..][0..2], .big);
+                pos += 4;
+                const ext_len = std.math.mul(usize, words, 4) catch return error.IntegerOverflow;
+                if (bytes.len < pos + ext_len) return error.BufferTooShort;
+                extension = .{ .profile = profile, .data = bytes[pos .. pos + ext_len] };
+                pos += ext_len;
+            }
+
+            var payload_end = bytes.len;
+            var padding_len: u8 = 0;
+            if (header.padding) {
+                if (bytes.len == pos) return error.InvalidRtpPacket;
+                padding_len = bytes[bytes.len - 1];
+                if (padding_len == 0 or padding_len > bytes.len - pos) return error.InvalidRtpPacket;
+                payload_end -= padding_len;
+            }
+
+            return .{
+                .header = header,
+                .extension = extension,
+                .payload = bytes[pos..payload_end],
+                .padding_len = padding_len,
+            };
+        }
+
+        pub fn deinit(self: *Packet, allocator: std.mem.Allocator) void {
+            self.header.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
+    pub const WriteOptions = struct {
+        marker: bool = false,
+        payload_type: u7,
+        sequence_number: u16,
+        timestamp: u32,
+        ssrc: u32,
+        csrcs: []const u32 = &.{},
+        extension: ?Extension = null,
+        padding_len: u8 = 0,
+    };
+
+    pub fn writePacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: WriteOptions, payload: []const u8) Error!void {
+        if (options.csrcs.len > 15) return error.InvalidRtpPacket;
+        if (options.padding_len == 1) return error.InvalidRtpPacket;
+        const has_padding = options.padding_len > 0;
+        const has_extension = options.extension != null;
+        const b0: u8 = 0x80 |
+            (if (has_padding) @as(u8, 0x20) else 0) |
+            (if (has_extension) @as(u8, 0x10) else 0) |
+            @as(u8, @intCast(options.csrcs.len));
+        const b1: u8 = (if (options.marker) @as(u8, 0x80) else 0) | @as(u8, options.payload_type);
+        try list.append(allocator, b0);
+        try list.append(allocator, b1);
+        try wire.appendInt(list, allocator, u16, options.sequence_number, .big);
+        try wire.appendInt(list, allocator, u32, options.timestamp, .big);
+        try wire.appendInt(list, allocator, u32, options.ssrc, .big);
+        for (options.csrcs) |csrc| try wire.appendInt(list, allocator, u32, csrc, .big);
+        if (options.extension) |extension| {
+            if (extension.data.len % 4 != 0) return error.InvalidRtpPacket;
+            try wire.appendInt(list, allocator, u16, extension.profile, .big);
+            try wire.appendInt(list, allocator, u16, @intCast(extension.data.len / 4), .big);
+            try list.appendSlice(allocator, extension.data);
+        }
+        try list.appendSlice(allocator, payload);
+        if (options.padding_len > 0) {
+            try list.appendNTimes(allocator, 0, options.padding_len - 1);
+            try list.append(allocator, options.padding_len);
+        }
+    }
 };
 
 pub const sctp = struct {
@@ -492,6 +657,17 @@ test "STUN binding message roundtrip" {
     try std.testing.expectEqualStrings("user:peer", parsed.attributes[0].value);
 }
 
+test "STUN XOR-MAPPED-ADDRESS helper" {
+    const allocator = std.testing.allocator;
+    const tid: [12]u8 = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    var value: std.ArrayList(u8) = .empty;
+    defer value.deinit(allocator);
+    try stun.writeXorMappedAddress(&value, allocator, .ipv4, 54321, &.{ 192, 0, 2, 99 }, tid);
+    const decoded = try stun.parseXorMappedAddress(value.items, tid);
+    try std.testing.expectEqual(@as(u16, 54321), decoded.port);
+    try std.testing.expectEqualStrings(&.{ 192, 0, 2, 99 }, decoded.bytes());
+}
+
 test "ICE candidate parser and SDP parser" {
     const allocator = std.testing.allocator;
     const line = "candidate:1 1 UDP 2130706431 192.0.2.1 54400 typ host";
@@ -520,4 +696,27 @@ test "RTP and DTLS record parsers" {
     try std.testing.expectEqual(dtls.ContentType.handshake, record.content_type);
     try std.testing.expectEqual(@as(u48, 2), record.sequence_number);
     try std.testing.expectEqualStrings(&.{0xff}, record.fragment);
+}
+
+test "RTP packet extension padding and writer" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try rtp.writePacket(&encoded, allocator, .{
+        .marker = true,
+        .payload_type = 111,
+        .sequence_number = 10,
+        .timestamp = 99,
+        .ssrc = 0x01020304,
+        .extension = .{ .profile = 0xbede, .data = &.{ 0x10, 0x00, 0x00, 0x00 } },
+        .padding_len = 4,
+    }, "opus");
+
+    var packet = try rtp.Packet.parse(allocator, encoded.items);
+    defer packet.deinit(allocator);
+    try std.testing.expect(packet.header.marker);
+    try std.testing.expectEqual(@as(u7, 111), packet.header.payload_type);
+    try std.testing.expectEqual(@as(u16, 0xbede), packet.extension.?.profile);
+    try std.testing.expectEqualStrings("opus", packet.payload);
+    try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
 }
