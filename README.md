@@ -14,7 +14,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   QUIC UDP frame endpoint
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), plus
-  a blocking UDP endpoint runtime for frame datagrams
+  v1 Initial key/header/payload protection helpers and a blocking UDP endpoint
+  runtime for frame datagrams
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, message assembly, and a blocking TCP
   client/server runtime over HTTP/1 Upgrade
@@ -31,11 +32,12 @@ starts with deterministic parsers, serializers, and state helpers for:
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1,
 prior-knowledge HTTP/2 (h2c), and WebSocket now include blocking TCP
-client/server runtimes built on Zig 0.16 `std.Io.net`; QUIC has a blocking UDP
-endpoint runtime for datagram/frame transport; MQTT has a blocking TCP
-client/server runtime for CONNECT/PUBLISH/PING/DISCONNECT flows. TLS, event
-loops, packet protection, congestion control, ICE/DTLS/SRTP state machines, and
-richer high-level clients/servers can layer on the same byte-level pieces.
+client/server runtimes built on Zig 0.16 `std.Io.net`; QUIC has Initial
+protection primitives plus a blocking UDP endpoint runtime for datagram/frame
+transport; MQTT has a blocking TCP client/server runtime for
+CONNECT/PUBLISH/PING/DISCONNECT flows. TLS, event loops, congestion control,
+ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on
+the same byte-level pieces.
 
 The HTTP/3 runtime is intentionally labeled as a cleartext development transport:
 it exercises real UDP I/O and HTTP/3 frame/message handling over QUIC STREAM

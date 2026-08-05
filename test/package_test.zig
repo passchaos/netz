@@ -14,6 +14,7 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.mqtt.runtime.Limits{}).max_packet_size);
     try std.testing.expectEqual(@as(usize, 65_535), (netz.quic.runtime.Limits{}).max_datagram_size);
+    try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(netz.webtransport.SessionId.init(0).isClientInitiatedBidirectional());
     try std.testing.expectEqual(@as(usize, 65_535), (netz.webtransport.runtime.Limits{}).http3.quic.max_datagram_size);
     try std.testing.expectEqual(@as(u32, 0x2112A442), netz.webrtc.stun.magic_cookie);

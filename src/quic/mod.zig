@@ -3,6 +3,7 @@ const wire = @import("../internal/wire.zig");
 
 pub const varint = @import("varint.zig");
 pub const runtime = @import("runtime.zig");
+pub const protection = @import("protection.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
