@@ -189,6 +189,46 @@ pub const Connection = struct {
         try writeAll(self.io, self.stream, encoded.items);
     }
 
+    pub fn subscribe(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions) Error!OwnedSubAck {
+        const packet_id = self.nextPacketId();
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try mqtt.Subscribe.write(&encoded, self.allocator, self.protocol, packet_id, options.properties, subscriptions);
+        try writeAll(self.io, self.stream, encoded.items);
+
+        var suback = try self.readSubAck();
+        errdefer suback.deinit(self.allocator);
+        if (suback.suback.packet_id != packet_id or suback.suback.reason_codes.len != subscriptions.len) {
+            return error.UnexpectedPacket;
+        }
+        return suback;
+    }
+
+    pub fn readSubscribe(self: *Connection) Error!OwnedSubscribe {
+        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        errdefer packet.deinit(self.allocator);
+        if (packet.fixed.packet_type != .subscribe) return error.UnexpectedPacket;
+        var subscribe_packet = try mqtt.Subscribe.parse(self.allocator, self.protocol, packet.bytes);
+        errdefer subscribe_packet.deinit(self.allocator);
+        return .{ .packet = packet, .subscribe = subscribe_packet };
+    }
+
+    pub fn writeSubAck(self: *Connection, packet_id: u16, reason_codes: []const u8, properties: []const mqtt.Property) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try mqtt.SubAck.write(&encoded, self.allocator, self.protocol, packet_id, properties, reason_codes);
+        try writeAll(self.io, self.stream, encoded.items);
+    }
+
+    pub fn readSubAck(self: *Connection) Error!OwnedSubAck {
+        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        errdefer packet.deinit(self.allocator);
+        if (packet.fixed.packet_type != .suback) return error.UnexpectedPacket;
+        var suback = try mqtt.SubAck.parse(self.allocator, self.protocol, packet.bytes);
+        errdefer suback.deinit(self.allocator);
+        return .{ .packet = packet, .suback = suback };
+    }
+
     pub fn ping(self: *Connection) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
@@ -253,6 +293,10 @@ pub const PublishOptions = struct {
     dup: bool = false,
 };
 
+pub const SubscribeOptions = struct {
+    properties: []const mqtt.Property = &.{},
+};
+
 pub const OwnedPacket = struct {
     bytes: []u8,
     fixed: mqtt.FixedHeader,
@@ -302,6 +346,28 @@ pub const OwnedAck = struct {
 
     pub fn deinit(self: *OwnedAck, allocator: std.mem.Allocator) void {
         self.ack.deinit(allocator);
+        self.packet.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedSubscribe = struct {
+    packet: OwnedPacket,
+    subscribe: mqtt.Subscribe,
+
+    pub fn deinit(self: *OwnedSubscribe, allocator: std.mem.Allocator) void {
+        self.subscribe.deinit(allocator);
+        self.packet.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedSubAck = struct {
+    packet: OwnedPacket,
+    suback: mqtt.SubAck,
+
+    pub fn deinit(self: *OwnedSubAck, allocator: std.mem.Allocator) void {
+        self.suback.deinit(allocator);
         self.packet.deinit(allocator);
         self.* = undefined;
     }
@@ -391,6 +457,16 @@ test "MQTT runtime client and server exchange over TCP" {
             defer accepted.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("client-1", accepted.connect.connect.client_id);
 
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(usize, 2), subscribe.subscribe.subscriptions.len);
+            try std.testing.expectEqualStrings("sensors/+", subscribe.subscribe.subscriptions[0].topic_filter);
+            try std.testing.expectEqualStrings("alerts/#", subscribe.subscribe.subscriptions[1].topic_filter);
+            const reason_codes = [_]u8{ 0x01, 0x00 };
+            try accepted.connection.writeSubAck(subscribe.subscribe.packet_id, &reason_codes, &.{});
+
+            try accepted.connection.publish("alerts/system", "online", .{});
+
             var publish = try accepted.connection.readPublish();
             defer publish.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("sensors/temp", publish.publish.topic);
@@ -416,6 +492,19 @@ test "MQTT runtime client and server exchange over TCP" {
         .limits = .{ .max_packet_size = 4096 },
     });
     defer client.close();
+
+    const subscriptions = [_]mqtt.Subscription{
+        .{ .topic_filter = "sensors/+", .qos = .at_least_once },
+        .{ .topic_filter = "alerts/#", .qos = .at_most_once },
+    };
+    var suback = try client.subscribe(&subscriptions, .{});
+    defer suback.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x00 }, suback.suback.reason_codes);
+
+    var server_publish = try client.readPublish();
+    defer server_publish.deinit(allocator);
+    try std.testing.expectEqualStrings("alerts/system", server_publish.publish.topic);
+    try std.testing.expectEqualStrings("online", server_publish.publish.payload);
 
     try client.publish("sensors/temp", "21.5", .{ .qos = .at_least_once });
     try client.ping();
