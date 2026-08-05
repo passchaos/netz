@@ -63,17 +63,21 @@ pub const Server = struct {
         if (client_settings.frame.header.frame_type != .settings or (client_settings.frame.header.flags & flag_ack) != 0) {
             return error.UnexpectedFrame;
         }
+        const peer_settings = try http2.parseSettings(self.allocator, client_settings.frame.payload);
+        defer self.allocator.free(peer_settings);
 
         try writeFrame(self.allocator, self.io, stream, .settings, 0, 0, &.{});
         try writeFrame(self.allocator, self.io, stream, .settings, flag_ack, 0, &.{});
 
-        return .{
+        var connection = Connection{
             .io = self.io,
             .allocator = self.allocator,
             .stream = stream,
             .role = .server,
             .limits = self.limits,
         };
+        try connection.applySettings(peer_settings);
+        return connection;
     }
 
     pub fn serveConcurrent(
@@ -172,6 +176,14 @@ pub const Client = struct {
 
         var saw_server_settings = false;
         var saw_settings_ack = false;
+        var connection = Connection{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .role = .client,
+            .limits = limits,
+        };
+        errdefer connection.close();
         while (!saw_server_settings or !saw_settings_ack) {
             var frame = try readFrame(allocator, io, stream, limits);
             defer frame.deinit(allocator);
@@ -180,17 +192,13 @@ pub const Client = struct {
                 saw_settings_ack = true;
             } else {
                 saw_server_settings = true;
+                const settings = try http2.parseSettings(allocator, frame.frame.payload);
+                defer allocator.free(settings);
+                try connection.applySettings(settings);
                 try writeFrame(allocator, io, stream, .settings, flag_ack, 0, &.{});
             }
         }
-
-        return .{
-            .io = io,
-            .allocator = allocator,
-            .stream = stream,
-            .role = .client,
-            .limits = limits,
-        };
+        return connection;
     }
 };
 
@@ -217,6 +225,10 @@ pub const FlowWindow = struct {
     pub fn update(self: *FlowWindow, increment: u31) void {
         self.value = std.math.add(i64, self.value, increment) catch std.math.maxInt(i64);
     }
+
+    pub fn adjust(self: *FlowWindow, delta: i64) void {
+        self.value = std.math.add(i64, self.value, delta) catch if (delta > 0) std.math.maxInt(i64) else std.math.minInt(i64);
+    }
 };
 
 const StreamWindowEntry = struct {
@@ -235,6 +247,7 @@ pub const Connection = struct {
     recv_connection_window: FlowWindow = .{},
     send_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
+    peer_initial_stream_window: i64 = default_flow_window,
 
     pub fn close(self: *Connection) void {
         self.send_stream_windows.deinit(self.allocator);
@@ -269,6 +282,9 @@ pub const Connection = struct {
             switch (frame.frame.header.frame_type) {
                 .settings => {
                     if ((frame.frame.header.flags & flag_ack) == 0) {
+                        const settings = try http2.parseSettings(self.allocator, frame.frame.payload);
+                        defer self.allocator.free(settings);
+                        try self.applySettings(settings);
                         try writeFrame(self.allocator, self.io, self.stream, .settings, flag_ack, 0, &.{});
                     }
                     continue;
@@ -412,6 +428,9 @@ pub const Connection = struct {
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type == .settings) {
                 if ((frame.frame.header.flags & flag_ack) == 0) {
+                    const settings = try http2.parseSettings(self.allocator, frame.frame.payload);
+                    defer self.allocator.free(settings);
+                    try self.applySettings(settings);
                     try writeFrame(self.allocator, self.io, self.stream, .settings, flag_ack, 0, &.{});
                 }
                 continue;
@@ -486,11 +505,22 @@ pub const Connection = struct {
         );
     }
 
+    fn applySettings(self: *Connection, settings: []const http2.Setting) Error!void {
+        for (settings) |setting| {
+            if (setting.id == .initial_window_size) {
+                const new_window = std.math.cast(i64, setting.value) orelse return error.InvalidSetting;
+                const delta = new_window - self.peer_initial_stream_window;
+                self.peer_initial_stream_window = new_window;
+                for (self.send_stream_windows.items) |*entry| entry.window.adjust(delta);
+            }
+        }
+    }
+
     fn sendStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
         for (self.send_stream_windows.items) |*entry| {
             if (entry.stream_id == stream_id) return &entry.window;
         }
-        try self.send_stream_windows.append(self.allocator, .{ .stream_id = stream_id });
+        try self.send_stream_windows.append(self.allocator, .{ .stream_id = stream_id, .window = .{ .value = self.peer_initial_stream_window } });
         return &self.send_stream_windows.items[self.send_stream_windows.items.len - 1].window;
     }
 
@@ -877,4 +907,27 @@ test "HTTP/2 flow window blocks and updates" {
     try std.testing.expectError(error.FlowControlViolation, recv.receive(3));
     try recv.receive(2);
     try std.testing.expectEqual(@as(i64, 0), recv.value);
+}
+
+test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+    }
+
+    const first = try connection.sendStreamWindow(1);
+    try first.reserve(1024);
+    try std.testing.expectEqual(@as(i64, default_flow_window - 1024), first.value);
+
+    const settings = [_]http2.Setting{.{ .id = .initial_window_size, .value = 70_000 }};
+    try connection.applySettings(&settings);
+    try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
+    try std.testing.expectEqual(@as(i64, 70_000 - 1024), (try connection.sendStreamWindow(1)).value);
+    try std.testing.expectEqual(@as(i64, 70_000), (try connection.sendStreamWindow(3)).value);
 }
