@@ -24,7 +24,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   datagram mapping
 - WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
   SDP, DTLS record headers, RTP packets/extensions/padding, and SCTP common
-  headers
+  headers, plus a blocking UDP STUN binding client/server runtime
 
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1,
@@ -32,8 +32,8 @@ prior-knowledge HTTP/2 (h2c), and WebSocket now include blocking TCP
 client/server runtimes built on Zig 0.16 `std.Io.net`; QUIC has a blocking UDP
 endpoint runtime for datagram/frame transport; MQTT has a blocking TCP
 client/server runtime for CONNECT/PUBLISH/PING/DISCONNECT flows. TLS, event
-loops, packet protection, congestion control, and richer high-level
-clients/servers can layer on the same byte-level pieces.
+loops, packet protection, congestion control, ICE/DTLS/SRTP state machines, and
+richer high-level clients/servers can layer on the same byte-level pieces.
 
 ## Build
 

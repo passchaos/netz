@@ -1,6 +1,8 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 
+pub const runtime = @import("runtime.zig");
+
 pub const Error = wire.Error || error{
     BufferTooShort,
     InvalidStunMessage,
