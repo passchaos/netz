@@ -13,7 +13,8 @@ starts with deterministic parsers, serializers, and state helpers for:
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames)
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
-  validation, close payload checks, and message assembly
+  validation, close payload checks, message assembly, and a blocking TCP
+  client/server runtime over HTTP/1 Upgrade
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK, PUBLISH, PUBACK-style
   acknowledgements, SUBSCRIBE/SUBACK, PING, DISCONNECT, properties, and
   remaining length
@@ -24,10 +25,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   headers
 
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
-but practical runtime APIs are being added in priority order. HTTP/1 now includes
-a blocking TCP client/server built on Zig 0.16 `std.Io.net`; TLS, event loops,
-congestion control, and richer high-level clients/servers can layer on the same
-byte-level pieces.
+but practical runtime APIs are being added in priority order. HTTP/1 and
+WebSocket now include blocking TCP client/server runtimes built on Zig 0.16
+`std.Io.net`; TLS, event loops, congestion control, and richer high-level
+clients/servers can layer on the same byte-level pieces.
 
 ## Build
 
@@ -72,6 +73,22 @@ var response = try client.request(.{
     .headers = &.{.{ .name = "Host", .value = "localhost" }},
 });
 defer response.deinit(allocator);
+```
+
+WebSocket can upgrade over the same TCP layer:
+
+```zig
+var ws = try netz.websocket.runtime.Client.connect(
+    allocator,
+    io,
+    try std.Io.net.IpAddress.parse("127.0.0.1", 8080),
+    .{ .host = "localhost", .target = "/chat" },
+);
+defer ws.close();
+
+try ws.sendText("hello");
+var frame = try ws.receiveFrame();
+defer frame.deinit(allocator);
 ```
 
 ## Design notes

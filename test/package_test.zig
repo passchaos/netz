@@ -4,6 +4,7 @@ const netz = @import("netz");
 test "public modules are reachable" {
     try std.testing.expectEqualStrings("258EAFA5-E914-47DA-95CA-C5AB0DC85B11", netz.websocket.handshake_guid);
     try std.testing.expectEqual(@as(usize, 64 * 1024), (netz.http1.runtime.Limits{}).max_head_bytes);
+    try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.websocket.runtime.Limits{}).max_frame_bytes);
     try std.testing.expectEqual(@as(u8, 0x40), netz.quic.varint.prefixForLength(2));
     try std.testing.expect(netz.http1.Method.GET.safe());
     try std.testing.expectEqual(@as(u64, 9), netz.http2.FrameHeader.encoded_len);

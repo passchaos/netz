@@ -2,6 +2,7 @@ const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const http1 = @import("../http1/mod.zig");
 
+pub const runtime = @import("runtime.zig");
 pub const handshake_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub const Error = error{
