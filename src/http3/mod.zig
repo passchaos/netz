@@ -12,6 +12,8 @@ pub const Error = wire.Error || error{
     MissingSettings,
     DuplicateSettings,
     GoAwayIdIncreased,
+    MaxPushIdReduced,
+    PushIdExceeded,
     ExpectedHeadersFrame,
     UnexpectedFrame,
     MissingMethod,
@@ -143,6 +145,8 @@ pub const ControlState = struct {
     settings: SettingsState = .{},
     peer_goaway_id: ?u64 = null,
     local_goaway_id: ?u64 = null,
+    peer_max_push_id: ?u64 = null,
+    local_max_push_id: ?u64 = null,
 
     pub fn writeSettingsStream(self: *ControlState, list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
         try writeControlStreamPrefix(list, allocator);
@@ -160,6 +164,14 @@ pub const ControlState = struct {
         try quic.varint.encode(&payload, allocator, stream_id);
         try (Frame{ .frame_type = FrameType.goaway, .payload = payload.items, .consumed = 0 }).write(list, allocator);
         self.local_goaway_id = stream_id;
+    }
+
+    pub fn writeMaxPushId(self: *ControlState, list: *std.ArrayList(u8), allocator: std.mem.Allocator, push_id: u64) Error!void {
+        if (self.local_max_push_id) |previous| {
+            if (push_id < previous) return error.MaxPushIdReduced;
+        }
+        try writeMaxPushIdFrame(list, allocator, push_id);
+        self.local_max_push_id = push_id;
     }
 
     pub fn applyControlStreamBytes(self: *ControlState, allocator: std.mem.Allocator, bytes: []const u8) Error!void {
@@ -191,6 +203,14 @@ pub const ControlState = struct {
                 }
                 self.peer_goaway_id = id;
             },
+            FrameType.max_push_id => {
+                const push_id = try parseSingleVarintPayload(frame.payload);
+                if (self.peer_max_push_id) |previous| {
+                    if (push_id < previous) return error.MaxPushIdReduced;
+                }
+                self.peer_max_push_id = push_id;
+            },
+            FrameType.cancel_push => _ = try parseSingleVarintPayload(frame.payload),
             else => {}, // Unknown extension frames on the control stream are ignored.
         }
     }
@@ -199,6 +219,11 @@ pub const ControlState = struct {
         const goaway_id = self.peer_goaway_id orelse return true;
         return stream_id < goaway_id;
     }
+};
+
+pub const PushPromisePayload = struct {
+    push_id: u64,
+    field_section: []const u8,
 };
 
 pub fn writeControlStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
@@ -213,10 +238,61 @@ pub fn writeSettingsFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator
 }
 
 pub fn parseGoAwayPayload(payload: []const u8) Error!u64 {
+    return parseSingleVarintPayload(payload);
+}
+
+pub fn writeCancelPushFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, push_id: u64) Error!void {
+    try writeSingleVarintFrame(list, allocator, FrameType.cancel_push, push_id);
+}
+
+pub fn parseCancelPushPayload(payload: []const u8) Error!u64 {
+    return parseSingleVarintPayload(payload);
+}
+
+pub fn writeMaxPushIdFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, push_id: u64) Error!void {
+    try writeSingleVarintFrame(list, allocator, FrameType.max_push_id, push_id);
+}
+
+pub fn parseMaxPushIdPayload(payload: []const u8) Error!u64 {
+    return parseSingleVarintPayload(payload);
+}
+
+pub fn writePushPromiseFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    push_id: u64,
+    field_section: []const u8,
+) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try quic.varint.encode(&payload, allocator, push_id);
+    try payload.appendSlice(allocator, field_section);
+    try (Frame{ .frame_type = FrameType.push_promise, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+}
+
+pub fn parsePushPromisePayload(payload: []const u8) Error!PushPromisePayload {
     var cursor = wire.Cursor.init(payload);
-    const stream_id = try quic.varint.decode(&cursor);
+    const push_id = try quic.varint.decode(&cursor);
+    return .{ .push_id = push_id, .field_section = payload[cursor.pos..] };
+}
+
+pub fn validatePushPromise(control: ControlState, push_id: u64) Error!void {
+    const max_push_id = control.local_max_push_id orelse return error.PushIdExceeded;
+    if (push_id > max_push_id) return error.PushIdExceeded;
+}
+
+fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try quic.varint.encode(&payload, allocator, value);
+    try (Frame{ .frame_type = frame_type, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+}
+
+fn parseSingleVarintPayload(payload: []const u8) Error!u64 {
+    var cursor = wire.Cursor.init(payload);
+    const value = try quic.varint.decode(&cursor);
     if (!cursor.eof()) return error.InvalidFrame;
-    return stream_id;
+    return value;
 }
 
 pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]Setting {
@@ -717,6 +793,65 @@ test "HTTP/3 control stream enforces SETTINGS first and GOAWAY monotonicity" {
     try duplicate_settings.writeSettingsStream(&duplicate, allocator, .{});
     try writeSettingsFrame(&duplicate, allocator, .{});
     try std.testing.expectError(error.DuplicateSettings, duplicate_settings.applyControlStreamBytes(allocator, duplicate.items));
+}
+
+test "HTTP/3 push control frames and state" {
+    const allocator = std.testing.allocator;
+
+    var cancel: std.ArrayList(u8) = .empty;
+    defer cancel.deinit(allocator);
+    try writeCancelPushFrame(&cancel, allocator, 7);
+    const cancel_frame = try Frame.parse(cancel.items);
+    try std.testing.expectEqual(FrameType.cancel_push, cancel_frame.frame_type);
+    try std.testing.expectEqual(@as(u64, 7), try parseCancelPushPayload(cancel_frame.payload));
+
+    var max_push: std.ArrayList(u8) = .empty;
+    defer max_push.deinit(allocator);
+    var control = ControlState{};
+    try control.writeMaxPushId(&max_push, allocator, 4);
+    try std.testing.expectEqual(@as(?u64, 4), control.local_max_push_id);
+    try control.writeMaxPushId(&max_push, allocator, 8);
+    try std.testing.expectEqual(@as(?u64, 8), control.local_max_push_id);
+    try std.testing.expectError(error.MaxPushIdReduced, control.writeMaxPushId(&max_push, allocator, 2));
+
+    var peer_control = ControlState{ .settings = .{ .received = true } };
+    const first = try Frame.parse(max_push.items);
+    try peer_control.applyFrame(allocator, first);
+    try std.testing.expectEqual(@as(?u64, 4), peer_control.peer_max_push_id);
+    const second = try Frame.parse(max_push.items[first.consumed..]);
+    try peer_control.applyFrame(allocator, second);
+    try std.testing.expectEqual(@as(?u64, 8), peer_control.peer_max_push_id);
+
+    var reduced: std.ArrayList(u8) = .empty;
+    defer reduced.deinit(allocator);
+    try writeMaxPushIdFrame(&reduced, allocator, 1);
+    const reduced_frame = try Frame.parse(reduced.items);
+    try std.testing.expectError(error.MaxPushIdReduced, peer_control.applyFrame(allocator, reduced_frame));
+}
+
+test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
+    const allocator = std.testing.allocator;
+    var field_section: std.ArrayList(u8) = .empty;
+    defer field_section.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&field_section, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/pushed.css" },
+    });
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writePushPromiseFrame(&encoded, allocator, 3, field_section.items);
+    const frame = try Frame.parse(encoded.items);
+    try std.testing.expectEqual(FrameType.push_promise, frame.frame_type);
+    const promise = try parsePushPromisePayload(frame.payload);
+    try std.testing.expectEqual(@as(u64, 3), promise.push_id);
+    const decoded = try Qpack.decodeLiteralBlock(allocator, promise.field_section);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings("/pushed.css", decoded[1].value);
+
+    try validatePushPromise(.{ .local_max_push_id = 3 }, promise.push_id);
+    try std.testing.expectError(error.PushIdExceeded, validatePushPromise(.{}, promise.push_id));
+    try std.testing.expectError(error.PushIdExceeded, validatePushPromise(.{ .local_max_push_id = 2 }, promise.push_id));
 }
 
 test "HTTP/3 datagram" {
