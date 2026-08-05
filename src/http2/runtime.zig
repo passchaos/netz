@@ -291,16 +291,8 @@ pub const Connection = struct {
         while (true) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
+            if (try self.handleConnectionFrame(frame.frame)) continue;
             switch (frame.frame.header.frame_type) {
-                .settings => {
-                    if ((frame.frame.header.flags & flag_ack) == 0) {
-                        const settings = try http2.parseSettings(self.allocator, frame.frame.payload);
-                        defer self.allocator.free(settings);
-                        try self.applySettings(settings);
-                        try writeFrame(self.allocator, self.io, self.stream, .settings, flag_ack, 0, &.{});
-                    }
-                    continue;
-                },
                 .headers => {
                     const stream_id = frame.frame.header.stream_id;
                     if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
@@ -320,6 +312,7 @@ pub const Connection = struct {
                         while (true) {
                             var data_frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
                             defer data_frame.deinit(self.allocator);
+                            if (try self.handleConnectionFrame(data_frame.frame)) continue;
                             if (data_frame.frame.header.stream_id != stream_id) continue;
                             switch (data_frame.frame.header.frame_type) {
                                 .data => {
@@ -482,24 +475,7 @@ pub const Connection = struct {
         while (true) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
-            if (frame.frame.header.frame_type == .settings) {
-                if ((frame.frame.header.flags & flag_ack) == 0) {
-                    const settings = try http2.parseSettings(self.allocator, frame.frame.payload);
-                    defer self.allocator.free(settings);
-                    try self.applySettings(settings);
-                    try writeFrame(self.allocator, self.io, self.stream, .settings, flag_ack, 0, &.{});
-                }
-                continue;
-            }
-            if (frame.frame.header.frame_type == .window_update) {
-                const update = try http2.WindowUpdatePayload.parse(frame.frame);
-                if (update.stream_id == 0) {
-                    self.send_connection_window.update(update.increment);
-                } else {
-                    (try self.sendStreamWindow(update.stream_id)).update(update.increment);
-                }
-                continue;
-            }
+            if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.stream_id != stream_id) continue;
             switch (frame.frame.header.frame_type) {
                 .headers => {
@@ -558,6 +534,37 @@ pub const Connection = struct {
         defer block.deinit(self.allocator);
         try http2.Hpack.encodeLiteralBlock(&block, self.allocator, headers);
         try self.writeHeaderBlock(stream_id, block.items, end_stream);
+    }
+
+    fn handleConnectionFrame(self: *Connection, frame: http2.Frame) Error!bool {
+        switch (frame.header.frame_type) {
+            .settings => {
+                if ((frame.header.flags & flag_ack) == 0) {
+                    const settings = try http2.parseSettings(self.allocator, frame.payload);
+                    defer self.allocator.free(settings);
+                    try self.applySettings(settings);
+                    try writeFrame(self.allocator, self.io, self.stream, .settings, flag_ack, 0, &.{});
+                }
+                return true;
+            },
+            .ping => {
+                const ping_payload = try http2.PingPayload.parse(frame);
+                if ((frame.header.flags & flag_ack) == 0) {
+                    try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
+                }
+                return true;
+            },
+            .window_update => {
+                const update = try http2.WindowUpdatePayload.parse(frame);
+                if (update.stream_id == 0) {
+                    self.send_connection_window.update(update.increment);
+                } else {
+                    (try self.sendStreamWindow(update.stream_id)).update(update.increment);
+                }
+                return true;
+            },
+            else => return false,
+        }
     }
 
     fn writeHeaderBlock(self: *Connection, stream_id: u31, block: []const u8, end_stream: bool) Error!void {
@@ -1390,6 +1397,148 @@ test "HTTP/2 runtime decodes padded priority HEADERS payloads" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HTTP/2 runtime answers PING while reading request body" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/interleaved-ping", request.path);
+            try std.testing.expectEqualStrings("hello", request.body);
+            try connection.writeResponse(request.stream_id, .{ .body = "ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const headers = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/interleaved-ping" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "content-length", .value = "5" },
+    };
+    try client.writeHeaders(1, &headers, false);
+    try client.writeData(1, "he", false);
+    const ping_payload = [_]u8{ 1, 3, 3, 7, 0, 0, 0, 1 };
+    try writeFrame(allocator, io, client.stream, .ping, 0, 0, &ping_payload);
+
+    var ping_ack = try readFrame(allocator, io, client.stream, client.limits);
+    defer ping_ack.deinit(allocator);
+    try std.testing.expectEqual(http2.FrameType.ping, ping_ack.frame.header.frame_type);
+    try std.testing.expect((ping_ack.frame.header.flags & flag_ack) != 0);
+    try std.testing.expectEqualSlices(u8, &ping_payload, ping_ack.frame.payload);
+
+    try client.writeData(1, "llo", true);
+    var response = try client.readResponse(1, "POST");
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HTTP/2 client answers PING while reading response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/response-ping", request.path);
+
+            const ping_payload = [_]u8{ 9, 8, 7, 6, 5, 4, 3, 2 };
+            try writeFrame(server_ptr.allocator, server_ptr.io, connection.stream, .ping, 0, 0, &ping_payload);
+            var ping_ack = try readFrame(server_ptr.allocator, server_ptr.io, connection.stream, server_ptr.limits);
+            defer ping_ack.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(http2.FrameType.ping, ping_ack.frame.header.frame_type);
+            try std.testing.expect((ping_ack.frame.header.flags & flag_ack) != 0);
+            try std.testing.expectEqualSlices(u8, &ping_payload, ping_ack.frame.payload);
+
+            try connection.writeResponse(request.stream_id, .{ .body = "after-ping" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/response-ping",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("after-ping", response.body);
 }
 
 test "HTTP/2 runtime rejects malformed CONTINUATION sequence" {

@@ -12,7 +12,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY)/CONTINUATION/RST_STREAM payload parsing, a bootstrap
   HPACK static/literal encoder-decoder, PING/GOAWAY/WINDOW_UPDATE connection
-  management, connection- and stream-level flow-control enforcement including
+  management including interleaved SETTINGS/PING/WINDOW_UPDATE handling during stream reads, connection- and stream-level flow-control enforcement including
   SETTINGS_INITIAL_WINDOW_SIZE updates, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation,
   outbound frame splitting, frame-envelope and stream-id direction validation, request/response trailers, content-length
   validation, HTTP/2 pseudo-header/lowercase field-name validation,
