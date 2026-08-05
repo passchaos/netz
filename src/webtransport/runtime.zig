@@ -51,11 +51,78 @@ pub const Server = struct {
     }
 };
 
+pub const ProtectedServer = struct {
+    h3: http3.runtime.ProtectedServer,
+
+    pub fn bind(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        limits: Limits,
+        config: http3.runtime.ProtectedConfig,
+    ) Error!ProtectedServer {
+        return .{ .h3 = try .bind(allocator, io, bind_address, limits.http3, config) };
+    }
+
+    pub fn deinit(self: *ProtectedServer) void {
+        self.h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn address(self: ProtectedServer) net.IpAddress {
+        return self.h3.address();
+    }
+
+    pub fn accept(self: *ProtectedServer) Error!AcceptedProtectedSession {
+        var request = try self.h3.receiveRequest();
+        errdefer request.deinit(self.h3.quic_server.endpoint.allocator);
+        if (!std.mem.eql(u8, request.request.method, "CONNECT")) return error.InvalidConnect;
+        if (!std.mem.eql(u8, findHeader(request.request.headers, ":protocol") orelse "", "webtransport")) {
+            return error.InvalidConnect;
+        }
+        const session_id = webtransport.SessionId.init(request.stream_id);
+        try self.h3.sendResponse(request.from, request.stream_id, .{ .status = 200 });
+        return .{ .request = request, .session_id = session_id };
+    }
+
+    pub fn receiveDatagram(self: *ProtectedServer) Error!OwnedProtectedDatagram {
+        return receiveProtectedDatagramFromEndpoint(
+            &self.h3.quic_server.endpoint,
+            self.h3.config.receive_keys,
+            self.h3.config.local_connection_id.len,
+            &self.h3.expected_packet_number,
+            self.h3.config.max_frames_per_packet,
+        );
+    }
+
+    pub fn sendDatagram(self: *ProtectedServer, to: net.IpAddress, session_id: webtransport.SessionId, payload: []const u8) Error!void {
+        try sendProtectedDatagramFromEndpoint(
+            &self.h3.quic_server.endpoint,
+            to,
+            self.h3.config.send_keys,
+            self.h3.config.peer_connection_id,
+            &self.h3.next_packet_number,
+            session_id,
+            payload,
+        );
+    }
+};
+
 pub const AcceptedSession = struct {
     request: http3.runtime.OwnedRequest,
     session_id: webtransport.SessionId,
 
     pub fn deinit(self: *AcceptedSession, allocator: std.mem.Allocator) void {
+        self.request.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const AcceptedProtectedSession = struct {
+    request: http3.runtime.OwnedProtectedRequest,
+    session_id: webtransport.SessionId,
+
+    pub fn deinit(self: *AcceptedProtectedSession, allocator: std.mem.Allocator) void {
         self.request.deinit(allocator);
         self.* = undefined;
     }
@@ -107,11 +174,73 @@ pub const ClientSession = struct {
     }
 };
 
+pub const ProtectedClientSession = struct {
+    h3: http3.runtime.ProtectedClient,
+    session_id: webtransport.SessionId,
+
+    pub fn connect(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: ProtectedConnectOptions,
+    ) Error!ProtectedClientSession {
+        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, options.config);
+        errdefer h3_client.deinit();
+        _ = options.origin;
+        var response = try h3_client.request(.{
+            .method = "CONNECT",
+            .path = options.path,
+            .scheme = "https",
+            .authority = options.authority,
+            .headers = &.{.{ .name = ":protocol", .value = "webtransport" }},
+        });
+        defer response.deinit(allocator);
+        if (response.response.status < 200 or response.response.status >= 300) return error.InvalidConnect;
+        return .{ .h3 = h3_client, .session_id = .init(0) };
+    }
+
+    pub fn deinit(self: *ProtectedClientSession) void {
+        self.h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn sendDatagram(self: *ProtectedClientSession, payload: []const u8) Error!void {
+        try sendProtectedDatagramFromEndpoint(
+            &self.h3.quic_client.endpoint,
+            self.h3.quic_client.peer,
+            self.h3.config.send_keys,
+            self.h3.config.peer_connection_id,
+            &self.h3.next_packet_number,
+            self.session_id,
+            payload,
+        );
+    }
+
+    pub fn receiveDatagram(self: *ProtectedClientSession) Error!OwnedProtectedDatagram {
+        return receiveProtectedDatagramFromEndpoint(
+            &self.h3.quic_client.endpoint,
+            self.h3.config.receive_keys,
+            self.h3.config.local_connection_id.len,
+            &self.h3.expected_packet_number,
+            self.h3.config.max_frames_per_packet,
+        );
+    }
+};
+
 pub const ConnectOptions = struct {
     authority: []const u8,
     path: []const u8 = "/",
     origin: []const u8 = "/",
     limits: Limits = .{},
+};
+
+pub const ProtectedConnectOptions = struct {
+    authority: []const u8,
+    path: []const u8 = "/",
+    origin: []const u8 = "/",
+    limits: Limits = .{},
+    config: http3.runtime.ProtectedConfig,
 };
 
 pub const OwnedDatagram = struct {
@@ -120,6 +249,16 @@ pub const OwnedDatagram = struct {
 
     pub fn deinit(self: *OwnedDatagram, allocator: std.mem.Allocator) void {
         self.quic_datagram.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedProtectedDatagram = struct {
+    packet: quic.one_rtt.ReceivedPacket,
+    datagram: webtransport.Datagram,
+
+    pub fn deinit(self: *OwnedProtectedDatagram, allocator: std.mem.Allocator) void {
+        self.packet.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -148,6 +287,48 @@ fn receiveDatagramFromEndpoint(endpoint: *quic.runtime.Endpoint) Error!OwnedData
             }
         }
         datagram.deinit(endpoint.allocator);
+    }
+}
+
+fn sendProtectedDatagramFromEndpoint(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    destination_connection_id: []const u8,
+    packet_number: *u64,
+    session_id: webtransport.SessionId,
+    payload: []const u8,
+) Error!void {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(endpoint.allocator);
+    try (webtransport.Datagram{ .session_id = session_id, .payload = payload }).write(&encoded, endpoint.allocator);
+    const frames = [_]quic.Frame{.{ .datagram = .{ .data = encoded.items, .length_present = true } }};
+    try quic.one_rtt.sendFrames(endpoint, to, keys, .{
+        .destination_connection_id = destination_connection_id,
+        .packet_number = packet_number.*,
+        .frames = &frames,
+    });
+    packet_number.* += 1;
+}
+
+fn receiveProtectedDatagramFromEndpoint(
+    endpoint: *quic.runtime.Endpoint,
+    keys: quic.protection.PacketProtectionKeys,
+    local_connection_id_len: usize,
+    expected_packet_number: *u64,
+    max_frames: usize,
+) Error!OwnedProtectedDatagram {
+    while (true) {
+        var packet = try quic.one_rtt.receive(endpoint, keys, local_connection_id_len, expected_packet_number.*, max_frames);
+        errdefer packet.deinit(endpoint.allocator);
+        expected_packet_number.* = packet.packet.packet_number + 1;
+        for (packet.frames) |frame| {
+            if (frame == .datagram) {
+                const wt = try webtransport.Datagram.parse(frame.datagram.data);
+                return .{ .packet = packet, .datagram = wt };
+            }
+        }
+        packet.deinit(endpoint.allocator);
     }
 }
 
@@ -209,6 +390,75 @@ test "WebTransport runtime CONNECT and datagrams over HTTP/3 dev runtime" {
     defer response.deinit(allocator);
     try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
     try std.testing.expectEqualStrings("server-dgram", response.datagram.payload);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xfa, 0xce, 0x00, 0x01 };
+    const server_cid = [_]u8{ 0xfa, 0xce, 0x00, 0x02 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0xb1} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0xb2} ** quic.protection.secret_len);
+
+    var server = try ProtectedServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } },
+    }, .{
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *ProtectedServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *ProtectedServer) !void {
+            var accepted = try server_ptr.accept();
+            defer accepted.deinit(server_ptr.h3.quic_server.endpoint.allocator);
+            var datagram = try server_ptr.receiveDatagram();
+            defer datagram.deinit(server_ptr.h3.quic_server.endpoint.allocator);
+            try std.testing.expectEqual(accepted.session_id.value, datagram.datagram.session_id.value);
+            try std.testing.expectEqualStrings("protected-client-dgram", datagram.datagram.payload);
+            try server_ptr.sendDatagram(datagram.packet.from, accepted.session_id, "protected-server-dgram");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try ProtectedClientSession.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .authority = "localhost",
+        .path = "/wt-protected",
+        .limits = .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } } },
+        .config = .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    });
+    defer client.deinit();
+
+    try client.sendDatagram("protected-client-dgram");
+    var response = try client.receiveDatagram();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
+    try std.testing.expectEqualStrings("protected-server-dgram", response.datagram.payload);
 
     thread.join();
     if (shared.err) |err| return err;
