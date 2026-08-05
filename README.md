@@ -29,7 +29,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
   a minimal 1-RTT recovery queue for PTO retransmission of unacknowledged
   ack-eliciting frame payloads,
-  plus a blocking UDP endpoint runtime for frame datagrams
+  plus a blocking UDP endpoint runtime for frame datagrams with a
+  `std.Io.async` concurrent receive helper
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, message assembly, and a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
