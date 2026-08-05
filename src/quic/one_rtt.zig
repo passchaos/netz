@@ -40,18 +40,30 @@ pub const ReceivedPacket = struct {
 };
 
 pub const ConnectionConfig = struct {
+    pub const EndpointRole = enum { client, server };
+
     peer: net.IpAddress,
     receive_keys: quic.protection.PacketProtectionKeys,
     send_keys: quic.protection.PacketProtectionKeys,
     local_connection_id: []const u8,
     peer_connection_id: []const u8,
+    local_endpoint: EndpointRole = .client,
     max_ack_ranges: usize = 64,
     max_frames_per_packet: usize = 16,
     initial_send_max_data: u64 = std.math.maxInt(u62),
     initial_receive_max_data: u64 = std.math.maxInt(u62),
     receive_window: u64 = 64 * 1024,
+    /// Back-compat fallback used when stream-direction-specific limits below
+    /// are not supplied.  Real handshakes should prefer the specific fields so
+    /// client/server and uni/bidi stream rules follow RFC 9000 Section 18.2.
     initial_send_max_stream_data: u64 = std.math.maxInt(u62),
     initial_receive_max_stream_data: u64 = std.math.maxInt(u62),
+    initial_send_max_stream_data_bidi_local: ?u64 = null,
+    initial_send_max_stream_data_bidi_remote: ?u64 = null,
+    initial_send_max_stream_data_uni: ?u64 = null,
+    initial_receive_max_stream_data_bidi_local: ?u64 = null,
+    initial_receive_max_stream_data_bidi_remote: ?u64 = null,
+    initial_receive_max_stream_data_uni: ?u64 = null,
     stream_receive_window: u64 = 64 * 1024,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
 };
@@ -579,7 +591,7 @@ pub const Connection = struct {
         if (self.findSendStreamEntry(stream_id)) |entry| return entry;
         try self.stream_send_flows.append(self.endpoint.allocator, .{
             .stream_id = stream_id,
-            .flow = .init(self.config.initial_send_max_stream_data),
+            .flow = .init(self.initialSendStreamDataLimit(stream_id)),
         });
         return &self.stream_send_flows.items[self.stream_send_flows.items.len - 1];
     }
@@ -597,11 +609,45 @@ pub const Connection = struct {
         }
         try self.stream_recv_flows.append(self.endpoint.allocator, .{
             .stream_id = stream_id,
-            .flow = try .init(self.config.initial_receive_max_stream_data, self.config.stream_receive_window),
+            .flow = try .init(self.initialReceiveStreamDataLimit(stream_id), self.config.stream_receive_window),
         });
         return &self.stream_recv_flows.items[self.stream_recv_flows.items.len - 1];
     }
+
+    fn initialSendStreamDataLimit(self: Connection, stream_id: u64) u64 {
+        if (streamDirection(stream_id) == .unidirectional) {
+            if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) return 0;
+            return self.config.initial_send_max_stream_data_uni orelse self.config.initial_send_max_stream_data;
+        }
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return self.config.initial_send_max_stream_data_bidi_remote orelse self.config.initial_send_max_stream_data;
+        }
+        return self.config.initial_send_max_stream_data_bidi_local orelse self.config.initial_send_max_stream_data;
+    }
+
+    fn initialReceiveStreamDataLimit(self: Connection, stream_id: u64) u64 {
+        if (streamDirection(stream_id) == .unidirectional) {
+            if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) return 0;
+            return self.config.initial_receive_max_stream_data_uni orelse self.config.initial_receive_max_stream_data;
+        }
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            return self.config.initial_receive_max_stream_data_bidi_local orelse self.config.initial_receive_max_stream_data;
+        }
+        return self.config.initial_receive_max_stream_data_bidi_remote orelse self.config.initial_receive_max_stream_data;
+    }
 };
+
+fn streamInitiatedByLocal(local_endpoint: ConnectionConfig.EndpointRole, stream_id: u64) bool {
+    const client_initiated = (stream_id & 0x01) == 0;
+    return switch (local_endpoint) {
+        .client => client_initiated,
+        .server => !client_initiated,
+    };
+}
+
+fn streamDirection(stream_id: u64) enum { bidirectional, unidirectional } {
+    return if ((stream_id & 0x02) == 0) .bidirectional else .unidirectional;
+}
 
 pub fn sendFrames(
     endpoint: *quic.runtime.Endpoint,

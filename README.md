@@ -22,14 +22,18 @@ starts with deterministic parsers, serializers, and state helpers for:
   client/server runtime, plus a `std.Io.async` request receive helper for the
   development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
-  frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), plus
-  CRYPTO stream reassembly, v1 Initial key/header/payload protection, protected
-  Initial packet seal/open, Initial CRYPTO byte exchange over UDP, minimal TLS
+  frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), typed
+  RFC-defaulted transport-parameter encoding/validation (duplicate detection,
+  endpoint-specific client/server parameter rules, preferred-address parsing,
+  max UDP payload/ACK delay/stream-count bounds), plus CRYPTO stream reassembly,
+  v1 Initial key/header/payload protection, protected Initial packet seal/open,
+  Initial CRYPTO byte exchange over UDP, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
   packet server/client Finished flights, and handshake/application secret
-  derivation for QUIC, an integrated minimal client/server handshake that
-  establishes 1-RTT connection objects, stateless reset token helpers,
+  derivation for QUIC, an integrated minimal client/server handshake that emits
+  practical transport parameters and applies negotiated flow-control, stream,
+  and UDP-payload limits to established 1-RTT connection objects, stateless reset token helpers,
   packet-number space ACK tracking and adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, stream send/receive state with
   offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING

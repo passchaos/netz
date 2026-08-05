@@ -26,6 +26,10 @@ pub const Error = wire.Error || error{
     InvalidFrameLength,
     InvalidAckRange,
     InvalidConnectionIdLength,
+    InvalidTransportParameter,
+    InvalidTransportParameterLength,
+    DuplicateTransportParameter,
+    TransportParameterForbidden,
     UnsupportedFrameType,
 } || std.mem.Allocator.Error;
 
@@ -123,6 +127,210 @@ pub const TransportParameter = struct {
     value: []const u8,
 };
 
+pub const TransportParameterSource = enum {
+    client,
+    server,
+};
+
+pub const default_max_udp_payload_size: u64 = 65_527;
+pub const default_ack_delay_exponent: u64 = 3;
+pub const default_max_ack_delay_ms: u64 = 25;
+pub const default_active_connection_id_limit: u64 = 2;
+pub const max_stream_count: u64 = 1 << 60;
+
+pub const PreferredAddress = struct {
+    ipv4_address: [4]u8 = [_]u8{0} ** 4,
+    ipv4_port: u16 = 0,
+    ipv6_address: [16]u8 = [_]u8{0} ** 16,
+    ipv6_port: u16 = 0,
+    connection_id: []const u8 = &.{},
+    stateless_reset_token: [16]u8 = [_]u8{0} ** 16,
+};
+
+/// Typed QUIC transport parameters with RFC defaults.
+///
+/// Decoded byte slices borrow from the input buffer, matching the lower-level
+/// parser below.  The struct is intentionally allocation-free so handshakes can
+/// validate peer parameters before deriving 1-RTT state without introducing
+/// ownership surprises.
+pub const TransportParameters = struct {
+    original_destination_connection_id: ?[]const u8 = null,
+    max_idle_timeout: u64 = 0,
+    stateless_reset_token: ?[16]u8 = null,
+    max_udp_payload_size: u64 = default_max_udp_payload_size,
+    initial_max_data: u64 = 0,
+    initial_max_stream_data_bidi_local: u64 = 0,
+    initial_max_stream_data_bidi_remote: u64 = 0,
+    initial_max_stream_data_uni: u64 = 0,
+    initial_max_streams_bidi: u64 = 0,
+    initial_max_streams_uni: u64 = 0,
+    ack_delay_exponent: u64 = default_ack_delay_exponent,
+    max_ack_delay: u64 = default_max_ack_delay_ms,
+    disable_active_migration: bool = false,
+    preferred_address: ?PreferredAddress = null,
+    active_connection_id_limit: u64 = default_active_connection_id_limit,
+    initial_source_connection_id: ?[]const u8 = null,
+    retry_source_connection_id: ?[]const u8 = null,
+    max_datagram_frame_size: ?u64 = null,
+};
+
+/// Practical defaults for netz's in-repository QUIC/H3/WebTransport runtimes.
+/// The RFC defaults are intentionally conservative (all flow-control limits are
+/// zero), which is useful for parsers but makes an integrated handshake unable
+/// to exchange application data unless the caller constructs parameters by
+/// hand.  These values mirror the shape used by production stacks such as
+/// quic-zig, tquic, s2n-quic, and quicz: advertise enough initial credit for
+/// request/response traffic while still keeping bounded windows.
+pub const practical_transport_parameters = TransportParameters{
+    .initial_max_data = 1024 * 1024,
+    .initial_max_stream_data_bidi_local = 256 * 1024,
+    .initial_max_stream_data_bidi_remote = 256 * 1024,
+    .initial_max_stream_data_uni = 256 * 1024,
+    .initial_max_streams_bidi = 100,
+    .initial_max_streams_uni = 100,
+    .active_connection_id_limit = 4,
+    .max_datagram_frame_size = 65_535,
+};
+
+pub fn encodeTransportParameters(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    params: TransportParameters,
+) Error!void {
+    if (params.original_destination_connection_id) |cid| {
+        try validateTransportConnectionId(cid, false);
+        try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.original_destination_connection_id), cid);
+    }
+    if (params.max_idle_timeout != 0) try encodeIntegerTransportParameter(list, allocator, .max_idle_timeout, params.max_idle_timeout);
+    if (params.stateless_reset_token) |token| {
+        try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.stateless_reset_token), &token);
+    }
+    if (params.max_udp_payload_size != default_max_udp_payload_size) {
+        try encodeIntegerTransportParameter(list, allocator, .max_udp_payload_size, params.max_udp_payload_size);
+    }
+    if (params.initial_max_data != 0) try encodeIntegerTransportParameter(list, allocator, .initial_max_data, params.initial_max_data);
+    if (params.initial_max_stream_data_bidi_local != 0) try encodeIntegerTransportParameter(list, allocator, .initial_max_stream_data_bidi_local, params.initial_max_stream_data_bidi_local);
+    if (params.initial_max_stream_data_bidi_remote != 0) try encodeIntegerTransportParameter(list, allocator, .initial_max_stream_data_bidi_remote, params.initial_max_stream_data_bidi_remote);
+    if (params.initial_max_stream_data_uni != 0) try encodeIntegerTransportParameter(list, allocator, .initial_max_stream_data_uni, params.initial_max_stream_data_uni);
+    if (params.initial_max_streams_bidi != 0) try encodeIntegerTransportParameter(list, allocator, .initial_max_streams_bidi, params.initial_max_streams_bidi);
+    if (params.initial_max_streams_uni != 0) try encodeIntegerTransportParameter(list, allocator, .initial_max_streams_uni, params.initial_max_streams_uni);
+    if (params.ack_delay_exponent != default_ack_delay_exponent) try encodeIntegerTransportParameter(list, allocator, .ack_delay_exponent, params.ack_delay_exponent);
+    if (params.max_ack_delay != default_max_ack_delay_ms) try encodeIntegerTransportParameter(list, allocator, .max_ack_delay, params.max_ack_delay);
+    if (params.disable_active_migration) try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.disable_active_migration), &.{});
+    if (params.preferred_address) |preferred| try encodePreferredAddressTransportParameter(list, allocator, preferred);
+    if (params.active_connection_id_limit != default_active_connection_id_limit) try encodeIntegerTransportParameter(list, allocator, .active_connection_id_limit, params.active_connection_id_limit);
+    if (params.initial_source_connection_id) |cid| {
+        try validateTransportConnectionId(cid, false);
+        try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.initial_source_connection_id), cid);
+    }
+    if (params.retry_source_connection_id) |cid| {
+        try validateTransportConnectionId(cid, false);
+        try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.retry_source_connection_id), cid);
+    }
+    if (params.max_datagram_frame_size) |size| try encodeIntegerTransportParameter(list, allocator, .max_datagram_frame_size, size);
+}
+
+pub fn validateTransportParameters(params: TransportParameters, source: TransportParameterSource) Error!void {
+    if (source == .client) {
+        if (params.original_destination_connection_id != null or
+            params.stateless_reset_token != null or
+            params.preferred_address != null or
+            params.retry_source_connection_id != null)
+        {
+            return error.TransportParameterForbidden;
+        }
+    }
+
+    if (params.original_destination_connection_id) |cid| try validateTransportConnectionId(cid, false);
+    if (params.initial_source_connection_id) |cid| try validateTransportConnectionId(cid, false);
+    if (params.retry_source_connection_id) |cid| try validateTransportConnectionId(cid, false);
+    if (params.preferred_address) |preferred| try validatePreferredAddress(preferred);
+
+    try validateTransportInteger(.max_udp_payload_size, params.max_udp_payload_size);
+    try validateTransportInteger(.initial_max_streams_bidi, params.initial_max_streams_bidi);
+    try validateTransportInteger(.initial_max_streams_uni, params.initial_max_streams_uni);
+    try validateTransportInteger(.ack_delay_exponent, params.ack_delay_exponent);
+    try validateTransportInteger(.max_ack_delay, params.max_ack_delay);
+    try validateTransportInteger(.active_connection_id_limit, params.active_connection_id_limit);
+    if (params.max_datagram_frame_size) |size| try validateTransportInteger(.max_datagram_frame_size, size);
+}
+
+pub fn parseTransportParametersTyped(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    source: TransportParameterSource,
+) Error!TransportParameters {
+    var cursor = wire.Cursor.init(bytes);
+    var params = TransportParameters{};
+    var seen: std.ArrayList(u64) = .empty;
+    defer seen.deinit(allocator);
+
+    while (!cursor.eof()) {
+        const id = try varint.decode(&cursor);
+        for (seen.items) |seen_id| {
+            if (seen_id == id) return error.DuplicateTransportParameter;
+        }
+        try seen.append(allocator, id);
+
+        const len = try usizeFromVarint(try varint.decode(&cursor));
+        const value = try cursor.readSlice(len);
+
+        if (id == @intFromEnum(TransportParameterId.original_destination_connection_id)) {
+            if (source == .client) return error.TransportParameterForbidden;
+            try validateTransportConnectionId(value, false);
+            params.original_destination_connection_id = value;
+        } else if (id == @intFromEnum(TransportParameterId.max_idle_timeout)) {
+            params.max_idle_timeout = try parseTransportInteger(.max_idle_timeout, value);
+        } else if (id == @intFromEnum(TransportParameterId.stateless_reset_token)) {
+            if (source == .client) return error.TransportParameterForbidden;
+            if (value.len != 16) return error.InvalidTransportParameterLength;
+            params.stateless_reset_token = value[0..16].*;
+        } else if (id == @intFromEnum(TransportParameterId.max_udp_payload_size)) {
+            params.max_udp_payload_size = try parseTransportInteger(.max_udp_payload_size, value);
+        } else if (id == @intFromEnum(TransportParameterId.initial_max_data)) {
+            params.initial_max_data = try parseTransportInteger(.initial_max_data, value);
+        } else if (id == @intFromEnum(TransportParameterId.initial_max_stream_data_bidi_local)) {
+            params.initial_max_stream_data_bidi_local = try parseTransportInteger(.initial_max_stream_data_bidi_local, value);
+        } else if (id == @intFromEnum(TransportParameterId.initial_max_stream_data_bidi_remote)) {
+            params.initial_max_stream_data_bidi_remote = try parseTransportInteger(.initial_max_stream_data_bidi_remote, value);
+        } else if (id == @intFromEnum(TransportParameterId.initial_max_stream_data_uni)) {
+            params.initial_max_stream_data_uni = try parseTransportInteger(.initial_max_stream_data_uni, value);
+        } else if (id == @intFromEnum(TransportParameterId.initial_max_streams_bidi)) {
+            params.initial_max_streams_bidi = try parseTransportInteger(.initial_max_streams_bidi, value);
+        } else if (id == @intFromEnum(TransportParameterId.initial_max_streams_uni)) {
+            params.initial_max_streams_uni = try parseTransportInteger(.initial_max_streams_uni, value);
+        } else if (id == @intFromEnum(TransportParameterId.ack_delay_exponent)) {
+            params.ack_delay_exponent = try parseTransportInteger(.ack_delay_exponent, value);
+        } else if (id == @intFromEnum(TransportParameterId.max_ack_delay)) {
+            params.max_ack_delay = try parseTransportInteger(.max_ack_delay, value);
+        } else if (id == @intFromEnum(TransportParameterId.disable_active_migration)) {
+            if (value.len != 0) return error.InvalidTransportParameterLength;
+            params.disable_active_migration = true;
+        } else if (id == @intFromEnum(TransportParameterId.preferred_address)) {
+            if (source == .client) return error.TransportParameterForbidden;
+            params.preferred_address = try parsePreferredAddress(value);
+        } else if (id == @intFromEnum(TransportParameterId.active_connection_id_limit)) {
+            params.active_connection_id_limit = try parseTransportInteger(.active_connection_id_limit, value);
+        } else if (id == @intFromEnum(TransportParameterId.initial_source_connection_id)) {
+            try validateTransportConnectionId(value, false);
+            params.initial_source_connection_id = value;
+        } else if (id == @intFromEnum(TransportParameterId.retry_source_connection_id)) {
+            if (source == .client) return error.TransportParameterForbidden;
+            try validateTransportConnectionId(value, false);
+            params.retry_source_connection_id = value;
+        } else if (id == @intFromEnum(TransportParameterId.max_datagram_frame_size)) {
+            params.max_datagram_frame_size = try parseTransportInteger(.max_datagram_frame_size, value);
+        } else {
+            // Unknown parameters, including greasing identifiers of the form
+            // 31*N+27, are intentionally ignored after duplicate detection as
+            // required by RFC 9000.
+        }
+    }
+
+    try validateTransportParameters(params, source);
+    return params;
+}
+
 pub fn encodeTransportParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: u64, value: []const u8) !void {
     try varint.encode(list, allocator, id);
     try varint.encode(list, allocator, value.len);
@@ -140,6 +348,100 @@ pub fn parseTransportParameters(allocator: std.mem.Allocator, bytes: []const u8)
         try params.append(allocator, .{ .id = id, .value = value });
     }
     return params.toOwnedSlice(allocator);
+}
+
+fn encodeIntegerTransportParameter(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    id: TransportParameterId,
+    value: u64,
+) Error!void {
+    try validateTransportInteger(id, value);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try varint.encode(&encoded, allocator, value);
+    try encodeTransportParameter(list, allocator, @intFromEnum(id), encoded.items);
+}
+
+fn encodePreferredAddressTransportParameter(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    preferred: PreferredAddress,
+) Error!void {
+    try validatePreferredAddress(preferred);
+
+    var value: std.ArrayList(u8) = .empty;
+    defer value.deinit(allocator);
+    try value.appendSlice(allocator, &preferred.ipv4_address);
+    try wire.appendInt(&value, allocator, u16, preferred.ipv4_port, .big);
+    try value.appendSlice(allocator, &preferred.ipv6_address);
+    try wire.appendInt(&value, allocator, u16, preferred.ipv6_port, .big);
+    try value.append(allocator, @intCast(preferred.connection_id.len));
+    try value.appendSlice(allocator, preferred.connection_id);
+    try value.appendSlice(allocator, &preferred.stateless_reset_token);
+    try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.preferred_address), value.items);
+}
+
+fn parseTransportInteger(id: TransportParameterId, value: []const u8) Error!u64 {
+    if (value.len == 0) return error.InvalidTransportParameterLength;
+    var cursor = wire.Cursor.init(value);
+    const parsed = try varint.decode(&cursor);
+    if (!cursor.eof()) return error.InvalidTransportParameterLength;
+    try validateTransportInteger(id, parsed);
+    return parsed;
+}
+
+fn validateTransportInteger(id: TransportParameterId, value: u64) Error!void {
+    if (value > varint.max_value) return error.InvalidTransportParameter;
+    switch (id) {
+        .max_udp_payload_size => {
+            if (value < 1200 or value > default_max_udp_payload_size) return error.InvalidTransportParameter;
+        },
+        .initial_max_streams_bidi, .initial_max_streams_uni => {
+            if (value > max_stream_count) return error.InvalidTransportParameter;
+        },
+        .ack_delay_exponent => {
+            if (value > 20) return error.InvalidTransportParameter;
+        },
+        .max_ack_delay => {
+            if (value >= (@as(u64, 1) << 14)) return error.InvalidTransportParameter;
+        },
+        .active_connection_id_limit => {
+            if (value < default_active_connection_id_limit) return error.InvalidTransportParameter;
+        },
+        else => {},
+    }
+}
+
+fn parsePreferredAddress(value: []const u8) Error!PreferredAddress {
+    var cursor = wire.Cursor.init(value);
+    const ipv4 = (try cursor.readSlice(4))[0..4].*;
+    const ipv4_port = try cursor.readInt(u16, .big);
+    const ipv6 = (try cursor.readSlice(16))[0..16].*;
+    const ipv6_port = try cursor.readInt(u16, .big);
+    const cid_len = try cursor.readByte();
+    const cid = try cursor.readSlice(cid_len);
+    try validateTransportConnectionId(cid, true);
+    const token = (try cursor.readSlice(16))[0..16].*;
+    if (!cursor.eof()) return error.InvalidTransportParameterLength;
+    return .{
+        .ipv4_address = ipv4,
+        .ipv4_port = ipv4_port,
+        .ipv6_address = ipv6,
+        .ipv6_port = ipv6_port,
+        .connection_id = cid,
+        .stateless_reset_token = token,
+    };
+}
+
+fn validatePreferredAddress(preferred: PreferredAddress) Error!void {
+    try validateTransportConnectionId(preferred.connection_id, true);
+}
+
+fn validateTransportConnectionId(cid: []const u8, require_non_empty: bool) Error!void {
+    if ((require_non_empty and cid.len == 0) or cid.len > 20) {
+        return error.InvalidTransportParameter;
+    }
 }
 
 pub const StreamId = struct {
@@ -732,6 +1034,87 @@ test "QUIC transport parameter parser" {
     defer allocator.free(params);
     try std.testing.expectEqual(@as(u64, 0x04), params[0].id);
     try std.testing.expectEqualStrings(&.{ 0x40, 0x64 }, params[0].value);
+}
+
+test "QUIC typed transport parameters roundtrip and validate" {
+    const allocator = std.testing.allocator;
+    const client_cid = [_]u8{ 1, 2, 3, 4 };
+    const params = TransportParameters{
+        .max_udp_payload_size = 1400,
+        .initial_max_data = 4096,
+        .initial_max_stream_data_bidi_local = 1024,
+        .initial_max_stream_data_bidi_remote = 2048,
+        .initial_max_stream_data_uni = 512,
+        .initial_max_streams_bidi = 8,
+        .initial_max_streams_uni = 4,
+        .ack_delay_exponent = 10,
+        .max_ack_delay = 50,
+        .active_connection_id_limit = 4,
+        .initial_source_connection_id = &client_cid,
+        .max_datagram_frame_size = 1200,
+    };
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try encodeTransportParameters(&bytes, allocator, params);
+    const decoded = try parseTransportParametersTyped(allocator, bytes.items, .client);
+
+    try std.testing.expectEqual(@as(u64, 1400), decoded.max_udp_payload_size);
+    try std.testing.expectEqual(@as(u64, 4096), decoded.initial_max_data);
+    try std.testing.expectEqual(@as(u64, 2048), decoded.initial_max_stream_data_bidi_remote);
+    try std.testing.expectEqual(@as(u64, 10), decoded.ack_delay_exponent);
+    try std.testing.expectEqual(@as(u64, 50), decoded.max_ack_delay);
+    try std.testing.expectEqual(@as(u64, 4), decoded.active_connection_id_limit);
+    try std.testing.expectEqual(@as(?u64, 1200), decoded.max_datagram_frame_size);
+    try std.testing.expectEqualSlices(u8, &client_cid, decoded.initial_source_connection_id.?);
+
+    var duplicate: std.ArrayList(u8) = .empty;
+    defer duplicate.deinit(allocator);
+    try encodeTransportParameter(&duplicate, allocator, @intFromEnum(TransportParameterId.max_idle_timeout), &.{1});
+    try encodeTransportParameter(&duplicate, allocator, @intFromEnum(TransportParameterId.max_idle_timeout), &.{2});
+    try std.testing.expectError(error.DuplicateTransportParameter, parseTransportParametersTyped(allocator, duplicate.items, .client));
+
+    var invalid_udp: std.ArrayList(u8) = .empty;
+    defer invalid_udp.deinit(allocator);
+    try encodeTransportParameter(&invalid_udp, allocator, @intFromEnum(TransportParameterId.max_udp_payload_size), &.{1});
+    try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, invalid_udp.items, .client));
+
+    var forbidden: std.ArrayList(u8) = .empty;
+    defer forbidden.deinit(allocator);
+    const token = [_]u8{0xaa} ** 16;
+    try encodeTransportParameter(&forbidden, allocator, @intFromEnum(TransportParameterId.stateless_reset_token), &token);
+    try std.testing.expectError(error.TransportParameterForbidden, parseTransportParametersTyped(allocator, forbidden.items, .client));
+}
+
+test "QUIC server transport parameters include preferred address" {
+    const allocator = std.testing.allocator;
+    const original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const server_cid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const preferred_cid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const token = [_]u8{0x99} ** 16;
+    const params = TransportParameters{
+        .original_destination_connection_id = &original_dcid,
+        .stateless_reset_token = token,
+        .preferred_address = .{
+            .ipv4_address = .{ 127, 0, 0, 1 },
+            .ipv4_port = 4433,
+            .connection_id = &preferred_cid,
+            .stateless_reset_token = token,
+        },
+        .active_connection_id_limit = 4,
+        .initial_source_connection_id = &server_cid,
+    };
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try encodeTransportParameters(&bytes, allocator, params);
+    const decoded = try parseTransportParametersTyped(allocator, bytes.items, .server);
+
+    try std.testing.expectEqualSlices(u8, &original_dcid, decoded.original_destination_connection_id.?);
+    try std.testing.expectEqualSlices(u8, &server_cid, decoded.initial_source_connection_id.?);
+    try std.testing.expectEqualSlices(u8, &token, &decoded.stateless_reset_token.?);
+    try std.testing.expectEqual(@as(u16, 4433), decoded.preferred_address.?.ipv4_port);
+    try std.testing.expectEqualSlices(u8, &preferred_cid, decoded.preferred_address.?.connection_id);
 }
 
 test "QUIC stream and crypto frame codec" {

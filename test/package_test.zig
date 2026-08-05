@@ -61,6 +61,15 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.tls_client_hello, "deriveApplicationSecrets"));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "connect"));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "accept"));
+    try std.testing.expect(@hasDecl(netz.quic, "TransportParameters"));
+    try std.testing.expect(@hasDecl(netz.quic, "parseTransportParametersTyped"));
+    try std.testing.expect(@hasDecl(netz.quic, "encodeTransportParameters"));
+    try std.testing.expect(@hasDecl(netz.quic, "validateTransportParameters"));
+    try std.testing.expect(@hasDecl(netz.quic, "practical_transport_parameters"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "local_transport_parameters"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "local_transport_parameters"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));
