@@ -17,6 +17,7 @@ pub const Error = websocket.Error || http1_runtime.Error || error{
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
     max_frame_bytes: usize = 16 * 1024 * 1024,
+    max_message_bytes: usize = 16 * 1024 * 1024,
 };
 
 pub const Role = enum {
@@ -341,7 +342,7 @@ pub const Connection = struct {
     }
 
     pub fn receiveMessage(self: *Connection) Error!OwnedMessage {
-        var assembler = websocket.MessageAssembler.init(self.allocator);
+        var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
         defer assembler.deinit();
 
         while (true) {
@@ -750,6 +751,61 @@ test "WebSocket receiveMessage assembles fragments and handles control frames" {
     try std.testing.expectEqualStrings("?", pong.payload);
 
     try client.sendClose(.normal_closure, "bye");
+    var close = try client.receiveFrame();
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket receiveMessage enforces aggregate fragmented message limit" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 12 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+
+            try std.testing.expectError(error.PayloadTooLarge, connection.receiveMessage());
+            try connection.sendClose(.message_too_big, "too big");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/message-limit",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
+    });
+    defer client.close();
+
+    const fragments = [_][]const u8{ "12345678", "abcdef" };
+    try client.sendFragmented(.text, &fragments);
+
     var close = try client.receiveFrame();
     defer close.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);

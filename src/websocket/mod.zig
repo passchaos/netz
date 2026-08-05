@@ -296,6 +296,7 @@ pub fn writeServerHandshake(
 
 pub const MessageAssembler = struct {
     allocator: std.mem.Allocator,
+    max_message_bytes: usize = std.math.maxInt(usize),
     opcode: ?Opcode = null,
     buffer: std.ArrayList(u8) = .empty,
 
@@ -306,6 +307,10 @@ pub const MessageAssembler = struct {
 
     pub fn init(allocator: std.mem.Allocator) MessageAssembler {
         return .{ .allocator = allocator };
+    }
+
+    pub fn initLimited(allocator: std.mem.Allocator, max_message_bytes: usize) MessageAssembler {
+        return .{ .allocator = allocator, .max_message_bytes = max_message_bytes };
     }
 
     pub fn deinit(self: *MessageAssembler) void {
@@ -322,6 +327,11 @@ pub const MessageAssembler = struct {
         } else if (self.opcode == null) {
             return error.InvalidFrame;
         }
+        // A fragmented message can be split into many individually-valid
+        // frames.  Bound the aggregate payload, not only the current frame, so
+        // peers cannot bypass runtime limits with many small fragments.
+        const new_len = std.math.add(usize, self.buffer.items.len, frame.payload.len) catch return error.PayloadTooLarge;
+        if (new_len > self.max_message_bytes) return error.PayloadTooLarge;
         try self.buffer.appendSlice(self.allocator, frame.payload);
         if (!frame.header.fin) return null;
         const payload = try self.buffer.toOwnedSlice(self.allocator);
@@ -383,6 +393,42 @@ test "WebSocket close payload validation" {
 
     var bad_utf8 = [_]u8{ 0x03, 0xe8, 0xc0, 0x80 };
     try std.testing.expectError(error.InvalidUtf8, validateClosePayload(&bad_utf8));
+}
+
+test "WebSocket message assembler enforces aggregate payload limit" {
+    const allocator = std.testing.allocator;
+    var assembler = MessageAssembler.initLimited(allocator, 8);
+    defer assembler.deinit();
+
+    var first_payload = [_]u8{ 'h', 'e', 'l', 'l', 'o' };
+    const first = Frame{
+        .header = .{
+            .fin = false,
+            .opcode = .text,
+            .masked = false,
+            .payload_len = first_payload.len,
+            .mask_key = null,
+            .header_len = 2,
+        },
+        .payload = &first_payload,
+        .consumed = 2 + first_payload.len,
+    };
+    try std.testing.expectEqual(@as(?MessageAssembler.Message, null), try assembler.feed(first));
+
+    var second_payload = [_]u8{ 'w', 'o', 'r', 'l', 'd' };
+    const second = Frame{
+        .header = .{
+            .fin = true,
+            .opcode = .continuation,
+            .masked = false,
+            .payload_len = second_payload.len,
+            .mask_key = null,
+            .header_len = 2,
+        },
+        .payload = &second_payload,
+        .consumed = 2 + second_payload.len,
+    };
+    try std.testing.expectError(error.PayloadTooLarge, assembler.feed(second));
 }
 
 test "WebSocket handshake rejects malformed nonce" {
