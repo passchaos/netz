@@ -5,15 +5,20 @@ const wire = @import("../internal/wire.zig");
 pub const Error = error{
     InvalidClientHello,
     InvalidServerHello,
+    InvalidEncryptedExtensions,
+    InvalidFinished,
     MissingKeyShare,
     MissingSupportedVersions,
     MissingTransportParameters,
     MissingAlpn,
     KeyExchangeFailed,
+    BadFinished,
 } || wire.Error || std.mem.Allocator.Error;
 
 const handshake_type_client_hello: u8 = 0x01;
 const handshake_type_server_hello: u8 = 0x02;
+const handshake_type_encrypted_extensions: u8 = 0x08;
+const handshake_type_finished: u8 = 0x14;
 const tls_1_2: u16 = 0x0303;
 const tls_1_3: u16 = 0x0304;
 const cipher_tls_aes_128_gcm_sha256: u16 = 0x1301;
@@ -64,6 +69,11 @@ pub const HandshakeSecrets = struct {
     server_handshake_traffic_secret: [quic.protection.secret_len]u8,
     client_quic: quic.protection.PacketProtectionKeys,
     server_quic: quic.protection.PacketProtectionKeys,
+};
+
+pub const ParsedEncryptedExtensions = struct {
+    alpn: []const u8,
+    transport_parameters: []const u8,
 };
 
 pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: ClientHelloOptions) Error!void {
@@ -124,6 +134,33 @@ pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try list.append(allocator, handshake_type_server_hello);
     try appendU24(list, allocator, @intCast(body.items.len));
     try list.appendSlice(allocator, body.items);
+}
+
+pub fn writeEncryptedExtensions(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    alpn: []const u8,
+    transport_parameters: []const u8,
+) Error!void {
+    var extensions: std.ArrayList(u8) = .empty;
+    defer extensions.deinit(allocator);
+    if (alpn.len != 0) try writeAlpnExtension(&extensions, allocator, &.{alpn});
+    try writeExtension(&extensions, allocator, ext_quic_transport_parameters, transport_parameters);
+
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+    try appendInt(&body, allocator, u16, @intCast(extensions.items.len));
+    try body.appendSlice(allocator, extensions.items);
+
+    try list.append(allocator, handshake_type_encrypted_extensions);
+    try appendU24(list, allocator, @intCast(body.items.len));
+    try list.appendSlice(allocator, body.items);
+}
+
+pub fn writeFinished(list: *std.ArrayList(u8), allocator: std.mem.Allocator, verify_data: [32]u8) Error!void {
+    try list.append(allocator, handshake_type_finished);
+    try appendU24(list, allocator, verify_data.len);
+    try list.appendSlice(allocator, &verify_data);
 }
 
 pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!ParsedClientHello {
@@ -230,6 +267,49 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
     return .{ .random = random, .x25519_public_key = x25519.? };
 }
 
+pub fn parseEncryptedExtensions(bytes: []const u8) Error!ParsedEncryptedExtensions {
+    var cursor = wire.Cursor.init(bytes);
+    if (try cursor.readByte() != handshake_type_encrypted_extensions) return error.InvalidEncryptedExtensions;
+    const body_len = try readU24(&cursor);
+    const body = try cursor.readSlice(body_len);
+    if (!cursor.eof()) return error.InvalidEncryptedExtensions;
+
+    var body_cursor = wire.Cursor.init(body);
+    const extensions_len = try body_cursor.readInt(u16, .big);
+    const extensions = try body_cursor.readSlice(extensions_len);
+    if (!body_cursor.eof()) return error.InvalidEncryptedExtensions;
+
+    var alpn: ?[]const u8 = null;
+    var transport_parameters: ?[]const u8 = null;
+    var ext_cursor = wire.Cursor.init(extensions);
+    while (!ext_cursor.eof()) {
+        const typ = try ext_cursor.readInt(u16, .big);
+        const len = try ext_cursor.readInt(u16, .big);
+        const payload = try ext_cursor.readSlice(len);
+        switch (typ) {
+            ext_alpn => {
+                alpn = try parseSingleAlpn(payload);
+            },
+            ext_quic_transport_parameters => transport_parameters = payload,
+            else => return error.InvalidEncryptedExtensions,
+        }
+    }
+    return .{
+        .alpn = alpn orelse return error.MissingAlpn,
+        .transport_parameters = transport_parameters orelse return error.MissingTransportParameters,
+    };
+}
+
+pub fn parseFinished(bytes: []const u8) Error![32]u8 {
+    var cursor = wire.Cursor.init(bytes);
+    if (try cursor.readByte() != handshake_type_finished) return error.InvalidFinished;
+    const body_len = try readU24(&cursor);
+    if (body_len != 32) return error.InvalidFinished;
+    const verify_data = (try cursor.readSlice(32))[0..32].*;
+    if (!cursor.eof()) return error.InvalidFinished;
+    return verify_data;
+}
+
 pub fn x25519PublicKey(secret_key: [32]u8) Error![32]u8 {
     return std.crypto.dh.X25519.recoverPublicKey(secret_key) catch return error.KeyExchangeFailed;
 }
@@ -264,6 +344,19 @@ pub fn deriveHandshakeSecrets(shared_secret: [32]u8, transcript_hash: [32]u8) Ha
         .client_quic = quic.protection.deriveAes128Keys(client_hs),
         .server_quic = quic.protection.deriveAes128Keys(server_hs),
     };
+}
+
+pub fn computeFinishedVerifyData(base_key: [32]u8, transcript_hash: [32]u8) [32]u8 {
+    const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
+    const finished_key = std.crypto.tls.hkdfExpandLabel(HkdfSha256, base_key, "finished", "", 32);
+    var out: [32]u8 = undefined;
+    std.crypto.auth.hmac.sha2.HmacSha256.create(&out, &transcript_hash, &finished_key);
+    return out;
+}
+
+pub fn verifyFinished(base_key: [32]u8, transcript_hash: [32]u8, verify_data: [32]u8) Error!void {
+    const expected = computeFinishedVerifyData(base_key, transcript_hash);
+    if (!std.crypto.timing_safe.eql([32]u8, expected, verify_data)) return error.BadFinished;
 }
 
 fn writeServerNameExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) Error!void {
@@ -352,6 +445,19 @@ fn parseAlpn(allocator: std.mem.Allocator, out: *std.ArrayList([]const u8), payl
         if (len == 0) return error.InvalidClientHello;
         try out.append(allocator, try list_cursor.readSlice(len));
     }
+}
+
+fn parseSingleAlpn(payload: []const u8) Error![]const u8 {
+    var cursor = wire.Cursor.init(payload);
+    const list_len = try cursor.readInt(u16, .big);
+    const list = try cursor.readSlice(list_len);
+    if (!cursor.eof()) return error.InvalidEncryptedExtensions;
+    var list_cursor = wire.Cursor.init(list);
+    const len = try list_cursor.readByte();
+    if (len == 0) return error.InvalidEncryptedExtensions;
+    const protocol = try list_cursor.readSlice(len);
+    if (!list_cursor.eof()) return error.InvalidEncryptedExtensions;
+    return protocol;
 }
 
 fn parseX25519KeyShare(payload: []const u8) Error![]const u8 {
@@ -582,4 +688,35 @@ test "QUIC TLS ClientHello and ServerHello exchange over protected Initial packe
     try std.testing.expectEqualSlices(u8, &server_shared, &client_shared);
     try std.testing.expectEqualSlices(u8, &server_handshake.client_quic.key, &client_handshake.client_quic.key);
     try std.testing.expectEqualSlices(u8, &server_handshake.server_quic.key, &client_handshake.server_quic.key);
+}
+
+test "QUIC TLS EncryptedExtensions and Finished verify data" {
+    const allocator = std.testing.allocator;
+    var tp: std.ArrayList(u8) = .empty;
+    defer tp.deinit(allocator);
+    try quic.encodeTransportParameter(&tp, allocator, @intFromEnum(quic.TransportParameterId.initial_max_data), &.{ 0x40, 0x64 });
+
+    var ee: std.ArrayList(u8) = .empty;
+    defer ee.deinit(allocator);
+    try writeEncryptedExtensions(&ee, allocator, "h3", tp.items);
+    const parsed_ee = try parseEncryptedExtensions(ee.items);
+    try std.testing.expectEqualStrings("h3", parsed_ee.alpn);
+    const params = try quic.parseTransportParameters(allocator, parsed_ee.transport_parameters);
+    defer allocator.free(params);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.TransportParameterId.initial_max_data)), params[0].id);
+
+    const base_key = [_]u8{0x5a} ** 32;
+    var transcript_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(ee.items, &transcript_hash, .{});
+    const verify_data = computeFinishedVerifyData(base_key, transcript_hash);
+
+    var finished: std.ArrayList(u8) = .empty;
+    defer finished.deinit(allocator);
+    try writeFinished(&finished, allocator, verify_data);
+    const parsed_finished = try parseFinished(finished.items);
+    try verifyFinished(base_key, transcript_hash, parsed_finished);
+
+    var wrong_hash = transcript_hash;
+    wrong_hash[0] ^= 0xff;
+    try std.testing.expectError(error.BadFinished, verifyFinished(base_key, wrong_hash, parsed_finished));
 }
