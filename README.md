@@ -45,10 +45,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   validation, close payload checks, message assembly, serialized connection
   writes, and a blocking TCP client/server runtime over HTTP/1 Upgrade with a
   `std.Io.async` concurrent server helper
-- MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK, PUBLISH, PUBACK-style
-  acknowledgements, SUBSCRIBE/SUBACK, PING, DISCONNECT, properties, and
-  remaining length, plus a blocking TCP client/server runtime with a
-  `std.Io.async` concurrent server helper and QoS publish inflight limiting
+- MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK, PUBLISH,
+  PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK, PING,
+  DISCONNECT, properties, and remaining length, plus a blocking TCP
+  client/server runtime with a `std.Io.async` concurrent server helper, QoS
+  publish inflight limiting, and QoS 2 exactly-once publish handshakes
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
   datagram mapping, session lifecycle/counter state, plus a cleartext
   development runtime over the HTTP/3 dev transport, a protected QUIC 1-RTT
@@ -65,7 +66,8 @@ prior-knowledge HTTP/2 (h2c), and WebSocket now include blocking TCP
 client/server runtimes built on Zig 0.16 `std.Io.net`; QUIC has Initial
 protection primitives plus a blocking UDP endpoint runtime for datagram/frame
 transport; MQTT has a blocking TCP client/server runtime for
-CONNECT/PUBLISH/PING/DISCONNECT flows. TLS, event loops, congestion control,
+CONNECT/SUBSCRIBE/PUBLISH/PING/DISCONNECT flows, including QoS 1 and QoS 2
+publish acknowledgements. TLS, event loops, congestion control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on
 the same byte-level pieces.
 

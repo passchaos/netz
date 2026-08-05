@@ -245,7 +245,9 @@ pub const Connection = struct {
         if (packet_id != null) {
             if (self.outgoing_inflight >= self.max_outgoing_inflight) return error.InflightFull;
             self.outgoing_inflight += 1;
-            errdefer self.outgoing_inflight -= 1;
+        }
+        defer {
+            if (packet_id != null) self.outgoing_inflight -= 1;
         }
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
@@ -257,10 +259,23 @@ pub const Connection = struct {
         });
         try writeAll(self.io, self.stream, encoded.items);
         if (packet_id) |id| {
-            var ack = try self.readAck(.puback);
-            defer ack.deinit(self.allocator);
-            if (ack.ack.packet_id != id) return error.UnexpectedPacket;
-            self.outgoing_inflight -= 1;
+            switch (options.qos) {
+                .at_most_once => unreachable,
+                .at_least_once => {
+                    var ack = try self.readPubAck();
+                    defer ack.deinit(self.allocator);
+                    if (ack.ack.packet_id != id) return error.UnexpectedPacket;
+                },
+                .exactly_once => {
+                    var pubrec = try self.readPubRec();
+                    defer pubrec.deinit(self.allocator);
+                    if (pubrec.ack.packet_id != id) return error.UnexpectedPacket;
+                    try self.writePubRel(id, 0);
+                    var pubcomp = try self.readPubComp();
+                    defer pubcomp.deinit(self.allocator);
+                    if (pubcomp.ack.packet_id != id) return error.UnexpectedPacket;
+                },
+            }
         }
     }
 
@@ -274,9 +289,41 @@ pub const Connection = struct {
     }
 
     pub fn writePubAck(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
+        try self.writeAckPacket(.puback, packet_id, reason_code);
+    }
+
+    pub fn readPubAck(self: *Connection) Error!OwnedAck {
+        return self.readAck(.puback);
+    }
+
+    pub fn writePubRec(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
+        try self.writeAckPacket(.pubrec, packet_id, reason_code);
+    }
+
+    pub fn readPubRec(self: *Connection) Error!OwnedAck {
+        return self.readAck(.pubrec);
+    }
+
+    pub fn writePubRel(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
+        try self.writeAckPacket(.pubrel, packet_id, reason_code);
+    }
+
+    pub fn readPubRel(self: *Connection) Error!OwnedAck {
+        return self.readAck(.pubrel);
+    }
+
+    pub fn writePubComp(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
+        try self.writeAckPacket(.pubcomp, packet_id, reason_code);
+    }
+
+    pub fn readPubComp(self: *Connection) Error!OwnedAck {
+        return self.readAck(.pubcomp);
+    }
+
+    fn writeAckPacket(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_code: u8) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
-        try mqtt.AckPacket.write(&encoded, self.allocator, self.protocol, .puback, packet_id, reason_code, &.{});
+        try mqtt.AckPacket.write(&encoded, self.allocator, self.protocol, packet_type, packet_id, reason_code, &.{});
         try writeAll(self.io, self.stream, encoded.items);
     }
 
@@ -558,6 +605,17 @@ test "MQTT runtime client and server exchange over TCP" {
 
             try accepted.connection.publish("alerts/system", "online", .{});
 
+            var exact = try accepted.connection.readPublish();
+            defer exact.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("sensors/exact", exact.publish.topic);
+            try std.testing.expectEqualStrings("exactly-once", exact.publish.payload);
+            try std.testing.expectEqual(mqtt.QoS.exactly_once, exact.publish.qos);
+            try accepted.connection.writePubRec(exact.publish.packet_id.?, 0);
+            var pubrel = try accepted.connection.readPubRel();
+            defer pubrel.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(exact.publish.packet_id.?, pubrel.ack.packet_id);
+            try accepted.connection.writePubComp(pubrel.ack.packet_id, 0);
+
             var publish = try accepted.connection.readPublish();
             defer publish.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("sensors/temp", publish.publish.topic);
@@ -597,6 +655,7 @@ test "MQTT runtime client and server exchange over TCP" {
     try std.testing.expectEqualStrings("alerts/system", server_publish.publish.topic);
     try std.testing.expectEqualStrings("online", server_publish.publish.payload);
 
+    try client.publish("sensors/exact", "exactly-once", .{ .qos = .exactly_once });
     try client.publish("sensors/temp", "21.5", .{ .qos = .at_least_once });
     try client.ping();
     try client.disconnect(0);
