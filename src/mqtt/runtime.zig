@@ -8,6 +8,7 @@ pub const Error = mqtt.Error || error{
     PacketTooLarge,
     UnexpectedPacket,
     ConnectRefused,
+    InflightFull,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -48,6 +49,7 @@ pub const Server = struct {
             .stream = stream,
             .protocol = options.protocol,
             .limits = self.limits,
+            .max_outgoing_inflight = options.max_outgoing_inflight,
         };
         errdefer connection.close();
 
@@ -139,6 +141,7 @@ fn ServeTask(comptime HandlerContext: type) type {
 pub const AcceptOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
     reason_code: u8 = 0,
+    max_outgoing_inflight: u16 = 16,
 };
 
 pub const AcceptedClient = struct {
@@ -163,6 +166,7 @@ pub const Client = struct {
             .stream = stream,
             .protocol = options.protocol,
             .limits = options.limits,
+            .max_outgoing_inflight = options.max_outgoing_inflight,
         };
         errdefer connection.close();
 
@@ -185,12 +189,14 @@ pub const ConnectOptions = struct {
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,
     limits: Limits = .{},
+    max_outgoing_inflight: u16 = 16,
 };
 
 pub const ConnAckOptions = struct {
     session_present: bool = false,
     reason_code: u8 = 0,
     properties: []const mqtt.Property = &.{},
+    max_outgoing_inflight: u16 = 16,
 };
 
 pub const Connection = struct {
@@ -200,6 +206,8 @@ pub const Connection = struct {
     protocol: mqtt.ProtocolVersion = .v5,
     limits: Limits = .{},
     next_packet_id: u16 = 1,
+    outgoing_inflight: u16 = 0,
+    max_outgoing_inflight: u16 = 16,
 
     pub fn close(self: *Connection) void {
         self.stream.close(self.io);
@@ -234,6 +242,11 @@ pub const Connection = struct {
 
     pub fn publish(self: *Connection, topic: []const u8, payload: []const u8, options: PublishOptions) Error!void {
         const packet_id = if (options.qos == .at_most_once) null else self.nextPacketId();
+        if (packet_id != null) {
+            if (self.outgoing_inflight >= self.max_outgoing_inflight) return error.InflightFull;
+            self.outgoing_inflight += 1;
+            errdefer self.outgoing_inflight -= 1;
+        }
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.writePublish(&encoded, self.allocator, self.protocol, topic, payload, .{
@@ -247,6 +260,7 @@ pub const Connection = struct {
             var ack = try self.readAck(.puback);
             defer ack.deinit(self.allocator);
             if (ack.ack.packet_id != id) return error.UnexpectedPacket;
+            self.outgoing_inflight -= 1;
         }
     }
 
@@ -589,6 +603,20 @@ test "MQTT runtime client and server exchange over TCP" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "MQTT connection enforces outgoing inflight limit before writing" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .protocol = .v5,
+        .outgoing_inflight = 1,
+        .max_outgoing_inflight = 1,
+    };
+
+    try std.testing.expectError(error.InflightFull, connection.publish("limited/topic", "blocked", .{ .qos = .at_least_once }));
+    try std.testing.expectEqual(@as(u16, 1), connection.outgoing_inflight);
 }
 
 test "MQTT async std.Io server handles concurrent clients" {

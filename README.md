@@ -41,7 +41,7 @@ starts with deterministic parsers, serializers, and state helpers for:
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK, PUBLISH, PUBACK-style
   acknowledgements, SUBSCRIBE/SUBACK, PING, DISCONNECT, properties, and
   remaining length, plus a blocking TCP client/server runtime with a
-  `std.Io.async` concurrent server helper
+  `std.Io.async` concurrent server helper and QoS publish inflight limiting
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
   datagram mapping, plus a cleartext development runtime over the HTTP/3 dev
   transport, a protected QUIC 1-RTT runtime over protected HTTP/3, and a
