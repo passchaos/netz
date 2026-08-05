@@ -70,7 +70,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   username/password payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
   UNSUBSCRIBE/UNSUBACK, PING,
-  DISCONNECT, properties, remaining length, topic-name/filter validation, and
+  DISCONNECT, AUTH enhanced-authentication exchanges, properties, remaining length, topic-name/filter validation, and
   wildcard matching, plus a blocking TCP client/server runtime with a
   `std.Io.async` concurrent server helper, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes

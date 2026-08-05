@@ -460,6 +460,22 @@ pub const Connection = struct {
         return .{ .packet = packet, .disconnect = disconnect_packet };
     }
 
+    pub fn writeAuth(self: *Connection, reason_code: u8, properties: []const mqtt.Property) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try mqtt.Auth.write(&encoded, self.allocator, self.protocol, reason_code, properties);
+        try writeAll(self.io, self.stream, encoded.items);
+    }
+
+    pub fn readAuth(self: *Connection) Error!OwnedAuth {
+        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        errdefer packet.deinit(self.allocator);
+        if (packet.fixed.packet_type != .auth) return error.UnexpectedPacket;
+        var auth_packet = try mqtt.Auth.parse(self.allocator, self.protocol, packet.bytes);
+        errdefer auth_packet.deinit(self.allocator);
+        return .{ .packet = packet, .auth = auth_packet };
+    }
+
     fn readAck(self: *Connection, packet_type: mqtt.PacketType) Error!OwnedAck {
         var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
         errdefer packet.deinit(self.allocator);
@@ -600,6 +616,17 @@ pub const OwnedDisconnect = struct {
     }
 };
 
+pub const OwnedAuth = struct {
+    packet: OwnedPacket,
+    auth: mqtt.Auth,
+
+    pub fn deinit(self: *OwnedAuth, allocator: std.mem.Allocator) void {
+        self.auth.deinit(allocator);
+        self.packet.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 fn readPacket(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!OwnedPacket {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);
@@ -678,6 +705,15 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqualStrings("rumq", accepted.connect.connect.username.?);
             try std.testing.expectEqualStrings("mq", accepted.connect.connect.password.?);
 
+            var client_auth = try accepted.connection.readAuth();
+            defer client_auth.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(u8, 0x19), client_auth.auth.reason_code);
+            try std.testing.expectEqualStrings("SCRAM-SHA-256", client_auth.auth.properties[0].utf8.value);
+            try std.testing.expectEqualStrings("client-first", client_auth.auth.properties[1].binary.value);
+            try accepted.connection.writeAuth(0x18, &.{
+                .{ .utf8 = .{ .id = .reason_string, .value = "continue auth" } },
+            });
+
             var subscribe = try accepted.connection.readSubscribe();
             defer subscribe.deinit(server_ptr.allocator);
             try std.testing.expectEqual(@as(usize, 2), subscribe.subscribe.subscriptions.len);
@@ -741,6 +777,15 @@ test "MQTT runtime client and server exchange over TCP" {
         .limits = .{ .max_packet_size = 4096 },
     });
     defer client.close();
+
+    try client.writeAuth(0x19, &.{
+        .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },
+        .{ .binary = .{ .id = .authentication_data, .value = "client-first" } },
+    });
+    var auth = try client.readAuth();
+    defer auth.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0x18), auth.auth.reason_code);
+    try std.testing.expectEqualStrings("continue auth", auth.auth.properties[0].utf8.value);
 
     const subscriptions = [_]mqtt.Subscription{
         .{ .topic_filter = "sensors/+", .qos = .at_least_once },

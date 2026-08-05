@@ -882,6 +882,58 @@ pub const Disconnect = struct {
     }
 };
 
+pub const Auth = struct {
+    reason_code: u8 = 0,
+    properties: []Property = &.{},
+
+    pub fn deinit(self: *Auth, allocator: std.mem.Allocator) void {
+        allocator.free(self.properties);
+        self.* = undefined;
+    }
+
+    pub fn parse(allocator: std.mem.Allocator, protocol: ProtocolVersion, packet: []const u8) Error!Auth {
+        const fixed = try FixedHeader.parse(packet);
+        if (fixed.packet_type != .auth) return error.InvalidPacketType;
+        try validateControlFlags(fixed);
+        if (protocol != .v5) return error.InvalidPacketType;
+        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+
+        if (fixed.remaining_len == 0) {
+            return .{ .reason_code = 0, .properties = try allocator.alloc(Property, 0) };
+        }
+
+        var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
+        const reason_code = try cursor.readByte();
+        try validateAuthReason(reason_code);
+        const props = try parseProperties(allocator, &cursor);
+        errdefer allocator.free(props);
+        try validateAuthProperties(props);
+        if (!cursor.eof()) return error.InvalidPacketType;
+        return .{ .reason_code = reason_code, .properties = props };
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        reason_code: u8,
+        properties: []const Property,
+    ) Error!void {
+        if (protocol != .v5) return error.InvalidPacketType;
+        try validateAuthReason(reason_code);
+        try validateAuthProperties(properties);
+
+        var variable: std.ArrayList(u8) = .empty;
+        defer variable.deinit(allocator);
+        if (reason_code != 0 or properties.len != 0) {
+            try variable.append(allocator, reason_code);
+            try writeProperties(&variable, allocator, properties);
+        }
+        try (FixedHeader{ .packet_type = .auth, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
+        try list.appendSlice(allocator, variable.items);
+    }
+};
+
 fn validateSubscriptionOptions(options: u8) Error!void {
     if ((options & 0xc0) != 0) return error.InvalidSubscription;
     const qos_bits: u2 = @truncate(options & 0x03);
@@ -901,6 +953,39 @@ fn validateUnsubAckReason(code: u8) Error!void {
         0x00, 0x11, 0x80, 0x83, 0x87, 0x8f, 0x91 => {},
         else => return error.InvalidReasonCode,
     }
+}
+
+fn validateAuthReason(code: u8) Error!void {
+    switch (code) {
+        0x00, 0x18, 0x19 => {},
+        else => return error.InvalidReasonCode,
+    }
+}
+
+fn validateAuthProperties(properties: []const Property) Error!void {
+    for (properties) |property| {
+        const id = propertyId(property);
+        switch (id) {
+            .authentication_method,
+            .authentication_data,
+            .reason_string,
+            .user_property,
+            => {},
+            else => return error.InvalidProperty,
+        }
+    }
+}
+
+fn propertyId(property: Property) PropertyId {
+    return switch (property) {
+        .byte => |p| p.id,
+        .two_byte => |p| p.id,
+        .four_byte => |p| p.id,
+        .varint => |p| p.id,
+        .binary => |p| p.id,
+        .utf8 => |p| p.id,
+        .utf8_pair => |p| p.id,
+    };
 }
 
 pub fn writePing(list: *std.ArrayList(u8), allocator: std.mem.Allocator, response: bool) Error!void {
@@ -1183,6 +1268,37 @@ test "MQTT disconnect control" {
     var disconnect = try Disconnect.parse(allocator, .v5, encoded.items);
     defer disconnect.deinit(allocator);
     try std.testing.expectEqual(@as(u8, 0), disconnect.reason_code);
+}
+
+test "MQTT v5 AUTH control" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try Auth.write(&encoded, allocator, .v5, 0x18, &.{
+        .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },
+        .{ .binary = .{ .id = .authentication_data, .value = "client-first" } },
+        .{ .utf8_pair = .{ .id = .user_property, .key = "trace", .value = "auth-1" } },
+    });
+    var auth = try Auth.parse(allocator, .v5, encoded.items);
+    defer auth.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0x18), auth.reason_code);
+    try std.testing.expectEqual(@as(usize, 3), auth.properties.len);
+    try std.testing.expectEqual(PropertyId.authentication_method, auth.properties[0].utf8.id);
+    try std.testing.expectEqualStrings("SCRAM-SHA-256", auth.properties[0].utf8.value);
+    try std.testing.expectEqualStrings("client-first", auth.properties[1].binary.value);
+
+    encoded.clearRetainingCapacity();
+    try Auth.write(&encoded, allocator, .v5, 0x00, &.{});
+    auth.deinit(allocator);
+    auth = try Auth.parse(allocator, .v5, encoded.items);
+    try std.testing.expectEqual(@as(u8, 0), auth.reason_code);
+    try std.testing.expectEqual(@as(usize, 0), auth.properties.len);
+
+    try std.testing.expectError(error.InvalidReasonCode, Auth.write(&encoded, allocator, .v5, 0x01, &.{}));
+    try std.testing.expectError(error.InvalidPacketType, Auth.write(&encoded, allocator, .v3_1_1, 0x00, &.{}));
+    try std.testing.expectError(error.InvalidProperty, Auth.write(&encoded, allocator, .v5, 0x18, &.{
+        .{ .two_byte = .{ .id = .receive_maximum, .value = 10 } },
+    }));
 }
 
 test {

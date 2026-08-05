@@ -86,6 +86,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "unsubscribe"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readUnsubscribe"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writeUnsubAck"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "Auth"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writeAuth"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readAuth"));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.quic.runtime.Limits{}).max_datagram_size);
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
