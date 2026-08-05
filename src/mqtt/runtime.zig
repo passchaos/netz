@@ -57,7 +57,84 @@ pub const Server = struct {
 
         return .{ .connection = connection, .connect = connect };
     }
+
+    pub fn serveConcurrent(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (*HandlerContext, *AcceptedClient) Error!void,
+        max_connections: usize,
+        options: AcceptOptions,
+    ) AsyncServeError!ConcurrentServeResult {
+        var group: std.Io.Group = .init;
+        const results = try self.allocator.alloc(?anyerror, max_connections);
+        errdefer self.allocator.free(results);
+        @memset(results, null);
+
+        for (results) |*result| {
+            var accepted = try self.accept(options);
+            errdefer accepted.deinit(self.allocator);
+            const task = ServeTask(HandlerContext){
+                .accepted = accepted,
+                .context = context,
+                .handler = handler,
+                .result = result,
+                .allocator = self.allocator,
+            };
+            group.async(self.io, ServeTask(HandlerContext).run, .{task});
+        }
+
+        try group.await(self.io);
+        return .{ .allocator = self.allocator, .errors = results };
+    }
 };
+
+pub const AsyncServeError = Error || std.Io.Cancelable;
+
+pub const ConcurrentServeResult = struct {
+    allocator: std.mem.Allocator,
+    errors: []?anyerror,
+
+    pub fn deinit(self: *ConcurrentServeResult) void {
+        self.allocator.free(self.errors);
+        self.* = undefined;
+    }
+
+    pub fn firstError(self: ConcurrentServeResult) ?anyerror {
+        for (self.errors) |err| {
+            if (err) |value| return value;
+        }
+        return null;
+    }
+
+    pub fn successCount(self: ConcurrentServeResult) usize {
+        var count: usize = 0;
+        for (self.errors) |err| {
+            if (err == null) count += 1;
+        }
+        return count;
+    }
+};
+
+fn ServeTask(comptime HandlerContext: type) type {
+    return struct {
+        accepted: AcceptedClient,
+        context: *HandlerContext,
+        handler: *const fn (*HandlerContext, *AcceptedClient) Error!void,
+        result: *?anyerror,
+        allocator: std.mem.Allocator,
+
+        fn run(task: @This()) std.Io.Cancelable!void {
+            var accepted = task.accepted;
+            defer accepted.deinit(task.allocator);
+            task.handler(task.context, &accepted) catch |err| {
+                task.result.* = err;
+                return;
+            };
+            task.result.* = null;
+        }
+    };
+}
 
 pub const AcceptOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
@@ -512,4 +589,96 @@ test "MQTT runtime client and server exchange over TCP" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "MQTT async std.Io server handles concurrent clients" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_packet_size = 4096 });
+    defer server.deinit();
+
+    const Context = struct {
+        pub fn handle(_: *@This(), accepted: *AcceptedClient) Error!void {
+            if (std.mem.eql(u8, accepted.connect.connect.client_id, "mqtt-one")) {
+                var publish = try accepted.connection.readPublish();
+                defer publish.deinit(accepted.connection.allocator);
+                if (!std.mem.eql(u8, publish.publish.payload, "one")) return error.UnexpectedPacket;
+                try accepted.connection.writePubAck(publish.publish.packet_id.?, 0);
+                return;
+            }
+            if (std.mem.eql(u8, accepted.connect.connect.client_id, "mqtt-two")) {
+                var publish = try accepted.connection.readPublish();
+                defer publish.deinit(accepted.connection.allocator);
+                if (!std.mem.eql(u8, publish.publish.payload, "two")) return error.UnexpectedPacket;
+                try accepted.connection.writePubAck(publish.publish.packet_id.?, 0);
+                return;
+            }
+            return error.UnexpectedPacket;
+        }
+    };
+
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        result: ?ConcurrentServeResult = null,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.result = shared.server.serveConcurrent(Context, &shared.context, Context.handle, 2, .{ .protocol = .v5 }) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const ClientTask = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        client_id: []const u8,
+        payload: []const u8,
+        err: ?anyerror = null,
+
+        fn run(task: *@This()) void {
+            runFallible(task) catch |err| {
+                task.err = err;
+            };
+        }
+
+        fn runFallible(task: *@This()) !void {
+            var client = try Client.connect(task.allocator, task.io, task.address, .{
+                .protocol = .v5,
+                .client_id = task.client_id,
+                .limits = .{ .max_packet_size = 4096 },
+            });
+            defer client.close();
+            try client.publish("async/topic", task.payload, .{ .qos = .at_least_once });
+        }
+    };
+
+    var clients = [_]ClientTask{
+        .{ .allocator = allocator, .io = io, .address = server.address(), .client_id = "mqtt-one", .payload = "one" },
+        .{ .allocator = allocator, .io = io, .address = server.address(), .client_id = "mqtt-two", .payload = "two" },
+    };
+    const client_one = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[0]});
+    const client_two = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
+
+    client_one.join();
+    client_two.join();
+    server_thread.join();
+    defer if (shared.result) |*result| result.deinit();
+
+    if (clients[0].err) |err| return err;
+    if (clients[1].err) |err| return err;
+    if (shared.err) |err| return err;
+    const result = shared.result.?;
+    if (result.firstError()) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), result.successCount());
 }
