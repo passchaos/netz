@@ -356,7 +356,8 @@ pub const Connection = struct {
                         .trailers = trailers,
                     };
                 },
-                else => continue,
+                .goaway => continue,
+                else => return error.UnexpectedFrame,
             }
         }
     }
@@ -1709,6 +1710,123 @@ test "HTTP/2 runtime ignores PRIORITY while reading request body" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HTTP/2 runtime handles pre-request stream frame ordering" {
+    const allocator = std.testing.allocator;
+
+    {
+        var threaded = std.Io.Threaded.init(allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+
+        var server = try Server.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        );
+        defer server.deinit();
+
+        const Shared = struct {
+            server: *Server,
+            saw_expected: bool = false,
+            err: ?anyerror = null,
+
+            fn run(shared: *@This()) void {
+                var connection = shared.server.accept() catch |err| {
+                    shared.err = err;
+                    return;
+                };
+                defer connection.close();
+
+                var request = connection.readRequest() catch |err| {
+                    if (err == error.UnexpectedFrame) {
+                        shared.saw_expected = true;
+                        return;
+                    }
+                    shared.err = err;
+                    return;
+                };
+                request.deinit(shared.server.allocator);
+                shared.err = error.UnexpectedFrame;
+            }
+        };
+
+        var shared = Shared{ .server = &server };
+        const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+        var client = try Client.connect(allocator, io, server.address(), .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+        });
+        defer client.close();
+        try client.writeData(1, "body-before-headers", true);
+
+        thread.join();
+        if (shared.err) |err| return err;
+        try std.testing.expect(shared.saw_expected);
+    }
+
+    {
+        var threaded = std.Io.Threaded.init(allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+
+        var server = try Server.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        );
+        defer server.deinit();
+
+        const Shared = struct {
+            server: *Server,
+            err: ?anyerror = null,
+
+            fn run(shared: *@This()) void {
+                runFallible(shared.server) catch |err| {
+                    shared.err = err;
+                };
+            }
+
+            fn runFallible(server_ptr: *Server) !void {
+                var connection = try server_ptr.accept();
+                defer connection.close();
+
+                var request = try connection.readRequest();
+                defer request.deinit(server_ptr.allocator);
+                try std.testing.expectEqualStrings("/after-priority", request.path);
+                try connection.writeResponse(request.stream_id, .{ .body = "ok" });
+            }
+        };
+
+        var shared = Shared{ .server = &server };
+        const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+        var client = try Client.connect(allocator, io, server.address(), .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+        });
+        defer client.close();
+
+        var priority: std.ArrayList(u8) = .empty;
+        defer priority.deinit(allocator);
+        try http2.PriorityPayload.write(&priority, allocator, 1, false, 0, 16);
+        try writeAll(io, client.stream, priority.items);
+
+        var response = try client.request(.{
+            .method = "GET",
+            .path = "/after-priority",
+            .authority = "localhost",
+        });
+        defer response.deinit(allocator);
+
+        thread.join();
+        if (shared.err) |err| return err;
+        try std.testing.expectEqualStrings("ok", response.body);
+    }
 }
 
 test "HTTP/2 client answers PING while reading response" {
