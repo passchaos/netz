@@ -508,3 +508,78 @@ test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
     try std.testing.expectEqualSlices(u8, &client_keys.server_quic.key, &server_keys.server_quic.key);
     try std.testing.expect(!std.mem.eql(u8, &client_keys.client_quic.key, &client_keys.server_quic.key));
 }
+
+test "QUIC TLS ClientHello and ServerHello exchange over protected Initial packets" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try quic.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server.deinit();
+    var client = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{ .max_datagram_size = 4096 });
+    defer client.deinit();
+
+    const original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0x01, 0x02, 0x03, 0x04 };
+    const client_scid = [_]u8{ 0x10, 0x11, 0x12, 0x13 };
+    const server_scid = [_]u8{ 0x20, 0x21, 0x22, 0x23 };
+    const initial_secrets = quic.protection.deriveInitialSecrets(&original_dcid);
+
+    const client_secret = [_]u8{0x45} ** 32;
+    const server_secret = [_]u8{0x46} ** 32;
+    const client_public = try x25519PublicKey(client_secret);
+    const server_public = try x25519PublicKey(server_secret);
+
+    var client_hello: std.ArrayList(u8) = .empty;
+    defer client_hello.deinit(allocator);
+    try writeClientHello(&client_hello, allocator, .{
+        .random = [_]u8{0x47} ** 32,
+        .x25519_public_key = client_public,
+        .server_name = "localhost",
+        .alpn_protocols = &.{"h3"},
+        .transport_parameters = &.{},
+    });
+
+    try quic.initial_exchange.sendInitialCrypto(&client.endpoint, server.address(), initial_secrets.client, .{
+        .destination_connection_id = &original_dcid,
+        .source_connection_id = &client_scid,
+        .packet_number = 0,
+        .crypto_data = client_hello.items,
+        .max_crypto_frame_data_len = 64,
+    });
+
+    var server_received = try quic.initial_exchange.receiveInitialCrypto(&server.endpoint, initial_secrets.client, 0, 4096);
+    defer server_received.deinit(allocator);
+    var parsed_client = try parseClientHello(allocator, server_received.crypto_data);
+    defer parsed_client.deinit(allocator);
+    const server_shared = try x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
+
+    var server_hello: std.ArrayList(u8) = .empty;
+    defer server_hello.deinit(allocator);
+    try writeServerHello(&server_hello, allocator, .{
+        .random = [_]u8{0x48} ** 32,
+        .x25519_public_key = server_public,
+    });
+    const server_transcript = transcriptHash(client_hello.items, server_hello.items);
+    const server_handshake = deriveHandshakeSecrets(server_shared, server_transcript);
+
+    try quic.initial_exchange.sendInitialCrypto(&server.endpoint, server_received.from, initial_secrets.server, .{
+        .destination_connection_id = &client_scid,
+        .source_connection_id = &server_scid,
+        .packet_number = 0,
+        .crypto_data = server_hello.items,
+        .max_crypto_frame_data_len = 64,
+    });
+
+    var client_received = try quic.initial_exchange.receiveInitialCrypto(&client.endpoint, initial_secrets.server, 0, 4096);
+    defer client_received.deinit(allocator);
+    const parsed_server = try parseServerHello(client_received.crypto_data);
+    const client_shared = try x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
+    const client_transcript = transcriptHash(client_hello.items, client_received.crypto_data);
+    const client_handshake = deriveHandshakeSecrets(client_shared, client_transcript);
+
+    try std.testing.expectEqualSlices(u8, &server_shared, &client_shared);
+    try std.testing.expectEqualSlices(u8, &server_handshake.client_quic.key, &client_handshake.client_quic.key);
+    try std.testing.expectEqualSlices(u8, &server_handshake.server_quic.key, &client_handshake.server_quic.key);
+}

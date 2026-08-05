@@ -16,8 +16,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), plus
   CRYPTO stream reassembly, v1 Initial key/header/payload protection, protected
   Initial packet seal/open, Initial CRYPTO byte exchange over UDP, minimal TLS
-  ClientHello/ServerHello encoding/parsing and handshake secret derivation for
-  QUIC, and a blocking UDP endpoint runtime for frame datagrams
+  ClientHello/ServerHello encoding/parsing, protected Initial ClientHello ↔
+  ServerHello exchange, and handshake secret derivation for QUIC, plus a
+  blocking UDP endpoint runtime for frame datagrams
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, message assembly, and a blocking TCP
   client/server runtime over HTTP/1 Upgrade
