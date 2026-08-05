@@ -4,7 +4,7 @@ const quic = @import("../quic/mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = http3.Error || quic.runtime.Error || quic.one_rtt.Error || quic.stream_state.Error || error{
+pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error || error{
     MissingStreamFrame,
     UnexpectedStream,
 };
@@ -127,6 +127,177 @@ pub const ProtectedConfig = struct {
     max_frames_per_packet: usize = 8,
     max_stream_buffer: usize = 64 * 1024,
     max_stream_frame_data: usize = 1200,
+};
+
+pub const HandshakeSessionOptions = struct {
+    max_frames_per_packet: usize = 8,
+    max_stream_buffer: usize = 64 * 1024,
+    max_stream_frame_data: usize = 1200,
+};
+
+pub const HandshakeServerOptions = struct {
+    handshake: quic.handshake.ServerOptions,
+    session: HandshakeSessionOptions = .{},
+};
+
+pub const HandshakeClientOptions = struct {
+    handshake: quic.handshake.ClientOptions,
+    session: HandshakeSessionOptions = .{},
+};
+
+pub const HandshakeServer = struct {
+    quic_server: quic.runtime.Server,
+    allocator: std.mem.Allocator,
+    handshake_options: quic.handshake.ServerOptions,
+    session_options: HandshakeSessionOptions,
+    local_connection_id: []u8,
+    alpn_protocol: []u8,
+    transport_parameters: []u8,
+
+    pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits, options: HandshakeServerOptions) Error!HandshakeServer {
+        var quic_server = try quic.runtime.Server.bind(allocator, io, bind_address, limits.quic);
+        errdefer quic_server.deinit();
+
+        const local_connection_id = try allocator.dupe(u8, options.handshake.local_connection_id);
+        errdefer allocator.free(local_connection_id);
+        const alpn_protocol = try allocator.dupe(u8, options.handshake.alpn_protocol);
+        errdefer allocator.free(alpn_protocol);
+        const transport_parameters = try allocator.dupe(u8, options.handshake.transport_parameters);
+        errdefer allocator.free(transport_parameters);
+
+        var handshake_options = options.handshake;
+        handshake_options.local_connection_id = local_connection_id;
+        handshake_options.alpn_protocol = alpn_protocol;
+        handshake_options.transport_parameters = transport_parameters;
+
+        return .{
+            .quic_server = quic_server,
+            .allocator = allocator,
+            .handshake_options = handshake_options,
+            .session_options = options.session,
+            .local_connection_id = local_connection_id,
+            .alpn_protocol = alpn_protocol,
+            .transport_parameters = transport_parameters,
+        };
+    }
+
+    pub fn deinit(self: *HandshakeServer) void {
+        self.quic_server.deinit();
+        self.allocator.free(self.local_connection_id);
+        self.allocator.free(self.alpn_protocol);
+        self.allocator.free(self.transport_parameters);
+        self.* = undefined;
+    }
+
+    pub fn address(self: HandshakeServer) net.IpAddress {
+        return self.quic_server.address();
+    }
+
+    pub fn accept(self: *HandshakeServer) Error!HandshakeServerSession {
+        var established = try quic.handshake.accept(&self.quic_server.endpoint, self.handshake_options);
+        errdefer established.deinit();
+        return .{ .established = established, .options = self.session_options };
+    }
+};
+
+pub const HandshakeServerSession = struct {
+    established: quic.handshake.EstablishedConnection,
+    options: HandshakeSessionOptions,
+
+    pub fn deinit(self: *HandshakeServerSession) void {
+        self.established.deinit();
+        self.* = undefined;
+    }
+
+    pub fn receiveRequest(self: *HandshakeServerSession) Error!OwnedHandshakeRequest {
+        const assembled = try receiveConnectionStreamBytes(&self.established.connection, null, self.options);
+        errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
+        var request = try http3.decodeRequest(self.established.connection.endpoint.allocator, assembled.bytes);
+        errdefer request.deinit(self.established.connection.endpoint.allocator);
+        return .{
+            .from = assembled.from,
+            .stream_id = assembled.stream_id,
+            .stream_bytes = assembled.bytes,
+            .request = request,
+        };
+    }
+
+    pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
+        try sendConnectionMessage(&self.established.connection, stream_id, response, self.options);
+    }
+};
+
+pub const HandshakeClient = struct {
+    endpoint: *quic.runtime.Endpoint,
+    peer: net.IpAddress,
+    allocator: std.mem.Allocator,
+    established: quic.handshake.EstablishedConnection,
+    options: HandshakeSessionOptions,
+    next_stream_id: u62 = 0,
+
+    pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, options: HandshakeClientOptions) Error!HandshakeClient {
+        const endpoint = try allocator.create(quic.runtime.Endpoint);
+        errdefer allocator.destroy(endpoint);
+        endpoint.* = try quic.runtime.Endpoint.bind(allocator, io, local_address, limits.quic);
+        errdefer endpoint.deinit();
+
+        var established = try quic.handshake.connect(endpoint, server, options.handshake);
+        errdefer established.deinit();
+        return .{
+            .endpoint = endpoint,
+            .peer = server,
+            .allocator = allocator,
+            .established = established,
+            .options = options.session,
+        };
+    }
+
+    pub fn deinit(self: *HandshakeClient) void {
+        self.established.deinit();
+        self.endpoint.deinit();
+        self.allocator.destroy(self.endpoint);
+        self.* = undefined;
+    }
+
+    pub fn address(self: HandshakeClient) net.IpAddress {
+        return self.endpoint.address();
+    }
+
+    pub fn request(self: *HandshakeClient, request_options: http3.Request) Error!OwnedHandshakeResponse {
+        const stream_id = self.next_stream_id;
+        self.next_stream_id += 4;
+
+        try sendConnectionMessage(&self.established.connection, stream_id, request_options, self.options);
+        const assembled = try receiveConnectionStreamBytes(&self.established.connection, stream_id, self.options);
+        errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
+        var response = try http3.decodeResponse(self.established.connection.endpoint.allocator, assembled.bytes);
+        errdefer response.deinit(self.established.connection.endpoint.allocator);
+        return .{ .stream_bytes = assembled.bytes, .response = response };
+    }
+};
+
+pub const OwnedHandshakeRequest = struct {
+    from: net.IpAddress,
+    stream_id: u62,
+    stream_bytes: []u8,
+    request: http3.DecodedRequest,
+
+    pub fn deinit(self: *OwnedHandshakeRequest, allocator: std.mem.Allocator) void {
+        self.request.deinit(allocator);
+        allocator.free(self.stream_bytes);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedHandshakeResponse = struct {
+    stream_bytes: []u8,
+    response: http3.DecodedResponse,
+
+    pub fn deinit(self: *OwnedHandshakeResponse, allocator: std.mem.Allocator) void {
+        self.response.deinit(allocator);
+        allocator.free(self.stream_bytes);
+        self.* = undefined;
+    }
 };
 
 pub const ProtectedServer = struct {
@@ -321,6 +492,60 @@ const AssembledStream = struct {
     bytes: []u8,
 };
 
+fn sendConnectionMessage(connection: *quic.one_rtt.Connection, stream_id: u62, message: anytype, options: HandshakeSessionOptions) Error!void {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(connection.endpoint.allocator);
+    try message.write(&encoded, connection.endpoint.allocator);
+
+    var send_state = quic.stream_state.SendState.init(stream_id);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(connection.endpoint.allocator);
+    try send_state.appendFrames(&frames, connection.endpoint.allocator, encoded.items, options.max_stream_frame_data, true);
+    try sendConnectionFrames(connection, frames.items, options.max_frames_per_packet);
+}
+
+fn sendConnectionFrames(connection: *quic.one_rtt.Connection, frames: []const quic.Frame, max_frames_per_packet: usize) Error!void {
+    const chunk_size = @max(@as(usize, 1), max_frames_per_packet);
+    var offset: usize = 0;
+    while (offset < frames.len) {
+        const end = @min(frames.len, offset + chunk_size);
+        try connection.send(frames[offset..end]);
+        offset = end;
+    }
+}
+
+fn receiveConnectionStreamBytes(connection: *quic.one_rtt.Connection, expected_stream_id: ?u62, options: HandshakeSessionOptions) Error!AssembledStream {
+    var recv: ?quic.stream_state.RecvState = null;
+    defer if (recv) |*state| state.deinit();
+    var from: ?net.IpAddress = null;
+    var stream_id: ?u62 = expected_stream_id;
+
+    while (true) {
+        var packet = try connection.receivePacket();
+        defer packet.deinit(connection.endpoint.allocator);
+        if (from == null) from = packet.from;
+
+        for (packet.frames) |frame| {
+            if (frame != .stream) continue;
+            const incoming_id: u62 = @intCast(frame.stream.stream_id);
+            if (stream_id) |id| {
+                if (incoming_id != id) continue;
+            } else {
+                stream_id = incoming_id;
+                recv = quic.stream_state.RecvState.init(connection.endpoint.allocator, incoming_id, options.max_stream_buffer);
+            }
+            if (recv == null) recv = quic.stream_state.RecvState.init(connection.endpoint.allocator, incoming_id, options.max_stream_buffer);
+            if (recv) |*state| {
+                try state.insert(frame.stream);
+                if (state.final_size != null and state.contiguous_end >= state.final_size.?) {
+                    const bytes = try connection.endpoint.allocator.dupe(u8, state.buffer.items[0..state.final_size.?]);
+                    return .{ .from = from.?, .stream_id = stream_id.?, .bytes = bytes };
+                }
+            }
+        }
+    }
+}
+
 fn sendProtectedFrames(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -425,6 +650,90 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
 
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expectEqualStrings("pong", response.response.body);
+}
+
+test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7 };
+    const client_cid = [_]u8{ 0xd8, 0xd9, 0xda, 0xdb };
+    const server_cid = [_]u8{ 0xdc, 0xdd, 0xde, 0xdf };
+
+    var server = try HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x73} ** 32,
+            .x25519_secret_key = [_]u8{0x74} ** 32,
+        },
+        .session = .{ .max_stream_frame_data = 7 },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            try std.testing.expectEqualStrings("h3", session.established.alpn);
+
+            var request = try session.receiveRequest();
+            defer request.deinit(session.established.connection.endpoint.allocator);
+            try std.testing.expectEqualStrings("POST", request.request.method);
+            try std.testing.expectEqualStrings("/h3-handshake", request.request.path);
+            try std.testing.expectEqualStrings("split by handshake runtime", request.request.body);
+            try session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                .body = "handshake pong",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try HandshakeClient.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x71} ** 32,
+            .x25519_secret_key = [_]u8{0x72} ** 32,
+        },
+        .session = .{ .max_stream_frame_data = 7 },
+    });
+    defer client.deinit();
+    try std.testing.expectEqualStrings("h3", client.established.alpn);
+
+    var response = try client.request(.{
+        .method = "POST",
+        .path = "/h3-handshake",
+        .authority = "localhost",
+        .body = "split by handshake runtime",
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("handshake pong", response.response.body);
 }
 
 test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint" {
