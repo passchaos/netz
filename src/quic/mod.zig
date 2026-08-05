@@ -14,6 +14,7 @@ pub const stream_state = @import("stream.zig");
 pub const flow_control = @import("flow_control.zig");
 pub const recovery = @import("recovery.zig");
 pub const connection_router = @import("connection_router.zig");
+pub const connection_id = @import("connection_id.zig");
 pub const congestion = @import("congestion.zig");
 pub const path_validation = @import("path_validation.zig");
 
@@ -541,12 +542,12 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
         if (retire_prior_to > sequence_number) return error.InvalidFrame;
         const connection_id_len = try cursor.readByte();
         try validateConnectionIdLen(connection_id_len);
-        const connection_id = try cursor.readSlice(connection_id_len);
+        const cid = try cursor.readSlice(connection_id_len);
         const stateless_reset_token = (try cursor.readSlice(16))[0..16].*;
         return .{ .new_connection_id = .{
             .sequence_number = sequence_number,
             .retire_prior_to = retire_prior_to,
-            .connection_id = connection_id,
+            .connection_id = cid,
             .stateless_reset_token = stateless_reset_token,
         } };
     }
@@ -694,6 +695,7 @@ test {
     _ = flow_control;
     _ = recovery;
     _ = connection_router;
+    _ = connection_id;
     _ = congestion;
     _ = path_validation;
 }

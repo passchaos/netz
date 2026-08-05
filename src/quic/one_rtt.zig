@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.congestion.Error || quic.path_validation.Error || quic.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.congestion.Error || quic.path_validation.Error || quic.connection_id.Error || quic.Error || error{
     MissingFrame,
 };
 
@@ -74,6 +74,8 @@ pub const Connection = struct {
     recovery: quic.recovery.Queue,
     congestion: quic.congestion.Controller,
     path_validation: quic.path_validation.State,
+    peer_connection_ids: quic.connection_id.PeerPool = .{},
+    local_connection_ids: quic.connection_id.LocalPool = .{},
     send_flow: quic.flow_control.SendFlow,
     recv_flow: quic.flow_control.RecvFlow,
     recv_data_total: u64 = 0,
@@ -81,7 +83,7 @@ pub const Connection = struct {
     stream_recv_flows: std.ArrayList(StreamRecvFlowEntry) = .empty,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
-        return .{
+        var connection = Connection{
             .endpoint = endpoint,
             .config = config,
             .received = .init(endpoint.allocator, config.max_ack_ranges),
@@ -92,6 +94,10 @@ pub const Connection = struct {
             .send_flow = .init(config.initial_send_max_data),
             .recv_flow = try .init(config.initial_receive_max_data, config.receive_window),
         };
+        try connection.local_connection_ids.registerInitial(config.local_connection_id, [_]u8{0} ** 16);
+        try connection.peer_connection_ids.add(0, config.peer_connection_id, [_]u8{0} ** 16);
+        try connection.peer_connection_ids.markInUse(0);
+        return connection;
     }
 
     pub fn deinit(self: *Connection) void {
@@ -216,6 +222,18 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn sendNewConnectionId(self: *Connection, connection_id: []const u8, stateless_reset_token: [16]u8) Error!void {
+        const frame = try self.local_connection_ids.issue(connection_id, stateless_reset_token);
+        const frames = [_]quic.Frame{frame};
+        try self.send(&frames);
+    }
+
+    pub fn switchToNextPeerConnectionId(self: *Connection) bool {
+        const entry = self.peer_connection_ids.consumeUnused() orelse return false;
+        self.config.peer_connection_id = entry.slice();
+        return true;
+    }
+
     pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
         var packet = try receive(
             self.endpoint,
@@ -235,7 +253,7 @@ pub const Connection = struct {
             routed.datagram.from,
             routed.datagram.bytes,
             self.config.receive_keys,
-            self.config.local_connection_id.len,
+            routed.destination_connection_id.len,
             self.expected_packet_number,
             self.config.max_frames_per_packet,
         );
@@ -261,6 +279,15 @@ pub const Connection = struct {
                     const flow = try self.sendStreamFlow(max_stream_data.stream_id);
                     flow.updateLimit(max_stream_data.maximum_stream_data);
                 },
+                .new_connection_id => |new_connection_id| {
+                    self.peer_connection_ids.retirePriorTo(new_connection_id.retire_prior_to);
+                    try self.peer_connection_ids.add(
+                        new_connection_id.sequence_number,
+                        new_connection_id.connection_id,
+                        new_connection_id.stateless_reset_token,
+                    );
+                },
+                .retire_connection_id => |retire| try self.local_connection_ids.retire(retire.sequence_number),
                 .path_challenge => |path_challenge| try self.path_validation.receiveChallenge(path_challenge.data),
                 .path_response => |path_response| try self.path_validation.receiveResponse(path_response.data),
                 .stream => |stream| {
@@ -681,6 +708,58 @@ test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {
     var response_packet = try client.receivePacket();
     defer response_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), client.path_validation.outstandingChallengeCount());
+}
+
+test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const server_cid = [_]u8{ 0x75, 0x76, 0x77, 0x78 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe1} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    try server.sendNewConnectionId("server-new-cid", [_]u8{0xaa} ** 16);
+    var new_cid_packet = try client.receivePacket();
+    defer new_cid_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
+    try std.testing.expect(client.switchToNextPeerConnectionId());
+    try std.testing.expectEqualStrings("server-new-cid", client.config.peer_connection_id);
+
+    const retire = [_]quic.Frame{.{ .retire_connection_id = .{ .sequence_number = 0 } }};
+    try client.send(&retire);
+    var router = quic.connection_router.Router.init(allocator);
+    defer router.deinit();
+    try router.register("server-new-cid", .{ .connection_index = 0, .sequence_number = 1 });
+    var routed = try server_endpoint.receiveRoutedBytes(router);
+    defer routed.deinit(allocator);
+    var retire_packet = try server.receiveRoutedDatagram(routed);
+    defer retire_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
 }
 
 test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {

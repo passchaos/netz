@@ -36,7 +36,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   ack-eliciting frame payloads,
   endpoint-level connection-ID routing primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
-  delivery, PATH_CHALLENGE/PATH_RESPONSE validation state wired into 1-RTT,
+  delivery, NEW_CONNECTION_ID/RETIRE_CONNECTION_ID lifecycle state wired into
+  1-RTT, PATH_CHALLENGE/PATH_RESPONSE validation state wired into 1-RTT,
   plus a blocking UDP endpoint runtime for frame datagrams with a
   `std.Io.async` concurrent receive helper
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
