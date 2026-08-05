@@ -10,8 +10,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   HPACK static/literal encoder-decoder, and a blocking prior-knowledge h2c
   client/server runtime
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
-  stateless QPACK literal helpers, and a cleartext development runtime over the
-  QUIC UDP frame endpoint
+  stateless QPACK literal helpers, a cleartext development runtime over the
+  QUIC UDP frame endpoint, and a protected 1-RTT QUIC STREAM runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), plus
   CRYPTO stream reassembly, v1 Initial key/header/payload protection, protected
@@ -44,12 +44,11 @@ CONNECT/PUBLISH/PING/DISCONNECT flows. TLS, event loops, congestion control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on
 the same byte-level pieces.
 
-The HTTP/3 runtime is intentionally labeled as a cleartext development transport:
-it exercises real UDP I/O and HTTP/3 frame/message handling over QUIC STREAM
-frames, but it is not a substitute for RFC-compliant QUIC TLS packet protection.
-The WebTransport runtime builds on that same development transport for local
-CONNECT/datagram flows and is likewise not a substitute for standards-compliant
-HTTP/3 over protected QUIC.
+The legacy HTTP/3 development runtime is intentionally labeled as cleartext; the
+protected HTTP/3 runtime uses the QUIC 1-RTT short-packet API for request/response
+STREAM frames. WebTransport still builds on the cleartext development transport
+for local CONNECT/datagram flows and is not yet a substitute for
+standards-compliant HTTP/3 over protected QUIC.
 
 ## Build
 
