@@ -4,12 +4,18 @@ pub const max_connection_id_len = 20;
 
 pub const Error = error{
     InvalidConnectionId,
+    InvalidPacket,
     DuplicateConnectionId,
 } || std.mem.Allocator.Error;
 
 pub const Route = struct {
     connection_index: usize,
     sequence_number: u64 = 0,
+};
+
+pub const RoutedDatagram = struct {
+    route: Route,
+    destination_connection_id: []const u8,
 };
 
 /// Fixed-size key used for routing QUIC datagrams by Destination Connection ID.
@@ -74,6 +80,41 @@ pub const Router = struct {
         return self.map.remove(try ConnectionIdKey.init(connection_id));
     }
 
+    pub fn routeDatagram(self: Router, packet: []const u8) Error!?RoutedDatagram {
+        if (packet.len == 0) return error.InvalidPacket;
+        return if ((packet[0] & 0x80) != 0)
+            try self.routeLongHeaderDatagram(packet)
+        else
+            self.routeShortHeaderDatagram(packet);
+    }
+
+    fn routeLongHeaderDatagram(self: Router, packet: []const u8) Error!?RoutedDatagram {
+        if (packet.len < 6) return error.InvalidPacket;
+        const dcid_len = packet[5];
+        if (dcid_len == 0 or dcid_len > max_connection_id_len) return error.InvalidConnectionId;
+        const dcid_start: usize = 6;
+        const dcid_end = dcid_start + @as(usize, dcid_len);
+        if (packet.len < dcid_end) return error.InvalidPacket;
+        const dcid = packet[dcid_start..dcid_end];
+        const route = try self.lookup(dcid) orelse return null;
+        return .{ .route = route, .destination_connection_id = dcid };
+    }
+
+    fn routeShortHeaderDatagram(self: Router, packet: []const u8) ?RoutedDatagram {
+        if ((packet[0] & 0x40) == 0) return null;
+        var iter = self.map.iterator();
+        var best: ?RoutedDatagram = null;
+        while (iter.next()) |entry| {
+            const cid = entry.key_ptr.slice();
+            if (packet.len < 1 + cid.len) continue;
+            if (!std.mem.eql(u8, packet[1 .. 1 + cid.len], cid)) continue;
+            if (best == null or cid.len > best.?.destination_connection_id.len) {
+                best = .{ .route = entry.value_ptr.*, .destination_connection_id = packet[1 .. 1 + cid.len] };
+            }
+        }
+        return best;
+    }
+
     pub fn count(self: Router) usize {
         return self.map.count();
     }
@@ -100,6 +141,27 @@ test "QUIC connection router maps and retires connection IDs" {
     try std.testing.expect(try router.unregister("server-cid-b"));
     try std.testing.expectEqual(@as(?Route, null), try router.lookup("server-cid-b"));
     try std.testing.expectEqual(@as(usize, 1), router.count());
+}
+
+test "QUIC connection router routes short and long header datagrams" {
+    const allocator = std.testing.allocator;
+    var router = Router.init(allocator);
+    defer router.deinit();
+
+    try router.register("abc", .{ .connection_index = 1, .sequence_number = 10 });
+    try router.register("abcdef", .{ .connection_index = 2, .sequence_number = 20 });
+
+    const short = [_]u8{ 0x40, 'a', 'b', 'c', 'd', 'e', 'f', 0x00, 0x01 };
+    const short_route = (try router.routeDatagram(&short)).?;
+    try std.testing.expectEqual(@as(usize, 2), short_route.route.connection_index);
+    try std.testing.expectEqualStrings("abcdef", short_route.destination_connection_id);
+
+    const long = [_]u8{ 0xc0, 0, 0, 0, 1, 3, 'a', 'b', 'c', 0, 0, 0 };
+    const long_route = (try router.routeDatagram(&long)).?;
+    try std.testing.expectEqual(@as(usize, 1), long_route.route.connection_index);
+    try std.testing.expectEqualStrings("abc", long_route.destination_connection_id);
+
+    try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&.{ 0x40, 'z', 'z' }));
 }
 
 test "QUIC connection router validates CID lengths" {
