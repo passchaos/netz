@@ -22,8 +22,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   packet server/client Finished flights, and handshake/application secret
   derivation for QUIC, packet number space ACK tracking wired into 1-RTT
   ACK/STREAM exchange, stream send/receive state with offset reassembly and FIN,
-  flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames, plus a
-  blocking UDP endpoint runtime for frame datagrams
+  flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
+  1-RTT DATA_BLOCKED/MAX_DATA handling, plus a blocking UDP endpoint runtime for
+  frame datagrams
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, message assembly, and a blocking TCP
   client/server runtime over HTTP/1 Upgrade

@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.Error || error{
     MissingFrame,
 };
 
@@ -35,6 +35,9 @@ pub const ConnectionConfig = struct {
     peer_connection_id: []const u8,
     max_ack_ranges: usize = 64,
     max_frames_per_packet: usize = 16,
+    initial_send_max_data: u64 = std.math.maxInt(u62),
+    initial_receive_max_data: u64 = std.math.maxInt(u62),
+    receive_window: u64 = 64 * 1024,
 };
 
 pub const Connection = struct {
@@ -44,13 +47,18 @@ pub const Connection = struct {
     expected_packet_number: u64 = 0,
     received: quic.packet_space.ReceivedPacketTracker,
     sent: quic.packet_space.SentPacketTracker,
+    send_flow: quic.flow_control.SendFlow,
+    recv_flow: quic.flow_control.RecvFlow,
+    recv_data_total: u64 = 0,
 
-    pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Connection {
+    pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         return .{
             .endpoint = endpoint,
             .config = config,
             .received = .init(endpoint.allocator, config.max_ack_ranges),
             .sent = .init(endpoint.allocator),
+            .send_flow = .init(config.initial_send_max_data),
+            .recv_flow = try .init(config.initial_receive_max_data, config.receive_window),
         };
     }
 
@@ -61,12 +69,30 @@ pub const Connection = struct {
     }
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
+        const stream_bytes = countStreamBytes(frames);
+        if (stream_bytes > 0) {
+            self.send_flow.reserve(stream_bytes) catch |err| {
+                try self.sendDataBlocked();
+                return err;
+            };
+        }
         try sendFrames(self.endpoint, self.config.peer, self.config.send_keys, .{
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = self.next_packet_number,
             .frames = frames,
         });
         try self.sent.sent(self.next_packet_number, ackEliciting(frames));
+        self.next_packet_number += 1;
+    }
+
+    fn sendDataBlocked(self: *Connection) Error!void {
+        const frames = [_]quic.Frame{self.send_flow.dataBlockedFrame()};
+        try sendFrames(self.endpoint, self.config.peer, self.config.send_keys, .{
+            .destination_connection_id = self.config.peer_connection_id,
+            .packet_number = self.next_packet_number,
+            .frames = &frames,
+        });
+        try self.sent.sent(self.next_packet_number, true);
         self.next_packet_number += 1;
     }
 
@@ -89,9 +115,23 @@ pub const Connection = struct {
         self.expected_packet_number = packet.packet.packet_number + 1;
         try self.received.record(packet.packet.packet_number);
         for (packet.frames) |frame| {
-            if (frame == .ack) _ = try self.sent.applyAck(frame.ack);
+            switch (frame) {
+                .ack => _ = try self.sent.applyAck(frame.ack),
+                .max_data => |max_data| self.send_flow.updateLimit(max_data.maximum_data),
+                .stream => |stream| {
+                    const next_total = self.recv_data_total + stream.data.len;
+                    try self.recv_flow.receive(next_total);
+                    self.recv_data_total = next_total;
+                },
+                else => {},
+            }
         }
         return packet;
+    }
+
+    pub fn consumeReceived(self: *Connection, amount: u64) ?quic.Frame {
+        if (self.recv_flow.consume(amount)) |_| return self.recv_flow.maxDataFrame();
+        return null;
     }
 };
 
@@ -123,6 +163,14 @@ fn ackEliciting(frames: []const quic.Frame) bool {
         }
     }
     return false;
+}
+
+fn countStreamBytes(frames: []const quic.Frame) u64 {
+    var total: u64 = 0;
+    for (frames) |frame| {
+        if (frame == .stream) total += frame.stream.data.len;
+    }
+    return total;
 }
 
 pub fn receive(
@@ -215,7 +263,7 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     const client_keys = quic.protection.deriveAes128Keys([_]u8{0x71} ** quic.protection.secret_len);
     const server_keys = quic.protection.deriveAes128Keys([_]u8{0x72} ** quic.protection.secret_len);
 
-    var client = Connection.init(&client_endpoint, .{
+    var client = try Connection.init(&client_endpoint, .{
         .peer = server_endpoint.address(),
         .receive_keys = server_keys,
         .send_keys = client_keys,
@@ -223,7 +271,7 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
         .peer_connection_id = &server_cid,
     });
     defer client.deinit();
-    var server = Connection.init(&server_endpoint, .{
+    var server = try Connection.init(&server_endpoint, .{
         .peer = client_endpoint.address(),
         .receive_keys = client_keys,
         .send_keys = server_keys,
@@ -246,4 +294,57 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     defer ack_packet.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.largest_acknowledged);
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
+}
+
+test "QUIC 1-RTT connection emits DATA_BLOCKED and applies MAX_DATA" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x11, 0x12, 0x13, 0x14 };
+    const server_cid = [_]u8{ 0x15, 0x16, 0x17, 0x18 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x81} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x82} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .initial_send_max_data = 5,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    const too_much = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "123456", .fin = false } }};
+    try std.testing.expectError(error.FlowControlBlocked, client.send(&too_much));
+    var blocked = try server.receivePacket();
+    defer blocked.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 5), blocked.frames[0].data_blocked.maximum_data);
+
+    const grant = [_]quic.Frame{.{ .max_data = .{ .maximum_data = 10 } }};
+    try server.send(&grant);
+    var grant_packet = try client.receivePacket();
+    defer grant_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 10), client.send_flow.limit);
+
+    try client.send(&too_much);
+    var data = try server.receivePacket();
+    defer data.deinit(allocator);
+    try std.testing.expectEqualStrings("123456", data.frames[0].stream.data);
 }
