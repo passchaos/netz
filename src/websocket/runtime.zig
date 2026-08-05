@@ -10,6 +10,7 @@ pub const Error = websocket.Error || http1_runtime.Error || error{
     HeadersTooLarge,
     ConnectionClosed,
     InvalidResponse,
+    InvalidSubprotocol,
     MessageTooLarge,
 } || std.Io.RandomSecureError || net.Stream.Reader.Error || net.Stream.Writer.Error;
 
@@ -58,9 +59,15 @@ pub const Server = struct {
         try websocket.validateClientHandshake(request);
 
         const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
+        const selected_protocol = try selectSubprotocol(self.http.allocator, request.header("sec-websocket-protocol"), options.protocols);
+        errdefer if (selected_protocol) |protocol| self.http.allocator.free(protocol);
         var response: std.ArrayList(u8) = .empty;
         defer response.deinit(self.http.allocator);
-        try websocket.writeServerHandshake(&response, self.http.allocator, key, options.extra_headers);
+        var headers: std.ArrayList(http1.Header) = .empty;
+        defer headers.deinit(self.http.allocator);
+        if (selected_protocol) |protocol| try headers.append(self.http.allocator, .{ .name = "Sec-WebSocket-Protocol", .value = protocol });
+        try headers.appendSlice(self.http.allocator, options.extra_headers);
+        try websocket.writeServerHandshake(&response, self.http.allocator, key, headers.items);
         try writeAll(http_conn.io, http_conn.stream, response.items);
 
         var connection = Connection{
@@ -69,6 +76,7 @@ pub const Server = struct {
             .stream = http_conn.stream,
             .role = .server,
             .limits = self.limits,
+            .selected_protocol = selected_protocol,
             .inbuf = try std.ArrayList(u8).initCapacity(self.http.allocator, head.extra.len),
         };
         errdefer connection.inbuf.deinit(connection.allocator);
@@ -153,6 +161,7 @@ fn ServeTask(comptime HandlerContext: type) type {
 }
 
 pub const AcceptOptions = struct {
+    protocols: []const []const u8 = &.{},
     extra_headers: []const http1.Header = &.{},
 };
 
@@ -171,17 +180,29 @@ pub const Client = struct {
         var key: [24]u8 = undefined;
         _ = std.base64.standard.Encoder.encode(&key, &nonce);
 
-        const headers = [_]http1.Header{
+        var headers: std.ArrayList(http1.Header) = .empty;
+        defer headers.deinit(allocator);
+        try headers.appendSlice(allocator, &.{
             .{ .name = "Host", .value = options.host },
             .{ .name = "Upgrade", .value = "websocket" },
             .{ .name = "Connection", .value = "Upgrade" },
             .{ .name = "Sec-WebSocket-Key", .value = &key },
             .{ .name = "Sec-WebSocket-Version", .value = "13" },
-        };
+        });
+        var protocol_value: std.ArrayList(u8) = .empty;
+        defer protocol_value.deinit(allocator);
+        if (options.protocols.len != 0) {
+            for (options.protocols, 0..) |protocol, index| {
+                if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+                if (index != 0) try protocol_value.appendSlice(allocator, ", ");
+                try protocol_value.appendSlice(allocator, protocol);
+            }
+            try headers.append(allocator, .{ .name = "Sec-WebSocket-Protocol", .value = protocol_value.items });
+        }
         try http1_runtime.writeRequestToStream(allocator, io, stream, .{
             .method = .GET,
             .target = options.target,
-            .headers = &headers,
+            .headers = headers.items,
         });
 
         var head = try readHttpHead(allocator, io, stream, options.limits.max_head_bytes);
@@ -189,7 +210,8 @@ pub const Client = struct {
         var response = try http1.parseResponse(allocator, head.head, .{});
         defer response.deinit(allocator);
         if (response.status != 101) return error.InvalidResponse;
-        try validateServerHandshake(response, &key);
+        const selected_protocol = try validateServerHandshake(allocator, response, &key, options.protocols);
+        errdefer if (selected_protocol) |protocol| allocator.free(protocol);
 
         var connection = Connection{
             .io = io,
@@ -197,6 +219,7 @@ pub const Client = struct {
             .stream = stream,
             .role = .client,
             .limits = options.limits,
+            .selected_protocol = selected_protocol,
             .inbuf = try std.ArrayList(u8).initCapacity(allocator, head.extra.len),
         };
         errdefer connection.inbuf.deinit(connection.allocator);
@@ -208,6 +231,7 @@ pub const Client = struct {
 pub const ConnectOptions = struct {
     host: []const u8,
     target: []const u8 = "/",
+    protocols: []const []const u8 = &.{},
     limits: Limits = .{},
 };
 
@@ -231,12 +255,14 @@ pub const Connection = struct {
     send_mutex: std.Io.Mutex = .init,
     close_sent: bool = false,
     close_received: bool = false,
+    selected_protocol: ?[]u8 = null,
 
     fn bufferInitial(self: *Connection, bytes: []const u8) Error!void {
         try self.inbuf.appendSlice(self.allocator, bytes);
     }
 
     pub fn close(self: *Connection) void {
+        if (self.selected_protocol) |protocol| self.allocator.free(protocol);
         self.inbuf.deinit(self.allocator);
         self.stream.close(self.io);
         self.* = undefined;
@@ -412,7 +438,12 @@ fn readHttpHead(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, ma
     }
 }
 
-fn validateServerHandshake(response: http1.Response, client_key: []const u8) Error!void {
+fn validateServerHandshake(
+    allocator: std.mem.Allocator,
+    response: http1.Response,
+    client_key: []const u8,
+    offered_protocols: []const []const u8,
+) Error!?[]u8 {
     const upgrade = response.header("upgrade") orelse return error.MissingHeader;
     if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
     const connection = response.header("connection") orelse return error.MissingHeader;
@@ -420,6 +451,46 @@ fn validateServerHandshake(response: http1.Response, client_key: []const u8) Err
     const accept = response.header("sec-websocket-accept") orelse return error.MissingHeader;
     const expected = websocket.acceptKey(client_key);
     if (!std.mem.eql(u8, accept, &expected)) return error.InvalidHandshake;
+    if (response.header("sec-websocket-protocol")) |selected| {
+        const protocol = wire.trimOws(selected);
+        if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+        for (offered_protocols) |offered| {
+            if (std.mem.eql(u8, protocol, offered)) return try allocator.dupe(u8, protocol);
+        }
+        return error.InvalidSubprotocol;
+    }
+    return null;
+}
+
+fn selectSubprotocol(allocator: std.mem.Allocator, requested_header: ?[]const u8, supported: []const []const u8) Error!?[]u8 {
+    for (supported) |protocol| {
+        if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+    }
+    const raw_requested = requested_header orelse return null;
+    var requested = std.mem.splitScalar(u8, raw_requested, ',');
+    while (requested.next()) |raw| {
+        const candidate = wire.trimOws(raw);
+        if (!validSubprotocolToken(candidate)) return error.InvalidSubprotocol;
+        for (supported) |protocol| {
+            if (std.mem.eql(u8, candidate, protocol)) return try allocator.dupe(u8, protocol);
+        }
+    }
+    return null;
+}
+
+fn validSubprotocolToken(protocol: []const u8) bool {
+    if (protocol.len == 0) return false;
+    for (protocol) |byte| {
+        if (!isTchar(byte)) return false;
+    }
+    return true;
+}
+
+fn isTchar(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or switch (byte) {
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
+    };
 }
 
 fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
@@ -497,6 +568,123 @@ test "WebSocket runtime client and server exchange over TCP" {
     try std.testing.expectEqualStrings("world", response.payload);
 
     try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket runtime negotiates subprotocol" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{ .protocols = &.{ "chat.v2", "superchat" } });
+            defer connection.close();
+            try std.testing.expectEqualStrings("superchat", connection.selected_protocol.?);
+
+            var frame = try connection.receiveFrame();
+            defer frame.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqualStrings("hello", frame.payload);
+            try connection.sendText("world");
+
+            var close = try connection.receiveFrame();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/subprotocol",
+        .protocols = &.{ "video", "superchat" },
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+    try std.testing.expectEqualStrings("superchat", client.selected_protocol.?);
+
+    try client.sendText("hello");
+    var response = try client.receiveFrame();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("world", response.payload);
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket client rejects unoffered subprotocol" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var http_conn = try server_ptr.http.accept();
+            defer http_conn.close();
+            var head = try readHttpHead(server_ptr.http.allocator, http_conn.io, http_conn.stream, server_ptr.limits.max_head_bytes);
+            defer head.deinit(server_ptr.http.allocator);
+            var request = try http1.parseRequest(server_ptr.http.allocator, head.head, .{});
+            defer request.deinit(server_ptr.http.allocator);
+            const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
+            var response: std.ArrayList(u8) = .empty;
+            defer response.deinit(server_ptr.http.allocator);
+            try websocket.writeServerHandshake(&response, server_ptr.http.allocator, key, &.{.{ .name = "Sec-WebSocket-Protocol", .value = "not-offered" }});
+            try writeAll(http_conn.io, http_conn.stream, response.items);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    try std.testing.expectError(error.InvalidSubprotocol, Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/bad-subprotocol",
+        .protocols = &.{"superchat"},
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    }));
 
     thread.join();
     if (shared.err) |err| return err;
