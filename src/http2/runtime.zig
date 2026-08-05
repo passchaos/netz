@@ -8,6 +8,7 @@ pub const Error = http2.Error || error{
     UnexpectedFrame,
     MissingPseudoHeader,
     InvalidStatus,
+    InvalidContentLength,
     MessageTooLarge,
     FlowControlBlocked,
     FlowControlViolation,
@@ -271,7 +272,7 @@ pub const Connection = struct {
 
         try self.writeHeaders(stream_id, fields.items, options.body.len == 0);
         if (options.body.len != 0) try self.writeData(stream_id, options.body, true);
-        return self.readResponse(stream_id);
+        return self.readResponse(stream_id, options.method);
     }
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
@@ -296,7 +297,11 @@ pub const Connection = struct {
                     var body: std.ArrayList(u8) = .empty;
                     errdefer body.deinit(self.allocator);
 
-                    if ((frame.frame.header.flags & flag_end_stream) == 0) {
+                    const method = findHeader(headers, ":method") orelse return error.MissingPseudoHeader;
+                    const expected_request_len = try contentLength(headers);
+                    if (std.ascii.eqlIgnoreCase(method, "CONNECT") and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
+
+                    if (!std.ascii.eqlIgnoreCase(method, "CONNECT") and (frame.frame.header.flags & flag_end_stream) == 0) {
                         while (true) {
                             var data_frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
                             defer data_frame.deinit(self.allocator);
@@ -311,10 +316,11 @@ pub const Connection = struct {
                         }
                     }
 
+                    try validateContentLength(headers, body.items.len);
                     return .{
                         .stream_id = stream_id,
                         .headers = headers,
-                        .method = findHeader(headers, ":method") orelse return error.MissingPseudoHeader,
+                        .method = method,
                         .path = findHeader(headers, ":path") orelse return error.MissingPseudoHeader,
                         .scheme = findHeader(headers, ":scheme") orelse "https",
                         .authority = findHeader(headers, ":authority"),
@@ -417,7 +423,7 @@ pub const Connection = struct {
         }
     }
 
-    fn readResponse(self: *Connection, stream_id: u31) Error!OwnedResponse {
+    fn readResponse(self: *Connection, stream_id: u31, request_method: []const u8) Error!OwnedResponse {
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |h| freeHeaders(self.allocator, h);
         var body: std.ArrayList(u8) = .empty;
@@ -449,7 +455,17 @@ pub const Connection = struct {
                 .headers => {
                     if (headers != null) return error.UnexpectedFrame;
                     headers = try cloneDecodedHeaders(self.allocator, frame.frame.payload, self.limits);
-                    if ((frame.frame.header.flags & flag_end_stream) != 0) break;
+                    const status_s = findHeader(headers.?, ":status") orelse return error.MissingPseudoHeader;
+                    const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
+                    if (responseForbidsBody(status, request_method)) {
+                        const response_content_length = (try contentLength(headers.?)) orelse 0;
+                        if (std.ascii.eqlIgnoreCase(request_method, "CONNECT") and response_content_length != 0) return error.InvalidContentLength;
+                        break;
+                    }
+                    if ((frame.frame.header.flags & flag_end_stream) != 0) {
+                        try validateContentLength(headers.?, 0);
+                        break;
+                    }
                 },
                 .data => {
                     const data = try http2.DataPayload.parse(frame.frame);
@@ -457,7 +473,10 @@ pub const Connection = struct {
                     try self.recv_connection_window.receive(data.data.len);
                     try (try self.recvStreamWindow(stream_id)).receive(data.data.len);
                     try body.appendSlice(self.allocator, data.data);
-                    if ((frame.frame.header.flags & flag_end_stream) != 0) break;
+                    if ((frame.frame.header.flags & flag_end_stream) != 0) {
+                        if (headers) |h| try validateContentLength(h, body.items.len);
+                        break;
+                    }
                 },
                 else => continue,
             }
@@ -671,6 +690,38 @@ fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField)
         allocator.free(header.value);
     }
     allocator.free(headers);
+}
+
+fn contentLength(headers: []const http2.Hpack.HeaderField) Error!?usize {
+    var found: ?usize = null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;
+        var parts = std.mem.splitScalar(u8, header.value, ',');
+        while (parts.next()) |raw_part| {
+            const part = std.mem.trim(u8, raw_part, " \t");
+            if (part.len == 0) return error.InvalidContentLength;
+            const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
+            if (found) |existing| {
+                if (existing != parsed) return error.InvalidContentLength;
+            } else {
+                found = parsed;
+            }
+        }
+    }
+    return found;
+}
+
+fn validateContentLength(headers: []const http2.Hpack.HeaderField, actual: usize) Error!void {
+    if (try contentLength(headers)) |expected| {
+        if (expected != actual) return error.InvalidContentLength;
+    }
+}
+
+fn responseForbidsBody(status: u16, request_method: []const u8) bool {
+    if ((status >= 100 and status < 200) or status == 204 or status == 304) return true;
+    if (std.ascii.eqlIgnoreCase(request_method, "HEAD")) return true;
+    if (std.ascii.eqlIgnoreCase(request_method, "CONNECT") and status >= 200 and status < 300) return true;
+    return false;
 }
 
 fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
@@ -892,6 +943,172 @@ test "HTTP/2 async std.Io server handles concurrent h2c clients" {
     const result = shared.result.?;
     if (result.firstError()) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), result.successCount());
+}
+
+test "HTTP/2 runtime validates request content-length" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            var request = connection.readRequest() catch |err| {
+                if (err == error.InvalidContentLength) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            request.deinit(shared.server.allocator);
+            shared.err = error.InvalidContentLength;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const fields = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/bad-length" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "content-length", .value = "5" },
+    };
+    try client.writeHeaders(1, &fields, false);
+    try client.writeData(1, "ping", true);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
+}
+
+test "HTTP/2 runtime validates response content-length and method body rules" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            var mismatch = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer mismatch.deinit(shared.server.allocator);
+            connection.writeResponse(mismatch.stream_id, .{
+                .status = 200,
+                .headers = &.{.{ .name = "content-length", .value = "5" }},
+                .body = "pong",
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+
+            var head = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer head.deinit(shared.server.allocator);
+            connection.writeResponse(head.stream_id, .{
+                .status = 200,
+                .headers = &.{.{ .name = "content-length", .value = "5" }},
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+
+            var connect = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connect.deinit(shared.server.allocator);
+            connection.writeResponse(connect.stream_id, .{
+                .status = 200,
+                .headers = &.{.{ .name = "content-length", .value = "9" }},
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.InvalidContentLength, client.request(.{
+        .method = "GET",
+        .path = "/mismatch",
+        .authority = "localhost",
+    }));
+
+    var head_response = try client.request(.{
+        .method = "HEAD",
+        .path = "/head",
+        .authority = "localhost",
+    });
+    defer head_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), head_response.status);
+    try std.testing.expectEqualStrings("", head_response.body);
+
+    try std.testing.expectError(error.InvalidContentLength, client.request(.{
+        .method = "CONNECT",
+        .path = "example.com:443",
+        .authority = "example.com:443",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 flow window blocks and updates" {
