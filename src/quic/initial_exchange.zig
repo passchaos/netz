@@ -30,6 +30,18 @@ pub const ReceivedInitialCrypto = struct {
     }
 };
 
+pub const ReceivedHandshakeCrypto = struct {
+    from: net.IpAddress,
+    packet: quic.protection.OpenedHandshakePacket,
+    crypto_data: []u8,
+
+    pub fn deinit(self: *ReceivedHandshakeCrypto, allocator: std.mem.Allocator) void {
+        self.packet.deinit(allocator);
+        allocator.free(self.crypto_data);
+        self.* = undefined;
+    }
+};
+
 pub fn sendInitialCrypto(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -66,6 +78,61 @@ pub fn receiveInitialCrypto(
     var datagram = try endpoint.receiveBytes();
     defer datagram.deinit(endpoint.allocator);
     var packet = try quic.protection.openInitialPacket(endpoint.allocator, keys, datagram.bytes, expected_packet_number);
+    errdefer packet.deinit(endpoint.allocator);
+
+    var reassembler = quic.crypto_stream.Reassembler.init(endpoint.allocator, max_crypto_buffer);
+    defer reassembler.deinit();
+    var pos: usize = 0;
+    var saw_crypto = false;
+    while (pos < packet.payload.len) {
+        const parsed = try quic.parseFrame(packet.payload[pos..]);
+        if (parsed.frame == .crypto) {
+            saw_crypto = true;
+            try reassembler.insert(parsed.frame.crypto);
+        }
+        pos += parsed.consumed;
+    }
+    if (!saw_crypto) return error.MissingCryptoFrame;
+    const crypto_data = try reassembler.readAllAvailable(endpoint.allocator);
+    errdefer endpoint.allocator.free(crypto_data);
+    return .{ .from = datagram.from, .packet = packet, .crypto_data = crypto_data };
+}
+
+pub fn sendHandshakeCrypto(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendInitialOptions,
+) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(endpoint.allocator);
+    try quic.crypto_stream.writeCryptoFrames(
+        &payload,
+        endpoint.allocator,
+        options.crypto_offset,
+        options.crypto_data,
+        options.max_crypto_frame_data_len,
+    );
+    const packet = try quic.protection.sealHandshakePacket(endpoint.allocator, keys, .{
+        .destination_connection_id = options.destination_connection_id,
+        .source_connection_id = options.source_connection_id,
+        .packet_number = options.packet_number,
+        .packet_number_len = options.packet_number_len,
+        .payload = payload.items,
+    });
+    defer endpoint.allocator.free(packet);
+    try endpoint.sendBytes(to, packet);
+}
+
+pub fn receiveHandshakeCrypto(
+    endpoint: *quic.runtime.Endpoint,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_crypto_buffer: usize,
+) Error!ReceivedHandshakeCrypto {
+    var datagram = try endpoint.receiveBytes();
+    defer datagram.deinit(endpoint.allocator);
+    var packet = try quic.protection.openHandshakePacket(endpoint.allocator, keys, datagram.bytes, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
 
     var reassembler = quic.crypto_stream.Reassembler.init(endpoint.allocator, max_crypto_buffer);

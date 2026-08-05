@@ -17,9 +17,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   CRYPTO stream reassembly, v1 Initial key/header/payload protection, protected
   Initial packet seal/open, Initial CRYPTO byte exchange over UDP, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
-  protected Initial ClientHello ↔ ServerHello exchange, and handshake/Finished
-  secret derivation for QUIC, plus a blocking UDP endpoint runtime for frame
-  datagrams
+  protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
+  packet server flight carrying EncryptedExtensions/Finished, and
+  handshake/Finished secret derivation for QUIC, plus a blocking UDP endpoint
+  runtime for frame datagrams
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, message assembly, and a blocking TCP
   client/server runtime over HTTP/1 Upgrade

@@ -720,3 +720,100 @@ test "QUIC TLS EncryptedExtensions and Finished verify data" {
     wrong_hash[0] ^= 0xff;
     try std.testing.expectError(error.BadFinished, verifyFinished(base_key, wrong_hash, parsed_finished));
 }
+
+test "QUIC TLS server handshake flight travels over Handshake packet" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try quic.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server.deinit();
+    var client = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{ .max_datagram_size = 4096 });
+    defer client.deinit();
+
+    const original_dcid = [_]u8{ 0xf0, 0xe1, 0xd2, 0xc3, 0xb4, 0xa5, 0x96, 0x87 };
+    const client_scid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
+    const server_scid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
+    const initial_secrets = quic.protection.deriveInitialSecrets(&original_dcid);
+
+    const client_secret = [_]u8{0x51} ** 32;
+    const server_secret = [_]u8{0x52} ** 32;
+    const client_public = try x25519PublicKey(client_secret);
+    const server_public = try x25519PublicKey(server_secret);
+
+    var client_hello: std.ArrayList(u8) = .empty;
+    defer client_hello.deinit(allocator);
+    try writeClientHello(&client_hello, allocator, .{
+        .random = [_]u8{0x53} ** 32,
+        .x25519_public_key = client_public,
+        .server_name = "localhost",
+        .transport_parameters = &.{},
+    });
+    try quic.initial_exchange.sendInitialCrypto(&client.endpoint, server.address(), initial_secrets.client, .{
+        .destination_connection_id = &original_dcid,
+        .source_connection_id = &client_scid,
+        .packet_number = 0,
+        .crypto_data = client_hello.items,
+        .max_crypto_frame_data_len = 64,
+    });
+
+    var server_received = try quic.initial_exchange.receiveInitialCrypto(&server.endpoint, initial_secrets.client, 0, 4096);
+    defer server_received.deinit(allocator);
+    var parsed_client = try parseClientHello(allocator, server_received.crypto_data);
+    defer parsed_client.deinit(allocator);
+    const server_shared = try x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
+
+    var server_hello: std.ArrayList(u8) = .empty;
+    defer server_hello.deinit(allocator);
+    try writeServerHello(&server_hello, allocator, .{
+        .random = [_]u8{0x54} ** 32,
+        .x25519_public_key = server_public,
+    });
+    const hs_hash = transcriptHash(client_hello.items, server_hello.items);
+    const server_keys = deriveHandshakeSecrets(server_shared, hs_hash);
+
+    var ee: std.ArrayList(u8) = .empty;
+    defer ee.deinit(allocator);
+    try writeEncryptedExtensions(&ee, allocator, "h3", &.{});
+    var transcript = std.crypto.hash.sha2.Sha256.init(.{});
+    transcript.update(client_hello.items);
+    transcript.update(server_hello.items);
+    transcript.update(ee.items);
+    var server_finished_hash: [32]u8 = undefined;
+    transcript.final(&server_finished_hash);
+    const verify_data = computeFinishedVerifyData(server_keys.server_handshake_traffic_secret, server_finished_hash);
+
+    var finished: std.ArrayList(u8) = .empty;
+    defer finished.deinit(allocator);
+    try writeFinished(&finished, allocator, verify_data);
+
+    var server_flight: std.ArrayList(u8) = .empty;
+    defer server_flight.deinit(allocator);
+    try server_flight.appendSlice(allocator, ee.items);
+    try server_flight.appendSlice(allocator, finished.items);
+    try quic.initial_exchange.sendHandshakeCrypto(&server.endpoint, server_received.from, server_keys.server_quic, .{
+        .destination_connection_id = &client_scid,
+        .source_connection_id = &server_scid,
+        .packet_number = 0,
+        .crypto_data = server_flight.items,
+        .max_crypto_frame_data_len = 64,
+    });
+
+    var client_received = try quic.initial_exchange.receiveHandshakeCrypto(&client.endpoint, server_keys.server_quic, 0, 4096);
+    defer client_received.deinit(allocator);
+    const ee_len = handshakeMessageLen(client_received.crypto_data);
+    const parsed_ee = try parseEncryptedExtensions(client_received.crypto_data[0..ee_len]);
+    try std.testing.expectEqualStrings("h3", parsed_ee.alpn);
+    const parsed_finished = try parseFinished(client_received.crypto_data[ee_len..]);
+
+    const parsed_server = try parseServerHello(server_hello.items);
+    const client_shared = try x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
+    const client_keys = deriveHandshakeSecrets(client_shared, hs_hash);
+    try verifyFinished(client_keys.server_handshake_traffic_secret, server_finished_hash, parsed_finished);
+}
+
+fn handshakeMessageLen(bytes: []const u8) usize {
+    return 4 + ((@as(usize, bytes[1]) << 16) | (@as(usize, bytes[2]) << 8) | bytes[3]);
+}

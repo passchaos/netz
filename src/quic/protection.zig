@@ -73,6 +73,30 @@ pub const OpenedInitialPacket = struct {
     }
 };
 
+pub const HandshakePacketOptions = struct {
+    version: u32 = 0x00000001,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    packet_number: u64,
+    packet_number_len: u8 = 4,
+    payload: []const u8,
+};
+
+pub const OpenedHandshakePacket = struct {
+    version: u32,
+    destination_connection_id: []u8,
+    source_connection_id: []u8,
+    packet_number: u64,
+    payload: []u8,
+
+    pub fn deinit(self: *OpenedHandshakePacket, allocator: std.mem.Allocator) void {
+        allocator.free(self.destination_connection_id);
+        allocator.free(self.source_connection_id);
+        allocator.free(self.payload);
+        self.* = undefined;
+    }
+};
+
 pub fn deriveInitialSecrets(client_initial_dcid: []const u8) InitialSecrets {
     const initial_secret = HkdfSha256.extract(&initial_salt_v1, client_initial_dcid);
     const client_secret = hkdfExpandLabel(initial_secret, "client in", secret_len);
@@ -249,6 +273,92 @@ pub fn openInitialPacket(
     };
 }
 
+pub fn sealHandshakePacket(
+    allocator: std.mem.Allocator,
+    keys: PacketProtectionKeys,
+    options: HandshakePacketOptions,
+) Error![]u8 {
+    try validatePacketNumberLen(options.packet_number_len);
+    if (options.destination_connection_id.len > 20 or options.source_connection_id.len > 20) return error.InvalidInitialPacket;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    const pn_len = @as(usize, options.packet_number_len);
+    const first_byte: u8 = 0xe0 | @as(u8, @intCast(pn_len - 1));
+    try out.append(allocator, first_byte);
+    var version_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &version_bytes, options.version, .big);
+    try out.appendSlice(allocator, &version_bytes);
+    try out.append(allocator, @intCast(options.destination_connection_id.len));
+    try out.appendSlice(allocator, options.destination_connection_id);
+    try out.append(allocator, @intCast(options.source_connection_id.len));
+    try out.appendSlice(allocator, options.source_connection_id);
+
+    const protected_payload_len = options.payload.len + aead_tag_len;
+    try varint.encode(&out, allocator, pn_len + protected_payload_len);
+    const pn_offset = out.items.len;
+    try appendTruncatedPacketNumber(&out, allocator, options.packet_number, options.packet_number_len);
+    const payload_offset = out.items.len;
+
+    try out.resize(allocator, payload_offset + options.payload.len + aead_tag_len);
+    const ciphertext = out.items[payload_offset .. payload_offset + options.payload.len];
+    const tag = out.items[payload_offset + options.payload.len ..][0..aead_tag_len];
+    try protectAes128Payload(keys, options.packet_number, out.items[0..payload_offset], options.payload, ciphertext, tag);
+
+    try applyHeaderProtection(keys.hp, .long, out.items, pn_offset);
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn openHandshakePacket(
+    allocator: std.mem.Allocator,
+    keys: PacketProtectionKeys,
+    packet: []const u8,
+    expected_packet_number: u64,
+) Error!OpenedHandshakePacket {
+    var bytes = try allocator.dupe(u8, packet);
+    defer allocator.free(bytes);
+    if (bytes.len < 7 or (bytes[0] & 0xf0) != 0xe0) return error.InvalidInitialPacket;
+
+    var cursor = wire.Cursor.init(bytes);
+    _ = try cursor.readByte();
+    const version = try cursor.readInt(u32, .big);
+    const dcid_len = try cursor.readByte();
+    const dcid = try cursor.readSlice(dcid_len);
+    const scid_len = try cursor.readByte();
+    const scid = try cursor.readSlice(scid_len);
+    const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
+    const pn_offset = cursor.pos;
+    if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
+
+    try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
+    if ((bytes[0] & 0xf0) != 0xe0) return error.InvalidInitialPacket;
+    const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
+    if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
+    const payload_offset = pn_offset + pn_len;
+    const packet_number = reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
+    const packet_end = pn_offset + protected_len;
+    const ciphertext = bytes[payload_offset .. packet_end - aead_tag_len];
+    const tag = bytes[packet_end - aead_tag_len .. packet_end][0..aead_tag_len].*;
+
+    const payload = try allocator.alloc(u8, ciphertext.len);
+    errdefer allocator.free(payload);
+    try openAes128Payload(keys, packet_number, bytes[0..payload_offset], ciphertext, tag, payload);
+
+    const dcid_owned = try allocator.dupe(u8, dcid);
+    errdefer allocator.free(dcid_owned);
+    const scid_owned = try allocator.dupe(u8, scid);
+    errdefer allocator.free(scid_owned);
+
+    return .{
+        .version = version,
+        .destination_connection_id = dcid_owned,
+        .source_connection_id = scid_owned,
+        .packet_number = packet_number,
+        .payload = payload,
+    };
+}
+
 pub fn applyHeaderProtection(
     hp_key: [hp_key_len]u8,
     header_form: HeaderForm,
@@ -396,4 +506,28 @@ test "QUIC Initial packet seal/open roundtrip" {
     defer allocator.free(tampered);
     tampered[tampered.len - 1] ^= 0x01;
     try std.testing.expectError(error.AuthenticationFailed, openInitialPacket(allocator, keys, tampered, 0));
+}
+
+test "QUIC Handshake packet seal/open roundtrip" {
+    const allocator = std.testing.allocator;
+    const keys = deriveAes128Keys([_]u8{0x42} ** secret_len);
+    const dcid = [_]u8{ 0x10, 0x11, 0x12, 0x13 };
+    const scid = [_]u8{ 0x20, 0x21, 0x22, 0x23 };
+    const payload = "encrypted extensions and finished";
+
+    const sealed = try sealHandshakePacket(allocator, keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 3,
+        .packet_number_len = 2,
+        .payload = payload,
+    });
+    defer allocator.free(sealed);
+
+    var opened = try openHandshakePacket(allocator, keys, sealed, 0);
+    defer opened.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 3), opened.packet_number);
+    try std.testing.expectEqualSlices(u8, &dcid, opened.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &scid, opened.source_connection_id);
+    try std.testing.expectEqualStrings(payload, opened.payload);
 }
