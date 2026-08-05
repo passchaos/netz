@@ -414,6 +414,25 @@ pub const Connection = struct {
         }
     }
 
+    pub fn sendResetStream(self: *Connection, stream_id: u31, error_code: http2.ErrorCode) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try http2.ResetStreamPayload.write(&encoded, self.allocator, stream_id, error_code);
+        try writeAll(self.io, self.stream, encoded.items);
+    }
+
+    pub fn readResetStream(self: *Connection) Error!OwnedResetStream {
+        while (true) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            errdefer frame.deinit(self.allocator);
+            if (frame.frame.header.frame_type != .rst_stream) {
+                frame.deinit(self.allocator);
+                continue;
+            }
+            return .{ .frame = frame, .reset = try http2.ResetStreamPayload.parse(frame.frame) };
+        }
+    }
+
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
         if (stream_id == 0) {
             self.recv_connection_window.update(increment);
@@ -680,6 +699,16 @@ pub const OwnedGoAway = struct {
     goaway: http2.GoAwayPayload,
 
     pub fn deinit(self: *OwnedGoAway, allocator: std.mem.Allocator) void {
+        self.frame.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedResetStream = struct {
+    frame: OwnedFrame,
+    reset: http2.ResetStreamPayload,
+
+    pub fn deinit(self: *OwnedResetStream, allocator: std.mem.Allocator) void {
         self.frame.deinit(allocator);
         self.* = undefined;
     }
@@ -1037,6 +1066,75 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
     try std.testing.expectEqualStrings("done", goaway.goaway.debug_data);
+}
+
+test "HTTP/2 runtime sends and receives RST_STREAM" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/reset-me", request.path);
+            try connection.sendResetStream(request.stream_id, .cancel);
+
+            var reset = try connection.readResetStream();
+            defer reset.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(request.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(http2.ErrorCode.no_error, reset.reset.error_code);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const fields = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/reset-me" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    };
+    try client.writeHeaders(1, &fields, true);
+
+    var inbound_reset = try client.readResetStream();
+    defer inbound_reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), inbound_reset.reset.stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.cancel, inbound_reset.reset.error_code);
+
+    try client.sendResetStream(1, .no_error);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {

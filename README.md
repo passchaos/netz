@@ -9,7 +9,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   CONNECT, interim 1xx response skipping plus server-side `Expect:
   100-continue` handling, ambiguous body-length rejection, and a blocking `std.Io.net` TCP
   client/server runtime with a `std.Io.async` concurrent server helper
-- HTTP/2 frame headers, SETTINGS, DATA/HEADERS/CONTINUATION payload parsing, a bootstrap
+- HTTP/2 frame headers, SETTINGS, DATA/HEADERS/CONTINUATION/RST_STREAM payload parsing, a bootstrap
   HPACK static/literal encoder-decoder, PING/GOAWAY/WINDOW_UPDATE connection
   management, connection- and stream-level flow-control enforcement including
   SETTINGS_INITIAL_WINDOW_SIZE updates, request/response trailers, content-length

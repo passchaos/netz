@@ -172,6 +172,31 @@ pub const DataPayload = struct {
     }
 };
 
+pub const ResetStreamPayload = struct {
+    stream_id: u31,
+    error_code: ErrorCode,
+
+    pub fn parse(frame: Frame) Error!ResetStreamPayload {
+        if (frame.header.frame_type != .rst_stream) return error.InvalidFrameSize;
+        if (frame.header.stream_id == 0) return error.InvalidStreamId;
+        if (frame.payload.len != 4) return error.InvalidFrameSize;
+        return .{
+            .stream_id = frame.header.stream_id,
+            .error_code = @enumFromInt(std.mem.readInt(u32, frame.payload[0..4], .big)),
+        };
+    }
+
+    pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_id: u31, error_code: ErrorCode) Error!void {
+        if (stream_id == 0) return error.InvalidStreamId;
+        var payload: [4]u8 = undefined;
+        std.mem.writeInt(u32, &payload, @intFromEnum(error_code), .big);
+        try (Frame{
+            .header = .{ .length = 4, .frame_type = .rst_stream, .flags = 0, .stream_id = stream_id },
+            .payload = &payload,
+        }).write(list, allocator);
+    }
+};
+
 pub const HeadersPayload = struct {
     header_block: []const u8,
     priority: ?Priority,
@@ -566,6 +591,18 @@ test "HTTP/2 window update payload helper" {
     try std.testing.expectEqual(@as(u31, 3), update.stream_id);
     try std.testing.expectEqual(@as(u31, 1024), update.increment);
     try std.testing.expectError(error.InvalidFrameSize, WindowUpdatePayload.write(&encoded, allocator, 0, 0));
+}
+
+test "HTTP/2 RST_STREAM payload helper" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try ResetStreamPayload.write(&encoded, allocator, 3, .cancel);
+    const frame = try Frame.parse(encoded.items);
+    const reset = try ResetStreamPayload.parse(frame);
+    try std.testing.expectEqual(@as(u31, 3), reset.stream_id);
+    try std.testing.expectEqual(ErrorCode.cancel, reset.error_code);
+    try std.testing.expectError(error.InvalidStreamId, ResetStreamPayload.write(&encoded, allocator, 0, .cancel));
 }
 
 test "HTTP/2 HPACK static table decode" {
