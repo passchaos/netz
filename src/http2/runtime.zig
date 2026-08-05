@@ -259,6 +259,7 @@ pub const Connection = struct {
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
+    last_peer_client_stream_id: u31 = 0,
 
     pub fn close(self: *Connection) void {
         self.send_stream_windows.deinit(self.allocator);
@@ -298,6 +299,8 @@ pub const Connection = struct {
                 .headers => {
                     const stream_id = frame.frame.header.stream_id;
                     if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
+                    if (stream_id <= self.last_peer_client_stream_id) return error.InvalidFrame;
+                    self.last_peer_client_stream_id = stream_id;
                     const headers = try self.readHeaderBlock(frame.frame);
                     errdefer freeHeaders(self.allocator, headers);
                     try validateHeaderBlock(headers, .request);
@@ -1980,6 +1983,84 @@ test "HTTP/2 runtime rejects server-initiated request stream ids" {
         .{ .name = ":scheme", .value = "https" },
     });
     try writeFrame(allocator, io, client.stream, .headers, flag_end_headers | flag_end_stream, 2, block.items);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
+}
+
+test "HTTP/2 runtime rejects reused or decreasing client stream ids" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            var first = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer first.deinit(shared.server.allocator);
+            if (!std.mem.eql(u8, first.path, "/first-high")) {
+                shared.err = error.UnexpectedFrame;
+                return;
+            }
+
+            var second = connection.readRequest() catch |err| {
+                if (err == error.InvalidFrame) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            second.deinit(shared.server.allocator);
+            shared.err = error.UnexpectedFrame;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const first_fields = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/first-high" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try client.writeHeaders(3, &first_fields, true);
+
+    const second_fields = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/second-low" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try client.writeHeaders(1, &second_fields, true);
 
     thread.join();
     if (shared.err) |err| return err;
