@@ -13,10 +13,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   SETTINGS_INITIAL_WINDOW_SIZE updates, and a blocking prior-knowledge h2c
   client/server runtime with a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
-  typed SETTINGS negotiation state, stateless QPACK literal helpers, a
-  cleartext development runtime over the QUIC UDP frame endpoint, a protected
-  1-RTT QUIC STREAM runtime with
-  STREAM frame splitting/reassembly, and a handshake-backed protected
+  SETTINGS-first control-stream negotiation with GOAWAY monotonicity checks,
+  stateless QPACK literal helpers, a cleartext development runtime over the QUIC
+  UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with STREAM frame
+  splitting/reassembly and SETTINGS exchange, and a handshake-backed protected
   client/server runtime, plus a `std.Io.async` request receive helper for the
   development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
@@ -75,10 +75,11 @@ ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on
 the same byte-level pieces.
 
 The legacy HTTP/3 development runtime is intentionally labeled as cleartext; the
-protected HTTP/3 runtime uses the QUIC 1-RTT short-packet API for request/response
-STREAM frames. WebTransport has the cleartext development transport, a protected
-runtime that performs CONNECT over protected HTTP/3 and datagrams over protected
-QUIC 1-RTT packets, and a handshake-backed protected session API.
+protected HTTP/3 runtime uses the QUIC 1-RTT short-packet API for SETTINGS
+control streams and request/response STREAM frames. WebTransport has the
+cleartext development transport, a protected runtime that performs CONNECT over
+protected HTTP/3 and datagrams over protected QUIC 1-RTT packets, and a
+handshake-backed protected session API.
 
 ## Build
 

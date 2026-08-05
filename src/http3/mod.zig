@@ -9,6 +9,9 @@ pub const Error = wire.Error || error{
     InvalidFrame,
     InvalidSetting,
     InvalidStreamType,
+    MissingSettings,
+    DuplicateSettings,
+    GoAwayIdIncreased,
     ExpectedHeadersFrame,
     MissingMethod,
     MissingPath,
@@ -134,6 +137,86 @@ pub const SettingsState = struct {
     }
 };
 
+pub const ControlState = struct {
+    settings: SettingsState = .{},
+    peer_goaway_id: ?u64 = null,
+    local_goaway_id: ?u64 = null,
+
+    pub fn writeSettingsStream(self: *ControlState, list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
+        try writeControlStreamPrefix(list, allocator);
+        try writeSettingsFrame(list, allocator, settings);
+        self.settings.markSent(settings);
+    }
+
+    pub fn writeGoAway(self: *ControlState, list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_id: u64) Error!void {
+        if (self.local_goaway_id) |previous| {
+            if (stream_id > previous) return error.GoAwayIdIncreased;
+        }
+
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        try quic.varint.encode(&payload, allocator, stream_id);
+        try (Frame{ .frame_type = FrameType.goaway, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+        self.local_goaway_id = stream_id;
+    }
+
+    pub fn applyControlStreamBytes(self: *ControlState, allocator: std.mem.Allocator, bytes: []const u8) Error!void {
+        var cursor = wire.Cursor.init(bytes);
+        const stream_type: StreamType = @enumFromInt(try quic.varint.decode(&cursor));
+        if (stream_type != .control) return error.InvalidStreamType;
+
+        while (!cursor.eof()) {
+            const frame = try Frame.parse(bytes[cursor.pos..]);
+            cursor.pos += frame.consumed;
+            try self.applyFrame(allocator, frame);
+        }
+    }
+
+    pub fn applyFrame(self: *ControlState, allocator: std.mem.Allocator, frame: Frame) Error!void {
+        if (!self.settings.received and frame.frame_type != FrameType.settings) return error.MissingSettings;
+
+        switch (frame.frame_type) {
+            FrameType.settings => {
+                if (self.settings.received) return error.DuplicateSettings;
+                const raw = try parseSettings(allocator, frame.payload);
+                defer allocator.free(raw);
+                self.settings.markReceived(Settings.fromList(raw));
+            },
+            FrameType.goaway => {
+                const id = try parseGoAwayPayload(frame.payload);
+                if (self.peer_goaway_id) |previous| {
+                    if (id > previous) return error.GoAwayIdIncreased;
+                }
+                self.peer_goaway_id = id;
+            },
+            else => {}, // Unknown extension frames on the control stream are ignored.
+        }
+    }
+
+    pub fn acceptsRequestStream(self: ControlState, stream_id: u64) bool {
+        const goaway_id = self.peer_goaway_id orelse return true;
+        return stream_id < goaway_id;
+    }
+};
+
+pub fn writeControlStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+    try quic.varint.encode(list, allocator, @intFromEnum(StreamType.control));
+}
+
+pub fn writeSettingsFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try settings.writePayload(&payload, allocator);
+    try (Frame{ .frame_type = FrameType.settings, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+}
+
+pub fn parseGoAwayPayload(payload: []const u8) Error!u64 {
+    var cursor = wire.Cursor.init(payload);
+    const stream_id = try quic.varint.decode(&cursor);
+    if (!cursor.eof()) return error.InvalidFrame;
+    return stream_id;
+}
+
 pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]Setting {
     var cursor = wire.Cursor.init(payload);
     var settings: std.ArrayList(Setting) = .empty;
@@ -141,9 +224,27 @@ pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]
     while (!cursor.eof()) {
         const id = try quic.varint.decode(&cursor);
         const value = try quic.varint.decode(&cursor);
+        try validateSetting(id, value, settings.items);
         try settings.append(allocator, .{ .id = id, .value = value });
     }
     return settings.toOwnedSlice(allocator);
+}
+
+fn validateSetting(id: u64, value: u64, seen: []const Setting) Error!void {
+    for (seen) |setting| {
+        if (setting.id == id) return error.InvalidSetting;
+    }
+
+    switch (id) {
+        // RFC 9114 reserves HTTP/2 SETTINGS identifiers that have no HTTP/3
+        // meaning.  Reference stacks such as tquic and quic-zig reject these as
+        // H3_SETTINGS_ERROR instead of silently ignoring them.
+        0x00, 0x02, 0x03, 0x04, 0x05 => return error.InvalidSetting,
+        @intFromEnum(SettingId.enable_connect_protocol),
+        @intFromEnum(SettingId.h3_datagram),
+        => if (value > 1) return error.InvalidSetting,
+        else => {},
+    }
 }
 
 pub fn writeSettings(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: []const Setting) !void {
@@ -481,6 +582,55 @@ test "HTTP/3 typed settings state tracks negotiation" {
     state.markReceived(decoded);
     try std.testing.expect(state.ready());
     try std.testing.expect(state.peer.h3_datagram);
+}
+
+test "HTTP/3 control stream enforces SETTINGS first and GOAWAY monotonicity" {
+    const allocator = std.testing.allocator;
+
+    var local_control = ControlState{};
+    var stream_bytes: std.ArrayList(u8) = .empty;
+    defer stream_bytes.deinit(allocator);
+    try local_control.writeSettingsStream(&stream_bytes, allocator, .{
+        .h3_datagram = true,
+        .webtransport_max_sessions = 2,
+    });
+    try local_control.writeGoAway(&stream_bytes, allocator, 12);
+    try std.testing.expectError(error.GoAwayIdIncreased, local_control.writeGoAway(&stream_bytes, allocator, 16));
+
+    var peer_control = ControlState{};
+    try peer_control.applyControlStreamBytes(allocator, stream_bytes.items);
+    try std.testing.expect(peer_control.settings.received);
+    try std.testing.expect(peer_control.settings.peer.h3_datagram);
+    try std.testing.expectEqual(@as(u64, 2), peer_control.settings.peer.webtransport_max_sessions);
+    try std.testing.expectEqual(@as(?u64, 12), peer_control.peer_goaway_id);
+    try std.testing.expect(peer_control.acceptsRequestStream(8));
+    try std.testing.expect(!peer_control.acceptsRequestStream(12));
+
+    var invalid: std.ArrayList(u8) = .empty;
+    defer invalid.deinit(allocator);
+    try writeControlStreamPrefix(&invalid, allocator);
+    var goaway_payload: std.ArrayList(u8) = .empty;
+    defer goaway_payload.deinit(allocator);
+    try quic.varint.encode(&goaway_payload, allocator, 0);
+    try (Frame{ .frame_type = FrameType.goaway, .payload = goaway_payload.items, .consumed = 0 }).write(&invalid, allocator);
+    var missing_settings = ControlState{};
+    try std.testing.expectError(error.MissingSettings, missing_settings.applyControlStreamBytes(allocator, invalid.items));
+
+    var bad_settings: std.ArrayList(u8) = .empty;
+    defer bad_settings.deinit(allocator);
+    try writeSettings(&bad_settings, allocator, &[_]Setting{.{ .id = 0x04, .value = 1 }});
+    try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, bad_settings.items));
+
+    bad_settings.clearRetainingCapacity();
+    try writeSettings(&bad_settings, allocator, &[_]Setting{.{ .id = @intFromEnum(SettingId.h3_datagram), .value = 2 }});
+    try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, bad_settings.items));
+
+    var duplicate_settings = ControlState{};
+    var duplicate: std.ArrayList(u8) = .empty;
+    defer duplicate.deinit(allocator);
+    try duplicate_settings.writeSettingsStream(&duplicate, allocator, .{});
+    try writeSettingsFrame(&duplicate, allocator, .{});
+    try std.testing.expectError(error.DuplicateSettings, duplicate_settings.applyControlStreamBytes(allocator, duplicate.items));
 }
 
 test "HTTP/3 datagram" {
