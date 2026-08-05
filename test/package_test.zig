@@ -14,6 +14,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.runtime.Server, "serveConcurrent"));
     try std.testing.expectEqual(@as(u64, 0x01), netz.http3.FrameType.headers);
     try std.testing.expectEqual(@as(usize, 65_535), (netz.http3.runtime.Limits{}).quic.max_datagram_size);
+    try std.testing.expect(@hasDecl(netz.http3.runtime.Server, "receiveRequestsConcurrent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ProtectedClient"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "HandshakeClient"));
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());

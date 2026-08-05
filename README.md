@@ -14,7 +14,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   stateless QPACK literal helpers, a cleartext development runtime over the
   QUIC UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with
   STREAM frame splitting/reassembly, and a handshake-backed protected
-  client/server runtime
+  client/server runtime, plus a `std.Io.async` request receive helper for the
+  development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), plus
   CRYPTO stream reassembly, v1 Initial key/header/payload protection, protected

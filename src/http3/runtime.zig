@@ -43,12 +43,48 @@ pub const Server = struct {
         };
     }
 
+    pub fn receiveRequestsConcurrent(self: *Server, count: usize) Error!OwnedRequestBatch {
+        var group: std.Io.Group = .init;
+        const requests = try self.quic_server.endpoint.allocator.alloc(?OwnedRequest, count);
+        errdefer self.quic_server.endpoint.allocator.free(requests);
+        @memset(requests, null);
+        const errors = try self.quic_server.endpoint.allocator.alloc(?anyerror, count);
+        errdefer self.quic_server.endpoint.allocator.free(errors);
+        @memset(errors, null);
+
+        for (requests, errors) |*request, *err_slot| {
+            const task = RequestTask{
+                .server = self,
+                .request = request,
+                .err = err_slot,
+            };
+            group.async(self.quic_server.endpoint.io, RequestTask.run, .{task});
+        }
+
+        try group.await(self.quic_server.endpoint.io);
+        return .{ .allocator = self.quic_server.endpoint.allocator, .requests = requests, .errors = errors };
+    }
+
     pub fn sendResponse(self: *Server, to: net.IpAddress, stream_id: u62, response: http3.Response) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
         try response.write(&encoded, self.quic_server.endpoint.allocator);
         const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = stream_id, .data = encoded.items, .fin = true } }};
         try self.quic_server.sendFrames(to, &frames);
+    }
+};
+
+const RequestTask = struct {
+    server: *Server,
+    request: *?OwnedRequest,
+    err: *?anyerror,
+
+    fn run(task: RequestTask) std.Io.Cancelable!void {
+        task.request.* = task.server.receiveRequest() catch |err| {
+            task.err.* = err;
+            return;
+        };
+        task.err.* = null;
     }
 };
 
@@ -105,6 +141,36 @@ pub const OwnedRequest = struct {
         self.request.deinit(allocator);
         self.datagram.deinit(allocator);
         self.* = undefined;
+    }
+};
+
+pub const OwnedRequestBatch = struct {
+    allocator: std.mem.Allocator,
+    requests: []?OwnedRequest,
+    errors: []?anyerror,
+
+    pub fn deinit(self: *OwnedRequestBatch) void {
+        for (self.requests) |*request| {
+            if (request.*) |*owned| owned.deinit(self.allocator);
+        }
+        self.allocator.free(self.requests);
+        self.allocator.free(self.errors);
+        self.* = undefined;
+    }
+
+    pub fn firstError(self: OwnedRequestBatch) ?anyerror {
+        for (self.errors) |err| {
+            if (err) |value| return value;
+        }
+        return null;
+    }
+
+    pub fn receivedCount(self: OwnedRequestBatch) usize {
+        var count: usize = 0;
+        for (self.requests) |request| {
+            if (request != null) count += 1;
+        }
+        return count;
     }
 };
 
@@ -794,4 +860,72 @@ test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint
 
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expectEqualStrings("pong", response.response.body);
+}
+
+test "HTTP/3 dev runtime receives requests with std.Io async batch" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        batch: ?OwnedRequestBatch = null,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.batch = shared.server.receiveRequestsConcurrent(2) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const receiver = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client_a = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    });
+    defer client_a.deinit();
+    var client_b = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    });
+    defer client_b.deinit();
+
+    const req_a = http3.Request{ .method = "POST", .path = "/batch-a", .authority = "localhost", .body = "a" };
+    const req_b = http3.Request{ .method = "POST", .path = "/batch-b", .authority = "localhost", .body = "b" };
+    var encoded_a: std.ArrayList(u8) = .empty;
+    defer encoded_a.deinit(allocator);
+    var encoded_b: std.ArrayList(u8) = .empty;
+    defer encoded_b.deinit(allocator);
+    try req_a.write(&encoded_a, allocator);
+    try req_b.write(&encoded_b, allocator);
+    const frame_a = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = encoded_a.items, .fin = true } }};
+    const frame_b = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = encoded_b.items, .fin = true } }};
+    try client_a.quic_client.sendFrames(&frame_a);
+    try client_b.quic_client.sendFrames(&frame_b);
+
+    receiver.join();
+    if (shared.err) |err| return err;
+    var batch = shared.batch.?;
+    defer batch.deinit();
+    if (batch.firstError()) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), batch.receivedCount());
+
+    var saw_a = false;
+    var saw_b = false;
+    for (batch.requests) |maybe_request| {
+        const request = maybe_request.?;
+        if (std.mem.eql(u8, request.request.path, "/batch-a")) saw_a = true;
+        if (std.mem.eql(u8, request.request.path, "/batch-b")) saw_b = true;
+    }
+    try std.testing.expect(saw_a);
+    try std.testing.expect(saw_b);
 }
