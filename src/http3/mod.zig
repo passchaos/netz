@@ -13,10 +13,12 @@ pub const Error = wire.Error || error{
     DuplicateSettings,
     GoAwayIdIncreased,
     ExpectedHeadersFrame,
+    UnexpectedFrame,
     MissingMethod,
     MissingPath,
     MissingStatus,
     InvalidStatus,
+    InvalidContentLength,
     IntegerOverflow,
     QpackDynamicTableUnsupported,
 } || std.mem.Allocator.Error;
@@ -339,6 +341,7 @@ pub const Request = struct {
     authority: ?[]const u8 = null,
     headers: []const Qpack.HeaderField = &.{},
     body: []const u8 = &.{},
+    trailers: []const Qpack.HeaderField = &.{},
 
     pub fn headerFields(self: Request, out: []Qpack.HeaderField) Error![]Qpack.HeaderField {
         var count: usize = 0;
@@ -353,7 +356,7 @@ pub const Request = struct {
     pub fn write(self: Request, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         const fields = try self.headerFields(&fields_buf);
-        try writeHeadersAndData(list, allocator, fields, self.body);
+        try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 };
 
@@ -361,6 +364,7 @@ pub const Response = struct {
     status: u16,
     headers: []const Qpack.HeaderField = &.{},
     body: []const u8 = &.{},
+    trailers: []const Qpack.HeaderField = &.{},
 
     pub fn successful(self: Response) bool {
         return self.status >= 200 and self.status < 300;
@@ -379,7 +383,7 @@ pub const Response = struct {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         var status_buf: [3]u8 = undefined;
         const fields = try self.headerFields(&fields_buf, &status_buf);
-        try writeHeadersAndData(list, allocator, fields, self.body);
+        try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 };
 
@@ -389,11 +393,18 @@ pub const DecodedRequest = struct {
     scheme: []const u8,
     authority: ?[]const u8,
     headers: []Qpack.HeaderField,
+    trailers: []Qpack.HeaderField = &.{},
     body: []const u8,
+    body_storage: ?[]u8 = null,
     consumed: usize,
 
+    /// Release arrays and body storage owned by `decodeRequest`. Header field
+    /// names/values still borrow from the encoded stream bytes; callers must
+    /// keep those bytes alive while reading `headers` or `trailers`.
     pub fn deinit(self: *DecodedRequest, allocator: std.mem.Allocator) void {
         allocator.free(self.headers);
+        allocator.free(self.trailers);
+        if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
     }
 };
@@ -401,15 +412,22 @@ pub const DecodedRequest = struct {
 pub const DecodedResponse = struct {
     status: u16,
     headers: []Qpack.HeaderField,
+    trailers: []Qpack.HeaderField = &.{},
     body: []const u8,
+    body_storage: ?[]u8 = null,
     consumed: usize,
 
     pub fn successful(self: DecodedResponse) bool {
         return self.status >= 200 and self.status < 300;
     }
 
+    /// Release arrays and body storage owned by `decodeResponse`. Header field
+    /// names/values still borrow from the encoded stream bytes; callers must
+    /// keep those bytes alive while reading `headers` or `trailers`.
     pub fn deinit(self: *DecodedResponse, allocator: std.mem.Allocator) void {
         allocator.free(self.headers);
+        allocator.free(self.trailers);
+        if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
     }
 };
@@ -432,7 +450,9 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!Deco
         .scheme = scheme,
         .authority = authority,
         .headers = message.headers,
+        .trailers = message.trailers,
         .body = message.body,
+        .body_storage = message.body_storage,
         .consumed = message.consumed,
     };
 }
@@ -452,18 +472,24 @@ pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!Dec
     return .{
         .status = status orelse return error.MissingStatus,
         .headers = message.headers,
+        .trailers = message.trailers,
         .body = message.body,
+        .body_storage = message.body_storage,
         .consumed = message.consumed,
     };
 }
 
 const DecodedMessage = struct {
     headers: []Qpack.HeaderField,
+    trailers: []Qpack.HeaderField = &.{},
     body: []const u8,
+    body_storage: ?[]u8 = null,
     consumed: usize,
 
     fn deinit(self: *DecodedMessage, allocator: std.mem.Allocator) void {
         allocator.free(self.headers);
+        allocator.free(self.trailers);
+        if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
     }
 };
@@ -473,6 +499,7 @@ fn writeHeadersAndData(
     allocator: std.mem.Allocator,
     fields: []const Qpack.HeaderField,
     body: []const u8,
+    trailers: []const Qpack.HeaderField,
 ) Error!void {
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(allocator);
@@ -480,6 +507,11 @@ fn writeHeadersAndData(
     try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, allocator);
     if (body.len > 0) {
         try (Frame{ .frame_type = FrameType.data, .payload = body, .consumed = 0 }).write(list, allocator);
+    }
+    if (trailers.len > 0) {
+        block.clearRetainingCapacity();
+        try Qpack.encodeLiteralBlock(&block, allocator, trailers);
+        try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, allocator);
     }
 }
 
@@ -490,24 +522,78 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedM
     errdefer allocator.free(headers);
 
     var consumed = headers_frame.consumed;
-    var body: []const u8 = &.{};
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(allocator);
+    var trailers: []Qpack.HeaderField = &.{};
+    errdefer allocator.free(trailers);
+    var saw_trailers = false;
     while (consumed < bytes.len) {
         const frame = try Frame.parse(bytes[consumed..]);
         consumed += frame.consumed;
         switch (frame.frame_type) {
-            FrameType.data => body = frame.payload,
-            FrameType.headers => break,
+            FrameType.data => {
+                if (saw_trailers) return error.UnexpectedFrame;
+                try body.appendSlice(allocator, frame.payload);
+            },
+            FrameType.headers => {
+                if (saw_trailers) return error.UnexpectedFrame;
+                trailers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
+                saw_trailers = true;
+            },
+            FrameType.cancel_push,
+            FrameType.settings,
+            FrameType.goaway,
+            FrameType.max_push_id,
+            => return error.UnexpectedFrame,
             else => {},
         }
     }
 
-    return .{ .headers = headers, .body = body, .consumed = consumed };
+    try validateContentLength(headers, body.items.len);
+
+    const body_storage: ?[]u8 = if (body.items.len == 0) storage: {
+        body.deinit(allocator);
+        break :storage null;
+    } else try body.toOwnedSlice(allocator);
+
+    return .{
+        .headers = headers,
+        .trailers = trailers,
+        .body = if (body_storage) |storage| storage else &.{},
+        .body_storage = body_storage,
+        .consumed = consumed,
+    };
 }
 
 fn appendHeaderField(out: []Qpack.HeaderField, count: *usize, field: Qpack.HeaderField) Error!void {
     if (count.* >= out.len) return error.InvalidFrame;
     out[count.*] = field;
     count.* += 1;
+}
+
+fn contentLength(headers: []const Qpack.HeaderField) Error!?usize {
+    var found: ?usize = null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;
+        var parts = std.mem.splitScalar(u8, header.value, ',');
+        while (parts.next()) |raw_part| {
+            const part = std.mem.trim(u8, raw_part, " \t");
+            if (part.len == 0) return error.InvalidContentLength;
+            const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
+            if (found) |existing| {
+                if (existing != parsed) return error.InvalidContentLength;
+            } else {
+                found = parsed;
+            }
+        }
+    }
+    return found;
+}
+
+fn validateContentLength(headers: []const Qpack.HeaderField, actual: usize) Error!void {
+    if (try contentLength(headers)) |expected| {
+        if (expected != actual) return error.InvalidContentLength;
+    }
 }
 
 pub const Datagram = struct {
@@ -664,6 +750,76 @@ test "HTTP/3 request encode decode" {
     try std.testing.expectEqualStrings("hello", decoded.body);
 }
 
+test "HTTP/3 message aggregates DATA frames and trailing HEADERS" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/multi" },
+        .{ .name = "content-length", .value = "11" },
+    });
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&encoded, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "hello ", .consumed = 0 }).write(&encoded, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "world", .consumed = 0 }).write(&encoded, allocator);
+
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{
+        .{ .name = "grpc-status", .value = "0" },
+    });
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&encoded, allocator);
+
+    var decoded = try decodeRequest(allocator, encoded.items);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("POST", decoded.method);
+    try std.testing.expectEqualStrings("hello world", decoded.body);
+    try std.testing.expectEqual(@as(usize, 1), decoded.trailers.len);
+    try std.testing.expectEqualStrings("grpc-status", decoded.trailers[0].name);
+    try std.testing.expectEqual(@as(usize, encoded.items.len), decoded.consumed);
+}
+
+test "HTTP/3 message rejects bad frame order and content length" {
+    const allocator = std.testing.allocator;
+
+    var data_first: std.ArrayList(u8) = .empty;
+    defer data_first.deinit(allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "oops", .consumed = 0 }).write(&data_first, allocator);
+    try std.testing.expectError(error.ExpectedHeadersFrame, decodeRequest(allocator, data_first.items));
+
+    var invalid_length: std.ArrayList(u8) = .empty;
+    defer invalid_length.deinit(allocator);
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/bad-length" },
+        .{ .name = "content-length", .value = "5" },
+    });
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&invalid_length, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "1234", .consumed = 0 }).write(&invalid_length, allocator);
+    try std.testing.expectError(error.InvalidContentLength, decodeRequest(allocator, invalid_length.items));
+
+    var bad_order: std.ArrayList(u8) = .empty;
+    defer bad_order.deinit(allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{
+        .{ .name = ":status", .value = "200" },
+    });
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&bad_order, allocator);
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&bad_order, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "late", .consumed = 0 }).write(&bad_order, allocator);
+    try std.testing.expectError(error.UnexpectedFrame, decodeResponse(allocator, bad_order.items));
+
+    var forbidden: std.ArrayList(u8) = .empty;
+    defer forbidden.deinit(allocator);
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&forbidden, allocator);
+    try (Frame{ .frame_type = FrameType.settings, .payload = &.{}, .consumed = 0 }).write(&forbidden, allocator);
+    try std.testing.expectError(error.UnexpectedFrame, decodeResponse(allocator, forbidden.items));
+}
+
 test "HTTP/3 response encode decode" {
     const allocator = std.testing.allocator;
     var encoded: std.ArrayList(u8) = .empty;
@@ -671,8 +827,12 @@ test "HTTP/3 response encode decode" {
 
     const response = Response{
         .status = 201,
-        .headers = &.{.{ .name = "server", .value = "netz" }},
+        .headers = &.{
+            .{ .name = "server", .value = "netz" },
+            .{ .name = "content-length", .value = "7" },
+        },
         .body = "created",
+        .trailers = &.{.{ .name = "checksum", .value = "ok" }},
     };
     try std.testing.expect(response.successful());
     try response.write(&encoded, allocator);
@@ -682,6 +842,8 @@ test "HTTP/3 response encode decode" {
     try std.testing.expectEqual(@as(u16, 201), decoded.status);
     try std.testing.expect(decoded.successful());
     try std.testing.expectEqualStrings("created", decoded.body);
+    try std.testing.expectEqual(@as(usize, 1), decoded.trailers.len);
+    try std.testing.expectEqualStrings("checksum", decoded.trailers[0].name);
 }
 
 test {

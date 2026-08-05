@@ -35,6 +35,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3, "ControlState"));
     try std.testing.expect(@hasDecl(netz.http3, "writeSettingsFrame"));
     try std.testing.expect(@hasDecl(netz.http3, "writeControlStreamPrefix"));
+    try std.testing.expect(@hasField(netz.http3.Request, "trailers"));
+    try std.testing.expect(@hasField(netz.http3.Response, "trailers"));
+    try std.testing.expect(@hasField(netz.http3.DecodedRequest, "trailers"));
+    try std.testing.expect(@hasField(netz.http3.DecodedResponse, "body_storage"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedConfig, "local_settings"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "control"));
     try std.testing.expect(@hasField(netz.http3.runtime.HandshakeClient, "control"));

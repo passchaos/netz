@@ -16,7 +16,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with GOAWAY monotonicity checks,
-  stateless QPACK literal helpers, a cleartext development runtime over the QUIC
+  request/response message decoding with ordered HEADERS/DATA/trailer handling,
+  DATA-frame aggregation, content-length validation, stateless QPACK literal helpers, a cleartext development runtime over the QUIC
   UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with STREAM frame
   splitting/reassembly and SETTINGS exchange, and a handshake-backed protected
   client/server runtime, plus a `std.Io.async` request receive helper for the
