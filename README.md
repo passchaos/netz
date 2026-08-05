@@ -9,7 +9,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   server helper
 - HTTP/2 frame headers, SETTINGS, DATA/HEADERS payload parsing, a bootstrap
   HPACK static/literal encoder-decoder, and a blocking prior-knowledge h2c
-  client/server runtime
+  client/server runtime with a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   stateless QPACK literal helpers, a cleartext development runtime over the
   QUIC UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with
