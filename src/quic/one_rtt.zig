@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.congestion.Error || quic.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.congestion.Error || quic.path_validation.Error || quic.Error || error{
     MissingFrame,
 };
 
@@ -73,6 +73,7 @@ pub const Connection = struct {
     sent: quic.packet_space.SentPacketTracker,
     recovery: quic.recovery.Queue,
     congestion: quic.congestion.Controller,
+    path_validation: quic.path_validation.State,
     send_flow: quic.flow_control.SendFlow,
     recv_flow: quic.flow_control.RecvFlow,
     recv_data_total: u64 = 0,
@@ -87,6 +88,7 @@ pub const Connection = struct {
             .sent = .init(endpoint.allocator),
             .recovery = .init(endpoint.allocator),
             .congestion = .init(config.max_datagram_size),
+            .path_validation = .init(endpoint.allocator),
             .send_flow = .init(config.initial_send_max_data),
             .recv_flow = try .init(config.initial_receive_max_data, config.receive_window),
         };
@@ -96,6 +98,7 @@ pub const Connection = struct {
         self.received.deinit();
         self.sent.deinit();
         self.recovery.deinit();
+        self.path_validation.deinit();
         self.stream_send_flows.deinit(self.endpoint.allocator);
         self.stream_recv_flows.deinit(self.endpoint.allocator);
         self.* = undefined;
@@ -197,6 +200,22 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn queuePathChallenge(self: *Connection, data: [8]u8) Error!void {
+        try self.path_validation.queueChallenge(data);
+    }
+
+    pub fn sendPendingPathChallenge(self: *Connection) Error!void {
+        const frame = try self.path_validation.nextChallengeFrame();
+        const frames = [_]quic.Frame{frame};
+        try self.send(&frames);
+    }
+
+    pub fn sendPendingPathResponse(self: *Connection) Error!void {
+        const frame = try self.path_validation.nextResponseFrame();
+        const frames = [_]quic.Frame{frame};
+        try self.send(&frames);
+    }
+
     pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
         var packet = try receive(
             self.endpoint,
@@ -242,6 +261,8 @@ pub const Connection = struct {
                     const flow = try self.sendStreamFlow(max_stream_data.stream_id);
                     flow.updateLimit(max_stream_data.maximum_stream_data);
                 },
+                .path_challenge => |path_challenge| try self.path_validation.receiveChallenge(path_challenge.data),
+                .path_response => |path_response| try self.path_validation.receiveResponse(path_response.data),
                 .stream => |stream| {
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
                     const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
@@ -613,6 +634,53 @@ test "QUIC 1-RTT routed datagrams dispatch to separate connections" {
     }
     try std.testing.expect(saw_a);
     try std.testing.expect(saw_b);
+}
+
+test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const server_cid = [_]u8{ 0x65, 0x66, 0x67, 0x68 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xd1} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    const challenge = [_]u8{ 1, 3, 5, 7, 9, 11, 13, 15 };
+    try client.queuePathChallenge(challenge);
+    try client.sendPendingPathChallenge();
+
+    var challenge_packet = try server.receivePacket();
+    defer challenge_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), server.path_validation.pendingResponseCount());
+    try server.sendPendingPathResponse();
+
+    var response_packet = try client.receivePacket();
+    defer response_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), client.path_validation.outstandingChallengeCount());
 }
 
 test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {
