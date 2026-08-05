@@ -13,7 +13,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   HPACK static/literal encoder-decoder, PING/GOAWAY/WINDOW_UPDATE connection
   management, connection- and stream-level flow-control enforcement including
   SETTINGS_INITIAL_WINDOW_SIZE updates, request/response trailers, content-length
-  validation, HTTP/2 connection-specific header rejection including `TE` rules,
+  validation, HTTP/2 pseudo-header/lowercase field-name validation,
+  connection-specific header rejection including `TE` rules,
   and CONNECT body rules, and a blocking prior-knowledge h2c client/server runtime with a
   `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,

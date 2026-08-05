@@ -766,8 +766,27 @@ const HeaderBlockKind = enum {
 fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlockKind) Error!void {
     var connection_header_values: std.ArrayList([]const u8) = .empty;
     defer connection_header_values.deinit(std.heap.page_allocator);
+    var saw_regular = false;
+    var seen_method = false;
+    var seen_scheme = false;
+    var seen_path = false;
+    var seen_authority = false;
+    var seen_status = false;
 
     for (headers) |header| {
+        try validateHeaderName(header.name);
+        const pseudo = std.mem.startsWith(u8, header.name, ":");
+        if (pseudo) {
+            if (saw_regular) return error.InvalidHeader;
+            switch (kind) {
+                .request => try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority),
+                .response => try markResponsePseudo(header.name, &seen_status),
+                .request_trailers, .response_trailers => return error.InvalidHeader,
+            }
+            continue;
+        }
+        saw_regular = true;
+
         if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
         if (std.ascii.eqlIgnoreCase(header.name, "connection")) {
             // RFC 9113 inherits the HTTP/1.1 Connection token rule: anything
@@ -785,6 +804,12 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
         }
     }
 
+    switch (kind) {
+        .request => if (!seen_method or !seen_scheme or !seen_path) return error.MissingPseudoHeader,
+        .response => if (!seen_status) return error.MissingPseudoHeader,
+        .request_trailers, .response_trailers => {},
+    }
+
     for (connection_header_values.items) |value| {
         var tokens = std.mem.splitScalar(u8, value, ',');
         while (tokens.next()) |raw| {
@@ -795,6 +820,45 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
             }
         }
     }
+}
+
+fn validateHeaderName(name: []const u8) Error!void {
+    if (name.len == 0) return error.InvalidHeader;
+    for (name) |byte| {
+        if (byte >= 'A' and byte <= 'Z') return error.InvalidHeader;
+        if (!validHeaderNameByte(byte)) return error.InvalidHeader;
+    }
+}
+
+fn validHeaderNameByte(byte: u8) bool {
+    return std.ascii.isLower(byte) or std.ascii.isDigit(byte) or switch (byte) {
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~', ':' => true,
+        else => false,
+    };
+}
+
+fn markRequestPseudo(
+    name: []const u8,
+    seen_method: *bool,
+    seen_scheme: *bool,
+    seen_path: *bool,
+    seen_authority: *bool,
+) Error!void {
+    if (std.mem.eql(u8, name, ":method")) return markOnce(seen_method);
+    if (std.mem.eql(u8, name, ":scheme")) return markOnce(seen_scheme);
+    if (std.mem.eql(u8, name, ":path")) return markOnce(seen_path);
+    if (std.mem.eql(u8, name, ":authority")) return markOnce(seen_authority);
+    return error.InvalidHeader;
+}
+
+fn markResponsePseudo(name: []const u8, seen_status: *bool) Error!void {
+    if (std.mem.eql(u8, name, ":status")) return markOnce(seen_status);
+    return error.InvalidHeader;
+}
+
+fn markOnce(seen: *bool) Error!void {
+    if (seen.*) return error.InvalidHeader;
+    seen.* = true;
 }
 
 fn connectionSpecificHeaderName(name: []const u8) bool {
@@ -1089,6 +1153,100 @@ test "HTTP/2 runtime validates connection-specific headers" {
         .path = "/bad-trailer-te",
         .authority = "localhost",
         .trailers = &.{.{ .name = "te", .value = "trailers" }},
+    }));
+}
+
+test "HTTP/2 runtime validates pseudo headers and lowercase names" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        expected_errors: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            while (shared.expected_errors < 3) {
+                var request = connection.readRequest() catch |err| {
+                    if (err == error.InvalidHeader or err == error.MissingPseudoHeader) {
+                        shared.expected_errors += 1;
+                        continue;
+                    }
+                    shared.err = err;
+                    return;
+                };
+                request.deinit(shared.server.allocator);
+                shared.err = error.InvalidHeader;
+                return;
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const uppercase = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/uppercase" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "Host", .value = "localhost" },
+    };
+    try client.writeHeaders(1, &uppercase, true);
+
+    const late_pseudo = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/late-pseudo" },
+        .{ .name = "accept", .value = "*/*" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try client.writeHeaders(3, &late_pseudo, true);
+
+    const duplicate_pseudo = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/duplicate-pseudo" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try client.writeHeaders(5, &duplicate_pseudo, true);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 3), shared.expected_errors);
+
+    try std.testing.expectError(error.InvalidHeader, client.request(.{
+        .method = "GET",
+        .path = "/bad-response-header",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "Uppercase", .value = "bad" }},
+    }));
+    try std.testing.expectError(error.InvalidHeader, client.request(.{
+        .method = "GET",
+        .path = "/bad-request-pseudo",
+        .authority = "localhost",
+        .headers = &.{.{ .name = ":status", .value = "200" }},
     }));
 }
 
