@@ -1,0 +1,189 @@
+const std = @import("std");
+const quic = @import("mod.zig");
+
+const net = std.Io.net;
+
+pub const Error = quic.Error || error{
+    EmptyDatagram,
+    DatagramTooLarge,
+    TrailingBytes,
+} || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError;
+
+pub const Limits = struct {
+    max_datagram_size: usize = 65_535,
+    max_frames_per_datagram: usize = 256,
+};
+
+pub const Server = struct {
+    endpoint: Endpoint,
+
+    pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
+        return .{ .endpoint = try .bind(allocator, io, bind_address, limits) };
+    }
+
+    pub fn deinit(self: *Server) void {
+        self.endpoint.deinit();
+        self.* = undefined;
+    }
+
+    pub fn address(self: Server) net.IpAddress {
+        return self.endpoint.address();
+    }
+
+    pub fn receive(self: *Server) Error!OwnedDatagram {
+        return self.endpoint.receive();
+    }
+
+    pub fn sendFrames(self: *Server, to: net.IpAddress, frames: []const quic.Frame) Error!void {
+        try self.endpoint.sendFrames(to, frames);
+    }
+};
+
+pub const Client = struct {
+    endpoint: Endpoint,
+    peer: net.IpAddress,
+
+    pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, peer: net.IpAddress, limits: Limits) Error!Client {
+        return .{
+            .endpoint = try .bind(allocator, io, local_address, limits),
+            .peer = peer,
+        };
+    }
+
+    pub fn deinit(self: *Client) void {
+        self.endpoint.deinit();
+        self.* = undefined;
+    }
+
+    pub fn address(self: Client) net.IpAddress {
+        return self.endpoint.address();
+    }
+
+    pub fn sendFrames(self: *Client, frames: []const quic.Frame) Error!void {
+        try self.endpoint.sendFrames(self.peer, frames);
+    }
+
+    pub fn receive(self: *Client) Error!OwnedDatagram {
+        return self.endpoint.receive();
+    }
+};
+
+pub const Endpoint = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    socket: net.Socket,
+    limits: Limits = .{},
+
+    pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Endpoint {
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .socket = try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp }),
+            .limits = limits,
+        };
+    }
+
+    pub fn deinit(self: *Endpoint) void {
+        self.socket.close(self.io);
+        self.* = undefined;
+    }
+
+    pub fn address(self: Endpoint) net.IpAddress {
+        return self.socket.address;
+    }
+
+    pub fn sendBytes(self: *Endpoint, to: net.IpAddress, bytes: []const u8) Error!void {
+        if (bytes.len == 0) return error.EmptyDatagram;
+        if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
+        try self.socket.send(self.io, &to, bytes);
+    }
+
+    pub fn sendFrames(self: *Endpoint, to: net.IpAddress, frames: []const quic.Frame) Error!void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+        for (frames) |frame| try frame.write(&payload, self.allocator);
+        try self.sendBytes(to, payload.items);
+    }
+
+    pub fn receive(self: *Endpoint) Error!OwnedDatagram {
+        const buffer = try self.allocator.alloc(u8, self.limits.max_datagram_size);
+        defer self.allocator.free(buffer);
+        const incoming = try self.socket.receive(self.io, buffer);
+        if (incoming.data.len == 0) return error.EmptyDatagram;
+
+        const bytes = try self.allocator.dupe(u8, incoming.data);
+        errdefer self.allocator.free(bytes);
+        var frames: std.ArrayList(quic.Frame) = .empty;
+        errdefer frames.deinit(self.allocator);
+
+        var pos: usize = 0;
+        while (pos < bytes.len) {
+            if (frames.items.len >= self.limits.max_frames_per_datagram) return error.DatagramTooLarge;
+            const parsed = try quic.parseFrame(bytes[pos..]);
+            if (parsed.consumed == 0) return error.TrailingBytes;
+            try frames.append(self.allocator, parsed.frame);
+            pos += parsed.consumed;
+        }
+
+        return .{
+            .from = incoming.from,
+            .bytes = bytes,
+            .frames = try frames.toOwnedSlice(self.allocator),
+        };
+    }
+};
+
+pub const OwnedDatagram = struct {
+    from: net.IpAddress,
+    bytes: []u8,
+    frames: []quic.Frame,
+
+    pub fn deinit(self: *OwnedDatagram, allocator: std.mem.Allocator) void {
+        allocator.free(self.frames);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+test "QUIC UDP endpoint sends and receives frame datagrams" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer server.deinit();
+
+    var client = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer client.deinit();
+
+    const outbound = [_]quic.Frame{
+        .{ .ping = {} },
+        .{ .datagram = .{ .data = "hello", .length_present = true } },
+    };
+    try client.sendFrames(&outbound);
+
+    var received = try server.receive();
+    defer received.deinit(allocator);
+    try std.testing.expect(received.from.eql(&client.address()));
+    try std.testing.expectEqual(@as(usize, 2), received.frames.len);
+    try std.testing.expectEqualStrings("hello", received.frames[1].datagram.data);
+
+    const response = [_]quic.Frame{
+        .{ .stream = .{ .stream_id = 0, .data = "world", .fin = true } },
+    };
+    try server.sendFrames(received.from, &response);
+
+    var client_received = try client.receive();
+    defer client_received.deinit(allocator);
+    try std.testing.expect(client_received.from.eql(&server.address()));
+    try std.testing.expectEqual(@as(usize, 1), client_received.frames.len);
+    try std.testing.expectEqualStrings("world", client_received.frames[0].stream.data);
+}
