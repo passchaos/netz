@@ -81,6 +81,10 @@ pub const ParseOptions = struct {
     allow_obs_fold: bool = false,
 };
 
+pub const ResponseContext = struct {
+    request_method: ?Method = null,
+};
+
 pub const BodyFraming = enum {
     /// No message body framing was present in the parsed bytes.
     none,
@@ -193,6 +197,24 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
 }
 
 pub fn parseResponse(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!Response {
+    return parseResponseWithContext(allocator, bytes, options, .{});
+}
+
+pub fn parseResponseForRequest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: ParseOptions,
+    request_method: Method,
+) Error!Response {
+    return parseResponseWithContext(allocator, bytes, options, .{ .request_method = request_method });
+}
+
+pub fn parseResponseWithContext(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: ParseOptions,
+    context: ResponseContext,
+) Error!Response {
     const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
     const head = bytes[0..head_end];
     var lines = std.mem.splitSequence(u8, head, "\r\n");
@@ -210,7 +232,7 @@ pub fn parseResponse(allocator: std.mem.Allocator, bytes: []const u8, options: P
     const headers = try parseHeaderLines(allocator, &lines, options);
     errdefer allocator.free(headers);
     const consumed_head = head_end + 4;
-    const parsed_body = if (statusCodeForbidsBody(status))
+    const parsed_body = if (responseForbidsBody(status, context.request_method))
         ParsedBody{
             .framing = .none,
             .body = bytes[consumed_head..consumed_head],
@@ -370,6 +392,21 @@ fn transferEncodingFraming(headers: []const Header) Error!?BodyFraming {
 
 fn statusCodeForbidsBody(status: u16) bool {
     return (status >= 100 and status < 200) or status == 204 or status == 304;
+}
+
+fn responseForbidsBody(status: u16, request_method: ?Method) bool {
+    if (statusCodeForbidsBody(status)) return true;
+    return switch (request_method orelse return false) {
+        // RFC 9110: HEAD responses have the same headers as GET but never carry
+        // content.  Hyper applies the request method when deciding response body
+        // length; doing the same prevents a HEAD Content-Length from consuming
+        // the next pipelined response as body bytes.
+        .HEAD => true,
+        // A successful CONNECT switches the connection to a tunnel after the
+        // header section.  From HTTP's perspective there is no response body.
+        .CONNECT => status >= 200 and status < 300,
+        else => false,
+    };
 }
 
 pub fn writeRequest(
@@ -624,6 +661,24 @@ test "HTTP/1 response body framing helpers" {
     try std.testing.expectEqual(@as(usize, raw.len - "hello".len), resp.consumed);
     try std.testing.expectEqualStrings("", resp.body);
     try std.testing.expect(!resp.keepAlive());
+}
+
+test "HTTP/1 response parsing honors request method body rules" {
+    const allocator = std.testing.allocator;
+
+    const head_raw = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong";
+    var head_response = try parseResponseForRequest(allocator, head_raw, .{}, .HEAD);
+    defer head_response.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.none, head_response.body_framing);
+    try std.testing.expectEqual(@as(usize, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n".len), head_response.consumed);
+    try std.testing.expectEqualStrings("", head_response.body);
+
+    const connect_raw = "HTTP/1.1 200 Connection Established\r\nContent-Length: 9\r\n\r\ntunnel bytes";
+    var connect_response = try parseResponseForRequest(allocator, connect_raw, .{}, .CONNECT);
+    defer connect_response.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.none, connect_response.body_framing);
+    try std.testing.expectEqual(@as(usize, "HTTP/1.1 200 Connection Established\r\nContent-Length: 9\r\n\r\n".len), connect_response.consumed);
+    try std.testing.expectEqualStrings("", connect_response.body);
 }
 test {
     _ = runtime;

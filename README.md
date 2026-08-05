@@ -5,8 +5,9 @@ starts with deterministic parsers, serializers, and state helpers for:
 
 - HTTP/1.1 requests, responses, chunked transfer decoding, trailer fields,
   keep-alive/upgrade handling, pipelined byte buffering for persistent
-  connections, ambiguous body-length rejection, and a blocking `std.Io.net`
-  TCP client/server runtime with a `std.Io.async` concurrent server helper
+  connections, method-aware response body handling for HEAD and successful
+  CONNECT, ambiguous body-length rejection, and a blocking `std.Io.net` TCP
+  client/server runtime with a `std.Io.async` concurrent server helper
 - HTTP/2 frame headers, SETTINGS, DATA/HEADERS payload parsing, a bootstrap
   HPACK static/literal encoder-decoder, PING/GOAWAY/WINDOW_UPDATE connection
   management, connection- and stream-level flow-control enforcement including
