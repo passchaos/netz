@@ -10,7 +10,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   server-side `Expect: 100-continue` handling, ambiguous body-length rejection,
   and a blocking `std.Io.net` TCP client/server runtime with a `std.Io.async`
   concurrent server helper
-- HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY)/CONTINUATION/RST_STREAM payload parsing, a bootstrap
+- HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY)/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder, PING/GOAWAY/WINDOW_UPDATE connection
   management including interleaved SETTINGS/PING/WINDOW_UPDATE handling during stream reads, connection- and stream-level flow-control enforcement including
   SETTINGS_INITIAL_WINDOW_SIZE updates, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation,

@@ -43,6 +43,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.runtime, "FlowWindow"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "sendResetStream"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "readResetStream"));
+    const stream_reset_error: netz.http2.runtime.Error = error.StreamReset;
+    try std.testing.expect(stream_reset_error == error.StreamReset);
     try std.testing.expectEqual(@as(u64, 0x01), netz.http3.FrameType.headers);
     try std.testing.expectEqual(@as(usize, 65_535), (netz.http3.runtime.Limits{}).quic.max_datagram_size);
     try std.testing.expect(@hasDecl(netz.http3.runtime.Server, "receiveRequestsConcurrent"));

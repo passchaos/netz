@@ -14,6 +14,7 @@ pub const Error = http2.Error || error{
     MessageTooLarge,
     FlowControlBlocked,
     FlowControlViolation,
+    StreamReset,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
@@ -329,6 +330,7 @@ pub const Connection = struct {
                                     try validateHeaderBlock(trailers, .request_trailers);
                                     break;
                                 },
+                                .rst_stream => return error.StreamReset,
                                 else => return error.UnexpectedFrame,
                             }
                         }
@@ -513,6 +515,7 @@ pub const Connection = struct {
                         break;
                     }
                 },
+                .rst_stream => return error.StreamReset,
                 else => continue,
             }
         }
@@ -1248,6 +1251,125 @@ test "HTTP/2 runtime sends and receives RST_STREAM" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client request fails when response stream is reset" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/reset-response", request.path);
+            try connection.sendResetStream(request.stream_id, .cancel);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.StreamReset, client.request(.{
+        .method = "GET",
+        .path = "/reset-response",
+        .authority = "localhost",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 server readRequest fails when request body stream is reset" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_reset: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            var request = connection.readRequest() catch |err| {
+                if (err == error.StreamReset) {
+                    shared.saw_reset = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            request.deinit(shared.server.allocator);
+            shared.err = error.UnexpectedFrame;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const headers = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/reset-request" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "content-length", .value = "5" },
+    };
+    try client.writeHeaders(1, &headers, false);
+    try client.writeData(1, "he", false);
+    try client.sendResetStream(1, .cancel);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_reset);
 }
 
 test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {
