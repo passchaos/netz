@@ -586,6 +586,14 @@ pub const Connection = struct {
                 }
                 return true;
             },
+            .priority => {
+                // PRIORITY can be interleaved with DATA/HEADERS and does not
+                // alter the message body.  The envelope validator has already
+                // checked stream id and payload length; parse it here so
+                // malformed priority payloads still fail before being ignored.
+                _ = try http2.PriorityPayload.parse(frame);
+                return true;
+            },
             else => return false,
         }
     }
@@ -831,10 +839,13 @@ fn validateFrameEnvelope(frame: http2.Frame) Error!void {
     switch (frame.header.frame_type) {
         .data,
         .headers,
-        .priority,
         .rst_stream,
         .continuation,
         => if (stream_id == 0) return error.InvalidFrame,
+
+        .priority => {
+            if (stream_id == 0 or frame.payload.len != 5) return error.InvalidFrame;
+        },
 
         .settings => {
             if (stream_id != 0) return error.InvalidFrame;
@@ -1609,6 +1620,77 @@ test "HTTP/2 runtime answers PING while reading request body" {
     try std.testing.expectEqualSlices(u8, &ping_payload, ping_ack.frame.payload);
 
     try client.writeData(1, "llo", true);
+    var response = try client.readResponse(1, "POST");
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HTTP/2 runtime ignores PRIORITY while reading request body" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/priority-body", request.path);
+            try std.testing.expectEqualStrings("hello", request.body);
+            try connection.writeResponse(request.stream_id, .{ .body = "ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const headers = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/priority-body" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "content-length", .value = "5" },
+    };
+    try client.writeHeaders(1, &headers, false);
+    try client.writeData(1, "he", false);
+
+    var priority_bytes: std.ArrayList(u8) = .empty;
+    defer priority_bytes.deinit(allocator);
+    try http2.PriorityPayload.write(&priority_bytes, allocator, 1, false, 0, 32);
+    try writeAll(io, client.stream, priority_bytes.items);
+    try client.writeData(1, "llo", true);
+
     var response = try client.readResponse(1, "POST");
     defer response.deinit(allocator);
 
@@ -2861,6 +2943,10 @@ test "HTTP/2 runtime validates frame envelope rules" {
     }));
     try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
         .header = .{ .length = 4, .frame_type = .window_update, .flags = 0, .stream_id = 1 },
+        .payload = &.{ 0, 0, 0, 0 },
+    }));
+    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
+        .header = .{ .length = 4, .frame_type = .priority, .flags = 0, .stream_id = 1 },
         .payload = &.{ 0, 0, 0, 0 },
     }));
     try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
