@@ -21,6 +21,8 @@ const flag_end_stream: u8 = 0x1;
 const flag_ack: u8 = 0x1;
 const flag_end_headers: u8 = 0x4;
 const default_flow_window: i64 = 65_535;
+const default_max_frame_size: usize = 16 * 1024;
+const max_max_frame_size: usize = 16_777_215;
 
 pub const Limits = struct {
     max_frame_payload: usize = 16 * 1024 * 1024,
@@ -250,6 +252,7 @@ pub const Connection = struct {
     send_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     peer_initial_stream_window: i64 = default_flow_window,
+    peer_max_frame_size: usize = default_max_frame_size,
 
     pub fn close(self: *Connection) void {
         self.send_stream_windows.deinit(self.allocator);
@@ -552,7 +555,7 @@ pub const Connection = struct {
     }
 
     fn writeHeaderBlock(self: *Connection, stream_id: u31, block: []const u8, end_stream: bool) Error!void {
-        const chunk_size = @max(@as(usize, 1), self.limits.max_frame_payload);
+        const chunk_size = self.outboundFramePayloadLimit();
         const first_len = @min(block.len, chunk_size);
         var offset = first_len;
         try writeFrame(
@@ -606,26 +609,61 @@ pub const Connection = struct {
         const stream_window = try self.sendStreamWindow(stream_id);
         try stream_window.reserve(data.len);
         errdefer stream_window.update(@intCast(data.len));
-        try writeFrame(
-            self.allocator,
-            self.io,
-            self.stream,
-            .data,
-            if (end_stream) flag_end_stream else 0,
-            stream_id,
-            data,
-        );
+
+        const chunk_size = self.outboundFramePayloadLimit();
+        if (data.len == 0) {
+            try writeFrame(
+                self.allocator,
+                self.io,
+                self.stream,
+                .data,
+                if (end_stream) flag_end_stream else 0,
+                stream_id,
+                &.{},
+            );
+            return;
+        }
+
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const end = @min(data.len, offset + chunk_size);
+            try writeFrame(
+                self.allocator,
+                self.io,
+                self.stream,
+                .data,
+                if (end_stream and end == data.len) flag_end_stream else 0,
+                stream_id,
+                data[offset..end],
+            );
+            offset = end;
+        }
     }
 
     fn applySettings(self: *Connection, settings: []const http2.Setting) Error!void {
         for (settings) |setting| {
-            if (setting.id == .initial_window_size) {
-                const new_window = std.math.cast(i64, setting.value) orelse return error.InvalidSetting;
-                const delta = new_window - self.peer_initial_stream_window;
-                self.peer_initial_stream_window = new_window;
-                for (self.send_stream_windows.items) |*entry| entry.window.adjust(delta);
+            switch (setting.id) {
+                .initial_window_size => {
+                    if (setting.value > std.math.maxInt(i31)) return error.InvalidSetting;
+                    const new_window: i64 = setting.value;
+                    const delta = new_window - self.peer_initial_stream_window;
+                    self.peer_initial_stream_window = new_window;
+                    for (self.send_stream_windows.items) |*entry| entry.window.adjust(delta);
+                },
+                .max_frame_size => {
+                    if (setting.value < default_max_frame_size or setting.value > max_max_frame_size) return error.InvalidSetting;
+                    self.peer_max_frame_size = setting.value;
+                },
+                else => {},
             }
         }
+    }
+
+    fn outboundFramePayloadLimit(self: Connection) usize {
+        // The peer's SETTINGS_MAX_FRAME_SIZE caps every frame payload we send.
+        // `limits.max_frame_payload` remains a local/test ceiling used by this
+        // minimal runtime to force small fragments, so use the stricter value.
+        return @max(@as(usize, 1), @min(self.peer_max_frame_size, self.limits.max_frame_payload));
     }
 
     fn sendStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
@@ -1826,4 +1864,139 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(@as(i64, 70_000 - 1024), (try connection.sendStreamWindow(1)).value);
     try std.testing.expectEqual(@as(i64, 70_000), (try connection.sendStreamWindow(3)).value);
+}
+
+test "HTTP/2 SETTINGS_MAX_FRAME_SIZE controls outbound DATA splitting" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        data_lengths: [4]usize = [_]usize{0} ** 4,
+        data_count: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var stream = try shared.listener.accept(shared.io);
+            defer stream.close(shared.io);
+            const limits = Limits{ .max_frame_payload = 64 * 1024, .max_body_bytes = 128 * 1024 };
+
+            var preface_buf: [http2.connection_preface.len]u8 = undefined;
+            try readExact(shared.io, stream, &preface_buf);
+            try http2.validateClientPreface(&preface_buf);
+
+            var client_settings = try readFrame(shared.allocator, shared.io, stream, limits);
+            defer client_settings.deinit(shared.allocator);
+            try std.testing.expectEqual(http2.FrameType.settings, client_settings.frame.header.frame_type);
+            try std.testing.expectEqual(@as(u8, 0), client_settings.frame.header.flags & flag_ack);
+
+            var settings_payload: std.ArrayList(u8) = .empty;
+            defer settings_payload.deinit(shared.allocator);
+            try http2.writeSettings(&settings_payload, shared.allocator, &.{
+                .{ .id = .max_frame_size, .value = 20_000 },
+            });
+            try writeFrame(shared.allocator, shared.io, stream, .settings, 0, 0, settings_payload.items);
+            try writeFrame(shared.allocator, shared.io, stream, .settings, flag_ack, 0, &.{});
+
+            var client_ack = try readFrame(shared.allocator, shared.io, stream, limits);
+            defer client_ack.deinit(shared.allocator);
+            try std.testing.expectEqual(http2.FrameType.settings, client_ack.frame.header.frame_type);
+            try std.testing.expect((client_ack.frame.header.flags & flag_ack) != 0);
+
+            var request_stream_id: u31 = 0;
+            while (true) {
+                var frame = try readFrame(shared.allocator, shared.io, stream, limits);
+                defer frame.deinit(shared.allocator);
+                switch (frame.frame.header.frame_type) {
+                    .headers => {
+                        request_stream_id = frame.frame.header.stream_id;
+                    },
+                    .data => {
+                        const data = try http2.DataPayload.parse(frame.frame);
+                        try std.testing.expect(shared.data_count < shared.data_lengths.len);
+                        shared.data_lengths[shared.data_count] = data.data.len;
+                        shared.data_count += 1;
+                        if ((frame.frame.header.flags & flag_end_stream) != 0) break;
+                    },
+                    else => {},
+                }
+            }
+
+            try std.testing.expectEqual(@as(u31, 1), request_stream_id);
+            var response_block: std.ArrayList(u8) = .empty;
+            defer response_block.deinit(shared.allocator);
+            try http2.Hpack.encodeLiteralBlock(&response_block, shared.allocator, &.{
+                .{ .name = ":status", .value = "200" },
+            });
+            try writeFrame(shared.allocator, shared.io, stream, .headers, flag_end_headers | flag_end_stream, request_stream_id, response_block.items);
+        }
+    };
+
+    var shared = Shared{ .allocator = allocator, .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const body = try allocator.alloc(u8, 45_000);
+    defer allocator.free(body);
+    @memset(body, 'x');
+
+    var client = try Client.connect(allocator, io, listener.socket.address, .{ .max_frame_payload = 64 * 1024, .max_body_bytes = 128 * 1024 });
+    defer client.close();
+    var response = try client.request(.{
+        .method = "POST",
+        .path = "/split-data",
+        .authority = "localhost",
+        .body = body,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqual(@as(usize, 3), shared.data_count);
+    try std.testing.expectEqual(@as(usize, 20_000), shared.data_lengths[0]);
+    try std.testing.expectEqual(@as(usize, 20_000), shared.data_lengths[1]);
+    try std.testing.expectEqual(@as(usize, 5_000), shared.data_lengths[2]);
+}
+
+test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
+        .{ .id = .max_frame_size, .value = default_max_frame_size - 1 },
+    }));
+    try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
+        .{ .id = .max_frame_size, .value = max_max_frame_size + 1 },
+    }));
+    try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
+        .{ .id = .initial_window_size, .value = @as(u32, std.math.maxInt(i31)) + 1 },
+    }));
+
+    try connection.applySettings(&.{
+        .{ .id = .max_frame_size, .value = 32_768 },
+    });
+    try std.testing.expectEqual(@as(usize, 32_768), connection.peer_max_frame_size);
 }
