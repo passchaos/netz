@@ -75,7 +75,7 @@ pub const Server = struct {
         const peer_settings = try http2.parseSettings(self.allocator, client_settings.frame.payload);
         defer self.allocator.free(peer_settings);
 
-        try writeInitialSettings(self.allocator, self.io, stream, self.limits);
+        try writeInitialSettings(self.allocator, self.io, stream, self.limits, .server);
         try writeFrame(self.allocator, self.io, stream, .settings, flag_ack, 0, &.{});
 
         var connection = Connection{
@@ -181,7 +181,7 @@ pub const Client = struct {
         errdefer stream.close(io);
 
         try writeAll(io, stream, http2.connection_preface);
-        try writeInitialSettings(allocator, io, stream, limits);
+        try writeInitialSettings(allocator, io, stream, limits, .client);
 
         var saw_server_settings = false;
         var saw_settings_ack = false;
@@ -494,6 +494,7 @@ pub const Connection = struct {
             }
             if (frame.frame.header.stream_id != stream_id) continue;
             switch (frame.frame.header.frame_type) {
+                .push_promise => return error.InvalidFrame,
                 .headers => {
                     if (headers) |h| {
                         if ((frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
@@ -889,12 +890,21 @@ fn writeFrame(
     try writeAll(io, stream, encoded.items);
 }
 
-fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!void {
+fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
-    try http2.writeSettings(&payload, allocator, &.{
-        .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) },
-    });
+    var settings_buf: [2]http2.Setting = undefined;
+    var count: usize = 0;
+    settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) };
+    count += 1;
+    if (role == .client) {
+        // Like hyper/h2, this lightweight client opts out of server push until
+        // a full pushed-stream lifecycle is implemented.  A peer that still
+        // sends PUSH_PROMISE is treated as a protocol error by readResponse.
+        settings_buf[count] = .{ .id = .enable_push, .value = 0 };
+        count += 1;
+    }
+    try http2.writeSettings(&payload, allocator, settings_buf[0..count]);
     try writeFrame(allocator, io, stream, .settings, 0, 0, payload.items);
 }
 
@@ -1831,6 +1841,72 @@ test "HTTP/2 client skips informational responses before final response" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("final", response.body);
+}
+
+test "HTTP/2 client rejects PUSH_PROMISE after disabling push" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/push-disabled", request.path);
+
+            var promised_block: std.ArrayList(u8) = .empty;
+            defer promised_block.deinit(server_ptr.allocator);
+            try http2.Hpack.encodeLiteralBlock(&promised_block, server_ptr.allocator, &.{
+                .{ .name = ":method", .value = "GET" },
+                .{ .name = ":path", .value = "/pushed" },
+                .{ .name = ":scheme", .value = "https" },
+            });
+            var promise: std.ArrayList(u8) = .empty;
+            defer promise.deinit(server_ptr.allocator);
+            try http2.PushPromisePayload.write(&promise, server_ptr.allocator, request.stream_id, 2, promised_block.items, .{});
+            try writeAll(server_ptr.io, connection.stream, promise.items);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.InvalidFrame, client.request(.{
+        .method = "GET",
+        .path = "/push-disabled",
+        .authority = "localhost",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 client fails active request rejected by GOAWAY" {
@@ -3004,7 +3080,8 @@ test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" 
         allocator: std.mem.Allocator,
         io: std.Io,
         listener: *net.Server,
-        value: u32 = 0,
+        max_header_list_size: ?u32 = null,
+        enable_push: ?u32 = null,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -3022,9 +3099,11 @@ test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" 
             try std.testing.expectEqual(http2.FrameType.settings, frame.frame.header.frame_type);
             const settings = try http2.parseSettings(shared.allocator, frame.frame.payload);
             defer shared.allocator.free(settings);
-            try std.testing.expectEqual(@as(usize, 1), settings.len);
-            try std.testing.expectEqual(http2.SettingId.max_header_list_size, settings[0].id);
-            shared.value = settings[0].value;
+            for (settings) |setting| switch (setting.id) {
+                .max_header_list_size => shared.max_header_list_size = setting.value,
+                .enable_push => shared.enable_push = setting.value,
+                else => {},
+            };
         }
     };
 
@@ -3033,9 +3112,10 @@ test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" 
 
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    try writeInitialSettings(allocator, io, stream, .{ .max_header_list_size = 4096 });
+    try writeInitialSettings(allocator, io, stream, .{ .max_header_list_size = 4096 }, .client);
 
     thread.join();
     if (shared.err) |err| return err;
-    try std.testing.expectEqual(@as(u32, 4096), shared.value);
+    try std.testing.expectEqual(@as(?u32, 4096), shared.max_header_list_size);
+    try std.testing.expectEqual(@as(?u32, 0), shared.enable_push);
 }
