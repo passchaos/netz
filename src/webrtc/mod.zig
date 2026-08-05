@@ -230,7 +230,7 @@ pub const stun = struct {
         var hmac = std.crypto.auth.hmac.HmacSha1.init(password);
         hmac.update(bytes[0..2]);
         hmac.update(&length_bytes);
-        hmac.update(bytes[4..located.attribute_start]);
+        hmac.update(bytes[4..located.value_start]);
         hmac.final(&expected);
         if (!std.crypto.timing_safe.eql([message_integrity_len]u8, expected, located.value[0..message_integrity_len].*)) {
             return error.BadMessageIntegrity;
@@ -342,6 +342,8 @@ pub const stun = struct {
         var integrity_input: std.ArrayList(u8) = .empty;
         defer integrity_input.deinit(allocator);
         try writeHeaderAndPayload(&integrity_input, allocator, class, method, transaction_id, integrity_payload_len, payload.items);
+        try wire.appendInt(&integrity_input, allocator, u16, @intFromEnum(AttributeType.message_integrity), .big);
+        try wire.appendInt(&integrity_input, allocator, u16, message_integrity_len, .big);
 
         var integrity: [message_integrity_len]u8 = undefined;
         std.crypto.auth.hmac.HmacSha1.create(&integrity, integrity_input.items, password);
