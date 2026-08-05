@@ -303,6 +303,7 @@ pub const Connection = struct {
                 },
                 .headers => {
                     const stream_id = frame.frame.header.stream_id;
+                    if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
                     const headers = try self.readHeaderBlock(frame.frame);
                     errdefer freeHeaders(self.allocator, headers);
                     try validateHeaderBlock(headers, .request);
@@ -822,6 +823,10 @@ fn validateFrameEnvelope(frame: http2.Frame) Error!void {
         .push_promise => if (stream_id == 0) return error.InvalidFrame,
         _ => {},
     }
+}
+
+fn clientInitiatedStreamId(stream_id: u31) bool {
+    return stream_id != 0 and (stream_id & 1) == 1;
 }
 
 fn writeFrame(
@@ -1368,6 +1373,69 @@ test "HTTP/2 runtime rejects malformed CONTINUATION sequence" {
     const split = block.items.len / 2;
     try writeFrame(allocator, io, client.stream, .headers, 0, 1, block.items[0..split]);
     try writeFrame(allocator, io, client.stream, .continuation, flag_end_headers, 3, block.items[split..]);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
+}
+
+test "HTTP/2 runtime rejects server-initiated request stream ids" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            var request = connection.readRequest() catch |err| {
+                if (err == error.InvalidFrame) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            request.deinit(shared.server.allocator);
+            shared.err = error.UnexpectedFrame;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/even-stream" },
+        .{ .name = ":scheme", .value = "https" },
+    });
+    try writeFrame(allocator, io, client.stream, .headers, flag_end_headers | flag_end_stream, 2, block.items);
 
     thread.join();
     if (shared.err) |err| return err;
