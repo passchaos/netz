@@ -203,11 +203,10 @@ pub const Response = struct {
         return self.status >= 200 and self.status < 300;
     }
 
-    pub fn headerFields(self: Response, out: []Qpack.HeaderField) Error![]Qpack.HeaderField {
+    pub fn headerFields(self: Response, out: []Qpack.HeaderField, status_buf: *[3]u8) Error![]Qpack.HeaderField {
         var count: usize = 0;
-        var status_buf: [3]u8 = undefined;
         if (self.status < 100 or self.status > 999) return error.InvalidStatus;
-        const status = std.fmt.bufPrint(&status_buf, "{d}", .{self.status}) catch return error.InvalidStatus;
+        const status = std.fmt.bufPrint(status_buf, "{d}", .{self.status}) catch return error.InvalidStatus;
         try appendHeaderField(out, &count, .{ .name = ":status", .value = status });
         for (self.headers) |header| try appendHeaderField(out, &count, header);
         return out[0..count];
@@ -215,7 +214,8 @@ pub const Response = struct {
 
     pub fn write(self: Response, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
-        const fields = try self.headerFields(&fields_buf);
+        var status_buf: [3]u8 = undefined;
+        const fields = try self.headerFields(&fields_buf, &status_buf);
         try writeHeadersAndData(list, allocator, fields, self.body);
     }
 };
@@ -282,6 +282,7 @@ pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!Dec
     for (message.headers) |header| {
         if (std.mem.eql(u8, header.name, ":status")) {
             status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
+            if (status.? < 100 or status.? > 999) return error.InvalidStatus;
         }
     }
 

@@ -3,17 +3,24 @@
 `netz` is a Zig 0.16 protocol toolkit for modern application networking.  It
 starts with deterministic parsers, serializers, and state helpers for:
 
-- HTTP/1.1 requests, responses, chunked bodies, keep-alive/upgrade handling
+- HTTP/1.1 requests, responses, chunked transfer decoding, trailer fields,
+  keep-alive/upgrade handling, and ambiguous body-length rejection
 - HTTP/2 frame headers, SETTINGS, DATA/HEADERS payload parsing, and a bootstrap
-  HPACK literal decoder
-- HTTP/3 frame, SETTINGS, DATAGRAM, and stateless QPACK literal helpers
-- QUIC varints, long-header parsing, stream IDs, and transport parameters
-- WebSocket handshakes, frame masking, control validation, and message assembly
-- MQTT 3.1.1/5 fixed headers, CONNECT, PUBLISH, properties, and remaining length
+  HPACK static/literal encoder-decoder
+- HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers, and
+  stateless QPACK literal helpers
+- QUIC varints, long-header parsing, stream IDs, transport parameters, and core
+  frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames)
+- WebSocket handshakes, nonce validation, frame masking, strict frame/control
+  validation, close payload checks, and message assembly
+- MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK, PUBLISH, PUBACK-style
+  acknowledgements, SUBSCRIBE/SUBACK, PING, DISCONNECT, properties, and
+  remaining length
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
   datagram mapping
-- WebRTC building blocks: STUN, ICE candidates, SDP, DTLS record headers, RTP,
-  and SCTP common headers
+- WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
+  SDP, DTLS record headers, RTP packets/extensions/padding, and SCTP common
+  headers
 
 The first implementation layer is intentionally codec-first rather than bound to
 one runtime.  TLS, UDP/TCP sockets, event loops, congestion control, and high
@@ -27,6 +34,11 @@ zig build test
 ```
 
 The build script pins the package to Zig `0.16.0`.
+
+## Implementation order
+
+Protocol work is prioritized as: HTTP/1 + HTTP/2, WebSocket, QUIC, HTTP/3,
+MQTT, then WebRTC.
 
 ## Package use
 

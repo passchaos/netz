@@ -571,7 +571,6 @@ pub const rtp = struct {
 
     pub fn writePacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: WriteOptions, payload: []const u8) Error!void {
         if (options.csrcs.len > 15) return error.InvalidRtpPacket;
-        if (options.padding_len == 1) return error.InvalidRtpPacket;
         const has_padding = options.padding_len > 0;
         const has_extension = options.extension != null;
         const b0: u8 = 0x80 |
