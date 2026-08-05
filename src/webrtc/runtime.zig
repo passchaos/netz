@@ -9,7 +9,7 @@ pub const Error = webrtc.Error || error{
     DatagramTooLarge,
     UnexpectedStunMessage,
     MissingXorMappedAddress,
-} || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError;
+} || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError || std.Io.Cancelable;
 
 pub const Limits = struct {
     max_datagram_size: usize = 2048,
@@ -57,6 +57,10 @@ pub const Peer = struct {
 
     pub fn receiveDtlsRecord(self: *Peer) Error!DtlsDatagram {
         return self.endpoint.receiveDtlsRecord();
+    }
+
+    pub fn receiveManyConcurrent(self: *Peer, count: usize) Error!PeerDatagramBatch {
+        return self.endpoint.receiveManyConcurrent(count);
     }
 };
 
@@ -176,6 +180,50 @@ pub const PeerEndpoint = struct {
         }
     }
 
+    pub fn receiveAny(self: *PeerEndpoint) Error!PeerDatagram {
+        while (true) {
+            var raw = try self.receiveRaw();
+            errdefer raw.deinit(self.allocator);
+            if (looksLikeStun(raw.bytes)) {
+                var message = try stun.parse(self.allocator, raw.bytes);
+                errdefer message.deinit(self.allocator);
+                return .{ .stun = .{ .from = raw.from, .bytes = raw.bytes, .message = message } };
+            }
+            if (looksLikeDtls(raw.bytes)) {
+                const record = try webrtc.dtls.Record.parse(raw.bytes);
+                return .{ .dtls = .{ .from = raw.from, .bytes = raw.bytes, .record = record } };
+            }
+            if (looksLikeRtp(raw.bytes)) {
+                var packet = try webrtc.rtp.Packet.parse(self.allocator, raw.bytes);
+                errdefer packet.deinit(self.allocator);
+                return .{ .rtp = .{ .from = raw.from, .bytes = raw.bytes, .packet = packet } };
+            }
+            raw.deinit(self.allocator);
+        }
+    }
+
+    pub fn receiveManyConcurrent(self: *PeerEndpoint, count: usize) Error!PeerDatagramBatch {
+        var group: std.Io.Group = .init;
+        const datagrams = try self.allocator.alloc(?PeerDatagram, count);
+        errdefer self.allocator.free(datagrams);
+        @memset(datagrams, null);
+        const errors = try self.allocator.alloc(?anyerror, count);
+        errdefer self.allocator.free(errors);
+        @memset(errors, null);
+
+        for (datagrams, errors) |*datagram, *err_slot| {
+            const task = PeerReceiveTask{
+                .endpoint = self,
+                .datagram = datagram,
+                .err = err_slot,
+            };
+            group.async(self.io, PeerReceiveTask.run, .{task});
+        }
+
+        try group.await(self.io);
+        return .{ .allocator = self.allocator, .datagrams = datagrams, .errors = errors };
+    }
+
     fn receiveStunDatagram(self: *PeerEndpoint) Error!StunDatagram {
         while (true) {
             var raw = try self.receiveRaw();
@@ -197,6 +245,20 @@ pub const PeerEndpoint = struct {
         if (incoming.data.len == 0) return error.EmptyDatagram;
         const bytes = try self.allocator.dupe(u8, incoming.data);
         return .{ .from = incoming.from, .bytes = bytes };
+    }
+};
+
+const PeerReceiveTask = struct {
+    endpoint: *PeerEndpoint,
+    datagram: *?PeerDatagram,
+    err: *?anyerror,
+
+    fn run(task: PeerReceiveTask) std.Io.Cancelable!void {
+        task.datagram.* = task.endpoint.receiveAny() catch |err| {
+            task.err.* = err;
+            return;
+        };
+        task.err.* = null;
     }
 };
 
@@ -327,6 +389,51 @@ pub const DtlsDatagram = struct {
     pub fn deinit(self: *DtlsDatagram, allocator: std.mem.Allocator) void {
         allocator.free(self.bytes);
         self.* = undefined;
+    }
+};
+
+pub const PeerDatagram = union(enum) {
+    stun: StunDatagram,
+    dtls: DtlsDatagram,
+    rtp: RtpDatagram,
+
+    pub fn deinit(self: *PeerDatagram, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .stun => |*datagram| datagram.deinit(allocator),
+            .dtls => |*datagram| datagram.deinit(allocator),
+            .rtp => |*datagram| datagram.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const PeerDatagramBatch = struct {
+    allocator: std.mem.Allocator,
+    datagrams: []?PeerDatagram,
+    errors: []?anyerror,
+
+    pub fn deinit(self: *PeerDatagramBatch) void {
+        for (self.datagrams) |*datagram| {
+            if (datagram.*) |*owned| owned.deinit(self.allocator);
+        }
+        self.allocator.free(self.datagrams);
+        self.allocator.free(self.errors);
+        self.* = undefined;
+    }
+
+    pub fn firstError(self: PeerDatagramBatch) ?anyerror {
+        for (self.errors) |err| {
+            if (err) |value| return value;
+        }
+        return null;
+    }
+
+    pub fn receivedCount(self: PeerDatagramBatch) usize {
+        var count: usize = 0;
+        for (self.datagrams) |datagram| {
+            if (datagram != null) count += 1;
+        }
+        return count;
     }
 };
 
@@ -709,4 +816,72 @@ test "WebRTC peer runtime multiplexes STUN DTLS and RTP on one UDP socket" {
     try std.testing.expect(media_response.from.eql(&server_addr));
     try std.testing.expectEqual(@as(u16, 12), media_response.packet.header.sequence_number);
     try std.testing.expectEqualStrings("server-media", media_response.packet.payload);
+}
+
+test "WebRTC peer receives mixed datagrams with std.Io async demux" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+    var client = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer client.deinit();
+
+    const Shared = struct {
+        peer: *Peer,
+        batch: ?PeerDatagramBatch = null,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.batch = shared.peer.receiveManyConcurrent(2) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .peer = &server };
+    const receiver = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    try client.sendDtlsRecord(server.address(), .{
+        .content_type = .handshake,
+        .epoch = 0,
+        .sequence_number = 9,
+    }, "dtls-nine");
+    try client.sendRtpPacket(server.address(), .{
+        .payload_type = 111,
+        .sequence_number = 33,
+        .timestamp = 1440,
+        .ssrc = 0x10111213,
+    }, "rtp-thirty-three");
+
+    receiver.join();
+    if (shared.err) |err| return err;
+    var batch = shared.batch.?;
+    defer batch.deinit();
+    if (batch.firstError()) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), batch.receivedCount());
+
+    var saw_dtls = false;
+    var saw_rtp = false;
+    for (batch.datagrams) |maybe_datagram| {
+        switch (maybe_datagram.?) {
+            .dtls => |dtls| {
+                try std.testing.expectEqual(@as(u48, 9), dtls.record.sequence_number);
+                try std.testing.expectEqualStrings("dtls-nine", dtls.record.fragment);
+                saw_dtls = true;
+            },
+            .rtp => |rtp| {
+                try std.testing.expectEqual(@as(u16, 33), rtp.packet.header.sequence_number);
+                try std.testing.expectEqualStrings("rtp-thirty-three", rtp.packet.payload);
+                saw_rtp = true;
+            },
+            .stun => return error.UnexpectedStunMessage,
+        }
+    }
+    try std.testing.expect(saw_dtls);
+    try std.testing.expect(saw_rtp);
 }

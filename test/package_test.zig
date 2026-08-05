@@ -44,4 +44,5 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "RtpClient"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "Peer"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "DtlsDatagram"));
+    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveManyConcurrent"));
 }
