@@ -57,7 +57,97 @@ pub const Server = struct {
         const response = try handler(context, request.request);
         try connection.writeResponse(response);
     }
+
+    pub fn serveConcurrent(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (*HandlerContext, http1.Request) Error!ResponseOptions,
+        max_connections: usize,
+    ) AsyncServeError!ConcurrentServeResult {
+        var group: std.Io.Group = .init;
+        const results = try self.allocator.alloc(?anyerror, max_connections);
+        errdefer self.allocator.free(results);
+        @memset(results, null);
+
+        for (results, 0..) |*result, index| {
+            var connection = try self.accept();
+            errdefer connection.close();
+
+            const task = ServeTask(HandlerContext){
+                .connection = connection,
+                .context = context,
+                .handler = handler,
+                .result = result,
+            };
+            // `std.Io.Group.async` copies the task context into the selected
+            // std.Io backend.  The connection stream ownership transfers to the
+            // task; each task closes its own stream after writing a response.
+            group.async(self.io, ServeTask(HandlerContext).run, .{task});
+            _ = index;
+        }
+
+        try group.await(self.io);
+        return .{ .allocator = self.allocator, .errors = results };
+    }
 };
+
+pub const AsyncServeError = Error || std.Io.Cancelable;
+
+pub const ConcurrentServeResult = struct {
+    allocator: std.mem.Allocator,
+    errors: []?anyerror,
+
+    pub fn deinit(self: *ConcurrentServeResult) void {
+        self.allocator.free(self.errors);
+        self.* = undefined;
+    }
+
+    pub fn firstError(self: ConcurrentServeResult) ?anyerror {
+        for (self.errors) |err| {
+            if (err) |value| return value;
+        }
+        return null;
+    }
+
+    pub fn successCount(self: ConcurrentServeResult) usize {
+        var count: usize = 0;
+        for (self.errors) |err| {
+            if (err == null) count += 1;
+        }
+        return count;
+    }
+};
+
+fn ServeTask(comptime HandlerContext: type) type {
+    return struct {
+        connection: Connection,
+        context: *HandlerContext,
+        handler: *const fn (*HandlerContext, http1.Request) Error!ResponseOptions,
+        result: *?anyerror,
+
+        fn run(task: @This()) std.Io.Cancelable!void {
+            var connection = task.connection;
+            defer connection.close();
+
+            var request = connection.readRequest(.{}) catch |err| {
+                task.result.* = err;
+                return;
+            };
+            defer request.deinit(connection.allocator);
+
+            const response = task.handler(task.context, request.request) catch |err| {
+                task.result.* = err;
+                return;
+            };
+            connection.writeResponse(response) catch |err| {
+                task.result.* = err;
+                return;
+            };
+            task.result.* = null;
+        }
+    };
+}
 
 pub const Client = struct {
     io: std.Io,
@@ -380,4 +470,98 @@ test "HTTP/1 runtime client and server exchange over TCP" {
     try std.testing.expectEqual(@as(u16, 201), response.response.status);
     try std.testing.expectEqualStrings("pong", response.response.body);
     try std.testing.expectEqualStrings("text/plain", response.response.header("content-type").?);
+}
+
+test "HTTP/1 async std.Io server handles concurrent clients" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        pub fn handle(_: *@This(), request: http1.Request) Error!ResponseOptions {
+            if (request.method != .POST) return error.InvalidMethod;
+            if (std.mem.eql(u8, request.target, "/one")) {
+                return .{ .status = 200, .body = "handled-one" };
+            }
+            if (std.mem.eql(u8, request.target, "/two")) {
+                return .{ .status = 200, .body = "handled-two" };
+            }
+            return .{ .status = 404, .reason = "Not Found", .body = "missing" };
+        }
+    };
+
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        result: ?ConcurrentServeResult = null,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.result = shared.server.serveConcurrent(Context, &shared.context, Context.handle, 2) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const ClientTask = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        target: []const u8,
+        expected: []const u8,
+        err: ?anyerror = null,
+
+        fn run(task: *@This()) void {
+            runFallible(task) catch |err| {
+                task.err = err;
+            };
+        }
+
+        fn runFallible(task: *@This()) !void {
+            var client = try Client.connect(task.allocator, task.io, task.address, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+            defer client.close();
+            var response = try client.request(.{
+                .method = .POST,
+                .target = task.target,
+                .headers = &.{.{ .name = "Host", .value = "127.0.0.1" }},
+                .body = "hello",
+            });
+            defer response.deinit(task.allocator);
+            try std.testing.expectEqual(@as(u16, 200), response.response.status);
+            try std.testing.expectEqualStrings(task.expected, response.response.body);
+        }
+    };
+
+    var clients = [_]ClientTask{
+        .{ .allocator = allocator, .io = io, .address = server.address(), .target = "/one", .expected = "handled-one" },
+        .{ .allocator = allocator, .io = io, .address = server.address(), .target = "/two", .expected = "handled-two" },
+    };
+    const client_one = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[0]});
+    const client_two = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
+
+    client_one.join();
+    client_two.join();
+    server_thread.join();
+    defer if (shared.result) |*result| result.deinit();
+
+    if (clients[0].err) |err| return err;
+    if (clients[1].err) |err| return err;
+    if (shared.err) |err| return err;
+    const result = shared.result.?;
+    if (result.firstError()) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), result.successCount());
 }
