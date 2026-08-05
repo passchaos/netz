@@ -32,7 +32,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   a minimal 1-RTT recovery queue for PTO retransmission of unacknowledged
   ack-eliciting frame payloads,
   endpoint-level connection-ID routing primitives for stable multi-connection
-  demultiplexing,
+  demultiplexing wired into raw UDP receive routing,
   plus a blocking UDP endpoint runtime for frame datagrams with a
   `std.Io.async` concurrent receive helper
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control

@@ -7,7 +7,8 @@ pub const Error = quic.Error || error{
     EmptyDatagram,
     DatagramTooLarge,
     TrailingBytes,
-} || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.Cancelable;
+    NoConnectionRoute,
+} || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.Cancelable;
 
 pub const Limits = struct {
     max_datagram_size: usize = 65_535,
@@ -142,6 +143,13 @@ pub const Endpoint = struct {
         return .{ .from = incoming.from, .bytes = bytes };
     }
 
+    pub fn receiveRoutedBytes(self: *Endpoint, router: quic.connection_router.Router) Error!RoutedBytes {
+        var raw = try self.receiveBytes();
+        errdefer raw.deinit(self.allocator);
+        const routed = (try router.routeDatagram(raw.bytes)) orelse return error.NoConnectionRoute;
+        return .{ .datagram = raw, .route = routed.route, .destination_connection_id = routed.destination_connection_id };
+    }
+
     pub fn receiveManyConcurrent(self: *Endpoint, count: usize) Error!OwnedDatagramBatch {
         var group: std.Io.Group = .init;
         const datagrams = try self.allocator.alloc(?OwnedDatagram, count);
@@ -185,6 +193,17 @@ pub const OwnedBytes = struct {
 
     pub fn deinit(self: *OwnedBytes, allocator: std.mem.Allocator) void {
         allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+pub const RoutedBytes = struct {
+    datagram: OwnedBytes,
+    route: quic.connection_router.Route,
+    destination_connection_id: []const u8,
+
+    pub fn deinit(self: *RoutedBytes, allocator: std.mem.Allocator) void {
+        self.datagram.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -338,4 +357,71 @@ test "QUIC UDP endpoint receives many datagrams with std.Io async" {
     }
     try std.testing.expect(saw_a);
     try std.testing.expect(saw_b);
+}
+
+test "QUIC UDP endpoint routes protected short datagrams by DCID" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer server.deinit();
+
+    var client_a = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer client_a.deinit();
+    var client_b = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer client_b.deinit();
+
+    var router = quic.connection_router.Router.init(allocator);
+    defer router.deinit();
+    try router.register("conn-a", .{ .connection_index = 10, .sequence_number = 1 });
+    try router.register("conn-b", .{ .connection_index = 11, .sequence_number = 2 });
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x5a} ** quic.protection.secret_len);
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try (quic.Frame{ .ping = {} }).write(&payload, allocator);
+
+    const packet_a = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "conn-a",
+        .packet_number = 0,
+        .payload = payload.items,
+    });
+    defer allocator.free(packet_a);
+    const packet_b = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "conn-b",
+        .packet_number = 0,
+        .payload = payload.items,
+    });
+    defer allocator.free(packet_b);
+
+    try client_a.endpoint.sendBytes(server.address(), packet_a);
+    try client_b.endpoint.sendBytes(server.address(), packet_b);
+
+    var first = try server.endpoint.receiveRoutedBytes(router);
+    defer first.deinit(allocator);
+    var second = try server.endpoint.receiveRoutedBytes(router);
+    defer second.deinit(allocator);
+
+    const first_idx = first.route.connection_index;
+    const second_idx = second.route.connection_index;
+    try std.testing.expect((first_idx == 10 and second_idx == 11) or (first_idx == 11 and second_idx == 10));
+    if (first_idx == 10) {
+        try std.testing.expectEqualStrings("conn-a", first.destination_connection_id);
+        try std.testing.expectEqualStrings("conn-b", second.destination_connection_id);
+    } else {
+        try std.testing.expectEqualStrings("conn-b", first.destination_connection_id);
+        try std.testing.expectEqualStrings("conn-a", second.destination_connection_id);
+    }
 }
