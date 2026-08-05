@@ -273,9 +273,12 @@ fn parseHeaderLines(
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MalformedHeader;
         if (colon == 0) return error.MalformedHeader;
         if (headers.items.len >= options.max_headers) return error.TooManyHeaders;
+        try validateHeaderName(line[0..colon]);
+        const value = wire.trimOws(line[colon + 1 ..]);
+        try validateHeaderValue(value);
         try headers.append(allocator, .{
             .name = line[0..colon],
-            .value = wire.trimOws(line[colon + 1 ..]),
+            .value = value,
         });
     }
 
@@ -500,6 +503,7 @@ pub fn writeResponseChecked(
 
 fn writeHeaders(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const Header) !void {
     for (headers) |header| {
+        try validateHeader(header);
         try list.appendSlice(allocator, header.name);
         try list.appendSlice(allocator, ": ");
         try list.appendSlice(allocator, header.value);
@@ -509,6 +513,7 @@ fn writeHeaders(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers:
 
 fn writeHeadersChecked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const Header) Error!void {
     for (headers) |header| {
+        try validateHeader(header);
         try list.appendSlice(allocator, header.name);
         try list.appendSlice(allocator, ": ");
         try list.appendSlice(allocator, header.value);
@@ -526,6 +531,31 @@ fn appendDecimalChecked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     var tmp: [32]u8 = undefined;
     const rendered = std.fmt.bufPrint(&tmp, "{}", .{value}) catch return error.RenderBufferTooSmall;
     try list.appendSlice(allocator, rendered);
+}
+
+pub fn validateHeader(header: Header) Error!void {
+    try validateHeaderName(header.name);
+    try validateHeaderValue(header.value);
+}
+
+pub fn validateHeaderName(name: []const u8) Error!void {
+    if (name.len == 0) return error.MalformedHeader;
+    for (name) |byte| {
+        if (!validHeaderNameByte(byte)) return error.MalformedHeader;
+    }
+}
+
+pub fn validateHeaderValue(value: []const u8) Error!void {
+    for (value) |byte| {
+        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.MalformedHeader;
+    }
+}
+
+fn validHeaderNameByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or switch (byte) {
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
+    };
 }
 
 pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunks: []const []const u8, trailers: []const Header) !void {
@@ -636,6 +666,21 @@ test "HTTP/1 request parse and serialize" {
     defer out.deinit(allocator);
     try writeRequest(&out, allocator, req.method, req.target, req.version, req.headers, req.body);
     try std.testing.expectEqualStrings(raw, out.items);
+}
+
+test "HTTP/1 validates header field syntax" {
+    const allocator = std.testing.allocator;
+    const bad_name = "GET / HTTP/1.1\r\nBad Header: value\r\n\r\n";
+    try std.testing.expectError(error.MalformedHeader, parseRequest(allocator, bad_name, .{}));
+
+    const bad_value = [_]Header{.{ .name = "x-test", .value = "ok\r\nInjected: yes" }};
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try std.testing.expectError(error.MalformedHeader, writeResponseChecked(&encoded, allocator, .http_1_1, 200, "OK", &bad_value, ""));
+
+    try validateHeader(.{ .name = "X-Custom_123", .value = "text\tvalue" });
+    try std.testing.expectError(error.MalformedHeader, validateHeader(.{ .name = "bad:name", .value = "value" }));
+    try std.testing.expectError(error.MalformedHeader, validateHeader(.{ .name = "x-test", .value = "bad\x7fvalue" }));
 }
 
 test "HTTP/1 chunked codec" {

@@ -503,6 +503,7 @@ fn appendDecimalForRuntime(list: *std.ArrayList(u8), allocator: std.mem.Allocato
 
 fn writeHeaderLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const http1.Header) Error!void {
     for (headers) |header| {
+        try http1.validateHeader(header);
         try list.appendSlice(allocator, header.name);
         try list.appendSlice(allocator, ": ");
         try list.appendSlice(allocator, header.value);
