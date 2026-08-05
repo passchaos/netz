@@ -9,6 +9,8 @@ pub const Error = http2.Error || error{
     MissingPseudoHeader,
     InvalidStatus,
     MessageTooLarge,
+    FlowControlBlocked,
+    FlowControlViolation,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
@@ -16,6 +18,7 @@ const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
 const flag_end_stream: u8 = 0x1;
 const flag_ack: u8 = 0x1;
 const flag_end_headers: u8 = 0x4;
+const default_flow_window: i64 = 65_535;
 
 pub const Limits = struct {
     max_frame_payload: usize = 16 * 1024 * 1024,
@@ -196,6 +199,26 @@ pub const Role = enum {
     server,
 };
 
+pub const FlowWindow = struct {
+    value: i64 = default_flow_window,
+
+    pub fn reserve(self: *FlowWindow, amount: usize) Error!void {
+        const delta = std.math.cast(i64, amount) orelse return error.MessageTooLarge;
+        if (delta > self.value) return error.FlowControlBlocked;
+        self.value -= delta;
+    }
+
+    pub fn receive(self: *FlowWindow, amount: usize) Error!void {
+        const delta = std.math.cast(i64, amount) orelse return error.MessageTooLarge;
+        if (delta > self.value) return error.FlowControlViolation;
+        self.value -= delta;
+    }
+
+    pub fn update(self: *FlowWindow, increment: u31) void {
+        self.value = std.math.add(i64, self.value, increment) catch std.math.maxInt(i64);
+    }
+};
+
 pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -203,6 +226,8 @@ pub const Connection = struct {
     role: Role,
     limits: Limits = .{},
     next_client_stream_id: u31 = 1,
+    send_connection_window: FlowWindow = .{},
+    recv_connection_window: FlowWindow = .{},
 
     pub fn close(self: *Connection) void {
         self.stream.close(self.io);
@@ -254,6 +279,7 @@ pub const Connection = struct {
                             if (data_frame.frame.header.frame_type != .data) return error.UnexpectedFrame;
                             const data = try http2.DataPayload.parse(data_frame.frame);
                             if (body.items.len + data.data.len > self.limits.max_body_bytes) return error.MessageTooLarge;
+                            try self.recv_connection_window.receive(data.data.len);
                             try body.appendSlice(self.allocator, data.data);
                             if ((data_frame.frame.header.flags & flag_end_stream) != 0) break;
                         }
@@ -336,6 +362,7 @@ pub const Connection = struct {
     }
 
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
+        if (stream_id == 0) self.recv_connection_window.update(increment);
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try http2.WindowUpdatePayload.write(&encoded, self.allocator, stream_id, increment);
@@ -350,7 +377,9 @@ pub const Connection = struct {
                 frame.deinit(self.allocator);
                 continue;
             }
-            return .{ .frame = frame, .window_update = try http2.WindowUpdatePayload.parse(frame.frame) };
+            const update = try http2.WindowUpdatePayload.parse(frame.frame);
+            if (update.stream_id == 0) self.send_connection_window.update(update.increment);
+            return .{ .frame = frame, .window_update = update };
         }
     }
 
@@ -369,6 +398,11 @@ pub const Connection = struct {
                 }
                 continue;
             }
+            if (frame.frame.header.frame_type == .window_update) {
+                const update = try http2.WindowUpdatePayload.parse(frame.frame);
+                if (update.stream_id == 0) self.send_connection_window.update(update.increment);
+                continue;
+            }
             if (frame.frame.header.stream_id != stream_id) continue;
             switch (frame.frame.header.frame_type) {
                 .headers => {
@@ -379,6 +413,7 @@ pub const Connection = struct {
                 .data => {
                     const data = try http2.DataPayload.parse(frame.frame);
                     if (body.items.len + data.data.len > self.limits.max_body_bytes) return error.MessageTooLarge;
+                    try self.recv_connection_window.receive(data.data.len);
                     try body.appendSlice(self.allocator, data.data);
                     if ((frame.frame.header.flags & flag_end_stream) != 0) break;
                 },
@@ -412,6 +447,7 @@ pub const Connection = struct {
     }
 
     fn writeData(self: *Connection, stream_id: u31, data: []const u8, end_stream: bool) Error!void {
+        try self.send_connection_window.reserve(data.len);
         try writeFrame(
             self.allocator,
             self.io,
@@ -674,6 +710,7 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     var window = try client.readWindowUpdate();
     defer window.deinit(allocator);
     try std.testing.expectEqual(@as(u31, 2048), window.window_update.increment);
+    try std.testing.expectEqual(@as(i64, default_flow_window + 2048 - "ping".len), client.send_connection_window.value);
     var goaway = try client.readGoAway();
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
@@ -776,4 +813,19 @@ test "HTTP/2 async std.Io server handles concurrent h2c clients" {
     const result = shared.result.?;
     if (result.firstError()) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), result.successCount());
+}
+
+test "HTTP/2 flow window blocks and updates" {
+    var window = FlowWindow{ .value = 4 };
+    try window.reserve(4);
+    try std.testing.expectEqual(@as(i64, 0), window.value);
+    try std.testing.expectError(error.FlowControlBlocked, window.reserve(1));
+    window.update(8);
+    try window.reserve(3);
+    try std.testing.expectEqual(@as(i64, 5), window.value);
+
+    var recv = FlowWindow{ .value = 2 };
+    try std.testing.expectError(error.FlowControlViolation, recv.receive(3));
+    try recv.receive(2);
+    try std.testing.expectEqual(@as(i64, 0), recv.value);
 }
