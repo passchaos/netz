@@ -106,30 +106,44 @@ pub const Endpoint = struct {
     }
 
     pub fn receive(self: *Endpoint) Error!OwnedDatagram {
+        var raw = try self.receiveBytes();
+        errdefer raw.deinit(self.allocator);
+        if (raw.bytes.len == 0) return error.EmptyDatagram;
+
+        var frames: std.ArrayList(quic.Frame) = .empty;
+        errdefer frames.deinit(self.allocator);
+
+        var pos: usize = 0;
+        while (pos < raw.bytes.len) {
+            if (frames.items.len >= self.limits.max_frames_per_datagram) return error.DatagramTooLarge;
+            const parsed = try quic.parseFrame(raw.bytes[pos..]);
+            if (parsed.consumed == 0) return error.TrailingBytes;
+            try frames.append(self.allocator, parsed.frame);
+            pos += parsed.consumed;
+        }
+
+        const owned_frames = try frames.toOwnedSlice(self.allocator);
+        return .{ .from = raw.from, .bytes = raw.bytes, .frames = owned_frames };
+    }
+
+    pub fn receiveBytes(self: *Endpoint) Error!OwnedBytes {
         const buffer = try self.allocator.alloc(u8, self.limits.max_datagram_size);
         defer self.allocator.free(buffer);
         const incoming = try self.socket.receive(self.io, buffer);
         if (incoming.data.len == 0) return error.EmptyDatagram;
 
         const bytes = try self.allocator.dupe(u8, incoming.data);
-        errdefer self.allocator.free(bytes);
-        var frames: std.ArrayList(quic.Frame) = .empty;
-        errdefer frames.deinit(self.allocator);
+        return .{ .from = incoming.from, .bytes = bytes };
+    }
+};
 
-        var pos: usize = 0;
-        while (pos < bytes.len) {
-            if (frames.items.len >= self.limits.max_frames_per_datagram) return error.DatagramTooLarge;
-            const parsed = try quic.parseFrame(bytes[pos..]);
-            if (parsed.consumed == 0) return error.TrailingBytes;
-            try frames.append(self.allocator, parsed.frame);
-            pos += parsed.consumed;
-        }
+pub const OwnedBytes = struct {
+    from: net.IpAddress,
+    bytes: []u8,
 
-        return .{
-            .from = incoming.from,
-            .bytes = bytes,
-            .frames = try frames.toOwnedSlice(self.allocator),
-        };
+    pub fn deinit(self: *OwnedBytes, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+        self.* = undefined;
     }
 };
 

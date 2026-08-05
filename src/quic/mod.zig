@@ -5,6 +5,7 @@ pub const varint = @import("varint.zig");
 pub const runtime = @import("runtime.zig");
 pub const protection = @import("protection.zig");
 pub const crypto_stream = @import("crypto_stream.zig");
+pub const initial_exchange = @import("initial_exchange.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
