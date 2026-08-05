@@ -6,6 +6,7 @@ const net = std.Io.net;
 pub const Error = http2.Error || error{
     ConnectionClosed,
     UnexpectedFrame,
+    InvalidFrame,
     MissingPseudoHeader,
     InvalidStatus,
     InvalidContentLength,
@@ -783,7 +784,39 @@ fn readFrame(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limit
     errdefer allocator.free(bytes);
     @memcpy(bytes[0..header_buf.len], &header_buf);
     try readExact(io, stream, bytes[header_buf.len..]);
-    return .{ .bytes = bytes, .frame = try http2.Frame.parse(bytes) };
+    const frame = try http2.Frame.parse(bytes);
+    try validateFrameEnvelope(frame);
+    return .{ .bytes = bytes, .frame = frame };
+}
+
+fn validateFrameEnvelope(frame: http2.Frame) Error!void {
+    const stream_id = frame.header.stream_id;
+    switch (frame.header.frame_type) {
+        .data,
+        .headers,
+        .priority,
+        .rst_stream,
+        .continuation,
+        => if (stream_id == 0) return error.InvalidFrame,
+
+        .settings => {
+            if (stream_id != 0) return error.InvalidFrame;
+            if ((frame.header.flags & flag_ack) != 0 and frame.payload.len != 0) return error.InvalidFrame;
+        },
+        .ping => {
+            if (stream_id != 0 or frame.payload.len != 8) return error.InvalidFrame;
+        },
+        .goaway => {
+            if (stream_id != 0 or frame.payload.len < 8) return error.InvalidFrame;
+        },
+        .window_update => {
+            if (frame.payload.len != 4) return error.InvalidFrame;
+            const increment = std.mem.readInt(u32, frame.payload[0..4], .big) & 0x7fff_ffff;
+            if (increment == 0) return error.InvalidFrame;
+        },
+        .push_promise => if (stream_id == 0) return error.InvalidFrame,
+        _ => {},
+    }
 }
 
 fn writeFrame(
@@ -1999,4 +2032,44 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
         .{ .id = .max_frame_size, .value = 32_768 },
     });
     try std.testing.expectEqual(@as(usize, 32_768), connection.peer_max_frame_size);
+}
+
+test "HTTP/2 runtime validates frame envelope rules" {
+    try validateFrameEnvelope(.{
+        .header = .{ .length = 0, .frame_type = .data, .flags = flag_end_stream, .stream_id = 1 },
+        .payload = &.{},
+    });
+    try validateFrameEnvelope(.{
+        .header = .{ .length = 0, .frame_type = .settings, .flags = flag_ack, .stream_id = 0 },
+        .payload = &.{},
+    });
+
+    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
+        .header = .{ .length = 0, .frame_type = .data, .flags = 0, .stream_id = 0 },
+        .payload = &.{},
+    }));
+    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
+        .header = .{ .length = 1, .frame_type = .settings, .flags = flag_ack, .stream_id = 0 },
+        .payload = &.{0},
+    }));
+    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
+        .header = .{ .length = 0, .frame_type = .settings, .flags = 0, .stream_id = 1 },
+        .payload = &.{},
+    }));
+    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
+        .header = .{ .length = 7, .frame_type = .ping, .flags = 0, .stream_id = 0 },
+        .payload = &.{ 0, 1, 2, 3, 4, 5, 6 },
+    }));
+    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
+        .header = .{ .length = 8, .frame_type = .ping, .flags = 0, .stream_id = 1 },
+        .payload = &.{ 0, 1, 2, 3, 4, 5, 6, 7 },
+    }));
+    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
+        .header = .{ .length = 4, .frame_type = .window_update, .flags = 0, .stream_id = 1 },
+        .payload = &.{ 0, 0, 0, 0 },
+    }));
+    try std.testing.expectError(error.InvalidFrame, validateFrameEnvelope(.{
+        .header = .{ .length = 8, .frame_type = .goaway, .flags = 0, .stream_id = 1 },
+        .payload = &.{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    }));
 }
