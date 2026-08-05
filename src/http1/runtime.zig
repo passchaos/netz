@@ -785,11 +785,16 @@ fn requestHeadHasBody(head: []const u8) bool {
 fn chunkedWireLength(body: []const u8, max_body_bytes: usize) Error!usize {
     var pos: usize = 0;
     var decoded_total: usize = 0;
+    var extension_bytes: usize = 0;
     while (true) {
         const line_end = std.mem.indexOf(u8, body[pos..], "\r\n") orelse return error.BufferTooShort;
         const line = body[pos .. pos + line_end];
         pos += line_end + 2;
         const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
+        if (semi != line.len) {
+            extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
+            if (extension_bytes > http1.max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
+        }
         const size = std.fmt.parseInt(usize, wire.trimOws(line[0..semi]), 16) catch return error.InvalidChunk;
         decoded_total = std.math.add(usize, decoded_total, size) catch return error.BodyTooLarge;
         if (decoded_total > max_body_bytes) return error.BodyTooLarge;

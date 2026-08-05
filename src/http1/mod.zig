@@ -18,6 +18,7 @@ pub const Error = wire.Error || error{
     InvalidTransferEncoding,
     InvalidTrailer,
     ChunkSizeOverflow,
+    ChunkExtensionTooLarge,
     ContentLengthOverflow,
     RenderBufferTooSmall,
 } || std.mem.Allocator.Error;
@@ -85,6 +86,8 @@ pub const ParseOptions = struct {
 pub const ResponseContext = struct {
     request_method: ?Method = null,
 };
+
+pub const max_chunk_extension_bytes: usize = 16 * 1024;
 
 pub const BodyFraming = enum {
     /// No message body framing was present in the parsed bytes.
@@ -586,6 +589,7 @@ pub const DecodedChunked = struct {
 
 pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!DecodedChunked {
     var pos: usize = 0;
+    var extension_bytes: usize = 0;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
@@ -594,6 +598,10 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
         const line = bytes[pos .. pos + line_end_rel];
         pos += line_end_rel + 2;
         const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
+        if (semi != line.len) {
+            extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
+            if (extension_bytes > max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
+        }
         const size = std.fmt.parseInt(usize, wire.trimOws(line[0..semi]), 16) catch |err| switch (err) {
             error.InvalidCharacter => return error.InvalidChunk,
             error.Overflow => return error.ChunkSizeOverflow,
@@ -713,6 +721,16 @@ test "HTTP/1 chunked trailers reject forbidden fields" {
 
     const raw = "5\r\nhello\r\n0\r\nContent-Length: 5\r\n\r\n";
     try std.testing.expectError(error.InvalidTrailer, decodeChunked(allocator, raw, .{}));
+}
+
+test "HTTP/1 chunked extensions are bounded" {
+    const allocator = std.testing.allocator;
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(allocator);
+    try raw.appendSlice(allocator, "1;");
+    try raw.appendNTimes(allocator, 'a', max_chunk_extension_bytes + 1);
+    try raw.appendSlice(allocator, "\r\nx\r\n0\r\n\r\n");
+    try std.testing.expectError(error.ChunkExtensionTooLarge, decodeChunked(allocator, raw.items, .{}));
 }
 
 test "HTTP/1 parser decodes chunked transfer bodies" {
