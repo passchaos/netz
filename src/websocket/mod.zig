@@ -13,6 +13,11 @@ pub const Error = error{
     MissingHeader,
     InvalidHandshake,
     PayloadTooLarge,
+    UnmaskedClientFrame,
+    MaskedServerFrame,
+    UnexpectedRsv,
+    NonMinimalLength,
+    InvalidCloseCode,
 } || std.mem.Allocator.Error;
 
 pub const Opcode = enum(u4) {
@@ -100,6 +105,18 @@ pub const FrameHeader = struct {
     }
 };
 
+pub const ParseFrameOptions = struct {
+    /// RFC 6455 requires client-to-server frames to be masked and server-to-client
+    /// frames to be unmasked.  The default keeps parseFrame's original tolerant
+    /// codec behavior for fixtures and intermediaries that inspect either side.
+    expect_mask: enum { any, masked, unmasked } = .any,
+    /// RSV bits are only legal when an extension negotiated their meaning.
+    allow_rsv1: bool = false,
+    allow_rsv2: bool = false,
+    allow_rsv3: bool = false,
+    validate_utf8: bool = true,
+};
+
 pub const Frame = struct {
     header: FrameHeader,
     payload: []u8,
@@ -112,13 +129,83 @@ pub const Frame = struct {
 };
 
 pub fn parseFrame(allocator: std.mem.Allocator, bytes: []const u8) Error!Frame {
+    return parseFrameOptions(allocator, bytes, .{});
+}
+
+pub fn parseFrameOptions(allocator: std.mem.Allocator, bytes: []const u8, options: ParseFrameOptions) Error!Frame {
     const header = try FrameHeader.parse(bytes);
+    try validateFrameHeader(header, options);
     const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
     if (bytes.len < header.header_len + payload_len) return error.BufferTooShort;
     const payload = try allocator.dupe(u8, bytes[header.header_len .. header.header_len + payload_len]);
     errdefer allocator.free(payload);
     if (header.mask_key) |mask| applyMask(payload, mask, 0);
+    try validatePayload(header, payload, options);
     return .{ .header = header, .payload = payload, .consumed = header.header_len + payload_len };
+}
+
+fn validateFrameHeader(header: FrameHeader, options: ParseFrameOptions) Error!void {
+    if ((header.rsv1 and !options.allow_rsv1) or
+        (header.rsv2 and !options.allow_rsv2) or
+        (header.rsv3 and !options.allow_rsv3)) return error.UnexpectedRsv;
+
+    switch (options.expect_mask) {
+        .any => {},
+        .masked => if (!header.masked) return error.UnmaskedClientFrame,
+        .unmasked => if (header.masked) return error.MaskedServerFrame,
+    }
+
+    // RFC 6455 requires the shortest available length encoding.  Enforcing this
+    // catches evasive encodings before callers allocate a payload buffer.
+    if (header.payload_len <= 125 and header.header_len >= 4 and header.mask_key == null) return error.NonMinimalLength;
+    if (header.payload_len <= 125 and header.header_len >= 8 and header.mask_key != null) return error.NonMinimalLength;
+    if (header.payload_len >= 126 and header.payload_len <= std.math.maxInt(u16)) {
+        const extended_len_bytes: usize = if (header.mask_key == null) header.header_len - 2 else header.header_len - 6;
+        if (extended_len_bytes == 8) return error.NonMinimalLength;
+    }
+}
+
+fn validatePayload(header: FrameHeader, payload: []const u8, options: ParseFrameOptions) Error!void {
+    switch (header.opcode) {
+        .text => if (options.validate_utf8 and header.fin and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8,
+        .close => try validateClosePayload(payload),
+        .continuation, .binary, .ping, .pong => {},
+        _ => {},
+    }
+}
+
+pub fn validateClosePayload(payload: []const u8) Error!void {
+    if (payload.len == 0) return;
+    if (payload.len == 1) return error.InvalidControlFrame;
+    const code: CloseCode = @enumFromInt(std.mem.readInt(u16, payload[0..2], .big));
+    if (!validCloseCode(code)) return error.InvalidCloseCode;
+    if (!std.unicode.utf8ValidateSlice(payload[2..])) return error.InvalidUtf8;
+}
+
+pub fn validCloseCode(code: CloseCode) bool {
+    return switch (code) {
+        .normal_closure,
+        .going_away,
+        .protocol_error,
+        .unsupported_data,
+        .invalid_payload_data,
+        .policy_violation,
+        .message_too_big,
+        .mandatory_extension,
+        .internal_server_error,
+        .service_restart,
+        .try_again_later,
+        .bad_gateway,
+        => true,
+        .no_status_received,
+        .abnormal_closure,
+        .tls_handshake,
+        => false,
+        _ => {
+            const raw = @intFromEnum(code);
+            return (raw >= 3000 and raw <= 4999);
+        },
+    };
 }
 
 pub fn writeFrame(
@@ -176,7 +263,14 @@ pub fn validateClientHandshake(req: http1.Request) Error!void {
     if (!wire.containsToken(connection, "upgrade")) return error.InvalidHandshake;
     const version = req.header("sec-websocket-version") orelse return error.MissingHeader;
     if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
-    _ = req.header("sec-websocket-key") orelse return error.MissingHeader;
+    const key = req.header("sec-websocket-key") orelse return error.MissingHeader;
+    try validateClientKey(key);
+}
+
+pub fn validateClientKey(key: []const u8) Error!void {
+    if (key.len != 24) return error.InvalidHandshake;
+    var nonce: [16]u8 = undefined;
+    std.base64.standard.Decoder.decode(&nonce, key) catch return error.InvalidHandshake;
 }
 
 pub fn writeServerHandshake(
@@ -221,6 +315,7 @@ pub const MessageAssembler = struct {
     pub fn feed(self: *MessageAssembler, frame: Frame) !?Message {
         if (frame.header.opcode.isControl()) return null;
         if (frame.header.opcode != .continuation) {
+            if (self.opcode != null) return error.InvalidFrame;
             self.opcode = frame.header.opcode;
             self.buffer.clearRetainingCapacity();
         } else if (self.opcode == null) {
@@ -246,7 +341,7 @@ test "WebSocket frame masked roundtrip" {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try writeFrame(&encoded, allocator, .text, "Hello", .{ .mask_key = .{ 1, 2, 3, 4 } });
-    var frame = try parseFrame(allocator, encoded.items);
+    var frame = try parseFrameOptions(allocator, encoded.items, .{ .expect_mask = .masked });
     defer frame.deinit(allocator);
     try std.testing.expectEqual(Opcode.text, frame.header.opcode);
     try std.testing.expectEqualStrings("Hello", frame.payload);
@@ -258,4 +353,41 @@ test "WebSocket handshake validation" {
     var req = try http1.parseRequest(allocator, raw, .{});
     defer req.deinit(allocator);
     try validateClientHandshake(req);
+}
+
+test "WebSocket strict frame validation" {
+    const allocator = std.testing.allocator;
+    const unmasked_text = "\x81\x02hi";
+    try std.testing.expectError(error.UnmaskedClientFrame, parseFrameOptions(allocator, unmasked_text, .{ .expect_mask = .masked }));
+
+    const masked_server_ping = "\x89\x80\x01\x02\x03\x04";
+    try std.testing.expectError(error.MaskedServerFrame, parseFrameOptions(allocator, masked_server_ping, .{ .expect_mask = .unmasked }));
+
+    const non_minimal = "\x81\x7e\x00\x02hi";
+    try std.testing.expectError(error.NonMinimalLength, parseFrameOptions(allocator, non_minimal, .{}));
+
+    const rsv = "\xc1\x02hi";
+    try std.testing.expectError(error.UnexpectedRsv, parseFrameOptions(allocator, rsv, .{}));
+
+    const bad_utf8 = "\x81\x02\xc0\x80";
+    try std.testing.expectError(error.InvalidUtf8, parseFrameOptions(allocator, bad_utf8, .{}));
+}
+
+test "WebSocket close payload validation" {
+    var good_payload = [_]u8{ 0x03, 0xe8, 'b', 'y', 'e' };
+    try validateClosePayload(&good_payload);
+
+    var bad_reserved = [_]u8{ 0x03, 0xed };
+    try std.testing.expectError(error.InvalidCloseCode, validateClosePayload(&bad_reserved));
+
+    var bad_utf8 = [_]u8{ 0x03, 0xe8, 0xc0, 0x80 };
+    try std.testing.expectError(error.InvalidUtf8, validateClosePayload(&bad_utf8));
+}
+
+test "WebSocket handshake rejects malformed nonce" {
+    const allocator = std.testing.allocator;
+    const raw = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: not-base64\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var req = try http1.parseRequest(allocator, raw, .{});
+    defer req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(req));
 }
