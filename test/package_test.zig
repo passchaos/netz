@@ -52,6 +52,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "Connection"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closeTransport"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "retransmitPacketThresholdLoss"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "resetStream"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendStopSending"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "streamResetReceived"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "streamStopped"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamResetInfo"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketTracker"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "default_packet_threshold"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "largestAcknowledged"));

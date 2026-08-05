@@ -6,6 +6,8 @@ const net = std.Io.net;
 pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.congestion.Error || quic.path_validation.Error || quic.connection_id.Error || quic.Error || error{
     MissingFrame,
     ConnectionClosed,
+    FinalSizeMismatch,
+    StreamStopped,
 };
 
 pub const SendOptions = struct {
@@ -57,12 +59,32 @@ pub const ConnectionConfig = struct {
 const StreamFlowEntry = struct {
     stream_id: u64,
     flow: quic.flow_control.SendFlow,
+    highest_sent_end: u64 = 0,
+    stopped: ?StopSendingInfo = null,
+    reset_sent: ?StreamResetInfo = null,
 };
 
 const StreamRecvFlowEntry = struct {
     stream_id: u64,
     flow: quic.flow_control.RecvFlow,
     highest_received_end: u64 = 0,
+    final_size: ?u64 = null,
+    reset: ?StreamResetInfo = null,
+    stop_sending_sent: ?StopSendingInfo = null,
+};
+
+pub const StreamResetInfo = struct {
+    application_error_code: u64,
+    final_size: u64,
+};
+
+pub const StopSendingInfo = struct {
+    application_error_code: u64,
+};
+
+const ReservedStreamCredit = struct {
+    stream_id: u64,
+    bytes: u64,
 };
 
 pub const CloseInfo = struct {
@@ -128,21 +150,50 @@ pub const Connection = struct {
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
         if (self.close_info != null) return error.ConnectionClosed;
         const stream_bytes = countStreamBytes(frames);
+        for (frames) |frame| {
+            if (frame != .stream) continue;
+            const entry = try self.sendStreamEntry(frame.stream.stream_id);
+            if (entry.stopped != null or entry.reset_sent != null) return error.StreamStopped;
+        }
+
+        var reserved_connection: u64 = 0;
+        var reserved_streams: std.ArrayList(ReservedStreamCredit) = .empty;
+        defer reserved_streams.deinit(self.endpoint.allocator);
+        errdefer {
+            for (reserved_streams.items) |reserved| {
+                if (self.findSendStreamEntry(reserved.stream_id)) |entry| {
+                    entry.flow.used -|= reserved.bytes;
+                }
+            }
+            self.send_flow.used -|= reserved_connection;
+        }
+
         if (stream_bytes > 0) {
             self.send_flow.reserve(stream_bytes) catch |err| {
                 try self.sendDataBlocked();
                 return err;
             };
+            reserved_connection = stream_bytes;
         }
         for (frames) |frame| {
             if (frame != .stream or frame.stream.data.len == 0) continue;
-            const flow = try self.sendStreamFlow(frame.stream.stream_id);
-            flow.reserve(frame.stream.data.len) catch |err| {
-                try self.sendStreamDataBlocked(frame.stream.stream_id, flow.limit);
+            const entry = (self.findSendStreamEntry(frame.stream.stream_id) orelse unreachable);
+            // Record a zero-sized reservation before mutating stream flow so an
+            // allocator failure cannot leave `entry.flow.used` inflated.  Once
+            // reserve succeeds, update the rollback byte count in place.
+            try reserved_streams.append(self.endpoint.allocator, .{
+                .stream_id = frame.stream.stream_id,
+                .bytes = 0,
+            });
+            const reserved_index = reserved_streams.items.len - 1;
+            entry.flow.reserve(frame.stream.data.len) catch |err| {
+                try self.sendStreamDataBlocked(frame.stream.stream_id, entry.flow.limit);
                 return err;
             };
+            reserved_streams.items[reserved_index].bytes = frame.stream.data.len;
         }
         try self.sendTrackedFrames(frames);
+        self.noteSentStreams(frames);
     }
 
     fn sendDataBlocked(self: *Connection) Error!void {
@@ -236,6 +287,40 @@ pub const Connection = struct {
         defer self.endpoint.allocator.free(ack.ranges);
         const frames = [_]quic.Frame{.{ .ack = ack }};
         try self.send(&frames);
+    }
+
+    pub fn resetStream(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
+        const entry = try self.sendStreamEntry(stream_id);
+        try self.sendResetStream(stream_id, application_error_code, entry.highest_sent_end);
+    }
+
+    pub fn sendStopSending(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
+        var recv_stream = try self.recvStreamFlow(stream_id);
+        const info: StopSendingInfo = .{ .application_error_code = application_error_code };
+        if (recv_stream.stop_sending_sent) |existing| {
+            if (existing.application_error_code == application_error_code) return;
+        }
+
+        const frames = [_]quic.Frame{.{ .stop_sending = .{
+            .stream_id = stream_id,
+            .application_error_code = application_error_code,
+        } }};
+        try self.sendTrackedFrames(&frames);
+        recv_stream.stop_sending_sent = info;
+    }
+
+    pub fn streamResetReceived(self: Connection, stream_id: u64) ?StreamResetInfo {
+        for (self.stream_recv_flows.items) |entry| {
+            if (entry.stream_id == stream_id) return entry.reset;
+        }
+        return null;
+    }
+
+    pub fn streamStopped(self: Connection, stream_id: u64) ?StopSendingInfo {
+        for (self.stream_send_flows.items) |entry| {
+            if (entry.stream_id == stream_id) return entry.stopped;
+        }
+        return null;
     }
 
     pub fn queuePathChallenge(self: *Connection, data: [8]u8) Error!void {
@@ -351,6 +436,8 @@ pub const Connection = struct {
                 .retire_connection_id => |retire| try self.local_connection_ids.retire(retire.sequence_number),
                 .path_challenge => |path_challenge| try self.path_validation.receiveChallenge(path_challenge.data),
                 .path_response => |path_response| try self.path_validation.receiveResponse(path_response.data),
+                .reset_stream => |reset| try self.receiveResetStream(reset),
+                .stop_sending => |stop| try self.receiveStopSending(stop),
                 .connection_close => |close| try self.setCloseInfo(.{
                     .application = false,
                     .error_code = close.error_code,
@@ -366,6 +453,7 @@ pub const Connection = struct {
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
                     const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
                     const stream_end = std.math.add(u64, stream.offset, data_len) catch return error.InvalidFrameLength;
+                    try self.applyFinalSize(recv_stream, stream_end, stream.fin);
                     try recv_stream.flow.receive(stream_end);
 
                     // PTO retransmits the same STREAM bytes with a new packet
@@ -381,6 +469,78 @@ pub const Connection = struct {
                 },
                 else => {},
             }
+        }
+    }
+
+    fn receiveResetStream(self: *Connection, reset: quic.ResetStreamFrame) Error!void {
+        var recv_stream = try self.recvStreamFlow(reset.stream_id);
+        try self.applyFinalSize(recv_stream, reset.final_size, true);
+        try recv_stream.flow.receive(reset.final_size);
+
+        if (reset.final_size > recv_stream.highest_received_end) {
+            const new_stream_credit = reset.final_size - recv_stream.highest_received_end;
+            const next_total = std.math.add(u64, self.recv_data_total, new_stream_credit) catch return error.FlowControlViolation;
+            try self.recv_flow.receive(next_total);
+            self.recv_data_total = next_total;
+            recv_stream.highest_received_end = reset.final_size;
+        }
+
+        recv_stream.reset = .{
+            .application_error_code = reset.application_error_code,
+            .final_size = reset.final_size,
+        };
+    }
+
+    fn receiveStopSending(self: *Connection, stop: quic.StopSendingFrame) Error!void {
+        const entry = try self.sendStreamEntry(stop.stream_id);
+        entry.stopped = .{ .application_error_code = stop.application_error_code };
+        if (entry.reset_sent == null) {
+            // RFC 9000 requires a peer that receives STOP_SENDING to answer
+            // with RESET_STREAM unless the send side is already terminal.  The
+            // reset uses the current stream final size (highest sent offset)
+            // so the peer can account stream and connection flow control even
+            // when locally generated STREAM frames use explicit offsets.
+            try self.sendResetStream(stop.stream_id, stop.application_error_code, entry.highest_sent_end);
+        }
+    }
+
+    fn applyFinalSize(_: *Connection, recv_stream: *StreamRecvFlowEntry, final_size: u64, final: bool) Error!void {
+        if (final and final_size < recv_stream.highest_received_end) return error.FinalSizeMismatch;
+        if (recv_stream.final_size) |known| {
+            if (final_size > known) return error.FinalSizeMismatch;
+            if (final and final_size != known) return error.FinalSizeMismatch;
+            return;
+        }
+        if (final) recv_stream.final_size = final_size;
+    }
+
+    fn sendResetStream(self: *Connection, stream_id: u64, application_error_code: u64, final_size: u64) Error!void {
+        const entry = try self.sendStreamEntry(stream_id);
+        const info: StreamResetInfo = .{
+            .application_error_code = application_error_code,
+            .final_size = final_size,
+        };
+        if (entry.reset_sent) |existing| {
+            if (existing.application_error_code == info.application_error_code and existing.final_size == info.final_size) return;
+            return error.FinalSizeMismatch;
+        }
+
+        const frames = [_]quic.Frame{.{ .reset_stream = .{
+            .stream_id = stream_id,
+            .application_error_code = application_error_code,
+            .final_size = final_size,
+        } }};
+        try self.sendTrackedFrames(&frames);
+        entry.reset_sent = info;
+    }
+
+    fn noteSentStreams(self: *Connection, frames: []const quic.Frame) void {
+        for (frames) |frame| {
+            if (frame != .stream) continue;
+            const entry = self.findSendStreamEntry(frame.stream.stream_id) orelse continue;
+            const data_len = std.math.cast(u64, frame.stream.data.len) orelse continue;
+            const stream_end = std.math.add(u64, frame.stream.offset, data_len) catch continue;
+            entry.highest_sent_end = @max(entry.highest_sent_end, stream_end);
         }
     }
 
@@ -411,14 +571,24 @@ pub const Connection = struct {
     }
 
     fn sendStreamFlow(self: *Connection, stream_id: u64) Error!*quic.flow_control.SendFlow {
-        for (self.stream_send_flows.items) |*entry| {
-            if (entry.stream_id == stream_id) return &entry.flow;
-        }
+        const entry = try self.sendStreamEntry(stream_id);
+        return &entry.flow;
+    }
+
+    fn sendStreamEntry(self: *Connection, stream_id: u64) Error!*StreamFlowEntry {
+        if (self.findSendStreamEntry(stream_id)) |entry| return entry;
         try self.stream_send_flows.append(self.endpoint.allocator, .{
             .stream_id = stream_id,
             .flow = .init(self.config.initial_send_max_stream_data),
         });
-        return &self.stream_send_flows.items[self.stream_send_flows.items.len - 1].flow;
+        return &self.stream_send_flows.items[self.stream_send_flows.items.len - 1];
+    }
+
+    fn findSendStreamEntry(self: *Connection, stream_id: u64) ?*StreamFlowEntry {
+        for (self.stream_send_flows.items) |*entry| {
+            if (entry.stream_id == stream_id) return entry;
+        }
+        return null;
     }
 
     fn recvStreamFlow(self: *Connection, stream_id: u64) Error!*StreamRecvFlowEntry {
@@ -924,6 +1094,126 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
     try std.testing.expect(client2.close_info.?.application);
     try std.testing.expectEqual(@as(u64, 42), client2.close_info.?.error_code);
     try std.testing.expectEqualStrings("app done", client2.close_info.?.reason_phrase);
+}
+
+test "QUIC 1-RTT connection handles RESET_STREAM final size" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x4a} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    try client.send(&[_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "abcde", .fin = false } }});
+    var stream_packet = try server.receivePacket();
+    defer stream_packet.deinit(allocator);
+    try std.testing.expectEqualStrings("abcde", stream_packet.frames[0].stream.data);
+    try std.testing.expectEqual(@as(u64, 5), server.recv_data_total);
+
+    try client.resetStream(0, 77);
+    var reset_packet = try server.receivePacket();
+    defer reset_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), reset_packet.frames[0].reset_stream.stream_id);
+    try std.testing.expectEqual(@as(u64, 77), reset_packet.frames[0].reset_stream.application_error_code);
+    try std.testing.expectEqual(@as(u64, 5), reset_packet.frames[0].reset_stream.final_size);
+    const reset = server.streamResetReceived(0).?;
+    try std.testing.expectEqual(@as(u64, 77), reset.application_error_code);
+    try std.testing.expectEqual(@as(u64, 5), reset.final_size);
+    try std.testing.expectEqual(@as(u64, 5), server.recv_data_total);
+
+    // A later RESET_STREAM with a different final size violates RFC 9000's
+    // invariant that the final size, once known, is immutable.
+    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 2,
+        .frames = &[_]quic.Frame{.{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = 78,
+            .final_size = 4,
+        } }},
+    });
+    try std.testing.expectError(error.FinalSizeMismatch, server.receivePacket());
+}
+
+test "QUIC 1-RTT connection answers STOP_SENDING with RESET_STREAM" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const server_cid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x4b} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    try client.send(&[_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "payload", .fin = false } }});
+    var payload = try server.receivePacket();
+    defer payload.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 7), server.recv_data_total);
+
+    try server.sendStopSending(0, 44);
+    var stop = try client.receivePacket();
+    defer stop.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), stop.frames[0].stop_sending.stream_id);
+    try std.testing.expectEqual(@as(u64, 44), stop.frames[0].stop_sending.application_error_code);
+    try std.testing.expectEqual(@as(u64, 44), client.streamStopped(0).?.application_error_code);
+
+    var reset = try server.receivePacket();
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), reset.frames[0].reset_stream.stream_id);
+    try std.testing.expectEqual(@as(u64, 44), reset.frames[0].reset_stream.application_error_code);
+    try std.testing.expectEqual(@as(u64, 7), reset.frames[0].reset_stream.final_size);
+    try std.testing.expectEqual(@as(u64, 7), server.streamResetReceived(0).?.final_size);
+
+    try std.testing.expectError(error.StreamStopped, client.send(&[_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "more", .fin = false } }}));
+    try std.testing.expectEqual(@as(u64, 7), client.send_flow.used);
 }
 
 test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {
