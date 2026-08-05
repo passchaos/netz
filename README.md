@@ -56,7 +56,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   PING→PONG and close echo handling, serialized connection writes, and a
   blocking TCP client/server runtime over HTTP/1 Upgrade with a `std.Io.async`
   concurrent server helper
-- MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK, PUBLISH,
+- MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
+  username/password payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK, PING,
   DISCONNECT, properties, remaining length, topic-name/filter validation, and
   wildcard matching, plus a blocking TCP client/server runtime with a

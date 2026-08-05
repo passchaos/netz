@@ -129,6 +129,11 @@ pub fn writeBinary(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value
     try list.appendSlice(allocator, value);
 }
 
+pub fn readBinary(cursor: *wire.Cursor) Error![]const u8 {
+    const len = try cursor.readInt(u16, .big);
+    return cursor.readSlice(len);
+}
+
 pub const QoS = enum(u2) {
     at_most_once = 0,
     at_least_once = 1,
@@ -352,9 +357,13 @@ pub const Connect = struct {
     keep_alive_seconds: u16,
     client_id: []const u8,
     properties: []Property = &.{},
+    will: ?LastWill = null,
+    username: ?[]const u8 = null,
+    password: ?[]const u8 = null,
 
     pub fn deinit(self: *Connect, allocator: std.mem.Allocator) void {
         allocator.free(self.properties);
+        if (self.will) |*will| will.deinit(allocator);
         self.* = undefined;
     }
 
@@ -368,19 +377,74 @@ pub const Connect = struct {
         const level = try cursor.readByte();
         const protocol = std.enums.fromInt(ProtocolVersion, level) orelse return error.InvalidProtocolLevel;
         const connect_flags = try cursor.readByte();
+        try validateConnectFlags(connect_flags);
         const keep_alive = try cursor.readInt(u16, .big);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
         const client_id = try readUtf8(&cursor);
+        var will: ?LastWill = null;
+        if ((connect_flags & 0x04) != 0) {
+            const will_props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+            errdefer allocator.free(will_props);
+            const topic = try readUtf8(&cursor);
+            try validateTopicName(topic);
+            const payload = try readBinary(&cursor);
+            will = .{
+                .topic = topic,
+                .payload = payload,
+                .qos = std.enums.fromInt(QoS, @as(u2, @truncate((connect_flags >> 3) & 0x03))) orelse return error.InvalidQoS,
+                .retain = (connect_flags & 0x20) != 0,
+                .properties = will_props,
+            };
+        }
+        errdefer if (will) |*owned_will| owned_will.deinit(allocator);
+        const username = if ((connect_flags & 0x80) != 0) try readUtf8(&cursor) else null;
+        const password = if ((connect_flags & 0x40) != 0) try readBinary(&cursor) else null;
+        if (!cursor.eof()) return error.InvalidPacketType;
         return .{
             .protocol = protocol,
             .clean_start = (connect_flags & 0x02) != 0,
             .keep_alive_seconds = keep_alive,
             .client_id = client_id,
             .properties = props,
+            .will = will,
+            .username = username,
+            .password = password,
         };
     }
 };
+
+pub const LastWill = struct {
+    topic: []const u8,
+    payload: []const u8,
+    qos: QoS = .at_most_once,
+    retain: bool = false,
+    properties: []Property = &.{},
+
+    pub fn deinit(self: *LastWill, allocator: std.mem.Allocator) void {
+        allocator.free(self.properties);
+        self.* = undefined;
+    }
+};
+
+pub const ConnectPacketOptions = struct {
+    client_id: []const u8,
+    clean_start: bool = true,
+    keep_alive_seconds: u16 = 30,
+    properties: []const Property = &.{},
+    will: ?LastWill = null,
+    username: ?[]const u8 = null,
+    password: ?[]const u8 = null,
+};
+
+fn validateConnectFlags(flags: u8) Error!void {
+    if ((flags & 0x01) != 0) return error.InvalidFlags;
+
+    const will_flag = (flags & 0x04) != 0;
+    const will_qos = (flags >> 3) & 0x03;
+    if (!will_flag and (flags & 0x38) != 0) return error.InvalidFlags;
+    if (will_qos == 0x03) return error.InvalidQoS;
+}
 
 pub const ConnAck = struct {
     session_present: bool,
@@ -733,16 +797,48 @@ pub fn writeConnect(
     clean_start: bool,
     keep_alive_seconds: u16,
 ) !void {
+    try writeConnectPacket(list, allocator, protocol, .{
+        .client_id = client_id,
+        .clean_start = clean_start,
+        .keep_alive_seconds = keep_alive_seconds,
+    });
+}
+
+pub fn writeConnectPacket(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    protocol: ProtocolVersion,
+    options: ConnectPacketOptions,
+) Error!void {
     var variable: std.ArrayList(u8) = .empty;
     defer variable.deinit(allocator);
     try writeUtf8(&variable, allocator, "MQTT");
     try variable.append(allocator, protocol.byte());
-    try variable.append(allocator, if (clean_start) 0x02 else 0x00);
-    try wire.appendInt(&variable, allocator, u16, keep_alive_seconds, .big);
-    if (protocol == .v5) try encodeRemainingLength(&variable, allocator, 0);
-    try writeUtf8(&variable, allocator, client_id);
+    try variable.append(allocator, connectFlags(options));
+    try wire.appendInt(&variable, allocator, u16, options.keep_alive_seconds, .big);
+    if (protocol == .v5) try writeProperties(&variable, allocator, options.properties);
+    try writeUtf8(&variable, allocator, options.client_id);
+    if (options.will) |will| {
+        try validateTopicName(will.topic);
+        if (protocol == .v5) try writeProperties(&variable, allocator, will.properties);
+        try writeUtf8(&variable, allocator, will.topic);
+        try writeBinary(&variable, allocator, will.payload);
+    }
+    if (options.username) |username| try writeUtf8(&variable, allocator, username);
+    if (options.password) |password| try writeBinary(&variable, allocator, password);
     try (FixedHeader{ .packet_type = .connect, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
     try list.appendSlice(allocator, variable.items);
+}
+
+fn connectFlags(options: ConnectPacketOptions) u8 {
+    var flags: u8 = if (options.clean_start) 0x02 else 0x00;
+    if (options.will) |will| {
+        flags |= 0x04 | (@as(u8, @intFromEnum(will.qos)) << 3);
+        if (will.retain) flags |= 0x20;
+    }
+    if (options.password != null) flags |= 0x40;
+    if (options.username != null) flags |= 0x80;
+    return flags;
 }
 
 pub fn writePublish(
@@ -784,12 +880,34 @@ test "MQTT connect and publish parse" {
     const allocator = std.testing.allocator;
     var connect_bytes: std.ArrayList(u8) = .empty;
     defer connect_bytes.deinit(allocator);
-    try writeConnect(&connect_bytes, allocator, .v5, "client-1", true, 30);
+    var will_props = [_]Property{.{ .four_byte = .{ .id = .will_delay_interval, .value = 5 } }};
+    try writeConnectPacket(&connect_bytes, allocator, .v5, .{
+        .client_id = "client-1",
+        .clean_start = true,
+        .keep_alive_seconds = 30,
+        .properties = &.{.{ .two_byte = .{ .id = .receive_maximum, .value = 10 } }},
+        .will = .{
+            .topic = "status/client-1",
+            .payload = "offline",
+            .qos = .at_least_once,
+            .properties = &will_props,
+        },
+        .username = "rumq",
+        .password = "mq",
+    });
     var connect = try Connect.parse(allocator, connect_bytes.items);
     defer connect.deinit(allocator);
     try std.testing.expectEqual(ProtocolVersion.v5, connect.protocol);
     try std.testing.expect(connect.clean_start);
     try std.testing.expectEqualStrings("client-1", connect.client_id);
+    try std.testing.expectEqual(@as(usize, 1), connect.properties.len);
+    try std.testing.expectEqual(@as(u16, 10), connect.properties[0].two_byte.value);
+    try std.testing.expectEqualStrings("status/client-1", connect.will.?.topic);
+    try std.testing.expectEqualStrings("offline", connect.will.?.payload);
+    try std.testing.expectEqual(QoS.at_least_once, connect.will.?.qos);
+    try std.testing.expectEqual(@as(u32, 5), connect.will.?.properties[0].four_byte.value);
+    try std.testing.expectEqualStrings("rumq", connect.username.?);
+    try std.testing.expectEqualStrings("mq", connect.password.?);
 
     var publish_bytes: std.ArrayList(u8) = .empty;
     defer publish_bytes.deinit(allocator);
@@ -799,6 +917,26 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqual(QoS.at_least_once, publish.qos);
     try std.testing.expectEqual(@as(u16, 7), publish.packet_id.?);
     try std.testing.expectEqualStrings("21.5", publish.payload);
+}
+
+test "MQTT CONNECT validates flags and will topic" {
+    const allocator = std.testing.allocator;
+    var invalid_flags: std.ArrayList(u8) = .empty;
+    defer invalid_flags.deinit(allocator);
+    try (FixedHeader{ .packet_type = .connect, .flags = 0, .remaining_len = 12, .header_len = 0 }).write(&invalid_flags, allocator);
+    try writeUtf8(&invalid_flags, allocator, "MQTT");
+    try invalid_flags.append(allocator, ProtocolVersion.v3_1_1.byte());
+    try invalid_flags.append(allocator, 0x20); // will retain without will flag
+    try wire.appendInt(&invalid_flags, allocator, u16, 30, .big);
+    try writeUtf8(&invalid_flags, allocator, "");
+    try std.testing.expectError(error.InvalidFlags, Connect.parse(allocator, invalid_flags.items));
+
+    var invalid_will: std.ArrayList(u8) = .empty;
+    defer invalid_will.deinit(allocator);
+    try std.testing.expectError(error.InvalidTopic, writeConnectPacket(&invalid_will, allocator, .v5, .{
+        .client_id = "client-2",
+        .will = .{ .topic = "bad/+/topic", .payload = "offline" },
+    }));
 }
 
 test "MQTT topic validation and filter matching" {

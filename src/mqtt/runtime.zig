@@ -172,7 +172,15 @@ pub const Client = struct {
 
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(allocator);
-        try mqtt.writeConnect(&encoded, allocator, options.protocol, options.client_id, options.clean_start, options.keep_alive_seconds);
+        try mqtt.writeConnectPacket(&encoded, allocator, options.protocol, .{
+            .client_id = options.client_id,
+            .clean_start = options.clean_start,
+            .keep_alive_seconds = options.keep_alive_seconds,
+            .properties = options.properties,
+            .will = options.will,
+            .username = options.username,
+            .password = options.password,
+        });
         try writeAll(io, stream, encoded.items);
 
         var connack = try connection.readConnAck();
@@ -188,6 +196,10 @@ pub const ConnectOptions = struct {
     client_id: []const u8,
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,
+    properties: []const mqtt.Property = &.{},
+    will: ?mqtt.LastWill = null,
+    username: ?[]const u8 = null,
+    password: ?[]const u8 = null,
     limits: Limits = .{},
     max_outgoing_inflight: u16 = 16,
 };
@@ -594,6 +606,11 @@ test "MQTT runtime client and server exchange over TCP" {
             var accepted = try server_ptr.accept(.{ .protocol = .v5 });
             defer accepted.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("client-1", accepted.connect.connect.client_id);
+            try std.testing.expectEqualStrings("status/client-1", accepted.connect.connect.will.?.topic);
+            try std.testing.expectEqualStrings("offline", accepted.connect.connect.will.?.payload);
+            try std.testing.expectEqual(mqtt.QoS.at_least_once, accepted.connect.connect.will.?.qos);
+            try std.testing.expectEqualStrings("rumq", accepted.connect.connect.username.?);
+            try std.testing.expectEqualStrings("mq", accepted.connect.connect.password.?);
 
             var subscribe = try accepted.connection.readSubscribe();
             defer subscribe.deinit(server_ptr.allocator);
@@ -635,9 +652,18 @@ test "MQTT runtime client and server exchange over TCP" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
+    var will_props = [_]mqtt.Property{.{ .four_byte = .{ .id = .will_delay_interval, .value = 1 } }};
     var client = try Client.connect(allocator, io, server.address(), .{
         .protocol = .v5,
         .client_id = "client-1",
+        .will = .{
+            .topic = "status/client-1",
+            .payload = "offline",
+            .qos = .at_least_once,
+            .properties = &will_props,
+        },
+        .username = "rumq",
+        .password = "mq",
         .limits = .{ .max_packet_size = 4096 },
     });
     defer client.close();

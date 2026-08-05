@@ -46,6 +46,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt, "validTopicName"));
     try std.testing.expect(@hasDecl(netz.mqtt, "validTopicFilter"));
     try std.testing.expect(@hasDecl(netz.mqtt, "topicMatchesFilter"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "LastWill"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "ConnectPacketOptions"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "writeConnectPacket"));
+    try std.testing.expect(@hasField(netz.mqtt.Connect, "will"));
+    try std.testing.expect(@hasField(netz.mqtt.runtime.ConnectOptions, "username"));
+    try std.testing.expect(@hasField(netz.mqtt.runtime.ConnectOptions, "password"));
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.mqtt.runtime.Limits{}).max_packet_size);
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasField(netz.mqtt.runtime.Connection, "max_outgoing_inflight"));
