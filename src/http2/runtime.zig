@@ -498,6 +498,12 @@ pub const Connection = struct {
                         try validateHeaderBlock(headers.?, .response);
                         const status_s = findHeader(headers.?, ":status") orelse return error.MissingPseudoHeader;
                         const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
+                        if (informationalResponseToSkip(status)) {
+                            if ((frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
+                            freeHeaders(self.allocator, headers.?);
+                            headers = null;
+                            continue;
+                        }
                         if (responseForbidsBody(status, request_method)) {
                             const response_content_length = (try contentLength(headers.?)) orelse 0;
                             if (std.ascii.eqlIgnoreCase(request_method, "CONNECT") and response_content_length != 0) return error.InvalidContentLength;
@@ -1065,6 +1071,10 @@ fn responseForbidsBody(status: u16, request_method: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(request_method, "HEAD")) return true;
     if (std.ascii.eqlIgnoreCase(request_method, "CONNECT") and status >= 200 and status < 300) return true;
     return false;
+}
+
+fn informationalResponseToSkip(status: u16) bool {
+    return status >= 100 and status < 200 and status != 101;
 }
 
 fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
@@ -1667,6 +1677,70 @@ test "HTTP/2 client answers PING while reading response" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("after-ping", response.body);
+}
+
+test "HTTP/2 client skips informational responses before final response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/interim-h2", request.path);
+
+            try connection.writeHeaders(request.stream_id, &.{
+                .{ .name = ":status", .value = "103" },
+                .{ .name = "link", .value = "</style.css>; rel=preload" },
+            }, true);
+            try connection.writeResponse(request.stream_id, .{ .body = "final" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/interim-h2",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("final", response.body);
 }
 
 test "HTTP/2 client fails active request rejected by GOAWAY" {
