@@ -274,6 +274,29 @@ pub const GoAwayPayload = struct {
     }
 };
 
+pub const WindowUpdatePayload = struct {
+    stream_id: u31,
+    increment: u31,
+
+    pub fn parse(frame: Frame) Error!WindowUpdatePayload {
+        if (frame.header.frame_type != .window_update or frame.payload.len != 4) return error.InvalidFrameSize;
+        const raw = std.mem.readInt(u32, frame.payload[0..4], .big);
+        const increment: u31 = @truncate(raw & 0x7fff_ffff);
+        if (increment == 0) return error.InvalidFrameSize;
+        return .{ .stream_id = frame.header.stream_id, .increment = increment };
+    }
+
+    pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_id: u31, increment: u31) Error!void {
+        if (increment == 0) return error.InvalidFrameSize;
+        var payload: [4]u8 = undefined;
+        std.mem.writeInt(u32, &payload, @as(u32, increment), .big);
+        try (Frame{
+            .header = .{ .length = 0, .frame_type = .window_update, .flags = 0, .stream_id = stream_id },
+            .payload = &payload,
+        }).write(list, allocator);
+    }
+};
+
 pub fn validateClientPreface(bytes: []const u8) Error!void {
     if (bytes.len < connection_preface.len) return error.BufferTooShort;
     if (!std.mem.eql(u8, bytes[0..connection_preface.len], connection_preface)) return error.InvalidPreface;
@@ -531,6 +554,18 @@ test "HTTP/2 ping and goaway payload helpers" {
     try std.testing.expectEqual(@as(u31, 7), goaway.last_stream_id);
     try std.testing.expectEqual(ErrorCode.no_error, goaway.error_code);
     try std.testing.expectEqualStrings("bye", goaway.debug_data);
+}
+
+test "HTTP/2 window update payload helper" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try WindowUpdatePayload.write(&encoded, allocator, 3, 1024);
+    const frame = try Frame.parse(encoded.items);
+    const update = try WindowUpdatePayload.parse(frame);
+    try std.testing.expectEqual(@as(u31, 3), update.stream_id);
+    try std.testing.expectEqual(@as(u31, 1024), update.increment);
+    try std.testing.expectError(error.InvalidFrameSize, WindowUpdatePayload.write(&encoded, allocator, 0, 0));
 }
 
 test "HTTP/2 HPACK static table decode" {

@@ -335,6 +335,25 @@ pub const Connection = struct {
         }
     }
 
+    pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try http2.WindowUpdatePayload.write(&encoded, self.allocator, stream_id, increment);
+        try writeAll(self.io, self.stream, encoded.items);
+    }
+
+    pub fn readWindowUpdate(self: *Connection) Error!OwnedWindowUpdate {
+        while (true) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            errdefer frame.deinit(self.allocator);
+            if (frame.frame.header.frame_type != .window_update) {
+                frame.deinit(self.allocator);
+                continue;
+            }
+            return .{ .frame = frame, .window_update = try http2.WindowUpdatePayload.parse(frame.frame) };
+        }
+    }
+
     fn readResponse(self: *Connection, stream_id: u31) Error!OwnedResponse {
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |h| freeHeaders(self.allocator, h);
@@ -453,6 +472,16 @@ pub const OwnedGoAway = struct {
     goaway: http2.GoAwayPayload,
 
     pub fn deinit(self: *OwnedGoAway, allocator: std.mem.Allocator) void {
+        self.frame.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedWindowUpdate = struct {
+    frame: OwnedFrame,
+    window_update: http2.WindowUpdatePayload,
+
+    pub fn deinit(self: *OwnedWindowUpdate, allocator: std.mem.Allocator) void {
         self.frame.deinit(allocator);
         self.* = undefined;
     }
@@ -590,6 +619,11 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
             var connection = try server_ptr.accept();
             defer connection.close();
 
+            var client_window = try connection.readWindowUpdate();
+            defer client_window.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(u31, 0), client_window.window_update.stream_id);
+            try std.testing.expectEqual(@as(u31, 4096), client_window.window_update.increment);
+
             const ping_data = try connection.readPing();
             try std.testing.expectEqualSlices(u8, &[_]u8{ 8, 6, 7, 5, 3, 0, 9, 9 }, &ping_data);
 
@@ -604,6 +638,7 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
                 .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
                 .body = "pong",
             });
+            try connection.sendWindowUpdate(0, 2048);
             try connection.sendGoAway(request.stream_id, .no_error, "done");
         }
     };
@@ -617,6 +652,7 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     });
     defer client.close();
 
+    try client.sendWindowUpdate(0, 4096);
     const ping_ack = try client.ping(.{ 8, 6, 7, 5, 3, 0, 9, 9 });
     try std.testing.expectEqualSlices(u8, &[_]u8{ 8, 6, 7, 5, 3, 0, 9, 9 }, &ping_ack);
 
@@ -635,6 +671,9 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("pong", response.body);
     try std.testing.expectEqualStrings("text/plain", findHeader(response.headers, "content-type").?);
+    var window = try client.readWindowUpdate();
+    defer window.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 2048), window.window_update.increment);
     var goaway = try client.readGoAway();
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
