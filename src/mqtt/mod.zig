@@ -798,3 +798,7 @@ test "MQTT disconnect control" {
     defer disconnect.deinit(allocator);
     try std.testing.expectEqual(@as(u8, 0), disconnect.reason_code);
 }
+
+test {
+    _ = runtime;
+}

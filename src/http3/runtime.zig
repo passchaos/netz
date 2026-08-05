@@ -169,12 +169,15 @@ pub const ProtectedServer = struct {
         var frames: std.ArrayList(quic.Frame) = .empty;
         defer frames.deinit(self.quic_server.endpoint.allocator);
         try send_state.appendFrames(&frames, self.quic_server.endpoint.allocator, encoded.items, self.config.max_stream_frame_data, true);
-        try quic.one_rtt.sendFrames(&self.quic_server.endpoint, to, self.config.send_keys, .{
-            .destination_connection_id = self.config.peer_connection_id,
-            .packet_number = self.next_packet_number,
-            .frames = frames.items,
-        });
-        self.next_packet_number += 1;
+        try sendProtectedFrames(
+            &self.quic_server.endpoint,
+            to,
+            self.config.send_keys,
+            self.config.peer_connection_id,
+            &self.next_packet_number,
+            frames.items,
+            self.config.max_frames_per_packet,
+        );
     }
 
     fn receiveStreamBytes(self: *ProtectedServer, expected_stream_id: ?u62) Error!AssembledStream {
@@ -244,12 +247,15 @@ pub const ProtectedClient = struct {
         var frames: std.ArrayList(quic.Frame) = .empty;
         defer frames.deinit(self.quic_client.endpoint.allocator);
         try send_state.appendFrames(&frames, self.quic_client.endpoint.allocator, encoded.items, self.config.max_stream_frame_data, true);
-        try quic.one_rtt.sendFrames(&self.quic_client.endpoint, self.quic_client.peer, self.config.send_keys, .{
-            .destination_connection_id = self.config.peer_connection_id,
-            .packet_number = self.next_packet_number,
-            .frames = frames.items,
-        });
-        self.next_packet_number += 1;
+        try sendProtectedFrames(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config.send_keys,
+            self.config.peer_connection_id,
+            &self.next_packet_number,
+            frames.items,
+            self.config.max_frames_per_packet,
+        );
 
         const assembled = try self.receiveStreamBytes(stream_id);
         errdefer self.quic_client.endpoint.allocator.free(assembled.bytes);
@@ -314,6 +320,29 @@ const AssembledStream = struct {
     stream_id: u62,
     bytes: []u8,
 };
+
+fn sendProtectedFrames(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    destination_connection_id: []const u8,
+    next_packet_number: *u64,
+    frames: []const quic.Frame,
+    max_frames_per_packet: usize,
+) Error!void {
+    const chunk_size = @max(@as(usize, 1), max_frames_per_packet);
+    var offset: usize = 0;
+    while (offset < frames.len) {
+        const end = @min(frames.len, offset + chunk_size);
+        try quic.one_rtt.sendFrames(endpoint, to, keys, .{
+            .destination_connection_id = destination_connection_id,
+            .packet_number = next_packet_number.*,
+            .frames = frames[offset..end],
+        });
+        next_packet_number.* += 1;
+        offset = end;
+    }
+}
 
 fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
     for (frames) |frame| {

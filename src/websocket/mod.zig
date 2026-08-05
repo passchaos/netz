@@ -392,3 +392,7 @@ test "WebSocket handshake rejects malformed nonce" {
     defer req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(req));
 }
+
+test {
+    _ = runtime;
+}

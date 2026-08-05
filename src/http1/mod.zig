@@ -18,6 +18,7 @@ pub const Error = wire.Error || error{
     InvalidTransferEncoding,
     ChunkSizeOverflow,
     ContentLengthOverflow,
+    RenderBufferTooSmall,
 } || std.mem.Allocator.Error;
 
 pub const Method = enum {
@@ -391,6 +392,26 @@ pub fn writeRequest(
     try list.appendSlice(allocator, body);
 }
 
+pub fn writeRequestChecked(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    method: Method,
+    target: []const u8,
+    version: Version,
+    headers: []const Header,
+    body: []const u8,
+) Error!void {
+    try list.appendSlice(allocator, method.string());
+    try list.append(allocator, ' ');
+    try list.appendSlice(allocator, target);
+    try list.append(allocator, ' ');
+    try list.appendSlice(allocator, version.string());
+    try list.appendSlice(allocator, "\r\n");
+    try writeHeadersChecked(list, allocator, headers);
+    try list.appendSlice(allocator, "\r\n");
+    try list.appendSlice(allocator, body);
+}
+
 pub fn writeResponse(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -413,7 +434,38 @@ pub fn writeResponse(
     try list.appendSlice(allocator, body);
 }
 
+pub fn writeResponseChecked(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    version: Version,
+    status: u16,
+    reason: []const u8,
+    headers: []const Header,
+    body: []const u8,
+) Error!void {
+    try list.appendSlice(allocator, version.string());
+    try list.append(allocator, ' ');
+    try appendDecimalChecked(list, allocator, status);
+    if (reason.len > 0) {
+        try list.append(allocator, ' ');
+        try list.appendSlice(allocator, reason);
+    }
+    try list.appendSlice(allocator, "\r\n");
+    try writeHeadersChecked(list, allocator, headers);
+    try list.appendSlice(allocator, "\r\n");
+    try list.appendSlice(allocator, body);
+}
+
 fn writeHeaders(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const Header) !void {
+    for (headers) |header| {
+        try list.appendSlice(allocator, header.name);
+        try list.appendSlice(allocator, ": ");
+        try list.appendSlice(allocator, header.value);
+        try list.appendSlice(allocator, "\r\n");
+    }
+}
+
+fn writeHeadersChecked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const Header) Error!void {
     for (headers) |header| {
         try list.appendSlice(allocator, header.name);
         try list.appendSlice(allocator, ": ");
@@ -425,6 +477,12 @@ fn writeHeaders(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers:
 fn appendDecimal(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: anytype) !void {
     var tmp: [32]u8 = undefined;
     const rendered = try std.fmt.bufPrint(&tmp, "{}", .{value});
+    try list.appendSlice(allocator, rendered);
+}
+
+fn appendDecimalChecked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: anytype) Error!void {
+    var tmp: [32]u8 = undefined;
+    const rendered = std.fmt.bufPrint(&tmp, "{}", .{value}) catch return error.RenderBufferTooSmall;
     try list.appendSlice(allocator, rendered);
 }
 
@@ -566,4 +624,7 @@ test "HTTP/1 response body framing helpers" {
     try std.testing.expectEqual(@as(usize, raw.len - "hello".len), resp.consumed);
     try std.testing.expectEqualStrings("", resp.body);
     try std.testing.expect(!resp.keepAlive());
+}
+test {
+    _ = runtime;
 }

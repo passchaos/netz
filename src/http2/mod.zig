@@ -501,3 +501,7 @@ test "HTTP/2 HPACK rejects dynamic table references" {
     try std.testing.expectError(error.HpackDynamicTableUnsupported, Hpack.decodeLiteralBlock(allocator, &.{0xfe}));
     try std.testing.expectError(error.HpackDynamicTableUnsupported, Hpack.decodeLiteralBlock(allocator, &.{ 0x20, 0x00 }));
 }
+
+test {
+    _ = runtime;
+}

@@ -168,3 +168,7 @@ test "WebTransport datagram maps quarter stream id" {
     try std.testing.expectEqual(@as(u62, 8), parsed.session_id.value);
     try std.testing.expectEqualStrings("dgram", parsed.payload);
 }
+
+test {
+    _ = runtime;
+}

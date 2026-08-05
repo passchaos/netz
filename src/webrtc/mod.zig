@@ -721,3 +721,7 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqualStrings("opus", packet.payload);
     try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
 }
+
+test {
+    _ = runtime;
+}

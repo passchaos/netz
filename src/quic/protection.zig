@@ -18,15 +18,13 @@ pub const aead_tag_len = Aes128Gcm.tag_length;
 pub const header_protection_sample_len = 16;
 pub const header_protection_mask_len = 5;
 
-pub const Error = error{
+pub const Error = varint.Error || error{
     InvalidInitialPacket,
     InvalidHeaderProtectionSample,
     InvalidPacketNumber,
     InvalidPacketNumberLength,
     InvalidPayloadLength,
-    VarIntTooLarge,
-    BufferTooShort,
-} || std.crypto.errors.AuthenticationError;
+} || std.crypto.errors.AuthenticationError || std.mem.Allocator.Error;
 
 pub const HeaderForm = enum {
     long,

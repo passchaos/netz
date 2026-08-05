@@ -11,6 +11,8 @@ pub const Error = http2.Error || error{
     MessageTooLarge,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
+const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
+
 const flag_end_stream: u8 = 0x1;
 const flag_ack: u8 = 0x1;
 const flag_end_headers: u8 = 0x4;
@@ -398,12 +400,12 @@ fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]con
     return null;
 }
 
-fn readExact(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!void {
+fn readExact(io: std.Io, stream: net.Stream, buffer: []u8) ReadExactError!void {
     var offset: usize = 0;
     while (offset < buffer.len) {
         var bufs = [_][]u8{buffer[offset..]};
         const n = try io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
-        if (n == 0) return error.EndOfStream;
+        if (n == 0) return error.ConnectionClosed;
         offset += n;
     }
 }

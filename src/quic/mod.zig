@@ -7,6 +7,7 @@ pub const protection = @import("protection.zig");
 pub const crypto_stream = @import("crypto_stream.zig");
 pub const initial_exchange = @import("initial_exchange.zig");
 pub const tls_client_hello = @import("tls_client_hello.zig");
+pub const handshake = @import("handshake.zig");
 pub const one_rtt = @import("one_rtt.zig");
 pub const packet_space = @import("packet_space.zig");
 pub const stream_state = @import("stream.zig");
@@ -675,6 +676,20 @@ fn validateConnectionIdLen(len: usize) Error!void {
 
 comptime {
     _ = varint;
+}
+
+test {
+    _ = runtime;
+    _ = protection;
+    _ = crypto_stream;
+    _ = initial_exchange;
+    _ = tls_client_hello;
+    _ = handshake;
+    _ = one_rtt;
+    _ = packet_space;
+    _ = stream_state;
+    _ = flow_control;
+    _ = recovery;
 }
 
 test "QUIC long initial header parse" {

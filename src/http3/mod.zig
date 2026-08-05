@@ -443,3 +443,7 @@ test "HTTP/3 response encode decode" {
     try std.testing.expect(decoded.successful());
     try std.testing.expectEqualStrings("created", decoded.body);
 }
+
+test {
+    _ = runtime;
+}

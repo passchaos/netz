@@ -179,7 +179,7 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    try http1.writeRequest(&encoded, allocator, options.method, options.target, options.version, headers.items, options.body);
+    try http1.writeRequestChecked(&encoded, allocator, options.method, options.target, options.version, headers.items, options.body);
     try writeAll(io, stream, encoded.items);
 }
 
@@ -191,7 +191,7 @@ pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: n
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    try http1.writeResponse(&encoded, allocator, options.version, options.status, options.reason, headers.items, options.body);
+    try http1.writeResponseChecked(&encoded, allocator, options.version, options.status, options.reason, headers.items, options.body);
     try writeAll(io, stream, encoded.items);
 }
 
