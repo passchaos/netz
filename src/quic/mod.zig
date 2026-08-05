@@ -15,6 +15,7 @@ pub const flow_control = @import("flow_control.zig");
 pub const recovery = @import("recovery.zig");
 pub const connection_router = @import("connection_router.zig");
 pub const connection_id = @import("connection_id.zig");
+pub const stateless_reset = @import("stateless_reset.zig");
 pub const congestion = @import("congestion.zig");
 pub const path_validation = @import("path_validation.zig");
 
@@ -696,6 +697,7 @@ test {
     _ = recovery;
     _ = connection_router;
     _ = connection_id;
+    _ = stateless_reset;
     _ = congestion;
     _ = path_validation;
 }

@@ -273,6 +273,10 @@ pub const Connection = struct {
         return true;
     }
 
+    pub fn detectStatelessReset(self: Connection, datagram: []const u8) ?u64 {
+        return self.peer_connection_ids.detectStatelessReset(datagram);
+    }
+
     pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
         var packet = try receive(
             self.endpoint,
@@ -814,6 +818,10 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
     try std.testing.expect(client.switchToNextPeerConnectionId());
     try std.testing.expectEqualStrings("server-new-cid", client.config.peer_connection_id);
+    var reset_datagram: std.ArrayList(u8) = .empty;
+    defer reset_datagram.deinit(allocator);
+    try quic.stateless_reset.encode(&reset_datagram, allocator, &.{ 0x40, 1, 2, 3, 4 }, [_]u8{0xaa} ** 16);
+    try std.testing.expectEqual(@as(?u64, 1), client.detectStatelessReset(reset_datagram.items));
 
     const retire = [_]quic.Frame{.{ .retire_connection_id = .{ .sequence_number = 0 } }};
     try client.send(&retire);

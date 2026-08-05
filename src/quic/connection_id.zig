@@ -51,11 +51,11 @@ pub const PeerPool = struct {
         }
     }
 
-    pub fn consumeUnused(self: *PeerPool) ?Entry {
+    pub fn consumeUnused(self: *PeerPool) ?*Entry {
         for (&self.entries) |*entry| {
             if (entry.occupied and !entry.in_use) {
                 entry.in_use = true;
-                return entry.*;
+                return entry;
             }
         }
         return null;
@@ -64,6 +64,14 @@ pub const PeerPool = struct {
     pub fn markInUse(self: *PeerPool, sequence_number: u64) Error!void {
         const entry = self.find(sequence_number) orelse return error.UnknownConnectionId;
         entry.in_use = true;
+    }
+
+    pub fn detectStatelessReset(self: *const PeerPool, datagram: []const u8) ?u64 {
+        for (&self.entries) |*entry| {
+            if (!entry.occupied) continue;
+            if (quic.stateless_reset.matches(datagram, entry.stateless_reset_token)) return entry.sequence_number;
+        }
+        return null;
     }
 
     pub fn count(self: *const PeerPool) usize {
@@ -143,6 +151,19 @@ test "QUIC peer CID pool stores retires and consumes IDs" {
     try std.testing.expectEqual(@as(u64, 2), entry.sequence_number);
     try std.testing.expectEqualStrings("cid-two", entry.slice());
     try std.testing.expect(pool.consumeUnused() == null);
+}
+
+test "QUIC peer CID pool detects stateless reset token" {
+    const allocator = std.testing.allocator;
+    var pool = PeerPool{};
+    const token = [_]u8{0x44} ** 16;
+    try pool.add(7, "reset-cid", token);
+
+    var datagram: std.ArrayList(u8) = .empty;
+    defer datagram.deinit(allocator);
+    try quic.stateless_reset.encode(&datagram, allocator, &.{ 0x40, 9, 8, 7, 6 }, token);
+    try std.testing.expectEqual(@as(?u64, 7), pool.detectStatelessReset(datagram.items));
+    try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(&.{ 0x40, 1, 2 }));
 }
 
 test "QUIC local CID pool issues and retires NEW_CONNECTION_ID frames" {
