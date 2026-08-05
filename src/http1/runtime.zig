@@ -244,7 +244,7 @@ pub fn readRequestFromStream(
     limits: Limits,
     options: http1.ParseOptions,
 ) Error!OwnedRequest {
-    const bytes = try readMessageBytes(allocator, io, stream, limits);
+    const bytes = try readRequestMessageBytes(allocator, io, stream, limits);
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
@@ -259,7 +259,7 @@ pub fn readRequestFromStreamBuffered(
     options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
 ) Error!OwnedRequest {
-    const bytes = try readMessageBytesBuffered(allocator, io, stream, limits, inbuf);
+    const bytes = try readRequestMessageBytesBuffered(allocator, io, stream, limits, inbuf);
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
@@ -273,11 +273,18 @@ pub fn readResponseFromStream(
     limits: Limits,
     options: http1.ParseOptions,
 ) Error!OwnedResponse {
-    const bytes = try readMessageBytes(allocator, io, stream, limits);
-    errdefer allocator.free(bytes);
-    var response = try http1.parseResponse(allocator, bytes, options);
-    errdefer response.deinit(allocator);
-    return .{ .bytes = bytes, .response = response };
+    while (true) {
+        const bytes = try readMessageBytes(allocator, io, stream, limits);
+        errdefer allocator.free(bytes);
+        var response = try http1.parseResponse(allocator, bytes, options);
+        errdefer response.deinit(allocator);
+        if (informationalResponseToSkip(response.status)) {
+            response.deinit(allocator);
+            allocator.free(bytes);
+            continue;
+        }
+        return .{ .bytes = bytes, .response = response };
+    }
 }
 
 pub fn readResponseFromStreamForRequest(
@@ -288,11 +295,18 @@ pub fn readResponseFromStreamForRequest(
     options: http1.ParseOptions,
     request_method: http1.Method,
 ) Error!OwnedResponse {
-    const bytes = try readMessageBytesForResponse(allocator, io, stream, limits, request_method);
-    errdefer allocator.free(bytes);
-    var response = try http1.parseResponseForRequest(allocator, bytes, options, request_method);
-    errdefer response.deinit(allocator);
-    return .{ .bytes = bytes, .response = response };
+    while (true) {
+        const bytes = try readMessageBytesForResponse(allocator, io, stream, limits, request_method);
+        errdefer allocator.free(bytes);
+        var response = try http1.parseResponseForRequest(allocator, bytes, options, request_method);
+        errdefer response.deinit(allocator);
+        if (informationalResponseToSkip(response.status)) {
+            response.deinit(allocator);
+            allocator.free(bytes);
+            continue;
+        }
+        return .{ .bytes = bytes, .response = response };
+    }
 }
 
 pub fn readResponseFromStreamBuffered(
@@ -303,11 +317,18 @@ pub fn readResponseFromStreamBuffered(
     options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
 ) Error!OwnedResponse {
-    const bytes = try readMessageBytesBuffered(allocator, io, stream, limits, inbuf);
-    errdefer allocator.free(bytes);
-    var response = try http1.parseResponse(allocator, bytes, options);
-    errdefer response.deinit(allocator);
-    return .{ .bytes = bytes, .response = response };
+    while (true) {
+        const bytes = try readMessageBytesBuffered(allocator, io, stream, limits, inbuf);
+        errdefer allocator.free(bytes);
+        var response = try http1.parseResponse(allocator, bytes, options);
+        errdefer response.deinit(allocator);
+        if (informationalResponseToSkip(response.status)) {
+            response.deinit(allocator);
+            allocator.free(bytes);
+            continue;
+        }
+        return .{ .bytes = bytes, .response = response };
+    }
 }
 
 pub fn readResponseFromStreamBufferedForRequest(
@@ -319,11 +340,18 @@ pub fn readResponseFromStreamBufferedForRequest(
     inbuf: *std.ArrayList(u8),
     request_method: http1.Method,
 ) Error!OwnedResponse {
-    const bytes = try readMessageBytesBufferedForResponse(allocator, io, stream, limits, inbuf, request_method);
-    errdefer allocator.free(bytes);
-    var response = try http1.parseResponseForRequest(allocator, bytes, options, request_method);
-    errdefer response.deinit(allocator);
-    return .{ .bytes = bytes, .response = response };
+    while (true) {
+        const bytes = try readMessageBytesBufferedForResponse(allocator, io, stream, limits, inbuf, request_method);
+        errdefer allocator.free(bytes);
+        var response = try http1.parseResponseForRequest(allocator, bytes, options, request_method);
+        errdefer response.deinit(allocator);
+        if (informationalResponseToSkip(response.status)) {
+            response.deinit(allocator);
+            allocator.free(bytes);
+            continue;
+        }
+        return .{ .bytes = bytes, .response = response };
+    }
 }
 
 pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: RequestOptions) Error!void {
@@ -372,14 +400,25 @@ fn appendDefaultedHeaders(
 }
 
 fn readMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
-    return readMessageBytesWithContext(allocator, io, stream, limits, null);
+    return readMessageBytesWithContext(allocator, io, stream, limits, null, false);
 }
 
 fn readMessageBytesForResponse(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, request_method: http1.Method) Error![]u8 {
-    return readMessageBytesWithContext(allocator, io, stream, limits, request_method);
+    return readMessageBytesWithContext(allocator, io, stream, limits, request_method, false);
 }
 
-fn readMessageBytesWithContext(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, request_method: ?http1.Method) Error![]u8 {
+fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
+    return readMessageBytesWithContext(allocator, io, stream, limits, null, true);
+}
+
+fn readMessageBytesWithContext(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    request_method: ?http1.Method,
+    auto_continue: bool,
+) Error![]u8 {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
 
@@ -392,6 +431,7 @@ fn readMessageBytesWithContext(allocator: std.mem.Allocator, io: std.Io, stream:
         try bytes.appendSlice(allocator, scratch[0..n]);
         head_end = std.mem.indexOf(u8, bytes.items, "\r\n\r\n");
     }
+    try maybeWriteContinue(io, stream, bytes.items[0..head_end.?], bytes.items.len - (head_end.? + 4), auto_continue);
 
     const target_len = while (true) {
         const len = messageTargetLength(bytes.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
@@ -423,7 +463,7 @@ fn readMessageBytesBuffered(
     limits: Limits,
     inbuf: *std.ArrayList(u8),
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, null);
+    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, null, false);
 }
 
 fn readMessageBytesBufferedForResponse(
@@ -434,7 +474,17 @@ fn readMessageBytesBufferedForResponse(
     inbuf: *std.ArrayList(u8),
     request_method: http1.Method,
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, request_method);
+    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, request_method, false);
+}
+
+fn readRequestMessageBytesBuffered(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    inbuf: *std.ArrayList(u8),
+) Error![]u8 {
+    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, null, true);
 }
 
 fn readMessageBytesBufferedWithContext(
@@ -444,6 +494,7 @@ fn readMessageBytesBufferedWithContext(
     limits: Limits,
     inbuf: *std.ArrayList(u8),
     request_method: ?http1.Method,
+    auto_continue: bool,
 ) Error![]u8 {
     var scratch: [4096]u8 = undefined;
     var head_end: ?usize = std.mem.indexOf(u8, inbuf.items, "\r\n\r\n");
@@ -454,6 +505,7 @@ fn readMessageBytesBufferedWithContext(
         try inbuf.appendSlice(allocator, scratch[0..n]);
         head_end = std.mem.indexOf(u8, inbuf.items, "\r\n\r\n");
     }
+    try maybeWriteContinue(io, stream, inbuf.items[0..head_end.?], inbuf.items.len - (head_end.? + 4), auto_continue);
 
     const target_len = while (true) {
         const len = messageTargetLength(inbuf.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
@@ -479,6 +531,12 @@ fn readMessageBytesBufferedWithContext(
     const bytes = try allocator.dupe(u8, inbuf.items[0..target_len]);
     discardPrefix(inbuf, target_len);
     return bytes;
+}
+
+fn maybeWriteContinue(io: std.Io, stream: net.Stream, head: []const u8, already_buffered_body_bytes: usize, auto_continue: bool) Error!void {
+    if (!auto_continue or already_buffered_body_bytes != 0) return;
+    if (!requestShouldSendContinue(head)) return;
+    try writeAll(io, stream, "HTTP/1.1 100 Continue\r\n\r\n");
 }
 
 fn discardPrefix(list: *std.ArrayList(u8), len: usize) void {
@@ -526,6 +584,36 @@ fn responseHeadForbidsBody(head: []const u8, request_method: ?http1.Method) bool
     };
 }
 
+fn informationalResponseToSkip(status: u16) bool {
+    // RFC 9110 allows one or more interim 1xx responses before the final
+    // response.  101 is deliberately not skipped because it transfers the
+    // connection to the upgraded protocol.
+    return status >= 100 and status < 200 and status != 101;
+}
+
+fn requestShouldSendContinue(head: []const u8) bool {
+    if (!requestHeadIsHttp11(head)) return false;
+    const expect = findHeaderValue(head, "expect") orelse return false;
+    if (!std.ascii.eqlIgnoreCase(wire.trimOws(expect), "100-continue")) return false;
+    return requestHeadHasBody(head);
+}
+
+fn requestHeadIsHttp11(head: []const u8) bool {
+    const first_line_end = std.mem.indexOf(u8, head, "\r\n") orelse head.len;
+    return std.mem.endsWith(u8, head[0..first_line_end], " HTTP/1.1");
+}
+
+fn requestHeadHasBody(head: []const u8) bool {
+    if (findHeaderValue(head, "transfer-encoding")) |transfer_encoding| {
+        if (wire.containsToken(transfer_encoding, "chunked")) return true;
+    }
+    if (findHeaderValue(head, "content-length")) |content_length| {
+        const len = std.fmt.parseInt(usize, wire.trimOws(content_length), 10) catch return false;
+        return len > 0;
+    }
+    return false;
+}
+
 fn chunkedWireLength(body: []const u8, max_body_bytes: usize) Error!usize {
     var pos: usize = 0;
     var decoded_total: usize = 0;
@@ -563,6 +651,15 @@ fn findHeaderValue(head: []const u8, name: []const u8) ?[]const u8 {
 fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
     var bufs = [_][]u8{buffer};
     return io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
+}
+
+fn readExactForTest(io: std.Io, stream: net.Stream, buffer: []u8) Error!void {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        const n = try readSome(io, stream, buffer[offset..]);
+        if (n == 0) return error.ConnectionClosed;
+        offset += n;
+    }
 }
 
 fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer.Error!void {
@@ -637,6 +734,135 @@ test "HTTP/1 runtime client and server exchange over TCP" {
     try std.testing.expectEqual(@as(u16, 201), response.response.status);
     try std.testing.expectEqualStrings("pong", response.response.body);
     try std.testing.expectEqualStrings("text/plain", response.response.header("content-type").?);
+}
+
+test "HTTP/1 server sends 100 Continue before reading expected body" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(http1.Method.POST, request.request.method);
+            try std.testing.expectEqualStrings("/expect", request.request.target);
+            try std.testing.expectEqualStrings("ping", request.request.body);
+
+            try connection.writeResponse(.{
+                .status = 200,
+                .reason = "OK",
+                .body = "accepted",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+
+    // Send only the head first.  A Hyper-compatible HTTP/1 server must emit
+    // 100 Continue after seeing a valid HTTP/1.1 request with a body so the
+    // client can safely stream a large payload without deadlocking.
+    try writeAll(io, client.stream, "POST /expect HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Expect: 100-Continue\r\n" ++
+        "Content-Length: 4\r\n" ++
+        "\r\n");
+    var interim: [25]u8 = undefined;
+    try readExactForTest(io, client.stream, &interim);
+    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", &interim);
+
+    try writeAll(io, client.stream, "ping");
+    var response = try readResponseFromStreamBufferedForRequest(allocator, io, client.stream, client.limits, .{}, &client.inbuf, .POST);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("accepted", response.response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 client skips interim responses before final response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/interim", request.request.target);
+
+            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 100 Continue\r\n\r\n" ++
+                "HTTP/1.1 102 Processing\r\n\r\n" ++
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfinal");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    var response = try client.request(.{
+        .method = .GET,
+        .target = "/interim",
+        .headers = &.{.{ .name = "Host", .value = "127.0.0.1" }},
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("final", response.response.body);
 }
 
 test "HTTP/1 async std.Io server handles concurrent clients" {
