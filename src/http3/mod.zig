@@ -20,6 +20,7 @@ pub const Error = wire.Error || error{
     MissingPath,
     MissingStatus,
     InvalidStatus,
+    InvalidHeader,
     InvalidContentLength,
     IntegerOverflow,
     QpackDynamicTableUnsupported,
@@ -432,6 +433,8 @@ pub const Request = struct {
     pub fn write(self: Request, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         const fields = try self.headerFields(&fields_buf);
+        try validateHeaderBlock(fields, .request);
+        try validateHeaderBlock(self.trailers, .trailers);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 };
@@ -459,6 +462,8 @@ pub const Response = struct {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         var status_buf: [3]u8 = undefined;
         const fields = try self.headerFields(&fields_buf, &status_buf);
+        try validateHeaderBlock(fields, .response);
+        try validateHeaderBlock(self.trailers, .trailers);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 };
@@ -512,6 +517,10 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!Deco
     var message = try decodeMessage(allocator, bytes);
     errdefer message.deinit(allocator);
 
+    try validateHeaderBlock(message.headers, .request);
+    try validateHeaderBlock(message.trailers, .trailers);
+    try validateContentLength(message.headers, message.body.len);
+
     var method: ?[]const u8 = null;
     var path: ?[]const u8 = null;
     var scheme: []const u8 = "https";
@@ -536,6 +545,10 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!Deco
 pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedResponse {
     var message = try decodeMessage(allocator, bytes);
     errdefer message.deinit(allocator);
+
+    try validateHeaderBlock(message.headers, .response);
+    try validateHeaderBlock(message.trailers, .trailers);
+    try validateContentLength(message.headers, message.body.len);
 
     var status: ?u16 = null;
     for (message.headers) |header| {
@@ -625,8 +638,6 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedM
         }
     }
 
-    try validateContentLength(headers, body.items.len);
-
     const body_storage: ?[]u8 = if (body.items.len == 0) storage: {
         body.deinit(allocator);
         break :storage null;
@@ -670,6 +681,112 @@ fn validateContentLength(headers: []const Qpack.HeaderField, actual: usize) Erro
     if (try contentLength(headers)) |expected| {
         if (expected != actual) return error.InvalidContentLength;
     }
+}
+
+const HeaderBlockKind = enum {
+    request,
+    response,
+    trailers,
+};
+
+fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind) Error!void {
+    var saw_regular = false;
+    var seen_method = false;
+    var seen_scheme = false;
+    var seen_path = false;
+    var seen_authority = false;
+    var seen_protocol = false;
+    var seen_status = false;
+
+    for (headers) |header| {
+        try validateHeaderName(header.name);
+        const pseudo = std.mem.startsWith(u8, header.name, ":");
+        if (pseudo) {
+            if (saw_regular) return error.InvalidHeader;
+            switch (kind) {
+                .request => try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority, &seen_protocol),
+                .response => try markResponsePseudo(header.name, &seen_status),
+                .trailers => return error.InvalidHeader,
+            }
+            continue;
+        }
+        saw_regular = true;
+
+        if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
+        if (std.ascii.eqlIgnoreCase(header.name, "te")) {
+            switch (kind) {
+                .request => if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, header.value, " \t"), "trailers")) return error.InvalidHeader,
+                .response, .trailers => return error.InvalidHeader,
+            }
+        }
+    }
+
+    switch (kind) {
+        .request => {
+            if (!seen_method) return error.MissingMethod;
+            if (!seen_path) return error.MissingPath;
+            if (!seen_scheme) return error.InvalidHeader;
+        },
+        .response => if (!seen_status) return error.MissingStatus,
+        .trailers => {},
+    }
+}
+
+fn validateHeaderName(name: []const u8) Error!void {
+    if (name.len == 0) return error.InvalidHeader;
+    if (name[0] == ':') {
+        if (name.len == 1) return error.InvalidHeader;
+        for (name[1..]) |byte| {
+            if (!validHeaderNameByte(byte)) return error.InvalidHeader;
+        }
+        return;
+    }
+    for (name) |byte| {
+        if (!validHeaderNameByte(byte)) return error.InvalidHeader;
+    }
+}
+
+fn validHeaderNameByte(byte: u8) bool {
+    if (byte >= 'A' and byte <= 'Z') return false;
+    return std.ascii.isLower(byte) or std.ascii.isDigit(byte) or switch (byte) {
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
+    };
+}
+
+fn markRequestPseudo(
+    name: []const u8,
+    seen_method: *bool,
+    seen_scheme: *bool,
+    seen_path: *bool,
+    seen_authority: *bool,
+    seen_protocol: *bool,
+) Error!void {
+    if (std.mem.eql(u8, name, ":method")) return markOnce(seen_method);
+    if (std.mem.eql(u8, name, ":scheme")) return markOnce(seen_scheme);
+    if (std.mem.eql(u8, name, ":path")) return markOnce(seen_path);
+    if (std.mem.eql(u8, name, ":authority")) return markOnce(seen_authority);
+    if (std.mem.eql(u8, name, ":protocol")) return markOnce(seen_protocol);
+    return error.InvalidHeader;
+}
+
+fn markResponsePseudo(name: []const u8, seen_status: *bool) Error!void {
+    if (std.mem.eql(u8, name, ":status")) return markOnce(seen_status);
+    return error.InvalidHeader;
+}
+
+fn markOnce(seen: *bool) Error!void {
+    if (seen.*) return error.InvalidHeader;
+    seen.* = true;
+}
+
+fn connectionSpecificHeaderName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "connection") or
+        std.ascii.eqlIgnoreCase(name, "keep-alive") or
+        std.ascii.eqlIgnoreCase(name, "proxy-connection") or
+        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
+        std.ascii.eqlIgnoreCase(name, "upgrade") or
+        std.ascii.eqlIgnoreCase(name, "http2-settings");
 }
 
 pub const Datagram = struct {
@@ -895,6 +1012,7 @@ test "HTTP/3 message aggregates DATA frames and trailing HEADERS" {
     try Qpack.encodeLiteralBlock(&header_block, allocator, &.{
         .{ .name = ":method", .value = "POST" },
         .{ .name = ":path", .value = "/multi" },
+        .{ .name = ":scheme", .value = "https" },
         .{ .name = "content-length", .value = "11" },
     });
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&encoded, allocator);
@@ -931,6 +1049,7 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try Qpack.encodeLiteralBlock(&header_block, allocator, &.{
         .{ .name = ":method", .value = "POST" },
         .{ .name = ":path", .value = "/bad-length" },
+        .{ .name = ":scheme", .value = "https" },
         .{ .name = "content-length", .value = "5" },
     });
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&invalid_length, allocator);
@@ -953,6 +1072,103 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&forbidden, allocator);
     try (Frame{ .frame_type = FrameType.settings, .payload = &.{}, .consumed = 0 }).write(&forbidden, allocator);
     try std.testing.expectError(error.UnexpectedFrame, decodeResponse(allocator, forbidden.items));
+}
+
+test "HTTP/3 validates pseudo headers and connection-specific fields" {
+    const allocator = std.testing.allocator;
+
+    const Helper = struct {
+        fn writeRequestBlock(list: *std.ArrayList(u8), gpa: std.mem.Allocator, fields: []const Qpack.HeaderField) !void {
+            var block: std.ArrayList(u8) = .empty;
+            defer block.deinit(gpa);
+            try Qpack.encodeLiteralBlock(&block, gpa, fields);
+            try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, gpa);
+        }
+
+        fn writeRequestWithTrailers(
+            list: *std.ArrayList(u8),
+            gpa: std.mem.Allocator,
+            fields: []const Qpack.HeaderField,
+            trailers: []const Qpack.HeaderField,
+        ) !void {
+            try writeRequestBlock(list, gpa, fields);
+            var block: std.ArrayList(u8) = .empty;
+            defer block.deinit(gpa);
+            try Qpack.encodeLiteralBlock(&block, gpa, trailers);
+            try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, gpa);
+        }
+    };
+
+    const valid_request = [_]Qpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+
+    var uppercase: std.ArrayList(u8) = .empty;
+    defer uppercase.deinit(allocator);
+    try Helper.writeRequestBlock(&uppercase, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "Content-Type", .value = "text/plain" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, uppercase.items));
+
+    var duplicate_pseudo: std.ArrayList(u8) = .empty;
+    defer duplicate_pseudo.deinit(allocator);
+    try Helper.writeRequestBlock(&duplicate_pseudo, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, duplicate_pseudo.items));
+
+    var connection_specific: std.ArrayList(u8) = .empty;
+    defer connection_specific.deinit(allocator);
+    try Helper.writeRequestBlock(&connection_specific, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "transfer-encoding", .value = "chunked" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, connection_specific.items));
+
+    var bad_te: std.ArrayList(u8) = .empty;
+    defer bad_te.deinit(allocator);
+    try Helper.writeRequestBlock(&bad_te, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "te", .value = "gzip" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, bad_te.items));
+
+    var good_te: std.ArrayList(u8) = .empty;
+    defer good_te.deinit(allocator);
+    try Helper.writeRequestBlock(&good_te, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "te", .value = "trailers" },
+    });
+    var decoded = try decodeRequest(allocator, good_te.items);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("GET", decoded.method);
+
+    var pseudo_trailer: std.ArrayList(u8) = .empty;
+    defer pseudo_trailer.deinit(allocator);
+    try Helper.writeRequestWithTrailers(&pseudo_trailer, allocator, &valid_request, &.{
+        .{ .name = ":status", .value = "200" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, pseudo_trailer.items));
+
+    try std.testing.expectError(error.InvalidHeader, (Request{
+        .method = "GET",
+        .path = "/",
+        .headers = &.{.{ .name = "Connection", .value = "close" }},
+    }).write(&pseudo_trailer, allocator));
 }
 
 test "HTTP/3 response encode decode" {
