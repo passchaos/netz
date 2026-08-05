@@ -8,8 +8,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   connections, ambiguous body-length rejection, and a blocking `std.Io.net`
   TCP client/server runtime with a `std.Io.async` concurrent server helper
 - HTTP/2 frame headers, SETTINGS, DATA/HEADERS payload parsing, a bootstrap
-  HPACK static/literal encoder-decoder, and a blocking prior-knowledge h2c
-  client/server runtime with a `std.Io.async` concurrent server helper
+  HPACK static/literal encoder-decoder, PING/GOAWAY connection management, and
+  a blocking prior-knowledge h2c client/server runtime with a `std.Io.async`
+  concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   typed SETTINGS negotiation state, stateless QPACK literal helpers, a
   cleartext development runtime over the QUIC UDP frame endpoint, a protected

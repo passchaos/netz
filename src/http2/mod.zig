@@ -219,6 +219,61 @@ pub const ErrorCode = enum(u32) {
     _,
 };
 
+pub const PingPayload = struct {
+    data: [8]u8,
+
+    pub fn parse(frame: Frame) Error!PingPayload {
+        if (frame.header.frame_type != .ping or frame.header.stream_id != 0 or frame.payload.len != 8) {
+            return error.InvalidFrameSize;
+        }
+        return .{ .data = frame.payload[0..8].* };
+    }
+
+    pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, data: [8]u8, ack: bool) Error!void {
+        try (Frame{
+            .header = .{ .length = 0, .frame_type = .ping, .flags = if (ack) 0x1 else 0, .stream_id = 0 },
+            .payload = &data,
+        }).write(list, allocator);
+    }
+};
+
+pub const GoAwayPayload = struct {
+    last_stream_id: u31,
+    error_code: ErrorCode,
+    debug_data: []const u8,
+
+    pub fn parse(frame: Frame) Error!GoAwayPayload {
+        if (frame.header.frame_type != .goaway or frame.header.stream_id != 0 or frame.payload.len < 8) {
+            return error.InvalidFrameSize;
+        }
+        const raw_last = std.mem.readInt(u32, frame.payload[0..4], .big);
+        const code: ErrorCode = @enumFromInt(std.mem.readInt(u32, frame.payload[4..8], .big));
+        return .{
+            .last_stream_id = @truncate(raw_last & 0x7fff_ffff),
+            .error_code = code,
+            .debug_data = frame.payload[8..],
+        };
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        last_stream_id: u31,
+        error_code: ErrorCode,
+        debug_data: []const u8,
+    ) Error!void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        try wire.appendInt(&payload, allocator, u32, @as(u32, last_stream_id), .big);
+        try wire.appendInt(&payload, allocator, u32, @intFromEnum(error_code), .big);
+        try payload.appendSlice(allocator, debug_data);
+        try (Frame{
+            .header = .{ .length = 0, .frame_type = .goaway, .flags = 0, .stream_id = 0 },
+            .payload = payload.items,
+        }).write(list, allocator);
+    }
+};
+
 pub fn validateClientPreface(bytes: []const u8) Error!void {
     if (bytes.len < connection_preface.len) return error.BufferTooShort;
     if (!std.mem.eql(u8, bytes[0..connection_preface.len], connection_preface)) return error.InvalidPreface;
@@ -453,6 +508,29 @@ test "HTTP/2 payload helpers" {
     const data = try DataPayload.parse(frame);
     try std.testing.expectEqualStrings("ok", data.data);
     try validateClientPreface(connection_preface ++ "rest");
+}
+
+test "HTTP/2 ping and goaway payload helpers" {
+    const allocator = std.testing.allocator;
+
+    var ping_bytes: std.ArrayList(u8) = .empty;
+    defer ping_bytes.deinit(allocator);
+    const ping_data = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    try PingPayload.write(&ping_bytes, allocator, ping_data, true);
+    const ping_frame = try Frame.parse(ping_bytes.items);
+    try std.testing.expectEqual(FrameType.ping, ping_frame.header.frame_type);
+    try std.testing.expectEqual(@as(u8, 1), ping_frame.header.flags);
+    const ping = try PingPayload.parse(ping_frame);
+    try std.testing.expectEqualSlices(u8, &ping_data, &ping.data);
+
+    var goaway_bytes: std.ArrayList(u8) = .empty;
+    defer goaway_bytes.deinit(allocator);
+    try GoAwayPayload.write(&goaway_bytes, allocator, 7, .no_error, "bye");
+    const goaway_frame = try Frame.parse(goaway_bytes.items);
+    const goaway = try GoAwayPayload.parse(goaway_frame);
+    try std.testing.expectEqual(@as(u31, 7), goaway.last_stream_id);
+    try std.testing.expectEqual(ErrorCode.no_error, goaway.error_code);
+    try std.testing.expectEqualStrings("bye", goaway.debug_data);
 }
 
 test "HTTP/2 HPACK static table decode" {

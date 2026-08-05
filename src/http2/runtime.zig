@@ -288,6 +288,53 @@ pub const Connection = struct {
         if (options.body.len != 0) try self.writeData(stream_id, options.body, true);
     }
 
+    pub fn ping(self: *Connection, data: [8]u8) Error![8]u8 {
+        try writeFrame(self.allocator, self.io, self.stream, .ping, 0, 0, &data);
+        while (true) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            defer frame.deinit(self.allocator);
+            if (frame.frame.header.frame_type != .ping) continue;
+            if ((frame.frame.header.flags & flag_ack) == 0) {
+                const ping_payload = try http2.PingPayload.parse(frame.frame);
+                try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
+                continue;
+            }
+            return (try http2.PingPayload.parse(frame.frame)).data;
+        }
+    }
+
+    pub fn readPing(self: *Connection) Error![8]u8 {
+        while (true) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            defer frame.deinit(self.allocator);
+            if (frame.frame.header.frame_type != .ping) continue;
+            const ping_payload = try http2.PingPayload.parse(frame.frame);
+            if ((frame.frame.header.flags & flag_ack) == 0) {
+                try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
+            }
+            return ping_payload.data;
+        }
+    }
+
+    pub fn sendGoAway(self: *Connection, last_stream_id: u31, error_code: http2.ErrorCode, debug_data: []const u8) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try http2.GoAwayPayload.write(&encoded, self.allocator, last_stream_id, error_code, debug_data);
+        try writeAll(self.io, self.stream, encoded.items);
+    }
+
+    pub fn readGoAway(self: *Connection) Error!OwnedGoAway {
+        while (true) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            errdefer frame.deinit(self.allocator);
+            if (frame.frame.header.frame_type != .goaway) {
+                frame.deinit(self.allocator);
+                continue;
+            }
+            return .{ .frame = frame, .goaway = try http2.GoAwayPayload.parse(frame.frame) };
+        }
+    }
+
     fn readResponse(self: *Connection, stream_id: u31) Error!OwnedResponse {
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |h| freeHeaders(self.allocator, h);
@@ -397,6 +444,16 @@ pub const OwnedResponse = struct {
     pub fn deinit(self: *OwnedResponse, allocator: std.mem.Allocator) void {
         freeHeaders(allocator, self.headers);
         allocator.free(self.body);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedGoAway = struct {
+    frame: OwnedFrame,
+    goaway: http2.GoAwayPayload,
+
+    pub fn deinit(self: *OwnedGoAway, allocator: std.mem.Allocator) void {
+        self.frame.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -533,6 +590,9 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
             var connection = try server_ptr.accept();
             defer connection.close();
 
+            const ping_data = try connection.readPing();
+            try std.testing.expectEqualSlices(u8, &[_]u8{ 8, 6, 7, 5, 3, 0, 9, 9 }, &ping_data);
+
             var request = try connection.readRequest();
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("POST", request.method);
@@ -544,6 +604,7 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
                 .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
                 .body = "pong",
             });
+            try connection.sendGoAway(request.stream_id, .no_error, "done");
         }
     };
 
@@ -555,6 +616,9 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
         .max_body_bytes = 4096,
     });
     defer client.close();
+
+    const ping_ack = try client.ping(.{ 8, 6, 7, 5, 3, 0, 9, 9 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 8, 6, 7, 5, 3, 0, 9, 9 }, &ping_ack);
 
     var response = try client.request(.{
         .method = "POST",
@@ -571,6 +635,10 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("pong", response.body);
     try std.testing.expectEqualStrings("text/plain", findHeader(response.headers, "content-type").?);
+    var goaway = try client.readGoAway();
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
+    try std.testing.expectEqualStrings("done", goaway.goaway.debug_data);
 }
 
 test "HTTP/2 async std.Io server handles concurrent h2c clients" {
