@@ -74,6 +74,66 @@ pub const Setting = struct {
     value: u64,
 };
 
+pub const Settings = struct {
+    qpack_max_table_capacity: u64 = 0,
+    max_field_section_size: u64 = 16 * 1024,
+    qpack_blocked_streams: u64 = 0,
+    enable_connect_protocol: bool = false,
+    h3_datagram: bool = false,
+    webtransport_max_sessions: u64 = 0,
+
+    pub fn fromList(settings: []const Setting) Settings {
+        var out: Settings = .{};
+        for (settings) |setting| {
+            switch (setting.id) {
+                @intFromEnum(SettingId.qpack_max_table_capacity) => out.qpack_max_table_capacity = setting.value,
+                @intFromEnum(SettingId.max_field_section_size) => out.max_field_section_size = setting.value,
+                @intFromEnum(SettingId.qpack_blocked_streams) => out.qpack_blocked_streams = setting.value,
+                @intFromEnum(SettingId.enable_connect_protocol) => out.enable_connect_protocol = setting.value != 0,
+                @intFromEnum(SettingId.h3_datagram) => out.h3_datagram = setting.value != 0,
+                @intFromEnum(SettingId.webtransport_max_sessions) => out.webtransport_max_sessions = setting.value,
+                else => {}, // RFC 9114 requires unknown settings to be ignored.
+            }
+        }
+        return out;
+    }
+
+    pub fn writePayload(self: Settings, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        if (self.qpack_max_table_capacity != 0) try writeSetting(list, allocator, .qpack_max_table_capacity, self.qpack_max_table_capacity);
+        if (self.max_field_section_size != 16 * 1024) try writeSetting(list, allocator, .max_field_section_size, self.max_field_section_size);
+        if (self.qpack_blocked_streams != 0) try writeSetting(list, allocator, .qpack_blocked_streams, self.qpack_blocked_streams);
+        if (self.enable_connect_protocol) try writeSetting(list, allocator, .enable_connect_protocol, 1);
+        if (self.h3_datagram) try writeSetting(list, allocator, .h3_datagram, 1);
+        if (self.webtransport_max_sessions != 0) try writeSetting(list, allocator, .webtransport_max_sessions, self.webtransport_max_sessions);
+    }
+};
+
+fn writeSetting(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: SettingId, value: u64) Error!void {
+    try quic.varint.encode(list, allocator, @intFromEnum(id));
+    try quic.varint.encode(list, allocator, value);
+}
+
+pub const SettingsState = struct {
+    local: Settings = .{},
+    peer: Settings = .{},
+    sent: bool = false,
+    received: bool = false,
+
+    pub fn markSent(self: *SettingsState, settings: Settings) void {
+        self.local = settings;
+        self.sent = true;
+    }
+
+    pub fn markReceived(self: *SettingsState, settings: Settings) void {
+        self.peer = settings;
+        self.received = true;
+    }
+
+    pub fn ready(self: SettingsState) bool {
+        return self.sent and self.received;
+    }
+};
+
 pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]Setting {
     var cursor = wire.Cursor.init(payload);
     var settings: std.ArrayList(Setting) = .empty;
@@ -391,6 +451,36 @@ test "HTTP/3 frame settings and qpack literal block" {
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings(":method", decoded[0].name);
     try std.testing.expectEqualStrings("GET", decoded[0].value);
+}
+
+test "HTTP/3 typed settings state tracks negotiation" {
+    const allocator = std.testing.allocator;
+    const local = Settings{
+        .max_field_section_size = 32 * 1024,
+        .enable_connect_protocol = true,
+        .h3_datagram = true,
+        .webtransport_max_sessions = 16,
+    };
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try local.writePayload(&payload, allocator);
+    const raw = try parseSettings(allocator, payload.items);
+    defer allocator.free(raw);
+    const decoded = Settings.fromList(raw);
+
+    try std.testing.expectEqual(@as(u64, 32 * 1024), decoded.max_field_section_size);
+    try std.testing.expect(decoded.enable_connect_protocol);
+    try std.testing.expect(decoded.h3_datagram);
+    try std.testing.expectEqual(@as(u64, 16), decoded.webtransport_max_sessions);
+
+    var state = SettingsState{};
+    try std.testing.expect(!state.ready());
+    state.markSent(local);
+    try std.testing.expect(!state.ready());
+    state.markReceived(decoded);
+    try std.testing.expect(state.ready());
+    try std.testing.expect(state.peer.h3_datagram);
 }
 
 test "HTTP/3 datagram" {

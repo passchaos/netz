@@ -11,8 +11,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   HPACK static/literal encoder-decoder, and a blocking prior-knowledge h2c
   client/server runtime with a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
-  stateless QPACK literal helpers, a cleartext development runtime over the
-  QUIC UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with
+  typed SETTINGS negotiation state, stateless QPACK literal helpers, a
+  cleartext development runtime over the QUIC UDP frame endpoint, a protected
+  1-RTT QUIC STREAM runtime with
   STREAM frame splitting/reassembly, and a handshake-backed protected
   client/server runtime, plus a `std.Io.async` request receive helper for the
   development runtime
