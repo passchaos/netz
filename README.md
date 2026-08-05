@@ -32,7 +32,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   plus a blocking UDP endpoint runtime for frame datagrams
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, message assembly, and a blocking TCP
-  client/server runtime over HTTP/1 Upgrade
+  client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
+  server helper
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK, PUBLISH, PUBACK-style
   acknowledgements, SUBSCRIBE/SUBACK, PING, DISCONNECT, properties, and
   remaining length, plus a blocking TCP client/server runtime
