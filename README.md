@@ -40,7 +40,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   transport and a protected QUIC 1-RTT runtime over protected HTTP/3
 - WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
   SDP, DTLS record headers, RTP packets/extensions/padding, and SCTP common
-  headers, plus a blocking UDP STUN binding client/server runtime
+  headers, plus blocking UDP STUN binding and RTP packet client/server runtimes
 
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1,
