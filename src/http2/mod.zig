@@ -166,6 +166,45 @@ pub const Priority = struct {
     }
 };
 
+pub const PriorityPayload = struct {
+    stream_id: u31,
+    exclusive: bool,
+    stream_dependency: u31,
+    weight: u8,
+
+    pub fn parse(frame: Frame) Error!PriorityPayload {
+        if (frame.header.frame_type != .priority) return error.InvalidFrameSize;
+        if (frame.header.stream_id == 0) return error.InvalidStreamId;
+        const priority = try Priority.parse(frame.payload);
+        return .{
+            .stream_id = frame.header.stream_id,
+            .exclusive = priority.exclusive,
+            .stream_dependency = priority.stream_dependency,
+            .weight = priority.weight,
+        };
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+        exclusive: bool,
+        stream_dependency: u31,
+        weight: u8,
+    ) Error!void {
+        if (stream_id == 0) return error.InvalidStreamId;
+        var payload: [5]u8 = undefined;
+        var dep = @as(u32, stream_dependency);
+        if (exclusive) dep |= 0x8000_0000;
+        std.mem.writeInt(u32, payload[0..4], dep, .big);
+        payload[4] = weight;
+        try (Frame{
+            .header = .{ .length = 0, .frame_type = .priority, .flags = 0, .stream_id = stream_id },
+            .payload = &payload,
+        }).write(list, allocator);
+    }
+};
+
 pub const DataPayload = struct {
     data: []const u8,
     padding_len: u8,
@@ -567,6 +606,27 @@ test "HTTP/2 payload helpers" {
     const data = try DataPayload.parse(frame);
     try std.testing.expectEqualStrings("ok", data.data);
     try validateClientPreface(connection_preface ++ "rest");
+}
+
+test "HTTP/2 PRIORITY payload helper" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try PriorityPayload.write(&encoded, allocator, 5, true, 3, 200);
+    const frame = try Frame.parse(encoded.items);
+    try std.testing.expectEqual(FrameType.priority, frame.header.frame_type);
+    const priority = try PriorityPayload.parse(frame);
+    try std.testing.expectEqual(@as(u31, 5), priority.stream_id);
+    try std.testing.expect(priority.exclusive);
+    try std.testing.expectEqual(@as(u31, 3), priority.stream_dependency);
+    try std.testing.expectEqual(@as(u8, 200), priority.weight);
+
+    try std.testing.expectError(error.InvalidStreamId, PriorityPayload.write(&encoded, allocator, 0, false, 0, 1));
+    try std.testing.expectError(error.InvalidFrameSize, PriorityPayload.parse(.{
+        .header = .{ .length = 4, .frame_type = .priority, .flags = 0, .stream_id = 1 },
+        .payload = &.{ 0, 0, 0, 0 },
+    }));
 }
 
 test "HTTP/2 SETTINGS validates RFC value bounds" {
