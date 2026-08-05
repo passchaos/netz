@@ -205,6 +205,64 @@ pub const PriorityPayload = struct {
     }
 };
 
+pub const PushPromisePayload = struct {
+    stream_id: u31,
+    promised_stream_id: u31,
+    header_block: []const u8,
+    padding_len: u8 = 0,
+
+    pub fn parse(frame: Frame) Error!PushPromisePayload {
+        if (frame.header.frame_type != .push_promise) return error.InvalidFrameSize;
+        if (frame.header.stream_id == 0) return error.InvalidStreamId;
+        const flags = Flags.fromByte(frame.header.flags);
+        var pos: usize = 0;
+        var pad_len: u8 = 0;
+        if (flags.padded) {
+            if (frame.payload.len == 0) return error.InvalidPadding;
+            pad_len = frame.payload[0];
+            pos = 1;
+        }
+        if (frame.payload.len < pos + 4 + @as(usize, pad_len)) return error.InvalidFrameSize;
+        const raw_promised = std.mem.readInt(u32, frame.payload[pos..][0..4], .big);
+        pos += 4;
+        return .{
+            .stream_id = frame.header.stream_id,
+            .promised_stream_id = @truncate(raw_promised & 0x7fff_ffff),
+            .header_block = frame.payload[pos .. frame.payload.len - pad_len],
+            .padding_len = pad_len,
+        };
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+        promised_stream_id: u31,
+        header_block: []const u8,
+        options: struct {
+            end_headers: bool = true,
+            padding_len: u8 = 0,
+        },
+    ) Error!void {
+        if (stream_id == 0) return error.InvalidStreamId;
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        if (options.padding_len != 0) try payload.append(allocator, options.padding_len);
+        try wire.appendInt(&payload, allocator, u32, @as(u32, promised_stream_id), .big);
+        try payload.appendSlice(allocator, header_block);
+        try payload.appendNTimes(allocator, 0, options.padding_len);
+        try (Frame{
+            .header = .{
+                .length = 0,
+                .frame_type = .push_promise,
+                .flags = (if (options.end_headers) @as(u8, 0x4) else 0) | if (options.padding_len != 0) @as(u8, 0x8) else 0,
+                .stream_id = stream_id,
+            },
+            .payload = payload.items,
+        }).write(list, allocator);
+    }
+};
+
 pub const DataPayload = struct {
     data: []const u8,
     padding_len: u8,
@@ -626,6 +684,38 @@ test "HTTP/2 PRIORITY payload helper" {
     try std.testing.expectError(error.InvalidFrameSize, PriorityPayload.parse(.{
         .header = .{ .length = 4, .frame_type = .priority, .flags = 0, .stream_id = 1 },
         .payload = &.{ 0, 0, 0, 0 },
+    }));
+}
+
+test "HTTP/2 PUSH_PROMISE payload helper" {
+    const allocator = std.testing.allocator;
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/pushed.css" },
+        .{ .name = ":scheme", .value = "https" },
+    });
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try PushPromisePayload.write(&encoded, allocator, 1, 2, block.items, .{ .padding_len = 3 });
+    const frame = try Frame.parse(encoded.items);
+    try std.testing.expectEqual(FrameType.push_promise, frame.header.frame_type);
+    try std.testing.expect((frame.header.flags & (@as(Flags, .{ .padded = true })).byte()) != 0);
+    const promise = try PushPromisePayload.parse(frame);
+    try std.testing.expectEqual(@as(u31, 1), promise.stream_id);
+    try std.testing.expectEqual(@as(u31, 2), promise.promised_stream_id);
+    try std.testing.expectEqual(@as(u8, 3), promise.padding_len);
+
+    const fields = try Hpack.decodeLiteralBlock(allocator, promise.header_block);
+    defer allocator.free(fields);
+    try std.testing.expectEqualStrings("/pushed.css", fields[1].value);
+
+    try std.testing.expectError(error.InvalidStreamId, PushPromisePayload.write(&encoded, allocator, 0, 2, block.items, .{}));
+    try std.testing.expectError(error.InvalidFrameSize, PushPromisePayload.parse(.{
+        .header = .{ .length = 2, .frame_type = .push_promise, .flags = 0, .stream_id = 1 },
+        .payload = &.{ 0, 0 },
     }));
 }
 
