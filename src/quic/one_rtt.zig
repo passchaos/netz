@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.congestion.Error || quic.Error || error{
     MissingFrame,
 };
 
@@ -50,6 +50,7 @@ pub const ConnectionConfig = struct {
     initial_send_max_stream_data: u64 = std.math.maxInt(u62),
     initial_receive_max_stream_data: u64 = std.math.maxInt(u62),
     stream_receive_window: u64 = 64 * 1024,
+    max_datagram_size: usize = quic.congestion.default_max_datagram_size,
 };
 
 const StreamFlowEntry = struct {
@@ -71,6 +72,7 @@ pub const Connection = struct {
     received: quic.packet_space.ReceivedPacketTracker,
     sent: quic.packet_space.SentPacketTracker,
     recovery: quic.recovery.Queue,
+    congestion: quic.congestion.Controller,
     send_flow: quic.flow_control.SendFlow,
     recv_flow: quic.flow_control.RecvFlow,
     recv_data_total: u64 = 0,
@@ -84,6 +86,7 @@ pub const Connection = struct {
             .received = .init(endpoint.allocator, config.max_ack_ranges),
             .sent = .init(endpoint.allocator),
             .recovery = .init(endpoint.allocator),
+            .congestion = .init(config.max_datagram_size),
             .send_flow = .init(config.initial_send_max_data),
             .recv_flow = try .init(config.initial_receive_max_data, config.receive_window),
         };
@@ -133,6 +136,14 @@ pub const Connection = struct {
         defer self.endpoint.allocator.free(payload);
 
         const is_ack_eliciting = ackEliciting(frames);
+        var tracked_congestion = false;
+        if (is_ack_eliciting) {
+            try self.congestion.reserve(payload.len);
+            tracked_congestion = true;
+        }
+        errdefer {
+            if (tracked_congestion) self.congestion.discard(payload.len);
+        }
         var tracked_recovery = false;
         if (is_ack_eliciting) {
             try self.recovery.trackSent(packet_number, payload);
@@ -141,7 +152,7 @@ pub const Connection = struct {
         errdefer {
             if (tracked_recovery) _ = self.recovery.forgetPacketNumber(packet_number);
         }
-        try self.sent.sent(packet_number, is_ack_eliciting);
+        try self.sent.sent(packet_number, is_ack_eliciting, if (is_ack_eliciting) payload.len else 0);
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacket(packet_number, payload);
         self.next_packet_number += 1;
@@ -158,9 +169,11 @@ pub const Connection = struct {
     pub fn retransmitPto(self: *Connection) Error!bool {
         const candidate = self.recovery.ptoCandidate() orelse return false;
         const packet_number = self.next_packet_number;
+        self.congestion.onPtoProbeSent(candidate.payload.len);
+        errdefer self.congestion.discard(candidate.payload.len);
         try self.recovery.recordRetransmission(candidate.group_index, packet_number);
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
-        try self.sent.sent(packet_number, true);
+        try self.sent.sent(packet_number, true, candidate.payload.len);
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacket(packet_number, candidate.payload);
         self.next_packet_number += 1;
@@ -200,7 +213,8 @@ pub const Connection = struct {
         for (packet.frames) |frame| {
             switch (frame) {
                 .ack => {
-                    _ = try self.sent.applyAck(frame.ack);
+                    const acked = try self.sent.applyAckDetailed(frame.ack);
+                    self.congestion.onAcked(acked.bytes);
                     _ = try self.recovery.applyAck(frame.ack);
                 },
                 .max_data => |max_data| self.send_flow.updateLimit(max_data.maximum_data),
@@ -441,6 +455,7 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     try client.send(&frames);
     try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
     try std.testing.expect(!client.sent.packets.items[0].acknowledged);
+    try std.testing.expect(client.congestion.bytes_in_flight > 0);
 
     var received = try server.receivePacket();
     defer received.deinit(allocator);
@@ -452,6 +467,40 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.largest_acknowledged);
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
+}
+
+test "QUIC 1-RTT connection enforces congestion send window" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    const server_cid = [_]u8{ 0x55, 0x56, 0x57, 0x58 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0xc1} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0xc2} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    client.congestion.congestion_window = 0;
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try std.testing.expectError(error.CongestionLimited, client.send(&ping));
+    try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
+    try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);
 }
 
 test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {

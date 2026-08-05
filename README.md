@@ -29,6 +29,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   into 1-RTT ACK/STREAM exchange, stream send/receive state with offset reassembly and FIN,
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
+  NewReno-style congestion-window and bytes-in-flight send admission wired into
+  1-RTT sending and ACK processing,
   a minimal 1-RTT recovery queue for PTO retransmission of unacknowledged
   ack-eliciting frame payloads,
   endpoint-level connection-ID routing primitives for stable multi-connection
