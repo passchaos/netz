@@ -1,0 +1,115 @@
+const std = @import("std");
+
+/// RFC 9002 timer granularity: endpoints SHOULD use 1ms.
+pub const timer_granularity_ns: u64 = 1_000_000;
+pub const default_initial_rtt_ns: u64 = 100_000_000;
+pub const default_max_ack_delay_ns: u64 = 25_000_000;
+pub const default_persistent_congestion_threshold: u64 = 3;
+
+pub const Stats = struct {
+    latest_rtt: u64 = 0,
+    smoothed_rtt: u64 = 0,
+    rtt_var: u64 = 0,
+    min_rtt: u64 = 0,
+    max_ack_delay: u64 = default_max_ack_delay_ns,
+    has_measurement: bool = false,
+
+    pub fn init(max_ack_delay_ns: u64) Stats {
+        return .{ .max_ack_delay = max_ack_delay_ns };
+    }
+
+    /// Update RTT state from an ACK sample.
+    ///
+    /// This follows RFC 9002 section 5.3 and mirrors the behavior in the local
+    /// quic-zig/tquic/s2n-quic references: ACK delay is ignored until the
+    /// handshake is confirmed, then capped by the peer's max_ack_delay and only
+    /// subtracted when it cannot reduce the sample below min_rtt.
+    pub fn update(self: *Stats, send_delta_ns: u64, ack_delay_ns: u64, handshake_confirmed: bool) void {
+        if (send_delta_ns == 0) return;
+        self.latest_rtt = send_delta_ns;
+
+        if (!self.has_measurement) {
+            self.min_rtt = send_delta_ns;
+            self.smoothed_rtt = send_delta_ns;
+            self.rtt_var = send_delta_ns / 2;
+            self.has_measurement = true;
+            return;
+        }
+
+        self.min_rtt = @min(self.min_rtt, send_delta_ns);
+
+        var adjusted_rtt = send_delta_ns;
+        if (handshake_confirmed) {
+            const effective_ack_delay = @min(ack_delay_ns, self.max_ack_delay);
+            if (adjusted_rtt > self.min_rtt + effective_ack_delay) {
+                adjusted_rtt -= effective_ack_delay;
+            }
+        }
+
+        const diff = if (self.smoothed_rtt > adjusted_rtt)
+            self.smoothed_rtt - adjusted_rtt
+        else
+            adjusted_rtt - self.smoothed_rtt;
+        self.rtt_var = (self.rtt_var * 3 + diff) / 4;
+        self.smoothed_rtt = (self.smoothed_rtt * 7 + adjusted_rtt) / 8;
+    }
+
+    pub fn smoothedOrInitial(self: Stats) u64 {
+        return if (self.has_measurement) self.smoothed_rtt else default_initial_rtt_ns;
+    }
+
+    pub fn pto(self: Stats, include_max_ack_delay: bool) u64 {
+        if (!self.has_measurement) return 2 * default_initial_rtt_ns;
+        const base = self.smoothed_rtt + @max(4 * self.rtt_var, timer_granularity_ns);
+        return base + if (include_max_ack_delay) self.max_ack_delay else 0;
+    }
+
+    pub fn lossDelay(self: Stats) u64 {
+        if (!self.has_measurement) return default_initial_rtt_ns;
+        const basis = @max(self.latest_rtt, self.smoothed_rtt);
+        return @max(timer_granularity_ns, (basis * 9) / 8);
+    }
+
+    pub fn persistentCongestionThreshold(self: Stats) u64 {
+        return self.pto(true) * default_persistent_congestion_threshold;
+    }
+};
+
+test "QUIC RTT estimator initializes and computes PTO" {
+    var stats = Stats{};
+    try std.testing.expect(!stats.has_measurement);
+    try std.testing.expectEqual(@as(u64, 2 * default_initial_rtt_ns), stats.pto(true));
+    try std.testing.expectEqual(default_initial_rtt_ns, stats.smoothedOrInitial());
+
+    stats.update(100_000_000, 0, false);
+    try std.testing.expect(stats.has_measurement);
+    try std.testing.expectEqual(@as(u64, 100_000_000), stats.latest_rtt);
+    try std.testing.expectEqual(@as(u64, 100_000_000), stats.smoothed_rtt);
+    try std.testing.expectEqual(@as(u64, 50_000_000), stats.rtt_var);
+    try std.testing.expectEqual(@as(u64, 325_000_000), stats.pto(true));
+    try std.testing.expectEqual(@as(u64, 300_000_000), stats.pto(false));
+}
+
+test "QUIC RTT estimator applies capped ACK delay after handshake" {
+    var stats = Stats{};
+    stats.update(100_000_000, 0, false);
+    stats.update(130_000_000, 20_000_000, true);
+
+    // adjusted_rtt is 110ms, so smoothed_rtt = 7/8*100 + 1/8*110 = 101.25ms.
+    try std.testing.expect(stats.smoothed_rtt > 100_000_000);
+    try std.testing.expect(stats.smoothed_rtt < 102_000_000);
+    try std.testing.expectEqual(@as(u64, 100_000_000), stats.min_rtt);
+
+    stats.max_ack_delay = 10_000_000;
+    stats.update(150_000_000, 50_000_000, true);
+    try std.testing.expect(stats.latest_rtt == 150_000_000);
+    try std.testing.expect(stats.smoothed_rtt < 110_000_000);
+}
+
+test "QUIC RTT estimator loss and persistent congestion thresholds" {
+    var stats = Stats{};
+    stats.update(100_000_000, 0, false);
+    stats.update(120_000_000, 0, true);
+    try std.testing.expect(stats.lossDelay() >= 120_000_000);
+    try std.testing.expectEqual(stats.pto(true) * 3, stats.persistentCongestionThreshold());
+}

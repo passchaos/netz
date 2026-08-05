@@ -43,7 +43,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
   NewReno-style congestion-window and bytes-in-flight send admission wired into
-  1-RTT sending and ACK processing,
+  1-RTT sending and ACK processing, RFC 9002-style RTT/PTO estimation with
+  ACK-delay adjustment,
   a 1-RTT recovery queue for PTO and packet-threshold retransmission of
   unacknowledged ack-eliciting frame payloads,
   endpoint-level connection-ID routing primitives for stable multi-connection
