@@ -100,6 +100,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "encodeTransportParameters"));
     try std.testing.expect(@hasDecl(netz.quic, "validateTransportParameters"));
     try std.testing.expect(@hasDecl(netz.quic, "practical_transport_parameters"));
+    try std.testing.expect(@hasDecl(netz.quic, "RetryPacket"));
+    try std.testing.expect(@hasDecl(netz.quic, "writeRetryPacket"));
+    try std.testing.expect(@hasDecl(netz.quic, "verifyRetryIntegrityTag"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));

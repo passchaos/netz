@@ -32,7 +32,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), typed
   RFC-defaulted transport-parameter encoding/validation (duplicate detection,
   endpoint-specific client/server parameter rules, preferred-address parsing,
-  max UDP payload/ACK delay/stream-count bounds), plus CRYPTO stream reassembly,
+  max UDP payload/ACK delay/stream-count bounds), Retry packet codec
+  with version-specific integrity-tag verification, plus CRYPTO stream reassembly,
   v1 Initial key/header/payload protection, protected Initial packet seal/open,
   Initial CRYPTO byte exchange over UDP, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,

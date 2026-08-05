@@ -34,6 +34,8 @@ pub const Error = wire.Error || error{
     UnsupportedFrameType,
 } || std.mem.Allocator.Error;
 
+const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+
 pub const Version = enum(u32) {
     version_1 = 0x00000001,
     version_2 = 0x6b3343cf,
@@ -52,6 +54,13 @@ pub const PacketType = enum(u2) {
     retry = 3,
 };
 
+pub const retry_integrity_tag_len = 16;
+
+const retry_integrity_key_v1: [Aes128Gcm.key_length]u8 = .{ 0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e };
+const retry_integrity_nonce_v1: [Aes128Gcm.nonce_length]u8 = .{ 0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb };
+const retry_integrity_key_v2: [Aes128Gcm.key_length]u8 = .{ 0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2, 0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92 };
+const retry_integrity_nonce_v2: [Aes128Gcm.nonce_length]u8 = .{ 0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99, 0x90, 0xef, 0xb0, 0x4a };
+
 pub const LongHeader = struct {
     fixed_bit: bool,
     packet_type: PacketType,
@@ -62,6 +71,7 @@ pub const LongHeader = struct {
     token: []const u8 = &.{},
     length: ?u64 = null,
     packet_number: []const u8 = &.{},
+    retry_integrity_tag: ?[retry_integrity_tag_len]u8 = null,
 
     pub fn parse(bytes: []const u8) !LongHeader {
         var cursor = wire.Cursor.init(bytes);
@@ -69,13 +79,16 @@ pub const LongHeader = struct {
         if ((first & 0x80) == 0) return error.InvalidEncoding;
         const version_value = try cursor.readInt(u32, .big);
         const dcid_len = try cursor.readByte();
+        try validatePacketConnectionIdLen(dcid_len);
         const dcid = try cursor.readSlice(dcid_len);
         const scid_len = try cursor.readByte();
+        try validatePacketConnectionIdLen(scid_len);
         const scid = try cursor.readSlice(scid_len);
-        const packet_type: PacketType = @enumFromInt((first >> 4) & 0x03);
+        const packet_type = longHeaderPacketType(first, version_value);
         var token: []const u8 = &.{};
         var payload_len: ?u64 = null;
         var packet_number: []const u8 = &.{};
+        var retry_tag: ?[retry_integrity_tag_len]u8 = null;
         if (packet_type == .initial) {
             const token_len = try varint.decode(&cursor);
             token = try cursor.readSlice(std.math.cast(usize, token_len) orelse return error.IntegerOverflow);
@@ -86,6 +99,12 @@ pub const LongHeader = struct {
             payload_len = try varint.decode(&cursor);
             const pn_len: usize = @as(usize, (first & 0x03)) + 1;
             packet_number = try cursor.readSlice(pn_len);
+        } else if (packet_type == .retry) {
+            const remaining = bytes[cursor.pos..];
+            if (remaining.len < retry_integrity_tag_len) return error.BufferTooShort;
+            token = remaining[0 .. remaining.len - retry_integrity_tag_len];
+            if (token.len == 0) return error.InvalidFrame;
+            retry_tag = remaining[remaining.len - retry_integrity_tag_len ..][0..retry_integrity_tag_len].*;
         }
         return .{
             .fixed_bit = (first & 0x40) != 0,
@@ -97,9 +116,132 @@ pub const LongHeader = struct {
             .token = token,
             .length = payload_len,
             .packet_number = packet_number,
+            .retry_integrity_tag = retry_tag,
         };
     }
 };
+
+pub const RetryPacket = struct {
+    version: u32,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    token: []const u8,
+    integrity_tag: [retry_integrity_tag_len]u8,
+    consumed: usize,
+};
+
+pub const RetryPacketOptions = struct {
+    version: u32 = Version.version_1.wireValue(),
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    token: []const u8,
+    original_destination_connection_id: []const u8,
+    /// RFC 9000 leaves Retry's four low bits unused; allowing callers to set
+    /// them makes exact interop/vector testing possible while the default uses
+    /// all ones like RFC 9001 Appendix A.4.
+    type_specific_bits: u4 = 0x0f,
+};
+
+pub fn parseRetryPacket(bytes: []const u8) Error!RetryPacket {
+    const header = try LongHeader.parse(bytes);
+    if (header.packet_type != .retry) return error.InvalidFrame;
+    return .{
+        .version = header.version,
+        .destination_connection_id = header.destination_connection_id,
+        .source_connection_id = header.source_connection_id,
+        .token = header.token,
+        .integrity_tag = header.retry_integrity_tag orelse return error.InvalidFrame,
+        .consumed = bytes.len,
+    };
+}
+
+pub fn writeRetryPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: RetryPacketOptions) Error!void {
+    try validatePacketConnectionIdLen(options.destination_connection_id.len);
+    try validatePacketConnectionIdLen(options.source_connection_id.len);
+    try validatePacketConnectionIdLen(options.original_destination_connection_id.len);
+    if (options.token.len == 0) return error.InvalidFrame;
+
+    const start = list.items.len;
+    const type_bits = longHeaderPacketTypeBits(options.version, .retry);
+    try list.append(allocator, 0x80 | 0x40 | (type_bits << 4) | @as(u8, options.type_specific_bits));
+    try wire.appendInt(list, allocator, u32, options.version, .big);
+    try list.append(allocator, @intCast(options.destination_connection_id.len));
+    try list.appendSlice(allocator, options.destination_connection_id);
+    try list.append(allocator, @intCast(options.source_connection_id.len));
+    try list.appendSlice(allocator, options.source_connection_id);
+    try list.appendSlice(allocator, options.token);
+
+    const tag = try retryIntegrityTag(allocator, options.original_destination_connection_id, list.items[start..]);
+    try list.appendSlice(allocator, &tag);
+}
+
+pub fn retryIntegrityTag(
+    allocator: std.mem.Allocator,
+    original_destination_connection_id: []const u8,
+    retry_without_integrity_tag: []const u8,
+) Error![retry_integrity_tag_len]u8 {
+    try validatePacketConnectionIdLen(original_destination_connection_id.len);
+    if (retry_without_integrity_tag.len < 1 + 4 + 2) return error.BufferTooShort;
+
+    const version = std.mem.readInt(u32, retry_without_integrity_tag[1..5], .big);
+    const profile = retryIntegrityProfile(version);
+    const pseudo_len = std.math.add(usize, 1 + original_destination_connection_id.len, retry_without_integrity_tag.len) catch return error.IntegerOverflow;
+    const pseudo_packet = try allocator.alloc(u8, pseudo_len);
+    defer allocator.free(pseudo_packet);
+    pseudo_packet[0] = @intCast(original_destination_connection_id.len);
+    @memcpy(pseudo_packet[1..][0..original_destination_connection_id.len], original_destination_connection_id);
+    @memcpy(pseudo_packet[1 + original_destination_connection_id.len ..], retry_without_integrity_tag);
+
+    const plaintext: [0]u8 = .{};
+    var ciphertext: [0]u8 = .{};
+    var tag: [retry_integrity_tag_len]u8 = undefined;
+    Aes128Gcm.encrypt(&ciphertext, &tag, &plaintext, pseudo_packet, profile.nonce, profile.key);
+    return tag;
+}
+
+pub fn verifyRetryIntegrityTag(
+    allocator: std.mem.Allocator,
+    original_destination_connection_id: []const u8,
+    retry_datagram: []const u8,
+) Error!bool {
+    if (retry_datagram.len < retry_integrity_tag_len) return false;
+    const retry_without_tag = retry_datagram[0 .. retry_datagram.len - retry_integrity_tag_len];
+    const expected = try retryIntegrityTag(allocator, original_destination_connection_id, retry_without_tag);
+    const received = retry_datagram[retry_datagram.len - retry_integrity_tag_len ..][0..retry_integrity_tag_len].*;
+    return std.crypto.timing_safe.eql([retry_integrity_tag_len]u8, expected, received);
+}
+
+fn longHeaderPacketType(first_byte: u8, version: u32) PacketType {
+    const bits: u2 = @truncate((first_byte >> 4) & 0x03);
+    if (version == Version.version_2.wireValue()) {
+        return switch (bits) {
+            0 => .retry,
+            1 => .initial,
+            2 => .zero_rtt,
+            3 => .handshake,
+        };
+    }
+    return @enumFromInt(bits);
+}
+
+fn longHeaderPacketTypeBits(version: u32, packet_type: PacketType) u8 {
+    if (version == Version.version_2.wireValue()) {
+        return switch (packet_type) {
+            .retry => 0,
+            .initial => 1,
+            .zero_rtt => 2,
+            .handshake => 3,
+        };
+    }
+    return @intFromEnum(packet_type);
+}
+
+fn retryIntegrityProfile(version: u32) struct { key: [Aes128Gcm.key_length]u8, nonce: [Aes128Gcm.nonce_length]u8 } {
+    if (version == Version.version_2.wireValue()) {
+        return .{ .key = retry_integrity_key_v2, .nonce = retry_integrity_nonce_v2 };
+    }
+    return .{ .key = retry_integrity_key_v1, .nonce = retry_integrity_nonce_v1 };
+}
 
 pub const TransportParameterId = enum(u64) {
     original_destination_connection_id = 0x00,
@@ -982,6 +1124,10 @@ fn validateConnectionIdLen(len: usize) Error!void {
     if (len == 0 or len > 20) return error.InvalidConnectionIdLength;
 }
 
+fn validatePacketConnectionIdLen(len: usize) Error!void {
+    if (len > 20) return error.InvalidConnectionIdLength;
+}
+
 comptime {
     _ = varint;
 }
@@ -1025,6 +1171,103 @@ test "QUIC long initial header parse" {
     try std.testing.expectEqual(PacketType.initial, parsed.packet_type);
     try std.testing.expectEqualStrings("dcid", parsed.destination_connection_id);
     try std.testing.expectEqual(@as(u64, 4), parsed.length.?);
+}
+
+test "QUIC Retry packet matches RFC vector and verifies integrity" {
+    const allocator = std.testing.allocator;
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const retry_scid = [_]u8{ 0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5 };
+    const token = [_]u8{ 't', 'o', 'k', 'e', 'n' };
+    const expected_tag = [_]u8{ 0x04, 0xa2, 0x65, 0xba, 0x2e, 0xff, 0x4d, 0x82, 0x90, 0x58, 0xfb, 0x3f, 0x0f, 0x24, 0x96, 0xba };
+    const expected = [_]u8{
+        0xff,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0x00,
+        0x08,
+        0xf0,
+        0x67,
+        0xa5,
+        0x50,
+        0x2a,
+        0x42,
+        0x62,
+        0xb5,
+        't',
+        'o',
+        'k',
+        'e',
+        'n',
+        0x04,
+        0xa2,
+        0x65,
+        0xba,
+        0x2e,
+        0xff,
+        0x4d,
+        0x82,
+        0x90,
+        0x58,
+        0xfb,
+        0x3f,
+        0x0f,
+        0x24,
+        0x96,
+        0xba,
+    };
+
+    const parsed = try parseRetryPacket(&expected);
+    try std.testing.expectEqual(PacketType.retry, (try LongHeader.parse(&expected)).packet_type);
+    try std.testing.expectEqual(@as(u32, 1), parsed.version);
+    try std.testing.expectEqualStrings("", parsed.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &retry_scid, parsed.source_connection_id);
+    try std.testing.expectEqualSlices(u8, &token, parsed.token);
+    try std.testing.expectEqualSlices(u8, &expected_tag, &parsed.integrity_tag);
+    try std.testing.expect(try verifyRetryIntegrityTag(allocator, &original_dcid, &expected));
+
+    var tampered = expected;
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expect(!try verifyRetryIntegrityTag(allocator, &original_dcid, &tampered));
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const empty_cid = [_]u8{};
+    try writeRetryPacket(&encoded, allocator, .{
+        .destination_connection_id = &empty_cid,
+        .source_connection_id = &retry_scid,
+        .token = &token,
+        .original_destination_connection_id = &original_dcid,
+    });
+    try std.testing.expectEqualSlices(u8, &expected, encoded.items);
+}
+
+test "QUIC Retry packet supports version 2 type mapping" {
+    const allocator = std.testing.allocator;
+    const original_dcid = [_]u8{ 1, 2, 3, 4 };
+    const retry_dcid = [_]u8{ 5, 6 };
+    const retry_scid = [_]u8{ 7, 8, 9 };
+    const token = [_]u8{ 10, 11, 12 };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeRetryPacket(&encoded, allocator, .{
+        .version = Version.version_2.wireValue(),
+        .destination_connection_id = &retry_dcid,
+        .source_connection_id = &retry_scid,
+        .token = &token,
+        .original_destination_connection_id = &original_dcid,
+        .type_specific_bits = 0,
+    });
+
+    const header = try LongHeader.parse(encoded.items);
+    try std.testing.expectEqual(PacketType.retry, header.packet_type);
+    try std.testing.expectEqual(@as(u4, 0), header.type_specific_bits);
+    try std.testing.expectEqualSlices(u8, &retry_dcid, header.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &retry_scid, header.source_connection_id);
+    try std.testing.expectEqualSlices(u8, &token, header.token);
+    try std.testing.expect(try verifyRetryIntegrityTag(allocator, &original_dcid, encoded.items));
 }
 
 test "QUIC transport parameter parser" {
