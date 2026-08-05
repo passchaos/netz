@@ -218,6 +218,7 @@ pub const Connection = struct {
     role: Role,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
+    send_mutex: std.Io.Mutex = .init,
 
     fn bufferInitial(self: *Connection, bytes: []const u8) Error!void {
         try self.inbuf.appendSlice(self.allocator, bytes);
@@ -255,6 +256,9 @@ pub const Connection = struct {
     }
 
     pub fn sendFrame(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         const mask_key = if (self.role == .client) blk: {
@@ -532,4 +536,80 @@ test "WebSocket async std.Io server handles concurrent clients" {
     const result = shared.result.?;
     if (result.firstError()) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), result.successCount());
+}
+
+test "WebSocket connection serializes concurrent sends" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn sendOne(connection: *Connection, payload: []const u8, err: *?anyerror) void {
+            connection.sendText(payload) catch |e| {
+                err.* = e;
+            };
+        }
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+
+            var err_a: ?anyerror = null;
+            var err_b: ?anyerror = null;
+            const thread_a = try std.Thread.spawn(.{}, sendOne, .{ &connection, "from-a", &err_a });
+            const thread_b = try std.Thread.spawn(.{}, sendOne, .{ &connection, "from-b", &err_b });
+            thread_a.join();
+            thread_b.join();
+            if (err_a) |err| return err;
+            if (err_b) |err| return err;
+
+            var close = try connection.receiveFrame();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/send-lock",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+
+    var first = try client.receiveFrame();
+    defer first.deinit(allocator);
+    var second = try client.receiveFrame();
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, first.header.opcode);
+    try std.testing.expectEqual(websocket.Opcode.text, second.header.opcode);
+    const saw_a = std.mem.eql(u8, first.payload, "from-a") or std.mem.eql(u8, second.payload, "from-a");
+    const saw_b = std.mem.eql(u8, first.payload, "from-b") or std.mem.eql(u8, second.payload, "from-b");
+    try std.testing.expect(saw_a);
+    try std.testing.expect(saw_b);
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
