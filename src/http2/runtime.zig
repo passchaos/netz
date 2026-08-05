@@ -24,11 +24,13 @@ const flag_end_headers: u8 = 0x4;
 const default_flow_window: i64 = 65_535;
 const default_max_frame_size: usize = 16 * 1024;
 const max_max_frame_size: usize = 16_777_215;
+const default_max_header_list_size: usize = 16 * 1024;
 
 pub const Limits = struct {
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
     max_header_fields: usize = 256,
+    max_header_list_size: usize = default_max_header_list_size,
 };
 
 pub const Server = struct {
@@ -71,7 +73,7 @@ pub const Server = struct {
         const peer_settings = try http2.parseSettings(self.allocator, client_settings.frame.payload);
         defer self.allocator.free(peer_settings);
 
-        try writeFrame(self.allocator, self.io, stream, .settings, 0, 0, &.{});
+        try writeInitialSettings(self.allocator, self.io, stream, self.limits);
         try writeFrame(self.allocator, self.io, stream, .settings, flag_ack, 0, &.{});
 
         var connection = Connection{
@@ -177,7 +179,7 @@ pub const Client = struct {
         errdefer stream.close(io);
 
         try writeAll(io, stream, http2.connection_preface);
-        try writeFrame(allocator, io, stream, .settings, 0, 0, &.{});
+        try writeInitialSettings(allocator, io, stream, limits);
 
         var saw_server_settings = false;
         var saw_settings_ack = false;
@@ -254,6 +256,7 @@ pub const Connection = struct {
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
+    peer_max_header_list_size: usize = std.math.maxInt(usize),
 
     pub fn close(self: *Connection) void {
         self.send_stream_windows.deinit(self.allocator);
@@ -549,6 +552,7 @@ pub const Connection = struct {
     }
 
     fn writeHeaders(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, end_stream: bool) Error!void {
+        try validateHeaderListSize(headers, self.peer_max_header_list_size);
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
         try http2.Hpack.encodeLiteralBlock(&block, self.allocator, headers);
@@ -655,6 +659,7 @@ pub const Connection = struct {
                     if (setting.value < default_max_frame_size or setting.value > max_max_frame_size) return error.InvalidSetting;
                     self.peer_max_frame_size = setting.value;
                 },
+                .max_header_list_size => self.peer_max_header_list_size = setting.value,
                 else => {},
             }
         }
@@ -837,10 +842,20 @@ fn writeFrame(
     try writeAll(io, stream, encoded.items);
 }
 
+fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try http2.writeSettings(&payload, allocator, &.{
+        .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) },
+    });
+    try writeFrame(allocator, io, stream, .settings, 0, 0, payload.items);
+}
+
 fn cloneDecodedHeaders(allocator: std.mem.Allocator, block: []const u8, limits: Limits) Error![]http2.Hpack.HeaderField {
     const decoded = try http2.Hpack.decodeLiteralBlock(allocator, block);
     defer allocator.free(decoded);
     if (decoded.len > limits.max_header_fields) return error.MessageTooLarge;
+    try validateHeaderListSize(decoded, limits.max_header_list_size);
     const cloned = try allocator.alloc(http2.Hpack.HeaderField, decoded.len);
     var initialized: usize = 0;
     errdefer {
@@ -894,6 +909,20 @@ fn contentLength(headers: []const http2.Hpack.HeaderField) Error!?usize {
 fn validateContentLength(headers: []const http2.Hpack.HeaderField, actual: usize) Error!void {
     if (try contentLength(headers)) |expected| {
         if (expected != actual) return error.InvalidContentLength;
+    }
+}
+
+fn validateHeaderListSize(headers: []const http2.Hpack.HeaderField, max_size: usize) Error!void {
+    var total: usize = 0;
+    for (headers) |header| {
+        // RFC 9113 measures SETTINGS_MAX_HEADER_LIST_SIZE as the uncompressed
+        // field section size: name bytes + value bytes + 32 bytes overhead per
+        // field.  Enforcing the same accounting protects both inbound decoded
+        // headers and outbound headers constrained by the peer's SETTINGS.
+        total = std.math.add(usize, total, header.name.len) catch return error.MessageTooLarge;
+        total = std.math.add(usize, total, header.value.len) catch return error.MessageTooLarge;
+        total = std.math.add(usize, total, 32) catch return error.MessageTooLarge;
+        if (total > max_size) return error.MessageTooLarge;
     }
 }
 
@@ -2072,4 +2101,89 @@ test "HTTP/2 runtime validates frame envelope rules" {
         .header = .{ .length = 8, .frame_type = .goaway, .flags = 0, .stream_id = 1 },
         .payload = &.{ 0, 0, 0, 0, 0, 0, 0, 0 },
     }));
+}
+
+test "HTTP/2 runtime enforces header list size limits" {
+    const allocator = std.testing.allocator;
+
+    const oversized = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "x-large", .value = "0123456789" },
+    };
+    try std.testing.expectError(error.MessageTooLarge, validateHeaderListSize(&oversized, 172));
+    try validateHeaderListSize(&oversized, 173);
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &oversized);
+    try std.testing.expectError(error.MessageTooLarge, cloneDecodedHeaders(allocator, block.items, .{
+        .max_header_fields = 16,
+        .max_header_list_size = 120,
+    }));
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.recv_stream_windows.deinit(allocator);
+    }
+    try connection.applySettings(&.{.{ .id = .max_header_list_size, .value = 120 }});
+    try std.testing.expectEqual(@as(usize, 120), connection.peer_max_header_list_size);
+    try std.testing.expectError(error.MessageTooLarge, connection.writeHeaders(1, &oversized, true));
+}
+
+test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        value: u32 = 0,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            const stream = try shared.listener.accept(shared.io);
+            defer stream.close(shared.io);
+
+            var frame = try readFrame(shared.allocator, shared.io, stream, .{});
+            defer frame.deinit(shared.allocator);
+            try std.testing.expectEqual(http2.FrameType.settings, frame.frame.header.frame_type);
+            const settings = try http2.parseSettings(shared.allocator, frame.frame.payload);
+            defer shared.allocator.free(settings);
+            try std.testing.expectEqual(@as(usize, 1), settings.len);
+            try std.testing.expectEqual(http2.SettingId.max_header_list_size, settings[0].id);
+            shared.value = settings[0].value;
+        }
+    };
+
+    var shared = Shared{ .allocator = allocator, .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeInitialSettings(allocator, io, stream, .{ .max_header_list_size = 4096 });
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u32, 4096), shared.value);
 }
