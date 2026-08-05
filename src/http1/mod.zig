@@ -1,6 +1,7 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 
+pub const runtime = @import("runtime.zig");
 pub const Header = wire.Header;
 
 pub const Error = wire.Error || error{

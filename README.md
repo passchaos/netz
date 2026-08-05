@@ -4,7 +4,8 @@
 starts with deterministic parsers, serializers, and state helpers for:
 
 - HTTP/1.1 requests, responses, chunked transfer decoding, trailer fields,
-  keep-alive/upgrade handling, and ambiguous body-length rejection
+  keep-alive/upgrade handling, ambiguous body-length rejection, and a blocking
+  `std.Io.net` TCP client/server runtime
 - HTTP/2 frame headers, SETTINGS, DATA/HEADERS payload parsing, and a bootstrap
   HPACK static/literal encoder-decoder
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers, and
@@ -22,10 +23,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   SDP, DTLS record headers, RTP packets/extensions/padding, and SCTP common
   headers
 
-The first implementation layer is intentionally codec-first rather than bound to
-one runtime.  TLS, UDP/TCP sockets, event loops, congestion control, and high
-level clients/servers can be layered on top while the byte-level pieces remain
-small enough to fuzz and unit test.
+The lower protocol layers remain codec-first so they can be fuzzed and embedded,
+but practical runtime APIs are being added in priority order. HTTP/1 now includes
+a blocking TCP client/server built on Zig 0.16 `std.Io.net`; TLS, event loops,
+congestion control, and richer high-level clients/servers can layer on the same
+byte-level pieces.
 
 ## Build
 
@@ -47,6 +49,29 @@ const netz = @import("netz");
 
 const accept = netz.websocket.acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
 _ = accept;
+```
+
+HTTP/1 can also run over a real TCP stream:
+
+```zig
+var threaded = std.Io.Threaded.init(allocator, .{});
+defer threaded.deinit();
+const io = threaded.io();
+
+var client = try netz.http1.runtime.Client.connect(
+    allocator,
+    io,
+    try std.Io.net.IpAddress.parse("127.0.0.1", 8080),
+    .{},
+);
+defer client.close();
+
+var response = try client.request(.{
+    .method = .GET,
+    .target = "/",
+    .headers = &.{.{ .name = "Host", .value = "localhost" }},
+});
+defer response.deinit(allocator);
 ```
 
 ## Design notes
