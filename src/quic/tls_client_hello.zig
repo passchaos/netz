@@ -4,13 +4,16 @@ const wire = @import("../internal/wire.zig");
 
 pub const Error = error{
     InvalidClientHello,
+    InvalidServerHello,
     MissingKeyShare,
     MissingSupportedVersions,
     MissingTransportParameters,
     MissingAlpn,
+    KeyExchangeFailed,
 } || wire.Error || std.mem.Allocator.Error;
 
 const handshake_type_client_hello: u8 = 0x01;
+const handshake_type_server_hello: u8 = 0x02;
 const tls_1_2: u16 = 0x0303;
 const tls_1_3: u16 = 0x0304;
 const cipher_tls_aes_128_gcm_sha256: u16 = 0x1301;
@@ -45,6 +48,24 @@ pub const ParsedClientHello = struct {
     }
 };
 
+pub const ServerHelloOptions = struct {
+    random: [32]u8,
+    x25519_public_key: [32]u8,
+};
+
+pub const ParsedServerHello = struct {
+    random: [32]u8,
+    x25519_public_key: []const u8,
+};
+
+pub const HandshakeSecrets = struct {
+    handshake_secret: [quic.protection.secret_len]u8,
+    client_handshake_traffic_secret: [quic.protection.secret_len]u8,
+    server_handshake_traffic_secret: [quic.protection.secret_len]u8,
+    client_quic: quic.protection.PacketProtectionKeys,
+    server_quic: quic.protection.PacketProtectionKeys,
+};
+
 pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: ClientHelloOptions) Error!void {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
@@ -71,6 +92,36 @@ pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try body.appendSlice(allocator, extensions.items);
 
     try list.append(allocator, handshake_type_client_hello);
+    try appendU24(list, allocator, @intCast(body.items.len));
+    try list.appendSlice(allocator, body.items);
+}
+
+pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: ServerHelloOptions) Error!void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+
+    try appendInt(&body, allocator, u16, tls_1_2);
+    try body.appendSlice(allocator, &options.random);
+    try body.append(allocator, 0); // legacy_session_id_echo
+    try appendInt(&body, allocator, u16, cipher_tls_aes_128_gcm_sha256);
+    try body.append(allocator, 0); // legacy_compression_method
+
+    var extensions: std.ArrayList(u8) = .empty;
+    defer extensions.deinit(allocator);
+    const supported_versions = [_]u8{ 0x03, 0x04 };
+    try writeExtension(&extensions, allocator, ext_supported_versions, &supported_versions);
+
+    var key_share: std.ArrayList(u8) = .empty;
+    defer key_share.deinit(allocator);
+    try appendInt(&key_share, allocator, u16, group_x25519);
+    try appendInt(&key_share, allocator, u16, options.x25519_public_key.len);
+    try key_share.appendSlice(allocator, &options.x25519_public_key);
+    try writeExtension(&extensions, allocator, ext_key_share, key_share.items);
+
+    try appendInt(&body, allocator, u16, @intCast(extensions.items.len));
+    try body.appendSlice(allocator, extensions.items);
+
+    try list.append(allocator, handshake_type_server_hello);
     try appendU24(list, allocator, @intCast(body.items.len));
     try list.appendSlice(allocator, body.items);
 }
@@ -137,6 +188,81 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .alpn_protocols = try alpn_list.toOwnedSlice(allocator),
         .x25519_public_key = x25519.?,
         .transport_parameters = transport_parameters.?,
+    };
+}
+
+pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
+    var cursor = wire.Cursor.init(bytes);
+    if (try cursor.readByte() != handshake_type_server_hello) return error.InvalidServerHello;
+    const body_len = try readU24(&cursor);
+    const body = try cursor.readSlice(body_len);
+    if (!cursor.eof()) return error.InvalidServerHello;
+
+    var body_cursor = wire.Cursor.init(body);
+    if (try body_cursor.readInt(u16, .big) != tls_1_2) return error.InvalidServerHello;
+    const random = (try body_cursor.readSlice(32))[0..32].*;
+    const session_id_len = try body_cursor.readByte();
+    try body_cursor.skip(session_id_len);
+    if (try body_cursor.readInt(u16, .big) != cipher_tls_aes_128_gcm_sha256) return error.InvalidServerHello;
+    if (try body_cursor.readByte() != 0) return error.InvalidServerHello;
+    const extensions_len = try body_cursor.readInt(u16, .big);
+    const extensions = try body_cursor.readSlice(extensions_len);
+    if (!body_cursor.eof()) return error.InvalidServerHello;
+
+    var saw_supported_versions = false;
+    var x25519: ?[]const u8 = null;
+    var ext_cursor = wire.Cursor.init(extensions);
+    while (!ext_cursor.eof()) {
+        const typ = try ext_cursor.readInt(u16, .big);
+        const len = try ext_cursor.readInt(u16, .big);
+        const payload = try ext_cursor.readSlice(len);
+        switch (typ) {
+            ext_supported_versions => {
+                if (payload.len != 2 or std.mem.readInt(u16, payload[0..2], .big) != tls_1_3) return error.InvalidServerHello;
+                saw_supported_versions = true;
+            },
+            ext_key_share => x25519 = try parseServerX25519KeyShare(payload),
+            else => {},
+        }
+    }
+    if (!saw_supported_versions) return error.MissingSupportedVersions;
+    if (x25519 == null) return error.MissingKeyShare;
+    return .{ .random = random, .x25519_public_key = x25519.? };
+}
+
+pub fn x25519PublicKey(secret_key: [32]u8) Error![32]u8 {
+    return std.crypto.dh.X25519.recoverPublicKey(secret_key) catch return error.KeyExchangeFailed;
+}
+
+pub fn x25519SharedSecret(secret_key: [32]u8, peer_public_key: []const u8) Error![32]u8 {
+    if (peer_public_key.len != 32) return error.MissingKeyShare;
+    return std.crypto.dh.X25519.scalarmult(secret_key, peer_public_key[0..32].*) catch return error.KeyExchangeFailed;
+}
+
+pub fn transcriptHash(client_hello: []const u8, server_hello: []const u8) [32]u8 {
+    var sha = std.crypto.hash.sha2.Sha256.init(.{});
+    sha.update(client_hello);
+    sha.update(server_hello);
+    var out: [32]u8 = undefined;
+    sha.final(&out);
+    return out;
+}
+
+pub fn deriveHandshakeSecrets(shared_secret: [32]u8, transcript_hash: [32]u8) HandshakeSecrets {
+    const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
+    const zero_secret = [_]u8{0} ** quic.protection.secret_len;
+    const early_secret = HkdfSha256.extract(&zero_secret, &.{});
+    const empty_hash = std.crypto.tls.emptyHash(std.crypto.hash.sha2.Sha256);
+    const derived_secret = std.crypto.tls.hkdfExpandLabel(HkdfSha256, early_secret, "derived", &empty_hash, quic.protection.secret_len);
+    const handshake_secret = HkdfSha256.extract(&derived_secret, &shared_secret);
+    const client_hs = std.crypto.tls.hkdfExpandLabel(HkdfSha256, handshake_secret, "c hs traffic", &transcript_hash, quic.protection.secret_len);
+    const server_hs = std.crypto.tls.hkdfExpandLabel(HkdfSha256, handshake_secret, "s hs traffic", &transcript_hash, quic.protection.secret_len);
+    return .{
+        .handshake_secret = handshake_secret,
+        .client_handshake_traffic_secret = client_hs,
+        .server_handshake_traffic_secret = server_hs,
+        .client_quic = quic.protection.deriveAes128Keys(client_hs),
+        .server_quic = quic.protection.deriveAes128Keys(server_hs),
     };
 }
 
@@ -246,6 +372,16 @@ fn parseX25519KeyShare(payload: []const u8) Error![]const u8 {
     return error.MissingKeyShare;
 }
 
+fn parseServerX25519KeyShare(payload: []const u8) Error![]const u8 {
+    var cursor = wire.Cursor.init(payload);
+    const group = try cursor.readInt(u16, .big);
+    const key_len = try cursor.readInt(u16, .big);
+    const key = try cursor.readSlice(key_len);
+    if (!cursor.eof()) return error.InvalidServerHello;
+    if (group != group_x25519 or key.len != 32) return error.MissingKeyShare;
+    return key;
+}
+
 fn appendInt(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime T: type, value: T) !void {
     var tmp: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
     std.mem.writeInt(T, &tmp, value, .big);
@@ -332,4 +468,43 @@ test "QUIC TLS ClientHello travels over Initial CRYPTO exchange" {
     defer parsed.deinit(allocator);
     try std.testing.expectEqualStrings("localhost", parsed.server_name.?);
     try std.testing.expectEqualStrings("h3", parsed.alpn_protocols[0]);
+}
+
+test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
+    const allocator = std.testing.allocator;
+    const client_secret = [_]u8{0x11} ** 32;
+    const server_secret = [_]u8{0x22} ** 32;
+    const client_public = try x25519PublicKey(client_secret);
+    const server_public = try x25519PublicKey(server_secret);
+
+    var client_hello: std.ArrayList(u8) = .empty;
+    defer client_hello.deinit(allocator);
+    try writeClientHello(&client_hello, allocator, .{
+        .random = [_]u8{0x33} ** 32,
+        .x25519_public_key = client_public,
+        .server_name = "localhost",
+        .transport_parameters = &.{},
+    });
+
+    var parsed_client = try parseClientHello(allocator, client_hello.items);
+    defer parsed_client.deinit(allocator);
+    const server_shared = try x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
+
+    var server_hello: std.ArrayList(u8) = .empty;
+    defer server_hello.deinit(allocator);
+    try writeServerHello(&server_hello, allocator, .{
+        .random = [_]u8{0x44} ** 32,
+        .x25519_public_key = server_public,
+    });
+    const parsed_server = try parseServerHello(server_hello.items);
+    const client_shared = try x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
+    try std.testing.expectEqualSlices(u8, &client_shared, &server_shared);
+
+    const th = transcriptHash(client_hello.items, server_hello.items);
+    const client_keys = deriveHandshakeSecrets(client_shared, th);
+    const server_keys = deriveHandshakeSecrets(server_shared, th);
+    try std.testing.expectEqualSlices(u8, &client_keys.handshake_secret, &server_keys.handshake_secret);
+    try std.testing.expectEqualSlices(u8, &client_keys.client_quic.key, &server_keys.client_quic.key);
+    try std.testing.expectEqualSlices(u8, &client_keys.server_quic.key, &server_keys.server_quic.key);
+    try std.testing.expect(!std.mem.eql(u8, &client_keys.client_quic.key, &client_keys.server_quic.key));
 }
