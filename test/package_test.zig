@@ -37,4 +37,5 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(u32, 0x2112A442), netz.webrtc.stun.magic_cookie);
     try std.testing.expectEqual(@as(usize, 2048), (netz.webrtc.runtime.Limits{}).max_datagram_size);
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "RtpClient"));
+    try std.testing.expect(@hasDecl(netz.webrtc.runtime, "Peer"));
 }
