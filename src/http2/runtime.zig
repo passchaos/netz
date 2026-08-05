@@ -219,6 +219,11 @@ pub const FlowWindow = struct {
     }
 };
 
+const StreamWindowEntry = struct {
+    stream_id: u31,
+    window: FlowWindow = .{},
+};
+
 pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -228,8 +233,12 @@ pub const Connection = struct {
     next_client_stream_id: u31 = 1,
     send_connection_window: FlowWindow = .{},
     recv_connection_window: FlowWindow = .{},
+    send_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
+    recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
 
     pub fn close(self: *Connection) void {
+        self.send_stream_windows.deinit(self.allocator);
+        self.recv_stream_windows.deinit(self.allocator);
         self.stream.close(self.io);
         self.* = undefined;
     }
@@ -280,6 +289,7 @@ pub const Connection = struct {
                             const data = try http2.DataPayload.parse(data_frame.frame);
                             if (body.items.len + data.data.len > self.limits.max_body_bytes) return error.MessageTooLarge;
                             try self.recv_connection_window.receive(data.data.len);
+                            try (try self.recvStreamWindow(stream_id)).receive(data.data.len);
                             try body.appendSlice(self.allocator, data.data);
                             if ((data_frame.frame.header.flags & flag_end_stream) != 0) break;
                         }
@@ -362,7 +372,11 @@ pub const Connection = struct {
     }
 
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
-        if (stream_id == 0) self.recv_connection_window.update(increment);
+        if (stream_id == 0) {
+            self.recv_connection_window.update(increment);
+        } else {
+            (try self.recvStreamWindow(stream_id)).update(increment);
+        }
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try http2.WindowUpdatePayload.write(&encoded, self.allocator, stream_id, increment);
@@ -378,7 +392,11 @@ pub const Connection = struct {
                 continue;
             }
             const update = try http2.WindowUpdatePayload.parse(frame.frame);
-            if (update.stream_id == 0) self.send_connection_window.update(update.increment);
+            if (update.stream_id == 0) {
+                self.send_connection_window.update(update.increment);
+            } else {
+                (try self.sendStreamWindow(update.stream_id)).update(update.increment);
+            }
             return .{ .frame = frame, .window_update = update };
         }
     }
@@ -400,7 +418,11 @@ pub const Connection = struct {
             }
             if (frame.frame.header.frame_type == .window_update) {
                 const update = try http2.WindowUpdatePayload.parse(frame.frame);
-                if (update.stream_id == 0) self.send_connection_window.update(update.increment);
+                if (update.stream_id == 0) {
+                    self.send_connection_window.update(update.increment);
+                } else {
+                    (try self.sendStreamWindow(update.stream_id)).update(update.increment);
+                }
                 continue;
             }
             if (frame.frame.header.stream_id != stream_id) continue;
@@ -414,6 +436,7 @@ pub const Connection = struct {
                     const data = try http2.DataPayload.parse(frame.frame);
                     if (body.items.len + data.data.len > self.limits.max_body_bytes) return error.MessageTooLarge;
                     try self.recv_connection_window.receive(data.data.len);
+                    try (try self.recvStreamWindow(stream_id)).receive(data.data.len);
                     try body.appendSlice(self.allocator, data.data);
                     if ((frame.frame.header.flags & flag_end_stream) != 0) break;
                 },
@@ -448,6 +471,10 @@ pub const Connection = struct {
 
     fn writeData(self: *Connection, stream_id: u31, data: []const u8, end_stream: bool) Error!void {
         try self.send_connection_window.reserve(data.len);
+        errdefer self.send_connection_window.update(@intCast(data.len));
+        const stream_window = try self.sendStreamWindow(stream_id);
+        try stream_window.reserve(data.len);
+        errdefer stream_window.update(@intCast(data.len));
         try writeFrame(
             self.allocator,
             self.io,
@@ -457,6 +484,22 @@ pub const Connection = struct {
             stream_id,
             data,
         );
+    }
+
+    fn sendStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
+        for (self.send_stream_windows.items) |*entry| {
+            if (entry.stream_id == stream_id) return &entry.window;
+        }
+        try self.send_stream_windows.append(self.allocator, .{ .stream_id = stream_id });
+        return &self.send_stream_windows.items[self.send_stream_windows.items.len - 1].window;
+    }
+
+    fn recvStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
+        for (self.recv_stream_windows.items) |*entry| {
+            if (entry.stream_id == stream_id) return &entry.window;
+        }
+        try self.recv_stream_windows.append(self.allocator, .{ .stream_id = stream_id });
+        return &self.recv_stream_windows.items[self.recv_stream_windows.items.len - 1].window;
     }
 };
 
@@ -675,6 +718,7 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
                 .body = "pong",
             });
             try connection.sendWindowUpdate(0, 2048);
+            try connection.sendWindowUpdate(request.stream_id, 1024);
             try connection.sendGoAway(request.stream_id, .no_error, "done");
         }
     };
@@ -711,6 +755,11 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     defer window.deinit(allocator);
     try std.testing.expectEqual(@as(u31, 2048), window.window_update.increment);
     try std.testing.expectEqual(@as(i64, default_flow_window + 2048 - "ping".len), client.send_connection_window.value);
+    var stream_window = try client.readWindowUpdate();
+    defer stream_window.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), stream_window.window_update.stream_id);
+    try std.testing.expectEqual(@as(u31, 1024), stream_window.window_update.increment);
+    try std.testing.expectEqual(@as(i64, default_flow_window + 1024 - "ping".len), (try client.sendStreamWindow(1)).value);
     var goaway = try client.readGoAway();
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
