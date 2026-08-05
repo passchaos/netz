@@ -9,8 +9,9 @@ starts with deterministic parsers, serializers, and state helpers for:
 - HTTP/2 frame headers, SETTINGS, DATA/HEADERS payload parsing, a bootstrap
   HPACK static/literal encoder-decoder, and a blocking prior-knowledge h2c
   client/server runtime
-- HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers, and
-  stateless QPACK literal helpers
+- HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
+  stateless QPACK literal helpers, and a cleartext development runtime over the
+  QUIC UDP frame endpoint
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), plus
   a blocking UDP endpoint runtime for frame datagrams
@@ -34,6 +35,10 @@ endpoint runtime for datagram/frame transport; MQTT has a blocking TCP
 client/server runtime for CONNECT/PUBLISH/PING/DISCONNECT flows. TLS, event
 loops, packet protection, congestion control, ICE/DTLS/SRTP state machines, and
 richer high-level clients/servers can layer on the same byte-level pieces.
+
+The HTTP/3 runtime is intentionally labeled as a cleartext development transport:
+it exercises real UDP I/O and HTTP/3 frame/message handling over QUIC STREAM
+frames, but it is not a substitute for RFC-compliant QUIC TLS packet protection.
 
 ## Build
 
