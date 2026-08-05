@@ -1,0 +1,335 @@
+const std = @import("std");
+const quic = @import("mod.zig");
+const wire = @import("../internal/wire.zig");
+
+pub const Error = error{
+    InvalidClientHello,
+    MissingKeyShare,
+    MissingSupportedVersions,
+    MissingTransportParameters,
+    MissingAlpn,
+} || wire.Error || std.mem.Allocator.Error;
+
+const handshake_type_client_hello: u8 = 0x01;
+const tls_1_2: u16 = 0x0303;
+const tls_1_3: u16 = 0x0304;
+const cipher_tls_aes_128_gcm_sha256: u16 = 0x1301;
+const group_x25519: u16 = 0x001d;
+
+const ext_server_name: u16 = 0x0000;
+const ext_supported_groups: u16 = 0x000a;
+const ext_signature_algorithms: u16 = 0x000d;
+const ext_alpn: u16 = 0x0010;
+const ext_supported_versions: u16 = 0x002b;
+const ext_key_share: u16 = 0x0033;
+const ext_quic_transport_parameters: u16 = 0x0039;
+
+pub const ClientHelloOptions = struct {
+    random: [32]u8,
+    x25519_public_key: [32]u8,
+    server_name: ?[]const u8 = null,
+    alpn_protocols: []const []const u8 = &.{"h3"},
+    transport_parameters: []const u8 = &.{},
+};
+
+pub const ParsedClientHello = struct {
+    random: [32]u8,
+    server_name: ?[]const u8,
+    alpn_protocols: [][]const u8,
+    x25519_public_key: []const u8,
+    transport_parameters: []const u8,
+
+    pub fn deinit(self: *ParsedClientHello, allocator: std.mem.Allocator) void {
+        allocator.free(self.alpn_protocols);
+        self.* = undefined;
+    }
+};
+
+pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: ClientHelloOptions) Error!void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+
+    try appendInt(&body, allocator, u16, tls_1_2);
+    try body.appendSlice(allocator, &options.random);
+    try body.append(allocator, 0); // legacy_session_id
+    try appendInt(&body, allocator, u16, 2);
+    try appendInt(&body, allocator, u16, cipher_tls_aes_128_gcm_sha256);
+    try body.append(allocator, 1);
+    try body.append(allocator, 0); // null compression
+
+    var extensions: std.ArrayList(u8) = .empty;
+    defer extensions.deinit(allocator);
+    if (options.server_name) |name| try writeServerNameExtension(&extensions, allocator, name);
+    try writeSupportedGroupsExtension(&extensions, allocator);
+    try writeSignatureAlgorithmsExtension(&extensions, allocator);
+    try writeAlpnExtension(&extensions, allocator, options.alpn_protocols);
+    try writeSupportedVersionsExtension(&extensions, allocator);
+    try writeKeyShareExtension(&extensions, allocator, options.x25519_public_key);
+    try writeExtension(&extensions, allocator, ext_quic_transport_parameters, options.transport_parameters);
+
+    try appendInt(&body, allocator, u16, @intCast(extensions.items.len));
+    try body.appendSlice(allocator, extensions.items);
+
+    try list.append(allocator, handshake_type_client_hello);
+    try appendU24(list, allocator, @intCast(body.items.len));
+    try list.appendSlice(allocator, body.items);
+}
+
+pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!ParsedClientHello {
+    var cursor = wire.Cursor.init(bytes);
+    if (try cursor.readByte() != handshake_type_client_hello) return error.InvalidClientHello;
+    const body_len = try readU24(&cursor);
+    const body = try cursor.readSlice(body_len);
+    if (!cursor.eof()) return error.InvalidClientHello;
+
+    var body_cursor = wire.Cursor.init(body);
+    if (try body_cursor.readInt(u16, .big) != tls_1_2) return error.InvalidClientHello;
+    const random = (try body_cursor.readSlice(32))[0..32].*;
+    const session_id_len = try body_cursor.readByte();
+    try body_cursor.skip(session_id_len);
+
+    const cipher_suites_len = try body_cursor.readInt(u16, .big);
+    if (cipher_suites_len == 0 or cipher_suites_len % 2 != 0) return error.InvalidClientHello;
+    try body_cursor.skip(cipher_suites_len);
+    const compression_len = try body_cursor.readByte();
+    if (compression_len == 0) return error.InvalidClientHello;
+    try body_cursor.skip(compression_len);
+
+    const extensions_len = try body_cursor.readInt(u16, .big);
+    const extensions = try body_cursor.readSlice(extensions_len);
+    if (!body_cursor.eof()) return error.InvalidClientHello;
+
+    var server_name: ?[]const u8 = null;
+    var x25519: ?[]const u8 = null;
+    var transport_parameters: ?[]const u8 = null;
+    var saw_supported_versions = false;
+    var alpn_list: std.ArrayList([]const u8) = .empty;
+    errdefer alpn_list.deinit(allocator);
+
+    var ext_cursor = wire.Cursor.init(extensions);
+    while (!ext_cursor.eof()) {
+        const typ = try ext_cursor.readInt(u16, .big);
+        const len = try ext_cursor.readInt(u16, .big);
+        const payload = try ext_cursor.readSlice(len);
+        switch (typ) {
+            ext_server_name => server_name = try parseServerName(payload),
+            ext_alpn => try parseAlpn(allocator, &alpn_list, payload),
+            ext_supported_versions => {
+                if (payload.len != 3 or payload[0] != 2 or std.mem.readInt(u16, payload[1..3], .big) != tls_1_3) {
+                    return error.InvalidClientHello;
+                }
+                saw_supported_versions = true;
+            },
+            ext_key_share => x25519 = try parseX25519KeyShare(payload),
+            ext_quic_transport_parameters => transport_parameters = payload,
+            else => {},
+        }
+    }
+
+    if (!saw_supported_versions) return error.MissingSupportedVersions;
+    if (x25519 == null) return error.MissingKeyShare;
+    if (transport_parameters == null) return error.MissingTransportParameters;
+    if (alpn_list.items.len == 0) return error.MissingAlpn;
+
+    return .{
+        .random = random,
+        .server_name = server_name,
+        .alpn_protocols = try alpn_list.toOwnedSlice(allocator),
+        .x25519_public_key = x25519.?,
+        .transport_parameters = transport_parameters.?,
+    };
+}
+
+fn writeServerNameExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try appendInt(&payload, allocator, u16, @intCast(1 + 2 + name.len));
+    try payload.append(allocator, 0);
+    try appendInt(&payload, allocator, u16, @intCast(name.len));
+    try payload.appendSlice(allocator, name);
+    try writeExtension(list, allocator, ext_server_name, payload.items);
+}
+
+fn writeSupportedGroupsExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+    var payload: [4]u8 = undefined;
+    std.mem.writeInt(u16, payload[0..2], 2, .big);
+    std.mem.writeInt(u16, payload[2..4], group_x25519, .big);
+    try writeExtension(list, allocator, ext_supported_groups, &payload);
+}
+
+fn writeSignatureAlgorithmsExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+    // ecdsa_secp256r1_sha256 + rsa_pss_rsae_sha256 are enough for a minimal offer.
+    var payload: [6]u8 = undefined;
+    std.mem.writeInt(u16, payload[0..2], 4, .big);
+    std.mem.writeInt(u16, payload[2..4], 0x0403, .big);
+    std.mem.writeInt(u16, payload[4..6], 0x0804, .big);
+    try writeExtension(list, allocator, ext_signature_algorithms, &payload);
+}
+
+fn writeAlpnExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, protocols: []const []const u8) Error!void {
+    var names: std.ArrayList(u8) = .empty;
+    defer names.deinit(allocator);
+    for (protocols) |protocol| {
+        if (protocol.len == 0 or protocol.len > 255) return error.InvalidClientHello;
+        try names.append(allocator, @intCast(protocol.len));
+        try names.appendSlice(allocator, protocol);
+    }
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try appendInt(&payload, allocator, u16, @intCast(names.items.len));
+    try payload.appendSlice(allocator, names.items);
+    try writeExtension(list, allocator, ext_alpn, payload.items);
+}
+
+fn writeSupportedVersionsExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+    const payload = [_]u8{ 2, 0x03, 0x04 };
+    try writeExtension(list, allocator, ext_supported_versions, &payload);
+}
+
+fn writeKeyShareExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, key: [32]u8) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try appendInt(&payload, allocator, u16, 2 + 2 + key.len);
+    try appendInt(&payload, allocator, u16, group_x25519);
+    try appendInt(&payload, allocator, u16, key.len);
+    try payload.appendSlice(allocator, &key);
+    try writeExtension(list, allocator, ext_key_share, payload.items);
+}
+
+fn writeExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, typ: u16, payload: []const u8) Error!void {
+    try appendInt(list, allocator, u16, typ);
+    try appendInt(list, allocator, u16, @intCast(payload.len));
+    try list.appendSlice(allocator, payload);
+}
+
+fn parseServerName(payload: []const u8) Error![]const u8 {
+    var cursor = wire.Cursor.init(payload);
+    const list_len = try cursor.readInt(u16, .big);
+    const list = try cursor.readSlice(list_len);
+    if (!cursor.eof()) return error.InvalidClientHello;
+    var list_cursor = wire.Cursor.init(list);
+    if (try list_cursor.readByte() != 0) return error.InvalidClientHello;
+    const name_len = try list_cursor.readInt(u16, .big);
+    const name = try list_cursor.readSlice(name_len);
+    if (!list_cursor.eof()) return error.InvalidClientHello;
+    return name;
+}
+
+fn parseAlpn(allocator: std.mem.Allocator, out: *std.ArrayList([]const u8), payload: []const u8) Error!void {
+    var cursor = wire.Cursor.init(payload);
+    const list_len = try cursor.readInt(u16, .big);
+    const list = try cursor.readSlice(list_len);
+    if (!cursor.eof()) return error.InvalidClientHello;
+    var list_cursor = wire.Cursor.init(list);
+    while (!list_cursor.eof()) {
+        const len = try list_cursor.readByte();
+        if (len == 0) return error.InvalidClientHello;
+        try out.append(allocator, try list_cursor.readSlice(len));
+    }
+}
+
+fn parseX25519KeyShare(payload: []const u8) Error![]const u8 {
+    var cursor = wire.Cursor.init(payload);
+    const shares_len = try cursor.readInt(u16, .big);
+    const shares = try cursor.readSlice(shares_len);
+    if (!cursor.eof()) return error.InvalidClientHello;
+    var shares_cursor = wire.Cursor.init(shares);
+    while (!shares_cursor.eof()) {
+        const group = try shares_cursor.readInt(u16, .big);
+        const key_len = try shares_cursor.readInt(u16, .big);
+        const key = try shares_cursor.readSlice(key_len);
+        if (group == group_x25519) {
+            if (key.len != 32) return error.InvalidClientHello;
+            return key;
+        }
+    }
+    return error.MissingKeyShare;
+}
+
+fn appendInt(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime T: type, value: T) !void {
+    var tmp: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
+    std.mem.writeInt(T, &tmp, value, .big);
+    try list.appendSlice(allocator, &tmp);
+}
+
+fn appendU24(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u24) !void {
+    try list.append(allocator, @truncate(value >> 16));
+    try list.append(allocator, @truncate(value >> 8));
+    try list.append(allocator, @truncate(value));
+}
+
+fn readU24(cursor: *wire.Cursor) !usize {
+    const bytes = try cursor.readSlice(3);
+    return (@as(usize, bytes[0]) << 16) | (@as(usize, bytes[1]) << 8) | bytes[2];
+}
+
+test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
+    const allocator = std.testing.allocator;
+    const random = [_]u8{0x11} ** 32;
+    const key = [_]u8{0x22} ** 32;
+    var tp: std.ArrayList(u8) = .empty;
+    defer tp.deinit(allocator);
+    try quic.encodeTransportParameter(&tp, allocator, @intFromEnum(quic.TransportParameterId.initial_max_data), &.{ 0x40, 0x64 });
+
+    var hello: std.ArrayList(u8) = .empty;
+    defer hello.deinit(allocator);
+    try writeClientHello(&hello, allocator, .{
+        .random = random,
+        .x25519_public_key = key,
+        .server_name = "example.com",
+        .alpn_protocols = &.{ "h3", "h3-29" },
+        .transport_parameters = tp.items,
+    });
+
+    var parsed = try parseClientHello(allocator, hello.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &random, &parsed.random);
+    try std.testing.expectEqualStrings("example.com", parsed.server_name.?);
+    try std.testing.expectEqualStrings("h3", parsed.alpn_protocols[0]);
+    try std.testing.expectEqualStrings("h3-29", parsed.alpn_protocols[1]);
+    try std.testing.expectEqualSlices(u8, &key, parsed.x25519_public_key);
+
+    const params = try quic.parseTransportParameters(allocator, parsed.transport_parameters);
+    defer allocator.free(params);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.TransportParameterId.initial_max_data)), params[0].id);
+}
+
+test "QUIC TLS ClientHello travels over Initial CRYPTO exchange" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try quic.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server.deinit();
+    var client = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{ .max_datagram_size = 4096 });
+    defer client.deinit();
+
+    const original_dcid = [_]u8{ 8, 7, 6, 5, 4, 3, 2, 1 };
+    const client_scid = [_]u8{ 1, 1, 1, 1 };
+    const secrets = quic.protection.deriveInitialSecrets(&original_dcid);
+    var hello: std.ArrayList(u8) = .empty;
+    defer hello.deinit(allocator);
+    try writeClientHello(&hello, allocator, .{
+        .random = [_]u8{0x33} ** 32,
+        .x25519_public_key = [_]u8{0x44} ** 32,
+        .server_name = "localhost",
+        .transport_parameters = &.{},
+    });
+
+    try quic.initial_exchange.sendInitialCrypto(&client.endpoint, server.address(), secrets.client, .{
+        .destination_connection_id = &original_dcid,
+        .source_connection_id = &client_scid,
+        .packet_number = 0,
+        .crypto_data = hello.items,
+        .max_crypto_frame_data_len = 64,
+    });
+
+    var received = try quic.initial_exchange.receiveInitialCrypto(&server.endpoint, secrets.client, 0, 4096);
+    defer received.deinit(allocator);
+    var parsed = try parseClientHello(allocator, received.crypto_data);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualStrings("localhost", parsed.server_name.?);
+    try std.testing.expectEqualStrings("h3", parsed.alpn_protocols[0]);
+}

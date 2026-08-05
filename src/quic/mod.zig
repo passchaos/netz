@@ -6,6 +6,7 @@ pub const runtime = @import("runtime.zig");
 pub const protection = @import("protection.zig");
 pub const crypto_stream = @import("crypto_stream.zig");
 pub const initial_exchange = @import("initial_exchange.zig");
+pub const tls_client_hello = @import("tls_client_hello.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
