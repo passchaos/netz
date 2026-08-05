@@ -590,9 +590,10 @@ pub const Connection = struct {
 
     fn readHeaderBlock(self: *Connection, first: http2.Frame) Error![]http2.Hpack.HeaderField {
         if (first.header.frame_type != .headers) return error.UnexpectedFrame;
+        const first_headers = try http2.HeadersPayload.parse(first);
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
-        try block.appendSlice(self.allocator, first.payload);
+        try block.appendSlice(self.allocator, first_headers.header_block);
         if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
 
         var flags = first.header.flags;
@@ -1312,6 +1313,83 @@ test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("ok", response.body);
     try std.testing.expectEqualStrings(long_header_value, findHeader(response.headers, "x-long-response").?);
+}
+
+test "HTTP/2 runtime decodes padded priority HEADERS payloads" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/padded-priority", request.path);
+            try std.testing.expectEqualStrings("hello", request.body);
+
+            try connection.writeResponse(request.stream_id, .{ .body = "ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/padded-priority" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "content-length", .value = "5" },
+    });
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try payload.append(allocator, 2); // Pad Length.
+    try payload.appendSlice(allocator, &.{ 0, 0, 0, 0, 16 }); // PRIORITY: dependency 0, weight 16.
+    try payload.appendSlice(allocator, block.items);
+    try payload.appendSlice(allocator, &.{ 0, 0 });
+
+    const flags = flag_end_headers | @as(u8, (@as(http2.Flags, .{ .padded = true, .priority = true })).byte());
+    try writeFrame(allocator, io, client.stream, .headers, flags, 1, payload.items);
+    try client.writeData(1, "hello", true);
+
+    var response = try client.readResponse(1, "POST");
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
 }
 
 test "HTTP/2 runtime rejects malformed CONTINUATION sequence" {
