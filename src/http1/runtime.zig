@@ -516,6 +516,7 @@ fn encodeChunkedForRuntime(
     chunks: []const []const u8,
     trailers: []const http1.Header,
 ) Error!void {
+    try http1.validateTrailers(trailers);
     for (chunks) |chunk| {
         // A zero-length chunk is the chunked terminator on the wire.  Treat
         // empty payload slices as "no DATA" and emit exactly one terminating

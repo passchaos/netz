@@ -28,6 +28,7 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(u8, 0x40), netz.quic.varint.prefixForLength(2));
     try std.testing.expect(netz.http1.Method.GET.safe());
     try std.testing.expect(std.meta.stringToEnum(netz.http1.BodyFraming, "close_delimited") != null);
+    try std.testing.expect(@hasDecl(netz.http1, "validateTrailers"));
     try std.testing.expectEqual(@as(u64, 9), netz.http2.FrameHeader.encoded_len);
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.http2.runtime.Limits{}).max_body_bytes);
     try std.testing.expectEqual(@as(usize, 16 * 1024), (netz.http2.runtime.Limits{}).max_header_list_size);

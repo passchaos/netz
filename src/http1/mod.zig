@@ -16,6 +16,7 @@ pub const Error = wire.Error || error{
     InvalidContentLength,
     ConflictingContentLength,
     InvalidTransferEncoding,
+    InvalidTrailer,
     ChunkSizeOverflow,
     ContentLengthOverflow,
     RenderBufferTooSmall,
@@ -528,6 +529,7 @@ fn appendDecimalChecked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
 }
 
 pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunks: []const []const u8, trailers: []const Header) !void {
+    try validateTrailers(trailers);
     for (chunks) |chunk| {
         var tmp: [32]u8 = undefined;
         const rendered = try std.fmt.bufPrint(&tmp, "{x}\r\n", .{chunk.len});
@@ -587,6 +589,7 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
     var lines = std.mem.splitSequence(u8, bytes[pos..trailer_block_end], "\r\n");
     const trailers = try parseHeaderLines(allocator, &lines, options);
     errdefer allocator.free(trailers);
+    try validateTrailers(trailers);
     const consumed = if (trailer_end_rel == 0) pos + 2 else trailer_block_end + 4;
 
     return .{
@@ -594,6 +597,27 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
         .trailers = trailers,
         .consumed = consumed,
     };
+}
+
+pub fn validateTrailers(trailers: []const Header) Error!void {
+    for (trailers) |trailer| {
+        if (!validTrailerFieldName(trailer.name)) return error.InvalidTrailer;
+    }
+}
+
+fn validTrailerFieldName(name: []const u8) bool {
+    return !(std.ascii.eqlIgnoreCase(name, "authorization") or
+        std.ascii.eqlIgnoreCase(name, "cache-control") or
+        std.ascii.eqlIgnoreCase(name, "content-encoding") or
+        std.ascii.eqlIgnoreCase(name, "content-length") or
+        std.ascii.eqlIgnoreCase(name, "content-range") or
+        std.ascii.eqlIgnoreCase(name, "content-type") or
+        std.ascii.eqlIgnoreCase(name, "host") or
+        std.ascii.eqlIgnoreCase(name, "max-forwards") or
+        std.ascii.eqlIgnoreCase(name, "set-cookie") or
+        std.ascii.eqlIgnoreCase(name, "trailer") or
+        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
+        std.ascii.eqlIgnoreCase(name, "te"));
 }
 
 test "HTTP/1 request parse and serialize" {
@@ -626,6 +650,24 @@ test "HTTP/1 chunked codec" {
     defer decoded.deinit(allocator);
     try std.testing.expectEqualStrings("hello world", decoded.body);
     try std.testing.expectEqualStrings("sha-256=demo", decoded.trailers[0].value);
+}
+
+test "HTTP/1 chunked trailers reject forbidden fields" {
+    const allocator = std.testing.allocator;
+    const invalid = [_]Header{
+        .{ .name = "Content-Length", .value = "5" },
+        .{ .name = "Transfer-Encoding", .value = "chunked" },
+        .{ .name = "Trailer", .value = "Digest" },
+        .{ .name = "Host", .value = "example.com" },
+    };
+    for (invalid) |trailer| {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try std.testing.expectError(error.InvalidTrailer, encodeChunked(&encoded, allocator, &[_][]const u8{"hello"}, &.{trailer}));
+    }
+
+    const raw = "5\r\nhello\r\n0\r\nContent-Length: 5\r\n\r\n";
+    try std.testing.expectError(error.InvalidTrailer, decodeChunked(allocator, raw, .{}));
 }
 
 test "HTTP/1 parser decodes chunked transfer bodies" {
