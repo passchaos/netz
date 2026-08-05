@@ -71,6 +71,14 @@ pub const HandshakeSecrets = struct {
     server_quic: quic.protection.PacketProtectionKeys,
 };
 
+pub const ApplicationSecrets = struct {
+    master_secret: [quic.protection.secret_len]u8,
+    client_application_traffic_secret: [quic.protection.secret_len]u8,
+    server_application_traffic_secret: [quic.protection.secret_len]u8,
+    client_quic: quic.protection.PacketProtectionKeys,
+    server_quic: quic.protection.PacketProtectionKeys,
+};
+
 pub const ParsedEncryptedExtensions = struct {
     alpn: []const u8,
     transport_parameters: []const u8,
@@ -343,6 +351,23 @@ pub fn deriveHandshakeSecrets(shared_secret: [32]u8, transcript_hash: [32]u8) Ha
         .server_handshake_traffic_secret = server_hs,
         .client_quic = quic.protection.deriveAes128Keys(client_hs),
         .server_quic = quic.protection.deriveAes128Keys(server_hs),
+    };
+}
+
+pub fn deriveApplicationSecrets(handshake_secret: [32]u8, transcript_hash: [32]u8) ApplicationSecrets {
+    const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
+    const zero_secret = [_]u8{0} ** quic.protection.secret_len;
+    const empty_hash = std.crypto.tls.emptyHash(std.crypto.hash.sha2.Sha256);
+    const derived_secret = std.crypto.tls.hkdfExpandLabel(HkdfSha256, handshake_secret, "derived", &empty_hash, quic.protection.secret_len);
+    const master_secret = HkdfSha256.extract(&derived_secret, &zero_secret);
+    const client_ap = std.crypto.tls.hkdfExpandLabel(HkdfSha256, master_secret, "c ap traffic", &transcript_hash, quic.protection.secret_len);
+    const server_ap = std.crypto.tls.hkdfExpandLabel(HkdfSha256, master_secret, "s ap traffic", &transcript_hash, quic.protection.secret_len);
+    return .{
+        .master_secret = master_secret,
+        .client_application_traffic_secret = client_ap,
+        .server_application_traffic_secret = server_ap,
+        .client_quic = quic.protection.deriveAes128Keys(client_ap),
+        .server_quic = quic.protection.deriveAes128Keys(server_ap),
     };
 }
 
@@ -812,6 +837,45 @@ test "QUIC TLS server handshake flight travels over Handshake packet" {
     const client_shared = try x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
     const client_keys = deriveHandshakeSecrets(client_shared, hs_hash);
     try verifyFinished(client_keys.server_handshake_traffic_secret, server_finished_hash, parsed_finished);
+
+    var through_server_finished = std.crypto.hash.sha2.Sha256.init(.{});
+    through_server_finished.update(client_hello.items);
+    through_server_finished.update(server_hello.items);
+    through_server_finished.update(ee.items);
+    through_server_finished.update(finished.items);
+    var client_finished_hash: [32]u8 = undefined;
+    through_server_finished.final(&client_finished_hash);
+    const client_verify = computeFinishedVerifyData(client_keys.client_handshake_traffic_secret, client_finished_hash);
+
+    var client_finished: std.ArrayList(u8) = .empty;
+    defer client_finished.deinit(allocator);
+    try writeFinished(&client_finished, allocator, client_verify);
+    try quic.initial_exchange.sendHandshakeCrypto(&client.endpoint, server.address(), client_keys.client_quic, .{
+        .destination_connection_id = &server_scid,
+        .source_connection_id = &client_scid,
+        .packet_number = 0,
+        .crypto_data = client_finished.items,
+        .max_crypto_frame_data_len = 64,
+    });
+
+    var server_client_finished = try quic.initial_exchange.receiveHandshakeCrypto(&server.endpoint, server_keys.client_quic, 0, 4096);
+    defer server_client_finished.deinit(allocator);
+    const parsed_client_finished = try parseFinished(server_client_finished.crypto_data);
+    try verifyFinished(server_keys.client_handshake_traffic_secret, client_finished_hash, parsed_client_finished);
+
+    var full_transcript = std.crypto.hash.sha2.Sha256.init(.{});
+    full_transcript.update(client_hello.items);
+    full_transcript.update(server_hello.items);
+    full_transcript.update(ee.items);
+    full_transcript.update(finished.items);
+    full_transcript.update(client_finished.items);
+    var app_hash: [32]u8 = undefined;
+    full_transcript.final(&app_hash);
+    const client_app = deriveApplicationSecrets(client_keys.handshake_secret, app_hash);
+    const server_app = deriveApplicationSecrets(server_keys.handshake_secret, app_hash);
+    try std.testing.expectEqualSlices(u8, &client_app.client_quic.key, &server_app.client_quic.key);
+    try std.testing.expectEqualSlices(u8, &client_app.server_quic.key, &server_app.server_quic.key);
+    try std.testing.expect(!std.mem.eql(u8, &client_app.client_quic.key, &client_app.server_quic.key));
 }
 
 fn handshakeMessageLen(bytes: []const u8) usize {
