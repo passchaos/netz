@@ -6,8 +6,9 @@ starts with deterministic parsers, serializers, and state helpers for:
 - HTTP/1.1 requests, responses, chunked transfer decoding, trailer fields,
   keep-alive/upgrade handling, ambiguous body-length rejection, and a blocking
   `std.Io.net` TCP client/server runtime
-- HTTP/2 frame headers, SETTINGS, DATA/HEADERS payload parsing, and a bootstrap
-  HPACK static/literal encoder-decoder
+- HTTP/2 frame headers, SETTINGS, DATA/HEADERS payload parsing, a bootstrap
+  HPACK static/literal encoder-decoder, and a blocking prior-knowledge h2c
+  client/server runtime
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers, and
   stateless QPACK literal helpers
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
@@ -25,10 +26,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   headers
 
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
-but practical runtime APIs are being added in priority order. HTTP/1 and
-WebSocket now include blocking TCP client/server runtimes built on Zig 0.16
-`std.Io.net`; TLS, event loops, congestion control, and richer high-level
-clients/servers can layer on the same byte-level pieces.
+but practical runtime APIs are being added in priority order. HTTP/1,
+prior-knowledge HTTP/2 (h2c), and WebSocket now include blocking TCP
+client/server runtimes built on Zig 0.16 `std.Io.net`; TLS, event loops,
+congestion control, and richer high-level clients/servers can layer on the same
+byte-level pieces.
 
 ## Build
 

@@ -1,6 +1,7 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 
+pub const runtime = @import("runtime.zig");
 pub const connection_preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 pub const Error = wire.Error || error{

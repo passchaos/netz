@@ -8,6 +8,7 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(u8, 0x40), netz.quic.varint.prefixForLength(2));
     try std.testing.expect(netz.http1.Method.GET.safe());
     try std.testing.expectEqual(@as(u64, 9), netz.http2.FrameHeader.encoded_len);
+    try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.http2.runtime.Limits{}).max_body_bytes);
     try std.testing.expectEqual(@as(u64, 0x01), netz.http3.FrameType.headers);
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());
     try std.testing.expect(netz.webtransport.SessionId.init(0).isClientInitiatedBidirectional());
