@@ -206,11 +206,31 @@ pub const Connection = struct {
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        if (packet.packet.packet_number >= self.expected_packet_number) {
-            self.expected_packet_number = packet.packet.packet_number + 1;
+        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames);
+        return packet;
+    }
+
+    pub fn receiveRoutedDatagram(self: *Connection, routed: quic.runtime.RoutedBytes) Error!ReceivedPacket {
+        var packet = try openReceivedBytes(
+            self.endpoint,
+            routed.datagram.from,
+            routed.datagram.bytes,
+            self.config.receive_keys,
+            self.config.local_connection_id.len,
+            self.expected_packet_number,
+            self.config.max_frames_per_packet,
+        );
+        errdefer packet.deinit(self.endpoint.allocator);
+        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames);
+        return packet;
+    }
+
+    fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame) Error!void {
+        if (packet_number >= self.expected_packet_number) {
+            self.expected_packet_number = packet_number + 1;
         }
-        try self.received.record(packet.packet.packet_number);
-        for (packet.frames) |frame| {
+        try self.received.record(packet_number);
+        for (frames) |frame| {
             switch (frame) {
                 .ack => {
                     const acked = try self.sent.applyAckDetailed(frame.ack);
@@ -242,7 +262,6 @@ pub const Connection = struct {
                 else => {},
             }
         }
-        return packet;
     }
 
     pub fn consumeReceived(self: *Connection, amount: u64) ?quic.Frame {
@@ -347,7 +366,19 @@ pub fn receive(
 ) Error!ReceivedPacket {
     var datagram = try endpoint.receiveBytes();
     defer datagram.deinit(endpoint.allocator);
-    var packet = try quic.protection.openShortPacket(endpoint.allocator, keys, datagram.bytes, destination_connection_id_len, expected_packet_number);
+    return openReceivedBytes(endpoint, datagram.from, datagram.bytes, keys, destination_connection_id_len, expected_packet_number, max_frames);
+}
+
+pub fn openReceivedBytes(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    bytes: []const u8,
+    keys: quic.protection.PacketProtectionKeys,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+    max_frames: usize,
+) Error!ReceivedPacket {
+    var packet = try quic.protection.openShortPacket(endpoint.allocator, keys, bytes, destination_connection_id_len, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
     var frames: std.ArrayList(quic.Frame) = .empty;
     errdefer {
@@ -367,7 +398,7 @@ pub fn receive(
     }
     if (frames.items.len == 0) return error.MissingFrame;
     return .{
-        .from = datagram.from,
+        .from = from,
         .packet = packet,
         .frames = try frames.toOwnedSlice(endpoint.allocator),
     };
@@ -501,6 +532,87 @@ test "QUIC 1-RTT connection enforces congestion send window" {
     try std.testing.expectError(error.CongestionLimited, client.send(&ping));
     try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
     try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);
+}
+
+test "QUIC 1-RTT routed datagrams dispatch to separate connections" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_a_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_a_endpoint.deinit();
+    var client_b_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_b_endpoint.deinit();
+
+    const client_a_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const client_b_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const server_a_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_b_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const keys_a = quic.protection.deriveAes128Keys([_]u8{0x31} ** quic.protection.secret_len);
+    const keys_b = quic.protection.deriveAes128Keys([_]u8{0x32} ** quic.protection.secret_len);
+
+    var server_a = try Connection.init(&server_endpoint, .{
+        .peer = client_a_endpoint.address(),
+        .receive_keys = keys_a,
+        .send_keys = keys_a,
+        .local_connection_id = &server_a_cid,
+        .peer_connection_id = &client_a_cid,
+    });
+    defer server_a.deinit();
+    var server_b = try Connection.init(&server_endpoint, .{
+        .peer = client_b_endpoint.address(),
+        .receive_keys = keys_b,
+        .send_keys = keys_b,
+        .local_connection_id = &server_b_cid,
+        .peer_connection_id = &client_b_cid,
+    });
+    defer server_b.deinit();
+
+    var router = quic.connection_router.Router.init(allocator);
+    defer router.deinit();
+    try router.register(&server_a_cid, .{ .connection_index = 0 });
+    try router.register(&server_b_cid, .{ .connection_index = 1 });
+
+    const a_frames = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "for-a", .fin = true } }};
+    const b_frames = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "for-b", .fin = true } }};
+    try sendFrames(&client_a_endpoint, server_endpoint.address(), keys_a, .{
+        .destination_connection_id = &server_a_cid,
+        .packet_number = 0,
+        .frames = &a_frames,
+    });
+    try sendFrames(&client_b_endpoint, server_endpoint.address(), keys_b, .{
+        .destination_connection_id = &server_b_cid,
+        .packet_number = 0,
+        .frames = &b_frames,
+    });
+
+    var saw_a = false;
+    var saw_b = false;
+    for (0..2) |_| {
+        var routed = try server_endpoint.receiveRoutedBytes(router);
+        defer routed.deinit(allocator);
+        switch (routed.route.connection_index) {
+            0 => {
+                var packet = try server_a.receiveRoutedDatagram(routed);
+                defer packet.deinit(allocator);
+                try std.testing.expectEqualStrings("for-a", packet.frames[0].stream.data);
+                saw_a = true;
+            },
+            1 => {
+                var packet = try server_b.receiveRoutedDatagram(routed);
+                defer packet.deinit(allocator);
+                try std.testing.expectEqualStrings("for-b", packet.frames[0].stream.data);
+                saw_b = true;
+            },
+            else => return error.NoConnectionRoute,
+        }
+    }
+    try std.testing.expect(saw_a);
+    try std.testing.expect(saw_b);
 }
 
 test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {
