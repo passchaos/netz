@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.Error || error{
     MissingFrame,
 };
 
@@ -13,6 +13,14 @@ pub const SendOptions = struct {
     packet_number_len: u8 = 4,
     key_phase: bool = false,
     frames: []const quic.Frame,
+};
+
+const PayloadSendOptions = struct {
+    destination_connection_id: []const u8,
+    packet_number: u64,
+    packet_number_len: u8 = 4,
+    key_phase: bool = false,
+    payload: []const u8,
 };
 
 pub const ReceivedPacket = struct {
@@ -51,7 +59,7 @@ const StreamFlowEntry = struct {
 const StreamRecvFlowEntry = struct {
     stream_id: u64,
     flow: quic.flow_control.RecvFlow,
-    received_total: u64 = 0,
+    highest_received_end: u64 = 0,
 };
 
 pub const Connection = struct {
@@ -61,6 +69,7 @@ pub const Connection = struct {
     expected_packet_number: u64 = 0,
     received: quic.packet_space.ReceivedPacketTracker,
     sent: quic.packet_space.SentPacketTracker,
+    recovery: quic.recovery.Queue,
     send_flow: quic.flow_control.SendFlow,
     recv_flow: quic.flow_control.RecvFlow,
     recv_data_total: u64 = 0,
@@ -73,6 +82,7 @@ pub const Connection = struct {
             .config = config,
             .received = .init(endpoint.allocator, config.max_ack_ranges),
             .sent = .init(endpoint.allocator),
+            .recovery = .init(endpoint.allocator),
             .send_flow = .init(config.initial_send_max_data),
             .recv_flow = try .init(config.initial_receive_max_data, config.receive_window),
         };
@@ -81,6 +91,7 @@ pub const Connection = struct {
     pub fn deinit(self: *Connection) void {
         self.received.deinit();
         self.sent.deinit();
+        self.recovery.deinit();
         self.stream_send_flows.deinit(self.endpoint.allocator);
         self.stream_recv_flows.deinit(self.endpoint.allocator);
         self.* = undefined;
@@ -102,35 +113,67 @@ pub const Connection = struct {
                 return err;
             };
         }
-        try sendFrames(self.endpoint, self.config.peer, self.config.send_keys, .{
-            .destination_connection_id = self.config.peer_connection_id,
-            .packet_number = self.next_packet_number,
-            .frames = frames,
-        });
-        try self.sent.sent(self.next_packet_number, ackEliciting(frames));
-        self.next_packet_number += 1;
+        try self.sendTrackedFrames(frames);
     }
 
     fn sendDataBlocked(self: *Connection) Error!void {
         const frames = [_]quic.Frame{self.send_flow.dataBlockedFrame()};
-        try sendFrames(self.endpoint, self.config.peer, self.config.send_keys, .{
-            .destination_connection_id = self.config.peer_connection_id,
-            .packet_number = self.next_packet_number,
-            .frames = &frames,
-        });
-        try self.sent.sent(self.next_packet_number, true);
-        self.next_packet_number += 1;
+        try self.sendTrackedFrames(&frames);
     }
 
     fn sendStreamDataBlocked(self: *Connection, stream_id: u64, limit: u64) Error!void {
         const frames = [_]quic.Frame{.{ .stream_data_blocked = .{ .stream_id = stream_id, .maximum_stream_data = limit } }};
-        try sendFrames(self.endpoint, self.config.peer, self.config.send_keys, .{
-            .destination_connection_id = self.config.peer_connection_id,
-            .packet_number = self.next_packet_number,
-            .frames = &frames,
-        });
-        try self.sent.sent(self.next_packet_number, true);
+        try self.sendTrackedFrames(&frames);
+    }
+
+    fn sendTrackedFrames(self: *Connection, frames: []const quic.Frame) Error!void {
+        const packet_number = self.next_packet_number;
+        const payload = try encodeFrames(self.endpoint.allocator, frames);
+        defer self.endpoint.allocator.free(payload);
+
+        const is_ack_eliciting = ackEliciting(frames);
+        var tracked_recovery = false;
+        if (is_ack_eliciting) {
+            try self.recovery.trackSent(packet_number, payload);
+            tracked_recovery = true;
+        }
+        errdefer {
+            if (tracked_recovery) _ = self.recovery.forgetPacketNumber(packet_number);
+        }
+        try self.sent.sent(packet_number, is_ack_eliciting);
+        errdefer _ = self.sent.forget(packet_number);
+        try self.sendPayloadPacket(packet_number, payload);
         self.next_packet_number += 1;
+    }
+
+    fn sendPayloadPacket(self: *Connection, packet_number: u64, payload: []const u8) Error!void {
+        try sendPayload(self.endpoint, self.config.peer, self.config.send_keys, .{
+            .destination_connection_id = self.config.peer_connection_id,
+            .packet_number = packet_number,
+            .payload = payload,
+        });
+    }
+
+    pub fn retransmitPto(self: *Connection) Error!bool {
+        const candidate = self.recovery.ptoCandidate() orelse return false;
+        const packet_number = self.next_packet_number;
+        try self.recovery.recordRetransmission(candidate.group_index, packet_number);
+        errdefer _ = self.recovery.forgetPacketNumber(packet_number);
+        try self.sent.sent(packet_number, true);
+        errdefer _ = self.sent.forget(packet_number);
+        try self.sendPayloadPacket(packet_number, candidate.payload);
+        self.next_packet_number += 1;
+        return true;
+    }
+
+    pub fn markPacketAcknowledged(self: *Connection, packet_number: u64) bool {
+        const marked_sent = self.sent.markAcknowledged(packet_number);
+        const removed_recovery = self.recovery.acknowledgePacketNumber(packet_number);
+        return marked_sent or removed_recovery;
+    }
+
+    pub fn pendingRecoveryCount(self: Connection) usize {
+        return self.recovery.pendingCount();
     }
 
     pub fn sendAck(self: *Connection, ack_delay: u64) Error!void {
@@ -149,24 +192,37 @@ pub const Connection = struct {
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        self.expected_packet_number = packet.packet.packet_number + 1;
+        if (packet.packet.packet_number >= self.expected_packet_number) {
+            self.expected_packet_number = packet.packet.packet_number + 1;
+        }
         try self.received.record(packet.packet.packet_number);
         for (packet.frames) |frame| {
             switch (frame) {
-                .ack => _ = try self.sent.applyAck(frame.ack),
+                .ack => {
+                    _ = try self.sent.applyAck(frame.ack);
+                    _ = try self.recovery.applyAck(frame.ack);
+                },
                 .max_data => |max_data| self.send_flow.updateLimit(max_data.maximum_data),
                 .max_stream_data => |max_stream_data| {
                     const flow = try self.sendStreamFlow(max_stream_data.stream_id);
                     flow.updateLimit(max_stream_data.maximum_stream_data);
                 },
                 .stream => |stream| {
-                    const next_total = self.recv_data_total + stream.data.len;
-                    try self.recv_flow.receive(next_total);
-                    self.recv_data_total = next_total;
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
-                    const stream_next_total = recv_stream.received_total + stream.data.len;
-                    try recv_stream.flow.receive(stream_next_total);
-                    recv_stream.received_total = stream_next_total;
+                    const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
+                    const stream_end = std.math.add(u64, stream.offset, data_len) catch return error.InvalidFrameLength;
+                    try recv_stream.flow.receive(stream_end);
+
+                    // PTO retransmits the same STREAM bytes with a new packet
+                    // number.  Flow control is offset-based, so a duplicate
+                    // frame must not consume connection credit again.
+                    if (stream_end > recv_stream.highest_received_end) {
+                        const new_stream_credit = stream_end - recv_stream.highest_received_end;
+                        const next_total = std.math.add(u64, self.recv_data_total, new_stream_credit) catch return error.FlowControlViolation;
+                        try self.recv_flow.receive(next_total);
+                        self.recv_data_total = next_total;
+                        recv_stream.highest_received_end = stream_end;
+                    }
                 },
                 else => {},
             }
@@ -214,15 +270,36 @@ pub fn sendFrames(
     keys: quic.protection.PacketProtectionKeys,
     options: SendOptions,
 ) Error!void {
+    const payload = try encodeFrames(endpoint.allocator, options.frames);
+    defer endpoint.allocator.free(payload);
+    try sendPayload(endpoint, to, keys, .{
+        .destination_connection_id = options.destination_connection_id,
+        .packet_number = options.packet_number,
+        .packet_number_len = options.packet_number_len,
+        .key_phase = options.key_phase,
+        .payload = payload,
+    });
+}
+
+pub fn encodeFrames(allocator: std.mem.Allocator, frames: []const quic.Frame) Error![]u8 {
     var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
-    for (options.frames) |frame| try frame.write(&payload, endpoint.allocator);
+    errdefer payload.deinit(allocator);
+    for (frames) |frame| try frame.write(&payload, allocator);
+    return payload.toOwnedSlice(allocator);
+}
+
+fn sendPayload(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    options: PayloadSendOptions,
+) Error!void {
     const packet = try quic.protection.sealShortPacket(endpoint.allocator, keys, .{
         .destination_connection_id = options.destination_connection_id,
         .packet_number = options.packet_number,
         .packet_number_len = options.packet_number_len,
         .key_phase = options.key_phase,
-        .payload = payload.items,
+        .payload = options.payload,
     });
     defer endpoint.allocator.free(packet);
     try endpoint.sendBytes(to, packet);
@@ -367,6 +444,73 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     defer ack_packet.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.largest_acknowledged);
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+}
+
+test "QUIC 1-RTT connection retransmits PTO payload and clears recovery on ACK" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const server_cid = [_]u8{ 0x35, 0x36, 0x37, 0x38 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0xa1} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0xa2} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .initial_receive_max_data = 4,
+        .initial_receive_max_stream_data = 4,
+    });
+    defer server.deinit();
+
+    const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .offset = 0, .data = "lost", .fin = false } }};
+    try client.send(&frames);
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), first.packet.packet_number);
+    try std.testing.expectEqualStrings("lost", first.frames[0].stream.data);
+
+    try std.testing.expect(try client.retransmitPto());
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
+
+    var retransmitted = try server.receivePacket();
+    defer retransmitted.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), retransmitted.packet.packet_number);
+    try std.testing.expectEqualStrings("lost", retransmitted.frames[0].stream.data);
+    try std.testing.expectEqual(@as(u64, 4), server.recv_data_total);
+
+    try server.sendAck(0);
+    var ack_packet = try client.receivePacket();
+    defer ack_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), ack_packet.frames[0].ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 1), ack_packet.frames[0].ack.first_ack_range);
+    try std.testing.expect(client.sent.packets.items[0].acknowledged);
+    try std.testing.expect(client.sent.packets.items[1].acknowledged);
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+    try std.testing.expect(!(try client.retransmitPto()));
 }
 
 test "QUIC 1-RTT connection emits DATA_BLOCKED and applies MAX_DATA" {

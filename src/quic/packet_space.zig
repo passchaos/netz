@@ -123,15 +123,38 @@ pub const SentPacketTracker = struct {
         try self.packets.append(self.allocator, .{ .packet_number = packet_number, .ack_eliciting = ack_eliciting });
     }
 
+    pub fn forget(self: *SentPacketTracker, packet_number: u64) bool {
+        for (self.packets.items, 0..) |packet, i| {
+            if (packet.packet_number == packet_number) {
+                _ = self.packets.orderedRemove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn markAcknowledged(self: *SentPacketTracker, packet_number: u64) bool {
+        for (self.packets.items) |*packet| {
+            if (packet.packet_number == packet_number) {
+                packet.acknowledged = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
     pub fn applyAck(self: *SentPacketTracker, ack: quic.AckFrame) Error!usize {
+        if (ack.largest_acknowledged < ack.first_ack_range) return error.InvalidAckFrame;
+
         var acked: usize = 0;
         var start = ack.largest_acknowledged - ack.first_ack_range;
         var end = ack.largest_acknowledged;
         acked += self.markRange(start, end);
 
         for (ack.ranges) |range| {
-            if (start < range.gap + 2) return error.InvalidAckFrame;
-            end = start - range.gap - 2;
+            const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidAckFrame;
+            if (start < skipped) return error.InvalidAckFrame;
+            end = start - skipped;
             if (end < range.ack_range_length) return error.InvalidAckFrame;
             start = end - range.ack_range_length;
             acked += self.markRange(start, end);

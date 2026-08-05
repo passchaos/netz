@@ -11,6 +11,7 @@ pub const one_rtt = @import("one_rtt.zig");
 pub const packet_space = @import("packet_space.zig");
 pub const stream_state = @import("stream.zig");
 pub const flow_control = @import("flow_control.zig");
+pub const recovery = @import("recovery.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
