@@ -12,8 +12,8 @@ starts with deterministic parsers, serializers, and state helpers for:
 - HTTP/2 frame headers, SETTINGS, DATA/HEADERS payload parsing, a bootstrap
   HPACK static/literal encoder-decoder, PING/GOAWAY/WINDOW_UPDATE connection
   management, connection- and stream-level flow-control enforcement including
-  SETTINGS_INITIAL_WINDOW_SIZE updates, content-length validation and CONNECT
-  body rules, and a blocking prior-knowledge h2c client/server runtime with a
+  SETTINGS_INITIAL_WINDOW_SIZE updates, request/response trailers, content-length
+  validation and CONNECT body rules, and a blocking prior-knowledge h2c client/server runtime with a
   `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with GOAWAY monotonicity checks,
