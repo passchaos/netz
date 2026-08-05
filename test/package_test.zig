@@ -12,6 +12,11 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.websocket.runtime.Limits{}).max_frame_bytes);
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "send_mutex"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime, "OwnedMessage"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessage"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendFragmented"));
+    try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "close_sent"));
+    try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "close_received"));
     try std.testing.expectEqual(@as(u8, 0x40), netz.quic.varint.prefixForLength(2));
     try std.testing.expect(netz.http1.Method.GET.safe());
     try std.testing.expectEqual(@as(u64, 9), netz.http2.FrameHeader.encoded_len);

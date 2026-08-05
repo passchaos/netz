@@ -211,6 +211,16 @@ pub const ConnectOptions = struct {
     limits: Limits = .{},
 };
 
+pub const OwnedMessage = struct {
+    opcode: websocket.Opcode,
+    payload: []u8,
+
+    pub fn deinit(self: *OwnedMessage, allocator: std.mem.Allocator) void {
+        allocator.free(self.payload);
+        self.* = undefined;
+    }
+};
+
 pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -219,6 +229,8 @@ pub const Connection = struct {
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
     send_mutex: std.Io.Mutex = .init,
+    close_sent: bool = false,
+    close_received: bool = false,
 
     fn bufferInitial(self: *Connection, bytes: []const u8) Error!void {
         try self.inbuf.appendSlice(self.allocator, bytes);
@@ -256,18 +268,26 @@ pub const Connection = struct {
     }
 
     pub fn sendFrame(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
+        if (self.close_sent and opcode != .close) return error.ConnectionClosed;
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        try self.writeFrameLocked(opcode, payload, true);
+        if (opcode == .close) self.close_sent = true;
+    }
+
+    pub fn sendFragmented(self: *Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
+        if (self.close_sent) return error.ConnectionClosed;
+        if (opcode != .text and opcode != .binary) return error.InvalidFrame;
+        if (fragments.len == 0) return error.InvalidFrame;
+
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
 
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        const mask_key = if (self.role == .client) blk: {
-            var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io, &key);
-            break :blk key;
-        } else null;
-        try websocket.writeFrame(&encoded, self.allocator, opcode, payload, .{ .mask_key = mask_key });
-        try writeAll(self.io, self.stream, encoded.items);
+        for (fragments, 0..) |fragment, index| {
+            const frame_opcode: websocket.Opcode = if (index == 0) opcode else .continuation;
+            const fin = index + 1 == fragments.len;
+            try self.writeFrameLocked(frame_opcode, fragment, fin);
+        }
     }
 
     pub fn receiveFrame(self: *Connection) Error!websocket.Frame {
@@ -292,6 +312,52 @@ pub const Connection = struct {
         const frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
         self.discardBuffered(frame.consumed);
         return frame;
+    }
+
+    pub fn receiveMessage(self: *Connection) Error!OwnedMessage {
+        var assembler = websocket.MessageAssembler.init(self.allocator);
+        defer assembler.deinit();
+
+        while (true) {
+            var frame = try self.receiveFrame();
+            defer frame.deinit(self.allocator);
+            switch (frame.header.opcode) {
+                .ping => {
+                    try self.sendPong(frame.payload);
+                    continue;
+                },
+                .pong => continue,
+                .close => {
+                    self.close_received = true;
+                    if (!self.close_sent) {
+                        try self.sendFrame(.close, frame.payload);
+                    }
+                    return error.ConnectionClosed;
+                },
+                else => {
+                    const maybe_message = try assembler.feed(frame);
+                    if (maybe_message) |message| {
+                        if (message.opcode == .text and !std.unicode.utf8ValidateSlice(message.payload)) {
+                            self.allocator.free(message.payload);
+                            return error.InvalidUtf8;
+                        }
+                        return .{ .opcode = message.opcode, .payload = message.payload };
+                    }
+                },
+            }
+        }
+    }
+
+    fn writeFrameLocked(self: *Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        const mask_key = if (self.role == .client) blk: {
+            var key: [4]u8 = undefined;
+            try std.Io.randomSecure(self.io, &key);
+            break :blk key;
+        } else null;
+        try websocket.writeFrame(&encoded, self.allocator, opcode, payload, .{ .fin = fin, .mask_key = mask_key });
+        try writeAll(self.io, self.stream, encoded.items);
     }
 
     fn ensureBuffered(self: *Connection, len: usize) Error!void {
@@ -431,6 +497,74 @@ test "WebSocket runtime client and server exchange over TCP" {
     try std.testing.expectEqualStrings("world", response.payload);
 
     try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket receiveMessage assembles fragments and handles control frames" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+
+            var message = try connection.receiveMessage();
+            defer message.deinit(connection.allocator);
+            try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
+            try std.testing.expectEqualStrings("hello fragmented", message.payload);
+
+            try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
+            try std.testing.expect(connection.close_received);
+            try std.testing.expect(connection.close_sent);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/message",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+
+    try client.sendPing("?");
+    const fragments = [_][]const u8{ "hello ", "fragmented" };
+    try client.sendFragmented(.text, &fragments);
+
+    var pong = try client.receiveFrame();
+    defer pong.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.pong, pong.header.opcode);
+    try std.testing.expectEqualStrings("?", pong.payload);
+
+    try client.sendClose(.normal_closure, "bye");
+    var close = try client.receiveFrame();
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
 
     thread.join();
     if (shared.err) |err| return err;
