@@ -110,6 +110,7 @@ pub const SentPacket = struct {
 pub const SentPacketTracker = struct {
     allocator: std.mem.Allocator,
     packets: std.ArrayList(SentPacket) = .empty,
+    largest_acknowledged: ?u64 = null,
 
     pub fn init(allocator: std.mem.Allocator) SentPacketTracker {
         return .{ .allocator = allocator };
@@ -138,10 +139,15 @@ pub const SentPacketTracker = struct {
         for (self.packets.items) |*packet| {
             if (packet.packet_number == packet_number) {
                 packet.acknowledged = true;
+                self.observeAcknowledged(packet_number);
                 return true;
             }
         }
         return false;
+    }
+
+    pub fn largestAcknowledged(self: SentPacketTracker) ?u64 {
+        return self.largest_acknowledged;
     }
 
     pub const AckResult = struct {
@@ -180,6 +186,9 @@ pub const SentPacketTracker = struct {
     fn markRange(self: *SentPacketTracker, start: u64, end: u64) AckResult {
         var result: AckResult = .{};
         for (self.packets.items) |*packet| {
+            if (packet.packet_number >= start and packet.packet_number <= end) {
+                self.observeAcknowledged(packet.packet_number);
+            }
             if (!packet.acknowledged and packet.packet_number >= start and packet.packet_number <= end) {
                 packet.acknowledged = true;
                 result.packets += 1;
@@ -187,6 +196,12 @@ pub const SentPacketTracker = struct {
             }
         }
         return result;
+    }
+
+    fn observeAcknowledged(self: *SentPacketTracker, packet_number: u64) void {
+        if (self.largest_acknowledged == null or packet_number > self.largest_acknowledged.?) {
+            self.largest_acknowledged = packet_number;
+        }
     }
 };
 
@@ -227,6 +242,7 @@ test "QUIC sent packet tracker applies ACK ranges" {
     const result = try sent.applyAckDetailed(ack);
     try std.testing.expectEqual(@as(usize, 6), result.packets);
     try std.testing.expectEqual(@as(usize, 6 * 1200), result.bytes);
+    try std.testing.expectEqual(@as(u64, 10), sent.largestAcknowledged().?);
     try std.testing.expect(sent.packets.items[10].acknowledged);
     try std.testing.expect(sent.packets.items[8].acknowledged);
     try std.testing.expect(sent.packets.items[7].acknowledged);

@@ -187,6 +187,7 @@ pub const Connection = struct {
         try sendPayload(self.endpoint, self.config.peer, self.config.send_keys, .{
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = packet_number,
+            .packet_number_len = quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload.len),
             .payload = payload,
         });
     }

@@ -200,6 +200,39 @@ pub fn openAes128Payload(
     try Aes128Gcm.decrypt(plaintext, ciphertext, tag, associated_data, nonce, keys.key);
 }
 
+pub fn packetNumberLen(packet_number: u64, largest_acknowledged: ?u64) u8 {
+    // RFC 9000 Section 17.1 / Appendix A.2: the truncated packet number must
+    // represent more than twice the distance from the largest acknowledged
+    // packet.  Implementations such as tquic and s2n-quic compute the shortest
+    // valid encoding from that distance and then freely use a longer encoding
+    // when packet construction needs it.
+    const outstanding = if (largest_acknowledged) |largest|
+        packet_number -| largest
+    else
+        packet_number +| 1;
+    const significant_bits: u7 = if (outstanding == 0) 0 else @intCast(@bitSizeOf(u64) - @clz(outstanding));
+    const required_bits = significant_bits + 1;
+    const bytes = @max(@as(u7, 1), (required_bits + 7) / 8);
+    return @intCast(@min(bytes, 4));
+}
+
+pub fn packetNumberLenForPayload(packet_number: u64, largest_acknowledged: ?u64, payload_len: usize) u8 {
+    const adaptive = packetNumberLen(packet_number, largest_acknowledged);
+    return @max(adaptive, minimumPacketNumberLenForHeaderProtection(payload_len));
+}
+
+pub fn minimumPacketNumberLenForHeaderProtection(payload_len: usize) u8 {
+    // QUIC header protection samples 16 bytes starting four bytes after the
+    // packet-number offset, regardless of the actual packet-number length.
+    // Because the AEAD tag already contributes 16 bytes, an unpadded packet
+    // needs `packet_number_len + payload_len >= 4`.  Use a longer packet
+    // number for tiny payloads instead of silently producing an unprotectable
+    // packet; callers that insert PADDING can still request a shorter length
+    // directly through the seal*Packet options.
+    if (payload_len >= 3) return 1;
+    return @intCast(4 - payload_len);
+}
+
 pub fn sealInitialPacket(
     allocator: std.mem.Allocator,
     keys: PacketProtectionKeys,
@@ -557,6 +590,21 @@ test "QUIC AES payload protection roundtrip" {
     var bad_tag = tag;
     bad_tag[0] ^= 0xff;
     try std.testing.expectError(error.AuthenticationFailed, openAes128Payload(keys, 2, ad, &ciphertext, bad_tag, &opened));
+}
+
+test "QUIC packet number length follows RFC 9000 adaptive encoding" {
+    try std.testing.expectEqual(@as(u8, 1), packetNumberLen(0, null));
+    try std.testing.expectEqual(@as(u8, 1), packetNumberLen(0xabe8b3 + 1, 0xabe8b3));
+    try std.testing.expectEqual(@as(u8, 2), packetNumberLen(0xac5c02, 0xabe8b3));
+    try std.testing.expectEqual(@as(u8, 3), packetNumberLen(0xace8fe, 0xabe8b3));
+    try std.testing.expectEqual(@as(u8, 4), packetNumberLen(std.math.maxInt(u62), 0));
+}
+
+test "QUIC packet number length grows for tiny unpadded payloads" {
+    try std.testing.expectEqual(@as(u8, 4), minimumPacketNumberLenForHeaderProtection(0));
+    try std.testing.expectEqual(@as(u8, 3), packetNumberLenForPayload(1, 0, 1));
+    try std.testing.expectEqual(@as(u8, 2), packetNumberLenForPayload(1, 0, 2));
+    try std.testing.expectEqual(@as(u8, 1), packetNumberLenForPayload(1, 0, 3));
 }
 
 test "QUIC Initial packet seal/open roundtrip" {
