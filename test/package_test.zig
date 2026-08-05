@@ -11,6 +11,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readResponseFromStreamBufferedForRequest"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readRequestFromStreamBuffered"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readResponseFromStreamForRequest"));
+    try std.testing.expect(@hasField(netz.http1.runtime.RequestOptions, "trailers"));
+    try std.testing.expect(@hasField(netz.http1.runtime.ResponseOptions, "trailers"));
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.websocket.runtime.Limits{}).max_frame_bytes);
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "send_mutex"));

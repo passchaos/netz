@@ -227,6 +227,7 @@ pub const RequestOptions = struct {
     version: http1.Version = .http_1_1,
     headers: []const http1.Header = &.{},
     body: []const u8 = &.{},
+    trailers: []const http1.Header = &.{},
 };
 
 pub const ResponseOptions = struct {
@@ -235,6 +236,7 @@ pub const ResponseOptions = struct {
     reason: []const u8 = "OK",
     headers: []const http1.Header = &.{},
     body: []const u8 = &.{},
+    trailers: []const http1.Header = &.{},
 };
 
 pub fn readRequestFromStream(
@@ -355,26 +357,60 @@ pub fn readResponseFromStreamBufferedForRequest(
 }
 
 pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: RequestOptions) Error!void {
+    const use_chunked = try chunkedWriteFraming(options.version, options.headers, options.trailers);
     var headers: std.ArrayList(http1.Header) = .empty;
     defer headers.deinit(allocator);
     var len_buf: [32]u8 = undefined;
-    try appendDefaultedHeaders(&headers, allocator, options.headers, options.body.len, &len_buf);
+    var trailer_value: std.ArrayList(u8) = .empty;
+    defer trailer_value.deinit(allocator);
+    try appendDefaultedHeaders(&headers, allocator, options.headers, options.body.len, options.trailers, use_chunked, &len_buf, &trailer_value);
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    try http1.writeRequestChecked(&encoded, allocator, options.method, options.target, options.version, headers.items, options.body);
+    try encoded.appendSlice(allocator, options.method.string());
+    try encoded.append(allocator, ' ');
+    try encoded.appendSlice(allocator, options.target);
+    try encoded.append(allocator, ' ');
+    try encoded.appendSlice(allocator, options.version.string());
+    try encoded.appendSlice(allocator, "\r\n");
+    try writeHeaderLines(&encoded, allocator, headers.items);
+    try encoded.appendSlice(allocator, "\r\n");
+    if (use_chunked) {
+        const chunks = [_][]const u8{options.body};
+        try encodeChunkedForRuntime(&encoded, allocator, &chunks, options.trailers);
+    } else {
+        try encoded.appendSlice(allocator, options.body);
+    }
     try writeAll(io, stream, encoded.items);
 }
 
 pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: ResponseOptions) Error!void {
+    const use_chunked = try chunkedWriteFraming(options.version, options.headers, options.trailers);
     var headers: std.ArrayList(http1.Header) = .empty;
     defer headers.deinit(allocator);
     var len_buf: [32]u8 = undefined;
-    try appendDefaultedHeaders(&headers, allocator, options.headers, options.body.len, &len_buf);
+    var trailer_value: std.ArrayList(u8) = .empty;
+    defer trailer_value.deinit(allocator);
+    try appendDefaultedHeaders(&headers, allocator, options.headers, options.body.len, options.trailers, use_chunked, &len_buf, &trailer_value);
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    try http1.writeResponseChecked(&encoded, allocator, options.version, options.status, options.reason, headers.items, options.body);
+    try encoded.appendSlice(allocator, options.version.string());
+    try encoded.append(allocator, ' ');
+    try appendDecimalForRuntime(&encoded, allocator, options.status);
+    if (options.reason.len != 0) {
+        try encoded.append(allocator, ' ');
+        try encoded.appendSlice(allocator, options.reason);
+    }
+    try encoded.appendSlice(allocator, "\r\n");
+    try writeHeaderLines(&encoded, allocator, headers.items);
+    try encoded.appendSlice(allocator, "\r\n");
+    if (use_chunked) {
+        const chunks = [_][]const u8{options.body};
+        try encodeChunkedForRuntime(&encoded, allocator, &chunks, options.trailers);
+    } else {
+        try encoded.appendSlice(allocator, options.body);
+    }
     try writeAll(io, stream, encoded.items);
 }
 
@@ -383,20 +419,104 @@ fn appendDefaultedHeaders(
     allocator: std.mem.Allocator,
     headers: []const http1.Header,
     body_len: usize,
+    trailers: []const http1.Header,
+    use_chunked: bool,
     len_buf: *[32]u8,
+    trailer_value: *std.ArrayList(u8),
 ) Error!void {
     var has_content_length = false;
     var has_connection = false;
+    var has_transfer_encoding = false;
+    var has_trailer = false;
     for (headers) |header| {
         if (header.eqlName("content-length")) has_content_length = true;
         if (header.eqlName("connection")) has_connection = true;
+        if (header.eqlName("transfer-encoding")) has_transfer_encoding = true;
+        if (header.eqlName("trailer")) has_trailer = true;
+        if (use_chunked and header.eqlName("content-length")) continue;
         try list.append(allocator, header);
     }
-    if (!has_content_length) {
+    if (use_chunked) {
+        if (!has_transfer_encoding) try list.append(allocator, .{ .name = "Transfer-Encoding", .value = "chunked" });
+        if (trailers.len != 0 and !has_trailer) {
+            try renderTrailerHeaderValue(trailer_value, allocator, trailers);
+            try list.append(allocator, .{ .name = "Trailer", .value = trailer_value.items });
+        }
+    } else if (!has_content_length) {
         const rendered = std.fmt.bufPrint(len_buf, "{}", .{body_len}) catch unreachable;
         try list.append(allocator, .{ .name = "Content-Length", .value = rendered });
     }
     if (!has_connection) try list.append(allocator, .{ .name = "Connection", .value = "close" });
+}
+
+fn chunkedWriteFraming(version: http1.Version, headers: []const http1.Header, trailers: []const http1.Header) Error!bool {
+    var has_transfer_encoding = false;
+    for (headers) |header| {
+        if (header.eqlName("transfer-encoding")) {
+            has_transfer_encoding = true;
+            break;
+        }
+    }
+
+    if (has_transfer_encoding) {
+        // Once callers opt into transfer coding, the runtime must emit bytes
+        // that match the declared framing.  This HTTP/1 layer only knows how to
+        // encode chunked bodies, so reject unsupported stacked codings instead
+        // of silently sending a raw body under misleading headers.
+        if ((try http1.bodyFraming(headers)) != .chunked) return error.InvalidTransferEncoding;
+        if (version == .http_1_0) return error.InvalidVersion;
+        return true;
+    }
+
+    if (trailers.len == 0) return false;
+    if (version == .http_1_0) return error.InvalidVersion;
+    return true;
+}
+
+fn renderTrailerHeaderValue(value: *std.ArrayList(u8), allocator: std.mem.Allocator, trailers: []const http1.Header) Error!void {
+    value.clearRetainingCapacity();
+    for (trailers, 0..) |trailer, index| {
+        if (index != 0) try value.appendSlice(allocator, ", ");
+        try value.appendSlice(allocator, trailer.name);
+    }
+}
+
+fn appendDecimalForRuntime(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: anytype) Error!void {
+    var tmp: [32]u8 = undefined;
+    const rendered = std.fmt.bufPrint(&tmp, "{}", .{value}) catch return error.InvalidResponse;
+    try list.appendSlice(allocator, rendered);
+}
+
+fn writeHeaderLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const http1.Header) Error!void {
+    for (headers) |header| {
+        try list.appendSlice(allocator, header.name);
+        try list.appendSlice(allocator, ": ");
+        try list.appendSlice(allocator, header.value);
+        try list.appendSlice(allocator, "\r\n");
+    }
+}
+
+fn encodeChunkedForRuntime(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    chunks: []const []const u8,
+    trailers: []const http1.Header,
+) Error!void {
+    for (chunks) |chunk| {
+        // A zero-length chunk is the chunked terminator on the wire.  Treat
+        // empty payload slices as "no DATA" and emit exactly one terminating
+        // chunk after all non-empty payload slices so empty bodies can still
+        // carry trailers.
+        if (chunk.len == 0) continue;
+        var tmp: [32]u8 = undefined;
+        const rendered = std.fmt.bufPrint(&tmp, "{x}\r\n", .{chunk.len}) catch return error.InvalidResponse;
+        try list.appendSlice(allocator, rendered);
+        try list.appendSlice(allocator, chunk);
+        try list.appendSlice(allocator, "\r\n");
+    }
+    try list.appendSlice(allocator, "0\r\n");
+    try writeHeaderLines(list, allocator, trailers);
+    try list.appendSlice(allocator, "\r\n");
 }
 
 fn readMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
@@ -1117,4 +1237,215 @@ test "HTTP/1 client keeps pipelined response after HEAD response headers" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/1 runtime writes request trailers with chunked framing" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+
+            try std.testing.expectEqual(http1.Method.POST, request.request.method);
+            try std.testing.expectEqual(http1.BodyFraming.chunked, request.request.body_framing);
+            try std.testing.expectEqualStrings("upload", request.request.body);
+            try std.testing.expectEqualStrings("chunked", request.request.header("transfer-encoding").?);
+            try std.testing.expectEqualStrings("Digest, X-Upload-Complete", request.request.header("trailer").?);
+            try std.testing.expectEqual(@as(usize, 2), request.request.trailers.len);
+            try std.testing.expectEqualStrings("Digest", request.request.trailers[0].name);
+            try std.testing.expectEqualStrings("sha-256=demo", request.request.trailers[0].value);
+            try std.testing.expectEqualStrings("X-Upload-Complete", request.request.trailers[1].name);
+            try std.testing.expectEqualStrings("yes", request.request.trailers[1].value);
+
+            try connection.writeResponse(.{ .body = "ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    var response = try client.request(.{
+        .method = .POST,
+        .target = "/upload",
+        .headers = &.{.{ .name = "Host", .value = "127.0.0.1" }},
+        .body = "upload",
+        .trailers = &.{
+            .{ .name = "Digest", .value = "sha-256=demo" },
+            .{ .name = "X-Upload-Complete", .value = "yes" },
+        },
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("ok", response.response.body);
+}
+
+test "HTTP/1 runtime writes response trailers with chunked framing" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/download", request.request.target);
+            try std.testing.expectEqualStrings("trailers", request.request.header("te").?);
+
+            try connection.writeResponse(.{
+                .status = 200,
+                .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
+                .body = "download",
+                .trailers = &.{.{ .name = "Digest", .value = "sha-256=response" }},
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    var response = try client.request(.{
+        .method = .GET,
+        .target = "/download",
+        .headers = &.{
+            .{ .name = "Host", .value = "127.0.0.1" },
+            .{ .name = "TE", .value = "trailers" },
+        },
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqual(http1.BodyFraming.chunked, response.response.body_framing);
+    try std.testing.expectEqualStrings("download", response.response.body);
+    try std.testing.expectEqualStrings("chunked", response.response.header("transfer-encoding").?);
+    try std.testing.expectEqualStrings("Digest", response.response.header("trailer").?);
+    try std.testing.expectEqual(@as(usize, 1), response.response.trailers.len);
+    try std.testing.expectEqualStrings("Digest", response.response.trailers[0].name);
+    try std.testing.expectEqualStrings("sha-256=response", response.response.trailers[0].value);
+}
+
+test "HTTP/1 runtime honors explicit transfer-encoding chunked writes" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(http1.BodyFraming.chunked, request.request.body_framing);
+            try std.testing.expectEqualStrings("streamed", request.request.body);
+            try std.testing.expectEqual(@as(?[]const u8, null), request.request.header("content-length"));
+            try std.testing.expectEqual(@as(?[]const u8, null), request.request.header("trailer"));
+
+            try connection.writeResponse(.{
+                .headers = &.{.{ .name = "Transfer-Encoding", .value = "chunked" }},
+                .body = "accepted",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    var response = try client.request(.{
+        .method = .POST,
+        .target = "/explicit-chunked",
+        .headers = &.{
+            .{ .name = "Host", .value = "127.0.0.1" },
+            .{ .name = "Transfer-Encoding", .value = "chunked" },
+            .{ .name = "Content-Length", .value = "999" },
+        },
+        .body = "streamed",
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(http1.BodyFraming.chunked, response.response.body_framing);
+    try std.testing.expectEqualStrings("accepted", response.response.body);
+    try std.testing.expectEqual(@as(?[]const u8, null), response.response.header("content-length"));
+    try std.testing.expectEqual(@as(usize, 0), response.response.trailers.len);
 }
