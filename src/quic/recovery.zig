@@ -100,6 +100,27 @@ pub const Queue = struct {
         };
     }
 
+    pub fn packetThresholdCandidate(self: *const Queue, largest_acknowledged: u64, packet_threshold: u64) ?Candidate {
+        if (packet_threshold == 0 or largest_acknowledged < packet_threshold) return null;
+        const largest_lost = largest_acknowledged - packet_threshold;
+        for (self.pending.items, 0..) |entry, group_index| {
+            // tquic/quic-zig both apply RFC 9002's packet threshold to sent
+            // packets whenever an ACK advances the largest acknowledged packet.
+            // This queue groups retransmissions of the same encoded payload, so
+            // only the newest copy is used for scheduling; older lost packet
+            // numbers remain in the group so an ACK for any copy still retires
+            // the payload without a second retransmission storm.
+            if (entry.newestPacketNumber() > largest_lost) continue;
+            return .{
+                .group_index = group_index,
+                .packet_number = entry.newestPacketNumber(),
+                .payload = entry.payload,
+                .retransmission_count = entry.retransmission_count,
+            };
+        }
+        return null;
+    }
+
     pub fn recordRetransmission(self: *Queue, group_index: usize, packet_number: u64) Error!void {
         if (group_index >= self.pending.items.len) return error.InvalidRetransmission;
         const entry = &self.pending.items[group_index];
@@ -221,4 +242,31 @@ test "QUIC recovery queue applies ACK ranges" {
     try std.testing.expectEqual(@as(usize, 2), try queue.applyAck(ack));
     try std.testing.expectEqual(@as(usize, 1), queue.pendingCount());
     try std.testing.expectEqual(@as(u64, 1), queue.pending.items[0].newestPacketNumber());
+}
+
+test "QUIC recovery queue schedules packet-threshold loss once per newest copy" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    try queue.trackSent(0, "zero");
+    try queue.trackSent(2, "two");
+    try queue.trackSent(6, "six");
+
+    const candidate = queue.packetThresholdCandidate(4, quic.packet_space.default_packet_threshold).?;
+    try std.testing.expectEqual(@as(usize, 0), candidate.group_index);
+    try std.testing.expectEqual(@as(u64, 0), candidate.packet_number);
+    try std.testing.expectEqualStrings("zero", candidate.payload);
+
+    try queue.recordRetransmission(candidate.group_index, 7);
+    try std.testing.expect(queue.packetThresholdCandidate(4, quic.packet_space.default_packet_threshold) == null);
+    try std.testing.expectEqualStrings("zero", queue.pending.items[0].payload);
+
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 7,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    try std.testing.expectEqual(@as(usize, 1), try queue.applyAck(ack));
+    try std.testing.expectEqual(@as(usize, 2), queue.pendingCount());
 }

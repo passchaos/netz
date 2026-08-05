@@ -6,6 +6,8 @@ pub const Error = error{
     InvalidAckFrame,
 } || std.mem.Allocator.Error;
 
+pub const default_packet_threshold: u64 = 3;
+
 pub const PacketRange = struct {
     start: u64,
     end: u64,
@@ -104,6 +106,7 @@ pub const SentPacket = struct {
     packet_number: u64,
     ack_eliciting: bool = true,
     acknowledged: bool = false,
+    lost: bool = false,
     bytes: usize = 0,
 };
 
@@ -183,6 +186,20 @@ pub const SentPacketTracker = struct {
         return acked;
     }
 
+    pub fn detectPacketThresholdLoss(self: *SentPacketTracker, largest_acknowledged: u64, packet_threshold: u64) AckResult {
+        if (packet_threshold == 0 or largest_acknowledged < packet_threshold) return .{};
+        const largest_lost = largest_acknowledged - packet_threshold;
+
+        var lost: AckResult = .{};
+        for (self.packets.items) |*packet| {
+            if (packet.acknowledged or packet.lost or packet.packet_number > largest_lost) continue;
+            packet.lost = true;
+            lost.packets += 1;
+            if (packet.ack_eliciting) lost.bytes += packet.bytes;
+        }
+        return lost;
+    }
+
     fn markRange(self: *SentPacketTracker, start: u64, end: u64) AckResult {
         var result: AckResult = .{};
         for (self.packets.items) |*packet| {
@@ -192,7 +209,7 @@ pub const SentPacketTracker = struct {
             if (!packet.acknowledged and packet.packet_number >= start and packet.packet_number <= end) {
                 packet.acknowledged = true;
                 result.packets += 1;
-                if (packet.ack_eliciting) result.bytes += packet.bytes;
+                if (packet.ack_eliciting and !packet.lost) result.bytes += packet.bytes;
             }
         }
         return result;
@@ -248,4 +265,27 @@ test "QUIC sent packet tracker applies ACK ranges" {
     try std.testing.expect(sent.packets.items[7].acknowledged);
     try std.testing.expect(sent.packets.items[3].acknowledged);
     try std.testing.expect(!sent.packets.items[9].acknowledged);
+}
+
+test "QUIC sent packet tracker detects packet-threshold loss" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+    for (0..6) |pn| try sent.sent(@intCast(pn), true, 1200);
+
+    const lost = sent.detectPacketThresholdLoss(4, default_packet_threshold);
+    try std.testing.expectEqual(@as(usize, 2), lost.packets);
+    try std.testing.expectEqual(@as(usize, 2400), lost.bytes);
+    try std.testing.expect(sent.packets.items[0].lost);
+    try std.testing.expect(sent.packets.items[1].lost);
+    try std.testing.expect(!sent.packets.items[2].lost);
+
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 1,
+    };
+    const acked_after_loss = try sent.applyAckDetailed(ack);
+    try std.testing.expectEqual(@as(usize, 2), acked_after_loss.packets);
+    try std.testing.expectEqual(@as(usize, 0), acked_after_loss.bytes);
 }
