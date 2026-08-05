@@ -3,6 +3,8 @@ const wire = @import("../internal/wire.zig");
 const quic = @import("../quic/mod.zig");
 const http3 = @import("../http3/mod.zig");
 
+pub const runtime = @import("runtime.zig");
+
 pub const Error = wire.Error || error{
     BufferTooShort,
     InvalidSessionId,

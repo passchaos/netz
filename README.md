@@ -22,7 +22,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   acknowledgements, SUBSCRIBE/SUBACK, PING, DISCONNECT, properties, and
   remaining length, plus a blocking TCP client/server runtime
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
-  datagram mapping
+  datagram mapping, plus a cleartext development runtime over the HTTP/3 dev
+  transport
 - WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
   SDP, DTLS record headers, RTP packets/extensions/padding, and SCTP common
   headers, plus a blocking UDP STUN binding client/server runtime
@@ -39,6 +40,9 @@ richer high-level clients/servers can layer on the same byte-level pieces.
 The HTTP/3 runtime is intentionally labeled as a cleartext development transport:
 it exercises real UDP I/O and HTTP/3 frame/message handling over QUIC STREAM
 frames, but it is not a substitute for RFC-compliant QUIC TLS packet protection.
+The WebTransport runtime builds on that same development transport for local
+CONNECT/datagram flows and is likewise not a substitute for standards-compliant
+HTTP/3 over protected QUIC.
 
 ## Build
 
