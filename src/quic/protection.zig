@@ -1,4 +1,6 @@
 const std = @import("std");
+const varint = @import("varint.zig");
+const wire = @import("../internal/wire.zig");
 
 pub const initial_salt_v1 = [_]u8{
     0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
@@ -17,9 +19,13 @@ pub const header_protection_sample_len = 16;
 pub const header_protection_mask_len = 5;
 
 pub const Error = error{
+    InvalidInitialPacket,
+    InvalidHeaderProtectionSample,
     InvalidPacketNumber,
     InvalidPacketNumberLength,
     InvalidPayloadLength,
+    VarIntTooLarge,
+    BufferTooShort,
 } || std.crypto.errors.AuthenticationError;
 
 pub const HeaderForm = enum {
@@ -38,6 +44,33 @@ pub const InitialSecrets = struct {
     initial_secret: [secret_len]u8,
     client: PacketProtectionKeys,
     server: PacketProtectionKeys,
+};
+
+pub const InitialPacketOptions = struct {
+    version: u32 = 0x00000001,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    token: []const u8 = &.{},
+    packet_number: u64,
+    packet_number_len: u8 = 4,
+    payload: []const u8,
+};
+
+pub const OpenedInitialPacket = struct {
+    version: u32,
+    destination_connection_id: []u8,
+    source_connection_id: []u8,
+    token: []u8,
+    packet_number: u64,
+    payload: []u8,
+
+    pub fn deinit(self: *OpenedInitialPacket, allocator: std.mem.Allocator) void {
+        allocator.free(self.destination_connection_id);
+        allocator.free(self.source_connection_id);
+        allocator.free(self.token);
+        allocator.free(self.payload);
+        self.* = undefined;
+    }
 };
 
 pub fn deriveInitialSecrets(client_initial_dcid: []const u8) InitialSecrets {
@@ -124,6 +157,158 @@ pub fn openAes128Payload(
     try Aes128Gcm.decrypt(plaintext, ciphertext, tag, associated_data, nonce, keys.key);
 }
 
+pub fn sealInitialPacket(
+    allocator: std.mem.Allocator,
+    keys: PacketProtectionKeys,
+    options: InitialPacketOptions,
+) Error![]u8 {
+    try validatePacketNumberLen(options.packet_number_len);
+    if (options.destination_connection_id.len > 20 or options.source_connection_id.len > 20) return error.InvalidInitialPacket;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    const pn_len = @as(usize, options.packet_number_len);
+    const first_byte: u8 = 0xc0 | @as(u8, @intCast(pn_len - 1));
+    try out.append(allocator, first_byte);
+    var version_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &version_bytes, options.version, .big);
+    try out.appendSlice(allocator, &version_bytes);
+    try out.append(allocator, @intCast(options.destination_connection_id.len));
+    try out.appendSlice(allocator, options.destination_connection_id);
+    try out.append(allocator, @intCast(options.source_connection_id.len));
+    try out.appendSlice(allocator, options.source_connection_id);
+    try varint.encode(&out, allocator, options.token.len);
+    try out.appendSlice(allocator, options.token);
+
+    const protected_payload_len = options.payload.len + aead_tag_len;
+    try varint.encode(&out, allocator, pn_len + protected_payload_len);
+    const pn_offset = out.items.len;
+    try appendTruncatedPacketNumber(&out, allocator, options.packet_number, options.packet_number_len);
+    const payload_offset = out.items.len;
+
+    try out.resize(allocator, payload_offset + options.payload.len + aead_tag_len);
+    const ciphertext = out.items[payload_offset .. payload_offset + options.payload.len];
+    const tag = out.items[payload_offset + options.payload.len ..][0..aead_tag_len];
+    try protectAes128Payload(keys, options.packet_number, out.items[0..payload_offset], options.payload, ciphertext, tag);
+
+    try applyHeaderProtection(keys.hp, .long, out.items, pn_offset);
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn openInitialPacket(
+    allocator: std.mem.Allocator,
+    keys: PacketProtectionKeys,
+    packet: []const u8,
+    expected_packet_number: u64,
+) Error!OpenedInitialPacket {
+    var bytes = try allocator.dupe(u8, packet);
+    defer allocator.free(bytes);
+    if (bytes.len < 7 or (bytes[0] & 0x80) == 0) return error.InvalidInitialPacket;
+
+    var cursor = wire.Cursor.init(bytes);
+    _ = try cursor.readByte();
+    const version = try cursor.readInt(u32, .big);
+    const dcid_len = try cursor.readByte();
+    const dcid = try cursor.readSlice(dcid_len);
+    const scid_len = try cursor.readByte();
+    const scid = try cursor.readSlice(scid_len);
+    const token_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
+    const token = try cursor.readSlice(token_len);
+    const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
+    const pn_offset = cursor.pos;
+    if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
+
+    try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
+    const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
+    if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
+    const payload_offset = pn_offset + pn_len;
+    const packet_number = reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
+    const packet_end = pn_offset + protected_len;
+    const ciphertext = bytes[payload_offset .. packet_end - aead_tag_len];
+    const tag = bytes[packet_end - aead_tag_len .. packet_end][0..aead_tag_len].*;
+
+    const payload = try allocator.alloc(u8, ciphertext.len);
+    errdefer allocator.free(payload);
+    try openAes128Payload(keys, packet_number, bytes[0..payload_offset], ciphertext, tag, payload);
+
+    const dcid_owned = try allocator.dupe(u8, dcid);
+    errdefer allocator.free(dcid_owned);
+    const scid_owned = try allocator.dupe(u8, scid);
+    errdefer allocator.free(scid_owned);
+    const token_owned = try allocator.dupe(u8, token);
+    errdefer allocator.free(token_owned);
+
+    return .{
+        .version = version,
+        .destination_connection_id = dcid_owned,
+        .source_connection_id = scid_owned,
+        .token = token_owned,
+        .packet_number = packet_number,
+        .payload = payload,
+    };
+}
+
+pub fn applyHeaderProtection(
+    hp_key: [hp_key_len]u8,
+    header_form: HeaderForm,
+    packet: []u8,
+    pn_offset: usize,
+) Error!void {
+    if (pn_offset + 4 + header_protection_sample_len > packet.len) return error.InvalidHeaderProtectionSample;
+    const sample = packet[pn_offset + 4 ..][0..header_protection_sample_len].*;
+    const mask = aes128HeaderProtectionMask(hp_key, sample);
+    const pn_len = @as(usize, (packet[0] & 0x03) + 1);
+    try applyHeaderProtectionMask(header_form, &packet[0], packet[pn_offset .. pn_offset + pn_len], mask);
+}
+
+pub fn removeHeaderProtection(
+    hp_key: [hp_key_len]u8,
+    header_form: HeaderForm,
+    packet: []u8,
+    pn_offset: usize,
+) Error!void {
+    if (pn_offset + 4 + header_protection_sample_len > packet.len) return error.InvalidHeaderProtectionSample;
+    const sample = packet[pn_offset + 4 ..][0..header_protection_sample_len].*;
+    const mask = aes128HeaderProtectionMask(hp_key, sample);
+    packet[0] ^= mask[0] & switch (header_form) {
+        .long => @as(u8, 0x0f),
+        .short => @as(u8, 0x1f),
+    };
+    const pn_len = @as(usize, (packet[0] & 0x03) + 1);
+    if (pn_offset + pn_len > packet.len) return error.InvalidPacketNumberLength;
+    for (packet[pn_offset .. pn_offset + pn_len], 0..) |*byte, i| {
+        byte.* ^= mask[i + 1];
+    }
+}
+
+fn validatePacketNumberLen(packet_number_len: u8) Error!void {
+    if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacketNumberLength;
+}
+
+fn appendTruncatedPacketNumber(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet_number: u64, packet_number_len: u8) Error!void {
+    try validatePacketNumberLen(packet_number_len);
+    var full: [8]u8 = undefined;
+    std.mem.writeInt(u64, &full, packet_number, .big);
+    try list.appendSlice(allocator, full[8 - packet_number_len ..]);
+}
+
+fn reconstructPacketNumber(expected_packet_number: u64, packet_number_bytes: []const u8) u64 {
+    var truncated: u64 = 0;
+    for (packet_number_bytes) |byte| truncated = (truncated << 8) | byte;
+    const pn_nbits: u6 = @intCast(packet_number_bytes.len * 8);
+    const pn_win = @as(u64, 1) << pn_nbits;
+    const pn_hwin = pn_win / 2;
+    const pn_mask = pn_win - 1;
+    var candidate = (expected_packet_number & ~pn_mask) | truncated;
+    if (candidate + pn_hwin <= expected_packet_number and candidate < (std.math.maxInt(u62) - pn_win)) {
+        candidate += pn_win;
+    } else if (candidate > expected_packet_number + pn_hwin and candidate >= pn_win) {
+        candidate -= pn_win;
+    }
+    return candidate;
+}
+
 fn expectHex(expected_hex: []const u8, actual: []const u8) !void {
     var expected_buf: [128]u8 = undefined;
     const expected = try std.fmt.hexToBytes(&expected_buf, expected_hex);
@@ -179,4 +364,36 @@ test "QUIC AES payload protection roundtrip" {
     var bad_tag = tag;
     bad_tag[0] ^= 0xff;
     try std.testing.expectError(error.AuthenticationFailed, openAes128Payload(keys, 2, ad, &ciphertext, bad_tag, &opened));
+}
+
+test "QUIC Initial packet seal/open roundtrip" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const keys = deriveInitialSecrets(&dcid).client;
+    const payload = "initial crypto payload";
+
+    const sealed = try sealInitialPacket(allocator, keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 2,
+        .packet_number_len = 4,
+        .payload = payload,
+    });
+    defer allocator.free(sealed);
+    try std.testing.expect(sealed.len > payload.len + dcid.len + scid.len);
+    try std.testing.expect(sealed[0] != 0xc3); // Header protection changed the first byte for this vector.
+
+    var opened = try openInitialPacket(allocator, keys, sealed, 0);
+    defer opened.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), opened.version);
+    try std.testing.expectEqual(@as(u64, 2), opened.packet_number);
+    try std.testing.expectEqualSlices(u8, &dcid, opened.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &scid, opened.source_connection_id);
+    try std.testing.expectEqualStrings(payload, opened.payload);
+
+    var tampered = try allocator.dupe(u8, sealed);
+    defer allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+    try std.testing.expectError(error.AuthenticationFailed, openInitialPacket(allocator, keys, tampered, 0));
 }

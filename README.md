@@ -14,8 +14,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   QUIC UDP frame endpoint
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), plus
-  v1 Initial key/header/payload protection helpers and a blocking UDP endpoint
-  runtime for frame datagrams
+  v1 Initial key/header/payload protection, protected Initial packet seal/open,
+  and a blocking UDP endpoint runtime for frame datagrams
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, message assembly, and a blocking TCP
   client/server runtime over HTTP/1 Upgrade
