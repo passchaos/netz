@@ -127,15 +127,26 @@ pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]
     while (!cursor.eof()) {
         const id: SettingId = @enumFromInt(try cursor.readInt(u16, .big));
         const value = try cursor.readInt(u32, .big);
+        try validateSetting(id, value);
         try settings.append(allocator, .{ .id = id, .value = value });
     }
     return settings.toOwnedSlice(allocator);
 }
 
-pub fn writeSettings(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: []const Setting) !void {
+pub fn writeSettings(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: []const Setting) Error!void {
     for (settings) |setting| {
+        try validateSetting(setting.id, setting.value);
         try wire.appendInt(list, allocator, u16, @intFromEnum(setting.id), .big);
         try wire.appendInt(list, allocator, u32, setting.value, .big);
+    }
+}
+
+pub fn validateSetting(id: SettingId, value: u32) Error!void {
+    switch (id) {
+        .enable_push => if (value > 1) return error.InvalidSetting,
+        .initial_window_size => if (value > std.math.maxInt(i31)) return error.InvalidSetting,
+        .max_frame_size => if (value < 16_384 or value > 16_777_215) return error.InvalidSetting,
+        else => {},
     }
 }
 
@@ -556,6 +567,45 @@ test "HTTP/2 payload helpers" {
     const data = try DataPayload.parse(frame);
     try std.testing.expectEqualStrings("ok", data.data);
     try validateClientPreface(connection_preface ++ "rest");
+}
+
+test "HTTP/2 SETTINGS validates RFC value bounds" {
+    const allocator = std.testing.allocator;
+
+    var invalid_write: std.ArrayList(u8) = .empty;
+    defer invalid_write.deinit(allocator);
+    try std.testing.expectError(error.InvalidSetting, writeSettings(&invalid_write, allocator, &.{
+        .{ .id = .enable_push, .value = 2 },
+    }));
+
+    var invalid_enable_push: std.ArrayList(u8) = .empty;
+    defer invalid_enable_push.deinit(allocator);
+    try wire.appendInt(&invalid_enable_push, allocator, u16, @intFromEnum(SettingId.enable_push), .big);
+    try wire.appendInt(&invalid_enable_push, allocator, u32, 2, .big);
+    try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, invalid_enable_push.items));
+
+    var invalid_window: std.ArrayList(u8) = .empty;
+    defer invalid_window.deinit(allocator);
+    try wire.appendInt(&invalid_window, allocator, u16, @intFromEnum(SettingId.initial_window_size), .big);
+    try wire.appendInt(&invalid_window, allocator, u32, @as(u32, std.math.maxInt(i31)) + 1, .big);
+    try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, invalid_window.items));
+
+    var invalid_frame: std.ArrayList(u8) = .empty;
+    defer invalid_frame.deinit(allocator);
+    try wire.appendInt(&invalid_frame, allocator, u16, @intFromEnum(SettingId.max_frame_size), .big);
+    try wire.appendInt(&invalid_frame, allocator, u32, 16_383, .big);
+    try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, invalid_frame.items));
+
+    var valid: std.ArrayList(u8) = .empty;
+    defer valid.deinit(allocator);
+    try writeSettings(&valid, allocator, &.{
+        .{ .id = .enable_push, .value = 0 },
+        .{ .id = .initial_window_size, .value = std.math.maxInt(i31) },
+        .{ .id = .max_frame_size, .value = 16_777_215 },
+    });
+    const parsed = try parseSettings(allocator, valid.items);
+    defer allocator.free(parsed);
+    try std.testing.expectEqual(@as(usize, 3), parsed.len);
 }
 
 test "HTTP/2 ping and goaway payload helpers" {

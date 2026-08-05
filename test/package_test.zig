@@ -38,6 +38,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2, "GoAwayPayload"));
     try std.testing.expect(@hasDecl(netz.http2, "ResetStreamPayload"));
     try std.testing.expect(@hasDecl(netz.http2, "WindowUpdatePayload"));
+    try std.testing.expect(@hasDecl(netz.http2, "validateSetting"));
     try std.testing.expect(@hasDecl(netz.http2.runtime, "FlowWindow"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "sendResetStream"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "readResetStream"));
