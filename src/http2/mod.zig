@@ -11,6 +11,7 @@ pub const Error = wire.Error || error{
     InvalidPreface,
     InvalidSetting,
     IntegerOverflow,
+    HpackDynamicTableUnsupported,
 } || std.mem.Allocator.Error;
 
 pub const FrameType = enum(u8) {
@@ -223,16 +224,123 @@ pub fn validateClientPreface(bytes: []const u8) Error!void {
 }
 
 pub const Hpack = struct {
+    pub const StaticEntry = struct {
+        name: []const u8,
+        value: []const u8,
+    };
+
+    /// HPACK's static table is one-indexed on the wire (RFC 7541 Appendix A).
+    /// The array remains zero-indexed internally; helpers below translate the
+    /// public/wire index to keep invalid index 0 easy to reject.
+    pub const static_table = [_]StaticEntry{
+        .{ .name = ":authority", .value = "" },
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":path", .value = "/index.html" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":status", .value = "200" },
+        .{ .name = ":status", .value = "204" },
+        .{ .name = ":status", .value = "206" },
+        .{ .name = ":status", .value = "304" },
+        .{ .name = ":status", .value = "400" },
+        .{ .name = ":status", .value = "404" },
+        .{ .name = ":status", .value = "500" },
+        .{ .name = "accept-charset", .value = "" },
+        .{ .name = "accept-encoding", .value = "gzip, deflate" },
+        .{ .name = "accept-language", .value = "" },
+        .{ .name = "accept-ranges", .value = "" },
+        .{ .name = "accept", .value = "" },
+        .{ .name = "access-control-allow-origin", .value = "" },
+        .{ .name = "age", .value = "" },
+        .{ .name = "allow", .value = "" },
+        .{ .name = "authorization", .value = "" },
+        .{ .name = "cache-control", .value = "" },
+        .{ .name = "content-disposition", .value = "" },
+        .{ .name = "content-encoding", .value = "" },
+        .{ .name = "content-language", .value = "" },
+        .{ .name = "content-length", .value = "" },
+        .{ .name = "content-location", .value = "" },
+        .{ .name = "content-range", .value = "" },
+        .{ .name = "content-type", .value = "" },
+        .{ .name = "cookie", .value = "" },
+        .{ .name = "date", .value = "" },
+        .{ .name = "etag", .value = "" },
+        .{ .name = "expect", .value = "" },
+        .{ .name = "expires", .value = "" },
+        .{ .name = "from", .value = "" },
+        .{ .name = "host", .value = "" },
+        .{ .name = "if-match", .value = "" },
+        .{ .name = "if-modified-since", .value = "" },
+        .{ .name = "if-none-match", .value = "" },
+        .{ .name = "if-range", .value = "" },
+        .{ .name = "if-unmodified-since", .value = "" },
+        .{ .name = "last-modified", .value = "" },
+        .{ .name = "link", .value = "" },
+        .{ .name = "location", .value = "" },
+        .{ .name = "max-forwards", .value = "" },
+        .{ .name = "proxy-authenticate", .value = "" },
+        .{ .name = "proxy-authorization", .value = "" },
+        .{ .name = "range", .value = "" },
+        .{ .name = "referer", .value = "" },
+        .{ .name = "refresh", .value = "" },
+        .{ .name = "retry-after", .value = "" },
+        .{ .name = "server", .value = "" },
+        .{ .name = "set-cookie", .value = "" },
+        .{ .name = "strict-transport-security", .value = "" },
+        .{ .name = "transfer-encoding", .value = "" },
+        .{ .name = "user-agent", .value = "" },
+        .{ .name = "vary", .value = "" },
+        .{ .name = "via", .value = "" },
+        .{ .name = "www-authenticate", .value = "" },
+    };
+
     pub const HeaderField = struct {
         name: []const u8,
         value: []const u8,
         never_index: bool = false,
     };
 
-    /// A pragmatic HPACK literal decoder.  It accepts the indexed/literal forms
-    /// used in HTTP/2 tests and intentionally does not maintain a dynamic table;
-    /// callers that need compression can layer a table implementation on this
-    /// representation without changing frame parsing.
+    pub fn findStaticIndex(name: []const u8, value: []const u8) ?u64 {
+        for (static_table, 0..) |entry, i| {
+            if (std.mem.eql(u8, entry.name, name) and std.mem.eql(u8, entry.value, value)) {
+                return @intCast(i + 1);
+            }
+        }
+        return null;
+    }
+
+    pub fn findStaticNameIndex(name: []const u8) ?u64 {
+        for (static_table, 0..) |entry, i| {
+            if (std.mem.eql(u8, entry.name, name)) return @intCast(i + 1);
+        }
+        return null;
+    }
+
+    pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
+        for (fields) |field| {
+            if (!field.never_index) {
+                if (findStaticIndex(field.name, field.value)) |index| {
+                    try encodeInteger(list, allocator, 7, 0x80, index);
+                    continue;
+                }
+            }
+
+            const representation: u8 = if (field.never_index) 0x10 else 0x00;
+            if (findStaticNameIndex(field.name)) |name_index| {
+                try encodeInteger(list, allocator, 4, representation, name_index);
+            } else {
+                try encodeInteger(list, allocator, 4, representation, 0);
+                try encodeString(list, allocator, field.name);
+            }
+            try encodeString(list, allocator, field.value);
+        }
+    }
+
+    /// A pragmatic HPACK codec. It resolves RFC 7541 static-table references and
+    /// literal fields, but intentionally refuses dynamic-table references and
+    /// Huffman strings so callers never observe partially-decoded state.
     pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
         var cursor = wire.Cursor.init(block);
         var fields: std.ArrayList(HeaderField) = .empty;
@@ -240,49 +348,79 @@ pub const Hpack = struct {
         while (!cursor.eof()) {
             const first = try cursor.readByte();
             if ((first & 0x80) != 0) {
-                // Indexed field; expose the static index as a pseudo-name so a
-                // future dynamic table can resolve it without losing ordering.
-                const idx = first & 0x7f;
-                const name_buf = try allocator.alloc(u8, 16);
-                errdefer allocator.free(name_buf);
-                const rendered = try std.fmt.bufPrint(name_buf, ":indexed:{}", .{idx});
-                try fields.append(allocator, .{ .name = rendered, .value = "" });
+                const entry = try staticEntry(try decodeInteger(first, &cursor, 7));
+                try fields.append(allocator, .{ .name = entry.name, .value = entry.value });
                 continue;
             }
+
+            const name_index = if ((first & 0x40) != 0)
+                try decodeInteger(first, &cursor, 6)
+            else if ((first & 0x20) != 0)
+                return error.HpackDynamicTableUnsupported
+            else
+                try decodeInteger(first, &cursor, 4);
             const never_index = (first & 0x10) != 0;
-            const name_index = first & 0x0f;
-            const name = if (name_index == 0) try decodeString(&cursor) else try staticName(name_index);
+            const name = if (name_index == 0) try decodeString(&cursor) else (try staticEntry(name_index)).name;
             const value = try decodeString(&cursor);
             try fields.append(allocator, .{ .name = name, .value = value, .never_index = never_index });
         }
         return fields.toOwnedSlice(allocator);
     }
 
+    fn encodeInteger(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        comptime prefix_bits: u4,
+        high_bits: u8,
+        value: u64,
+    ) !void {
+        const prefix_max = (@as(u16, 1) << prefix_bits) - 1;
+        if (value < prefix_max) {
+            try list.append(allocator, high_bits | @as(u8, @intCast(value)));
+            return;
+        }
+
+        try list.append(allocator, high_bits | @as(u8, @intCast(prefix_max)));
+        var remaining = value - prefix_max;
+        while (remaining >= 128) {
+            try list.append(allocator, @as(u8, @intCast(remaining & 0x7f)) | 0x80);
+            remaining >>= 7;
+        }
+        try list.append(allocator, @intCast(remaining));
+    }
+
+    fn decodeInteger(first: u8, cursor: *wire.Cursor, comptime prefix_bits: u4) Error!u64 {
+        const prefix_max: u8 = @intCast((@as(u16, 1) << prefix_bits) - 1);
+        var value: u64 = first & prefix_max;
+        if (value < prefix_max) return value;
+
+        var shift: u6 = 0;
+        while (true) {
+            const byte = try cursor.readByte();
+            value = std.math.add(u64, value, @as(u64, byte & 0x7f) << shift) catch return error.IntegerOverflow;
+            if ((byte & 0x80) == 0) return value;
+            if (shift >= 56) return error.IntegerOverflow;
+            shift += 7;
+        }
+    }
+
+    fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+        try encodeInteger(list, allocator, 7, 0x00, value.len);
+        try list.appendSlice(allocator, value);
+    }
+
     fn decodeString(cursor: *wire.Cursor) ![]const u8 {
         const first = try cursor.readByte();
         const huffman = (first & 0x80) != 0;
-        const len = first & 0x7f;
         if (huffman) return error.InvalidEncoding;
+        const len = std.math.cast(usize, try decodeInteger(first, cursor, 7)) orelse return error.IntegerOverflow;
         return cursor.readSlice(len);
     }
 
-    fn staticName(index: u8) ![]const u8 {
-        return switch (index) {
-            1 => ":authority",
-            2 => ":method",
-            3 => ":method",
-            4 => ":path",
-            5 => ":path",
-            6 => ":scheme",
-            7 => ":scheme",
-            8 => ":status",
-            16 => "accept-encoding",
-            31 => "content-type",
-            33 => "date",
-            38 => "host",
-            58 => "user-agent",
-            else => error.InvalidEncoding,
-        };
+    fn staticEntry(index: u64) Error!StaticEntry {
+        if (index == 0) return error.InvalidEncoding;
+        if (index > static_table.len) return error.HpackDynamicTableUnsupported;
+        return static_table[@intCast(index - 1)];
     }
 };
 
@@ -314,4 +452,51 @@ test "HTTP/2 payload helpers" {
     const data = try DataPayload.parse(frame);
     try std.testing.expectEqualStrings("ok", data.data);
     try validateClientPreface(connection_preface ++ "rest");
+}
+
+test "HTTP/2 HPACK static table decode" {
+    const allocator = std.testing.allocator;
+    // RFC 7541 Appendix C.3: :method GET, :scheme http, :path /,
+    // :authority www.example.com.  The literal authority field is accepted but
+    // not inserted because this bootstrap decoder has no dynamic table.
+    const block = "\x82\x86\x84\x41\x0fwww.example.com";
+    const fields = try Hpack.decodeLiteralBlock(allocator, block);
+    defer allocator.free(fields);
+
+    try std.testing.expectEqual(@as(usize, 4), fields.len);
+    try std.testing.expectEqualStrings(":method", fields[0].name);
+    try std.testing.expectEqualStrings("GET", fields[0].value);
+    try std.testing.expectEqualStrings(":scheme", fields[1].name);
+    try std.testing.expectEqualStrings("http", fields[1].value);
+    try std.testing.expectEqualStrings(":authority", fields[3].name);
+    try std.testing.expectEqualStrings("www.example.com", fields[3].value);
+}
+
+test "HTTP/2 HPACK static-only encode roundtrip" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const fields_in = [_]Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/resource" },
+        .{ .name = "authorization", .value = "Bearer token", .never_index = true },
+        .{ .name = "x-long", .value = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz" },
+    };
+
+    try Hpack.encodeLiteralBlock(&encoded, allocator, &fields_in);
+    const decoded = try Hpack.decodeLiteralBlock(allocator, encoded.items);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqual(fields_in.len, decoded.len);
+    for (fields_in, decoded) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.name, actual.name);
+        try std.testing.expectEqualStrings(expected.value, actual.value);
+        try std.testing.expectEqual(expected.never_index, actual.never_index);
+    }
+}
+
+test "HTTP/2 HPACK rejects dynamic table references" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.HpackDynamicTableUnsupported, Hpack.decodeLiteralBlock(allocator, &.{0xfe}));
+    try std.testing.expectError(error.HpackDynamicTableUnsupported, Hpack.decodeLiteralBlock(allocator, &.{ 0x20, 0x00 }));
 }
