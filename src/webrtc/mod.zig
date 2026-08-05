@@ -11,6 +11,7 @@ pub const Error = wire.Error || error{
     InvalidSdp,
     InvalidDtlsRecord,
     InvalidRtpPacket,
+    InvalidRtcpPacket,
     UnsupportedAddressFamily,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
@@ -618,6 +619,292 @@ pub const rtp = struct {
     }
 };
 
+pub const rtcp = struct {
+    pub const PacketType = enum(u8) {
+        sender_report = 200,
+        receiver_report = 201,
+        source_description = 202,
+        goodbye = 203,
+        application_defined = 204,
+        transport_feedback = 205,
+        payload_feedback = 206,
+        _,
+    };
+
+    pub const transport_feedback_nack: u5 = 1;
+    pub const payload_feedback_pli: u5 = 1;
+
+    pub const Header = struct {
+        version: u2,
+        padding: bool,
+        count_or_format: u5,
+        packet_type: PacketType,
+        length_words_minus_one: u16,
+
+        pub fn parse(bytes: []const u8) Error!Header {
+            if (bytes.len < 4) return error.BufferTooShort;
+            const first = bytes[0];
+            const version: u2 = @truncate(first >> 6);
+            if (version != 2) return error.InvalidRtcpPacket;
+            return .{
+                .version = version,
+                .padding = (first & 0x20) != 0,
+                .count_or_format = @truncate(first & 0x1f),
+                .packet_type = @enumFromInt(bytes[1]),
+                .length_words_minus_one = std.mem.readInt(u16, bytes[2..4], .big),
+            };
+        }
+
+        pub fn packetLen(self: Header) usize {
+            return (@as(usize, self.length_words_minus_one) + 1) * 4;
+        }
+    };
+
+    pub const ReportBlock = struct {
+        ssrc: u32,
+        fraction_lost: u8 = 0,
+        cumulative_lost: u24 = 0,
+        highest_sequence_number: u32 = 0,
+        interarrival_jitter: u32 = 0,
+        last_sender_report: u32 = 0,
+        delay_since_last_sender_report: u32 = 0,
+    };
+
+    pub const SenderReport = struct {
+        sender_ssrc: u32,
+        ntp_timestamp_msw: u32,
+        ntp_timestamp_lsw: u32,
+        rtp_timestamp: u32,
+        sender_packet_count: u32,
+        sender_octet_count: u32,
+        report_blocks: []ReportBlock = &.{},
+    };
+
+    pub const ReceiverReport = struct {
+        sender_ssrc: u32,
+        report_blocks: []ReportBlock = &.{},
+    };
+
+    pub const PictureLossIndication = struct {
+        sender_ssrc: u32,
+        media_ssrc: u32,
+    };
+
+    pub const NackPair = struct {
+        packet_id: u16,
+        lost_packet_bitmask: u16 = 0,
+
+        pub fn contains(self: NackPair, sequence_number: u16) bool {
+            if (sequence_number == self.packet_id) return true;
+            const delta = sequence_number -% self.packet_id;
+            if (delta == 0 or delta > 16) return false;
+            return ((self.lost_packet_bitmask >> @intCast(delta - 1)) & 1) != 0;
+        }
+    };
+
+    pub const TransportLayerNack = struct {
+        sender_ssrc: u32,
+        media_ssrc: u32,
+        pairs: []NackPair,
+    };
+
+    pub const Unknown = struct {
+        header: Header,
+        payload: []const u8,
+    };
+
+    pub const Packet = union(enum) {
+        sender_report: SenderReport,
+        receiver_report: ReceiverReport,
+        picture_loss_indication: PictureLossIndication,
+        transport_layer_nack: TransportLayerNack,
+        unknown: Unknown,
+
+        pub fn deinit(self: *Packet, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .sender_report => |report| allocator.free(report.report_blocks),
+                .receiver_report => |report| allocator.free(report.report_blocks),
+                .transport_layer_nack => |nack| allocator.free(nack.pairs),
+                else => {},
+            }
+            self.* = undefined;
+        }
+    };
+
+    pub const ParsedPacket = struct {
+        packet: Packet,
+        consumed: usize,
+
+        pub fn deinit(self: *ParsedPacket, allocator: std.mem.Allocator) void {
+            self.packet.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
+    pub fn parsePacket(allocator: std.mem.Allocator, bytes: []const u8) Error!ParsedPacket {
+        const header = try Header.parse(bytes);
+        const packet_len = header.packetLen();
+        if (bytes.len < packet_len) return error.BufferTooShort;
+        if (packet_len < 4) return error.InvalidRtcpPacket;
+        const payload = bytes[4..packet_len];
+
+        const packet: Packet = switch (header.packet_type) {
+            .sender_report => .{ .sender_report = try parseSenderReport(allocator, header, payload) },
+            .receiver_report => .{ .receiver_report = try parseReceiverReport(allocator, header, payload) },
+            .payload_feedback => if (header.count_or_format == payload_feedback_pli)
+                .{ .picture_loss_indication = try parsePictureLossIndication(payload) }
+            else
+                .{ .unknown = .{ .header = header, .payload = payload } },
+            .transport_feedback => if (header.count_or_format == transport_feedback_nack)
+                .{ .transport_layer_nack = try parseTransportLayerNack(allocator, payload) }
+            else
+                .{ .unknown = .{ .header = header, .payload = payload } },
+            else => .{ .unknown = .{ .header = header, .payload = payload } },
+        };
+        return .{ .packet = packet, .consumed = packet_len };
+    }
+
+    pub fn writePacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet: Packet) Error!void {
+        switch (packet) {
+            .sender_report => |report| try writeSenderReport(list, allocator, report),
+            .receiver_report => |report| try writeReceiverReport(list, allocator, report),
+            .picture_loss_indication => |pli| try writePictureLossIndication(list, allocator, pli),
+            .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
+            .unknown => |unknown| {
+                try writeHeader(list, allocator, unknown.header.count_or_format, unknown.header.packet_type, unknown.payload.len);
+                try list.appendSlice(allocator, unknown.payload);
+            },
+        }
+    }
+
+    fn parseSenderReport(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!SenderReport {
+        const report_count = @as(usize, header.count_or_format);
+        if (payload.len != 24 + report_count * 24) return error.InvalidRtcpPacket;
+        var cursor = wire.Cursor.init(payload);
+        const sender_ssrc = try cursor.readInt(u32, .big);
+        const ntp_timestamp_msw = try cursor.readInt(u32, .big);
+        const ntp_timestamp_lsw = try cursor.readInt(u32, .big);
+        const rtp_timestamp = try cursor.readInt(u32, .big);
+        const sender_packet_count = try cursor.readInt(u32, .big);
+        const sender_octet_count = try cursor.readInt(u32, .big);
+        const report_blocks = try parseReportBlocks(allocator, &cursor, report_count);
+        return .{
+            .sender_ssrc = sender_ssrc,
+            .ntp_timestamp_msw = ntp_timestamp_msw,
+            .ntp_timestamp_lsw = ntp_timestamp_lsw,
+            .rtp_timestamp = rtp_timestamp,
+            .sender_packet_count = sender_packet_count,
+            .sender_octet_count = sender_octet_count,
+            .report_blocks = report_blocks,
+        };
+    }
+
+    fn parseReceiverReport(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!ReceiverReport {
+        const report_count = @as(usize, header.count_or_format);
+        if (payload.len != 4 + report_count * 24) return error.InvalidRtcpPacket;
+        var cursor = wire.Cursor.init(payload);
+        const sender_ssrc = try cursor.readInt(u32, .big);
+        return .{
+            .sender_ssrc = sender_ssrc,
+            .report_blocks = try parseReportBlocks(allocator, &cursor, report_count),
+        };
+    }
+
+    fn parsePictureLossIndication(payload: []const u8) Error!PictureLossIndication {
+        if (payload.len != 8) return error.InvalidRtcpPacket;
+        return .{
+            .sender_ssrc = std.mem.readInt(u32, payload[0..4], .big),
+            .media_ssrc = std.mem.readInt(u32, payload[4..8], .big),
+        };
+    }
+
+    fn parseTransportLayerNack(allocator: std.mem.Allocator, payload: []const u8) Error!TransportLayerNack {
+        if (payload.len < 8 or ((payload.len - 8) % 4) != 0) return error.InvalidRtcpPacket;
+        const pair_count = (payload.len - 8) / 4;
+        const pairs = try allocator.alloc(NackPair, pair_count);
+        errdefer allocator.free(pairs);
+        var cursor = wire.Cursor.init(payload);
+        const sender_ssrc = try cursor.readInt(u32, .big);
+        const media_ssrc = try cursor.readInt(u32, .big);
+        for (pairs) |*pair| {
+            pair.* = .{
+                .packet_id = try cursor.readInt(u16, .big),
+                .lost_packet_bitmask = try cursor.readInt(u16, .big),
+            };
+        }
+        return .{ .sender_ssrc = sender_ssrc, .media_ssrc = media_ssrc, .pairs = pairs };
+    }
+
+    fn parseReportBlocks(allocator: std.mem.Allocator, cursor: *wire.Cursor, count: usize) Error![]ReportBlock {
+        const blocks = try allocator.alloc(ReportBlock, count);
+        errdefer allocator.free(blocks);
+        for (blocks) |*block| {
+            block.* = .{
+                .ssrc = try cursor.readInt(u32, .big),
+                .fraction_lost = try cursor.readByte(),
+                .cumulative_lost = try wire.readU24(cursor),
+                .highest_sequence_number = try cursor.readInt(u32, .big),
+                .interarrival_jitter = try cursor.readInt(u32, .big),
+                .last_sender_report = try cursor.readInt(u32, .big),
+                .delay_since_last_sender_report = try cursor.readInt(u32, .big),
+            };
+        }
+        return blocks;
+    }
+
+    fn writeSenderReport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, report: SenderReport) Error!void {
+        if (report.report_blocks.len > 31) return error.InvalidRtcpPacket;
+        try writeHeader(list, allocator, @intCast(report.report_blocks.len), .sender_report, 24 + report.report_blocks.len * 24);
+        try wire.appendInt(list, allocator, u32, report.sender_ssrc, .big);
+        try wire.appendInt(list, allocator, u32, report.ntp_timestamp_msw, .big);
+        try wire.appendInt(list, allocator, u32, report.ntp_timestamp_lsw, .big);
+        try wire.appendInt(list, allocator, u32, report.rtp_timestamp, .big);
+        try wire.appendInt(list, allocator, u32, report.sender_packet_count, .big);
+        try wire.appendInt(list, allocator, u32, report.sender_octet_count, .big);
+        for (report.report_blocks) |block| try writeReportBlock(list, allocator, block);
+    }
+
+    fn writeReceiverReport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, report: ReceiverReport) Error!void {
+        if (report.report_blocks.len > 31) return error.InvalidRtcpPacket;
+        try writeHeader(list, allocator, @intCast(report.report_blocks.len), .receiver_report, 4 + report.report_blocks.len * 24);
+        try wire.appendInt(list, allocator, u32, report.sender_ssrc, .big);
+        for (report.report_blocks) |block| try writeReportBlock(list, allocator, block);
+    }
+
+    fn writePictureLossIndication(list: *std.ArrayList(u8), allocator: std.mem.Allocator, pli: PictureLossIndication) Error!void {
+        try writeHeader(list, allocator, payload_feedback_pli, .payload_feedback, 8);
+        try wire.appendInt(list, allocator, u32, pli.sender_ssrc, .big);
+        try wire.appendInt(list, allocator, u32, pli.media_ssrc, .big);
+    }
+
+    fn writeTransportLayerNack(list: *std.ArrayList(u8), allocator: std.mem.Allocator, nack: TransportLayerNack) Error!void {
+        try writeHeader(list, allocator, transport_feedback_nack, .transport_feedback, 8 + nack.pairs.len * 4);
+        try wire.appendInt(list, allocator, u32, nack.sender_ssrc, .big);
+        try wire.appendInt(list, allocator, u32, nack.media_ssrc, .big);
+        for (nack.pairs) |pair| {
+            try wire.appendInt(list, allocator, u16, pair.packet_id, .big);
+            try wire.appendInt(list, allocator, u16, pair.lost_packet_bitmask, .big);
+        }
+    }
+
+    fn writeReportBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, block: ReportBlock) Error!void {
+        try wire.appendInt(list, allocator, u32, block.ssrc, .big);
+        try list.append(allocator, block.fraction_lost);
+        try wire.appendU24(list, allocator, block.cumulative_lost);
+        try wire.appendInt(list, allocator, u32, block.highest_sequence_number, .big);
+        try wire.appendInt(list, allocator, u32, block.interarrival_jitter, .big);
+        try wire.appendInt(list, allocator, u32, block.last_sender_report, .big);
+        try wire.appendInt(list, allocator, u32, block.delay_since_last_sender_report, .big);
+    }
+
+    fn writeHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocator, count_or_format: u5, packet_type: PacketType, payload_len: usize) Error!void {
+        if ((payload_len % 4) != 0 or payload_len / 4 > std.math.maxInt(u16)) return error.InvalidRtcpPacket;
+        try list.append(allocator, 0x80 | @as(u8, count_or_format));
+        try list.append(allocator, @intFromEnum(packet_type));
+        try wire.appendInt(list, allocator, u16, @intCast(payload_len / 4), .big);
+    }
+};
+
 pub const sctp = struct {
     pub const ChunkType = enum(u8) {
         data = 0,
@@ -747,6 +1034,60 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(u16, 0xbede), packet.extension.?.profile);
     try std.testing.expectEqualStrings("opus", packet.payload);
     try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
+}
+
+test "RTCP receiver report and feedback packets" {
+    const allocator = std.testing.allocator;
+
+    var report_blocks = [_]rtcp.ReportBlock{.{
+        .ssrc = 0x01020304,
+        .fraction_lost = 7,
+        .cumulative_lost = 3,
+        .highest_sequence_number = 0x0001_0203,
+        .interarrival_jitter = 44,
+        .last_sender_report = 55,
+        .delay_since_last_sender_report = 66,
+    }};
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try rtcp.writePacket(&encoded, allocator, .{ .receiver_report = .{
+        .sender_ssrc = 0x0a0b0c0d,
+        .report_blocks = &report_blocks,
+    } });
+    var rr = try rtcp.parsePacket(allocator, encoded.items);
+    defer rr.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, encoded.items.len), rr.consumed);
+    try std.testing.expectEqual(@as(u32, 0x0a0b0c0d), rr.packet.receiver_report.sender_ssrc);
+    try std.testing.expectEqual(@as(u24, 3), rr.packet.receiver_report.report_blocks[0].cumulative_lost);
+    try std.testing.expectEqual(@as(u32, 44), rr.packet.receiver_report.report_blocks[0].interarrival_jitter);
+
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, .{ .picture_loss_indication = .{
+        .sender_ssrc = 0x11111111,
+        .media_ssrc = 0x22222222,
+    } });
+    var pli = try rtcp.parsePacket(allocator, encoded.items);
+    defer pli.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x11111111), pli.packet.picture_loss_indication.sender_ssrc);
+    try std.testing.expectEqual(@as(u32, 0x22222222), pli.packet.picture_loss_indication.media_ssrc);
+
+    encoded.clearRetainingCapacity();
+    var nack_pairs = [_]rtcp.NackPair{.{
+        .packet_id = 100,
+        .lost_packet_bitmask = 0b0000_0000_0000_1010,
+    }};
+    try rtcp.writePacket(&encoded, allocator, .{ .transport_layer_nack = .{
+        .sender_ssrc = 0x33333333,
+        .media_ssrc = 0x44444444,
+        .pairs = &nack_pairs,
+    } });
+    var nack = try rtcp.parsePacket(allocator, encoded.items);
+    defer nack.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x33333333), nack.packet.transport_layer_nack.sender_ssrc);
+    try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(100));
+    try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
+    try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
+    try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
 }
 
 test {

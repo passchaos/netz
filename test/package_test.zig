@@ -87,9 +87,16 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "HandshakeClientSession"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "receiveManyDatagrams"));
     try std.testing.expectEqual(@as(u32, 0x2112A442), netz.webrtc.stun.magic_cookie);
+    try std.testing.expect(@hasDecl(netz.webrtc, "rtcp"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "ReceiverReport"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "PictureLossIndication"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "TransportLayerNack"));
     try std.testing.expectEqual(@as(usize, 2048), (netz.webrtc.runtime.Limits{}).max_datagram_size);
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "RtpClient"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "Peer"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "DtlsDatagram"));
+    try std.testing.expect(@hasDecl(netz.webrtc.runtime, "RtcpDatagram"));
+    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "sendRtcpPacket"));
+    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveRtcpPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveManyConcurrent"));
 }

@@ -51,6 +51,14 @@ pub const Peer = struct {
         return self.endpoint.receiveRtpPacket();
     }
 
+    pub fn sendRtcpPacket(self: *Peer, to: net.IpAddress, packet: webrtc.rtcp.Packet) Error!void {
+        try self.endpoint.sendRtcpPacket(to, packet);
+    }
+
+    pub fn receiveRtcpPacket(self: *Peer) Error!RtcpDatagram {
+        return self.endpoint.receiveRtcpPacket();
+    }
+
     pub fn sendDtlsRecord(self: *Peer, to: net.IpAddress, options: webrtc.dtls.WriteOptions, fragment: []const u8) Error!void {
         try self.endpoint.sendDtlsRecord(to, options, fragment);
     }
@@ -153,6 +161,13 @@ pub const PeerEndpoint = struct {
         try self.sendBytes(to, encoded.items);
     }
 
+    pub fn sendRtcpPacket(self: *PeerEndpoint, to: net.IpAddress, packet: webrtc.rtcp.Packet) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try webrtc.rtcp.writePacket(&encoded, self.allocator, packet);
+        try self.sendBytes(to, encoded.items);
+    }
+
     pub fn receiveRtpPacket(self: *PeerEndpoint) Error!RtpDatagram {
         while (true) {
             var raw = try self.receiveRaw();
@@ -164,6 +179,20 @@ pub const PeerEndpoint = struct {
             var packet = try webrtc.rtp.Packet.parse(self.allocator, raw.bytes);
             errdefer packet.deinit(self.allocator);
             return .{ .from = raw.from, .bytes = raw.bytes, .packet = packet };
+        }
+    }
+
+    pub fn receiveRtcpPacket(self: *PeerEndpoint) Error!RtcpDatagram {
+        while (true) {
+            var raw = try self.receiveRaw();
+            errdefer raw.deinit(self.allocator);
+            if (!looksLikeRtcp(raw.bytes)) {
+                raw.deinit(self.allocator);
+                continue;
+            }
+            var parsed = try webrtc.rtcp.parsePacket(self.allocator, raw.bytes);
+            errdefer parsed.deinit(self.allocator);
+            return .{ .from = raw.from, .bytes = raw.bytes, .packet = parsed.packet };
         }
     }
 
@@ -192,6 +221,11 @@ pub const PeerEndpoint = struct {
             if (looksLikeDtls(raw.bytes)) {
                 const record = try webrtc.dtls.Record.parse(raw.bytes);
                 return .{ .dtls = .{ .from = raw.from, .bytes = raw.bytes, .record = record } };
+            }
+            if (looksLikeRtcp(raw.bytes)) {
+                var parsed = try webrtc.rtcp.parsePacket(self.allocator, raw.bytes);
+                errdefer parsed.deinit(self.allocator);
+                return .{ .rtcp = .{ .from = raw.from, .bytes = raw.bytes, .packet = parsed.packet } };
             }
             if (looksLikeRtp(raw.bytes)) {
                 var packet = try webrtc.rtp.Packet.parse(self.allocator, raw.bytes);
@@ -392,15 +426,29 @@ pub const DtlsDatagram = struct {
     }
 };
 
+pub const RtcpDatagram = struct {
+    from: net.IpAddress,
+    bytes: []u8,
+    packet: webrtc.rtcp.Packet,
+
+    pub fn deinit(self: *RtcpDatagram, allocator: std.mem.Allocator) void {
+        self.packet.deinit(allocator);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
 pub const PeerDatagram = union(enum) {
     stun: StunDatagram,
     dtls: DtlsDatagram,
+    rtcp: RtcpDatagram,
     rtp: RtpDatagram,
 
     pub fn deinit(self: *PeerDatagram, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .stun => |*datagram| datagram.deinit(allocator),
             .dtls => |*datagram| datagram.deinit(allocator),
+            .rtcp => |*datagram| datagram.deinit(allocator),
             .rtp => |*datagram| datagram.deinit(allocator),
         }
         self.* = undefined;
@@ -625,7 +673,15 @@ fn looksLikeStun(bytes: []const u8) bool {
 }
 
 fn looksLikeRtp(bytes: []const u8) bool {
-    return bytes.len >= 12 and (bytes[0] & 0xc0) == 0x80;
+    return bytes.len >= 12 and (bytes[0] & 0xc0) == 0x80 and !looksLikeRtcp(bytes);
+}
+
+fn looksLikeRtcp(bytes: []const u8) bool {
+    if (bytes.len < 4 or (bytes[0] & 0xc0) != 0x80) return false;
+    return switch (bytes[1]) {
+        192...223 => true,
+        else => false,
+    };
 }
 
 fn looksLikeDtls(bytes: []const u8) bool {
@@ -818,6 +874,50 @@ test "WebRTC peer runtime multiplexes STUN DTLS and RTP on one UDP socket" {
     try std.testing.expectEqualStrings("server-media", media_response.packet.payload);
 }
 
+test "WebRTC peer runtime sends and receives RTCP feedback" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer receiver.deinit();
+    var sender = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer sender.deinit();
+
+    try receiver.sendRtcpPacket(sender.address(), .{ .picture_loss_indication = .{
+        .sender_ssrc = 0x01020304,
+        .media_ssrc = 0x11121314,
+    } });
+
+    var inbound_pli = try sender.receiveRtcpPacket();
+    defer inbound_pli.deinit(allocator);
+    try std.testing.expect(inbound_pli.from.eql(&receiver.address()));
+    try std.testing.expectEqual(@as(u32, 0x01020304), inbound_pli.packet.picture_loss_indication.sender_ssrc);
+    try std.testing.expectEqual(@as(u32, 0x11121314), inbound_pli.packet.picture_loss_indication.media_ssrc);
+
+    var nack_pairs = [_]webrtc.rtcp.NackPair{.{ .packet_id = 44, .lost_packet_bitmask = 0b101 }};
+    try sender.sendRtcpPacket(receiver.address(), .{ .transport_layer_nack = .{
+        .sender_ssrc = 0x22232425,
+        .media_ssrc = 0x33343536,
+        .pairs = &nack_pairs,
+    } });
+
+    var inbound_nack = try receiver.endpoint.receiveAny();
+    defer inbound_nack.deinit(allocator);
+    switch (inbound_nack) {
+        .rtcp => |rtcp| {
+            try std.testing.expectEqual(@as(u32, 0x22232425), rtcp.packet.transport_layer_nack.sender_ssrc);
+            try std.testing.expect(rtcp.packet.transport_layer_nack.pairs[0].contains(44));
+            try std.testing.expect(rtcp.packet.transport_layer_nack.pairs[0].contains(45));
+            try std.testing.expect(rtcp.packet.transport_layer_nack.pairs[0].contains(47));
+            try std.testing.expect(!rtcp.packet.transport_layer_nack.pairs[0].contains(46));
+        },
+        else => return error.UnexpectedStunMessage,
+    }
+}
+
 test "WebRTC peer receives mixed datagrams with std.Io async demux" {
     const allocator = std.testing.allocator;
 
@@ -879,6 +979,7 @@ test "WebRTC peer receives mixed datagrams with std.Io async demux" {
                 try std.testing.expectEqualStrings("rtp-thirty-three", rtp.packet.payload);
                 saw_rtp = true;
             },
+            .rtcp => return error.UnexpectedStunMessage,
             .stun => return error.UnexpectedStunMessage,
         }
     }

@@ -60,9 +60,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   runtime over protected HTTP/3, and a handshake-backed protected runtime with
   a `std.Io.async` datagram receive helper
 - WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
-  SDP, DTLS record headers, RTP packets/extensions/padding, and SCTP common
-  headers, plus blocking UDP STUN binding, RTP packet, and same-socket
-  STUN/DTLS/RTP peer runtimes with a `std.Io.async` concurrent receive helper
+  SDP, DTLS record headers, RTP packets/extensions/padding, RTCP
+  sender/receiver reports plus PLI/NACK feedback, and SCTP common headers, plus
+  blocking UDP STUN binding, RTP/RTCP packet, and same-socket STUN/DTLS/RTP/RTCP
+  peer runtimes with a `std.Io.async` concurrent receive helper
 
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1,
