@@ -19,6 +19,8 @@ pub const Error = wire.Error || error{
     InvalidDtlsRecord,
     InvalidRtpPacket,
     InvalidRtcpPacket,
+    InvalidSctpPacket,
+    BadSctpChecksum,
     UnsupportedAddressFamily,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
@@ -1194,6 +1196,12 @@ pub const rtcp = struct {
 };
 
 pub const sctp = struct {
+    pub const datachannel_ppid: u32 = 50;
+    pub const string_ppid: u32 = 51;
+    pub const binary_ppid: u32 = 53;
+    pub const string_empty_ppid: u32 = 56;
+    pub const binary_empty_ppid: u32 = 57;
+
     pub const ChunkType = enum(u8) {
         data = 0,
         init = 1,
@@ -1208,6 +1216,15 @@ pub const sctp = struct {
         cookie_echo = 10,
         cookie_ack = 11,
         shutdown_complete = 14,
+        _,
+    };
+
+    pub const PayloadProtocolIdentifier = enum(u32) {
+        webrtc_dcep = datachannel_ppid,
+        webrtc_string = string_ppid,
+        webrtc_binary = binary_ppid,
+        webrtc_string_empty = string_empty_ppid,
+        webrtc_binary_empty = binary_empty_ppid,
         _,
     };
 
@@ -1227,6 +1244,219 @@ pub const sctp = struct {
             };
         }
     };
+
+    pub const PacketOptions = struct {
+        source_port: u16,
+        destination_port: u16,
+        verification_tag: u32,
+    };
+
+    pub const Chunk = struct {
+        chunk_type: ChunkType,
+        flags: u8,
+        value: []const u8,
+        consumed: usize,
+    };
+
+    pub const ParsedPacket = struct {
+        header: Header,
+        chunks: []Chunk,
+
+        pub fn deinit(self: *ParsedPacket, allocator: std.mem.Allocator) void {
+            allocator.free(self.chunks);
+            self.* = undefined;
+        }
+    };
+
+    pub const DataChunk = struct {
+        unordered: bool = false,
+        beginning: bool = true,
+        ending: bool = true,
+        tsn: u32,
+        stream_id: u16,
+        stream_sequence_number: u16,
+        payload_protocol_identifier: PayloadProtocolIdentifier,
+        user_data: []const u8,
+
+        pub fn flags(self: DataChunk) u8 {
+            return (if (self.unordered) @as(u8, 0x04) else 0) |
+                (if (self.beginning) @as(u8, 0x02) else 0) |
+                (if (self.ending) @as(u8, 0x01) else 0);
+        }
+
+        pub fn parse(chunk: Chunk) Error!DataChunk {
+            if (chunk.chunk_type != .data) return error.InvalidSctpPacket;
+            if ((chunk.flags & 0xf8) != 0 or chunk.value.len < 12) return error.InvalidSctpPacket;
+            return .{
+                .unordered = (chunk.flags & 0x04) != 0,
+                .beginning = (chunk.flags & 0x02) != 0,
+                .ending = (chunk.flags & 0x01) != 0,
+                .tsn = std.mem.readInt(u32, chunk.value[0..4], .big),
+                .stream_id = std.mem.readInt(u16, chunk.value[4..6], .big),
+                .stream_sequence_number = std.mem.readInt(u16, chunk.value[6..8], .big),
+                .payload_protocol_identifier = @enumFromInt(std.mem.readInt(u32, chunk.value[8..12], .big)),
+                .user_data = chunk.value[12..],
+            };
+        }
+    };
+
+    pub const DataChannelType = enum(u8) {
+        reliable = 0x00,
+        partial_reliable_retransmit = 0x01,
+        partial_reliable_timed = 0x02,
+        reliable_unordered = 0x80,
+        partial_reliable_retransmit_unordered = 0x81,
+        partial_reliable_timed_unordered = 0x82,
+        _,
+    };
+
+    pub const DataChannelOpen = struct {
+        channel_type: DataChannelType = .reliable,
+        priority: u16 = 0,
+        reliability_parameter: u32 = 0,
+        label: []const u8,
+        protocol: []const u8 = &.{},
+    };
+
+    pub const DataChannelMessage = union(enum) {
+        open: DataChannelOpen,
+        ack: void,
+    };
+
+    pub fn parsePacket(allocator: std.mem.Allocator, bytes: []const u8, verify_checksum: bool) Error!ParsedPacket {
+        if (bytes.len < 12) return error.BufferTooShort;
+        if (verify_checksum and !try validChecksum(bytes)) return error.BadSctpChecksum;
+        const header = try Header.parse(bytes[0..12]);
+
+        var chunks: std.ArrayList(Chunk) = .empty;
+        errdefer chunks.deinit(allocator);
+        var pos: usize = 12;
+        while (pos < bytes.len) {
+            if (bytes.len - pos < 4) return error.InvalidSctpPacket;
+            const chunk_type: ChunkType = @enumFromInt(bytes[pos]);
+            const flags = bytes[pos + 1];
+            const len = std.mem.readInt(u16, bytes[pos + 2 ..][0..2], .big);
+            if (len < 4 or bytes.len - pos < len) return error.InvalidSctpPacket;
+            const padded_len = align4(len);
+            if (bytes.len - pos < padded_len) return error.InvalidSctpPacket;
+            try chunks.append(allocator, .{
+                .chunk_type = chunk_type,
+                .flags = flags,
+                .value = bytes[pos + 4 .. pos + len],
+                .consumed = padded_len,
+            });
+            pos += padded_len;
+        }
+        return .{ .header = header, .chunks = try chunks.toOwnedSlice(allocator) };
+    }
+
+    pub fn writeDataPacket(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        options: PacketOptions,
+        chunks: []const DataChunk,
+    ) Error!void {
+        if (chunks.len == 0) return error.InvalidSctpPacket;
+        const start = list.items.len;
+        try wire.appendInt(list, allocator, u16, options.source_port, .big);
+        try wire.appendInt(list, allocator, u16, options.destination_port, .big);
+        try wire.appendInt(list, allocator, u32, options.verification_tag, .big);
+        try wire.appendInt(list, allocator, u32, 0, .little);
+        for (chunks) |chunk| try writeDataChunk(list, allocator, chunk);
+
+        // SCTP stores the CRC32C checksum in little-endian form and computes it
+        // with the checksum field itself zeroed.  This mirrors the kernel SCTP
+        // implementation's libcrc32c path and lets the codec catch corruption
+        // before upper layers parse DCEP or user data.
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeDataChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunk: DataChunk) Error!void {
+        const value_len = 12 + chunk.user_data.len;
+        const chunk_len = 4 + value_len;
+        if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try list.append(allocator, @intFromEnum(ChunkType.data));
+        try list.append(allocator, chunk.flags());
+        try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        try wire.appendInt(list, allocator, u32, chunk.tsn, .big);
+        try wire.appendInt(list, allocator, u16, chunk.stream_id, .big);
+        try wire.appendInt(list, allocator, u16, chunk.stream_sequence_number, .big);
+        try wire.appendInt(list, allocator, u32, @intFromEnum(chunk.payload_protocol_identifier), .big);
+        try list.appendSlice(allocator, chunk.user_data);
+        try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
+    }
+
+    pub fn checksum(bytes: []const u8) Error!u32 {
+        if (bytes.len < 12) return error.BufferTooShort;
+        var crc = std.hash.crc.Crc32Iscsi.init();
+        crc.update(bytes[0..8]);
+        crc.update(&[_]u8{ 0, 0, 0, 0 });
+        crc.update(bytes[12..]);
+        return crc.final();
+    }
+
+    pub fn validChecksum(bytes: []const u8) Error!bool {
+        if (bytes.len < 12) return error.BufferTooShort;
+        const expected = try checksum(bytes);
+        const actual = std.mem.readInt(u32, bytes[8..12], .little);
+        return expected == actual;
+    }
+
+    pub fn dataChannelPayloadProtocol(is_string: bool, len: usize) PayloadProtocolIdentifier {
+        if (is_string) return if (len == 0) .webrtc_string_empty else .webrtc_string;
+        return if (len == 0) .webrtc_binary_empty else .webrtc_binary;
+    }
+
+    pub fn writeDcepOpen(list: *std.ArrayList(u8), allocator: std.mem.Allocator, open: DataChannelOpen) Error!void {
+        if (open.label.len > std.math.maxInt(u16) or open.protocol.len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try list.append(allocator, 0x03); // DATA_CHANNEL_OPEN
+        try list.append(allocator, @intFromEnum(open.channel_type));
+        try wire.appendInt(list, allocator, u16, open.priority, .big);
+        try wire.appendInt(list, allocator, u32, open.reliability_parameter, .big);
+        try wire.appendInt(list, allocator, u16, @intCast(open.label.len), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(open.protocol.len), .big);
+        try list.appendSlice(allocator, open.label);
+        try list.appendSlice(allocator, open.protocol);
+    }
+
+    pub fn writeDcepAck(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        try list.append(allocator, 0x02); // DATA_CHANNEL_ACK
+    }
+
+    pub fn parseDcepMessage(bytes: []const u8) Error!DataChannelMessage {
+        if (bytes.len == 0) return error.InvalidSctpPacket;
+        return switch (bytes[0]) {
+            0x02 => blk: {
+                if (bytes.len != 1) return error.InvalidSctpPacket;
+                break :blk .{ .ack = {} };
+            },
+            0x03 => blk: {
+                if (bytes.len < 12) return error.InvalidSctpPacket;
+                const channel_type: DataChannelType = @enumFromInt(bytes[1]);
+                const priority = std.mem.readInt(u16, bytes[2..4], .big);
+                const reliability_parameter = std.mem.readInt(u32, bytes[4..8], .big);
+                const label_len = std.mem.readInt(u16, bytes[8..10], .big);
+                const protocol_len = std.mem.readInt(u16, bytes[10..12], .big);
+                const label_start: usize = 12;
+                const protocol_start = label_start + @as(usize, label_len);
+                const end = protocol_start + @as(usize, protocol_len);
+                if (end != bytes.len) return error.InvalidSctpPacket;
+                break :blk .{ .open = .{
+                    .channel_type = channel_type,
+                    .priority = priority,
+                    .reliability_parameter = reliability_parameter,
+                    .label = bytes[label_start..protocol_start],
+                    .protocol = bytes[protocol_start..end],
+                } };
+            },
+            else => error.InvalidSctpPacket,
+        };
+    }
+
+    fn align4(value: usize) usize {
+        return (value + 3) & ~@as(usize, 3);
+    }
 };
 
 pub const magic_cookie = stun.magic_cookie;
@@ -1477,6 +1707,65 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
     try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
+}
+
+test "SCTP DATA packet and DCEP channel messages" {
+    const allocator = std.testing.allocator;
+
+    var dcep_open: std.ArrayList(u8) = .empty;
+    defer dcep_open.deinit(allocator);
+    try sctp.writeDcepOpen(&dcep_open, allocator, .{
+        .channel_type = .partial_reliable_retransmit_unordered,
+        .priority = 128,
+        .reliability_parameter = 3,
+        .label = "chat",
+        .protocol = "json",
+    });
+
+    var packet_bytes: std.ArrayList(u8) = .empty;
+    defer packet_bytes.deinit(allocator);
+    try sctp.writeDataPacket(&packet_bytes, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, &.{.{
+        .unordered = true,
+        .tsn = 10,
+        .stream_id = 2,
+        .stream_sequence_number = 0,
+        .payload_protocol_identifier = .webrtc_dcep,
+        .user_data = dcep_open.items,
+    }});
+
+    try std.testing.expect(try sctp.validChecksum(packet_bytes.items));
+    var parsed = try sctp.parsePacket(allocator, packet_bytes.items, true);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 5000), parsed.header.source_port);
+    try std.testing.expectEqual(@as(u32, 0x01020304), parsed.header.verification_tag);
+    try std.testing.expectEqual(@as(usize, 1), parsed.chunks.len);
+
+    const data = try sctp.DataChunk.parse(parsed.chunks[0]);
+    try std.testing.expect(data.unordered);
+    try std.testing.expect(data.beginning);
+    try std.testing.expect(data.ending);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_dcep, data.payload_protocol_identifier);
+    const dcep = try sctp.parseDcepMessage(data.user_data);
+    try std.testing.expectEqual(sctp.DataChannelType.partial_reliable_retransmit_unordered, dcep.open.channel_type);
+    try std.testing.expectEqual(@as(u32, 3), dcep.open.reliability_parameter);
+    try std.testing.expectEqualStrings("chat", dcep.open.label);
+    try std.testing.expectEqualStrings("json", dcep.open.protocol);
+
+    var tampered = try allocator.dupe(u8, packet_bytes.items);
+    defer allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0xff;
+    try std.testing.expectError(error.BadSctpChecksum, sctp.parsePacket(allocator, tampered, true));
+
+    var ack: std.ArrayList(u8) = .empty;
+    defer ack.deinit(allocator);
+    try sctp.writeDcepAck(&ack, allocator);
+    try std.testing.expect(try sctp.parseDcepMessage(ack.items) == .ack);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string_empty, sctp.dataChannelPayloadProtocol(true, 0));
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_binary, sctp.dataChannelPayloadProtocol(false, 4));
 }
 
 test {

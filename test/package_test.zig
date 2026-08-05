@@ -158,6 +158,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.sdp, "extractIceCredentials"));
     try std.testing.expect(@hasDecl(netz.webrtc.sdp, "Fingerprint"));
     try std.testing.expect(@hasDecl(netz.webrtc.sdp, "IceCredentials"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "DataChunk"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeDataPacket"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "parseDcepMessage"));
     try std.testing.expectEqual(@as(usize, 2048), (netz.webrtc.runtime.Limits{}).max_datagram_size);
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "RtpClient"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "Peer"));
