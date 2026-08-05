@@ -423,12 +423,40 @@ pub const Frame = union(enum) {
     }
 };
 
+pub fn deinitOwnedFrame(frame: *Frame, allocator: std.mem.Allocator) void {
+    switch (frame.*) {
+        // `parseFrameOwned` allocates ACK ranges because the wire can carry an
+        // arbitrary number of sparse ranges.  Other frame payload slices still
+        // borrow from the containing packet/datagram bytes.
+        .ack => |ack| allocator.free(ack.ranges),
+        else => {},
+    }
+    frame.* = undefined;
+}
+
+pub fn deinitOwnedFrameSlice(frames: []Frame, allocator: std.mem.Allocator) void {
+    for (frames) |*frame| deinitOwnedFrame(frame, allocator);
+}
+
 pub const ParsedFrame = struct {
     frame: Frame,
     consumed: usize,
+
+    pub fn deinitOwned(self: *ParsedFrame, allocator: std.mem.Allocator) void {
+        deinitOwnedFrame(&self.frame, allocator);
+        self.* = undefined;
+    }
 };
 
 pub fn parseFrame(bytes: []const u8) Error!ParsedFrame {
+    return parseFrameWithAllocator(null, bytes);
+}
+
+pub fn parseFrameOwned(allocator: std.mem.Allocator, bytes: []const u8) Error!ParsedFrame {
+    return parseFrameWithAllocator(allocator, bytes);
+}
+
+fn parseFrameWithAllocator(allocator: ?std.mem.Allocator, bytes: []const u8) Error!ParsedFrame {
     var cursor = wire.Cursor.init(bytes);
     const frame_type = try varint.decode(&cursor);
 
@@ -439,15 +467,15 @@ pub fn parseFrame(bytes: []const u8) Error!ParsedFrame {
         return .{ .frame = .{ .padding = .{ .len = cursor.pos } }, .consumed = cursor.pos };
     }
 
-    const frame = try parseFrameAfterType(frame_type, &cursor, bytes);
+    const frame = try parseFrameAfterType(allocator, frame_type, &cursor, bytes);
     return .{ .frame = frame, .consumed = cursor.pos };
 }
 
-fn parseFrameAfterType(frame_type: u64, cursor: *wire.Cursor, packet_payload: []const u8) Error!Frame {
+fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *wire.Cursor, packet_payload: []const u8) Error!Frame {
     if (frame_type == @intFromEnum(FrameType.ping)) return .{ .ping = {} };
 
     if (frame_type == @intFromEnum(FrameType.ack) or frame_type == @intFromEnum(FrameType.ack_ecn)) {
-        return .{ .ack = try parseAckFrame(cursor, frame_type == @intFromEnum(FrameType.ack_ecn)) };
+        return .{ .ack = try parseAckFrame(allocator, cursor, frame_type == @intFromEnum(FrameType.ack_ecn)) };
     }
 
     if (frame_type == @intFromEnum(FrameType.reset_stream)) {
@@ -577,15 +605,17 @@ fn parseFrameAfterType(frame_type: u64, cursor: *wire.Cursor, packet_payload: []
     return error.UnsupportedFrameType;
 }
 
-fn parseAckFrame(cursor: *wire.Cursor, has_ecn: bool) Error!AckFrame {
+fn parseAckFrame(allocator: ?std.mem.Allocator, cursor: *wire.Cursor, has_ecn: bool) Error!AckFrame {
     const largest_acknowledged = try varint.decode(cursor);
     const ack_delay = try varint.decode(cursor);
     const range_count = try usizeFromVarint(try varint.decode(cursor));
     const first_ack_range = try varint.decode(cursor);
 
-    var ranges_buf: [32]AckRange = undefined;
-    if (range_count > ranges_buf.len) return error.InvalidAckRange;
-    const ranges: []AckRange = ranges_buf[0..range_count];
+    const ranges: []AckRange = if (allocator) |gpa| try gpa.alloc(AckRange, range_count) else ranges: {
+        if (range_count != 0) return error.InvalidAckRange;
+        break :ranges &.{};
+    };
+    errdefer if (allocator) |gpa| gpa.free(ranges);
     for (ranges) |*range| {
         range.* = .{
             .gap = try varint.decode(cursor),
@@ -599,15 +629,11 @@ fn parseAckFrame(cursor: *wire.Cursor, has_ecn: bool) Error!AckFrame {
         .ecn_ce_count = try varint.decode(cursor),
     } else null;
 
-    // Keep ACK parsing allocation-free by supporting the common small range
-    // count directly.  Return a stable empty slice for no additional ranges;
-    // callers that need many sparse ranges can decode ranges themselves.
-    if (range_count != 0) return error.InvalidAckRange;
     return .{
         .largest_acknowledged = largest_acknowledged,
         .ack_delay = ack_delay,
         .first_ack_range = first_ack_range,
-        .ranges = &.{},
+        .ranges = ranges,
         .ecn_counts = ecn_counts,
     };
 }
@@ -733,4 +759,34 @@ test "QUIC ack close datagram and padding frames" {
     const padding = try parseFrame(&.{ 0, 0, 0, @intFromEnum(FrameType.ping) });
     try std.testing.expectEqual(@as(usize, 3), padding.frame.padding.len);
     try std.testing.expectEqual(@as(usize, 3), padding.consumed);
+}
+
+test "QUIC ACK frame owned parser preserves sparse ranges" {
+    const allocator = std.testing.allocator;
+    const ranges = [_]AckRange{
+        .{ .gap = 0, .ack_range_length = 1 },
+        .{ .gap = 2, .ack_range_length = 0 },
+    };
+    const frame = Frame{ .ack = .{
+        .largest_acknowledged = 10,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    } };
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try frame.write(&bytes, allocator);
+
+    try std.testing.expectError(error.InvalidAckRange, parseFrame(bytes.items));
+    var parsed = try parseFrameOwned(allocator, bytes.items);
+    defer parsed.deinitOwned(allocator);
+
+    try std.testing.expectEqual(@as(u64, 10), parsed.frame.ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 0), parsed.frame.ack.first_ack_range);
+    try std.testing.expectEqual(@as(usize, 2), parsed.frame.ack.ranges.len);
+    try std.testing.expectEqual(@as(u64, 0), parsed.frame.ack.ranges[0].gap);
+    try std.testing.expectEqual(@as(u64, 1), parsed.frame.ack.ranges[0].ack_range_length);
+    try std.testing.expectEqual(@as(u64, 2), parsed.frame.ack.ranges[1].gap);
+    try std.testing.expectEqual(@as(u64, 0), parsed.frame.ack.ranges[1].ack_range_length);
 }

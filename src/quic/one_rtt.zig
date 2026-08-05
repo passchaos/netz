@@ -29,6 +29,7 @@ pub const ReceivedPacket = struct {
     frames: []quic.Frame,
 
     pub fn deinit(self: *ReceivedPacket, allocator: std.mem.Allocator) void {
+        quic.deinitOwnedFrameSlice(self.frames, allocator);
         allocator.free(self.frames);
         self.packet.deinit(allocator);
         self.* = undefined;
@@ -335,13 +336,19 @@ pub fn receive(
     var packet = try quic.protection.openShortPacket(endpoint.allocator, keys, datagram.bytes, destination_connection_id_len, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
     var frames: std.ArrayList(quic.Frame) = .empty;
-    errdefer frames.deinit(endpoint.allocator);
+    errdefer {
+        quic.deinitOwnedFrameSlice(frames.items, endpoint.allocator);
+        frames.deinit(endpoint.allocator);
+    }
 
     var pos: usize = 0;
     while (pos < packet.payload.len) {
         if (frames.items.len >= max_frames) return error.MissingFrame;
-        const parsed = try quic.parseFrame(packet.payload[pos..]);
+        var parsed = try quic.parseFrameOwned(endpoint.allocator, packet.payload[pos..]);
+        var appended = false;
+        defer if (!appended) parsed.deinitOwned(endpoint.allocator);
         try frames.append(endpoint.allocator, parsed.frame);
+        appended = true;
         pos += parsed.consumed;
     }
     if (frames.items.len == 0) return error.MissingFrame;
@@ -445,6 +452,74 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.largest_acknowledged);
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+}
+
+test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const server_cid = [_]u8{ 0x45, 0x46, 0x47, 0x48 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0xb1} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0xb2} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.send(&ping); // packet 0
+    try client.send(&ping); // packet 1, deliberately dropped below
+    try client.send(&ping); // packet 2
+    try std.testing.expectEqual(@as(usize, 3), client.pendingRecoveryCount());
+
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), first.packet.packet_number);
+
+    // Simulate a lost middle packet by removing packet 1 from the UDP receive
+    // queue without recording it in the peer's ACK tracker.
+    var dropped = try server_endpoint.receiveBytes();
+    defer dropped.deinit(allocator);
+
+    var third = try server.receivePacket();
+    defer third.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), third.packet.packet_number);
+
+    try server.sendAck(0);
+    var ack_packet = try client.receivePacket();
+    defer ack_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), ack_packet.frames[0].ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.first_ack_range);
+    try std.testing.expectEqual(@as(usize, 1), ack_packet.frames[0].ack.ranges.len);
+    try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.ranges[0].gap);
+    try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.ranges[0].ack_range_length);
+    try std.testing.expect(client.sent.packets.items[0].acknowledged);
+    try std.testing.expect(!client.sent.packets.items[1].acknowledged);
+    try std.testing.expect(client.sent.packets.items[2].acknowledged);
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(u64, 1), client.recovery.pending.items[0].packet_numbers.items[0]);
 }
 
 test "QUIC 1-RTT connection retransmits PTO payload and clears recovery on ACK" {

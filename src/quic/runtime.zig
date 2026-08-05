@@ -111,14 +111,20 @@ pub const Endpoint = struct {
         if (raw.bytes.len == 0) return error.EmptyDatagram;
 
         var frames: std.ArrayList(quic.Frame) = .empty;
-        errdefer frames.deinit(self.allocator);
+        errdefer {
+            quic.deinitOwnedFrameSlice(frames.items, self.allocator);
+            frames.deinit(self.allocator);
+        }
 
         var pos: usize = 0;
         while (pos < raw.bytes.len) {
             if (frames.items.len >= self.limits.max_frames_per_datagram) return error.DatagramTooLarge;
-            const parsed = try quic.parseFrame(raw.bytes[pos..]);
+            var parsed = try quic.parseFrameOwned(self.allocator, raw.bytes[pos..]);
+            var appended = false;
+            defer if (!appended) parsed.deinitOwned(self.allocator);
             if (parsed.consumed == 0) return error.TrailingBytes;
             try frames.append(self.allocator, parsed.frame);
+            appended = true;
             pos += parsed.consumed;
         }
 
@@ -153,6 +159,7 @@ pub const OwnedDatagram = struct {
     frames: []quic.Frame,
 
     pub fn deinit(self: *OwnedDatagram, allocator: std.mem.Allocator) void {
+        quic.deinitOwnedFrameSlice(self.frames, allocator);
         allocator.free(self.frames);
         allocator.free(self.bytes);
         self.* = undefined;
