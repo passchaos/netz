@@ -19,7 +19,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   client/server runtime over HTTP/1 Upgrade
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK, PUBLISH, PUBACK-style
   acknowledgements, SUBSCRIBE/SUBACK, PING, DISCONNECT, properties, and
-  remaining length
+  remaining length, plus a blocking TCP client/server runtime
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
   datagram mapping
 - WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
@@ -30,9 +30,10 @@ The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1,
 prior-knowledge HTTP/2 (h2c), and WebSocket now include blocking TCP
 client/server runtimes built on Zig 0.16 `std.Io.net`; QUIC has a blocking UDP
-endpoint runtime for datagram/frame transport. TLS, event loops, packet
-protection, congestion control, and richer high-level clients/servers can layer
-on the same byte-level pieces.
+endpoint runtime for datagram/frame transport; MQTT has a blocking TCP
+client/server runtime for CONNECT/PUBLISH/PING/DISCONNECT flows. TLS, event
+loops, packet protection, congestion control, and richer high-level
+clients/servers can layer on the same byte-level pieces.
 
 ## Build
 
