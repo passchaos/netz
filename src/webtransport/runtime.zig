@@ -108,6 +108,44 @@ pub const ProtectedServer = struct {
     }
 };
 
+pub const HandshakeServer = struct {
+    h3: http3.runtime.HandshakeServer,
+
+    pub fn bind(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        limits: Limits,
+        options: http3.runtime.HandshakeServerOptions,
+    ) Error!HandshakeServer {
+        return .{ .h3 = try .bind(allocator, io, bind_address, limits.http3, options) };
+    }
+
+    pub fn deinit(self: *HandshakeServer) void {
+        self.h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn address(self: HandshakeServer) net.IpAddress {
+        return self.h3.address();
+    }
+
+    pub fn accept(self: *HandshakeServer) Error!AcceptedHandshakeSession {
+        var session = try self.h3.accept();
+        errdefer session.deinit();
+
+        var request = try session.receiveRequest();
+        errdefer request.deinit(session.established.connection.endpoint.allocator);
+        if (!std.mem.eql(u8, request.request.method, "CONNECT")) return error.InvalidConnect;
+        if (!std.mem.eql(u8, findHeader(request.request.headers, ":protocol") orelse "", "webtransport")) {
+            return error.InvalidConnect;
+        }
+        const session_id = webtransport.SessionId.init(request.stream_id);
+        try session.sendResponse(request.stream_id, .{ .status = 200 });
+        return .{ .h3 = session, .request = request, .session_id = session_id };
+    }
+};
+
 pub const AcceptedSession = struct {
     request: http3.runtime.OwnedRequest,
     session_id: webtransport.SessionId,
@@ -125,6 +163,27 @@ pub const AcceptedProtectedSession = struct {
     pub fn deinit(self: *AcceptedProtectedSession, allocator: std.mem.Allocator) void {
         self.request.deinit(allocator);
         self.* = undefined;
+    }
+};
+
+pub const AcceptedHandshakeSession = struct {
+    h3: http3.runtime.HandshakeServerSession,
+    request: http3.runtime.OwnedHandshakeRequest,
+    session_id: webtransport.SessionId,
+
+    pub fn deinit(self: *AcceptedHandshakeSession) void {
+        const allocator = self.h3.established.connection.endpoint.allocator;
+        self.request.deinit(allocator);
+        self.h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
+        return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
+    }
+
+    pub fn sendDatagram(self: *AcceptedHandshakeSession, payload: []const u8) Error!void {
+        try sendHandshakeDatagramFromConnection(&self.h3.established.connection, self.session_id, payload);
     }
 };
 
@@ -171,6 +230,46 @@ pub const ClientSession = struct {
 
     pub fn receiveDatagram(self: *ClientSession) Error!OwnedDatagram {
         return receiveDatagramFromEndpoint(&self.h3.quic_client.endpoint);
+    }
+};
+
+pub const HandshakeClientSession = struct {
+    h3: http3.runtime.HandshakeClient,
+    session_id: webtransport.SessionId,
+
+    pub fn connect(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        options: HandshakeConnectOptions,
+    ) Error!HandshakeClientSession {
+        var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, options.h3);
+        errdefer h3_client.deinit();
+        _ = options.origin;
+        var response = try h3_client.request(.{
+            .method = "CONNECT",
+            .path = options.path,
+            .scheme = "https",
+            .authority = options.authority,
+            .headers = &.{.{ .name = ":protocol", .value = "webtransport" }},
+        });
+        defer response.deinit(allocator);
+        if (response.response.status < 200 or response.response.status >= 300) return error.InvalidConnect;
+        return .{ .h3 = h3_client, .session_id = .init(0) };
+    }
+
+    pub fn deinit(self: *HandshakeClientSession) void {
+        self.h3.deinit();
+        self.* = undefined;
+    }
+
+    pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
+        try sendHandshakeDatagramFromConnection(&self.h3.established.connection, self.session_id, payload);
+    }
+
+    pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
+        return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
     }
 };
 
@@ -243,6 +342,14 @@ pub const ProtectedConnectOptions = struct {
     config: http3.runtime.ProtectedConfig,
 };
 
+pub const HandshakeConnectOptions = struct {
+    authority: []const u8,
+    path: []const u8 = "/",
+    origin: []const u8 = "/",
+    limits: Limits = .{},
+    h3: http3.runtime.HandshakeClientOptions,
+};
+
 pub const OwnedDatagram = struct {
     quic_datagram: quic.runtime.OwnedDatagram,
     datagram: webtransport.Datagram,
@@ -258,6 +365,16 @@ pub const OwnedProtectedDatagram = struct {
     datagram: webtransport.Datagram,
 
     pub fn deinit(self: *OwnedProtectedDatagram, allocator: std.mem.Allocator) void {
+        self.packet.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedHandshakeDatagram = struct {
+    packet: quic.one_rtt.ReceivedPacket,
+    datagram: webtransport.Datagram,
+
+    pub fn deinit(self: *OwnedHandshakeDatagram, allocator: std.mem.Allocator) void {
         self.packet.deinit(allocator);
         self.* = undefined;
     }
@@ -287,6 +404,32 @@ fn receiveDatagramFromEndpoint(endpoint: *quic.runtime.Endpoint) Error!OwnedData
             }
         }
         datagram.deinit(endpoint.allocator);
+    }
+}
+
+fn sendHandshakeDatagramFromConnection(
+    connection: *quic.one_rtt.Connection,
+    session_id: webtransport.SessionId,
+    payload: []const u8,
+) Error!void {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(connection.endpoint.allocator);
+    try (webtransport.Datagram{ .session_id = session_id, .payload = payload }).write(&encoded, connection.endpoint.allocator);
+    const frames = [_]quic.Frame{.{ .datagram = .{ .data = encoded.items, .length_present = true } }};
+    try connection.send(&frames);
+}
+
+fn receiveHandshakeDatagramFromConnection(connection: *quic.one_rtt.Connection) Error!OwnedHandshakeDatagram {
+    while (true) {
+        var packet = try connection.receivePacket();
+        errdefer packet.deinit(connection.endpoint.allocator);
+        for (packet.frames) |frame| {
+            if (frame == .datagram) {
+                const wt = try webtransport.Datagram.parse(frame.datagram.data);
+                return .{ .packet = packet, .datagram = wt };
+            }
+        }
+        packet.deinit(connection.endpoint.allocator);
     }
 }
 
@@ -459,6 +602,80 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     defer response.deinit(allocator);
     try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
     try std.testing.expectEqualStrings("protected-server-dgram", response.datagram.payload);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xea, 0xce, 0x10, 0x01, 0xea, 0xce, 0x10, 0x02 };
+    const client_cid = [_]u8{ 0xea, 0xce, 0x10, 0x03 };
+    const server_cid = [_]u8{ 0xea, 0xce, 0x10, 0x04 };
+
+    var server = try HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } },
+    }, .{
+        .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x83} ** 32,
+            .x25519_secret_key = [_]u8{0x84} ** 32,
+        },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var accepted = try server_ptr.accept();
+            defer accepted.deinit();
+            try std.testing.expect(accepted.session_id.isClientInitiatedBidirectional());
+
+            var datagram = try accepted.receiveDatagram();
+            defer datagram.deinit(accepted.h3.established.connection.endpoint.allocator);
+            try std.testing.expectEqual(accepted.session_id.value, datagram.datagram.session_id.value);
+            try std.testing.expectEqualStrings("handshake-client-dgram", datagram.datagram.payload);
+            try accepted.sendDatagram("handshake-server-dgram");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try HandshakeClientSession.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .authority = "localhost",
+        .path = "/wt-handshake",
+        .limits = .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } } },
+        .h3 = .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x81} ** 32,
+                .x25519_secret_key = [_]u8{0x82} ** 32,
+            },
+        },
+    });
+    defer client.deinit();
+
+    try client.sendDatagram("handshake-client-dgram");
+    var response = try client.receiveDatagram();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
+    try std.testing.expectEqualStrings("handshake-server-dgram", response.datagram.payload);
 
     thread.join();
     if (shared.err) |err| return err;

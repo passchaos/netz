@@ -37,7 +37,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   remaining length, plus a blocking TCP client/server runtime
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
   datagram mapping, plus a cleartext development runtime over the HTTP/3 dev
-  transport and a protected QUIC 1-RTT runtime over protected HTTP/3
+  transport, a protected QUIC 1-RTT runtime over protected HTTP/3, and a
+  handshake-backed protected runtime
 - WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
   SDP, DTLS record headers, RTP packets/extensions/padding, and SCTP common
   headers, plus blocking UDP STUN binding and RTP packet client/server runtimes
@@ -54,9 +55,9 @@ the same byte-level pieces.
 
 The legacy HTTP/3 development runtime is intentionally labeled as cleartext; the
 protected HTTP/3 runtime uses the QUIC 1-RTT short-packet API for request/response
-STREAM frames. WebTransport has both the cleartext development transport and a
-protected runtime that performs CONNECT over protected HTTP/3 and datagrams over
-protected QUIC 1-RTT packets.
+STREAM frames. WebTransport has the cleartext development transport, a protected
+runtime that performs CONNECT over protected HTTP/3 and datagrams over protected
+QUIC 1-RTT packets, and a handshake-backed protected session API.
 
 ## Build
 
