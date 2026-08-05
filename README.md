@@ -44,10 +44,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   remaining length, plus a blocking TCP client/server runtime with a
   `std.Io.async` concurrent server helper and QoS publish inflight limiting
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
-  datagram mapping, plus a cleartext development runtime over the HTTP/3 dev
-  transport, a protected QUIC 1-RTT runtime over protected HTTP/3, and a
-  handshake-backed protected runtime with a `std.Io.async` datagram receive
-  helper
+  datagram mapping, session lifecycle/counter state, plus a cleartext
+  development runtime over the HTTP/3 dev transport, a protected QUIC 1-RTT
+  runtime over protected HTTP/3, and a handshake-backed protected runtime with
+  a `std.Io.async` datagram receive helper
 - WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
   SDP, DTLS record headers, RTP packets/extensions/padding, and SCTP common
   headers, plus blocking UDP STUN binding, RTP packet, and same-socket

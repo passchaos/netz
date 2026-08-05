@@ -43,6 +43,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveRoutedBytes"));
     try std.testing.expect(@hasDecl(netz.quic.connection_router, "Router"));
     try std.testing.expect(netz.webtransport.SessionId.init(0).isClientInitiatedBidirectional());
+    try std.testing.expect(@hasDecl(netz.webtransport, "SessionState"));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.webtransport.runtime.Limits{}).http3.quic.max_datagram_size);
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "ProtectedClientSession"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "HandshakeClientSession"));

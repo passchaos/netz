@@ -42,6 +42,52 @@ pub const SessionId = struct {
     }
 };
 
+pub const SessionState = struct {
+    session_id: ?SessionId = null,
+    established: bool = false,
+    draining: bool = false,
+    closed: bool = false,
+    close_code: ?u32 = null,
+    datagrams_sent: u64 = 0,
+    datagrams_received: u64 = 0,
+
+    pub fn establish(self: *SessionState, session_id: SessionId) Error!void {
+        if (!session_id.isClientInitiatedBidirectional()) return error.InvalidSessionId;
+        self.session_id = session_id;
+        self.established = true;
+        self.draining = false;
+        self.closed = false;
+        self.close_code = null;
+    }
+
+    pub fn recordDatagramSent(self: *SessionState, session_id: SessionId) Error!void {
+        try self.ensureOpen(session_id);
+        self.datagrams_sent += 1;
+    }
+
+    pub fn recordDatagramReceived(self: *SessionState, session_id: SessionId) Error!void {
+        try self.ensureOpen(session_id);
+        self.datagrams_received += 1;
+    }
+
+    pub fn drain(self: *SessionState) void {
+        if (self.established and !self.closed) self.draining = true;
+    }
+
+    pub fn close(self: *SessionState, code: u32) void {
+        self.closed = true;
+        self.established = false;
+        self.draining = false;
+        self.close_code = code;
+    }
+
+    pub fn ensureOpen(self: SessionState, session_id: SessionId) Error!void {
+        if (!self.established or self.closed) return error.InvalidSessionId;
+        const current = self.session_id orelse return error.InvalidSessionId;
+        if (current.value != session_id.value) return error.InvalidSessionId;
+    }
+};
+
 pub const Capsule = union(enum) {
     datagram: []const u8,
     close_session: CloseSession,
@@ -167,6 +213,27 @@ test "WebTransport datagram maps quarter stream id" {
     const parsed = try Datagram.parse(encoded.items);
     try std.testing.expectEqual(@as(u62, 8), parsed.session_id.value);
     try std.testing.expectEqualStrings("dgram", parsed.payload);
+}
+
+test "WebTransport session state tracks lifecycle and datagram counters" {
+    var state = SessionState{};
+    try std.testing.expect(!state.established);
+    try std.testing.expectError(error.InvalidSessionId, state.establish(.init(1))); // server-initiated, invalid for CONNECT sessions.
+
+    try state.establish(.init(0));
+    try std.testing.expect(state.established);
+    try state.recordDatagramSent(.init(0));
+    try state.recordDatagramReceived(.init(0));
+    try std.testing.expectEqual(@as(u64, 1), state.datagrams_sent);
+    try std.testing.expectEqual(@as(u64, 1), state.datagrams_received);
+    try std.testing.expectError(error.InvalidSessionId, state.recordDatagramReceived(.init(4)));
+
+    state.drain();
+    try std.testing.expect(state.draining);
+    state.close(42);
+    try std.testing.expect(state.closed);
+    try std.testing.expectEqual(@as(?u32, 42), state.close_code);
+    try std.testing.expectError(error.InvalidSessionId, state.recordDatagramSent(.init(0)));
 }
 
 test {
