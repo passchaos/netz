@@ -260,6 +260,7 @@ pub const Connection = struct {
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
     last_peer_client_stream_id: u31 = 0,
+    peer_goaway_last_stream_id: ?u31 = null,
 
     pub fn close(self: *Connection) void {
         self.send_stream_windows.deinit(self.allocator);
@@ -271,6 +272,9 @@ pub const Connection = struct {
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
         if (self.role != .client) return error.UnexpectedFrame;
         const stream_id = self.next_client_stream_id;
+        if (self.peer_goaway_last_stream_id) |last| {
+            if (stream_id > last) return error.ConnectionGoAway;
+        }
         self.next_client_stream_id += 2;
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
@@ -484,6 +488,7 @@ pub const Connection = struct {
             if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
+                self.peer_goaway_last_stream_id = goaway.last_stream_id;
                 if (stream_id > goaway.last_stream_id) return error.ConnectionGoAway;
                 continue;
             }
@@ -1859,6 +1864,74 @@ test "HTTP/2 client continues active request allowed by GOAWAY" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("still-ok", response.body);
+}
+
+test "HTTP/2 client refuses new request after peer GOAWAY" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/first-before-goaway", request.path);
+            try connection.sendGoAway(request.stream_id, .no_error, "draining");
+            try connection.writeResponse(request.stream_id, .{ .body = "first" });
+
+            // If the client incorrectly opens stream 3 after GOAWAY, this read
+            // would eventually observe it.  The test expects the client to
+            // reject locally instead, so the server can simply return.
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var first = try client.request(.{
+        .method = "GET",
+        .path = "/first-before-goaway",
+        .authority = "localhost",
+    });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("first", first.body);
+
+    try std.testing.expectError(error.ConnectionGoAway, client.request(.{
+        .method = "GET",
+        .path = "/second-after-goaway",
+        .authority = "localhost",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 runtime rejects malformed CONTINUATION sequence" {

@@ -12,7 +12,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder, PING/GOAWAY/WINDOW_UPDATE connection
-  management including interleaved SETTINGS/PING/WINDOW_UPDATE handling and GOAWAY propagation during stream reads, connection- and stream-level flow-control enforcement including
+  management including interleaved SETTINGS/PING/WINDOW_UPDATE handling and GOAWAY propagation during stream reads and post-GOAWAY request suppression, connection- and stream-level flow-control enforcement including
   SETTINGS_INITIAL_WINDOW_SIZE updates, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation,
   outbound frame splitting, frame-envelope and stream-id direction/monotonicity validation, request/response trailers, interim 1xx response skipping, content-length
   validation, HTTP/2 pseudo-header/lowercase field-name validation,
