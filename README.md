@@ -20,7 +20,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
   packet server/client Finished flights, and handshake/application secret
   derivation for QUIC, packet number space ACK tracking wired into 1-RTT
-  ACK/STREAM exchange, plus a blocking UDP endpoint runtime for frame datagrams
+  ACK/STREAM exchange, stream send/receive state with offset reassembly and FIN,
+  plus a blocking UDP endpoint runtime for frame datagrams
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, message assembly, and a blocking TCP
   client/server runtime over HTTP/1 Upgrade
