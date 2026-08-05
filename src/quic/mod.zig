@@ -13,6 +13,7 @@ pub const packet_space = @import("packet_space.zig");
 pub const stream_state = @import("stream.zig");
 pub const flow_control = @import("flow_control.zig");
 pub const recovery = @import("recovery.zig");
+pub const connection_router = @import("connection_router.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
@@ -690,6 +691,7 @@ test {
     _ = stream_state;
     _ = flow_control;
     _ = recovery;
+    _ = connection_router;
 }
 
 test "QUIC long initial header parse" {
