@@ -721,6 +721,126 @@ pub const SubAck = struct {
     }
 };
 
+pub const Unsubscribe = struct {
+    packet_id: u16,
+    properties: []Property = &.{},
+    topic_filters: [][]const u8,
+
+    pub fn deinit(self: *Unsubscribe, allocator: std.mem.Allocator) void {
+        allocator.free(self.properties);
+        allocator.free(self.topic_filters);
+        self.* = undefined;
+    }
+
+    pub fn parse(allocator: std.mem.Allocator, protocol: ProtocolVersion, packet: []const u8) Error!Unsubscribe {
+        const fixed = try FixedHeader.parse(packet);
+        if (fixed.packet_type != .unsubscribe) return error.InvalidPacketType;
+        try validateControlFlags(fixed);
+        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
+        const packet_id = try cursor.readInt(u16, .big);
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        errdefer allocator.free(props);
+
+        var filters: std.ArrayList([]const u8) = .empty;
+        errdefer filters.deinit(allocator);
+        while (!cursor.eof()) {
+            const filter = try readUtf8(&cursor);
+            try validateTopicFilter(filter);
+            try filters.append(allocator, filter);
+        }
+        if (filters.items.len == 0) return error.InvalidSubscription;
+        return .{ .packet_id = packet_id, .properties = props, .topic_filters = try filters.toOwnedSlice(allocator) };
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        packet_id: u16,
+        properties: []const Property,
+        topic_filters: []const []const u8,
+    ) Error!void {
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        if (topic_filters.len == 0) return error.InvalidSubscription;
+        var variable: std.ArrayList(u8) = .empty;
+        defer variable.deinit(allocator);
+        try wire.appendInt(&variable, allocator, u16, packet_id, .big);
+        if (protocol == .v5) try writeProperties(&variable, allocator, properties);
+        for (topic_filters) |filter| {
+            try validateTopicFilter(filter);
+            try writeUtf8(&variable, allocator, filter);
+        }
+        try (FixedHeader{ .packet_type = .unsubscribe, .flags = PacketType.unsubscribe.defaultFlags(), .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
+        try list.appendSlice(allocator, variable.items);
+    }
+};
+
+pub const UnsubAck = struct {
+    packet_id: u16,
+    properties: []Property = &.{},
+    reason_codes: []u8,
+
+    pub fn deinit(self: *UnsubAck, allocator: std.mem.Allocator) void {
+        allocator.free(self.properties);
+        allocator.free(self.reason_codes);
+        self.* = undefined;
+    }
+
+    pub fn parse(allocator: std.mem.Allocator, protocol: ProtocolVersion, packet: []const u8) Error!UnsubAck {
+        const fixed = try FixedHeader.parse(packet);
+        if (fixed.packet_type != .unsuback) return error.InvalidPacketType;
+        try validateControlFlags(fixed);
+        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
+        const packet_id = try cursor.readInt(u16, .big);
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        if (protocol == .v3_1_1) {
+            if (!cursor.eof()) return error.InvalidPacketType;
+            return .{
+                .packet_id = packet_id,
+                .properties = try allocator.alloc(Property, 0),
+                .reason_codes = try allocator.dupe(u8, &[_]u8{0x00}),
+            };
+        }
+        const props = try parseProperties(allocator, &cursor);
+        errdefer allocator.free(props);
+        const reason_codes = try allocator.dupe(u8, cursor.buf[cursor.pos..]);
+        errdefer allocator.free(reason_codes);
+        for (reason_codes) |code| try validateUnsubAckReason(code);
+        cursor.pos = cursor.buf.len;
+        if (reason_codes.len == 0) return error.InvalidReasonCode;
+        return .{ .packet_id = packet_id, .properties = props, .reason_codes = reason_codes };
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        packet_id: u16,
+        properties: []const Property,
+        reason_codes: []const u8,
+    ) Error!void {
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        if (reason_codes.len == 0) return error.InvalidReasonCode;
+        var variable: std.ArrayList(u8) = .empty;
+        defer variable.deinit(allocator);
+        try wire.appendInt(&variable, allocator, u16, packet_id, .big);
+        if (protocol == .v5) {
+            try writeProperties(&variable, allocator, properties);
+            for (reason_codes) |code| {
+                try validateUnsubAckReason(code);
+                try variable.append(allocator, code);
+            }
+        } else if (reason_codes.len != 1 or reason_codes[0] != 0x00) {
+            return error.InvalidReasonCode;
+        }
+        try (FixedHeader{ .packet_type = .unsuback, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
+        try list.appendSlice(allocator, variable.items);
+    }
+};
+
 pub const Disconnect = struct {
     reason_code: u8 = 0,
     properties: []Property = &.{},
@@ -772,6 +892,13 @@ fn validateSubscriptionOptions(options: u8) Error!void {
 fn validateSubAckReason(code: u8) Error!void {
     switch (code) {
         0x00, 0x01, 0x02, 0x80, 0x83, 0x87, 0x8f, 0x91, 0x97, 0x9e, 0xa1, 0xa2 => {},
+        else => return error.InvalidReasonCode,
+    }
+}
+
+fn validateUnsubAckReason(code: u8) Error!void {
+    switch (code) {
+        0x00, 0x11, 0x80, 0x83, 0x87, 0x8f, 0x91 => {},
         else => return error.InvalidReasonCode,
     }
 }
@@ -1016,6 +1143,36 @@ test "MQTT subscribe and suback controls" {
     defer suback.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 9), suback.packet_id);
     try std.testing.expectEqualSlices(u8, &reasons, suback.reason_codes);
+}
+
+test "MQTT unsubscribe and unsuback controls" {
+    const allocator = std.testing.allocator;
+    const filters = [_][]const u8{ "sensors/+", "alerts/#" };
+
+    var unsubscribe_bytes: std.ArrayList(u8) = .empty;
+    defer unsubscribe_bytes.deinit(allocator);
+    try Unsubscribe.write(&unsubscribe_bytes, allocator, .v5, 11, &.{}, &filters);
+    var unsubscribe = try Unsubscribe.parse(allocator, .v5, unsubscribe_bytes.items);
+    defer unsubscribe.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 11), unsubscribe.packet_id);
+    try std.testing.expectEqual(@as(usize, 2), unsubscribe.topic_filters.len);
+    try std.testing.expectEqualStrings("sensors/+", unsubscribe.topic_filters[0]);
+    try std.testing.expectEqualStrings("alerts/#", unsubscribe.topic_filters[1]);
+
+    var unsuback_bytes: std.ArrayList(u8) = .empty;
+    defer unsuback_bytes.deinit(allocator);
+    const reasons = [_]u8{ 0x00, 0x11 };
+    try UnsubAck.write(&unsuback_bytes, allocator, .v5, 11, &.{}, &reasons);
+    var unsuback = try UnsubAck.parse(allocator, .v5, unsuback_bytes.items);
+    defer unsuback.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 11), unsuback.packet_id);
+    try std.testing.expectEqualSlices(u8, &reasons, unsuback.reason_codes);
+
+    var invalid: std.ArrayList(u8) = .empty;
+    defer invalid.deinit(allocator);
+    try std.testing.expectError(error.InvalidSubscription, Unsubscribe.write(&invalid, allocator, .v5, 1, &.{}, &[_][]const u8{}));
+    try std.testing.expectError(error.InvalidSubscription, Unsubscribe.write(&invalid, allocator, .v5, 1, &.{}, &[_][]const u8{"bad/#/filter"}));
+    try std.testing.expectError(error.InvalidReasonCode, UnsubAck.write(&invalid, allocator, .v5, 1, &.{}, &[_]u8{0x42}));
 }
 
 test "MQTT disconnect control" {

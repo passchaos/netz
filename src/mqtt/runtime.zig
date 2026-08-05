@@ -379,6 +379,46 @@ pub const Connection = struct {
         return .{ .packet = packet, .suback = suback };
     }
 
+    pub fn unsubscribe(self: *Connection, topic_filters: []const []const u8, options: UnsubscribeOptions) Error!OwnedUnsubAck {
+        const packet_id = self.nextPacketId();
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try mqtt.Unsubscribe.write(&encoded, self.allocator, self.protocol, packet_id, options.properties, topic_filters);
+        try writeAll(self.io, self.stream, encoded.items);
+
+        var unsuback = try self.readUnsubAck();
+        errdefer unsuback.deinit(self.allocator);
+        if (unsuback.unsuback.packet_id != packet_id or unsuback.unsuback.reason_codes.len != topic_filters.len) {
+            return error.UnexpectedPacket;
+        }
+        return unsuback;
+    }
+
+    pub fn readUnsubscribe(self: *Connection) Error!OwnedUnsubscribe {
+        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        errdefer packet.deinit(self.allocator);
+        if (packet.fixed.packet_type != .unsubscribe) return error.UnexpectedPacket;
+        var unsubscribe_packet = try mqtt.Unsubscribe.parse(self.allocator, self.protocol, packet.bytes);
+        errdefer unsubscribe_packet.deinit(self.allocator);
+        return .{ .packet = packet, .unsubscribe = unsubscribe_packet };
+    }
+
+    pub fn writeUnsubAck(self: *Connection, packet_id: u16, reason_codes: []const u8, properties: []const mqtt.Property) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try mqtt.UnsubAck.write(&encoded, self.allocator, self.protocol, packet_id, properties, reason_codes);
+        try writeAll(self.io, self.stream, encoded.items);
+    }
+
+    pub fn readUnsubAck(self: *Connection) Error!OwnedUnsubAck {
+        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        errdefer packet.deinit(self.allocator);
+        if (packet.fixed.packet_type != .unsuback) return error.UnexpectedPacket;
+        var unsuback = try mqtt.UnsubAck.parse(self.allocator, self.protocol, packet.bytes);
+        errdefer unsuback.deinit(self.allocator);
+        return .{ .packet = packet, .unsuback = unsuback };
+    }
+
     pub fn ping(self: *Connection) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
@@ -444,6 +484,10 @@ pub const PublishOptions = struct {
 };
 
 pub const SubscribeOptions = struct {
+    properties: []const mqtt.Property = &.{},
+};
+
+pub const UnsubscribeOptions = struct {
     properties: []const mqtt.Property = &.{},
 };
 
@@ -518,6 +562,28 @@ pub const OwnedSubAck = struct {
 
     pub fn deinit(self: *OwnedSubAck, allocator: std.mem.Allocator) void {
         self.suback.deinit(allocator);
+        self.packet.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedUnsubscribe = struct {
+    packet: OwnedPacket,
+    unsubscribe: mqtt.Unsubscribe,
+
+    pub fn deinit(self: *OwnedUnsubscribe, allocator: std.mem.Allocator) void {
+        self.unsubscribe.deinit(allocator);
+        self.packet.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedUnsubAck = struct {
+    packet: OwnedPacket,
+    unsuback: mqtt.UnsubAck,
+
+    pub fn deinit(self: *OwnedUnsubAck, allocator: std.mem.Allocator) void {
+        self.unsuback.deinit(allocator);
         self.packet.deinit(allocator);
         self.* = undefined;
     }
@@ -620,6 +686,14 @@ test "MQTT runtime client and server exchange over TCP" {
             const reason_codes = [_]u8{ 0x01, 0x00 };
             try accepted.connection.writeSubAck(subscribe.subscribe.packet_id, &reason_codes, &.{});
 
+            var unsubscribe = try accepted.connection.readUnsubscribe();
+            defer unsubscribe.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(usize, 2), unsubscribe.unsubscribe.topic_filters.len);
+            try std.testing.expectEqualStrings("sensors/+", unsubscribe.unsubscribe.topic_filters[0]);
+            try std.testing.expectEqualStrings("alerts/#", unsubscribe.unsubscribe.topic_filters[1]);
+            const unsub_reasons = [_]u8{ 0x00, 0x11 };
+            try accepted.connection.writeUnsubAck(unsubscribe.unsubscribe.packet_id, &unsub_reasons, &.{});
+
             try accepted.connection.publish("alerts/system", "online", .{});
 
             var exact = try accepted.connection.readPublish();
@@ -675,6 +749,11 @@ test "MQTT runtime client and server exchange over TCP" {
     var suback = try client.subscribe(&subscriptions, .{});
     defer suback.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x00 }, suback.suback.reason_codes);
+
+    const unsubscribe_filters = [_][]const u8{ "sensors/+", "alerts/#" };
+    var unsuback = try client.unsubscribe(&unsubscribe_filters, .{});
+    defer unsuback.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x11 }, unsuback.unsuback.reason_codes);
 
     var server_publish = try client.readPublish();
     defer server_publish.deinit(allocator);

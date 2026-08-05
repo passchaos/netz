@@ -61,7 +61,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   concurrent server helper
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
   username/password payload support, PUBLISH,
-  PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK, PING,
+  PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
+  UNSUBSCRIBE/UNSUBACK, PING,
   DISCONNECT, properties, remaining length, topic-name/filter validation, and
   wildcard matching, plus a blocking TCP client/server runtime with a
   `std.Io.async` concurrent server helper, QoS publish inflight limiting, and
