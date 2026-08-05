@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.Error || error{
     MissingFrame,
 };
 
@@ -27,6 +27,74 @@ pub const ReceivedPacket = struct {
     }
 };
 
+pub const ConnectionConfig = struct {
+    peer: net.IpAddress,
+    receive_keys: quic.protection.PacketProtectionKeys,
+    send_keys: quic.protection.PacketProtectionKeys,
+    local_connection_id: []const u8,
+    peer_connection_id: []const u8,
+    max_ack_ranges: usize = 64,
+    max_frames_per_packet: usize = 16,
+};
+
+pub const Connection = struct {
+    endpoint: *quic.runtime.Endpoint,
+    config: ConnectionConfig,
+    next_packet_number: u64 = 0,
+    expected_packet_number: u64 = 0,
+    received: quic.packet_space.ReceivedPacketTracker,
+    sent: quic.packet_space.SentPacketTracker,
+
+    pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Connection {
+        return .{
+            .endpoint = endpoint,
+            .config = config,
+            .received = .init(endpoint.allocator, config.max_ack_ranges),
+            .sent = .init(endpoint.allocator),
+        };
+    }
+
+    pub fn deinit(self: *Connection) void {
+        self.received.deinit();
+        self.sent.deinit();
+        self.* = undefined;
+    }
+
+    pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
+        try sendFrames(self.endpoint, self.config.peer, self.config.send_keys, .{
+            .destination_connection_id = self.config.peer_connection_id,
+            .packet_number = self.next_packet_number,
+            .frames = frames,
+        });
+        try self.sent.sent(self.next_packet_number, ackEliciting(frames));
+        self.next_packet_number += 1;
+    }
+
+    pub fn sendAck(self: *Connection, ack_delay: u64) Error!void {
+        const ack = try self.received.ackFrame(self.endpoint.allocator, ack_delay);
+        defer self.endpoint.allocator.free(ack.ranges);
+        const frames = [_]quic.Frame{.{ .ack = ack }};
+        try self.send(&frames);
+    }
+
+    pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
+        var packet = try receive(
+            self.endpoint,
+            self.config.receive_keys,
+            self.config.local_connection_id.len,
+            self.expected_packet_number,
+            self.config.max_frames_per_packet,
+        );
+        errdefer packet.deinit(self.endpoint.allocator);
+        self.expected_packet_number = packet.packet.packet_number + 1;
+        try self.received.record(packet.packet.packet_number);
+        for (packet.frames) |frame| {
+            if (frame == .ack) _ = try self.sent.applyAck(frame.ack);
+        }
+        return packet;
+    }
+};
+
 pub fn sendFrames(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -45,6 +113,16 @@ pub fn sendFrames(
     });
     defer endpoint.allocator.free(packet);
     try endpoint.sendBytes(to, packet);
+}
+
+fn ackEliciting(frames: []const quic.Frame) bool {
+    for (frames) |frame| {
+        switch (frame) {
+            .ack, .padding => {},
+            else => return true,
+        }
+    }
+    return false;
 }
 
 pub fn receive(
@@ -118,4 +196,54 @@ test "QUIC 1-RTT STREAM frame exchange over UDP endpoint" {
     try std.testing.expect(response.from.eql(&server.address()));
     try std.testing.expectEqualSlices(u8, &client_dcid, response.packet.destination_connection_id);
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
+}
+
+test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const server_cid = [_]u8{ 0x05, 0x06, 0x07, 0x08 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x71} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x72} ** quic.protection.secret_len);
+
+    var client = Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "ack me", .fin = true } }};
+    try client.send(&frames);
+    try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
+    try std.testing.expect(!client.sent.packets.items[0].acknowledged);
+
+    var received = try server.receivePacket();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), received.packet.packet_number);
+    try server.sendAck(0);
+
+    var ack_packet = try client.receivePacket();
+    defer ack_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.largest_acknowledged);
+    try std.testing.expect(client.sent.packets.items[0].acknowledged);
 }
