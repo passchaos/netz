@@ -31,6 +31,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "control"));
     try std.testing.expect(@hasField(netz.http3.runtime.HandshakeClient, "control"));
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());
+    try std.testing.expect(@hasDecl(netz.mqtt, "validTopicName"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "validTopicFilter"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "topicMatchesFilter"));
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.mqtt.runtime.Limits{}).max_packet_size);
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasField(netz.mqtt.runtime.Connection, "max_outgoing_inflight"));

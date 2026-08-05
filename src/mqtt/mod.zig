@@ -15,6 +15,7 @@ pub const Error = wire.Error || error{
     InvalidQoS,
     InvalidProperty,
     InvalidReasonCode,
+    InvalidTopic,
     InvalidSubscription,
     InvalidPacketIdentifier,
     IntegerOverflow,
@@ -138,6 +139,66 @@ pub const QoS = enum(u2) {
         return std.enums.fromInt(QoS, bits) orelse error.InvalidQoS;
     }
 };
+
+pub fn hasWildcards(value: []const u8) bool {
+    return std.mem.indexOfAny(u8, value, "+#") != null;
+}
+
+pub fn validTopicName(topic: []const u8) bool {
+    return topic.len > 0 and !hasWildcards(topic);
+}
+
+pub fn validateTopicName(topic: []const u8) Error!void {
+    if (!validTopicName(topic)) return error.InvalidTopic;
+}
+
+pub fn validTopicFilter(filter: []const u8) bool {
+    if (filter.len == 0) return false;
+
+    var start: usize = 0;
+    while (true) {
+        const end = std.mem.indexOfScalarPos(u8, filter, start, '/') orelse filter.len;
+        const level = filter[start..end];
+        const last = end == filter.len;
+
+        if (std.mem.indexOfScalar(u8, level, '#')) |_| {
+            // Multi-level wildcard is legal only when it occupies the complete
+            // final level.  This mirrors rumqtt's broker/client validation and
+            // prevents ambiguous filters such as `sport/#/rank` or `sport#`.
+            return level.len == 1 and last;
+        }
+        if (std.mem.indexOfScalar(u8, level, '+')) |_| {
+            // Single-level wildcard must occupy a whole level.
+            if (level.len != 1) return false;
+        }
+
+        if (last) break;
+        start = end + 1;
+    }
+    return true;
+}
+
+pub fn validateTopicFilter(filter: []const u8) Error!void {
+    if (!validTopicFilter(filter)) return error.InvalidSubscription;
+}
+
+pub fn topicMatchesFilter(topic: []const u8, filter: []const u8) bool {
+    // MQTT reserves `$` topics from being matched by a leading wildcard.  A
+    // filter that explicitly starts with `$` still matches normally.
+    if (std.mem.startsWith(u8, topic, "$") and !std.mem.startsWith(u8, filter, "$")) return false;
+
+    var topic_levels = std.mem.splitScalar(u8, topic, '/');
+    var filter_levels = std.mem.splitScalar(u8, filter, '/');
+    while (filter_levels.next()) |filter_level| {
+        if (std.mem.eql(u8, filter_level, "#")) return true;
+
+        const topic_level = topic_levels.next() orelse return false;
+        if (std.mem.eql(u8, filter_level, "+")) continue;
+        if (!std.mem.eql(u8, filter_level, topic_level)) return false;
+    }
+
+    return topic_levels.next() == null;
+}
 
 pub const PropertyId = enum(u8) {
     payload_format_indicator = 0x01,
@@ -388,6 +449,7 @@ pub const Publish = struct {
         if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const topic = try readUtf8(&cursor);
+        try validateTopicName(topic);
         const qos = try QoS.fromFlags(fixed.flags);
         const packet_id = if (qos == .at_most_once) null else try cursor.readInt(u16, .big);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
@@ -499,6 +561,7 @@ pub const Subscribe = struct {
         errdefer subs.deinit(allocator);
         while (!cursor.eof()) {
             const topic_filter = try readUtf8(&cursor);
+            try validateTopicFilter(topic_filter);
             const options = try cursor.readByte();
             try validateSubscriptionOptions(options);
             try subs.append(allocator, .{
@@ -528,6 +591,7 @@ pub const Subscribe = struct {
         try wire.appendInt(&variable, allocator, u16, packet_id, .big);
         if (protocol == .v5) try writeProperties(&variable, allocator, properties);
         for (subscriptions) |subscription| {
+            try validateTopicFilter(subscription.topic_filter);
             if (subscription.retain_handling == 3) return error.InvalidSubscription;
             try writeUtf8(&variable, allocator, subscription.topic_filter);
             const options: u8 = @intFromEnum(subscription.qos) |
@@ -689,6 +753,7 @@ pub fn writePublish(
     payload: []const u8,
     options: struct { qos: QoS = .at_most_once, retain: bool = false, dup: bool = false, packet_id: ?u16 = null },
 ) !void {
+    try validateTopicName(topic);
     var variable: std.ArrayList(u8) = .empty;
     defer variable.deinit(allocator);
     try writeUtf8(&variable, allocator, topic);
@@ -734,6 +799,32 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqual(QoS.at_least_once, publish.qos);
     try std.testing.expectEqual(@as(u16, 7), publish.packet_id.?);
     try std.testing.expectEqualStrings("21.5", publish.payload);
+}
+
+test "MQTT topic validation and filter matching" {
+    try std.testing.expect(validTopicName("sensors/temp"));
+    try std.testing.expect(!validTopicName(""));
+    try std.testing.expect(!validTopicName("wrong/#/path"));
+    try std.testing.expect(!validTopicName("w/r/o/n/g+"));
+
+    try std.testing.expect(validTopicFilter("correct/filter/#"));
+    try std.testing.expect(validTopicFilter("cor/+/rect/+"));
+    try std.testing.expect(!validTopicFilter(""));
+    try std.testing.expect(!validTopicFilter("wrong/#/filter"));
+    try std.testing.expect(!validTopicFilter("wrong/wr#ng/filter"));
+    try std.testing.expect(!validTopicFilter("wr/+o+/ng"));
+
+    try std.testing.expect(topicMatchesFilter("a/b/c", "a/b/c"));
+    try std.testing.expect(topicMatchesFilter("a/b/c/d/e", "a/+/c/+/e"));
+    try std.testing.expect(topicMatchesFilter("a/b/c/d/e/f", "a/b/c/#"));
+    try std.testing.expect(!topicMatchesFilter("a/b", "a/b/+"));
+    try std.testing.expect(!topicMatchesFilter("$system/metrics", "+/+"));
+    try std.testing.expect(topicMatchesFilter("$system/metrics", "$system/+"));
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try std.testing.expectError(error.InvalidTopic, writePublish(&encoded, std.testing.allocator, .v5, "bad/#", "payload", .{}));
+    try std.testing.expectError(error.InvalidSubscription, Subscribe.write(&encoded, std.testing.allocator, .v5, 1, &.{}, &[_]Subscription{.{ .topic_filter = "bad/#/filter" }}));
 }
 
 test "MQTT connack ack and ping controls" {

@@ -50,9 +50,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   `std.Io.async` concurrent server helper
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK, PING,
-  DISCONNECT, properties, and remaining length, plus a blocking TCP
-  client/server runtime with a `std.Io.async` concurrent server helper, QoS
-  publish inflight limiting, and QoS 2 exactly-once publish handshakes
+  DISCONNECT, properties, remaining length, topic-name/filter validation, and
+  wildcard matching, plus a blocking TCP client/server runtime with a
+  `std.Io.async` concurrent server helper, QoS publish inflight limiting, and
+  QoS 2 exactly-once publish handshakes
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
   datagram mapping, session lifecycle/counter state, plus a cleartext
   development runtime over the HTTP/3 dev transport, a protected QUIC 1-RTT
