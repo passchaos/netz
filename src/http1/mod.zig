@@ -12,6 +12,9 @@ pub const Error = wire.Error || error{
     InvalidVersion,
     InvalidStatus,
     InvalidChunk,
+    InvalidContentLength,
+    ConflictingContentLength,
+    InvalidTransferEncoding,
     ChunkSizeOverflow,
     ContentLengthOverflow,
 } || std.mem.Allocator.Error;
@@ -76,16 +79,30 @@ pub const ParseOptions = struct {
     allow_obs_fold: bool = false,
 };
 
+pub const BodyFraming = enum {
+    /// No message body framing was present in the parsed bytes.
+    none,
+    /// The body is delimited by Content-Length and points into the caller buffer.
+    content_length,
+    /// The parser decoded RFC 9112 chunked transfer coding into owned storage.
+    chunked,
+};
+
 pub const Request = struct {
     method: Method,
     target: []const u8,
     version: Version,
     headers: []Header,
     body: []const u8,
+    body_framing: BodyFraming = .none,
+    trailers: []Header = &.{},
+    body_storage: ?[]u8 = null,
     consumed: usize,
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
+        if (self.body_storage) |body| allocator.free(body);
         allocator.free(self.headers);
+        allocator.free(self.trailers);
         self.* = undefined;
     }
 
@@ -100,6 +117,13 @@ pub const Request = struct {
         }
         return self.version == .http_1_1;
     }
+
+    pub fn upgradeProtocol(self: Request) ?[]const u8 {
+        const connection = self.header("connection") orelse return null;
+        if (!wire.containsToken(connection, "upgrade")) return null;
+        const upgrade = self.header("upgrade") orelse return null;
+        return wire.trimOws(upgrade);
+    }
 };
 
 pub const Response = struct {
@@ -108,15 +132,28 @@ pub const Response = struct {
     reason: []const u8,
     headers: []Header,
     body: []const u8,
+    body_framing: BodyFraming = .none,
+    trailers: []Header = &.{},
+    body_storage: ?[]u8 = null,
     consumed: usize,
 
     pub fn deinit(self: *Response, allocator: std.mem.Allocator) void {
+        if (self.body_storage) |body| allocator.free(body);
         allocator.free(self.headers);
+        allocator.free(self.trailers);
         self.* = undefined;
     }
 
     pub fn header(self: Response, name: []const u8) ?[]const u8 {
         return wire.findHeader(self.headers, name);
+    }
+
+    pub fn keepAlive(self: Response) bool {
+        if (self.header("connection")) |connection| {
+            if (wire.containsToken(connection, "close")) return false;
+            if (wire.containsToken(connection, "keep-alive")) return true;
+        }
+        return self.version == .http_1_1;
     }
 };
 
@@ -131,19 +168,25 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     const target = parts.next() orelse return error.MalformedStartLine;
     const version_s = parts.next() orelse return error.MalformedStartLine;
     if (parts.next() != null or target.len == 0) return error.MalformedStartLine;
+    const method = try Method.parse(method_s);
+    const version = try Version.parse(version_s);
 
     const headers = try parseHeaderLines(allocator, &lines, options);
     errdefer allocator.free(headers);
     const consumed_head = head_end + 4;
-    const body = try bodySlice(bytes, consumed_head, headers);
+    const parsed_body = try parseBody(allocator, bytes, consumed_head, headers, options);
+    errdefer parsed_body.deinit(allocator);
 
     return .{
-        .method = try Method.parse(method_s),
+        .method = method,
         .target = target,
-        .version = try Version.parse(version_s),
+        .version = version,
         .headers = headers,
-        .body = body,
-        .consumed = consumed_head + body.len,
+        .body = parsed_body.body,
+        .body_framing = parsed_body.framing,
+        .trailers = parsed_body.trailers,
+        .body_storage = parsed_body.body_storage,
+        .consumed = parsed_body.consumed,
     };
 }
 
@@ -160,19 +203,31 @@ pub fn parseResponse(allocator: std.mem.Allocator, bytes: []const u8, options: P
     if (status_s.len != 3) return error.InvalidStatus;
     const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
     if (status < 100 or status > 999) return error.InvalidStatus;
+    const version = try Version.parse(version_s);
 
     const headers = try parseHeaderLines(allocator, &lines, options);
     errdefer allocator.free(headers);
     const consumed_head = head_end + 4;
-    const body = try bodySlice(bytes, consumed_head, headers);
+    const parsed_body = if (statusCodeForbidsBody(status))
+        ParsedBody{
+            .framing = .none,
+            .body = bytes[consumed_head..consumed_head],
+            .consumed = consumed_head,
+        }
+    else
+        try parseBody(allocator, bytes, consumed_head, headers, options);
+    errdefer parsed_body.deinit(allocator);
 
     return .{
-        .version = try Version.parse(version_s),
+        .version = version,
         .status = status,
         .reason = reason,
         .headers = headers,
-        .body = body,
-        .consumed = consumed_head + body.len,
+        .body = parsed_body.body,
+        .body_framing = parsed_body.framing,
+        .trailers = parsed_body.trailers,
+        .body_storage = parsed_body.body_storage,
+        .consumed = parsed_body.consumed,
     };
 }
 
@@ -199,13 +254,120 @@ fn parseHeaderLines(
     return headers.toOwnedSlice(allocator);
 }
 
-fn bodySlice(bytes: []const u8, body_start: usize, headers: []const Header) Error![]const u8 {
-    if (wire.findHeader(headers, "content-length")) |value| {
-        const len = std.fmt.parseInt(usize, value, 10) catch return error.ContentLengthOverflow;
-        if (bytes.len < body_start + len) return error.BufferTooShort;
-        return bytes[body_start .. body_start + len];
+const ParsedBody = struct {
+    framing: BodyFraming,
+    body: []const u8,
+    body_storage: ?[]u8 = null,
+    trailers: []Header = &.{},
+    consumed: usize,
+
+    fn deinit(self: ParsedBody, allocator: std.mem.Allocator) void {
+        if (self.body_storage) |body| allocator.free(body);
+        allocator.free(self.trailers);
     }
-    return bytes[body_start..body_start];
+};
+
+fn parseBody(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    body_start: usize,
+    headers: []const Header,
+    options: ParseOptions,
+) Error!ParsedBody {
+    return switch (try bodyFraming(headers)) {
+        .none => .{
+            .framing = .none,
+            .body = bytes[body_start..body_start],
+            .consumed = body_start,
+        },
+        .content_length => blk: {
+            const len = (try contentLength(headers)).?;
+            const end = std.math.add(usize, body_start, len) catch return error.ContentLengthOverflow;
+            if (bytes.len < end) return error.BufferTooShort;
+            break :blk .{
+                .framing = .content_length,
+                .body = bytes[body_start..end],
+                .consumed = end,
+            };
+        },
+        .chunked => blk: {
+            var decoded = try decodeChunked(allocator, bytes[body_start..], options);
+            errdefer decoded.deinit(allocator);
+            break :blk .{
+                .framing = .chunked,
+                .body = decoded.body,
+                .body_storage = decoded.body,
+                .trailers = decoded.trailers,
+                .consumed = body_start + decoded.consumed,
+            };
+        },
+    };
+}
+
+pub fn bodyFraming(headers: []const Header) Error!BodyFraming {
+    if (try transferEncodingFraming(headers)) |framing| return framing;
+    if ((try contentLength(headers)) != null) return .content_length;
+    return .none;
+}
+
+pub fn contentLength(headers: []const Header) Error!?usize {
+    var found: ?usize = null;
+    for (headers) |header| {
+        if (!header.eqlName("content-length")) continue;
+        found = try parseContentLengthFieldValue(header.value, found);
+    }
+    return found;
+}
+
+fn parseContentLengthFieldValue(value: []const u8, previous: ?usize) Error!?usize {
+    var found = previous;
+    // HTTP field coalescing can turn repeated Content-Length fields into a
+    // comma-separated list.  The message is only unambiguous when every decimal
+    // value is byte-for-byte equivalent after OWS trimming.
+    var parts = std.mem.splitScalar(u8, value, ',');
+    while (parts.next()) |raw_part| {
+        const part = wire.trimOws(raw_part);
+        if (part.len == 0) return error.InvalidContentLength;
+        const parsed = std.fmt.parseInt(usize, part, 10) catch |err| switch (err) {
+            error.InvalidCharacter => return error.InvalidContentLength,
+            error.Overflow => return error.ContentLengthOverflow,
+        };
+        if (found) |existing| {
+            if (existing != parsed) return error.ConflictingContentLength;
+        } else {
+            found = parsed;
+        }
+    }
+    return found;
+}
+
+fn transferEncodingFraming(headers: []const Header) Error!?BodyFraming {
+    var saw_transfer_encoding = false;
+    var saw_chunked = false;
+
+    for (headers) |header| {
+        if (!header.eqlName("transfer-encoding")) continue;
+        saw_transfer_encoding = true;
+        var tokens = std.mem.splitScalar(u8, header.value, ',');
+        while (tokens.next()) |raw_token| {
+            const token = wire.trimOws(raw_token);
+            if (token.len == 0) return error.InvalidTransferEncoding;
+            // This codec layer only decodes chunked transfer coding.  Rejecting
+            // stacked codings avoids returning a body that is still gzip/deflate
+            // transfer-coded while appearing fully decoded to callers.
+            if (!std.ascii.eqlIgnoreCase(token, "chunked")) return error.InvalidTransferEncoding;
+            if (saw_chunked) return error.InvalidTransferEncoding;
+            saw_chunked = true;
+        }
+    }
+
+    if (!saw_transfer_encoding) return null;
+    if (!saw_chunked) return error.InvalidTransferEncoding;
+    return .chunked;
+}
+
+fn statusCodeForbidsBody(status: u16) bool {
+    return (status >= 100 and status < 200) or status == 204 or status == 304;
 }
 
 pub fn writeRequest(
@@ -300,11 +462,16 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
         const line = bytes[pos .. pos + line_end_rel];
         pos += line_end_rel + 2;
         const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
-        const size = std.fmt.parseInt(usize, wire.trimOws(line[0..semi]), 16) catch return error.InvalidChunk;
-        if (bytes.len < pos + size + 2) return error.BufferTooShort;
+        const size = std.fmt.parseInt(usize, wire.trimOws(line[0..semi]), 16) catch |err| switch (err) {
+            error.InvalidCharacter => return error.InvalidChunk,
+            error.Overflow => return error.ChunkSizeOverflow,
+        };
+        const data_end = std.math.add(usize, pos, size) catch return error.ChunkSizeOverflow;
+        const required_end = std.math.add(usize, data_end, 2) catch return error.ChunkSizeOverflow;
+        if (bytes.len < required_end) return error.BufferTooShort;
         if (size == 0) break;
-        try out.appendSlice(allocator, bytes[pos .. pos + size]);
-        pos += size;
+        try out.appendSlice(allocator, bytes[pos..data_end]);
+        pos = data_end;
         if (!std.mem.eql(u8, bytes[pos .. pos + 2], "\r\n")) return error.InvalidChunk;
         pos += 2;
     }
@@ -331,13 +498,15 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
 
 test "HTTP/1 request parse and serialize" {
     const allocator = std.testing.allocator;
-    const raw = "GET /chat HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive, Upgrade\r\nContent-Length: 5\r\n\r\nhello";
+    const raw = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nContent-Length: 5\r\n\r\nhello";
     var req = try parseRequest(allocator, raw, .{});
     defer req.deinit(allocator);
     try std.testing.expectEqual(Method.GET, req.method);
     try std.testing.expectEqualStrings("/chat", req.target);
+    try std.testing.expectEqual(BodyFraming.content_length, req.body_framing);
     try std.testing.expectEqualStrings("hello", req.body);
     try std.testing.expect(wire.containsToken(req.header("connection").?, "upgrade"));
+    try std.testing.expectEqualStrings("websocket", req.upgradeProtocol().?);
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
@@ -357,4 +526,43 @@ test "HTTP/1 chunked codec" {
     defer decoded.deinit(allocator);
     try std.testing.expectEqualStrings("hello world", decoded.body);
     try std.testing.expectEqualStrings("sha-256=demo", decoded.trailers[0].value);
+}
+
+test "HTTP/1 parser decodes chunked transfer bodies" {
+    const allocator = std.testing.allocator;
+    const raw = "POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\nDigest: sha-256=demo\r\n\r\nnext";
+    var req = try parseRequest(allocator, raw, .{});
+    defer req.deinit(allocator);
+
+    try std.testing.expectEqual(BodyFraming.chunked, req.body_framing);
+    try std.testing.expectEqualStrings("hello world", req.body);
+    try std.testing.expectEqualStrings("sha-256=demo", req.trailers[0].value);
+    try std.testing.expectEqual(raw.len - "next".len, req.consumed);
+}
+
+test "HTTP/1 parser rejects ambiguous body lengths" {
+    const allocator = std.testing.allocator;
+    const conflicting = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!";
+    try std.testing.expectError(error.ConflictingContentLength, parseRequest(allocator, conflicting, .{}));
+
+    const coalesced = "POST / HTTP/1.1\r\nContent-Length: 5, 5\r\n\r\nhello";
+    var req = try parseRequest(allocator, coalesced, .{});
+    defer req.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.content_length, req.body_framing);
+    try std.testing.expectEqualStrings("hello", req.body);
+
+    const unsupported_te = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n";
+    try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, unsupported_te, .{}));
+}
+
+test "HTTP/1 response body framing helpers" {
+    const allocator = std.testing.allocator;
+    const raw = "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+    var resp = try parseResponse(allocator, raw, .{});
+    defer resp.deinit(allocator);
+
+    try std.testing.expectEqual(BodyFraming.none, resp.body_framing);
+    try std.testing.expectEqual(@as(usize, raw.len - "hello".len), resp.consumed);
+    try std.testing.expectEqualStrings("", resp.body);
+    try std.testing.expect(!resp.keepAlive());
 }
