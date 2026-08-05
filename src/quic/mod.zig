@@ -8,6 +8,7 @@ pub const crypto_stream = @import("crypto_stream.zig");
 pub const initial_exchange = @import("initial_exchange.zig");
 pub const tls_client_hello = @import("tls_client_hello.zig");
 pub const one_rtt = @import("one_rtt.zig");
+pub const packet_space = @import("packet_space.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,

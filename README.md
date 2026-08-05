@@ -19,8 +19,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
   packet server/client Finished flights, and handshake/application secret
-  derivation for QUIC, 1-RTT short packet STREAM exchange, plus a blocking UDP
-  endpoint runtime for frame datagrams
+  derivation for QUIC, packet number space ACK tracking, 1-RTT short packet
+  STREAM exchange, plus a blocking UDP endpoint runtime for frame datagrams
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, message assembly, and a blocking TCP
   client/server runtime over HTTP/1 Upgrade
