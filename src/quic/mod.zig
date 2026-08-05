@@ -32,6 +32,7 @@ pub const Error = wire.Error || error{
     DuplicateTransportParameter,
     TransportParameterForbidden,
     UnsupportedFrameType,
+    InvalidVersionNegotiation,
 } || std.mem.Allocator.Error;
 
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
@@ -141,6 +142,75 @@ pub const RetryPacketOptions = struct {
     /// all ones like RFC 9001 Appendix A.4.
     type_specific_bits: u4 = 0x0f,
 };
+
+pub const VersionNegotiationPacket = struct {
+    first_byte: u8,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    versions: []u32,
+
+    pub fn deinit(self: *VersionNegotiationPacket, allocator: std.mem.Allocator) void {
+        allocator.free(self.versions);
+        self.* = undefined;
+    }
+};
+
+pub const VersionNegotiationPacketOptions = struct {
+    first_byte: u8 = 0x80,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    versions: []const u32,
+};
+
+pub fn parseVersionNegotiationPacket(allocator: std.mem.Allocator, bytes: []const u8) Error!VersionNegotiationPacket {
+    var cursor = wire.Cursor.init(bytes);
+    const first = try cursor.readByte();
+    if ((first & 0x80) == 0) return error.InvalidVersionNegotiation;
+    const version = try cursor.readInt(u32, .big);
+    if (version != Version.negotiation.wireValue()) return error.InvalidVersionNegotiation;
+    const dcid_len = try cursor.readByte();
+    try validatePacketConnectionIdLen(dcid_len);
+    const dcid = try cursor.readSlice(dcid_len);
+    const scid_len = try cursor.readByte();
+    try validatePacketConnectionIdLen(scid_len);
+    const scid = try cursor.readSlice(scid_len);
+    if (cursor.remaining() == 0 or (cursor.remaining() % 4) != 0) return error.InvalidVersionNegotiation;
+    const version_count = cursor.remaining() / 4;
+    const versions = try allocator.alloc(u32, version_count);
+    errdefer allocator.free(versions);
+    for (versions) |*out| {
+        const value = try cursor.readInt(u32, .big);
+        if (value == Version.negotiation.wireValue()) return error.InvalidVersionNegotiation;
+        out.* = value;
+    }
+    return .{
+        .first_byte = first,
+        .destination_connection_id = dcid,
+        .source_connection_id = scid,
+        .versions = versions,
+    };
+}
+
+pub fn writeVersionNegotiationPacket(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    options: VersionNegotiationPacketOptions,
+) Error!void {
+    if ((options.first_byte & 0x80) == 0) return error.InvalidVersionNegotiation;
+    try validatePacketConnectionIdLen(options.destination_connection_id.len);
+    try validatePacketConnectionIdLen(options.source_connection_id.len);
+    if (options.versions.len == 0) return error.InvalidVersionNegotiation;
+    for (options.versions) |version| {
+        if (version == Version.negotiation.wireValue()) return error.InvalidVersionNegotiation;
+    }
+    try list.append(allocator, options.first_byte);
+    try wire.appendInt(list, allocator, u32, Version.negotiation.wireValue(), .big);
+    try list.append(allocator, @intCast(options.destination_connection_id.len));
+    try list.appendSlice(allocator, options.destination_connection_id);
+    try list.append(allocator, @intCast(options.source_connection_id.len));
+    try list.appendSlice(allocator, options.source_connection_id);
+    for (options.versions) |version| try wire.appendInt(list, allocator, u32, version, .big);
+}
 
 pub fn parseRetryPacket(bytes: []const u8) Error!RetryPacket {
     const header = try LongHeader.parse(bytes);
@@ -1171,6 +1241,58 @@ test "QUIC long initial header parse" {
     try std.testing.expectEqual(PacketType.initial, parsed.packet_type);
     try std.testing.expectEqualStrings("dcid", parsed.destination_connection_id);
     try std.testing.expectEqual(@as(u64, 4), parsed.length.?);
+}
+
+test "QUIC version negotiation packet roundtrip" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const scid = [_]u8{ 0xca, 0xfe };
+    const versions = [_]u32{ Version.version_1.wireValue(), Version.version_2.wireValue(), 0x0a0a0a0a };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeVersionNegotiationPacket(&encoded, allocator, .{
+        .first_byte = 0xf0,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .versions = &versions,
+    });
+
+    var parsed = try parseVersionNegotiationPacket(allocator, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0xf0), parsed.first_byte);
+    try std.testing.expectEqualSlices(u8, &dcid, parsed.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &scid, parsed.source_connection_id);
+    try std.testing.expectEqualSlices(u32, &versions, parsed.versions);
+
+    try std.testing.expectError(error.InvalidVersionNegotiation, writeVersionNegotiationPacket(&encoded, allocator, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .versions = &.{},
+    }));
+    try std.testing.expectError(error.InvalidVersionNegotiation, writeVersionNegotiationPacket(&encoded, allocator, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .versions = &.{Version.negotiation.wireValue()},
+    }));
+}
+
+test "QUIC version negotiation packet rejects malformed inputs" {
+    const allocator = std.testing.allocator;
+    const short_form = [_]u8{ 0x40, 0, 0, 0, 0, 0, 0 };
+    try std.testing.expectError(error.InvalidVersionNegotiation, parseVersionNegotiationPacket(allocator, &short_form));
+
+    const non_zero_version = [_]u8{ 0x80, 0, 0, 0, 1, 0, 0, 0, 0, 0 };
+    try std.testing.expectError(error.InvalidVersionNegotiation, parseVersionNegotiationPacket(allocator, &non_zero_version));
+
+    const empty_versions = [_]u8{ 0x80, 0, 0, 0, 0, 1, 0xaa, 1, 0xbb };
+    try std.testing.expectError(error.InvalidVersionNegotiation, parseVersionNegotiationPacket(allocator, &empty_versions));
+
+    const truncated_versions = [_]u8{ 0x80, 0, 0, 0, 0, 0, 0, 1, 2, 3 };
+    try std.testing.expectError(error.InvalidVersionNegotiation, parseVersionNegotiationPacket(allocator, &truncated_versions));
+
+    const zero_supported_version = [_]u8{ 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    try std.testing.expectError(error.InvalidVersionNegotiation, parseVersionNegotiationPacket(allocator, &zero_supported_version));
 }
 
 test "QUIC Retry packet matches RFC vector and verifies integrity" {

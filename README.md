@@ -35,7 +35,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   endpoint-specific client/server parameter rules, preferred-address parsing,
   max UDP payload/ACK delay/stream-count bounds), Retry packet codec
   with version-specific integrity-tag verification, plus CRYPTO stream reassembly,
-  v1 Initial key/header/payload protection, protected Initial packet seal/open,
+  v1 Initial key/header/payload protection, protected Initial packet seal/open, Version Negotiation packet codec,
   Initial CRYPTO byte exchange over UDP, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
