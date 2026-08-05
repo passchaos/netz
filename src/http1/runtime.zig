@@ -280,6 +280,7 @@ pub fn readResponseFromStream(
         errdefer allocator.free(bytes);
         var response = try http1.parseResponse(allocator, bytes, options);
         errdefer response.deinit(allocator);
+        applyCloseDelimitedResponseBody(&response, bytes, null);
         if (informationalResponseToSkip(response.status)) {
             response.deinit(allocator);
             allocator.free(bytes);
@@ -302,6 +303,7 @@ pub fn readResponseFromStreamForRequest(
         errdefer allocator.free(bytes);
         var response = try http1.parseResponseForRequest(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
+        applyCloseDelimitedResponseBody(&response, bytes, request_method);
         if (informationalResponseToSkip(response.status)) {
             response.deinit(allocator);
             allocator.free(bytes);
@@ -324,6 +326,7 @@ pub fn readResponseFromStreamBuffered(
         errdefer allocator.free(bytes);
         var response = try http1.parseResponse(allocator, bytes, options);
         errdefer response.deinit(allocator);
+        applyCloseDelimitedResponseBody(&response, bytes, null);
         if (informationalResponseToSkip(response.status)) {
             response.deinit(allocator);
             allocator.free(bytes);
@@ -347,6 +350,7 @@ pub fn readResponseFromStreamBufferedForRequest(
         errdefer allocator.free(bytes);
         var response = try http1.parseResponseForRequest(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
+        applyCloseDelimitedResponseBody(&response, bytes, request_method);
         if (informationalResponseToSkip(response.status)) {
             response.deinit(allocator);
             allocator.free(bytes);
@@ -354,6 +358,16 @@ pub fn readResponseFromStreamBufferedForRequest(
         }
         return .{ .bytes = bytes, .response = response };
     }
+}
+
+fn applyCloseDelimitedResponseBody(response: *http1.Response, bytes: []const u8, request_method: ?http1.Method) void {
+    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return;
+    if (!responseHeadUsesCloseDelimitedBody(bytes[0..head_end], request_method)) return;
+    const body_start = head_end + 4;
+    if (bytes.len < body_start) return;
+    response.body = bytes[body_start..];
+    response.body_framing = .close_delimited;
+    response.consumed = bytes.len;
 }
 
 pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: RequestOptions) Error!void {
@@ -520,15 +534,15 @@ fn encodeChunkedForRuntime(
 }
 
 fn readMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
-    return readMessageBytesWithContext(allocator, io, stream, limits, null, false);
+    return readMessageBytesWithContext(allocator, io, stream, limits, null, false, true);
 }
 
 fn readMessageBytesForResponse(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, request_method: http1.Method) Error![]u8 {
-    return readMessageBytesWithContext(allocator, io, stream, limits, request_method, false);
+    return readMessageBytesWithContext(allocator, io, stream, limits, request_method, false, true);
 }
 
 fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
-    return readMessageBytesWithContext(allocator, io, stream, limits, null, true);
+    return readMessageBytesWithContext(allocator, io, stream, limits, null, true, false);
 }
 
 fn readMessageBytesWithContext(
@@ -538,6 +552,7 @@ fn readMessageBytesWithContext(
     limits: Limits,
     request_method: ?http1.Method,
     auto_continue: bool,
+    close_delimited_when_unknown: bool,
 ) Error![]u8 {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
@@ -552,6 +567,17 @@ fn readMessageBytesWithContext(
         head_end = std.mem.indexOf(u8, bytes.items, "\r\n\r\n");
     }
     try maybeWriteContinue(io, stream, bytes.items[0..head_end.?], bytes.items.len - (head_end.? + 4), auto_continue);
+
+    if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(bytes.items[0..head_end.?], request_method)) {
+        const body_start = head_end.? + 4;
+        while (true) {
+            const n = try readSome(io, stream, &scratch);
+            if (n == 0) break;
+            try bytes.appendSlice(allocator, scratch[0..n]);
+            if (bytes.items.len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
+        }
+        return bytes.toOwnedSlice(allocator);
+    }
 
     const target_len = while (true) {
         const len = messageTargetLength(bytes.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
@@ -583,7 +609,7 @@ fn readMessageBytesBuffered(
     limits: Limits,
     inbuf: *std.ArrayList(u8),
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, null, false);
+    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, null, false, true);
 }
 
 fn readMessageBytesBufferedForResponse(
@@ -594,7 +620,7 @@ fn readMessageBytesBufferedForResponse(
     inbuf: *std.ArrayList(u8),
     request_method: http1.Method,
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, request_method, false);
+    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, request_method, false, true);
 }
 
 fn readRequestMessageBytesBuffered(
@@ -604,7 +630,7 @@ fn readRequestMessageBytesBuffered(
     limits: Limits,
     inbuf: *std.ArrayList(u8),
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, null, true);
+    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, null, true, false);
 }
 
 fn readMessageBytesBufferedWithContext(
@@ -615,6 +641,7 @@ fn readMessageBytesBufferedWithContext(
     inbuf: *std.ArrayList(u8),
     request_method: ?http1.Method,
     auto_continue: bool,
+    close_delimited_when_unknown: bool,
 ) Error![]u8 {
     var scratch: [4096]u8 = undefined;
     var head_end: ?usize = std.mem.indexOf(u8, inbuf.items, "\r\n\r\n");
@@ -626,6 +653,19 @@ fn readMessageBytesBufferedWithContext(
         head_end = std.mem.indexOf(u8, inbuf.items, "\r\n\r\n");
     }
     try maybeWriteContinue(io, stream, inbuf.items[0..head_end.?], inbuf.items.len - (head_end.? + 4), auto_continue);
+
+    if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(inbuf.items[0..head_end.?], request_method)) {
+        const body_start = head_end.? + 4;
+        while (true) {
+            const n = try readSome(io, stream, &scratch);
+            if (n == 0) break;
+            try inbuf.appendSlice(allocator, scratch[0..n]);
+            if (inbuf.items.len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
+        }
+        const bytes = try inbuf.toOwnedSlice(allocator);
+        inbuf.* = .empty;
+        return bytes;
+    }
 
     const target_len = while (true) {
         const len = messageTargetLength(inbuf.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
@@ -686,9 +726,14 @@ fn messageTargetLength(bytes: []const u8, head_end: usize, max_body_bytes: usize
     return body_start;
 }
 
-fn responseHeadForbidsBody(head: []const u8, request_method: ?http1.Method) bool {
-    if (request_method == null) return false;
+fn responseHeadUsesCloseDelimitedBody(head: []const u8, request_method: ?http1.Method) bool {
+    if (responseHeadForbidsBody(head, request_method)) return false;
+    if (findHeaderValue(head, "transfer-encoding") != null) return false;
+    if (findHeaderValue(head, "content-length") != null) return false;
+    return true;
+}
 
+fn responseHeadForbidsBody(head: []const u8, request_method: ?http1.Method) bool {
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     const status_line = lines.next() orelse return false;
     var parts = std.mem.splitScalar(u8, status_line, ' ');
@@ -697,6 +742,7 @@ fn responseHeadForbidsBody(head: []const u8, request_method: ?http1.Method) bool
     if (status_s.len != 3) return false;
     const status = std.fmt.parseInt(u16, status_s, 10) catch return false;
     if ((status >= 100 and status < 200) or status == 204 or status == 304) return true;
+    if (request_method == null) return false;
     return switch (request_method.?) {
         .HEAD => true,
         .CONNECT => status >= 200 and status < 300,
@@ -1448,4 +1494,126 @@ test "HTTP/1 runtime honors explicit transfer-encoding chunked writes" {
     try std.testing.expectEqualStrings("accepted", response.response.body);
     try std.testing.expectEqual(@as(?[]const u8, null), response.response.header("content-length"));
     try std.testing.expectEqual(@as(usize, 0), response.response.trailers.len);
+}
+
+test "HTTP/1 client reads close-delimited response body" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/close-delimited", request.request.target);
+
+            // No Content-Length or Transfer-Encoding: the response body is
+            // delimited by closing the connection, which remains common for
+            // simple HTTP/1.0-style origin/proxy responses.
+            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-delimited-body");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    var response = try client.request(.{
+        .method = .GET,
+        .target = "/close-delimited",
+        .headers = &.{.{ .name = "Host", .value = "127.0.0.1" }},
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqual(http1.BodyFraming.close_delimited, response.response.body_framing);
+    try std.testing.expectEqualStrings("close-delimited-body", response.response.body);
+}
+
+test "HTTP/1 status-forbidden body preserves pipelined response without request context" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var first = try connection.readRequest(.{});
+            defer first.deinit(server_ptr.allocator);
+            var second = try connection.readRequest(.{});
+            defer second.deinit(server_ptr.allocator);
+
+            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\n" ++
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    const keep_alive = [_]http1.Header{.{ .name = "Connection", .value = "keep-alive" }};
+    try writeRequestToStream(allocator, io, client.stream, .{ .target = "/no-content", .headers = &keep_alive });
+    try writeRequestToStream(allocator, io, client.stream, .{ .target = "/next", .headers = &keep_alive });
+
+    var first_response = try readResponseFromStreamBuffered(allocator, io, client.stream, client.limits, .{}, &client.inbuf);
+    defer first_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), first_response.response.status);
+    try std.testing.expectEqualStrings("", first_response.response.body);
+
+    var second_response = try readResponseFromStreamBuffered(allocator, io, client.stream, client.limits, .{}, &client.inbuf);
+    defer second_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), second_response.response.status);
+    try std.testing.expectEqualStrings("pong", second_response.response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }

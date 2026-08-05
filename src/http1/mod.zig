@@ -92,6 +92,9 @@ pub const BodyFraming = enum {
     content_length,
     /// The parser decoded RFC 9112 chunked transfer coding into owned storage.
     chunked,
+    /// Runtime-only response body framing: no length/coding was declared and
+    /// EOF delimited the body bytes.
+    close_delimited,
 };
 
 pub const Request = struct {
@@ -325,6 +328,7 @@ fn parseBody(
                 .consumed = body_start + decoded.consumed,
             };
         },
+        .close_delimited => unreachable,
     };
 }
 
