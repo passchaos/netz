@@ -75,7 +75,8 @@ starts with deterministic parsers, serializers, and state helpers for:
 - WebRTC building blocks: STUN, ICE connectivity-check helpers with
   USERNAME/PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE plus
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
-  XOR-MAPPED-ADDRESS helpers, ICE candidates, SDP, DTLS record headers, RTP packets/extensions/padding, RTCP
+  XOR-MAPPED-ADDRESS helpers, ICE candidates, SDP parsing with DTLS fingerprint
+  and ICE credential extraction, DTLS record headers, RTP packets/extensions/padding, RTCP
   sender/receiver reports plus PLI/NACK feedback, and SCTP common headers, plus
   blocking UDP STUN binding, RTP/RTCP packet, and same-socket STUN/DTLS/RTP/RTCP
   peer runtimes with a `std.Io.async` concurrent receive helper

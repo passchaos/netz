@@ -11,6 +11,10 @@ pub const Error = wire.Error || error{
     BadMessageIntegrity,
     BadFingerprint,
     InvalidIceCandidate,
+    MissingFingerprint,
+    InvalidFingerprint,
+    MissingIceUfrag,
+    MissingIcePwd,
     InvalidSdp,
     InvalidDtlsRecord,
     InvalidRtpPacket,
@@ -545,6 +549,16 @@ pub const sdp = struct {
         }
     };
 
+    pub const Fingerprint = struct {
+        algorithm: []const u8,
+        value: []const u8,
+    };
+
+    pub const IceCredentials = struct {
+        ufrag: []const u8,
+        password: []const u8,
+    };
+
     pub fn parse(allocator: std.mem.Allocator, text: []const u8) Error!Session {
         var session_attrs: std.ArrayList(Attribute) = .empty;
         errdefer session_attrs.deinit(allocator);
@@ -629,6 +643,79 @@ pub const sdp = struct {
         const protocol = it.next() orelse return error.InvalidSdp;
         const formats = it.rest();
         return .{ .kind = kind, .port = std.fmt.parseInt(u16, port_s, 10) catch return error.InvalidSdp, .protocol = protocol, .formats = formats };
+    }
+
+    pub fn extractFingerprint(session: Session) Error!Fingerprint {
+        if (findAttr(session.attributes, "fingerprint")) |fingerprint| return parseFingerprint(fingerprint);
+
+        if (bundleId(session)) |bundle_id| {
+            for (session.media) |media| {
+                if (findAttr(media.attributes, "mid")) |mid| {
+                    if (std.mem.eql(u8, mid, bundle_id)) {
+                        if (findAttr(media.attributes, "fingerprint")) |fingerprint| return parseFingerprint(fingerprint);
+                    }
+                }
+            }
+        } else {
+            for (session.media) |media| {
+                if (findAttr(media.attributes, "fingerprint")) |fingerprint| return parseFingerprint(fingerprint);
+            }
+        }
+
+        return error.MissingFingerprint;
+    }
+
+    pub fn extractIceCredentials(session: Session) Error!IceCredentials {
+        var ufrag = findAttr(session.attributes, "ice-ufrag");
+        var password = findAttr(session.attributes, "ice-pwd");
+
+        if (ufrag == null or password == null) {
+            const media = candidateMedia(session);
+            if (media) |selected| {
+                if (ufrag == null) ufrag = findAttr(selected.attributes, "ice-ufrag");
+                if (password == null) password = findAttr(selected.attributes, "ice-pwd");
+            }
+        }
+
+        return .{
+            .ufrag = ufrag orelse return error.MissingIceUfrag,
+            .password = password orelse return error.MissingIcePwd,
+        };
+    }
+
+    pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
+        for (attrs) |attr| {
+            if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
+        }
+        return null;
+    }
+
+    fn parseFingerprint(raw: []const u8) Error!Fingerprint {
+        var parts = std.mem.splitScalar(u8, raw, ' ');
+        const algorithm = parts.next() orelse return error.InvalidFingerprint;
+        const value = parts.next() orelse return error.InvalidFingerprint;
+        if (algorithm.len == 0 or value.len == 0 or parts.next() != null) return error.InvalidFingerprint;
+        return .{ .algorithm = algorithm, .value = value };
+    }
+
+    fn bundleId(session: Session) ?[]const u8 {
+        const group = findAttr(session.attributes, "group") orelse return null;
+        var parts = std.mem.tokenizeScalar(u8, group, ' ');
+        const semantic = parts.next() orelse return null;
+        if (!std.mem.eql(u8, semantic, "BUNDLE")) return null;
+        return parts.next();
+    }
+
+    fn candidateMedia(session: Session) ?Media {
+        if (bundleId(session)) |bundle_id| {
+            for (session.media) |media| {
+                if (findAttr(media.attributes, "mid")) |mid| {
+                    if (std.mem.eql(u8, mid, bundle_id)) return media;
+                }
+            }
+            return null;
+        }
+        return if (session.media.len > 0) session.media[0] else null;
     }
 };
 
@@ -1219,6 +1306,76 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
     try std.testing.expectEqualStrings("mid", session.media[0].attributes[0].name);
+}
+
+test "SDP extracts DTLS fingerprint and ICE credentials" {
+    const allocator = std.testing.allocator;
+    const text =
+        "v=0\r\n" ++
+        "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=group:BUNDLE 1 0\r\n" ++
+        "a=fingerprint:sha-256 SESSION-FINGERPRINT\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:0\r\n" ++
+        "a=ice-ufrag:wrong\r\n" ++
+        "a=ice-pwd:wrong-pwd\r\n" ++
+        "a=fingerprint:sha-256 AUDIO-FINGERPRINT\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=mid:1\r\n" ++
+        "a=ice-ufrag:bundle-ufrag\r\n" ++
+        "a=ice-pwd:bundle-pwd\r\n" ++
+        "a=fingerprint:sha-256 BUNDLE-FINGERPRINT\r\n";
+    var session = try sdp.parse(allocator, text);
+    defer session.deinit(allocator);
+
+    const fingerprint = try sdp.extractFingerprint(session);
+    try std.testing.expectEqualStrings("sha-256", fingerprint.algorithm);
+    try std.testing.expectEqualStrings("SESSION-FINGERPRINT", fingerprint.value);
+
+    const creds = try sdp.extractIceCredentials(session);
+    try std.testing.expectEqualStrings("bundle-ufrag", creds.ufrag);
+    try std.testing.expectEqualStrings("bundle-pwd", creds.password);
+
+    const media_only =
+        "v=0\r\n" ++
+        "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=mid:data\r\n" ++
+        "a=ice-ufrag:media-ufrag\r\n" ++
+        "a=ice-pwd:media-pwd\r\n" ++
+        "a=fingerprint:sha-256 MEDIA-FINGERPRINT\r\n";
+    var media_session = try sdp.parse(allocator, media_only);
+    defer media_session.deinit(allocator);
+    const media_fingerprint = try sdp.extractFingerprint(media_session);
+    try std.testing.expectEqualStrings("MEDIA-FINGERPRINT", media_fingerprint.value);
+    const media_creds = try sdp.extractIceCredentials(media_session);
+    try std.testing.expectEqualStrings("media-ufrag", media_creds.ufrag);
+}
+
+test "SDP rejects missing or malformed DTLS/ICE details" {
+    const allocator = std.testing.allocator;
+
+    var no_fingerprint = try sdp.parse(allocator, "v=0\r\ns=-\r\nt=0 0\r\n");
+    defer no_fingerprint.deinit(allocator);
+    try std.testing.expectError(error.MissingFingerprint, sdp.extractFingerprint(no_fingerprint));
+
+    var bad_fingerprint = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=fingerprint:sha-256-only\r\n");
+    defer bad_fingerprint.deinit(allocator);
+    try std.testing.expectError(error.InvalidFingerprint, sdp.extractFingerprint(bad_fingerprint));
+
+    var missing_pwd = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=ice-ufrag:ufrag\r\n");
+    defer missing_pwd.deinit(allocator);
+    try std.testing.expectError(error.MissingIcePwd, sdp.extractIceCredentials(missing_pwd));
 }
 
 test "RTP and DTLS record parsers" {
