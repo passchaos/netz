@@ -5,6 +5,7 @@ const net = std.Io.net;
 
 pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_space.Error || quic.flow_control.Error || quic.recovery.Error || quic.congestion.Error || quic.path_validation.Error || quic.connection_id.Error || quic.Error || error{
     MissingFrame,
+    ConnectionClosed,
 };
 
 pub const SendOptions = struct {
@@ -64,6 +65,18 @@ const StreamRecvFlowEntry = struct {
     highest_received_end: u64 = 0,
 };
 
+pub const CloseInfo = struct {
+    application: bool = false,
+    error_code: u64,
+    frame_type: u64 = 0,
+    reason_phrase: []u8,
+
+    pub fn deinit(self: *CloseInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.reason_phrase);
+        self.* = undefined;
+    }
+};
+
 pub const Connection = struct {
     endpoint: *quic.runtime.Endpoint,
     config: ConnectionConfig,
@@ -81,6 +94,7 @@ pub const Connection = struct {
     recv_data_total: u64 = 0,
     stream_send_flows: std.ArrayList(StreamFlowEntry) = .empty,
     stream_recv_flows: std.ArrayList(StreamRecvFlowEntry) = .empty,
+    close_info: ?CloseInfo = null,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -105,12 +119,14 @@ pub const Connection = struct {
         self.sent.deinit();
         self.recovery.deinit();
         self.path_validation.deinit();
+        if (self.close_info) |*close_info| close_info.deinit(self.endpoint.allocator);
         self.stream_send_flows.deinit(self.endpoint.allocator);
         self.stream_recv_flows.deinit(self.endpoint.allocator);
         self.* = undefined;
     }
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
+        if (self.close_info != null) return error.ConnectionClosed;
         const stream_bytes = countStreamBytes(frames);
         if (stream_bytes > 0) {
             self.send_flow.reserve(stream_bytes) catch |err| {
@@ -222,6 +238,29 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn closeTransport(self: *Connection, error_code: u64, frame_type: u64, reason_phrase: []const u8) Error!void {
+        const frames = [_]quic.Frame{.{ .connection_close = .{
+            .error_code = error_code,
+            .frame_type = frame_type,
+            .reason_phrase = reason_phrase,
+        } }};
+        try self.sendTrackedFrames(&frames);
+        try self.setCloseInfo(.{ .application = false, .error_code = error_code, .frame_type = frame_type, .reason_phrase = reason_phrase });
+    }
+
+    pub fn closeApplication(self: *Connection, error_code: u64, reason_phrase: []const u8) Error!void {
+        const frames = [_]quic.Frame{.{ .application_close = .{
+            .error_code = error_code,
+            .reason_phrase = reason_phrase,
+        } }};
+        try self.sendTrackedFrames(&frames);
+        try self.setCloseInfo(.{ .application = true, .error_code = error_code, .reason_phrase = reason_phrase });
+    }
+
+    pub fn closed(self: Connection) bool {
+        return self.close_info != null;
+    }
+
     pub fn sendNewConnectionId(self: *Connection, connection_id: []const u8, stateless_reset_token: [16]u8) Error!void {
         const frame = try self.local_connection_ids.issue(connection_id, stateless_reset_token);
         const frames = [_]quic.Frame{frame};
@@ -290,6 +329,17 @@ pub const Connection = struct {
                 .retire_connection_id => |retire| try self.local_connection_ids.retire(retire.sequence_number),
                 .path_challenge => |path_challenge| try self.path_validation.receiveChallenge(path_challenge.data),
                 .path_response => |path_response| try self.path_validation.receiveResponse(path_response.data),
+                .connection_close => |close| try self.setCloseInfo(.{
+                    .application = false,
+                    .error_code = close.error_code,
+                    .frame_type = close.frame_type,
+                    .reason_phrase = close.reason_phrase,
+                }),
+                .application_close => |close| try self.setCloseInfo(.{
+                    .application = true,
+                    .error_code = close.error_code,
+                    .reason_phrase = close.reason_phrase,
+                }),
                 .stream => |stream| {
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
                     const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
@@ -310,6 +360,21 @@ pub const Connection = struct {
                 else => {},
             }
         }
+    }
+
+    fn setCloseInfo(self: *Connection, close: struct {
+        application: bool,
+        error_code: u64,
+        frame_type: u64 = 0,
+        reason_phrase: []const u8,
+    }) Error!void {
+        if (self.close_info != null) return;
+        self.close_info = .{
+            .application = close.application,
+            .error_code = close.error_code,
+            .frame_type = close.frame_type,
+            .reason_phrase = try self.endpoint.allocator.dupe(u8, close.reason_phrase),
+        };
     }
 
     pub fn consumeReceived(self: *Connection, amount: u64) ?quic.Frame {
@@ -760,6 +825,79 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     var retire_packet = try server.receiveRoutedDatagram(routed);
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
+}
+
+test "QUIC 1-RTT connection closes with transport and application close frames" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const server_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xf1} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    try client.closeTransport(0x100, @intFromEnum(quic.FrameType.stream), "done");
+    var close_packet = try server.receivePacket();
+    defer close_packet.deinit(allocator);
+    try std.testing.expect(server.closed());
+    try std.testing.expectEqual(@as(u64, 0x100), server.close_info.?.error_code);
+    try std.testing.expectEqualStrings("done", server.close_info.?.reason_phrase);
+    try std.testing.expectError(error.ConnectionClosed, server.send(&[_]quic.Frame{.{ .ping = {} }}));
+
+    var client2_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client2_endpoint.deinit();
+    var server2_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server2_endpoint.deinit();
+    const c2 = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const s2 = [_]u8{ 0x95, 0x96, 0x97, 0x98 };
+    var client2 = try Connection.init(&client2_endpoint, .{
+        .peer = server2_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &c2,
+        .peer_connection_id = &s2,
+    });
+    defer client2.deinit();
+    var server2 = try Connection.init(&server2_endpoint, .{
+        .peer = client2_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &s2,
+        .peer_connection_id = &c2,
+    });
+    defer server2.deinit();
+
+    try server2.closeApplication(42, "app done");
+    var app_close = try client2.receivePacket();
+    defer app_close.deinit(allocator);
+    try std.testing.expect(client2.closed());
+    try std.testing.expect(client2.close_info.?.application);
+    try std.testing.expectEqual(@as(u64, 42), client2.close_info.?.error_code);
+    try std.testing.expectEqualStrings("app done", client2.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {

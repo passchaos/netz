@@ -39,6 +39,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendFrames"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "Connection"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closeTransport"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketTracker"));
     try std.testing.expect(@hasDecl(netz.quic.stream_state, "RecvState"));
     try std.testing.expect(@hasDecl(netz.quic.flow_control, "SendFlow"));
