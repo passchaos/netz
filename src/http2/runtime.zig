@@ -296,7 +296,7 @@ pub const Connection = struct {
                 },
                 .headers => {
                     const stream_id = frame.frame.header.stream_id;
-                    const headers = try cloneDecodedHeaders(self.allocator, frame.frame.payload, self.limits);
+                    const headers = try self.readHeaderBlock(frame.frame);
                     errdefer freeHeaders(self.allocator, headers);
                     try validateHeaderBlock(headers, .request);
                     var trailers: []http2.Hpack.HeaderField = &.{};
@@ -324,7 +324,7 @@ pub const Connection = struct {
                                 },
                                 .headers => {
                                     if ((data_frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
-                                    trailers = try cloneDecodedHeaders(self.allocator, data_frame.frame.payload, self.limits);
+                                    trailers = try self.readHeaderBlock(data_frame.frame);
                                     try validateHeaderBlock(trailers, .request_trailers);
                                     break;
                                 },
@@ -479,11 +479,11 @@ pub const Connection = struct {
                     if (headers) |h| {
                         if ((frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
                         try validateContentLength(h, body.items.len);
-                        trailers = try cloneDecodedHeaders(self.allocator, frame.frame.payload, self.limits);
+                        trailers = try self.readHeaderBlock(frame.frame);
                         try validateHeaderBlock(trailers, .response_trailers);
                         break;
                     } else {
-                        headers = try cloneDecodedHeaders(self.allocator, frame.frame.payload, self.limits);
+                        headers = try self.readHeaderBlock(frame.frame);
                         try validateHeaderBlock(headers.?, .response);
                         const status_s = findHeader(headers.?, ":status") orelse return error.MissingPseudoHeader;
                         const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
@@ -529,15 +529,56 @@ pub const Connection = struct {
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
         try http2.Hpack.encodeLiteralBlock(&block, self.allocator, headers);
+        try self.writeHeaderBlock(stream_id, block.items, end_stream);
+    }
+
+    fn writeHeaderBlock(self: *Connection, stream_id: u31, block: []const u8, end_stream: bool) Error!void {
+        const chunk_size = @max(@as(usize, 1), self.limits.max_frame_payload);
+        const first_len = @min(block.len, chunk_size);
+        var offset = first_len;
         try writeFrame(
             self.allocator,
             self.io,
             self.stream,
             .headers,
-            flag_end_headers | if (end_stream) flag_end_stream else 0,
+            (if (offset == block.len) flag_end_headers else 0) | if (end_stream) flag_end_stream else 0,
             stream_id,
-            block.items,
+            block[0..first_len],
         );
+        while (offset < block.len) {
+            const end = @min(block.len, offset + chunk_size);
+            try writeFrame(
+                self.allocator,
+                self.io,
+                self.stream,
+                .continuation,
+                if (end == block.len) flag_end_headers else 0,
+                stream_id,
+                block[offset..end],
+            );
+            offset = end;
+        }
+    }
+
+    fn readHeaderBlock(self: *Connection, first: http2.Frame) Error![]http2.Hpack.HeaderField {
+        if (first.header.frame_type != .headers) return error.UnexpectedFrame;
+        var block: std.ArrayList(u8) = .empty;
+        defer block.deinit(self.allocator);
+        try block.appendSlice(self.allocator, first.payload);
+        if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
+
+        var flags = first.header.flags;
+        while ((flags & flag_end_headers) == 0) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            defer frame.deinit(self.allocator);
+            if (frame.frame.header.frame_type != .continuation or frame.frame.header.stream_id != first.header.stream_id) {
+                return error.UnexpectedFrame;
+            }
+            try block.appendSlice(self.allocator, frame.frame.payload);
+            if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
+            flags = frame.frame.header.flags;
+        }
+        return cloneDecodedHeaders(self.allocator, block.items, self.limits);
     }
 
     fn writeData(self: *Connection, stream_id: u31, data: []const u8, end_stream: bool) Error!void {
@@ -996,6 +1037,143 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
     try std.testing.expectEqualStrings("done", goaway.goaway.debug_data);
+}
+
+test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 24, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const long_header_value = "abcdefghijklmnopqrstuvwxyz0123456789";
+    const Shared = struct {
+        server: *Server,
+        expected: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server, shared.expected) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server, expected: []const u8) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/continuation", request.path);
+            try std.testing.expectEqualStrings(expected, findHeader(request.headers, "x-long").?);
+
+            try connection.writeResponse(request.stream_id, .{
+                .status = 200,
+                .headers = &.{
+                    .{ .name = "content-type", .value = "text/plain" },
+                    .{ .name = "x-long-response", .value = expected },
+                },
+                .body = "ok",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server, .expected = long_header_value };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 24,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/continuation",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "x-long", .value = long_header_value }},
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+    try std.testing.expectEqualStrings(long_header_value, findHeader(response.headers, "x-long-response").?);
+}
+
+test "HTTP/2 runtime rejects malformed CONTINUATION sequence" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            var request = connection.readRequest() catch |err| {
+                if (err == error.UnexpectedFrame) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            request.deinit(shared.server.allocator);
+            shared.err = error.UnexpectedFrame;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/bad-continuation" },
+        .{ .name = ":scheme", .value = "https" },
+    });
+    const split = block.items.len / 2;
+    try writeFrame(allocator, io, client.stream, .headers, 0, 1, block.items[0..split]);
+    try writeFrame(allocator, io, client.stream, .continuation, flag_end_headers, 3, block.items[split..]);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
 }
 
 test "HTTP/2 runtime exchanges request and response trailers" {
