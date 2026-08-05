@@ -182,6 +182,10 @@ pub const AcceptedHandshakeSession = struct {
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
     }
 
+    pub fn receiveManyDatagrams(self: *AcceptedHandshakeSession, count: usize) Error!OwnedHandshakeDatagramBatch {
+        return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
+    }
+
     pub fn sendDatagram(self: *AcceptedHandshakeSession, payload: []const u8) Error!void {
         try sendHandshakeDatagramFromConnection(&self.h3.established.connection, self.session_id, payload);
     }
@@ -270,6 +274,10 @@ pub const HandshakeClientSession = struct {
 
     pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
+    }
+
+    pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
+        return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
     }
 };
 
@@ -380,6 +388,36 @@ pub const OwnedHandshakeDatagram = struct {
     }
 };
 
+pub const OwnedHandshakeDatagramBatch = struct {
+    allocator: std.mem.Allocator,
+    datagrams: []?OwnedHandshakeDatagram,
+    errors: []?anyerror,
+
+    pub fn deinit(self: *OwnedHandshakeDatagramBatch) void {
+        for (self.datagrams) |*datagram| {
+            if (datagram.*) |*owned| owned.deinit(self.allocator);
+        }
+        self.allocator.free(self.datagrams);
+        self.allocator.free(self.errors);
+        self.* = undefined;
+    }
+
+    pub fn firstError(self: OwnedHandshakeDatagramBatch) ?anyerror {
+        for (self.errors) |err| {
+            if (err) |value| return value;
+        }
+        return null;
+    }
+
+    pub fn receivedCount(self: OwnedHandshakeDatagramBatch) usize {
+        var count: usize = 0;
+        for (self.datagrams) |datagram| {
+            if (datagram != null) count += 1;
+        }
+        return count;
+    }
+};
+
 fn sendDatagramFromEndpoint(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -432,6 +470,42 @@ fn receiveHandshakeDatagramFromConnection(connection: *quic.one_rtt.Connection) 
         packet.deinit(connection.endpoint.allocator);
     }
 }
+
+fn receiveManyHandshakeDatagrams(connection: *quic.one_rtt.Connection, count: usize) Error!OwnedHandshakeDatagramBatch {
+    var group: std.Io.Group = .init;
+    const datagrams = try connection.endpoint.allocator.alloc(?OwnedHandshakeDatagram, count);
+    errdefer connection.endpoint.allocator.free(datagrams);
+    @memset(datagrams, null);
+    const errors = try connection.endpoint.allocator.alloc(?anyerror, count);
+    errdefer connection.endpoint.allocator.free(errors);
+    @memset(errors, null);
+
+    for (datagrams, errors) |*datagram, *err_slot| {
+        const task = HandshakeDatagramTask{
+            .connection = connection,
+            .datagram = datagram,
+            .err = err_slot,
+        };
+        group.async(connection.endpoint.io, HandshakeDatagramTask.run, .{task});
+    }
+
+    try group.await(connection.endpoint.io);
+    return .{ .allocator = connection.endpoint.allocator, .datagrams = datagrams, .errors = errors };
+}
+
+const HandshakeDatagramTask = struct {
+    connection: *quic.one_rtt.Connection,
+    datagram: *?OwnedHandshakeDatagram,
+    err: *?anyerror,
+
+    fn run(task: HandshakeDatagramTask) std.Io.Cancelable!void {
+        task.datagram.* = receiveHandshakeDatagramFromConnection(task.connection) catch |err| {
+            task.err.* = err;
+            return;
+        };
+        task.err.* = null;
+    }
+};
 
 fn sendProtectedDatagramFromEndpoint(
     endpoint: *quic.runtime.Endpoint,
@@ -676,6 +750,85 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
     defer response.deinit(allocator);
     try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
     try std.testing.expectEqualStrings("handshake-server-dgram", response.datagram.payload);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport handshake session receives datagrams with std.Io async batch" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xba, 0xce, 0x20, 0x01, 0xba, 0xce, 0x20, 0x02 };
+    const client_cid = [_]u8{ 0xba, 0xce, 0x20, 0x03 };
+    const server_cid = [_]u8{ 0xba, 0xce, 0x20, 0x04 };
+
+    var server = try HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } },
+    }, .{
+        .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x93} ** 32,
+            .x25519_secret_key = [_]u8{0x94} ** 32,
+        },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var accepted = try server_ptr.accept();
+            defer accepted.deinit();
+            var batch = try accepted.receiveManyDatagrams(2);
+            defer batch.deinit();
+            if (batch.firstError()) |err| return err;
+            try std.testing.expectEqual(@as(usize, 2), batch.receivedCount());
+
+            var saw_one = false;
+            var saw_two = false;
+            for (batch.datagrams) |maybe_datagram| {
+                const datagram = maybe_datagram.?;
+                try std.testing.expectEqual(accepted.session_id.value, datagram.datagram.session_id.value);
+                if (std.mem.eql(u8, datagram.datagram.payload, "batch-one")) saw_one = true;
+                if (std.mem.eql(u8, datagram.datagram.payload, "batch-two")) saw_two = true;
+            }
+            try std.testing.expect(saw_one);
+            try std.testing.expect(saw_two);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try HandshakeClientSession.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .authority = "localhost",
+        .path = "/wt-handshake-batch",
+        .limits = .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } } },
+        .h3 = .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x91} ** 32,
+                .x25519_secret_key = [_]u8{0x92} ** 32,
+            },
+        },
+    });
+    defer client.deinit();
+
+    try client.sendDatagram("batch-one");
+    try client.sendDatagram("batch-two");
 
     thread.join();
     if (shared.err) |err| return err;
