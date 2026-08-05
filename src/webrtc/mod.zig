@@ -458,6 +458,24 @@ pub const dtls = struct {
             return .{ .content_type = content_type, .version = version, .epoch = epoch, .sequence_number = (@as(u48, seq_hi) << 32) | seq_lo, .fragment = fragment };
         }
     };
+
+    pub const WriteOptions = struct {
+        content_type: ContentType,
+        version: u16 = 0xfefd,
+        epoch: u16,
+        sequence_number: u48,
+    };
+
+    pub fn writeRecord(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: WriteOptions, fragment: []const u8) Error!void {
+        if (fragment.len > std.math.maxInt(u16)) return error.InvalidDtlsRecord;
+        try list.append(allocator, @intFromEnum(options.content_type));
+        try wire.appendInt(list, allocator, u16, options.version, .big);
+        try wire.appendInt(list, allocator, u16, options.epoch, .big);
+        try wire.appendInt(list, allocator, u16, @intCast(options.sequence_number >> 32), .big);
+        try wire.appendInt(list, allocator, u32, @truncate(options.sequence_number), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(fragment.len), .big);
+        try list.appendSlice(allocator, fragment);
+    }
 };
 
 pub const rtp = struct {
@@ -697,6 +715,15 @@ test "RTP and DTLS record parsers" {
     try std.testing.expectEqual(dtls.ContentType.handshake, record.content_type);
     try std.testing.expectEqual(@as(u48, 2), record.sequence_number);
     try std.testing.expectEqualStrings(&.{0xff}, record.fragment);
+
+    var written: std.ArrayList(u8) = .empty;
+    defer written.deinit(allocator);
+    try dtls.writeRecord(&written, allocator, .{ .content_type = .application_data, .epoch = 1, .sequence_number = 3 }, "dtls");
+    const written_record = try dtls.Record.parse(written.items);
+    try std.testing.expectEqual(dtls.ContentType.application_data, written_record.content_type);
+    try std.testing.expectEqual(@as(u16, 1), written_record.epoch);
+    try std.testing.expectEqual(@as(u48, 3), written_record.sequence_number);
+    try std.testing.expectEqualStrings("dtls", written_record.fragment);
 }
 
 test "RTP packet extension padding and writer" {

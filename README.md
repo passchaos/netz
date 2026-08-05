@@ -41,8 +41,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   handshake-backed protected runtime
 - WebRTC building blocks: STUN, XOR-MAPPED-ADDRESS helpers, ICE candidates,
   SDP, DTLS record headers, RTP packets/extensions/padding, and SCTP common
-  headers, plus blocking UDP STUN binding, RTP packet, and same-socket STUN/RTP
-  peer runtimes
+  headers, plus blocking UDP STUN binding, RTP packet, and same-socket
+  STUN/DTLS/RTP peer runtimes
 
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1,

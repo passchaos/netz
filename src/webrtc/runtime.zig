@@ -50,6 +50,14 @@ pub const Peer = struct {
     pub fn receiveRtpPacket(self: *Peer) Error!RtpDatagram {
         return self.endpoint.receiveRtpPacket();
     }
+
+    pub fn sendDtlsRecord(self: *Peer, to: net.IpAddress, options: webrtc.dtls.WriteOptions, fragment: []const u8) Error!void {
+        try self.endpoint.sendDtlsRecord(to, options, fragment);
+    }
+
+    pub fn receiveDtlsRecord(self: *Peer) Error!DtlsDatagram {
+        return self.endpoint.receiveDtlsRecord();
+    }
 };
 
 pub const PeerEndpoint = struct {
@@ -134,6 +142,13 @@ pub const PeerEndpoint = struct {
         try self.sendBytes(to, encoded.items);
     }
 
+    pub fn sendDtlsRecord(self: *PeerEndpoint, to: net.IpAddress, options: webrtc.dtls.WriteOptions, fragment: []const u8) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try webrtc.dtls.writeRecord(&encoded, self.allocator, options, fragment);
+        try self.sendBytes(to, encoded.items);
+    }
+
     pub fn receiveRtpPacket(self: *PeerEndpoint) Error!RtpDatagram {
         while (true) {
             var raw = try self.receiveRaw();
@@ -145,6 +160,19 @@ pub const PeerEndpoint = struct {
             var packet = try webrtc.rtp.Packet.parse(self.allocator, raw.bytes);
             errdefer packet.deinit(self.allocator);
             return .{ .from = raw.from, .bytes = raw.bytes, .packet = packet };
+        }
+    }
+
+    pub fn receiveDtlsRecord(self: *PeerEndpoint) Error!DtlsDatagram {
+        while (true) {
+            var raw = try self.receiveRaw();
+            errdefer raw.deinit(self.allocator);
+            if (!looksLikeDtls(raw.bytes)) {
+                raw.deinit(self.allocator);
+                continue;
+            }
+            const record = try webrtc.dtls.Record.parse(raw.bytes);
+            return .{ .from = raw.from, .bytes = raw.bytes, .record = record };
         }
     }
 
@@ -286,6 +314,17 @@ pub const RtpDatagram = struct {
 
     pub fn deinit(self: *RtpDatagram, allocator: std.mem.Allocator) void {
         self.packet.deinit(allocator);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+pub const DtlsDatagram = struct {
+    from: net.IpAddress,
+    bytes: []u8,
+    record: webrtc.dtls.Record,
+
+    pub fn deinit(self: *DtlsDatagram, allocator: std.mem.Allocator) void {
         allocator.free(self.bytes);
         self.* = undefined;
     }
@@ -482,6 +521,14 @@ fn looksLikeRtp(bytes: []const u8) bool {
     return bytes.len >= 12 and (bytes[0] & 0xc0) == 0x80;
 }
 
+fn looksLikeDtls(bytes: []const u8) bool {
+    if (bytes.len < 13) return false;
+    return switch (bytes[0]) {
+        20, 21, 22, 23 => true,
+        else => false,
+    };
+}
+
 test "WebRTC STUN runtime binding request over UDP" {
     const allocator = std.testing.allocator;
 
@@ -574,7 +621,7 @@ test "WebRTC RTP runtime sends and receives packets over UDP" {
     try std.testing.expectEqualStrings("server-frame", response.packet.payload);
 }
 
-test "WebRTC peer runtime multiplexes STUN and RTP on one UDP socket" {
+test "WebRTC peer runtime multiplexes STUN DTLS and RTP on one UDP socket" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -599,6 +646,16 @@ test "WebRTC peer runtime multiplexes STUN and RTP on one UDP socket" {
             defer request.deinit(server_ptr.endpoint.allocator);
             try server_ptr.respondBindingSuccess(request);
 
+            var dtls = try server_ptr.receiveDtlsRecord();
+            defer dtls.deinit(server_ptr.endpoint.allocator);
+            try std.testing.expectEqual(webrtc.dtls.ContentType.handshake, dtls.record.content_type);
+            try std.testing.expectEqualStrings("client-hello", dtls.record.fragment);
+            try server_ptr.sendDtlsRecord(dtls.from, .{
+                .content_type = .handshake,
+                .epoch = 0,
+                .sequence_number = 2,
+            }, "server-hello");
+
             var media = try server_ptr.receiveRtpPacket();
             defer media.deinit(server_ptr.endpoint.allocator);
             try std.testing.expectEqualStrings("client-media", media.packet.payload);
@@ -622,6 +679,17 @@ test "WebRTC peer runtime multiplexes STUN and RTP on one UDP socket" {
     const client_ip4 = client.address().ip4;
     try std.testing.expectEqual(stun.AddressFamily.ipv4, response.mapped_address.family);
     try std.testing.expectEqual(client_ip4.port, response.mapped_address.port);
+
+    try client.sendDtlsRecord(server.address(), .{
+        .content_type = .handshake,
+        .epoch = 0,
+        .sequence_number = 1,
+    }, "client-hello");
+    var dtls_response = try client.receiveDtlsRecord();
+    defer dtls_response.deinit(allocator);
+    try std.testing.expectEqual(webrtc.dtls.ContentType.handshake, dtls_response.record.content_type);
+    try std.testing.expectEqual(@as(u48, 2), dtls_response.record.sequence_number);
+    try std.testing.expectEqualStrings("server-hello", dtls_response.record.fragment);
 
     try client.sendRtpPacket(server.address(), .{
         .marker = true,
