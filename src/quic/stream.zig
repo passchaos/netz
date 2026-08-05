@@ -49,6 +49,38 @@ pub const SendState = struct {
         }
         if (fin) self.fin_sent = true;
     }
+
+    pub fn appendFrames(
+        self: *SendState,
+        list: *std.ArrayList(quic.Frame),
+        allocator: std.mem.Allocator,
+        data: []const u8,
+        max_frame_data_len: usize,
+        fin: bool,
+    ) Error!void {
+        if (self.fin_sent) return error.FinalSizeMismatch;
+        if (max_frame_data_len == 0) return error.InvalidStreamRange;
+        if (data.len == 0 and fin) {
+            try list.append(allocator, .{ .stream = .{ .stream_id = self.stream_id, .offset = self.next_offset, .data = &.{}, .fin = true } });
+            self.fin_sent = true;
+            return;
+        }
+
+        var written: usize = 0;
+        while (written < data.len) {
+            const chunk_len = @min(max_frame_data_len, data.len - written);
+            const is_last = written + chunk_len == data.len;
+            try list.append(allocator, .{ .stream = .{
+                .stream_id = self.stream_id,
+                .offset = self.next_offset,
+                .data = data[written .. written + chunk_len],
+                .fin = fin and is_last,
+            } });
+            self.next_offset += chunk_len;
+            written += chunk_len;
+        }
+        if (fin) self.fin_sent = true;
+    }
 };
 
 pub const RecvState = struct {

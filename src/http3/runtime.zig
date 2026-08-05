@@ -4,7 +4,7 @@ const quic = @import("../quic/mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = http3.Error || quic.runtime.Error || quic.one_rtt.Error || error{
+pub const Error = http3.Error || quic.runtime.Error || quic.one_rtt.Error || quic.stream_state.Error || error{
     MissingStreamFrame,
     UnexpectedStream,
 };
@@ -125,6 +125,8 @@ pub const ProtectedConfig = struct {
     local_connection_id: []const u8,
     peer_connection_id: []const u8,
     max_frames_per_packet: usize = 8,
+    max_stream_buffer: usize = 64 * 1024,
+    max_stream_frame_data: usize = 1200,
 };
 
 pub const ProtectedServer = struct {
@@ -147,22 +149,14 @@ pub const ProtectedServer = struct {
     }
 
     pub fn receiveRequest(self: *ProtectedServer) Error!OwnedProtectedRequest {
-        var packet = try quic.one_rtt.receive(
-            &self.quic_server.endpoint,
-            self.config.receive_keys,
-            self.config.local_connection_id.len,
-            self.expected_packet_number,
-            self.config.max_frames_per_packet,
-        );
-        errdefer packet.deinit(self.quic_server.endpoint.allocator);
-        self.expected_packet_number = packet.packet.packet_number + 1;
-        const stream = findStreamFrame(packet.frames) orelse return error.MissingStreamFrame;
-        var request = try http3.decodeRequest(self.quic_server.endpoint.allocator, stream.data);
+        const assembled = try self.receiveStreamBytes(null);
+        errdefer self.quic_server.endpoint.allocator.free(assembled.bytes);
+        var request = try http3.decodeRequest(self.quic_server.endpoint.allocator, assembled.bytes);
         errdefer request.deinit(self.quic_server.endpoint.allocator);
         return .{
-            .from = packet.from,
-            .stream_id = @intCast(stream.stream_id),
-            .packet = packet,
+            .from = assembled.from,
+            .stream_id = assembled.stream_id,
+            .stream_bytes = assembled.bytes,
             .request = request,
         };
     }
@@ -171,13 +165,55 @@ pub const ProtectedServer = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
         try response.write(&encoded, self.quic_server.endpoint.allocator);
-        const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = stream_id, .data = encoded.items, .fin = true } }};
+        var send_state = quic.stream_state.SendState.init(stream_id);
+        var frames: std.ArrayList(quic.Frame) = .empty;
+        defer frames.deinit(self.quic_server.endpoint.allocator);
+        try send_state.appendFrames(&frames, self.quic_server.endpoint.allocator, encoded.items, self.config.max_stream_frame_data, true);
         try quic.one_rtt.sendFrames(&self.quic_server.endpoint, to, self.config.send_keys, .{
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = self.next_packet_number,
-            .frames = &frames,
+            .frames = frames.items,
         });
         self.next_packet_number += 1;
+    }
+
+    fn receiveStreamBytes(self: *ProtectedServer, expected_stream_id: ?u62) Error!AssembledStream {
+        var recv: ?quic.stream_state.RecvState = null;
+        defer if (recv) |*state| state.deinit();
+        var from: ?net.IpAddress = null;
+        var stream_id: ?u62 = expected_stream_id;
+
+        while (true) {
+            var packet = try quic.one_rtt.receive(
+                &self.quic_server.endpoint,
+                self.config.receive_keys,
+                self.config.local_connection_id.len,
+                self.expected_packet_number,
+                self.config.max_frames_per_packet,
+            );
+            defer packet.deinit(self.quic_server.endpoint.allocator);
+            self.expected_packet_number = packet.packet.packet_number + 1;
+            if (from == null) from = packet.from;
+
+            for (packet.frames) |frame| {
+                if (frame != .stream) continue;
+                const incoming_id: u62 = @intCast(frame.stream.stream_id);
+                if (stream_id) |id| {
+                    if (incoming_id != id) continue;
+                } else {
+                    stream_id = incoming_id;
+                    recv = quic.stream_state.RecvState.init(self.quic_server.endpoint.allocator, incoming_id, self.config.max_stream_buffer);
+                }
+                if (recv == null) recv = quic.stream_state.RecvState.init(self.quic_server.endpoint.allocator, incoming_id, self.config.max_stream_buffer);
+                if (recv) |*state| {
+                    try state.insert(frame.stream);
+                    if (state.final_size != null and state.contiguous_end >= state.final_size.?) {
+                        const bytes = try self.quic_server.endpoint.allocator.dupe(u8, state.buffer.items[0..state.final_size.?]);
+                        return .{ .from = from.?, .stream_id = stream_id.?, .bytes = bytes };
+                    }
+                }
+            }
+        }
     }
 };
 
@@ -204,14 +240,28 @@ pub const ProtectedClient = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_client.endpoint.allocator);
         try request_options.write(&encoded, self.quic_client.endpoint.allocator);
-        const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = stream_id, .data = encoded.items, .fin = true } }};
+        var send_state = quic.stream_state.SendState.init(stream_id);
+        var frames: std.ArrayList(quic.Frame) = .empty;
+        defer frames.deinit(self.quic_client.endpoint.allocator);
+        try send_state.appendFrames(&frames, self.quic_client.endpoint.allocator, encoded.items, self.config.max_stream_frame_data, true);
         try quic.one_rtt.sendFrames(&self.quic_client.endpoint, self.quic_client.peer, self.config.send_keys, .{
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = self.next_packet_number,
-            .frames = &frames,
+            .frames = frames.items,
         });
         self.next_packet_number += 1;
 
+        const assembled = try self.receiveStreamBytes(stream_id);
+        errdefer self.quic_client.endpoint.allocator.free(assembled.bytes);
+        var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, assembled.bytes);
+        errdefer response.deinit(self.quic_client.endpoint.allocator);
+        return .{ .stream_bytes = assembled.bytes, .response = response };
+    }
+
+    fn receiveStreamBytes(self: *ProtectedClient, expected_stream_id: u62) Error!AssembledStream {
+        var recv = quic.stream_state.RecvState.init(self.quic_client.endpoint.allocator, expected_stream_id, self.config.max_stream_buffer);
+        defer recv.deinit();
+        var from: ?net.IpAddress = null;
         while (true) {
             var packet = try quic.one_rtt.receive(
                 &self.quic_client.endpoint,
@@ -220,16 +270,17 @@ pub const ProtectedClient = struct {
                 self.expected_packet_number,
                 self.config.max_frames_per_packet,
             );
-            errdefer packet.deinit(self.quic_client.endpoint.allocator);
+            defer packet.deinit(self.quic_client.endpoint.allocator);
             self.expected_packet_number = packet.packet.packet_number + 1;
-            const stream = findStreamFrame(packet.frames) orelse {
-                packet.deinit(self.quic_client.endpoint.allocator);
-                continue;
-            };
-            if (stream.stream_id != stream_id) return error.UnexpectedStream;
-            var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, stream.data);
-            errdefer response.deinit(self.quic_client.endpoint.allocator);
-            return .{ .packet = packet, .response = response };
+            if (from == null) from = packet.from;
+            for (packet.frames) |frame| {
+                if (frame != .stream or frame.stream.stream_id != expected_stream_id) continue;
+                try recv.insert(frame.stream);
+                if (recv.final_size != null and recv.contiguous_end >= recv.final_size.?) {
+                    const bytes = try self.quic_client.endpoint.allocator.dupe(u8, recv.buffer.items[0..recv.final_size.?]);
+                    return .{ .from = from.?, .stream_id = expected_stream_id, .bytes = bytes };
+                }
+            }
         }
     }
 };
@@ -237,25 +288,31 @@ pub const ProtectedClient = struct {
 pub const OwnedProtectedRequest = struct {
     from: net.IpAddress,
     stream_id: u62,
-    packet: quic.one_rtt.ReceivedPacket,
+    stream_bytes: []u8,
     request: http3.DecodedRequest,
 
     pub fn deinit(self: *OwnedProtectedRequest, allocator: std.mem.Allocator) void {
         self.request.deinit(allocator);
-        self.packet.deinit(allocator);
+        allocator.free(self.stream_bytes);
         self.* = undefined;
     }
 };
 
 pub const OwnedProtectedResponse = struct {
-    packet: quic.one_rtt.ReceivedPacket,
+    stream_bytes: []u8,
     response: http3.DecodedResponse,
 
     pub fn deinit(self: *OwnedProtectedResponse, allocator: std.mem.Allocator) void {
         self.response.deinit(allocator);
-        self.packet.deinit(allocator);
+        allocator.free(self.stream_bytes);
         self.* = undefined;
     }
+};
+
+const AssembledStream = struct {
+    from: net.IpAddress,
+    stream_id: u62,
+    bytes: []u8,
 };
 
 fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
@@ -284,6 +341,7 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
         .send_keys = server_keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .max_stream_frame_data = 7,
     });
     defer server.deinit();
 
@@ -302,7 +360,7 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
             defer request.deinit(server_ptr.quic_server.endpoint.allocator);
             try std.testing.expectEqualStrings("POST", request.request.method);
             try std.testing.expectEqualStrings("/protected-h3", request.request.path);
-            try std.testing.expectEqualStrings("ping", request.request.body);
+            try std.testing.expectEqualStrings("ping split across stream frames", request.request.body);
             try server_ptr.sendResponse(request.from, request.stream_id, .{
                 .status = 200,
                 .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
@@ -321,6 +379,7 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
         .send_keys = client_keys,
         .local_connection_id = &client_cid,
         .peer_connection_id = &server_cid,
+        .max_stream_frame_data = 7,
     });
     defer client.deinit();
 
@@ -328,7 +387,7 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
         .method = "POST",
         .path = "/protected-h3",
         .authority = "localhost",
-        .body = "ping",
+        .body = "ping split across stream frames",
     });
     defer response.deinit(allocator);
 

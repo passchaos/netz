@@ -11,7 +11,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   client/server runtime
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   stateless QPACK literal helpers, a cleartext development runtime over the
-  QUIC UDP frame endpoint, and a protected 1-RTT QUIC STREAM runtime
+  QUIC UDP frame endpoint, and a protected 1-RTT QUIC STREAM runtime with
+  STREAM frame splitting/reassembly
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), plus
   CRYPTO stream reassembly, v1 Initial key/header/payload protection, protected
