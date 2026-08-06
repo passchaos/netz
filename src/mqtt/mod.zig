@@ -2100,6 +2100,13 @@ test "MQTT v5 AUTH control" {
     try std.testing.expectEqual(@as(u8, 0), auth.reason_code);
     try std.testing.expectEqual(@as(usize, 0), auth.properties.len);
 
+    // MQTT 5 AUTH packets either omit the variable header entirely (remaining
+    // length 0, implicit Success/no properties) or include both a reason code
+    // and the following property-length varint.  A lone reason byte would make
+    // the packet ambiguous for streaming parsers, so keep it rejected like
+    // mature MQTT stacks such as rumqtt do.
+    try std.testing.expectError(error.BufferTooShort, Auth.parse(allocator, .v5, &.{ 0xf0, 0x01, 0x18 }));
+
     try std.testing.expectError(error.InvalidReasonCode, Auth.write(&encoded, allocator, .v5, 0x01, &.{}));
     try std.testing.expectError(error.InvalidPacketType, Auth.write(&encoded, allocator, .v3_1_1, 0x00, &.{}));
     try std.testing.expectError(error.InvalidProperty, Auth.write(&encoded, allocator, .v5, 0x18, &.{
