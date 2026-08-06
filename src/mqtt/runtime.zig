@@ -270,9 +270,13 @@ pub const Connection = struct {
     peer_maximum_qos: mqtt.QoS = .exactly_once,
     peer_retain_available: bool = true,
     incoming_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
+    outgoing_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
 
     pub fn close(self: *Connection) void {
         for (self.incoming_topic_aliases) |maybe_topic| {
+            if (maybe_topic) |topic| self.allocator.free(topic);
+        }
+        for (self.outgoing_topic_aliases) |maybe_topic| {
             if (maybe_topic) |topic| self.allocator.free(topic);
         }
         self.stream.close(self.io);
@@ -342,9 +346,7 @@ pub const Connection = struct {
         }
         if (@intFromEnum(options.qos) > @intFromEnum(self.peer_maximum_qos)) return error.InvalidQoS;
         if (options.retain and !self.peer_retain_available) return error.InvalidProperty;
-        if (mqtt.topicAlias(options.properties)) |alias| {
-            if (alias == 0 or alias > self.peer_topic_alias_maximum) return error.InvalidProperty;
-        }
+        try self.validateOutgoingTopicAlias(topic, options.properties);
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.writePublish(&encoded, self.allocator, self.protocol, topic, payload, .{
@@ -355,6 +357,7 @@ pub const Connection = struct {
             .properties = options.properties,
         });
         try self.writePacket(encoded.items);
+        try self.rememberOutgoingTopicAlias(topic, options.properties);
         if (packet_id) |id| {
             switch (options.qos) {
                 .at_most_once => unreachable,
@@ -560,6 +563,20 @@ pub const Connection = struct {
         var auth_packet = try mqtt.Auth.parse(self.allocator, self.protocol, packet.bytes);
         errdefer auth_packet.deinit(self.allocator);
         return .{ .packet = packet, .auth = auth_packet };
+    }
+
+    fn validateOutgoingTopicAlias(self: *Connection, topic: []const u8, properties: []const mqtt.Property) Error!void {
+        const alias = mqtt.topicAlias(properties) orelse return;
+        if (alias == 0 or alias > self.peer_topic_alias_maximum or alias > self.outgoing_topic_aliases.len) return error.InvalidProperty;
+        if (topic.len == 0 and self.outgoing_topic_aliases[alias - 1] == null) return error.InvalidTopic;
+    }
+
+    fn rememberOutgoingTopicAlias(self: *Connection, topic: []const u8, properties: []const mqtt.Property) Error!void {
+        const alias = mqtt.topicAlias(properties) orelse return;
+        if (topic.len == 0) return;
+        const index = alias - 1;
+        if (self.outgoing_topic_aliases[index]) |old| self.allocator.free(old);
+        self.outgoing_topic_aliases[index] = try self.allocator.dupe(u8, topic);
     }
 
     fn applyIncomingTopicAlias(self: *Connection, publish_packet: *mqtt.Publish) Error!void {
@@ -993,10 +1010,19 @@ test "MQTT connection rejects topic aliases beyond negotiated maximum" {
         .peer_topic_alias_maximum = 1,
         .incoming_topic_alias_maximum = 1,
     };
+    defer for (connection.outgoing_topic_aliases) |maybe_topic| {
+        if (maybe_topic) |topic| std.testing.allocator.free(topic);
+    };
 
     try std.testing.expectError(error.InvalidProperty, connection.publish("topic", "payload", .{
         .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 2 } }},
     }));
+    try std.testing.expectError(error.InvalidTopic, connection.publish("", "payload", .{
+        .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 1 } }},
+    }));
+    try connection.validateOutgoingTopicAlias("topic", &.{.{ .two_byte = .{ .id = .topic_alias, .value = 1 } }});
+    try connection.rememberOutgoingTopicAlias("topic", &.{.{ .two_byte = .{ .id = .topic_alias, .value = 1 } }});
+    try connection.validateOutgoingTopicAlias("", &.{.{ .two_byte = .{ .id = .topic_alias, .value = 1 } }});
 
     var incoming = mqtt.Publish{
         .dup = false,
