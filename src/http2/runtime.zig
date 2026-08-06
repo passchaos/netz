@@ -555,6 +555,7 @@ pub const Connection = struct {
         try validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
         const semantics = self.responseSemanticsFor(stream_id, options);
         try validateResponseBodyForRequestSemantics(options.status, semantics, options.headers, options.body, options.trailers);
+        try validateDeclaredResponseLength(options.status, semantics, options.headers, options.body.len);
         const suppress_body = responseWriteSuppressesBodySemantics(options.status, semantics);
         const status = std.fmt.bufPrint(&status_buf, "{}", .{options.status}) catch return error.InvalidStatus;
 
@@ -1978,6 +1979,24 @@ fn validateResponseBodyForRequestSemantics(
         // silently framing an ambiguous response.
         if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
         if ((try contentLength(headers)) != null) return error.InvalidContentLength;
+    }
+}
+
+fn validateDeclaredResponseLength(
+    status: u16,
+    semantics: ResponseBodySemantics,
+    headers: []const http2.Hpack.HeaderField,
+    body_len: usize,
+) Error!void {
+    if ((status >= 100 and status < 200) or status == 204) return;
+    if (semantics.traditional_connect and status >= 200 and status < 300) return;
+    if (try contentLength(headers)) |len| {
+        // 304 and HEAD responses may describe the selected representation, so
+        // only require equality when an actual DATA body is sent.  For normal
+        // responses, writing a declared length that differs from DATA bytes
+        // leaves peers waiting or causes them to reject the stream.
+        if (body_len != 0 and len != body_len) return error.InvalidContentLength;
+        if (body_len == 0 and status != 304 and !semantics.head and len != 0) return error.InvalidContentLength;
     }
 }
 
@@ -4224,11 +4243,14 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
                 return;
             };
             defer mismatch.deinit(shared.server.allocator);
-            connection.writeResponse(mismatch.stream_id, .{
-                .status = 200,
-                .headers = &.{.{ .name = "content-length", .value = "5" }},
-                .body = "pong",
-            }) catch |err| {
+            connection.writeHeaders(mismatch.stream_id, &.{
+                .{ .name = ":status", .value = "200" },
+                .{ .name = "content-length", .value = "5" },
+            }, false) catch |err| {
+                shared.err = err;
+                return;
+            };
+            connection.writeData(mismatch.stream_id, "pong", true) catch |err| {
                 shared.err = err;
                 return;
             };
@@ -4476,6 +4498,15 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(1, .{
         .status = 204,
         .body = "body",
+    }));
+    try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(1, .{
+        .status = 200,
+        .headers = &.{.{ .name = "content-length", .value = "5" }},
+        .body = "pong",
+    }));
+    try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(1, .{
+        .status = 200,
+        .headers = &.{.{ .name = "content-length", .value = "5" }},
     }));
     try std.testing.expectError(error.InvalidStatus, connection.writeResponse(1, .{
         .status = 103,
