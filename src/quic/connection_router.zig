@@ -91,6 +91,11 @@ pub const Router = struct {
 
     pub fn routeDatagramFrom(self: Router, from: ?net.IpAddress, packet: []const u8) Error!?RoutedDatagram {
         if (packet.len == 0) return error.InvalidPacket;
+        // All non-Version-Negotiation QUIC packets have the fixed bit set.  A
+        // mature endpoint drops fixed-bit-clear datagrams before CID lookup (see
+        // tquic/s2n-quic/quic-zig), which avoids routing greasing probes or
+        // non-QUIC UDP payloads into an established connection.
+        if ((packet[0] & 0x40) == 0) return null;
         const routed = if ((packet[0] & 0x80) != 0)
             try self.routeLongHeaderDatagram(packet)
         else
@@ -101,6 +106,8 @@ pub const Router = struct {
 
     fn routeLongHeaderDatagram(self: Router, packet: []const u8) Error!?RoutedDatagram {
         if (packet.len < 6) return error.InvalidPacket;
+        const version = std.mem.readInt(u32, packet[1..5], .big);
+        if (version == 0) return null;
         const dcid_len = packet[5];
         if (dcid_len == 0 or dcid_len > max_connection_id_len) return error.InvalidConnectionId;
         const dcid_start: usize = 6;
@@ -112,7 +119,6 @@ pub const Router = struct {
     }
 
     fn routeShortHeaderDatagram(self: Router, packet: []const u8) ?RoutedDatagram {
-        if ((packet[0] & 0x40) == 0) return null;
         var iter = self.map.iterator();
         var best: ?RoutedDatagram = null;
         while (iter.next()) |entry| {
@@ -180,6 +186,15 @@ test "QUIC connection router routes short and long header datagrams" {
     try std.testing.expectEqualStrings("abc", long_route.destination_connection_id);
 
     try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&.{ 0x40, 'z', 'z' }));
+
+    const fixed_bit_clear_long = [_]u8{ 0x80, 0, 0, 0, 1, 3, 'a', 'b', 'c', 0, 0, 0 };
+    try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&fixed_bit_clear_long));
+
+    const version_negotiation = [_]u8{ 0xc0, 0, 0, 0, 0, 3, 'a', 'b', 'c', 0, 0, 0 };
+    try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&version_negotiation));
+
+    const fixed_bit_clear_short = [_]u8{ 0x00, 'a', 'b', 'c', 0x00 };
+    try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&fixed_bit_clear_short));
 }
 
 test "QUIC connection router rejects changed paths when migration disabled" {

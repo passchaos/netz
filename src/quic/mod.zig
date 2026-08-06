@@ -78,10 +78,16 @@ pub const LongHeader = struct {
     packet_number: []const u8 = &.{},
     retry_integrity_tag: ?[retry_integrity_tag_len]u8 = null,
 
-    pub fn parse(bytes: []const u8) !LongHeader {
+    pub fn parse(bytes: []const u8) Error!LongHeader {
         var cursor = wire.Cursor.init(bytes);
         const first = try cursor.readByte();
         if ((first & 0x80) == 0) return error.InvalidEncoding;
+        // RFC 9000 §17.2 requires the fixed bit to be set on long-header
+        // packets.  Version Negotiation is parsed by parseVersionNegotiationPacket
+        // because its first byte is intentionally version-independent; all other
+        // long-header parsers should fail closed instead of letting random UDP
+        // traffic or ossification probes advance into packet-type-specific logic.
+        if ((first & 0x40) == 0) return error.InvalidEncoding;
         const version_value = try cursor.readInt(u32, .big);
         const dcid_len = try cursor.readByte();
         try validatePacketConnectionIdLen(dcid_len);
@@ -1502,6 +1508,9 @@ test "QUIC long initial header parse" {
     try std.testing.expectEqual(PacketType.initial, parsed.packet_type);
     try std.testing.expectEqualStrings("dcid", parsed.destination_connection_id);
     try std.testing.expectEqual(@as(u64, 4), parsed.length.?);
+
+    bytes.items[0] &= ~@as(u8, 0x40);
+    try std.testing.expectError(error.InvalidEncoding, LongHeader.parse(bytes.items));
 }
 
 test "QUIC version negotiation packet roundtrip" {
