@@ -235,8 +235,12 @@ pub const Connection = struct {
     outgoing_inflight: u16 = 0,
     max_outgoing_inflight: u16 = 16,
     peer_max_packet_size: usize = std.math.maxInt(usize),
+    incoming_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
 
     pub fn close(self: *Connection) void {
+        for (self.incoming_topic_aliases) |maybe_topic| {
+            if (maybe_topic) |topic| self.allocator.free(topic);
+        }
         self.stream.close(self.io);
         self.* = undefined;
     }
@@ -292,6 +296,7 @@ pub const Connection = struct {
             .retain = options.retain,
             .dup = options.dup,
             .packet_id = packet_id,
+            .properties = options.properties,
         });
         try self.writePacket(encoded.items);
         if (packet_id) |id| {
@@ -321,6 +326,7 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != .publish) return error.UnexpectedPacket;
         var publish_packet = try mqtt.Publish.parse(self.allocator, self.protocol, packet.bytes);
         errdefer publish_packet.deinit(self.allocator);
+        try self.applyIncomingTopicAlias(&publish_packet);
         return .{ .packet = packet, .publish = publish_packet };
     }
 
@@ -500,6 +506,23 @@ pub const Connection = struct {
         return .{ .packet = packet, .auth = auth_packet };
     }
 
+    fn applyIncomingTopicAlias(self: *Connection, publish_packet: *mqtt.Publish) Error!void {
+        const alias = mqtt.topicAlias(publish_packet.properties) orelse {
+            try mqtt.validateTopicName(publish_packet.topic);
+            return;
+        };
+        if (alias == 0 or alias > self.incoming_topic_aliases.len) return error.InvalidProperty;
+        const index = alias - 1;
+        if (publish_packet.topic.len != 0) {
+            try mqtt.validateTopicName(publish_packet.topic);
+            if (self.incoming_topic_aliases[index]) |old| self.allocator.free(old);
+            self.incoming_topic_aliases[index] = try self.allocator.dupe(u8, publish_packet.topic);
+            return;
+        }
+        const stored = self.incoming_topic_aliases[index] orelse return error.InvalidTopic;
+        publish_packet.topic = stored;
+    }
+
     fn writePacket(self: *Connection, bytes: []const u8) Error!void {
         if (bytes.len > self.peer_max_packet_size) return error.OutgoingPacketTooLarge;
         try writeAll(self.io, self.stream, bytes);
@@ -526,6 +549,7 @@ pub const PublishOptions = struct {
     qos: mqtt.QoS = .at_most_once,
     retain: bool = false,
     dup: bool = false,
+    properties: []const mqtt.Property = &.{},
 };
 
 pub const SubscribeOptions = struct {
@@ -783,6 +807,18 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqual(mqtt.QoS.at_least_once, publish.publish.qos);
             try accepted.connection.writePubAck(publish.publish.packet_id.?, 0);
 
+            var alias_registered = try accepted.connection.readPublish();
+            defer alias_registered.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("aliased/topic", alias_registered.publish.topic);
+            try std.testing.expectEqualStrings("first", alias_registered.publish.payload);
+            try std.testing.expectEqual(@as(?u16, 1), mqtt.topicAlias(alias_registered.publish.properties));
+
+            var alias_reused = try accepted.connection.readPublish();
+            defer alias_reused.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("aliased/topic", alias_reused.publish.topic);
+            try std.testing.expectEqualStrings("second", alias_reused.publish.payload);
+            try std.testing.expectEqual(@as(?u16, 1), mqtt.topicAlias(alias_reused.publish.properties));
+
             try accepted.connection.readPingReq();
             try accepted.connection.writePingResp();
 
@@ -843,6 +879,8 @@ test "MQTT runtime client and server exchange over TCP" {
 
     try client.publish("sensors/exact", "exactly-once", .{ .qos = .exactly_once });
     try client.publish("sensors/temp", "21.5", .{ .qos = .at_least_once });
+    try client.publish("aliased/topic", "first", .{ .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 1 } }} });
+    try client.publish("", "second", .{ .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 1 } }} });
     try client.ping();
     try client.disconnect(0);
 

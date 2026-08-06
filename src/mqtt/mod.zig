@@ -323,6 +323,20 @@ pub fn maximumPacketSize(properties: []const Property) ?u32 {
     return null;
 }
 
+pub fn topicAlias(properties: []const Property) ?u16 {
+    for (properties) |property| {
+        if (property == .two_byte and property.two_byte.id == .topic_alias) return property.two_byte.value;
+    }
+    return null;
+}
+
+pub fn topicAliasMaximum(properties: []const Property) ?u16 {
+    for (properties) |property| {
+        if (property == .two_byte and property.two_byte.id == .topic_alias_maximum) return property.two_byte.value;
+    }
+    return null;
+}
+
 pub fn writeProperties(list: *std.ArrayList(u8), allocator: std.mem.Allocator, properties: []const Property) Error!void {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -527,11 +541,13 @@ pub const Publish = struct {
         if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const topic = try readUtf8(&cursor);
-        try validateTopicName(topic);
         const qos = try QoS.fromFlags(fixed.flags);
         const packet_id = if (qos == .at_most_once) null else try cursor.readInt(u16, .big);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
+        if (topic.len == 0) {
+            if (protocol != .v5 or topicAlias(props) == null) return error.InvalidTopic;
+        } else try validateTopicName(topic);
         return .{
             .dup = (fixed.flags & 0x08) != 0,
             .qos = qos,
@@ -1073,14 +1089,16 @@ pub fn writePublish(
     protocol: ProtocolVersion,
     topic: []const u8,
     payload: []const u8,
-    options: struct { qos: QoS = .at_most_once, retain: bool = false, dup: bool = false, packet_id: ?u16 = null },
+    options: struct { qos: QoS = .at_most_once, retain: bool = false, dup: bool = false, packet_id: ?u16 = null, properties: []const Property = &.{} },
 ) !void {
-    try validateTopicName(topic);
+    if (topic.len == 0) {
+        if (protocol != .v5 or topicAlias(options.properties) == null) return error.InvalidTopic;
+    } else try validateTopicName(topic);
     var variable: std.ArrayList(u8) = .empty;
     defer variable.deinit(allocator);
     try writeUtf8(&variable, allocator, topic);
     if (options.qos != .at_most_once) try wire.appendInt(&variable, allocator, u16, options.packet_id orelse 1, .big);
-    if (protocol == .v5) try encodeRemainingLength(&variable, allocator, 0);
+    if (protocol == .v5) try writeProperties(&variable, allocator, options.properties);
     try variable.appendSlice(allocator, payload);
 
     const flags: u4 = (if (options.dup) @as(u4, 0x8) else 0) |
@@ -1130,6 +1148,7 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqual(@as(u16, 10), connect.properties[0].two_byte.value);
     try std.testing.expectEqual(@as(?u16, 10), receiveMaximum(connect.properties));
     try std.testing.expectEqual(@as(?u32, null), maximumPacketSize(connect.properties));
+    try std.testing.expectEqual(@as(?u16, null), topicAlias(connect.properties));
     try std.testing.expectEqualStrings("status/client-1", connect.will.?.topic);
     try std.testing.expectEqualStrings("offline", connect.will.?.payload);
     try std.testing.expectEqual(QoS.at_least_once, connect.will.?.qos);
@@ -1139,12 +1158,21 @@ test "MQTT connect and publish parse" {
 
     var publish_bytes: std.ArrayList(u8) = .empty;
     defer publish_bytes.deinit(allocator);
-    try writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "21.5", .{ .qos = .at_least_once, .packet_id = 7 });
+    try writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "21.5", .{ .qos = .at_least_once, .packet_id = 7, .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 2 } }} });
     var publish = try Publish.parse(allocator, .v5, publish_bytes.items);
     defer publish.deinit(allocator);
     try std.testing.expectEqual(QoS.at_least_once, publish.qos);
     try std.testing.expectEqual(@as(u16, 7), publish.packet_id.?);
     try std.testing.expectEqualStrings("21.5", publish.payload);
+    try std.testing.expectEqual(@as(?u16, 2), topicAlias(publish.properties));
+
+    var alias_only_bytes: std.ArrayList(u8) = .empty;
+    defer alias_only_bytes.deinit(allocator);
+    try writePublish(&alias_only_bytes, allocator, .v5, "", "alias payload", .{ .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 2 } }} });
+    var alias_only = try Publish.parse(allocator, .v5, alias_only_bytes.items);
+    defer alias_only.deinit(allocator);
+    try std.testing.expectEqualStrings("", alias_only.topic);
+    try std.testing.expectEqual(@as(?u16, 2), topicAlias(alias_only.properties));
 }
 
 test "MQTT CONNECT validates flags and will topic" {

@@ -103,7 +103,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   UNSUBSCRIBE/UNSUBACK, PING,
   DISCONNECT, AUTH enhanced-authentication exchanges, properties, remaining length, topic-name/filter validation, and
   wildcard matching, plus a blocking TCP client/server runtime with a
-  `std.Io.async` concurrent server helper, MQTT v5 Receive Maximum and Maximum Packet Size negotiation, QoS publish inflight limiting, and
+  `std.Io.async` concurrent server helper, MQTT v5 Receive Maximum, Maximum Packet Size, and Topic Alias negotiation/resolution, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
   datagram mapping, session lifecycle/counter state, plus a cleartext
