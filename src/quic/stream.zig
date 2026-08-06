@@ -6,6 +6,7 @@ pub const Error = error{
     InvalidStreamRange,
     FinalSizeMismatch,
     StreamBufferTooLarge,
+    ConflictingStreamData,
     NothingAvailable,
 } || quic.Error || std.mem.Allocator.Error;
 
@@ -114,6 +115,13 @@ pub const RecvState = struct {
         }
         if (frame.fin) self.final_size = end;
 
+        for (frame.data, 0..) |byte, i| {
+            const absolute = offset + i;
+            if (absolute >= self.received.items.len) break;
+            if (!self.received.items[absolute]) continue;
+            if (self.buffer.items[absolute] != byte) return error.ConflictingStreamData;
+        }
+
         if (end > self.buffer.items.len) {
             const old_len = self.buffer.items.len;
             try self.buffer.resize(self.allocator, end);
@@ -189,4 +197,24 @@ test "QUIC receive stream rejects inconsistent final size" {
     defer recv.deinit();
     try recv.insert(.{ .stream_id = 4, .offset = 0, .data = "abc", .fin = true });
     try std.testing.expectError(error.FinalSizeMismatch, recv.insert(.{ .stream_id = 4, .offset = 3, .data = "d", .fin = false }));
+}
+
+test "QUIC receive stream rejects conflicting duplicate bytes" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 1024);
+    defer recv.deinit();
+
+    try recv.insert(.{ .stream_id = 0, .offset = 0, .data = "abcdef", .fin = false });
+    // Identical overlap can be a benign retransmission and must not duplicate
+    // bytes or regress contiguous availability.
+    try recv.insert(.{ .stream_id = 0, .offset = 2, .data = "cde", .fin = false });
+    try std.testing.expectEqualStrings("abcdef", recv.available());
+
+    try std.testing.expectError(error.ConflictingStreamData, recv.insert(.{
+        .stream_id = 0,
+        .offset = 3,
+        .data = "XYZ",
+        .fin = false,
+    }));
+    try std.testing.expectEqualStrings("abcdef", recv.available());
 }

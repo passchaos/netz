@@ -4,6 +4,7 @@ const quic = @import("mod.zig");
 pub const Error = error{
     InvalidCryptoRange,
     CryptoBufferTooLarge,
+    ConflictingCryptoData,
     NothingAvailable,
 } || quic.Error || std.mem.Allocator.Error;
 
@@ -29,6 +30,12 @@ pub const Reassembler = struct {
         const offset = std.math.cast(usize, frame.offset) orelse return error.InvalidCryptoRange;
         const end = std.math.add(usize, offset, frame.data.len) catch return error.InvalidCryptoRange;
         if (end > self.max_buffered) return error.CryptoBufferTooLarge;
+        for (frame.data, 0..) |byte, i| {
+            const absolute = offset + i;
+            if (absolute >= self.received.items.len) break;
+            if (!self.received.items[absolute]) continue;
+            if (self.buffer.items[absolute] != byte) return error.ConflictingCryptoData;
+        }
         if (end > self.buffer.items.len) {
             const old_len = self.buffer.items.len;
             try self.buffer.resize(self.allocator, end);
@@ -126,4 +133,19 @@ test "QUIC CRYPTO reassembler exposes only contiguous bytes" {
     try std.testing.expectEqualStrings("helloworld", reassembler.available());
     try reassembler.consume(5);
     try std.testing.expectEqualStrings("world", reassembler.available());
+}
+
+test "QUIC CRYPTO reassembler rejects conflicting duplicate bytes" {
+    const allocator = std.testing.allocator;
+    var reassembler = Reassembler.init(allocator, 32);
+    defer reassembler.deinit();
+
+    try reassembler.insert(.{ .offset = 0, .data = "abcdef" });
+    // Identical retransmission overlap is harmless.
+    try reassembler.insert(.{ .offset = 2, .data = "cde" });
+    try std.testing.expectEqualStrings("abcdef", reassembler.available());
+
+    // A proven byte conflict is a protocol error; the old data remains intact.
+    try std.testing.expectError(error.ConflictingCryptoData, reassembler.insert(.{ .offset = 3, .data = "XYZ" }));
+    try std.testing.expectEqualStrings("abcdef", reassembler.available());
 }

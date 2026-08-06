@@ -193,6 +193,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckCoversSentPackets"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectPacketThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.stream_state, "RecvState"));
+    const stream_conflict_error: netz.quic.stream_state.Error = error.ConflictingStreamData;
+    try std.testing.expect(stream_conflict_error == error.ConflictingStreamData);
+    const crypto_conflict_error: netz.quic.crypto_stream.Error = error.ConflictingCryptoData;
+    try std.testing.expect(crypto_conflict_error == error.ConflictingCryptoData);
     try std.testing.expect(@hasDecl(netz.quic.flow_control, "SendFlow"));
     try std.testing.expect(@hasDecl(netz.quic.recovery, "Queue"));
     try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "packetThresholdCandidate"));

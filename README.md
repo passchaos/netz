@@ -35,7 +35,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   RFC-defaulted transport-parameter encoding/validation (duplicate detection,
   endpoint-specific client/server parameter rules, preferred-address parsing,
   max UDP payload/ACK delay/stream-count bounds), Retry packet codec
-  with version-specific integrity-tag verification, plus CRYPTO stream reassembly,
+  with version-specific integrity-tag verification, plus CRYPTO stream reassembly with duplicate-overlap conflict detection,
   v1/v2 Initial key/header/payload protection with version-aware salts, HKDF labels, and long-header type bits, protected Initial packet seal/open, long-header packet boundary peeking for coalesced datagrams, Version Negotiation packet codec and endpoint-level unsupported-version responses,
   Initial CRYPTO byte exchange over UDP with RFC 9000 1200-byte Initial datagram padding/validation, coalesced Initial+Handshake CRYPTO datagram helpers, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
@@ -46,7 +46,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   and UDP-payload limits to established 1-RTT connection objects, stateless reset token helpers,
   packet-number space ACK tracking with never-sent ACK range rejection and adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, stream send/receive state with
-  offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
+  duplicate-overlap conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
