@@ -984,8 +984,11 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedM
             },
             FrameType.cancel_push,
             FrameType.settings,
+            FrameType.push_promise,
             FrameType.goaway,
             FrameType.max_push_id,
+            FrameType.priority_update_request,
+            FrameType.priority_update_push,
             => return error.UnexpectedFrame,
             else => {},
         }
