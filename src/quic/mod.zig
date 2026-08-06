@@ -19,6 +19,7 @@ pub const stateless_reset = @import("stateless_reset.zig");
 pub const congestion = @import("congestion.zig");
 pub const path_validation = @import("path_validation.zig");
 pub const rtt = @import("rtt.zig");
+pub const pmtu = @import("pmtu.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
