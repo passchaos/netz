@@ -316,6 +316,13 @@ pub fn receiveMaximum(properties: []const Property) ?u16 {
     return null;
 }
 
+pub fn maximumPacketSize(properties: []const Property) ?u32 {
+    for (properties) |property| {
+        if (property == .four_byte and property.four_byte.id == .maximum_packet_size) return property.four_byte.value;
+    }
+    return null;
+}
+
 pub fn writeProperties(list: *std.ArrayList(u8), allocator: std.mem.Allocator, properties: []const Property) Error!void {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -1122,6 +1129,7 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqual(@as(usize, 1), connect.properties.len);
     try std.testing.expectEqual(@as(u16, 10), connect.properties[0].two_byte.value);
     try std.testing.expectEqual(@as(?u16, 10), receiveMaximum(connect.properties));
+    try std.testing.expectEqual(@as(?u32, null), maximumPacketSize(connect.properties));
     try std.testing.expectEqualStrings("status/client-1", connect.will.?.topic);
     try std.testing.expectEqualStrings("offline", connect.will.?.payload);
     try std.testing.expectEqual(QoS.at_least_once, connect.will.?.qos);

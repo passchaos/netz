@@ -9,6 +9,7 @@ pub const Error = mqtt.Error || error{
     UnexpectedPacket,
     ConnectRefused,
     InflightFull,
+    OutgoingPacketTooLarge,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -56,6 +57,7 @@ pub const Server = struct {
         var connect = try connection.readConnect();
         errdefer connect.deinit(self.allocator);
         if (mqtt.receiveMaximum(connect.connect.properties)) |receive_maximum| connection.max_outgoing_inflight = receive_maximum;
+        if (mqtt.maximumPacketSize(connect.connect.properties)) |maximum_packet_size| connection.peer_max_packet_size = maximum_packet_size;
         try connection.writeConnAck(.{ .session_present = false, .reason_code = options.reason_code, .max_outgoing_inflight = options.max_outgoing_inflight });
 
         return .{ .connection = connection, .connect = connect };
@@ -179,6 +181,9 @@ pub const Client = struct {
         if (options.protocol == .v5 and mqtt.receiveMaximum(options.properties) == null) {
             try connect_properties.append(allocator, .{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
         }
+        if (options.protocol == .v5 and mqtt.maximumPacketSize(options.properties) == null and options.limits.max_packet_size <= std.math.maxInt(u32)) {
+            try connect_properties.append(allocator, .{ .four_byte = .{ .id = .maximum_packet_size, .value = @intCast(options.limits.max_packet_size) } });
+        }
         try mqtt.writeConnectPacket(&encoded, allocator, options.protocol, .{
             .client_id = options.client_id,
             .clean_start = options.clean_start,
@@ -194,6 +199,7 @@ pub const Client = struct {
         defer connack.deinit(allocator);
         if (connack.connack.reason_code != 0) return error.ConnectRefused;
         if (mqtt.receiveMaximum(connack.connack.properties)) |receive_maximum| connection.max_outgoing_inflight = receive_maximum;
+        if (mqtt.maximumPacketSize(connack.connack.properties)) |maximum_packet_size| connection.peer_max_packet_size = maximum_packet_size;
 
         return connection;
     }
@@ -228,6 +234,7 @@ pub const Connection = struct {
     next_packet_id: u16 = 1,
     outgoing_inflight: u16 = 0,
     max_outgoing_inflight: u16 = 16,
+    peer_max_packet_size: usize = std.math.maxInt(usize),
 
     pub fn close(self: *Connection) void {
         self.stream.close(self.io);
@@ -253,8 +260,11 @@ pub const Connection = struct {
         if (self.protocol == .v5 and mqtt.receiveMaximum(options.properties) == null) {
             try properties.append(self.allocator, .{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
         }
+        if (self.protocol == .v5 and mqtt.maximumPacketSize(options.properties) == null and self.limits.max_packet_size <= std.math.maxInt(u32)) {
+            try properties.append(self.allocator, .{ .four_byte = .{ .id = .maximum_packet_size, .value = @intCast(self.limits.max_packet_size) } });
+        }
         try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
     }
 
     pub fn readConnAck(self: *Connection) Error!OwnedConnAck {
@@ -283,7 +293,7 @@ pub const Connection = struct {
             .dup = options.dup,
             .packet_id = packet_id,
         });
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
         if (packet_id) |id| {
             switch (options.qos) {
                 .at_most_once => unreachable,
@@ -350,7 +360,7 @@ pub const Connection = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.AckPacket.write(&encoded, self.allocator, self.protocol, packet_type, packet_id, reason_code, &.{});
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
     }
 
     pub fn subscribe(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions) Error!OwnedSubAck {
@@ -358,7 +368,7 @@ pub const Connection = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.Subscribe.write(&encoded, self.allocator, self.protocol, packet_id, options.properties, subscriptions);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
 
         var suback = try self.readSubAck();
         errdefer suback.deinit(self.allocator);
@@ -381,7 +391,7 @@ pub const Connection = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.SubAck.write(&encoded, self.allocator, self.protocol, packet_id, properties, reason_codes);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
     }
 
     pub fn readSubAck(self: *Connection) Error!OwnedSubAck {
@@ -398,7 +408,7 @@ pub const Connection = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.Unsubscribe.write(&encoded, self.allocator, self.protocol, packet_id, options.properties, topic_filters);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
 
         var unsuback = try self.readUnsubAck();
         errdefer unsuback.deinit(self.allocator);
@@ -421,7 +431,7 @@ pub const Connection = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.UnsubAck.write(&encoded, self.allocator, self.protocol, packet_id, properties, reason_codes);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
     }
 
     pub fn readUnsubAck(self: *Connection) Error!OwnedUnsubAck {
@@ -437,7 +447,7 @@ pub const Connection = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.writePing(&encoded, self.allocator, false);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
         var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
         defer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .pingresp) return error.UnexpectedPacket;
@@ -455,14 +465,14 @@ pub const Connection = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.writePing(&encoded, self.allocator, true);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
     }
 
     pub fn disconnect(self: *Connection, reason_code: u8) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.Disconnect.write(&encoded, self.allocator, self.protocol, reason_code, &.{});
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
     }
 
     pub fn readDisconnect(self: *Connection) Error!OwnedDisconnect {
@@ -478,7 +488,7 @@ pub const Connection = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.Auth.write(&encoded, self.allocator, self.protocol, reason_code, properties);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writePacket(encoded.items);
     }
 
     pub fn readAuth(self: *Connection) Error!OwnedAuth {
@@ -488,6 +498,11 @@ pub const Connection = struct {
         var auth_packet = try mqtt.Auth.parse(self.allocator, self.protocol, packet.bytes);
         errdefer auth_packet.deinit(self.allocator);
         return .{ .packet = packet, .auth = auth_packet };
+    }
+
+    fn writePacket(self: *Connection, bytes: []const u8) Error!void {
+        if (bytes.len > self.peer_max_packet_size) return error.OutgoingPacketTooLarge;
+        try writeAll(self.io, self.stream, bytes);
     }
 
     fn readAck(self: *Connection, packet_type: mqtt.PacketType) Error!OwnedAck {
@@ -719,7 +734,9 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqualStrings("rumq", accepted.connect.connect.username.?);
             try std.testing.expectEqualStrings("mq", accepted.connect.connect.password.?);
             try std.testing.expectEqual(@as(?u16, 3), mqtt.receiveMaximum(accepted.connect.connect.properties));
+            try std.testing.expectEqual(@as(?u32, 4096), mqtt.maximumPacketSize(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(u16, 3), accepted.connection.max_outgoing_inflight);
+            try std.testing.expectEqual(@as(usize, 4096), accepted.connection.peer_max_packet_size);
 
             var client_auth = try accepted.connection.readAuth();
             defer client_auth.deinit(server_ptr.allocator);
@@ -795,6 +812,7 @@ test "MQTT runtime client and server exchange over TCP" {
     });
     defer client.close();
     try std.testing.expectEqual(@as(u16, 2), client.max_outgoing_inflight);
+    try std.testing.expectEqual(@as(usize, 4096), client.peer_max_packet_size);
 
     try client.writeAuth(0x19, &.{
         .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },
@@ -844,6 +862,18 @@ test "MQTT connection enforces outgoing inflight limit before writing" {
 
     try std.testing.expectError(error.InflightFull, connection.publish("limited/topic", "blocked", .{ .qos = .at_least_once }));
     try std.testing.expectEqual(@as(u16, 1), connection.outgoing_inflight);
+}
+
+test "MQTT connection enforces negotiated maximum packet size" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .protocol = .v5,
+        .peer_max_packet_size = 8,
+    };
+
+    try std.testing.expectError(error.OutgoingPacketTooLarge, connection.publish("limited/topic", "payload too large", .{}));
 }
 
 test "MQTT async std.Io server handles concurrent clients" {
