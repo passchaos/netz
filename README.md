@@ -60,8 +60,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   1-RTT key-update derivation and key-phase state with ACK gating and retained
   previous receive/send generations for reordered short-header packets,
   NewReno-style congestion-window and bytes-in-flight send admission wired into
-  1-RTT sending and ACK/ACK_ECN processing with sent ECN counter validation and plain-ACK ECN fallback disablement, RFC 9002-style RTT/PTO estimation with
-  ACK-delay adjustment, packet/time-threshold loss detection, and persistent
+  1-RTT sending and ACK/ACK_ECN processing with sent ECN counter validation,
+  ACK_ECN CE congestion response, reordered-ACK_ECN tolerance, and plain-ACK
+  ECN fallback disablement, RFC 9002-style RTT/PTO estimation with ACK-delay
+  adjustment, packet/time-threshold loss detection, earliest loss/PTO timer
+  deadlines, exponential PTO backoff, two-probe PTO service, and persistent
   congestion detection that collapses the congestion window and resets the RTT
   measurement epoch after long contiguous lost periods,
   a 1-RTT recovery queue for PTO plus packet-threshold and time-threshold
