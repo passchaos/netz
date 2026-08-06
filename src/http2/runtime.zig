@@ -14,6 +14,7 @@ pub const Error = http2.Error || error{
     MessageTooLarge,
     FlowControlBlocked,
     FlowControlViolation,
+    ExtendedConnectDisabled,
     StreamReset,
     ConnectionGoAway,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
@@ -33,6 +34,10 @@ pub const Limits = struct {
     max_body_bytes: usize = 16 * 1024 * 1024,
     max_header_fields: usize = 256,
     max_header_list_size: usize = default_max_header_list_size,
+    /// Advertise RFC 8441 SETTINGS_ENABLE_CONNECT_PROTOCOL.  It is disabled by
+    /// default because peers may start tunnelling arbitrary bytes on streams
+    /// once extended CONNECT is accepted.
+    enable_connect_protocol: bool = false,
 };
 
 pub const Server = struct {
@@ -261,6 +266,7 @@ pub const Connection = struct {
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
+    peer_enable_connect_protocol: bool = false,
     last_peer_client_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
 
@@ -283,9 +289,20 @@ pub const Connection = struct {
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
+        const method_is_connect = std.ascii.eqlIgnoreCase(options.method, "CONNECT");
+        const extended_connect = options.protocol != null;
+        if (method_is_connect and !extended_connect and (options.body.len != 0 or options.trailers.len != 0)) {
+            return error.InvalidContentLength;
+        }
         try fields.append(self.allocator, .{ .name = ":method", .value = options.method });
-        try fields.append(self.allocator, .{ .name = ":path", .value = options.path });
-        try fields.append(self.allocator, .{ .name = ":scheme", .value = options.scheme });
+        if (!method_is_connect or extended_connect) {
+            try fields.append(self.allocator, .{ .name = ":path", .value = options.path });
+            try fields.append(self.allocator, .{ .name = ":scheme", .value = options.scheme });
+        }
+        if (options.protocol) |protocol| {
+            if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
+            try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
+        }
         if (options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
         for (options.headers) |header| try fields.append(self.allocator, header);
         try validateHeaderBlock(fields.items, .request);
@@ -294,7 +311,7 @@ pub const Connection = struct {
         try self.writeHeaders(stream_id, fields.items, options.body.len == 0 and options.trailers.len == 0);
         if (options.body.len != 0) try self.writeData(stream_id, options.body, options.trailers.len == 0);
         if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
-        return self.readResponse(stream_id, options.method);
+        return self.readResponse(stream_id, options.method, extended_connect);
     }
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
@@ -318,10 +335,17 @@ pub const Connection = struct {
                     errdefer body.deinit(self.allocator);
 
                     const method = findHeader(headers, ":method") orelse return error.MissingPseudoHeader;
+                    const protocol = findHeader(headers, ":protocol");
+                    if (protocol != null and !self.limits.enable_connect_protocol) {
+                        return error.ExtendedConnectDisabled;
+                    }
                     const expected_request_len = try contentLength(headers);
-                    if (std.ascii.eqlIgnoreCase(method, "CONNECT") and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
+                    const is_connect = std.ascii.eqlIgnoreCase(method, "CONNECT");
+                    const is_extended_connect = is_connect and protocol != null;
+                    if (is_connect and !is_extended_connect and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
+                    if (is_connect and !is_extended_connect and (frame.frame.header.flags & flag_end_stream) == 0) return error.InvalidContentLength;
 
-                    if (!std.ascii.eqlIgnoreCase(method, "CONNECT") and (frame.frame.header.flags & flag_end_stream) == 0) {
+                    if ((!is_connect or is_extended_connect) and (frame.frame.header.flags & flag_end_stream) == 0) {
                         while (true) {
                             var data_frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
                             defer data_frame.deinit(self.allocator);
@@ -353,9 +377,10 @@ pub const Connection = struct {
                         .stream_id = stream_id,
                         .headers = headers,
                         .method = method,
-                        .path = findHeader(headers, ":path") orelse return error.MissingPseudoHeader,
-                        .scheme = findHeader(headers, ":scheme") orelse "https",
+                        .path = findHeader(headers, ":path") orelse "",
+                        .scheme = findHeader(headers, ":scheme") orelse "",
                         .authority = findHeader(headers, ":authority"),
+                        .protocol = protocol,
                         .body = try body.toOwnedSlice(self.allocator),
                         .trailers = trailers,
                     };
@@ -479,7 +504,7 @@ pub const Connection = struct {
         }
     }
 
-    fn readResponse(self: *Connection, stream_id: u31, request_method: []const u8) Error!OwnedResponse {
+    fn readResponse(self: *Connection, stream_id: u31, request_method: []const u8, extended_connect: bool) Error!OwnedResponse {
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |h| freeHeaders(self.allocator, h);
         var trailers: []http2.Hpack.HeaderField = &.{};
@@ -518,9 +543,9 @@ pub const Connection = struct {
                             headers = null;
                             continue;
                         }
-                        if (responseForbidsBody(status, request_method)) {
+                        if (responseForbidsBody(status, request_method, extended_connect)) {
                             const response_content_length = (try contentLength(headers.?)) orelse 0;
-                            if (std.ascii.eqlIgnoreCase(request_method, "CONNECT") and response_content_length != 0) return error.InvalidContentLength;
+                            if (std.ascii.eqlIgnoreCase(request_method, "CONNECT") and !extended_connect and response_content_length != 0) return error.InvalidContentLength;
                             break;
                         }
                         if ((frame.frame.header.flags & flag_end_stream) != 0) {
@@ -710,6 +735,10 @@ pub const Connection = struct {
                 },
                 .max_header_list_size => self.peer_max_header_list_size = setting.value,
                 .header_table_size => self.hpack_encoder.setMaxDynamicTableSize(self.allocator, setting.value),
+                .enable_connect_protocol => {
+                    if (setting.value > 1) return error.InvalidSetting;
+                    self.peer_enable_connect_protocol = setting.value == 1;
+                },
                 else => {},
             }
         }
@@ -743,6 +772,9 @@ pub const RequestOptions = struct {
     method: []const u8 = "GET",
     path: []const u8 = "/",
     scheme: []const u8 = "https",
+    /// RFC 8441 extended CONNECT `:protocol` pseudo-header.  Sending it
+    /// requires the peer to advertise SETTINGS_ENABLE_CONNECT_PROTOCOL = 1.
+    protocol: ?[]const u8 = null,
     authority: ?[]const u8 = null,
     headers: []const http2.Hpack.HeaderField = &.{},
     body: []const u8 = &.{},
@@ -763,6 +795,7 @@ pub const OwnedRequest = struct {
     path: []const u8,
     scheme: []const u8,
     authority: ?[]const u8,
+    protocol: ?[]const u8 = null,
     body: []u8,
     trailers: []http2.Hpack.HeaderField = &.{},
 
@@ -902,10 +935,14 @@ fn writeFrame(
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
-    var settings_buf: [2]http2.Setting = undefined;
+    var settings_buf: [3]http2.Setting = undefined;
     var count: usize = 0;
     settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) };
     count += 1;
+    if (limits.enable_connect_protocol) {
+        settings_buf[count] = .{ .id = .enable_connect_protocol, .value = 1 };
+        count += 1;
+    }
     if (role == .client) {
         // Like hyper/h2, this lightweight client opts out of server push until
         // a full pushed-stream lifecycle is implemented.  A peer that still
@@ -1012,7 +1049,10 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
     var seen_scheme = false;
     var seen_path = false;
     var seen_authority = false;
+    var seen_protocol = false;
     var seen_status = false;
+    var method_value: ?[]const u8 = null;
+    var protocol_value: ?[]const u8 = null;
 
     for (headers) |header| {
         try validateHeaderName(header.name);
@@ -1020,7 +1060,11 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
         if (pseudo) {
             if (saw_regular) return error.InvalidHeader;
             switch (kind) {
-                .request => try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority),
+                .request => {
+                    try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority, &seen_protocol);
+                    if (std.mem.eql(u8, header.name, ":method")) method_value = header.value;
+                    if (std.mem.eql(u8, header.name, ":protocol")) protocol_value = header.value;
+                },
                 .response => try markResponsePseudo(header.name, &seen_status),
                 .request_trailers, .response_trailers => return error.InvalidHeader,
             }
@@ -1046,7 +1090,17 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
     }
 
     switch (kind) {
-        .request => if (!seen_method or !seen_scheme or !seen_path) return error.MissingPseudoHeader,
+        .request => {
+            if (!seen_method) return error.MissingPseudoHeader;
+            if (protocol_value) |protocol| {
+                if (protocol.len == 0) return error.InvalidHeader;
+                const method = method_value orelse return error.MissingPseudoHeader;
+                if (!std.ascii.eqlIgnoreCase(method, "CONNECT")) return error.InvalidHeader;
+                if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
+            } else if (method_value) |method| {
+                if (!std.ascii.eqlIgnoreCase(method, "CONNECT") and (!seen_scheme or !seen_path)) return error.MissingPseudoHeader;
+            }
+        },
         .response => if (!seen_status) return error.MissingPseudoHeader,
         .request_trailers, .response_trailers => {},
     }
@@ -1084,11 +1138,13 @@ fn markRequestPseudo(
     seen_scheme: *bool,
     seen_path: *bool,
     seen_authority: *bool,
+    seen_protocol: *bool,
 ) Error!void {
     if (std.mem.eql(u8, name, ":method")) return markOnce(seen_method);
     if (std.mem.eql(u8, name, ":scheme")) return markOnce(seen_scheme);
     if (std.mem.eql(u8, name, ":path")) return markOnce(seen_path);
     if (std.mem.eql(u8, name, ":authority")) return markOnce(seen_authority);
+    if (std.mem.eql(u8, name, ":protocol")) return markOnce(seen_protocol);
     return error.InvalidHeader;
 }
 
@@ -1109,10 +1165,10 @@ fn connectionSpecificHeaderName(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "upgrade");
 }
 
-fn responseForbidsBody(status: u16, request_method: []const u8) bool {
+fn responseForbidsBody(status: u16, request_method: []const u8, extended_connect: bool) bool {
     if ((status >= 100 and status < 200) or status == 204 or status == 304) return true;
     if (std.ascii.eqlIgnoreCase(request_method, "HEAD")) return true;
-    if (std.ascii.eqlIgnoreCase(request_method, "CONNECT") and status >= 200 and status < 300) return true;
+    if (!extended_connect and std.ascii.eqlIgnoreCase(request_method, "CONNECT") and status >= 200 and status < 300) return true;
     return false;
 }
 
@@ -1570,7 +1626,7 @@ test "HTTP/2 runtime decodes padded priority HEADERS payloads" {
     try writeFrame(allocator, io, client.stream, .headers, flags, 1, payload.items);
     try client.writeData(1, "hello", true);
 
-    var response = try client.readResponse(1, "POST");
+    var response = try client.readResponse(1, "POST", false);
     defer response.deinit(allocator);
 
     thread.join();
@@ -1713,7 +1769,7 @@ test "HTTP/2 runtime answers PING while reading request body" {
     try std.testing.expectEqualSlices(u8, &ping_payload, ping_ack.frame.payload);
 
     try client.writeData(1, "llo", true);
-    var response = try client.readResponse(1, "POST");
+    var response = try client.readResponse(1, "POST", false);
     defer response.deinit(allocator);
 
     thread.join();
@@ -1784,7 +1840,7 @@ test "HTTP/2 runtime ignores PRIORITY while reading request body" {
     try writeAll(io, client.stream, priority_bytes.items);
     try client.writeData(1, "llo", true);
 
-    var response = try client.readResponse(1, "POST");
+    var response = try client.readResponse(1, "POST", false);
     defer response.deinit(allocator);
 
     thread.join();
@@ -3071,6 +3127,137 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 runtime supports RFC 8441 extended CONNECT" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096, .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            var request = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer request.deinit(shared.server.allocator);
+            std.testing.expectEqualStrings("CONNECT", request.method) catch |err| {
+                shared.err = err;
+                return;
+            };
+            std.testing.expectEqualStrings("websocket", request.protocol orelse "") catch |err| {
+                shared.err = err;
+                return;
+            };
+            std.testing.expectEqualStrings("/chat", request.path) catch |err| {
+                shared.err = err;
+                return;
+            };
+            std.testing.expectEqualStrings("https", request.scheme) catch |err| {
+                shared.err = err;
+                return;
+            };
+            std.testing.expectEqualStrings("example.com", request.authority orelse "") catch |err| {
+                shared.err = err;
+                return;
+            };
+            std.testing.expectEqualStrings("client bytes", request.body) catch |err| {
+                shared.err = err;
+                return;
+            };
+
+            connection.writeResponse(request.stream_id, .{
+                .status = 200,
+                .body = "server bytes",
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    try std.testing.expect(client.peer_enable_connect_protocol);
+
+    var response = try client.request(.{
+        .method = "CONNECT",
+        .path = "/chat",
+        .scheme = "https",
+        .authority = "example.com",
+        .protocol = "websocket",
+        .body = "client bytes",
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("server bytes", response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 extended CONNECT requires peer opt-in" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(error.ExtendedConnectDisabled, connection.request(.{
+        .method = "CONNECT",
+        .path = "/chat",
+        .scheme = "https",
+        .authority = "example.com",
+        .protocol = "websocket",
+    }));
+
+    const invalid_protocol_method = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/bad" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":protocol", .value = "websocket" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_protocol_method, .request));
+
+    const empty_protocol = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":path", .value = "/bad" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":protocol", .value = "" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&empty_protocol, .request));
+}
+
 test "HTTP/2 flow window blocks and updates" {
     var window = FlowWindow{ .value = 4 };
     try window.reserve(4);
@@ -3347,6 +3534,7 @@ test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" 
         listener: *net.Server,
         max_header_list_size: ?u32 = null,
         enable_push: ?u32 = null,
+        enable_connect_protocol: ?u32 = null,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -3367,6 +3555,7 @@ test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" 
             for (settings) |setting| switch (setting.id) {
                 .max_header_list_size => shared.max_header_list_size = setting.value,
                 .enable_push => shared.enable_push = setting.value,
+                .enable_connect_protocol => shared.enable_connect_protocol = setting.value,
                 else => {},
             };
         }
@@ -3377,10 +3566,11 @@ test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" 
 
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    try writeInitialSettings(allocator, io, stream, .{ .max_header_list_size = 4096 }, .client);
+    try writeInitialSettings(allocator, io, stream, .{ .max_header_list_size = 4096, .enable_connect_protocol = true }, .client);
 
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(?u32, 4096), shared.max_header_list_size);
     try std.testing.expectEqual(@as(?u32, 0), shared.enable_push);
+    try std.testing.expectEqual(@as(?u32, 1), shared.enable_connect_protocol);
 }

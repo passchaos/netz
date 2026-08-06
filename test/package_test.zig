@@ -42,8 +42,11 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.http2.runtime.Limits{}).max_body_bytes);
     try std.testing.expectEqual(@as(usize, 16 * 1024), (netz.http2.runtime.Limits{}).max_header_list_size);
     try std.testing.expect(@hasDecl(netz.http2.runtime.Server, "serveConcurrent"));
+    try std.testing.expect(@hasField(netz.http2.runtime.Limits, "enable_connect_protocol"));
+    try std.testing.expect(@hasField(netz.http2.runtime.RequestOptions, "protocol"));
     try std.testing.expect(@hasField(netz.http2.runtime.RequestOptions, "trailers"));
     try std.testing.expect(@hasField(netz.http2.runtime.ResponseOptions, "trailers"));
+    try std.testing.expect(@hasField(netz.http2.runtime.OwnedRequest, "protocol"));
     try std.testing.expect(@hasField(netz.http2.runtime.OwnedRequest, "trailers"));
     try std.testing.expect(@hasField(netz.http2.runtime.OwnedResponse, "trailers"));
     try std.testing.expect(@hasDecl(netz.http2, "PingPayload"));

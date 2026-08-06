@@ -145,6 +145,7 @@ pub fn writeSettings(list: *std.ArrayList(u8), allocator: std.mem.Allocator, set
 pub fn validateSetting(id: SettingId, value: u32) Error!void {
     switch (id) {
         .enable_push => if (value > 1) return error.InvalidSetting,
+        .enable_connect_protocol => if (value > 1) return error.InvalidSetting,
         .initial_window_size => if (value > std.math.maxInt(i31)) return error.InvalidSetting,
         .max_frame_size => if (value < 16_384 or value > 16_777_215) return error.InvalidSetting,
         else => {},
@@ -1058,12 +1059,19 @@ test "HTTP/2 SETTINGS validates RFC value bounds" {
     defer valid.deinit(allocator);
     try writeSettings(&valid, allocator, &.{
         .{ .id = .enable_push, .value = 0 },
+        .{ .id = .enable_connect_protocol, .value = 1 },
         .{ .id = .initial_window_size, .value = std.math.maxInt(i31) },
         .{ .id = .max_frame_size, .value = 16_777_215 },
     });
     const parsed = try parseSettings(allocator, valid.items);
     defer allocator.free(parsed);
-    try std.testing.expectEqual(@as(usize, 3), parsed.len);
+    try std.testing.expectEqual(@as(usize, 4), parsed.len);
+
+    var invalid_connect_protocol: std.ArrayList(u8) = .empty;
+    defer invalid_connect_protocol.deinit(allocator);
+    try wire.appendInt(&invalid_connect_protocol, allocator, u16, @intFromEnum(SettingId.enable_connect_protocol), .big);
+    try wire.appendInt(&invalid_connect_protocol, allocator, u32, 2, .big);
+    try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, invalid_connect_protocol.items));
 }
 
 test "HTTP/2 ping and goaway payload helpers" {

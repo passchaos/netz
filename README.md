@@ -19,7 +19,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   outbound frame splitting, frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
   validation, HTTP/2 pseudo-header/lowercase field-name validation,
   connection-specific header rejection including `TE` rules,
-  and CONNECT body rules, and a blocking prior-knowledge h2c client/server runtime with a
+  CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling, and a blocking prior-knowledge h2c client/server runtime with a
   `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
