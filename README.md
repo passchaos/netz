@@ -68,7 +68,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   adjustment, packet/time-threshold loss detection, earliest loss/PTO timer
   deadlines, exponential PTO backoff, two-probe PTO service, and persistent
   congestion detection that collapses the congestion window and resets the RTT
-  measurement epoch after long contiguous lost periods,
+  measurement epoch after long contiguous lost periods, PMTUD/DPLPMTUD path MTU
+  probe sizing state with IPv4/IPv6 ceilings and loss-driven search backoff,
   a 1-RTT recovery queue for PTO plus packet-threshold and time-threshold
   retransmission of unacknowledged ack-eliciting frame payloads,
   endpoint-level connection-ID routing primitives for stable multi-connection
