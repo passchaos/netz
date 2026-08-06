@@ -22,7 +22,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
   validation, HTTP/2 pseudo-header/lowercase field-name validation,
   connection-specific header rejection including `TE` rules,
-  CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with
+  CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
+  SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
   open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, and a blocking prior-knowledge h2c client/server runtime with a
   `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,

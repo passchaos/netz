@@ -955,6 +955,12 @@ pub const Connection = struct {
                 .header_table_size => self.hpack_encoder.setMaxDynamicTableSize(self.allocator, setting.value),
                 .enable_connect_protocol => {
                     if (setting.value > 1) return error.InvalidSetting;
+                    // RFC 8441 uses SETTINGS_ENABLE_CONNECT_PROTOCOL as an
+                    // irreversible opt-in because :protocol changes request
+                    // validation semantics.  A peer may omit the setting or
+                    // send 0 before opting in, but once 1 has been observed it
+                    // must not downgrade the connection back to 0.
+                    if (self.peer_enable_connect_protocol and setting.value == 0) return error.InvalidSetting;
                     self.peer_enable_connect_protocol = setting.value == 1;
                 },
                 else => {},
@@ -3929,6 +3935,19 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
         .{ .id = .max_frame_size, .value = 32_768 },
     });
     try std.testing.expectEqual(@as(usize, 32_768), connection.peer_max_frame_size);
+
+    try connection.applySettings(&.{
+        .{ .id = .enable_connect_protocol, .value = 0 },
+    });
+    try std.testing.expect(!connection.peer_enable_connect_protocol);
+    try connection.applySettings(&.{
+        .{ .id = .enable_connect_protocol, .value = 1 },
+    });
+    try std.testing.expect(connection.peer_enable_connect_protocol);
+    try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
+        .{ .id = .enable_connect_protocol, .value = 0 },
+    }));
+    try std.testing.expect(connection.peer_enable_connect_protocol);
 }
 
 test "HTTP/2 runtime validates frame envelope rules" {
