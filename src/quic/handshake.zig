@@ -138,6 +138,9 @@ pub const OneRttConfig = struct {
             .peer_preferred_address = peer_transport_parameters.preferred_address,
             .local_max_datagram_frame_size = if (local_transport_parameters.max_datagram_frame_size) |size| std.math.cast(usize, size) orelse std.math.maxInt(usize) else null,
             .peer_max_datagram_frame_size = if (peer_transport_parameters.max_datagram_frame_size) |size| std.math.cast(usize, size) orelse std.math.maxInt(usize) else null,
+            .enable_ack_frequency = local_transport_parameters.min_ack_delay != null or peer_transport_parameters.min_ack_delay != null,
+            .local_min_ack_delay = local_transport_parameters.min_ack_delay,
+            .peer_min_ack_delay = peer_transport_parameters.min_ack_delay,
         };
     }
 };
@@ -1373,6 +1376,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     client_tp.initial_max_stream_data_bidi_remote = 12;
     client_tp.initial_max_stream_data_uni = 13;
     client_tp.max_datagram_frame_size = 777;
+    client_tp.min_ack_delay = 1_000;
 
     var server_tp = quic.practical_transport_parameters;
     server_tp.max_idle_timeout = 40;
@@ -1385,6 +1389,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     server_tp.initial_max_stream_data_uni = 23;
     server_tp.max_udp_payload_size = 1400;
     server_tp.max_datagram_frame_size = 888;
+    server_tp.min_ack_delay = 2_000;
 
     const Shared = struct {
         endpoint: *quic.runtime.Endpoint,
@@ -1419,6 +1424,9 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
             try std.testing.expectEqual(@as(u64, 35), established.connection.config.peer_max_ack_delay_ms);
             try std.testing.expectEqual(@as(?usize, 888), established.connection.config.local_max_datagram_frame_size);
             try std.testing.expectEqual(@as(?usize, 777), established.connection.config.peer_max_datagram_frame_size);
+            try std.testing.expect(established.connection.config.enable_ack_frequency);
+            try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.local_min_ack_delay);
+            try std.testing.expectEqual(@as(?u64, 1_000), established.connection.config.peer_min_ack_delay);
         }
     };
 
@@ -1447,6 +1455,9 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     try std.testing.expectEqual(@as(u64, 45), established.connection.config.peer_max_ack_delay_ms);
     try std.testing.expectEqual(@as(?usize, 777), established.connection.config.local_max_datagram_frame_size);
     try std.testing.expectEqual(@as(?usize, 888), established.connection.config.peer_max_datagram_frame_size);
+    try std.testing.expect(established.connection.config.enable_ack_frequency);
+    try std.testing.expectEqual(@as(?u64, 1_000), established.connection.config.local_min_ack_delay);
+    try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.peer_min_ack_delay);
     try std.testing.expectEqual(@as(usize, 1200), established.connection.congestion.max_datagram_size);
     try std.testing.expectError(error.FlowControlBlocked, established.connection.send(&[_]quic.Frame{.{ .stream = .{
         .stream_id = 0,

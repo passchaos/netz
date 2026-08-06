@@ -62,8 +62,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,
   receive queues, max-payload calculation, queue overflow/drop counters, and
   oversized/disabled DATAGRAM rejection,
-  draft ACK_FREQUENCY and IMMEDIATE_ACK frame codecs with opt-in 1-RTT state
-  updates for requested ACK threshold/max-delay/reordering behavior,
+  draft ACK_FREQUENCY and IMMEDIATE_ACK frame codecs with `min_ack_delay`
+  transport-parameter negotiation and opt-in 1-RTT state updates for requested
+  ACK threshold/max-delay/reordering behavior,
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling,

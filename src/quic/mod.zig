@@ -337,6 +337,7 @@ pub const TransportParameterId = enum(u64) {
     retry_source_connection_id = 0x10,
     version_information = 0x11,
     max_datagram_frame_size = 0x20,
+    min_ack_delay = 0xff04de1b,
     _,
 };
 
@@ -421,6 +422,7 @@ pub const TransportParameters = struct {
     retry_source_connection_id: ?[]const u8 = null,
     version_information: ?VersionInformation = null,
     max_datagram_frame_size: ?u64 = null,
+    min_ack_delay: ?u64 = null,
 };
 
 /// Practical defaults for netz's in-repository QUIC/H3/WebTransport runtimes.
@@ -480,6 +482,7 @@ pub fn encodeTransportParameters(
         try encodeVersionInformationTransportParameter(list, allocator, version_information);
     }
     if (params.max_datagram_frame_size) |size| try encodeIntegerTransportParameter(list, allocator, .max_datagram_frame_size, size);
+    if (params.min_ack_delay) |delay| try encodeIntegerTransportParameter(list, allocator, .min_ack_delay, delay);
 }
 
 pub fn validateTransportParameters(params: TransportParameters, source: TransportParameterSource) Error!void {
@@ -506,6 +509,7 @@ pub fn validateTransportParameters(params: TransportParameters, source: Transpor
     try validateTransportInteger(.max_ack_delay, params.max_ack_delay);
     try validateTransportInteger(.active_connection_id_limit, params.active_connection_id_limit);
     if (params.max_datagram_frame_size) |size| try validateTransportInteger(.max_datagram_frame_size, size);
+    if (params.min_ack_delay) |delay| try validateTransportInteger(.min_ack_delay, delay);
 }
 
 pub fn parseTransportParametersTyped(
@@ -575,6 +579,8 @@ pub fn parseTransportParametersTyped(
             params.version_information = try parseVersionInformation(value);
         } else if (id == @intFromEnum(TransportParameterId.max_datagram_frame_size)) {
             params.max_datagram_frame_size = try parseTransportInteger(.max_datagram_frame_size, value);
+        } else if (id == @intFromEnum(TransportParameterId.min_ack_delay)) {
+            params.min_ack_delay = try parseTransportInteger(.min_ack_delay, value);
         } else {
             // Unknown parameters, including greasing identifiers of the form
             // 31*N+27, are intentionally ignored after duplicate detection as
@@ -1683,6 +1689,7 @@ test "QUIC typed transport parameters roundtrip and validate" {
             .available_versions_wire = &available_versions_wire,
         },
         .max_datagram_frame_size = 1200,
+        .min_ack_delay = 1000,
     };
 
     var bytes: std.ArrayList(u8) = .empty;
@@ -1697,6 +1704,7 @@ test "QUIC typed transport parameters roundtrip and validate" {
     try std.testing.expectEqual(@as(u64, 50), decoded.max_ack_delay);
     try std.testing.expectEqual(@as(u64, 4), decoded.active_connection_id_limit);
     try std.testing.expectEqual(@as(?u64, 1200), decoded.max_datagram_frame_size);
+    try std.testing.expectEqual(@as(?u64, 1000), decoded.min_ack_delay);
     try std.testing.expectEqualSlices(u8, &client_cid, decoded.initial_source_connection_id.?);
     try std.testing.expectEqual(Version.version_1, decoded.version_information.?.chosen_version);
     try std.testing.expect(decoded.version_information.?.containsAvailableVersion(.version_2));

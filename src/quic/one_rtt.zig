@@ -125,6 +125,8 @@ pub const ConnectionConfig = struct {
     peer_max_datagram_frame_size: ?usize = null,
     max_datagram_queue_items: usize = 16,
     enable_ack_frequency: bool = false,
+    local_min_ack_delay: ?u64 = null,
+    peer_min_ack_delay: ?u64 = null,
 };
 
 const StreamFlowEntry = struct {

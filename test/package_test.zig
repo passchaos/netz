@@ -206,6 +206,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_max_datagram_frame_size"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_datagram_queue_items"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_ack_frequency"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_min_ack_delay"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_min_ack_delay"));
+    try std.testing.expect(@hasField(netz.quic.TransportParameters, "min_ack_delay"));
     try std.testing.expect(@hasDecl(netz.quic, "AckFrequencyFrame"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id.PeerPool, "addWithLimit"));
