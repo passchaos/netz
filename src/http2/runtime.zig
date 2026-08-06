@@ -36,6 +36,7 @@ pub const Limits = struct {
     header_table_size: usize = http2.Hpack.default_dynamic_table_size,
     initial_window_size: u32 = @intCast(default_flow_window),
     max_concurrent_streams: ?u32 = null,
+    max_frame_size: usize = default_max_frame_size,
     max_header_list_size: usize = default_max_header_list_size,
     /// Advertise RFC 8441 SETTINGS_ENABLE_CONNECT_PROTOCOL.  It is disabled by
     /// default because peers may start tunnelling arbitrary bytes on streams
@@ -1306,7 +1307,7 @@ fn writeFrame(
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
-    var settings_buf: [6]http2.Setting = undefined;
+    var settings_buf: [7]http2.Setting = undefined;
     var count: usize = 0;
     settings_buf[count] = .{ .id = .header_table_size, .value = @intCast(@min(limits.header_table_size, std.math.maxInt(u32))) };
     count += 1;
@@ -1314,6 +1315,10 @@ fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.St
     count += 1;
     if (limits.max_concurrent_streams) |max_streams| {
         settings_buf[count] = .{ .id = .max_concurrent_streams, .value = max_streams };
+        count += 1;
+    }
+    if (limits.max_frame_size != default_max_frame_size) {
+        settings_buf[count] = .{ .id = .max_frame_size, .value = @intCast(@min(limits.max_frame_size, max_max_frame_size)) };
         count += 1;
     }
     settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) };
@@ -4369,6 +4374,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
         header_table_size: ?u32 = null,
         initial_window_size: ?u32 = null,
         max_concurrent_streams: ?u32 = null,
+        max_frame_size: ?u32 = null,
         max_header_list_size: ?u32 = null,
         enable_push: ?u32 = null,
         enable_connect_protocol: ?u32 = null,
@@ -4393,6 +4399,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
                 .header_table_size => shared.header_table_size = setting.value,
                 .initial_window_size => shared.initial_window_size = setting.value,
                 .max_concurrent_streams => shared.max_concurrent_streams = setting.value,
+                .max_frame_size => shared.max_frame_size = setting.value,
                 .max_header_list_size => shared.max_header_list_size = setting.value,
                 .enable_push => shared.enable_push = setting.value,
                 .enable_connect_protocol => shared.enable_connect_protocol = setting.value,
@@ -4410,6 +4417,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
         .header_table_size = 1024,
         .initial_window_size = 70_000,
         .max_concurrent_streams = 11,
+        .max_frame_size = 20_000,
         .max_header_list_size = 4096,
         .enable_connect_protocol = true,
     }, .client);
@@ -4419,6 +4427,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
     try std.testing.expectEqual(@as(?u32, 1024), shared.header_table_size);
     try std.testing.expectEqual(@as(?u32, 70_000), shared.initial_window_size);
     try std.testing.expectEqual(@as(?u32, 11), shared.max_concurrent_streams);
+    try std.testing.expectEqual(@as(?u32, 20_000), shared.max_frame_size);
     try std.testing.expectEqual(@as(?u32, 4096), shared.max_header_list_size);
     try std.testing.expectEqual(@as(?u32, 0), shared.enable_push);
     try std.testing.expectEqual(@as(?u32, 1), shared.enable_connect_protocol);

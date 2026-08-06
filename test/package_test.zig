@@ -64,6 +64,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http2.runtime.Limits, "header_table_size"));
     try std.testing.expect(@hasField(netz.http2.runtime.Limits, "initial_window_size"));
     try std.testing.expect(@hasField(netz.http2.runtime.Limits, "max_concurrent_streams"));
+    try std.testing.expect(@hasField(netz.http2.runtime.Limits, "max_frame_size"));
     try std.testing.expect(@hasField(netz.http2.runtime.RequestOptions, "protocol"));
     try std.testing.expect(@hasField(netz.http2.runtime.RequestOptions, "trailers"));
     try std.testing.expect(@hasField(netz.http2.runtime.ResponseOptions, "trailers"));
