@@ -1459,6 +1459,7 @@ pub const rtcp = struct {
     pub const transport_feedback_twcc: u5 = 15;
     pub const payload_feedback_pli: u5 = 1;
     pub const payload_feedback_fir: u5 = 4;
+    pub const payload_feedback_remb: u5 = 15;
 
     pub const Header = struct {
         version: u2,
@@ -1509,6 +1510,17 @@ pub const rtcp = struct {
     pub const ReceiverReport = struct {
         sender_ssrc: u32,
         report_blocks: []ReportBlock = &.{},
+    };
+
+    pub const ReceiverEstimatedMaximumBitrate = struct {
+        sender_ssrc: u32,
+        bitrate: u64,
+        ssrcs: []const u32 = &.{},
+
+        pub fn deinit(self: *ReceiverEstimatedMaximumBitrate, allocator: std.mem.Allocator) void {
+            allocator.free(@constCast(self.ssrcs));
+            self.* = undefined;
+        }
     };
 
     pub const Goodbye = struct {
@@ -1864,6 +1876,7 @@ pub const rtcp = struct {
         source_description: SourceDescription,
         picture_loss_indication: PictureLossIndication,
         full_intra_request: FullIntraRequest,
+        receiver_estimated_maximum_bitrate: ReceiverEstimatedMaximumBitrate,
         transport_layer_nack: TransportLayerNack,
         transport_wide_cc: TransportWideCc,
         unknown: Unknown,
@@ -1875,6 +1888,7 @@ pub const rtcp = struct {
                 .goodbye => |*goodbye| goodbye.deinit(allocator),
                 .source_description => |*sdes| sdes.deinit(allocator),
                 .full_intra_request => |*fir| fir.deinit(allocator),
+                .receiver_estimated_maximum_bitrate => |*remb| remb.deinit(allocator),
                 .transport_layer_nack => |nack| allocator.free(nack.pairs),
                 .transport_wide_cc => |*twcc| twcc.deinit(allocator),
                 else => {},
@@ -1909,6 +1923,8 @@ pub const rtcp = struct {
                 .{ .picture_loss_indication = try parsePictureLossIndication(payload) }
             else if (header.count_or_format == payload_feedback_fir)
                 .{ .full_intra_request = try parseFullIntraRequest(allocator, payload) }
+            else if (header.count_or_format == payload_feedback_remb)
+                .{ .receiver_estimated_maximum_bitrate = try parseReceiverEstimatedMaximumBitrate(allocator, payload) }
             else
                 .{ .unknown = .{ .header = header, .payload = payload } },
             .transport_feedback => if (header.count_or_format == transport_feedback_nack)
@@ -1946,6 +1962,7 @@ pub const rtcp = struct {
             .source_description => |sdes| try writeSourceDescription(list, allocator, sdes),
             .picture_loss_indication => |pli| try writePictureLossIndication(list, allocator, pli),
             .full_intra_request => |fir| try writeFullIntraRequest(list, allocator, fir),
+            .receiver_estimated_maximum_bitrate => |remb| try writeReceiverEstimatedMaximumBitrate(list, allocator, remb),
             .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
             .transport_wide_cc => |twcc| try writeTransportWideCc(list, allocator, twcc),
             .unknown => |unknown| {
@@ -2085,6 +2102,33 @@ pub const rtcp = struct {
         }
         if (entries.len == 0) return error.InvalidRtcpPacket;
         return .{ .sender_ssrc = sender_ssrc, .media_ssrc = media_ssrc, .entries = entries };
+    }
+
+    fn parseReceiverEstimatedMaximumBitrate(allocator: std.mem.Allocator, payload: []const u8) Error!ReceiverEstimatedMaximumBitrate {
+        if (payload.len < 16) return error.InvalidRtcpPacket;
+        var cursor = wire.Cursor.init(payload);
+        const sender_ssrc = try cursor.readInt(u32, .big);
+        const media_ssrc = try cursor.readInt(u32, .big);
+        if (media_ssrc != 0) return error.InvalidRtcpPacket;
+        const identifier = try cursor.readSlice(4);
+        if (!std.mem.eql(u8, identifier, "REMB")) return error.InvalidRtcpPacket;
+        const num_ssrc = try cursor.readByte();
+        const bitrate_hi = try cursor.readByte();
+        const bitrate_mid = try cursor.readByte();
+        const bitrate_lo = try cursor.readByte();
+        const expected_len = 16 + @as(usize, num_ssrc) * 4;
+        if (payload.len != expected_len) return error.InvalidRtcpPacket;
+        const exponent: u6 = @truncate(bitrate_hi >> 2);
+        const mantissa = (@as(u64, bitrate_hi & 0x03) << 16) | (@as(u64, bitrate_mid) << 8) | bitrate_lo;
+        const bitrate = std.math.shlExact(u64, mantissa, exponent) catch return error.InvalidRtcpPacket;
+        const ssrcs = try allocator.alloc(u32, num_ssrc);
+        errdefer allocator.free(ssrcs);
+        for (ssrcs) |*ssrc| ssrc.* = try cursor.readInt(u32, .big);
+        return .{
+            .sender_ssrc = sender_ssrc,
+            .bitrate = bitrate,
+            .ssrcs = ssrcs,
+        };
     }
 
     fn parseSourceDescription(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!SourceDescription {
@@ -2266,6 +2310,28 @@ pub const rtcp = struct {
             try list.append(allocator, entry.sequence_number);
             try list.appendNTimes(allocator, 0, 3);
         }
+    }
+
+    fn writeReceiverEstimatedMaximumBitrate(list: *std.ArrayList(u8), allocator: std.mem.Allocator, remb: ReceiverEstimatedMaximumBitrate) Error!void {
+        if (remb.ssrcs.len > std.math.maxInt(u8)) return error.InvalidRtcpPacket;
+        var exponent: u6 = 0;
+        var mantissa = remb.bitrate;
+        while (mantissa >= (1 << 18)) {
+            mantissa >>= 1;
+            exponent += 1;
+            if (exponent == std.math.maxInt(u6)) break;
+        }
+        if (mantissa >= (1 << 18)) return error.InvalidRtcpPacket;
+
+        try writeHeader(list, allocator, payload_feedback_remb, .payload_feedback, 16 + remb.ssrcs.len * 4);
+        try wire.appendInt(list, allocator, u32, remb.sender_ssrc, .big);
+        try wire.appendInt(list, allocator, u32, 0, .big);
+        try list.appendSlice(allocator, "REMB");
+        try list.append(allocator, @intCast(remb.ssrcs.len));
+        try list.append(allocator, (@as(u8, exponent) << 2) | @as(u8, @intCast((mantissa >> 16) & 0x03)));
+        try list.append(allocator, @intCast((mantissa >> 8) & 0xff));
+        try list.append(allocator, @intCast(mantissa & 0xff));
+        for (remb.ssrcs) |ssrc| try wire.appendInt(list, allocator, u32, ssrc, .big);
     }
 
     fn writeTransportLayerNack(list: *std.ArrayList(u8), allocator: std.mem.Allocator, nack: TransportLayerNack) Error!void {
@@ -4397,6 +4463,29 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
     try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
+
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, .{ .receiver_estimated_maximum_bitrate = .{
+        .sender_ssrc = 1,
+        .bitrate = 8_927_168,
+        .ssrcs = &[_]u32{1215622422},
+    } });
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        143, 206, 0,   5,
+        0,   0,   0,   1,
+        0,   0,   0,   0,
+        'R', 'E', 'M', 'B',
+        1,   26,  32,  223,
+        72,  116, 237, 22,
+    }, encoded.items);
+    var remb = try rtcp.parsePacket(allocator, encoded.items);
+    defer remb.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), remb.packet.receiver_estimated_maximum_bitrate.sender_ssrc);
+    try std.testing.expectEqual(@as(u64, 8_927_168), remb.packet.receiver_estimated_maximum_bitrate.bitrate);
+    try std.testing.expectEqualSlices(u32, &[_]u32{1215622422}, remb.packet.receiver_estimated_maximum_bitrate.ssrcs);
+
+    encoded.items[8] = 1; // REMB media SSRC must be zero.
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, encoded.items));
 }
 
 test "RTCP transport-wide congestion feedback" {
