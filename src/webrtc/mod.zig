@@ -3101,6 +3101,7 @@ pub const sctp = struct {
         while (pos < bytes.len) {
             if (bytes.len - pos < 4) return error.InvalidSctpPacket;
             const chunk_type: ChunkType = @enumFromInt(bytes[pos]);
+            if (!supportedChunkType(chunk_type)) return error.InvalidSctpPacket;
             const flags = bytes[pos + 1];
             const len = std.mem.readInt(u16, bytes[pos + 2 ..][0..2], .big);
             if (len < 4 or bytes.len - pos < len) return error.InvalidSctpPacket;
@@ -3116,6 +3117,30 @@ pub const sctp = struct {
             pos += padded_len;
         }
         return .{ .header = header, .chunks = try chunks.toOwnedSlice(allocator) };
+    }
+
+    fn supportedChunkType(chunk_type: ChunkType) bool {
+        return switch (chunk_type) {
+            .data,
+            .init,
+            .init_ack,
+            .sack,
+            .heartbeat,
+            .heartbeat_ack,
+            .abort,
+            .shutdown,
+            .shutdown_ack,
+            .error_chunk,
+            .cookie_echo,
+            .cookie_ack,
+            .reconfig,
+            .i_data,
+            .forward_tsn,
+            .i_forward_tsn,
+            .shutdown_complete,
+            => true,
+            _ => false,
+        };
     }
 
     pub fn writeInitPacket(
@@ -4875,6 +4900,18 @@ test "SCTP SACK packet roundtrip" {
     const repaired_checksum = try sctp.checksum(padded.items);
     std.mem.writeInt(u32, padded.items[8..12], repaired_checksum, .little);
     try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, padded.items, true));
+
+    var unknown: std.ArrayList(u8) = .empty;
+    defer unknown.deinit(allocator);
+    try wire.appendInt(&unknown, allocator, u16, 5000, .big);
+    try wire.appendInt(&unknown, allocator, u16, 5000, .big);
+    try wire.appendInt(&unknown, allocator, u32, 0x11223344, .big);
+    try wire.appendInt(&unknown, allocator, u32, 0, .little);
+    try unknown.appendSlice(allocator, &.{ 0x7f, 0x00, 0x00, 0x04 });
+    const unknown_checksum = try sctp.checksum(unknown.items);
+    std.mem.writeInt(u32, unknown.items[8..12], unknown_checksum, .little);
+    try std.testing.expect(try sctp.validChecksum(unknown.items));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, unknown.items, true));
 
     var bad_gaps = [_]sctp.GapAckBlock{.{ .start = 3, .end = 2 }};
     var invalid: std.ArrayList(u8) = .empty;
