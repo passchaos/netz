@@ -63,6 +63,41 @@ pub fn encode(allocator: std.mem.Allocator, secret: Secret, context: Context) Er
     return out;
 }
 
+pub fn encodeRetry(
+    allocator: std.mem.Allocator,
+    secret: Secret,
+    context: Context,
+    original_destination_connection_id: []const u8,
+    retry_source_connection_id: []const u8,
+) Error![]u8 {
+    if (context.kind != .retry) return error.InvalidToken;
+    const binding = try retryPeerBinding(allocator, context.peer_address, original_destination_connection_id, retry_source_connection_id);
+    defer allocator.free(binding);
+    return encode(allocator, secret, .{
+        .kind = context.kind,
+        .version = context.version,
+        .issued_ns = context.issued_ns,
+        .lifetime_ns = context.lifetime_ns,
+        .peer_address = binding,
+        .nonce = context.nonce,
+    });
+}
+
+pub fn validateRetry(
+    allocator: std.mem.Allocator,
+    secret: Secret,
+    expected_version: quic.Version,
+    now_ns: i64,
+    peer_address: []const u8,
+    original_destination_connection_id: []const u8,
+    retry_source_connection_id: []const u8,
+    token: []const u8,
+) Error!Validation {
+    const binding = try retryPeerBinding(allocator, peer_address, original_destination_connection_id, retry_source_connection_id);
+    defer allocator.free(binding);
+    return validate(secret, .retry, expected_version, now_ns, binding, token);
+}
+
 pub fn validate(secret: Secret, expected_kind: Kind, expected_version: quic.Version, now_ns: i64, peer_address: []const u8, token: []const u8) Error!Validation {
     try validateEnvelope(token);
     if (std.enums.fromInt(Kind, token[magic.len]) != expected_kind) return error.InvalidToken;
@@ -151,6 +186,19 @@ pub fn validateAnySecretAndRemember(secrets: []const Secret, expected_kind: Kind
     return validation;
 }
 
+fn retryPeerBinding(allocator: std.mem.Allocator, peer_address: []const u8, odcid: []const u8, rscid: []const u8) Error![]u8 {
+    if (odcid.len == 0 or odcid.len > 20 or rscid.len == 0 or rscid.len > 20) return error.InvalidToken;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, peer_address);
+    try out.append(allocator, 0xff);
+    try out.append(allocator, @intCast(odcid.len));
+    try out.appendSlice(allocator, odcid);
+    try out.append(allocator, @intCast(rscid.len));
+    try out.appendSlice(allocator, rscid);
+    return out.toOwnedSlice(allocator);
+}
+
 fn validateContext(context: Context) Error!void {
     if (context.issued_ns < 0 or context.lifetime_ns == 0 or context.peer_address.len == 0) return error.InvalidToken;
     if (context.version == .negotiation) return error.InvalidToken;
@@ -201,6 +249,39 @@ test "QUIC address validation token validates kind lifetime version and peer add
     try std.testing.expectError(error.InvalidToken, validate(secret, .retry, .version_1, 120, "peer-b", token));
     try std.testing.expectError(error.TokenNotYetValid, validate(secret, .retry, .version_1, 99, "peer-a", token));
     try std.testing.expectError(error.TokenExpired, validate(secret, .retry, .version_1, 151, "peer-a", token));
+}
+
+test "QUIC Retry address token binds ODCID and RSCID" {
+    const allocator = std.testing.allocator;
+    const secret: Secret = [_]u8{0x91} ** secret_len;
+    const nonce: Nonce = [_]u8{0x92} ** nonce_len;
+    const odcid = [_]u8{ 1, 2, 3, 4 };
+    const rscid = [_]u8{ 5, 6, 7, 8 };
+
+    const token = try encodeRetry(allocator, secret, .{
+        .kind = .retry,
+        .issued_ns = 100,
+        .lifetime_ns = 500,
+        .peer_address = "client-path",
+        .nonce = nonce,
+    }, &odcid, &rscid);
+    defer allocator.free(token);
+
+    const validation = try validateRetry(allocator, secret, .version_1, 120, "client-path", &odcid, &rscid, token);
+    try std.testing.expectEqual(Kind.retry, validation.kind);
+    try std.testing.expectEqualSlices(u8, &nonce, &validation.nonce);
+
+    const wrong_odcid = [_]u8{ 1, 2, 3, 9 };
+    try std.testing.expectError(error.InvalidToken, validateRetry(allocator, secret, .version_1, 120, "client-path", &wrong_odcid, &rscid, token));
+    const wrong_rscid = [_]u8{ 5, 6, 7, 9 };
+    try std.testing.expectError(error.InvalidToken, validateRetry(allocator, secret, .version_1, 120, "client-path", &odcid, &wrong_rscid, token));
+    try std.testing.expectError(error.InvalidToken, encodeRetry(allocator, secret, .{
+        .kind = .new_token,
+        .issued_ns = 100,
+        .lifetime_ns = 500,
+        .peer_address = "client-path",
+        .nonce = nonce,
+    }, &odcid, &rscid));
 }
 
 test "QUIC address validation token validates rotated secrets" {
