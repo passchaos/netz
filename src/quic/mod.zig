@@ -21,6 +21,7 @@ pub const path_validation = @import("path_validation.zig");
 pub const rtt = @import("rtt.zig");
 pub const pmtu = @import("pmtu.zig");
 pub const address_validation_token = @import("address_validation_token.zig");
+pub const retry_flow = @import("retry_flow.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,

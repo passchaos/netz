@@ -287,6 +287,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "encodeRetry"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "validateRetry"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "ReplayFilter"));
+    try std.testing.expect(@hasDecl(netz.quic, "retry_flow"));
+    try std.testing.expect(@hasDecl(netz.quic.retry_flow, "issue"));
+    try std.testing.expect(@hasDecl(netz.quic.retry_flow, "validate"));
     try std.testing.expect(@hasDecl(netz.quic.pmtu, "State"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.pmtu.min_udp_payload_size);
     try std.testing.expectEqual(@as(u64, 100_000_000), netz.quic.rtt.default_initial_rtt_ns);
