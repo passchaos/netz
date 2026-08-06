@@ -300,6 +300,7 @@ pub const Connection = struct {
     peer_enable_connect_protocol: bool = false,
     last_peer_client_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
+    local_goaway_last_stream_id: ?u31 = null,
 
     pub fn close(self: *Connection) void {
         self.send_stream_windows.deinit(self.allocator);
@@ -619,10 +620,18 @@ pub const Connection = struct {
     }
 
     pub fn sendGoAway(self: *Connection, last_stream_id: u31, error_code: http2.ErrorCode, debug_data: []const u8) Error!void {
+        try self.validateLocalGoAway(last_stream_id);
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try http2.GoAwayPayload.write(&encoded, self.allocator, last_stream_id, error_code, debug_data);
         try writeAll(self.io, self.stream, encoded.items);
+        self.local_goaway_last_stream_id = last_stream_id;
+    }
+
+    fn validateLocalGoAway(self: Connection, last_stream_id: u31) Error!void {
+        if (self.local_goaway_last_stream_id) |last| {
+            if (last_stream_id > last) return error.InvalidFrame;
+        }
     }
 
     pub fn readGoAway(self: *Connection) Error!OwnedGoAway {
@@ -4941,6 +4950,28 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     }));
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(1)).value);
+}
+
+test "HTTP/2 sendGoAway enforces non-increasing boundaries" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try connection.validateLocalGoAway(7);
+    connection.local_goaway_last_stream_id = 7;
+    try connection.validateLocalGoAway(5);
+    connection.local_goaway_last_stream_id = 5;
+    try std.testing.expectError(error.InvalidFrame, connection.validateLocalGoAway(7));
+    try std.testing.expectEqual(@as(?u31, 5), connection.local_goaway_last_stream_id);
 }
 
 test "HTTP/2 readGoAway records monotonic peer boundary" {
