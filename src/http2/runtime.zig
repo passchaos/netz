@@ -319,6 +319,96 @@ pub const Connection = struct {
         return self.readResponse(stream_id, options.method, extended_connect);
     }
 
+    pub fn openExtendedConnect(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
+        if (self.role != .client) return error.UnexpectedFrame;
+        if (!std.ascii.eqlIgnoreCase(options.method, "CONNECT")) return error.InvalidHeader;
+        const protocol = options.protocol orelse return error.InvalidHeader;
+        if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
+        if (options.body.len != 0 or options.trailers.len != 0) return error.InvalidContentLength;
+
+        const stream_id = self.next_client_stream_id;
+        if (self.peer_goaway_last_stream_id) |last| {
+            if (stream_id > last) return error.ConnectionGoAway;
+        }
+        self.next_client_stream_id += 2;
+
+        var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+        defer fields.deinit(self.allocator);
+        try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
+        try fields.append(self.allocator, .{ .name = ":path", .value = options.path });
+        try fields.append(self.allocator, .{ .name = ":scheme", .value = options.scheme });
+        try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
+        if (options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
+        for (options.headers) |header| try fields.append(self.allocator, header);
+        try validateHeaderBlock(fields.items, .request);
+
+        // Extended CONNECT establishes a bidirectional byte tunnel.  The
+        // opening HEADERS therefore deliberately keeps the stream open instead
+        // of using END_STREAM like a request with no body would.
+        try self.writeHeaders(stream_id, fields.items, false);
+        return self.readExtendedConnectResponse(stream_id);
+    }
+
+    pub fn readExtendedConnectRequest(self: *Connection, expected_protocol: []const u8) Error!ExtendedConnectRequest {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (!self.limits.enable_connect_protocol) return error.ExtendedConnectDisabled;
+        while (true) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            defer frame.deinit(self.allocator);
+            if (try self.handleConnectionFrame(frame.frame)) continue;
+            switch (frame.frame.header.frame_type) {
+                .headers => {
+                    const stream_id = frame.frame.header.stream_id;
+                    if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
+                    if (stream_id <= self.last_peer_client_stream_id) return error.InvalidFrame;
+                    self.last_peer_client_stream_id = stream_id;
+                    if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
+
+                    const headers = try self.readHeaderBlock(frame.frame);
+                    errdefer freeHeaders(self.allocator, headers);
+                    try validateHeaderBlock(headers, .request);
+                    const method = findHeader(headers, ":method") orelse return error.MissingPseudoHeader;
+                    const protocol = findHeader(headers, ":protocol") orelse return error.InvalidHeader;
+                    if (!std.ascii.eqlIgnoreCase(method, "CONNECT")) return error.InvalidHeader;
+                    if (!std.mem.eql(u8, protocol, expected_protocol)) return error.InvalidHeader;
+
+                    return .{
+                        .stream_id = stream_id,
+                        .headers = headers,
+                        .method = method,
+                        .path = findHeader(headers, ":path") orelse "",
+                        .scheme = findHeader(headers, ":scheme") orelse "",
+                        .authority = findHeader(headers, ":authority"),
+                        .protocol = protocol,
+                    };
+                },
+                .goaway => continue,
+                else => return error.UnexpectedFrame,
+            }
+        }
+    }
+
+    pub fn acceptExtendedConnect(
+        self: *Connection,
+        connect_request: ExtendedConnectRequest,
+        response_headers: []const http2.Hpack.HeaderField,
+    ) Error!Tunnel {
+        if (self.role != .server) return error.UnexpectedFrame;
+        try self.writeExtendedConnectResponse(connect_request.stream_id, 200, response_headers, false);
+        return .{ .connection = self, .stream_id = connect_request.stream_id };
+    }
+
+    pub fn rejectExtendedConnect(
+        self: *Connection,
+        stream_id: u31,
+        status: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+    ) Error!void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (status < 300) return error.InvalidStatus;
+        try self.writeExtendedConnectResponse(stream_id, status, response_headers, true);
+    }
+
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
         if (self.role != .server) return error.UnexpectedFrame;
         while (true) {
@@ -614,12 +704,69 @@ pub const Connection = struct {
         };
     }
 
+    fn readExtendedConnectResponse(self: *Connection, stream_id: u31) Error!ExtendedConnectResponse {
+        while (true) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            defer frame.deinit(self.allocator);
+            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (frame.frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame.frame);
+                self.peer_goaway_last_stream_id = goaway.last_stream_id;
+                if (stream_id > goaway.last_stream_id) return error.ConnectionGoAway;
+                continue;
+            }
+            if (frame.frame.header.stream_id != stream_id) continue;
+            switch (frame.frame.header.frame_type) {
+                .headers => {
+                    const headers = try self.readHeaderBlock(frame.frame);
+                    errdefer freeHeaders(self.allocator, headers);
+                    try validateHeaderBlock(headers, .response);
+                    const status_s = findHeader(headers, ":status") orelse return error.MissingPseudoHeader;
+                    const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
+                    if (informationalResponseToSkip(status)) {
+                        if ((frame.frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
+                        freeHeaders(self.allocator, headers);
+                        continue;
+                    }
+                    if (status < 200 or status > 299) return error.InvalidStatus;
+                    if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
+                    return .{
+                        .status = status,
+                        .headers = headers,
+                        .tunnel = .{ .connection = self, .stream_id = stream_id },
+                    };
+                },
+                .data => return error.UnexpectedFrame,
+                .rst_stream => return error.StreamReset,
+                else => continue,
+            }
+        }
+    }
+
     fn writeHeaders(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, end_stream: bool) Error!void {
         try validateHeaderListSize(headers, self.peer_max_header_list_size);
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
         try self.hpack_encoder.encodeBlock(&block, self.allocator, headers);
         try self.writeHeaderBlock(stream_id, block.items, end_stream);
+    }
+
+    fn writeExtendedConnectResponse(
+        self: *Connection,
+        stream_id: u31,
+        status_code: u16,
+        response_headers: []const http2.Hpack.HeaderField,
+        end_stream: bool,
+    ) Error!void {
+        var status_buf: [3]u8 = undefined;
+        if (status_code < 100 or status_code > 999) return error.InvalidStatus;
+        const status = std.fmt.bufPrint(&status_buf, "{}", .{status_code}) catch return error.InvalidStatus;
+        var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+        defer fields.deinit(self.allocator);
+        try fields.append(self.allocator, .{ .name = ":status", .value = status });
+        for (response_headers) |header| try fields.append(self.allocator, header);
+        try validateHeaderBlock(fields.items, .response);
+        try self.writeHeaders(stream_id, fields.items, end_stream);
     }
 
     fn handleConnectionFrame(self: *Connection, frame: http2.Frame) Error!bool {
@@ -889,6 +1036,101 @@ pub const OwnedResponse = struct {
         freeHeaders(allocator, self.trailers);
         allocator.free(self.body);
         self.* = undefined;
+    }
+};
+
+pub const ExtendedConnectRequest = struct {
+    stream_id: u31,
+    headers: []http2.Hpack.HeaderField,
+    method: []const u8,
+    path: []const u8,
+    scheme: []const u8,
+    authority: ?[]const u8,
+    protocol: []const u8,
+
+    pub fn deinit(self: *ExtendedConnectRequest, allocator: std.mem.Allocator) void {
+        freeHeaders(allocator, self.headers);
+        self.* = undefined;
+    }
+};
+
+pub const ExtendedConnectResponse = struct {
+    status: u16,
+    headers: []http2.Hpack.HeaderField,
+    tunnel: Tunnel,
+
+    pub fn deinit(self: *ExtendedConnectResponse, allocator: std.mem.Allocator) void {
+        freeHeaders(allocator, self.headers);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedTunnelData = struct {
+    frame: OwnedFrame,
+    data: []const u8,
+    end_stream: bool,
+
+    pub fn deinit(self: *OwnedTunnelData, allocator: std.mem.Allocator) void {
+        self.frame.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const Tunnel = struct {
+    connection: *Connection,
+    stream_id: u31,
+
+    pub fn write(self: *Tunnel, data: []const u8, end_stream: bool) Error!void {
+        try self.connection.writeData(self.stream_id, data, end_stream);
+    }
+
+    pub fn closeWrite(self: *Tunnel) Error!void {
+        try self.connection.writeData(self.stream_id, &.{}, true);
+    }
+
+    pub fn reset(self: *Tunnel, error_code: http2.ErrorCode) Error!void {
+        try self.connection.sendResetStream(self.stream_id, error_code);
+    }
+
+    pub fn read(self: *Tunnel) Error!OwnedTunnelData {
+        while (true) {
+            var frame = try readFrame(self.connection.allocator, self.connection.io, self.connection.stream, self.connection.limits);
+            errdefer frame.deinit(self.connection.allocator);
+            if (try self.connection.handleConnectionFrame(frame.frame)) {
+                frame.deinit(self.connection.allocator);
+                continue;
+            }
+            if (frame.frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame.frame);
+                self.connection.peer_goaway_last_stream_id = goaway.last_stream_id;
+                if (self.stream_id > goaway.last_stream_id) return error.ConnectionGoAway;
+                frame.deinit(self.connection.allocator);
+                continue;
+            }
+            if (frame.frame.header.stream_id != self.stream_id) {
+                frame.deinit(self.connection.allocator);
+                continue;
+            }
+            switch (frame.frame.header.frame_type) {
+                .data => {
+                    const payload = try http2.DataPayload.parse(frame.frame);
+                    try self.connection.recv_connection_window.receive(payload.data.len);
+                    try (try self.connection.recvStreamWindow(self.stream_id)).receive(payload.data.len);
+                    try self.connection.maybeReleaseReceivedCapacity(self.stream_id);
+                    return .{
+                        .frame = frame,
+                        .data = payload.data,
+                        .end_stream = (frame.frame.header.flags & flag_end_stream) != 0,
+                    };
+                },
+                .rst_stream => return error.StreamReset,
+                .headers => return error.UnexpectedFrame,
+                else => {
+                    frame.deinit(self.connection.allocator);
+                    continue;
+                },
+            }
+        }
     }
 };
 

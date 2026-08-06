@@ -21,7 +21,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
   validation, HTTP/2 pseudo-header/lowercase field-name validation,
   connection-specific header rejection including `TE` rules,
-  CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling, and a blocking prior-knowledge h2c client/server runtime with a
+  CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with
+  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, and a blocking prior-knowledge h2c client/server runtime with a
   `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
@@ -106,9 +107,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   validation, close payload checks, fragmented message assembly with aggregate
   message-size limits, automatic PING→PONG and close echo handling,
   subprotocol negotiation, optional permessage-deflate negotiation with
-  no-context-takeover raw-deflate compression/decompression, serialized connection writes, and a blocking TCP
+  no-context-takeover raw-deflate compression/decompression, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
-  server helper
+  server helper, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
+  `:protocol = websocket`, subprotocols, and permessage-deflate over an h2 DATA tunnel
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
   username/password payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,

@@ -32,6 +32,13 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket, "ExtensionNegotiation"));
     try std.testing.expect(@hasDecl(netz.websocket, "compressMessage"));
     try std.testing.expect(@hasDecl(netz.websocket, "decompressMessage"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Client"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Server"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Connection"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Client, "open"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Server, "accept"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Connection, "receiveMessage"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Connection, "sendClose"));
     try std.testing.expectEqual(@as(u8, 0x40), netz.quic.varint.prefixForLength(2));
     try std.testing.expect(netz.http1.Method.GET.safe());
     try std.testing.expect(std.meta.stringToEnum(netz.http1.BodyFraming, "close_delimited") != null);
@@ -49,6 +56,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http2.runtime.OwnedRequest, "protocol"));
     try std.testing.expect(@hasField(netz.http2.runtime.OwnedRequest, "trailers"));
     try std.testing.expect(@hasField(netz.http2.runtime.OwnedResponse, "trailers"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime, "Tunnel"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime, "ExtendedConnectRequest"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime, "ExtendedConnectResponse"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "openExtendedConnect"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "readExtendedConnectRequest"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "acceptExtendedConnect"));
     try std.testing.expect(@hasDecl(netz.http2, "PingPayload"));
     try std.testing.expect(@hasDecl(netz.http2, "GoAwayPayload"));
     try std.testing.expect(@hasDecl(netz.http2, "ResetStreamPayload"));

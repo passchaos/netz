@@ -1,12 +1,14 @@
 const std = @import("std");
 const websocket = @import("mod.zig");
 const http1 = @import("../http1/mod.zig");
+const http2 = @import("../http2/mod.zig");
 const http1_runtime = http1.runtime;
+const http2_runtime = http2.runtime;
 const wire = @import("../internal/wire.zig");
 
 const net = std.Io.net;
 
-pub const Error = websocket.Error || http1_runtime.Error || error{
+pub const Error = websocket.Error || http1_runtime.Error || http2_runtime.Error || error{
     HeadersTooLarge,
     ConnectionClosed,
     InvalidResponse,
@@ -463,6 +465,332 @@ pub const Connection = struct {
     }
 };
 
+pub const H2Connection = struct {
+    allocator: std.mem.Allocator,
+    tunnel: http2_runtime.Tunnel,
+    role: Role,
+    limits: Limits = .{},
+    inbuf: std.ArrayList(u8) = .empty,
+    send_mutex: std.Io.Mutex = .init,
+    close_sent: bool = false,
+    close_received: bool = false,
+    selected_protocol: ?[]u8 = null,
+    permessage_deflate: bool = false,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        tunnel: http2_runtime.Tunnel,
+        role: Role,
+        limits: Limits,
+        selected_protocol: ?[]u8,
+        permessage_deflate: bool,
+    ) H2Connection {
+        return .{
+            .allocator = allocator,
+            .tunnel = tunnel,
+            .role = role,
+            .limits = limits,
+            .selected_protocol = selected_protocol,
+            .permessage_deflate = permessage_deflate,
+        };
+    }
+
+    pub fn close(self: *H2Connection) void {
+        if (self.selected_protocol) |protocol| self.allocator.free(protocol);
+        self.inbuf.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn sendText(self: *H2Connection, text: []const u8) Error!void {
+        try self.sendMessage(.text, text);
+    }
+
+    pub fn sendBinary(self: *H2Connection, payload: []const u8) Error!void {
+        try self.sendMessage(.binary, payload);
+    }
+
+    pub fn sendPing(self: *H2Connection, payload: []const u8) Error!void {
+        try self.sendFrame(.ping, payload);
+    }
+
+    pub fn sendPong(self: *H2Connection, payload: []const u8) Error!void {
+        try self.sendFrame(.pong, payload);
+    }
+
+    pub fn sendClose(self: *H2Connection, code: websocket.CloseCode, reason: []const u8) Error!void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+        try payload.append(self.allocator, @truncate(@intFromEnum(code) >> 8));
+        try payload.append(self.allocator, @truncate(@intFromEnum(code)));
+        try payload.appendSlice(self.allocator, reason);
+        try self.sendFrame(.close, payload.items);
+    }
+
+    pub fn sendFrame(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
+        if (self.close_sent and opcode != .close) return error.ConnectionClosed;
+        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        defer self.send_mutex.unlock(self.tunnel.connection.io);
+        try self.writeFrameLocked(opcode, payload, true);
+        if (opcode == .close) self.close_sent = true;
+    }
+
+    pub fn sendMessage(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
+        if (opcode != .text and opcode != .binary) return error.InvalidFrame;
+        if (self.close_sent) return error.ConnectionClosed;
+        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        defer self.send_mutex.unlock(self.tunnel.connection.io);
+
+        if (self.permessage_deflate and payload.len != 0) {
+            const compressed = try websocket.compressMessage(self.allocator, payload);
+            defer self.allocator.free(compressed);
+            try self.writeFrameLockedExtended(opcode, compressed, true, .{ .rsv1 = true });
+        } else {
+            try self.writeFrameLocked(opcode, payload, true);
+        }
+    }
+
+    pub fn sendFragmented(self: *H2Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
+        if (self.close_sent) return error.ConnectionClosed;
+        if (opcode != .text and opcode != .binary) return error.InvalidFrame;
+        if (fragments.len == 0) return error.InvalidFrame;
+
+        self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+        defer self.send_mutex.unlock(self.tunnel.connection.io);
+
+        for (fragments, 0..) |fragment, index| {
+            const frame_opcode: websocket.Opcode = if (index == 0) opcode else .continuation;
+            const fin = index + 1 == fragments.len;
+            try self.writeFrameLocked(frame_opcode, fragment, fin);
+        }
+    }
+
+    pub fn receiveFrame(self: *H2Connection) Error!websocket.Frame {
+        try self.ensureBuffered(2);
+        const second = self.inbuf.items[1];
+        var header_len: usize = 2;
+        const len_code = second & 0x7f;
+        if (len_code == 126) header_len += 2 else if (len_code == 127) header_len += 8;
+        if ((second & 0x80) != 0) header_len += 4;
+        try self.ensureBuffered(header_len);
+
+        const header = try websocket.FrameHeader.parse(self.inbuf.items);
+        const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
+        if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
+        const total_len = header.header_len + payload_len;
+        try self.ensureBuffered(total_len);
+
+        const parse_options: websocket.ParseFrameOptions = switch (self.role) {
+            .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
+            .server => .{ .expect_mask = .masked, .allow_rsv1 = self.permessage_deflate },
+        };
+        var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
+        errdefer frame.deinit(self.allocator);
+        if (frame.header.rsv1 and (frame.header.opcode.isControl() or frame.header.opcode == .continuation)) return error.UnexpectedRsv;
+        self.discardBuffered(frame.consumed);
+        return frame;
+    }
+
+    pub fn receiveMessage(self: *H2Connection) Error!OwnedMessage {
+        var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
+        defer assembler.deinit();
+
+        while (true) {
+            var frame = try self.receiveFrame();
+            defer frame.deinit(self.allocator);
+            switch (frame.header.opcode) {
+                .ping => {
+                    try self.sendPong(frame.payload);
+                    continue;
+                },
+                .pong => continue,
+                .close => {
+                    self.close_received = true;
+                    if (!self.close_sent) try self.sendFrame(.close, frame.payload);
+                    return error.ConnectionClosed;
+                },
+                else => {
+                    const maybe_message = try assembler.feed(frame);
+                    if (maybe_message) |message| {
+                        var payload = message.payload;
+                        if (message.compressed) {
+                            payload = try websocket.decompressMessage(self.allocator, message.payload, self.limits.max_message_bytes);
+                            self.allocator.free(message.payload);
+                        }
+                        if (message.opcode == .text and !std.unicode.utf8ValidateSlice(payload)) {
+                            self.allocator.free(payload);
+                            return error.InvalidUtf8;
+                        }
+                        return .{ .opcode = message.opcode, .payload = payload };
+                    }
+                },
+            }
+        }
+    }
+
+    fn writeFrameLocked(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
+        try self.writeFrameLockedExtended(opcode, payload, fin, .{});
+    }
+
+    fn writeFrameLockedExtended(
+        self: *H2Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        fin: bool,
+        options: struct { rsv1: bool = false },
+    ) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        const mask_key = if (self.role == .client) blk: {
+            var key: [4]u8 = undefined;
+            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            break :blk key;
+        } else null;
+        try websocket.writeFrameExtended(&encoded, self.allocator, opcode, payload, .{
+            .fin = fin,
+            .mask_key = mask_key,
+            .rsv1 = options.rsv1,
+        });
+        // RFC 8441 maps the WebSocket byte stream onto an HTTP/2 stream.  Once
+        // a Close frame is sent, this endpoint has no more WebSocket bytes to
+        // write, so carry END_STREAM with the DATA frame that contains Close.
+        try self.tunnel.write(encoded.items, opcode == .close);
+    }
+
+    fn ensureBuffered(self: *H2Connection, len: usize) Error!void {
+        while (self.inbuf.items.len < len) {
+            var data = try self.tunnel.read();
+            defer data.deinit(self.allocator);
+            if (data.data.len != 0) try self.inbuf.appendSlice(self.allocator, data.data);
+            if (data.end_stream) {
+                if (self.inbuf.items.len < len) return error.ConnectionClosed;
+                break;
+            }
+        }
+    }
+
+    fn discardBuffered(self: *H2Connection, len: usize) void {
+        if (len == self.inbuf.items.len) {
+            self.inbuf.clearRetainingCapacity();
+            return;
+        }
+        const remaining = self.inbuf.items[len..];
+        @memmove(self.inbuf.items[0..remaining.len], remaining);
+        self.inbuf.shrinkRetainingCapacity(remaining.len);
+    }
+};
+
+pub const H2Client = struct {
+    pub fn open(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2ConnectOptions,
+    ) Error!H2Connection {
+        var request_headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+        defer request_headers.deinit(allocator);
+        try request_headers.append(allocator, .{ .name = "sec-websocket-version", .value = "13" });
+        var protocol_value: std.ArrayList(u8) = .empty;
+        defer protocol_value.deinit(allocator);
+        if (options.protocols.len != 0) {
+            for (options.protocols, 0..) |protocol, index| {
+                if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+                if (index != 0) try protocol_value.appendSlice(allocator, ", ");
+                try protocol_value.appendSlice(allocator, protocol);
+            }
+            try request_headers.append(allocator, .{ .name = "sec-websocket-protocol", .value = protocol_value.items });
+        }
+        if (options.enable_permessage_deflate) {
+            try request_headers.append(allocator, .{
+                .name = "sec-websocket-extensions",
+                .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+            });
+        }
+        try request_headers.appendSlice(allocator, options.extra_headers);
+
+        var response = try connection.openExtendedConnect(.{
+            .method = "CONNECT",
+            .path = options.path,
+            .scheme = options.scheme,
+            .authority = options.authority,
+            .protocol = "websocket",
+            .headers = request_headers.items,
+        });
+        errdefer response.deinit(allocator);
+
+        const selected_protocol = try validateH2ServerHandshake(allocator, response.headers, options.protocols);
+        errdefer if (selected_protocol) |protocol| allocator.free(protocol);
+        const selected_extension = try websocket.ExtensionNegotiation.validateResponse(findH2Header(response.headers, "sec-websocket-extensions"));
+        if (selected_extension.permessage_deflate and !options.enable_permessage_deflate) return error.InvalidExtension;
+        const tunnel = response.tunnel;
+        response.tunnel = undefined;
+        response.deinit(allocator);
+
+        return H2Connection.init(
+            allocator,
+            tunnel,
+            .client,
+            options.limits,
+            selected_protocol,
+            selected_extension.permessage_deflate,
+        );
+    }
+};
+
+pub const H2Server = struct {
+    pub fn accept(
+        allocator: std.mem.Allocator,
+        connection: *http2_runtime.Connection,
+        options: H2AcceptOptions,
+    ) Error!H2Connection {
+        var request = try connection.readExtendedConnectRequest("websocket");
+        errdefer request.deinit(allocator);
+        const version = findH2Header(request.headers, "sec-websocket-version") orelse return error.MissingHeader;
+        if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
+
+        const selected_protocol = try selectSubprotocol(allocator, findH2Header(request.headers, "sec-websocket-protocol"), options.protocols);
+        errdefer if (selected_protocol) |protocol| allocator.free(protocol);
+        const selected_extension = try websocket.ExtensionNegotiation.accept(
+            allocator,
+            findH2Header(request.headers, "sec-websocket-extensions"),
+            options.enable_permessage_deflate,
+        );
+        defer if (selected_extension) |extension| allocator.free(extension);
+
+        var response_headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+        defer response_headers.deinit(allocator);
+        if (selected_protocol) |protocol| try response_headers.append(allocator, .{ .name = "sec-websocket-protocol", .value = protocol });
+        if (selected_extension) |extension| try response_headers.append(allocator, .{ .name = "sec-websocket-extensions", .value = extension });
+        try response_headers.appendSlice(allocator, options.extra_headers);
+
+        const tunnel = try connection.acceptExtendedConnect(request, response_headers.items);
+        request.deinit(allocator);
+        return H2Connection.init(
+            allocator,
+            tunnel,
+            .server,
+            options.limits,
+            selected_protocol,
+            selected_extension != null,
+        );
+    }
+};
+
+pub const H2ConnectOptions = struct {
+    authority: ?[]const u8 = null,
+    path: []const u8 = "/",
+    scheme: []const u8 = "https",
+    protocols: []const []const u8 = &.{},
+    extra_headers: []const http2.Hpack.HeaderField = &.{},
+    enable_permessage_deflate: bool = false,
+    limits: Limits = .{},
+};
+
+pub const H2AcceptOptions = struct {
+    protocols: []const []const u8 = &.{},
+    extra_headers: []const http2.Hpack.HeaderField = &.{},
+    enable_permessage_deflate: bool = false,
+    limits: Limits = .{},
+};
+
 const HttpHead = struct {
     head: []u8,
     extra: []u8,
@@ -515,6 +843,29 @@ fn validateServerHandshake(
             if (std.mem.eql(u8, protocol, offered)) return try allocator.dupe(u8, protocol);
         }
         return error.InvalidSubprotocol;
+    }
+    return null;
+}
+
+fn validateH2ServerHandshake(
+    allocator: std.mem.Allocator,
+    headers: []const http2.Hpack.HeaderField,
+    offered_protocols: []const []const u8,
+) Error!?[]u8 {
+    if (findH2Header(headers, "sec-websocket-protocol")) |selected| {
+        const protocol = wire.trimOws(selected);
+        if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+        for (offered_protocols) |offered| {
+            if (std.mem.eql(u8, protocol, offered)) return try allocator.dupe(u8, protocol);
+        }
+        return error.InvalidSubprotocol;
+    }
+    return null;
+}
+
+fn findH2Header(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
     }
     return null;
 }
@@ -755,6 +1106,94 @@ test "WebSocket runtime negotiates permessage-deflate" {
     try std.testing.expectEqualStrings("deflated response deflated response", response.payload);
 
     try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096, .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *http2_runtime.Server) !void {
+            var h2 = try server_ptr.accept();
+            defer h2.close();
+
+            var ws = try H2Server.accept(server_ptr.allocator, &h2, .{
+                .protocols = &.{"chat.v1"},
+                .enable_permessage_deflate = true,
+                .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
+            });
+            defer ws.close();
+            try std.testing.expectEqualStrings("chat.v1", ws.selected_protocol.?);
+            try std.testing.expect(ws.permessage_deflate);
+
+            var request = try ws.receiveMessage();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(websocket.Opcode.text, request.opcode);
+            try std.testing.expectEqualStrings("hello over h2 websocket", request.payload);
+
+            try ws.sendText("world over h2 websocket");
+
+            // The h2 WebSocket adapter still runs the normal RFC 6455 close
+            // handshake inside DATA frames and maps the final Close write to
+            // END_STREAM on the underlying HTTP/2 tunnel.
+            try std.testing.expectError(error.ConnectionClosed, ws.receiveMessage());
+            try std.testing.expect(ws.close_received);
+            try std.testing.expect(ws.close_sent);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var h2_client = try http2_runtime.Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer h2_client.close();
+
+    var ws_client = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/chat",
+        .protocols = &.{"chat.v1"},
+        .enable_permessage_deflate = true,
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
+    });
+    defer ws_client.close();
+    try std.testing.expectEqualStrings("chat.v1", ws_client.selected_protocol.?);
+    try std.testing.expect(ws_client.permessage_deflate);
+
+    try ws_client.sendText("hello over h2 websocket");
+    var response = try ws_client.receiveMessage();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, response.opcode);
+    try std.testing.expectEqualStrings("world over h2 websocket", response.payload);
+
+    try ws_client.sendClose(.normal_closure, "bye");
+    try std.testing.expectError(error.ConnectionClosed, ws_client.receiveMessage());
+    try std.testing.expect(ws_client.close_received);
 
     thread.join();
     if (shared.err) |err| return err;
