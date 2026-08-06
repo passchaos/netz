@@ -14,7 +14,7 @@ pub const Error = websocket.Error || http1_runtime.Error || http2_runtime.Error 
     InvalidResponse,
     InvalidSubprotocol,
     MessageTooLarge,
-} || std.Io.RandomSecureError || net.Stream.Reader.Error || net.Stream.Writer.Error;
+} || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error;
 
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
@@ -189,7 +189,28 @@ pub const Client = struct {
     ) Error!Connection {
         const stream = net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch |err| return err;
         errdefer stream.close(io);
+        return connectStream(allocator, io, stream, options);
+    }
 
+    pub fn connectHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+    ) Error!Connection {
+        const host_name = try net.HostName.init(host);
+        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        errdefer stream.close(io);
+        return connectStream(allocator, io, stream, options);
+    }
+
+    fn connectStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: ConnectOptions,
+    ) Error!Connection {
         var nonce: [16]u8 = undefined;
         try std.Io.randomSecure(io, &nonce);
         var key: [24]u8 = undefined;
@@ -1258,6 +1279,66 @@ test "WebSocket runtime negotiates subprotocol" {
     var response = try client.receiveFrame();
     defer response.deinit(allocator);
     try std.testing.expectEqualStrings("world", response.payload);
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket client connects by host name" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+
+            var request = try connection.receiveMessage();
+            defer request.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqualStrings("hello", request.payload);
+            try connection.sendText("dns-world");
+
+            var close = try connection.receiveFrame();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{
+        .host = "localhost",
+        .target = "/dns",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+
+    try client.sendText("hello");
+    var response = try client.receiveMessage();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("dns-world", response.payload);
     try client.sendClose(.normal_closure, "bye");
 
     thread.join();

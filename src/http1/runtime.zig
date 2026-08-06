@@ -9,7 +9,7 @@ pub const Error = http1.Error || error{
     BodyTooLarge,
     ConnectionClosed,
     InvalidResponse,
-} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
+} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
@@ -163,6 +163,22 @@ pub const Client = struct {
             .io = io,
             .allocator = allocator,
             .stream = try address.connect(io, .{ .mode = .stream }),
+            .limits = limits,
+        };
+    }
+
+    pub fn connectHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+    ) Error!Client {
+        const host_name = try net.HostName.init(host);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = try host_name.connect(io, port, .{ .mode = .stream }),
             .limits = limits,
         };
     }
@@ -1425,6 +1441,59 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
     if (shared.err) |err| return err;
 
     try std.testing.expectError(error.MalformedStartLine, client.openConnectTunnel("/not-authority", &.{}));
+}
+
+test "HTTP/1 client connects by host name" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("localhost", request.request.header("host").?);
+            try connection.writeResponse(.{ .body = "dns-ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.request(.{ .host = "localhost" });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("dns-ok", response.response.body);
 }
 
 test "HTTP/1 server sends 100 Continue before reading expected body" {
