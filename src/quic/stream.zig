@@ -104,7 +104,22 @@ pub const RecvState = struct {
         self.* = undefined;
     }
 
+    pub fn clone(self: RecvState, allocator: std.mem.Allocator) Error!RecvState {
+        var copy = RecvState.init(allocator, self.stream_id, self.max_buffered);
+        errdefer copy.deinit();
+        try copy.buffer.appendSlice(allocator, self.buffer.items);
+        try copy.received.appendSlice(allocator, self.received.items);
+        copy.read_offset = self.read_offset;
+        copy.contiguous_end = self.contiguous_end;
+        copy.final_size = self.final_size;
+        return copy;
+    }
+
     pub fn insert(self: *RecvState, frame: quic.StreamFrame) Error!void {
+        _ = try self.insertTracked(frame);
+    }
+
+    pub fn insertTracked(self: *RecvState, frame: quic.StreamFrame) Error!u64 {
         if (frame.stream_id != self.stream_id) return error.WrongStream;
         const offset = std.math.cast(usize, frame.offset) orelse return error.InvalidStreamRange;
         const end = std.math.add(usize, offset, frame.data.len) catch return error.InvalidStreamRange;
@@ -115,11 +130,14 @@ pub const RecvState = struct {
         }
         if (frame.fin) self.final_size = end;
 
+        var newly_received: u64 = 0;
         for (frame.data, 0..) |byte, i| {
             const absolute = offset + i;
-            if (absolute >= self.received.items.len) break;
-            if (!self.received.items[absolute]) continue;
-            if (self.buffer.items[absolute] != byte) return error.ConflictingStreamData;
+            if (absolute < self.received.items.len and self.received.items[absolute]) {
+                if (self.buffer.items[absolute] != byte) return error.ConflictingStreamData;
+            } else {
+                newly_received += 1;
+            }
         }
 
         if (end > self.buffer.items.len) {
@@ -134,6 +152,15 @@ pub const RecvState = struct {
         while (self.contiguous_end < self.received.items.len and self.received.items[self.contiguous_end]) {
             self.contiguous_end += 1;
         }
+        return newly_received;
+    }
+
+    pub fn receivedByteCount(self: RecvState) u64 {
+        var count: u64 = 0;
+        for (self.received.items) |received| {
+            if (received) count += 1;
+        }
+        return count;
     }
 
     pub fn available(self: RecvState) []const u8 {
