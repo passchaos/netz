@@ -263,8 +263,10 @@ pub const FlowWindow = struct {
         self.value = next;
     }
 
-    pub fn adjust(self: *FlowWindow, delta: i64) void {
-        self.value = std.math.add(i64, self.value, delta) catch if (delta > 0) std.math.maxInt(i64) else std.math.minInt(i64);
+    pub fn adjust(self: *FlowWindow, delta: i64) Error!void {
+        const next = std.math.add(i64, self.value, delta) catch return error.FlowControlViolation;
+        if (next > max_flow_window) return error.FlowControlViolation;
+        self.value = next;
     }
 };
 
@@ -1057,8 +1059,12 @@ pub const Connection = struct {
                     if (setting.value > std.math.maxInt(i31)) return error.InvalidSetting;
                     const new_window: i64 = setting.value;
                     const delta = new_window - self.peer_initial_stream_window;
+                    for (self.send_stream_windows.items) |entry| {
+                        const next = std.math.add(i64, entry.window.value, delta) catch return error.FlowControlViolation;
+                        if (next > max_flow_window) return error.FlowControlViolation;
+                    }
                     self.peer_initial_stream_window = new_window;
-                    for (self.send_stream_windows.items) |*entry| entry.window.adjust(delta);
+                    for (self.send_stream_windows.items) |*entry| try entry.window.adjust(delta);
                 },
                 .max_frame_size => {
                     if (setting.value < default_max_frame_size or setting.value > max_max_frame_size) return error.InvalidSetting;
@@ -4398,6 +4404,13 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(@as(i64, 70_000 - 1024), (try connection.sendStreamWindow(1)).value);
     try std.testing.expectEqual(@as(i64, 70_000), (try connection.sendStreamWindow(3)).value);
+
+    (try connection.sendStreamWindow(1)).value = max_flow_window;
+    try std.testing.expectError(error.FlowControlViolation, connection.applySettings(&.{
+        .{ .id = .initial_window_size, .value = std.math.maxInt(i31) },
+    }));
+    try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
+    try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(1)).value);
 }
 
 test "HTTP/2 local initial window config seeds receive stream windows" {
