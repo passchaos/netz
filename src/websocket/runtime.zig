@@ -798,13 +798,14 @@ fn validateOutgoingMessagePayload(opcode: websocket.Opcode, payload: []const u8)
 
 fn validateOutgoingFramePayload(opcode: websocket.Opcode, payload: []const u8) Error!void {
     switch (opcode) {
-        // Data-message validation lives in sendMessage/sendFragmented so a
-        // caller that intentionally uses sendFrame for low-level fixtures keeps
-        // explicit control. Control frames are always validated here because the
-        // runtime should never put an invalid close/ping/pong on the wire.
+        // Application data frames must go through sendMessage/sendFragmented so
+        // text UTF-8 checks and negotiated permessage-deflate framing cannot be
+        // bypassed by the low-level control-frame helper.
+        .text, .binary => return error.InvalidFrame,
         .close => try websocket.validateClosePayload(payload),
         .ping, .pong => if (payload.len > 125) return error.InvalidControlFrame,
-        else => {},
+        .continuation => {},
+        _ => return error.InvalidFrame,
     }
 }
 
@@ -1767,6 +1768,7 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidUtf8, connection.sendClose(.normal_closure, bad_utf8));
     try std.testing.expectError(error.InvalidCloseCode, connection.sendClose(.no_status_received, ""));
     try std.testing.expectError(error.InvalidControlFrame, connection.sendPing(too_large_control));
+    try std.testing.expectError(error.InvalidFrame, connection.sendFrame(.text, "bypass"));
     connection.permessage_deflate = true;
     try std.testing.expectError(error.InvalidFrame, connection.sendFragmented(.text, &.{ "compressed ", "fragments" }));
 
@@ -1780,6 +1782,7 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidUtf8, h2.sendClose(.normal_closure, bad_utf8));
     try std.testing.expectError(error.InvalidCloseCode, h2.sendClose(.abnormal_closure, ""));
     try std.testing.expectError(error.InvalidControlFrame, h2.sendPong(too_large_control));
+    try std.testing.expectError(error.InvalidFrame, h2.sendFrame(.binary, "bypass"));
     h2.permessage_deflate = true;
     try std.testing.expectError(error.InvalidFrame, h2.sendFragmented(.text, &.{ "compressed ", "fragments" }));
 }
