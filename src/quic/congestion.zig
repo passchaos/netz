@@ -58,6 +58,12 @@ pub const Controller = struct {
         self.congestion_avoidance_bytes_acked = 0;
     }
 
+    pub fn onPersistentCongestion(self: *Controller) void {
+        self.congestion_window = minimumWindow(self.max_datagram_size);
+        self.slow_start_threshold = self.congestion_window;
+        self.congestion_avoidance_bytes_acked = 0;
+    }
+
     pub fn onPtoProbeSent(self: *Controller, bytes: usize) void {
         self.bytes_in_flight += bytes;
     }
@@ -92,4 +98,16 @@ test "QUIC congestion controller reduces on loss" {
     try std.testing.expectEqual(@as(usize, 4800), cc.bytes_in_flight);
     try std.testing.expectEqual(@as(usize, 8400), cc.congestion_window);
     try std.testing.expectEqual(cc.congestion_window, cc.slow_start_threshold);
+}
+
+test "QUIC congestion controller resets on persistent congestion" {
+    var cc = Controller.init(1200);
+    cc.congestion_window = 24_000;
+    cc.slow_start_threshold = 24_000;
+    cc.congestion_avoidance_bytes_acked = 12_000;
+
+    cc.onPersistentCongestion();
+    try std.testing.expectEqual(minimumWindow(1200), cc.congestion_window);
+    try std.testing.expectEqual(cc.congestion_window, cc.slow_start_threshold);
+    try std.testing.expectEqual(@as(usize, 0), cc.congestion_avoidance_bytes_acked);
 }
