@@ -209,6 +209,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "peerAddressValidated"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "setPeerAddressValidated"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "beginPeerMigration"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendPendingPathChallengeAt"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "pathValidationDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkPathValidationTimeouts"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "recordPeerAddressBytesReceived"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "recordPeerAddressDatagramReceived"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "antiAmplificationLimitRemaining"));
@@ -266,6 +269,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.path_validation, "State"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "pendingChallengeCount"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "receiveResponseValidated"));
+    try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "earliestChallengeDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "checkTimeouts"));
     try std.testing.expect(@hasDecl(netz.quic.rtt, "Stats"));
     try std.testing.expect(@hasDecl(netz.quic.rtt, "decodeAckDelayNanos"));
     try std.testing.expect(@hasDecl(netz.quic.rtt.Stats, "updateAt"));

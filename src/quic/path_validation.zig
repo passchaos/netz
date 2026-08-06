@@ -7,9 +7,13 @@ pub const Error = error{
     UnknownPathResponse,
 } || std.mem.Allocator.Error;
 
+pub const default_max_challenge_transmissions: u8 = 3;
+
 pub const Challenge = struct {
     data: [8]u8,
     transmissions: u8 = 0,
+    sent_time_ns: ?u64 = null,
+    deadline_ns: ?u64 = null,
 };
 
 pub const State = struct {
@@ -17,6 +21,8 @@ pub const State = struct {
     pending_responses: std.ArrayList([8]u8) = .empty,
     pending_challenges: std.ArrayList(Challenge) = .empty,
     outstanding_challenges: std.ArrayList(Challenge) = .empty,
+    failed_challenges: std.ArrayList(Challenge) = .empty,
+    max_challenge_transmissions: u8 = default_max_challenge_transmissions,
 
     pub fn init(allocator: std.mem.Allocator) State {
         return .{ .allocator = allocator };
@@ -26,6 +32,7 @@ pub const State = struct {
         self.pending_responses.deinit(self.allocator);
         self.pending_challenges.deinit(self.allocator);
         self.outstanding_challenges.deinit(self.allocator);
+        self.failed_challenges.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -35,6 +42,8 @@ pub const State = struct {
         try out.pending_responses.appendSlice(allocator, self.pending_responses.items);
         try out.pending_challenges.appendSlice(allocator, self.pending_challenges.items);
         try out.outstanding_challenges.appendSlice(allocator, self.outstanding_challenges.items);
+        try out.failed_challenges.appendSlice(allocator, self.failed_challenges.items);
+        out.max_challenge_transmissions = self.max_challenge_transmissions;
         return out;
     }
 
@@ -62,9 +71,17 @@ pub const State = struct {
     }
 
     pub fn nextChallengeFrame(self: *State) Error!quic.Frame {
+        return try self.nextChallengeFrameAt(null, null);
+    }
+
+    pub fn nextChallengeFrameAt(self: *State, now_ns: ?u64, timeout_ns: ?u64) Error!quic.Frame {
         if (self.pending_challenges.items.len == 0) return error.NoPendingPathChallenge;
         var challenge = self.pending_challenges.orderedRemove(0);
         challenge.transmissions +|= 1;
+        challenge.sent_time_ns = now_ns;
+        if (now_ns) |now| {
+            if (timeout_ns) |timeout| challenge.deadline_ns = std.math.add(u64, now, timeout) catch std.math.maxInt(u64);
+        }
         try self.outstanding_challenges.append(self.allocator, challenge);
         return .{ .path_challenge = .{ .data = challenge.data } };
     }
@@ -94,6 +111,45 @@ pub const State = struct {
     pub fn outstandingChallengeCount(self: State) usize {
         return self.outstanding_challenges.items.len;
     }
+
+    pub fn failedChallengeCount(self: State) usize {
+        return self.failed_challenges.items.len;
+    }
+
+    pub fn earliestChallengeDeadline(self: State) ?u64 {
+        var deadline: ?u64 = null;
+        for (self.outstanding_challenges.items) |challenge| {
+            const candidate = challenge.deadline_ns orelse continue;
+            if (deadline == null or candidate < deadline.?) deadline = candidate;
+        }
+        return deadline;
+    }
+
+    pub fn checkTimeouts(self: *State, now_ns: u64) Error!usize {
+        var expired: usize = 0;
+        var i: usize = 0;
+        while (i < self.outstanding_challenges.items.len) {
+            const deadline = self.outstanding_challenges.items[i].deadline_ns orelse {
+                i += 1;
+                continue;
+            };
+            if (now_ns < deadline) {
+                i += 1;
+                continue;
+            }
+
+            var challenge = self.outstanding_challenges.orderedRemove(i);
+            challenge.sent_time_ns = null;
+            challenge.deadline_ns = null;
+            expired += 1;
+            if (challenge.transmissions >= self.max_challenge_transmissions) {
+                try self.failed_challenges.append(self.allocator, challenge);
+            } else {
+                try self.pending_challenges.append(self.allocator, challenge);
+            }
+        }
+        return expired;
+    }
 };
 
 test "QUIC path validation state queues responses and validates challenges" {
@@ -115,6 +171,27 @@ test "QUIC path validation state queues responses and validates challenges" {
     try state.receiveResponse(challenge);
     try std.testing.expectEqual(@as(usize, 0), state.outstandingChallengeCount());
     try std.testing.expectError(error.UnknownPathResponse, state.receiveResponse(challenge));
+}
+
+test "QUIC path validation retries and fails timed-out challenges" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+    state.max_challenge_transmissions = 2;
+
+    const challenge = [_]u8{ 1, 1, 2, 3, 5, 8, 13, 21 };
+    try state.queueChallenge(challenge);
+    _ = try state.nextChallengeFrameAt(100, 50);
+    try std.testing.expectEqual(@as(?u64, 150), state.earliestChallengeDeadline());
+    try std.testing.expectEqual(@as(usize, 0), try state.checkTimeouts(149));
+    try std.testing.expectEqual(@as(usize, 1), try state.checkTimeouts(150));
+    try std.testing.expectEqual(@as(usize, 1), state.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), state.failedChallengeCount());
+
+    _ = try state.nextChallengeFrameAt(200, 50);
+    try std.testing.expectEqual(@as(usize, 1), try state.checkTimeouts(250));
+    try std.testing.expectEqual(@as(usize, 0), state.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), state.failedChallengeCount());
 }
 
 test "QUIC path validation suppresses duplicate pending and outstanding challenges" {

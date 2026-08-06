@@ -684,9 +684,21 @@ pub const Connection = struct {
     }
 
     pub fn sendPendingPathChallenge(self: *Connection) Error!void {
-        const frame = try self.path_validation.nextChallengeFrame();
+        try self.sendPendingPathChallengeAt(null, null);
+    }
+
+    pub fn sendPendingPathChallengeAt(self: *Connection, now_ns: ?u64, timeout_ns: ?u64) Error!void {
+        const frame = try self.path_validation.nextChallengeFrameAt(now_ns, timeout_ns);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
+    }
+
+    pub fn pathValidationDeadline(self: Connection) ?u64 {
+        return self.path_validation.earliestChallengeDeadline();
+    }
+
+    pub fn checkPathValidationTimeouts(self: *Connection, now_ns: u64) Error!usize {
+        return try self.path_validation.checkTimeouts(now_ns);
     }
 
     pub fn sendPendingPathResponse(self: *Connection) Error!void {
@@ -3346,6 +3358,48 @@ test "QUIC 1-RTT routed datagrams dispatch to separate connections" {
     }
     try std.testing.expect(saw_a);
     try std.testing.expect(saw_b);
+}
+
+test "QUIC 1-RTT path validation timeout retries then fails" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
+    const server_cid = [_]u8{ 0xde, 0xdf, 0xe0, 0xe1 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xdd} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    client.path_validation.max_challenge_transmissions = 2;
+
+    const challenge = [_]u8{ 0xda, 1, 2, 3, 4, 5, 6, 7 };
+    try client.queuePathChallenge(challenge);
+    try client.sendPendingPathChallengeAt(100, 50);
+    try std.testing.expectEqual(@as(?u64, 150), client.pathValidationDeadline());
+    try std.testing.expectEqual(@as(usize, 0), try client.checkPathValidationTimeouts(149));
+    try std.testing.expectEqual(@as(usize, 1), try client.checkPathValidationTimeouts(150));
+    try std.testing.expectEqual(@as(usize, 1), client.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), client.path_validation.failedChallengeCount());
+
+    try client.sendPendingPathChallengeAt(200, 50);
+    try std.testing.expectEqual(@as(?u64, 250), client.pathValidationDeadline());
+    try std.testing.expectEqual(@as(usize, 1), try client.checkPathValidationTimeouts(250));
+    try std.testing.expectEqual(@as(usize, 0), client.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), client.path_validation.failedChallengeCount());
 }
 
 test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
