@@ -667,6 +667,13 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings(payload, decoded);
 
+    const repeated_payload = "fragmented compressed message fragmented compressed message";
+    const repeated_compressed = try compressMessage(allocator, repeated_payload);
+    defer allocator.free(repeated_compressed);
+    const repeated_decoded = try decompressMessage(allocator, repeated_compressed, 1024);
+    defer allocator.free(repeated_decoded);
+    try std.testing.expectEqualStrings(repeated_payload, repeated_decoded);
+
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try writeFrameExtended(&encoded, allocator, .text, compressed, .{ .rsv1 = true });
