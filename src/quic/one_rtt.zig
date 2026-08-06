@@ -391,6 +391,11 @@ pub const Connection = struct {
         return false;
     }
 
+    pub fn timeThresholdLossDeadline(self: Connection, loss_delay_ns: u64) ?u64 {
+        const largest = self.sent.largestAcknowledged() orelse return null;
+        return self.sent.timeThresholdLossDeadline(loss_delay_ns, largest);
+    }
+
     fn retransmitCandidate(self: *Connection, candidate: quic.recovery.Candidate, mode: enum { congestion_controlled, pto_probe }) Error!void {
         const packet_number = self.next_packet_number;
         switch (mode) {

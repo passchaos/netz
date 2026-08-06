@@ -368,6 +368,20 @@ pub const SentPacketTracker = struct {
         return lost;
     }
 
+    pub fn timeThresholdLossDeadline(self: SentPacketTracker, loss_delay_ns: u64, largest_acknowledged: ?u64) ?u64 {
+        var deadline: ?u64 = null;
+        for (self.packets.items) |packet| {
+            if (packet.acknowledged or packet.lost) continue;
+            if (largest_acknowledged) |largest| {
+                if (packet.packet_number > largest) continue;
+            }
+            const sent_time = packet.sent_time_ns orelse continue;
+            const lost_time = std.math.add(u64, sent_time, loss_delay_ns) catch std.math.maxInt(u64);
+            if (deadline == null or lost_time < deadline.?) deadline = lost_time;
+        }
+        return deadline;
+    }
+
     fn markRange(self: *SentPacketTracker, start: u64, end: u64) AckResult {
         var result: AckResult = .{};
         for (self.packets.items) |*packet| {
@@ -592,6 +606,9 @@ test "QUIC sent packet tracker detects time-threshold loss" {
     try sent.sentAt(1, true, 1200, .not_ect, 180);
     try sent.sentAt(2, true, 1200, .not_ect, 260);
 
+    try std.testing.expectEqual(@as(?u64, 250), sent.timeThresholdLossDeadline(150, 2));
+    try std.testing.expectEqual(@as(?u64, 250), sent.timeThresholdLossDeadline(150, 0));
+
     const early = sent.detectTimeThresholdLoss(249, 150, 2);
     try std.testing.expectEqual(@as(usize, 0), early.packets);
 
@@ -606,8 +623,10 @@ test "QUIC sent packet tracker detects time-threshold loss" {
     const none_for_future = sent.detectTimeThresholdLoss(1_000, 150, 0);
     try std.testing.expectEqual(@as(usize, 0), none_for_future.packets);
 
+    try std.testing.expectEqual(@as(?u64, 330), sent.timeThresholdLossDeadline(150, 2));
     const remaining = sent.detectTimeThresholdLoss(1_000, 150, 2);
     try std.testing.expectEqual(@as(usize, 2), remaining.packets);
+    try std.testing.expectEqual(@as(?u64, null), sent.timeThresholdLossDeadline(150, 2));
 }
 
 test "QUIC sent packet tracker detects packet-threshold loss" {

@@ -179,6 +179,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "retransmitPacketThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "retransmitTimeThresholdLoss"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "timeThresholdLossDeadline"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "localOneRttKeyPhase"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "peerOneRttKeyPhase"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "initiateKeyUpdate"));
@@ -214,6 +215,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckCoversSentPackets"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectPacketThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectTimeThresholdLoss"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "timeThresholdLossDeadline"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "sentAt"));
     try std.testing.expect(@hasDecl(netz.quic.stream_state, "RecvState"));
     const stream_conflict_error: netz.quic.stream_state.Error = error.ConflictingStreamData;
