@@ -1956,6 +1956,7 @@ pub const rtcp = struct {
             parsed.packet = undefined;
             pos += parsed.consumed;
         }
+        try validateCompound(packets.items);
         return packets.toOwnedSlice(allocator);
     }
 
@@ -1965,8 +1966,32 @@ pub const rtcp = struct {
     }
 
     pub fn writeCompound(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packets: []const Packet) Error!void {
-        if (packets.len == 0) return error.InvalidRtcpPacket;
+        try validateCompound(packets);
         for (packets) |packet| try writePacket(list, allocator, packet);
+    }
+
+    fn validateCompound(packets: []const Packet) Error!void {
+        if (packets.len == 0) return error.InvalidRtcpPacket;
+        switch (packets[0]) {
+            .sender_report, .receiver_report => {},
+            else => return error.InvalidRtcpPacket,
+        }
+
+        for (packets[1..]) |packet| {
+            switch (packet) {
+                .receiver_report => continue,
+                .source_description => |sdes| {
+                    for (sdes.chunks) |chunk| {
+                        for (chunk.items) |item| {
+                            if (item.item_type == .cname) return;
+                        }
+                    }
+                    return error.InvalidRtcpPacket;
+                },
+                else => return error.InvalidRtcpPacket,
+            }
+        }
+        return error.InvalidRtcpPacket;
     }
 
     fn parseSenderReport(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!SenderReport {
@@ -4185,6 +4210,22 @@ test "RTCP SDES and compound packets" {
 
     encoded.clearRetainingCapacity();
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{}));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{
+        .{ .picture_loss_indication = .{ .sender_ssrc = 1, .media_ssrc = 2 } },
+    }));
+
+    var no_cname_items = [_]rtcp.SdesItem{.{ .item_type = .name, .value = "alice" }};
+    var no_cname_chunks = [_]rtcp.SdesChunk{.{ .ssrc = 0x01020304, .items = &no_cname_items }};
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{
+        .{ .receiver_report = .{ .sender_ssrc = 0x01020304 } },
+        .{ .source_description = .{ .chunks = &no_cname_chunks } },
+    }));
+
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, .{ .receiver_report = .{ .sender_ssrc = 0x01020304 } });
+    try rtcp.writePacket(&encoded, allocator, .{ .picture_loss_indication = .{ .sender_ssrc = 1, .media_ssrc = 2 } });
+    try rtcp.writePacket(&encoded, allocator, .{ .source_description = .{ .chunks = &sdes_chunks } });
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parseCompound(allocator, encoded.items));
 }
 
 test "RTCP full intra request feedback" {
