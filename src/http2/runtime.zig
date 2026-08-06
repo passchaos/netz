@@ -726,6 +726,16 @@ pub const Connection = struct {
         return stream_id;
     }
 
+    fn outboundStreamIsActive(self: Connection, stream_id: u31) bool {
+        for (self.active_local_streams.items) |active| {
+            if (active == stream_id) return true;
+        }
+        for (self.active_peer_streams.items) |active| {
+            if (active == stream_id) return true;
+        }
+        return false;
+    }
+
     fn releaseLocalStream(self: *Connection, stream_id: u31) void {
         for (self.active_local_streams.items, 0..) |active, index| {
             if (active == stream_id) {
@@ -1060,7 +1070,7 @@ pub const Connection = struct {
                 const update = try http2.WindowUpdatePayload.parse(frame);
                 if (update.stream_id == 0) {
                     try self.send_connection_window.update(update.increment);
-                } else {
+                } else if (self.outboundStreamIsActive(update.stream_id)) {
                     try (try self.sendStreamWindow(update.stream_id)).update(update.increment);
                 }
                 return true;
@@ -5496,6 +5506,43 @@ test "HTTP/2 readGoAway records monotonic peer boundary" {
     try std.testing.expectEqual(@as(?u31, 5), connection.peer_goaway_last_stream_id);
     try std.testing.expectError(error.InvalidFrame, connection.recordPeerGoAway(.{ .last_stream_id = 7, .error_code = .no_error, .debug_data = &.{} }));
     try std.testing.expectEqual(@as(?u31, 5), connection.peer_goaway_last_stream_id);
+}
+
+test "HTTP/2 ignores WINDOW_UPDATE for inactive streams" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    const inactive_update = http2.Frame{
+        .header = .{ .length = 4, .frame_type = .window_update, .flags = 0, .stream_id = 1 },
+        .payload = &.{ 0, 0, 0, 10 },
+    };
+    try std.testing.expect(try connection.handleConnectionFrame(inactive_update));
+    try std.testing.expectEqual(@as(usize, 0), connection.send_stream_windows.items.len);
+
+    try connection.active_local_streams.append(std.testing.allocator, 1);
+    try std.testing.expect(try connection.handleConnectionFrame(inactive_update));
+    try std.testing.expectEqual(@as(usize, 1), connection.send_stream_windows.items.len);
+    try std.testing.expectEqual(@as(i64, default_flow_window + 10), (try connection.sendStreamWindow(1)).value);
+
+    const peer_update = http2.Frame{
+        .header = .{ .length = 4, .frame_type = .window_update, .flags = 0, .stream_id = 3 },
+        .payload = &.{ 0, 0, 0, 7 },
+    };
+    try connection.active_peer_streams.append(std.testing.allocator, 3);
+    try std.testing.expect(try connection.handleConnectionFrame(peer_update));
+    try std.testing.expectEqual(@as(i64, default_flow_window + 7), (try connection.sendStreamWindow(3)).value);
 }
 
 test "HTTP/2 stream window helpers reject connection stream id" {
