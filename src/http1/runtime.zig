@@ -505,7 +505,15 @@ fn chunkedWriteFraming(version: http1.Version, headers: []const http1.Header, tr
 fn renderTrailerHeaderValue(value: *std.ArrayList(u8), allocator: std.mem.Allocator, trailers: []const http1.Header) Error!void {
     value.clearRetainingCapacity();
     for (trailers, 0..) |trailer, index| {
-        if (index != 0) try value.appendSlice(allocator, ", ");
+        var duplicate = false;
+        for (trailers[0..index]) |prior| {
+            if (trailer.eqlName(prior.name)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        if (value.items.len != 0) try value.appendSlice(allocator, ", ");
         try value.appendSlice(allocator, trailer.name);
     }
 }
@@ -522,6 +530,36 @@ fn writeHeaderLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, head
         try list.appendSlice(allocator, header.name);
         try list.appendSlice(allocator, ": ");
         try list.appendSlice(allocator, header.value);
+        try list.appendSlice(allocator, "\r\n");
+    }
+}
+
+fn writeMergedHeaderLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const http1.Header) Error!void {
+    var written = try std.ArrayList(bool).initCapacity(allocator, headers.len);
+    defer written.deinit(allocator);
+    try written.appendNTimes(allocator, false, headers.len);
+
+    for (headers, 0..) |header, index| {
+        if (written.items[index]) continue;
+        try http1.validateHeader(header);
+        try list.appendSlice(allocator, header.name);
+        try list.appendSlice(allocator, ": ");
+        try list.appendSlice(allocator, header.value);
+        written.items[index] = true;
+
+        var next = index + 1;
+        while (next < headers.len) : (next += 1) {
+            if (written.items[next]) continue;
+            const duplicate = headers[next];
+            if (!header.eqlName(duplicate.name)) continue;
+            try http1.validateHeader(duplicate);
+            // Match Hyper's repeated-trailer behavior: preserve the first field
+            // name casing and append repeated values into the same field line so
+            // recipients see one logical trailer field.
+            try list.appendSlice(allocator, ", ");
+            try list.appendSlice(allocator, duplicate.value);
+            written.items[next] = true;
+        }
         try list.appendSlice(allocator, "\r\n");
     }
 }
@@ -546,7 +584,7 @@ fn encodeChunkedForRuntime(
         try list.appendSlice(allocator, "\r\n");
     }
     try list.appendSlice(allocator, "0\r\n");
-    try writeHeaderLines(list, allocator, trailers);
+    try writeMergedHeaderLines(list, allocator, trailers);
     try list.appendSlice(allocator, "\r\n");
 }
 
@@ -1448,7 +1486,7 @@ test "HTTP/1 runtime writes request trailers with chunked framing" {
             try std.testing.expectEqualStrings("Digest, X-Upload-Complete", request.request.header("trailer").?);
             try std.testing.expectEqual(@as(usize, 2), request.request.trailers.len);
             try std.testing.expectEqualStrings("Digest", request.request.trailers[0].name);
-            try std.testing.expectEqualStrings("sha-256=demo", request.request.trailers[0].value);
+            try std.testing.expectEqualStrings("sha-256=demo, sha-256=second", request.request.trailers[0].value);
             try std.testing.expectEqualStrings("X-Upload-Complete", request.request.trailers[1].name);
             try std.testing.expectEqualStrings("yes", request.request.trailers[1].value);
 
@@ -1468,6 +1506,7 @@ test "HTTP/1 runtime writes request trailers with chunked framing" {
         .body = "upload",
         .trailers = &.{
             .{ .name = "Digest", .value = "sha-256=demo" },
+            .{ .name = "digest", .value = "sha-256=second" },
             .{ .name = "X-Upload-Complete", .value = "yes" },
         },
     });
@@ -1518,7 +1557,10 @@ test "HTTP/1 runtime writes response trailers with chunked framing" {
                 .status = 200,
                 .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
                 .body = "download",
-                .trailers = &.{.{ .name = "Digest", .value = "sha-256=response" }},
+                .trailers = &.{
+                    .{ .name = "Digest", .value = "sha-256=response" },
+                    .{ .name = "digest", .value = "sha-256=second" },
+                },
             });
         }
     };
@@ -1548,7 +1590,7 @@ test "HTTP/1 runtime writes response trailers with chunked framing" {
     try std.testing.expectEqualStrings("Digest", response.response.header("trailer").?);
     try std.testing.expectEqual(@as(usize, 1), response.response.trailers.len);
     try std.testing.expectEqualStrings("Digest", response.response.trailers[0].name);
-    try std.testing.expectEqualStrings("sha-256=response", response.response.trailers[0].value);
+    try std.testing.expectEqualStrings("sha-256=response, sha-256=second", response.response.trailers[0].value);
 }
 
 test "HTTP/1 runtime honors explicit transfer-encoding chunked writes" {
