@@ -217,7 +217,10 @@ pub const Client = struct {
         while (!saw_server_settings or !saw_settings_ack) {
             var frame = try readFrame(allocator, io, stream, limits);
             defer frame.deinit(allocator);
-            if (frame.frame.header.frame_type != .settings) return error.UnexpectedFrame;
+            if (frame.frame.header.frame_type != .settings) {
+                if (try connection.handleConnectionOrGoAwayFrame(frame.frame)) continue;
+                return error.UnexpectedFrame;
+            }
             if ((frame.frame.header.flags & flag_ack) != 0) {
                 saw_settings_ack = true;
                 connection.awaiting_settings_ack = false;
@@ -5282,6 +5285,67 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     }));
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(1)).value);
+}
+
+test "HTTP/2 client connect handles interleaved PING before settings" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            const stream = try shared.listener.accept(shared.io);
+            defer stream.close(shared.io);
+
+            var preface: [http2.connection_preface.len]u8 = undefined;
+            try readExact(shared.io, stream, &preface);
+            try http2.validateClientPreface(&preface);
+            var client_settings = try readFrame(shared.allocator, shared.io, stream, .{ .max_frame_payload = 4096 });
+            defer client_settings.deinit(shared.allocator);
+            try std.testing.expectEqual(http2.FrameType.settings, client_settings.frame.header.frame_type);
+
+            const ping_payload = [_]u8{ 7, 0, 7, 0, 7, 0, 7, 0 };
+            try writeFrame(shared.allocator, shared.io, stream, .ping, 0, 0, &ping_payload);
+            try writeInitialSettings(shared.allocator, shared.io, stream, .{ .max_frame_payload = 4096 }, .server);
+            try writeFrame(shared.allocator, shared.io, stream, .settings, flag_ack, 0, &.{});
+
+            while (true) {
+                var frame = try readFrame(shared.allocator, shared.io, stream, .{ .max_frame_payload = 4096 });
+                defer frame.deinit(shared.allocator);
+                if (frame.frame.header.frame_type == .settings and (frame.frame.header.flags & flag_ack) != 0) continue;
+                try std.testing.expectEqual(http2.FrameType.ping, frame.frame.header.frame_type);
+                try std.testing.expect((frame.frame.header.flags & flag_ack) != 0);
+                try std.testing.expectEqualSlices(u8, &ping_payload, frame.frame.payload);
+                break;
+            }
+        }
+    };
+
+    var shared = Shared{ .allocator = allocator, .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, listener.socket.address, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    try std.testing.expect(!client.awaiting_settings_ack);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 client connect clears initial settings ACK wait" {
