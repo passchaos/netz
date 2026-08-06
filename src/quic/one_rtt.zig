@@ -98,6 +98,7 @@ pub const ConnectionConfig = struct {
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
     max_stored_new_tokens: usize = 4,
     enable_spin_bit: bool = false,
+    active_connection_id_limit: usize = quic.default_active_connection_id_limit,
 };
 
 const StreamFlowEntry = struct {
@@ -597,10 +598,11 @@ pub const Connection = struct {
                 .streams_blocked_uni => |blocked| try self.receiveStreamsBlocked(blocked.maximum_streams, .unidirectional),
                 .new_connection_id => |new_connection_id| {
                     self.peer_connection_ids.retirePriorTo(new_connection_id.retire_prior_to);
-                    try self.peer_connection_ids.add(
+                    try self.peer_connection_ids.addWithLimit(
                         new_connection_id.sequence_number,
                         new_connection_id.connection_id,
                         new_connection_id.stateless_reset_token,
+                        self.config.active_connection_id_limit,
                     );
                 },
                 .retire_connection_id => |retire| try self.local_connection_ids.retire(retire.sequence_number),
@@ -1826,6 +1828,72 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     var retire_packet = try server.receiveRoutedDatagram(routed);
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
+}
+
+test "QUIC 1-RTT rejects invalid NEW_CONNECTION_ID lifecycle updates" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const server_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe2} ** quic.protection.secret_len);
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .active_connection_id_limit = 2,
+    });
+    defer client.deinit();
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .new_connection_id = .{
+            .sequence_number = 1,
+            .retire_prior_to = 0,
+            .connection_id = "cid-1",
+            .stateless_reset_token = [_]u8{0x11} ** 16,
+        } }},
+    });
+    var first = try client.receivePacket();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 1,
+        .frames = &[_]quic.Frame{.{ .new_connection_id = .{
+            .sequence_number = 1,
+            .retire_prior_to = 0,
+            .connection_id = "cid-1",
+            .stateless_reset_token = [_]u8{0x22} ** 16,
+        } }},
+    });
+    try std.testing.expectError(error.DuplicateResetToken, client.receivePacket());
+    try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 2,
+        .frames = &[_]quic.Frame{.{ .new_connection_id = .{
+            .sequence_number = 2,
+            .retire_prior_to = 0,
+            .connection_id = "cid-2",
+            .stateless_reset_token = [_]u8{0x33} ** 16,
+        } }},
+    });
+    try std.testing.expectError(error.ActiveConnectionIdLimit, client.receivePacket());
+    try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
 }
 
 test "QUIC 1-RTT handles server-only NEW_TOKEN and HANDSHAKE_DONE roles" {

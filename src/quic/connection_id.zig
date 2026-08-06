@@ -6,6 +6,9 @@ pub const max_connection_id_len: usize = 20;
 
 pub const Error = error{
     InvalidConnectionId,
+    DuplicateConnectionId,
+    DuplicateResetToken,
+    ActiveConnectionIdLimit,
     PoolFull,
     UnknownConnectionId,
 } || std.mem.Allocator.Error;
@@ -27,14 +30,23 @@ pub const PeerPool = struct {
     entries: [max_pool_size]Entry = .{Entry{}} ** max_pool_size,
 
     pub fn add(self: *PeerPool, sequence_number: u64, connection_id: []const u8, token: [16]u8) Error!void {
+        try self.addWithLimit(sequence_number, connection_id, token, max_pool_size);
+    }
+
+    pub fn addWithLimit(self: *PeerPool, sequence_number: u64, connection_id: []const u8, token: [16]u8, active_limit: usize) Error!void {
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidConnectionId;
         if (self.find(sequence_number)) |entry| {
+            if (!std.mem.eql(u8, entry.slice(), connection_id)) return error.DuplicateConnectionId;
+            if (!std.mem.eql(u8, &entry.stateless_reset_token, &token)) return error.DuplicateResetToken;
             entry.connection_id_len = @intCast(connection_id.len);
             @memcpy(entry.connection_id[0..connection_id.len], connection_id);
             entry.stateless_reset_token = token;
             entry.occupied = true;
             return;
         }
+        if (self.findByConnectionId(connection_id) != null) return error.DuplicateConnectionId;
+        if (self.findByResetToken(token) != null) return error.DuplicateResetToken;
+        if (self.count() >= active_limit) return error.ActiveConnectionIdLimit;
         for (&self.entries) |*entry| {
             if (!entry.occupied) {
                 entry.* = .{ .sequence_number = sequence_number, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .occupied = true };
@@ -85,6 +97,20 @@ pub const PeerPool = struct {
     fn find(self: *PeerPool, sequence_number: u64) ?*Entry {
         for (&self.entries) |*entry| {
             if (entry.occupied and entry.sequence_number == sequence_number) return entry;
+        }
+        return null;
+    }
+
+    fn findByConnectionId(self: *PeerPool, connection_id: []const u8) ?*Entry {
+        for (&self.entries) |*entry| {
+            if (entry.occupied and std.mem.eql(u8, entry.slice(), connection_id)) return entry;
+        }
+        return null;
+    }
+
+    fn findByResetToken(self: *PeerPool, token: [16]u8) ?*Entry {
+        for (&self.entries) |*entry| {
+            if (entry.occupied and std.mem.eql(u8, &entry.stateless_reset_token, &token)) return entry;
         }
         return null;
     }
@@ -164,6 +190,22 @@ test "QUIC peer CID pool detects stateless reset token" {
     try quic.stateless_reset.encode(&datagram, allocator, &.{ 0x40, 9, 8, 7, 6 }, token);
     try std.testing.expectEqual(@as(?u64, 7), pool.detectStatelessReset(datagram.items));
     try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(&.{ 0x40, 1, 2 }));
+}
+
+test "QUIC peer CID pool validates duplicate IDs tokens and active limit" {
+    var pool = PeerPool{};
+    const token_a = [_]u8{0xaa} ** 16;
+    const token_b = [_]u8{0xbb} ** 16;
+    try pool.addWithLimit(0, "cid-a", token_a, 2);
+
+    // Repeated delivery of the same NEW_CONNECTION_ID is idempotent.
+    try pool.addWithLimit(0, "cid-a", token_a, 2);
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
+
+    try std.testing.expectError(error.DuplicateConnectionId, pool.addWithLimit(1, "cid-a", token_b, 2));
+    try std.testing.expectError(error.DuplicateResetToken, pool.addWithLimit(1, "cid-b", token_a, 2));
+    try pool.addWithLimit(1, "cid-b", token_b, 2);
+    try std.testing.expectError(error.ActiveConnectionIdLimit, pool.addWithLimit(2, "cid-c", [_]u8{0xcc} ** 16, 2));
 }
 
 test "QUIC local CID pool issues and retires NEW_CONNECTION_ID frames" {

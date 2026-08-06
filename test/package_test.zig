@@ -140,7 +140,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_receive_max_streams_uni"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_spin_bit"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "active_connection_id_limit"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
+    try std.testing.expect(@hasDecl(netz.quic.connection_id.PeerPool, "addWithLimit"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLenForPayload"));

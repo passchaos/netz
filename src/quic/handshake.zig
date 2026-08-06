@@ -104,6 +104,7 @@ pub const OneRttConfig = struct {
                 self.max_datagram_size,
                 std.math.cast(usize, peer_transport_parameters.max_udp_payload_size) orelse std.math.maxInt(usize),
             ),
+            .active_connection_id_limit = std.math.cast(usize, local_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
         };
     }
 };
