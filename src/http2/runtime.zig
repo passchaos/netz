@@ -284,6 +284,7 @@ pub const Connection = struct {
     recv_connection_window: FlowWindow = .{},
     send_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
+    active_local_streams: std.ArrayList(u31) = .empty,
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
     peer_initial_stream_window: i64 = default_flow_window,
@@ -297,6 +298,7 @@ pub const Connection = struct {
     pub fn close(self: *Connection) void {
         self.send_stream_windows.deinit(self.allocator);
         self.recv_stream_windows.deinit(self.allocator);
+        self.active_local_streams.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.stream.close(self.io);
@@ -305,11 +307,6 @@ pub const Connection = struct {
 
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
         if (self.role != .client) return error.UnexpectedFrame;
-        const stream_id = self.next_client_stream_id;
-        if (self.peer_goaway_last_stream_id) |last| {
-            if (stream_id > last) return error.ConnectionGoAway;
-        }
-        self.next_client_stream_id += 2;
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
@@ -332,6 +329,8 @@ pub const Connection = struct {
         try validateHeaderBlock(fields.items, .request);
         try validateHeaderBlock(options.trailers, .request_trailers);
 
+        const stream_id = try self.reserveNextClientStreamId();
+        errdefer self.releaseLocalStream(stream_id);
         try self.writeHeaders(stream_id, fields.items, options.body.len == 0 and options.trailers.len == 0);
         if (options.body.len != 0) try self.writeData(stream_id, options.body, options.trailers.len == 0);
         if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
@@ -345,12 +344,6 @@ pub const Connection = struct {
         if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
         if (options.body.len != 0 or options.trailers.len != 0) return error.InvalidContentLength;
 
-        const stream_id = self.next_client_stream_id;
-        if (self.peer_goaway_last_stream_id) |last| {
-            if (stream_id > last) return error.ConnectionGoAway;
-        }
-        self.next_client_stream_id += 2;
-
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
         try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
@@ -361,6 +354,8 @@ pub const Connection = struct {
         for (options.headers) |header| try fields.append(self.allocator, header);
         try validateHeaderBlock(fields.items, .request);
 
+        const stream_id = try self.reserveNextClientStreamId();
+        errdefer self.releaseLocalStream(stream_id);
         // Extended CONNECT establishes a bidirectional byte tunnel.  The
         // opening HEADERS therefore deliberately keeps the stream open instead
         // of using END_STREAM like a request with no body would.
@@ -374,12 +369,6 @@ pub const Connection = struct {
         if (options.authority == null) return error.MissingPseudoHeader;
         if (options.body.len != 0 or options.trailers.len != 0) return error.InvalidContentLength;
 
-        const stream_id = self.next_client_stream_id;
-        if (self.peer_goaway_last_stream_id) |last| {
-            if (stream_id > last) return error.ConnectionGoAway;
-        }
-        self.next_client_stream_id += 2;
-
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
         try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
@@ -387,6 +376,8 @@ pub const Connection = struct {
         for (options.headers) |header| try fields.append(self.allocator, header);
         try validateHeaderBlock(fields.items, .request);
 
+        const stream_id = try self.reserveNextClientStreamId();
+        errdefer self.releaseLocalStream(stream_id);
         // Traditional HTTP/2 CONNECT also establishes a tunnel on the stream.
         // Keep the request side open so DATA frames can flow immediately after
         // the peer accepts with a 2xx response.
@@ -648,6 +639,28 @@ pub const Connection = struct {
         }
     }
 
+    fn reserveNextClientStreamId(self: *Connection) Error!u31 {
+        const stream_id = self.next_client_stream_id;
+        if (self.peer_goaway_last_stream_id) |last| {
+            if (stream_id > last) return error.ConnectionGoAway;
+        }
+        if (self.peer_max_concurrent_streams) |max_streams| {
+            if (self.active_local_streams.items.len >= max_streams) return error.FlowControlBlocked;
+        }
+        try self.active_local_streams.append(self.allocator, stream_id);
+        self.next_client_stream_id += 2;
+        return stream_id;
+    }
+
+    fn releaseLocalStream(self: *Connection, stream_id: u31) void {
+        for (self.active_local_streams.items, 0..) |active, index| {
+            if (active == stream_id) {
+                _ = self.active_local_streams.swapRemove(index);
+                return;
+            }
+        }
+    }
+
     fn receiveDataPayload(self: *Connection, stream_id: u31, frame: http2.Frame) Error!http2.DataPayload {
         const data = try http2.DataPayload.parse(frame);
         // HTTP/2 flow control charges the whole DATA frame payload, not just
@@ -693,6 +706,7 @@ pub const Connection = struct {
     }
 
     fn readResponse(self: *Connection, stream_id: u31, request_method: []const u8, extended_connect: bool) Error!OwnedResponse {
+        defer self.releaseLocalStream(stream_id);
         var headers: ?[]http2.Hpack.HeaderField = null;
         errdefer if (headers) |h| freeHeaders(self.allocator, h);
         var trailers: []http2.Hpack.HeaderField = &.{};
@@ -1201,13 +1215,18 @@ pub const Tunnel = struct {
                 .data => {
                     const payload = try self.connection.receiveDataPayload(self.stream_id, frame.frame);
                     try self.connection.maybeReleaseReceivedCapacity(self.stream_id);
+                    const end_stream = (frame.frame.header.flags & flag_end_stream) != 0;
+                    if (end_stream) self.connection.releaseLocalStream(self.stream_id);
                     return .{
                         .frame = frame,
                         .data = payload.data,
-                        .end_stream = (frame.frame.header.flags & flag_end_stream) != 0,
+                        .end_stream = end_stream,
                     };
                 },
-                .rst_stream => return error.StreamReset,
+                .rst_stream => {
+                    self.connection.releaseLocalStream(self.stream_id);
+                    return error.StreamReset;
+                },
                 .headers => return error.UnexpectedFrame,
                 else => {
                     frame.deinit(self.connection.allocator);
@@ -4190,6 +4209,34 @@ test "HTTP/2 local initial window config seeds receive stream windows" {
     }
 
     try std.testing.expectEqual(@as(i64, 1024), (try connection.recvStreamWindow(1)).value);
+}
+
+test "HTTP/2 peer max concurrent streams limits locally opened streams" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+        .peer_max_concurrent_streams = 1,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    const first = try connection.reserveNextClientStreamId();
+    try std.testing.expectEqual(@as(u31, 1), first);
+    try std.testing.expectEqual(@as(usize, 1), connection.active_local_streams.items.len);
+    try std.testing.expectError(error.FlowControlBlocked, connection.reserveNextClientStreamId());
+    try std.testing.expectEqual(@as(u31, 3), connection.next_client_stream_id);
+
+    connection.releaseLocalStream(first);
+    const second = try connection.reserveNextClientStreamId();
+    try std.testing.expectEqual(@as(u31, 3), second);
+    try std.testing.expectEqual(@as(usize, 1), connection.active_local_streams.items.len);
 }
 
 test "HTTP/2 SETTINGS_MAX_FRAME_SIZE controls outbound DATA splitting" {
