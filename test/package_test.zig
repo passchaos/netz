@@ -202,6 +202,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkCloseExpired"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "decodedPeerAckDelayNanos"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ackRttSample"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "updateRttFromAck"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "CloseState"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamResetInfo"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));

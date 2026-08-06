@@ -187,6 +187,7 @@ pub const Connection = struct {
     sent: quic.packet_space.SentPacketTracker,
     recovery: quic.recovery.Queue,
     congestion: quic.congestion.Controller,
+    rtt_stats: quic.rtt.Stats,
     path_validation: quic.path_validation.State,
     peer_connection_ids: quic.connection_id.PeerPool = .{},
     local_connection_ids: quic.connection_id.LocalPool = .{},
@@ -217,6 +218,7 @@ pub const Connection = struct {
             .sent = .init(endpoint.allocator),
             .recovery = .init(endpoint.allocator),
             .congestion = .init(config.max_datagram_size),
+            .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
             .path_validation = .init(endpoint.allocator),
             .send_flow = .init(config.initial_send_max_data),
             .recv_flow = try .init(config.initial_receive_max_data, config.receive_window),
@@ -569,6 +571,12 @@ pub const Connection = struct {
 
     pub fn ackRttSample(self: Connection, ack: quic.AckFrame, now_ns: u64) Error!?quic.packet_space.SentPacketTracker.RttSample {
         return try self.sent.ackRttSample(ack, now_ns, self.config.peer_ack_delay_exponent);
+    }
+
+    pub fn updateRttFromAck(self: *Connection, ack: quic.AckFrame, now_ns: u64) Error!bool {
+        const sample = try self.ackRttSample(ack, now_ns) orelse return false;
+        self.rtt_stats.update(sample.latest_rtt_ns, sample.ack_delay_ns, self.handshake_confirmed);
+        return true;
     }
 
     pub fn effectiveIdleTimeoutMillis(self: Connection) ?u64 {
@@ -2113,6 +2121,45 @@ test "QUIC 1-RTT connection preflights role and path control frames before recei
     try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), server.expected_packet_number);
     try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
+}
+
+test "QUIC 1-RTT connection updates RTT from ACK samples" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xd2} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .peer_ack_delay_exponent = 3,
+        .peer_max_ack_delay_ms = 10,
+    });
+    defer connection.deinit();
+
+    try connection.sent.sentAt(0, true, 1200, .not_ect, 1_000_000);
+    const ack = quic.AckFrame{ .largest_acknowledged = 0, .ack_delay = 5, .first_ack_range = 0 };
+    try std.testing.expect(try connection.updateRttFromAck(ack, 101_000_000));
+    try std.testing.expect(connection.rtt_stats.has_measurement);
+    try std.testing.expectEqual(@as(u64, 100_000_000), connection.rtt_stats.latest_rtt);
+    try std.testing.expectEqual(@as(u64, 10_000_000), connection.rtt_stats.max_ack_delay);
+
+    connection.handshake_confirmed = true;
+    try connection.sent.sentAt(1, true, 1200, .not_ect, 201_000_000);
+    const ack2 = quic.AckFrame{ .largest_acknowledged = 1, .ack_delay = 5, .first_ack_range = 0 };
+    try std.testing.expect(try connection.updateRttFromAck(ack2, 331_000_000));
+    try std.testing.expect(connection.rtt_stats.smoothed_rtt > 100_000_000);
+
+    const missing = quic.AckFrame{ .largest_acknowledged = 99, .ack_delay = 0, .first_ack_range = 0 };
+    try std.testing.expect(!(try connection.updateRttFromAck(missing, 400_000_000)));
 }
 
 test "QUIC 1-RTT connection decodes peer ACK delay" {
