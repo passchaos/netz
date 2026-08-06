@@ -2111,6 +2111,23 @@ pub const sctp = struct {
         _,
     };
 
+    pub const ReconfigParameterType = enum(u16) {
+        outgoing_ssn_reset_request = 0x000d,
+        outgoing_ssn_reset_response = 0x0010,
+        _,
+    };
+
+    pub const ReconfigResult = enum(u32) {
+        success_nothing_to_do = 0,
+        success_performed = 1,
+        denied = 2,
+        error_wrong_ssn = 3,
+        error_request_already_in_progress = 4,
+        error_bad_sequence_number = 5,
+        in_progress = 6,
+        _,
+    };
+
     pub const InitParameter = struct {
         param_type: InitParameterType,
         value: []const u8,
@@ -2159,6 +2176,70 @@ pub const sctp = struct {
     pub const GapAckBlock = struct {
         start: u16,
         end: u16,
+    };
+
+    pub const OutgoingSsnResetRequest = struct {
+        request_sequence_number: u32,
+        response_sequence_number: u32,
+        sender_last_assigned_tsn: u32,
+        stream_numbers: []const u16 = &.{},
+    };
+
+    pub const OutgoingSsnResetResponse = struct {
+        response_sequence_number: u32,
+        result: ReconfigResult,
+    };
+
+    pub const ReconfigParameter = union(enum) {
+        outgoing_ssn_reset_request: OutgoingSsnResetRequest,
+        outgoing_ssn_reset_response: OutgoingSsnResetResponse,
+        unknown: struct { param_type: ReconfigParameterType, value: []const u8 },
+    };
+
+    pub const ReconfigChunk = struct {
+        parameters: []ReconfigParameter,
+
+        pub fn deinit(self: *ReconfigChunk, allocator: std.mem.Allocator) void {
+            for (self.parameters) |parameter| {
+                switch (parameter) {
+                    .outgoing_ssn_reset_request => |request| {
+                        if (!isConstEmptyU16(request.stream_numbers)) allocator.free(@constCast(request.stream_numbers));
+                    },
+                    else => {},
+                }
+            }
+            allocator.free(self.parameters);
+            self.* = undefined;
+        }
+
+        pub fn parse(allocator: std.mem.Allocator, chunk: Chunk) Error!ReconfigChunk {
+            if (chunk.chunk_type != .reconfig or chunk.flags != 0) return error.InvalidSctpPacket;
+            var cursor = wire.Cursor.init(chunk.value);
+            var params: std.ArrayList(ReconfigParameter) = .empty;
+            errdefer {
+                for (params.items) |*param| {
+                    if (param.* == .outgoing_ssn_reset_request and !isConstEmptyU16(param.outgoing_ssn_reset_request.stream_numbers)) {
+                        allocator.free(@constCast(param.outgoing_ssn_reset_request.stream_numbers));
+                    }
+                }
+                params.deinit(allocator);
+            }
+            while (!cursor.eof()) {
+                if (cursor.remaining() < 4) return error.InvalidSctpPacket;
+                const param_type: ReconfigParameterType = @enumFromInt(try cursor.readInt(u16, .big));
+                const len = try cursor.readInt(u16, .big);
+                if (len < 4 or cursor.remaining() < len - 4) return error.InvalidSctpPacket;
+                const value = try cursor.readSlice(len - 4);
+                try params.append(allocator, switch (param_type) {
+                    .outgoing_ssn_reset_request => .{ .outgoing_ssn_reset_request = try parseOutgoingSsnResetRequest(allocator, value) },
+                    .outgoing_ssn_reset_response => .{ .outgoing_ssn_reset_response = try parseOutgoingSsnResetResponse(value) },
+                    else => .{ .unknown = .{ .param_type = param_type, .value = value } },
+                });
+                try cursor.skip((4 - (len % 4)) % 4);
+            }
+            if (params.items.len == 0) return error.InvalidSctpPacket;
+            return .{ .parameters = try params.toOwnedSlice(allocator) };
+        }
     };
 
     pub const SackChunk = struct {
@@ -2465,6 +2546,29 @@ pub const sctp = struct {
         if (chunk.chunk_type != .cookie_ack or chunk.flags != 0 or chunk.value.len != 0) return error.InvalidSctpPacket;
     }
 
+    pub fn writeReconfigPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, parameters: []const ReconfigParameter) Error!void {
+        if (parameters.len == 0) return error.InvalidSctpPacket;
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeReconfigChunk(list, allocator, parameters);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeReconfigChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameters: []const ReconfigParameter) Error!void {
+        if (parameters.len == 0) return error.InvalidSctpPacket;
+        var value: std.ArrayList(u8) = .empty;
+        defer value.deinit(allocator);
+        for (parameters) |parameter| try writeReconfigParameter(&value, allocator, parameter);
+        const chunk_len = 4 + value.items.len;
+        if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try list.append(allocator, @intFromEnum(ChunkType.reconfig));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        try list.appendSlice(allocator, value.items);
+        try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
+    }
+
     pub fn writeSackPacket(
         list: *std.ArrayList(u8),
         allocator: std.mem.Allocator,
@@ -2579,6 +2683,65 @@ pub const sctp = struct {
         try wire.appendInt(list, allocator, u16, @intCast(len), .big);
         try list.appendSlice(allocator, parameter.value);
         try list.appendNTimes(allocator, 0, align4(len) - len);
+    }
+
+    fn parseOutgoingSsnResetRequest(allocator: std.mem.Allocator, value: []const u8) Error!OutgoingSsnResetRequest {
+        if (value.len < 12 or (value.len % 2) != 0) return error.InvalidSctpPacket;
+        var cursor = wire.Cursor.init(value);
+        const request_sequence_number = try cursor.readInt(u32, .big);
+        const response_sequence_number = try cursor.readInt(u32, .big);
+        const sender_last_assigned_tsn = try cursor.readInt(u32, .big);
+        const count = cursor.remaining() / 2;
+        const streams = try allocator.alloc(u16, count);
+        errdefer allocator.free(streams);
+        for (streams) |*stream| stream.* = try cursor.readInt(u16, .big);
+        return .{
+            .request_sequence_number = request_sequence_number,
+            .response_sequence_number = response_sequence_number,
+            .sender_last_assigned_tsn = sender_last_assigned_tsn,
+            .stream_numbers = streams,
+        };
+    }
+
+    fn parseOutgoingSsnResetResponse(value: []const u8) Error!OutgoingSsnResetResponse {
+        if (value.len != 8) return error.InvalidSctpPacket;
+        return .{
+            .response_sequence_number = std.mem.readInt(u32, value[0..4], .big),
+            .result = @enumFromInt(std.mem.readInt(u32, value[4..8], .big)),
+        };
+    }
+
+    fn writeReconfigParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameter: ReconfigParameter) Error!void {
+        var value: std.ArrayList(u8) = .empty;
+        defer value.deinit(allocator);
+        const param_type: ReconfigParameterType = switch (parameter) {
+            .outgoing_ssn_reset_request => |request| blk: {
+                try wire.appendInt(&value, allocator, u32, request.request_sequence_number, .big);
+                try wire.appendInt(&value, allocator, u32, request.response_sequence_number, .big);
+                try wire.appendInt(&value, allocator, u32, request.sender_last_assigned_tsn, .big);
+                for (request.stream_numbers) |stream| try wire.appendInt(&value, allocator, u16, stream, .big);
+                break :blk .outgoing_ssn_reset_request;
+            },
+            .outgoing_ssn_reset_response => |response| blk: {
+                try wire.appendInt(&value, allocator, u32, response.response_sequence_number, .big);
+                try wire.appendInt(&value, allocator, u32, @intFromEnum(response.result), .big);
+                break :blk .outgoing_ssn_reset_response;
+            },
+            .unknown => |unknown| blk: {
+                try value.appendSlice(allocator, unknown.value);
+                break :blk unknown.param_type;
+            },
+        };
+        const len = 4 + value.items.len;
+        if (len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try wire.appendInt(list, allocator, u16, @intFromEnum(param_type), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(len), .big);
+        try list.appendSlice(allocator, value.items);
+        try list.appendNTimes(allocator, 0, align4(len) - len);
+    }
+
+    fn isConstEmptyU16(value: []const u16) bool {
+        return value.ptr == (&[_]u16{}).ptr and value.len == 0;
     }
 
     pub fn dataChannelPayloadProtocol(is_string: bool, len: usize) PayloadProtocolIdentifier {
@@ -3173,6 +3336,50 @@ test "RTCP NACK tracker detects RTP gaps and wraparound" {
     wrap.observe(0xffff);
     wrap.observe(0);
     try std.testing.expectEqual(@as(usize, 0), wrap.pendingCount());
+}
+
+test "SCTP RE-CONFIG stream reset request and response" {
+    const allocator = std.testing.allocator;
+    const streams = [_]u16{ 2, 4, 6 };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try sctp.writeReconfigPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, &.{
+        .{ .outgoing_ssn_reset_request = .{
+            .request_sequence_number = 10,
+            .response_sequence_number = 9,
+            .sender_last_assigned_tsn = 1234,
+            .stream_numbers = &streams,
+        } },
+        .{ .outgoing_ssn_reset_response = .{
+            .response_sequence_number = 10,
+            .result = .success_performed,
+        } },
+    });
+
+    try std.testing.expect(try sctp.validChecksum(encoded.items));
+    var parsed = try sctp.parsePacket(allocator, encoded.items, true);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(sctp.ChunkType.reconfig, parsed.chunks[0].chunk_type);
+    var reconfig = try sctp.ReconfigChunk.parse(allocator, parsed.chunks[0]);
+    defer reconfig.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), reconfig.parameters.len);
+    const request = reconfig.parameters[0].outgoing_ssn_reset_request;
+    try std.testing.expectEqual(@as(u32, 10), request.request_sequence_number);
+    try std.testing.expectEqual(@as(u32, 9), request.response_sequence_number);
+    try std.testing.expectEqual(@as(u32, 1234), request.sender_last_assigned_tsn);
+    try std.testing.expectEqualSlices(u16, &streams, request.stream_numbers);
+    const response = reconfig.parameters[1].outgoing_ssn_reset_response;
+    try std.testing.expectEqual(@as(u32, 10), response.response_sequence_number);
+    try std.testing.expectEqual(sctp.ReconfigResult.success_performed, response.result);
+
+    var invalid: std.ArrayList(u8) = .empty;
+    defer invalid.deinit(allocator);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeReconfigChunk(&invalid, allocator, &.{}));
 }
 
 test "SCTP INIT cookie echo and cookie ack packets" {
