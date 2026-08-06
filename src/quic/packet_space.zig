@@ -181,10 +181,14 @@ pub const SentPacketTracker = struct {
     pub const AckResult = struct {
         packets: usize = 0,
         bytes: usize = 0,
+        ect0_packets: usize = 0,
+        ect1_packets: usize = 0,
 
         fn add(self: *AckResult, other: AckResult) void {
             self.packets += other.packets;
             self.bytes += other.bytes;
+            self.ect0_packets += other.ect0_packets;
+            self.ect1_packets += other.ect1_packets;
         }
     };
 
@@ -209,7 +213,15 @@ pub const SentPacketTracker = struct {
             start = end - range.ack_range_length;
             acked.add(self.markRange(start, end));
         }
-        if (ack.ecn_counts) |ecn_counts| self.latest_ecn_counts = ecn_counts;
+        if (ack.ecn_counts) |ecn_counts| {
+            self.latest_ecn_counts = ecn_counts;
+        } else if (acked.ect0_packets != 0 or acked.ect1_packets != 0) {
+            // RFC 9000 ECN validation requires ECN-capable packets to be
+            // acknowledged with ACK_ECN.  A plain ACK covering ECT-marked
+            // packets disables ECN for the packet number space; later ACK_ECN
+            // counters are rejected until a new tracker/space is used.
+            self.ecn_validation_failed = true;
+        }
         return acked;
     }
 
@@ -279,6 +291,11 @@ pub const SentPacketTracker = struct {
                 packet.acknowledged = true;
                 result.packets += 1;
                 if (packet.ack_eliciting and !packet.lost) result.bytes += packet.bytes;
+                switch (packet.ecn) {
+                    .not_ect => {},
+                    .ect0 => result.ect0_packets += 1,
+                    .ect1 => result.ect1_packets += 1,
+                }
             }
         }
         return result;
@@ -416,6 +433,31 @@ test "QUIC sent packet tracker validates ACK_ECN counters" {
     try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(excessive_ecn));
     try std.testing.expect(!sent.packets.items[1].acknowledged);
     try std.testing.expectEqual(@as(u64, 0), sent.latest_ecn_counts.ect1_count);
+}
+
+test "QUIC sent packet tracker disables ECN validation on plain ACK for ECT packet" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+    try sent.sentWithEcn(0, true, 1200, .ect0);
+
+    const plain_ack = quic.AckFrame{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    const result = try sent.applyAckDetailed(plain_ack);
+    try std.testing.expectEqual(@as(usize, 1), result.ect0_packets);
+    try std.testing.expect(sent.ecn_validation_failed);
+
+    try sent.sentWithEcn(1, true, 1200, .ect0);
+    const later_ecn = quic.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ecn_counts = .{ .ect0_count = 2, .ect1_count = 0, .ecn_ce_count = 0 },
+    };
+    try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(later_ecn));
 }
 
 test "QUIC sent packet tracker detects packet-threshold loss" {

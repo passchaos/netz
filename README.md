@@ -60,7 +60,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   1-RTT key-update derivation and key-phase state with ACK gating and retained
   previous receive/send generations for reordered short-header packets,
   NewReno-style congestion-window and bytes-in-flight send admission wired into
-  1-RTT sending and ACK/ACK_ECN processing with sent ECN counter validation, RFC 9002-style RTT/PTO estimation with
+  1-RTT sending and ACK/ACK_ECN processing with sent ECN counter validation and plain-ACK ECN fallback disablement, RFC 9002-style RTT/PTO estimation with
   ACK-delay adjustment,
   a 1-RTT recovery queue for PTO and packet-threshold retransmission of
   unacknowledged ack-eliciting frame payloads,
