@@ -459,6 +459,7 @@ pub const Connection = struct {
         if (self.role != .server) return error.UnexpectedFrame;
         if (status < 300) return error.InvalidStatus;
         try self.writeExtendedConnectResponse(stream_id, status, response_headers, true);
+        self.releasePeerStream(stream_id);
     }
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
@@ -541,7 +542,6 @@ pub const Connection = struct {
 
     pub fn writeResponse(self: *Connection, stream_id: u31, options: ResponseOptions) Error!void {
         if (self.role != .server) return error.UnexpectedFrame;
-        defer self.releasePeerStream(stream_id);
         var status_buf: [3]u8 = undefined;
         if (options.status < 100 or options.status > 999) return error.InvalidStatus;
         try validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
@@ -556,6 +556,7 @@ pub const Connection = struct {
         try self.writeHeaders(stream_id, fields.items, options.body.len == 0 and options.trailers.len == 0);
         if (options.body.len != 0) try self.writeData(stream_id, options.body, options.trailers.len == 0);
         if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
+        self.releasePeerStream(stream_id);
     }
 
     pub fn ping(self: *Connection, data: [8]u8) Error![8]u8 {
@@ -4357,6 +4358,21 @@ test "HTTP/2 local max concurrent streams limits peer opened streams" {
     connection.releasePeerStream(1);
     try connection.reservePeerStream(3);
     try std.testing.expectEqual(@as(usize, 1), connection.active_peer_streams.items.len);
+
+    try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(3, .{
+        .status = 204,
+        .body = "must not send",
+    }));
+    try std.testing.expectEqual(@as(usize, 1), connection.active_peer_streams.items.len);
+    try std.testing.expectError(error.FlowControlViolation, connection.reservePeerStream(5));
+
+    connection.releasePeerStream(3);
+    try std.testing.expectEqual(@as(usize, 0), connection.active_peer_streams.items.len);
+    try connection.reservePeerStream(5);
+    try std.testing.expectError(error.InvalidStatus, connection.rejectExtendedConnect(5, 200, &.{}));
+    try std.testing.expectEqual(@as(usize, 1), connection.active_peer_streams.items.len);
+    connection.releasePeerStream(5);
+    try std.testing.expectEqual(@as(usize, 0), connection.active_peer_streams.items.len);
 }
 
 test "HTTP/2 SETTINGS_MAX_FRAME_SIZE controls outbound DATA splitting" {
