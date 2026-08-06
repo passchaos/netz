@@ -2978,6 +2978,7 @@ pub const sctp = struct {
             if (len < 4 or bytes.len - pos < len) return error.InvalidSctpPacket;
             const padded_len = align4(len);
             if (bytes.len - pos < padded_len) return error.InvalidSctpPacket;
+            try validateZeroPadding(bytes[pos + len .. pos + padded_len]);
             try chunks.append(allocator, .{
                 .chunk_type = chunk_type,
                 .flags = flags,
@@ -3418,6 +3419,12 @@ pub const sctp = struct {
 
     fn isConstEmptyU16(value: []const u16) bool {
         return value.ptr == (&[_]u16{}).ptr and value.len == 0;
+    }
+
+    fn validateZeroPadding(bytes: []const u8) Error!void {
+        for (bytes) |byte| {
+            if (byte != 0) return error.InvalidSctpPacket;
+        }
     }
 
     pub fn dataChannelPayloadProtocol(is_string: bool, len: usize) PayloadProtocolIdentifier {
@@ -4517,6 +4524,25 @@ test "SCTP SACK packet roundtrip" {
     try std.testing.expectEqual(@as(u16, 2), sack.gap_ack_blocks[0].start);
     try std.testing.expectEqual(@as(u16, 4), sack.gap_ack_blocks[0].end);
     try std.testing.expectEqualSlices(u32, &duplicates, sack.duplicate_tsns);
+
+    var padded: std.ArrayList(u8) = .empty;
+    defer padded.deinit(allocator);
+    try sctp.writeHeartbeatPacket(&padded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x11223344,
+    }, false, &.{ 0xaa, 0xbb, 0xcc });
+    try std.testing.expectEqual(@as(u8, 0), padded.items[padded.items.len - 1]);
+    var parsed_padded = try sctp.parsePacket(allocator, padded.items, true);
+    defer parsed_padded.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), parsed_padded.chunks.len);
+    try std.testing.expectEqual(@as(usize, 3), parsed_padded.chunks[0].value.len);
+
+    padded.items[padded.items.len - 1] = 0xff;
+    std.mem.writeInt(u32, padded.items[8..12], 0, .little);
+    const repaired_checksum = try sctp.checksum(padded.items);
+    std.mem.writeInt(u32, padded.items[8..12], repaired_checksum, .little);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, padded.items, true));
 
     var bad_gaps = [_]sctp.GapAckBlock{.{ .start = 3, .end = 2 }};
     var invalid: std.ArrayList(u8) = .empty;
