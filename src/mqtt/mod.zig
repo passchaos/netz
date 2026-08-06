@@ -103,11 +103,22 @@ pub fn decodeRemainingLength(bytes: []const u8) Error!struct { value: usize, len
     var value: usize = 0;
     for (bytes, 0..) |byte, i| {
         value += @as(usize, byte & 127) * multiplier;
-        if ((byte & 128) == 0) return .{ .value = value, .len = i + 1 };
+        if ((byte & 128) == 0) {
+            const len = i + 1;
+            if (remainingLengthEncodedLen(value) != len) return error.MalformedRemainingLength;
+            return .{ .value = value, .len = len };
+        }
         multiplier *= 128;
         if (multiplier > 128 * 128 * 128) return error.MalformedRemainingLength;
     }
     return error.BufferTooShort;
+}
+
+fn remainingLengthEncodedLen(value: usize) usize {
+    if (value < 128) return 1;
+    if (value < 128 * 128) return 2;
+    if (value < 128 * 128 * 128) return 3;
+    return 4;
 }
 
 pub fn writeUtf8(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
@@ -1492,7 +1503,10 @@ test "MQTT remaining length roundtrip" {
         try encodeRemainingLength(&encoded, allocator, value);
         const decoded = try decodeRemainingLength(encoded.items);
         try std.testing.expectEqual(value, decoded.value);
+        try std.testing.expectEqual(remainingLengthEncodedLen(value), decoded.len);
     }
+    try std.testing.expectError(error.MalformedRemainingLength, decodeRemainingLength(&.{ 0x80, 0x00 }));
+    try std.testing.expectError(error.MalformedRemainingLength, decodeRemainingLength(&.{ 0xff, 0x00 }));
 }
 
 test "MQTT connect and publish parse" {
