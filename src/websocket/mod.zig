@@ -109,8 +109,8 @@ pub const FrameHeader = struct {
 
 pub const ExtensionNegotiation = struct {
     permessage_deflate: bool = false,
-    client_no_context_takeover: bool = true,
-    server_no_context_takeover: bool = true,
+    client_no_context_takeover: bool = false,
+    server_no_context_takeover: bool = false,
     client_max_window_bits: ?u8 = null,
     server_max_window_bits: ?u8 = null,
 
@@ -127,6 +127,13 @@ pub const ExtensionNegotiation = struct {
         const raw = offer_header orelse return null;
         const offer = try parseOffer(raw);
         if (!offer.permessage_deflate) return null;
+        if (offer.server_max_window_bits) |bits| {
+            // Our compressor currently uses std.compress.flate's default 32 KiB
+            // window.  Like websocket.zig, decline offers that require the
+            // server-to-client direction to use a smaller LZ77 window instead
+            // of negotiating an extension we cannot faithfully satisfy.
+            if (bits != 15) return null;
+        }
 
         var value: std.ArrayList(u8) = .empty;
         errdefer value.deinit(allocator);
@@ -144,6 +151,9 @@ pub const ExtensionNegotiation = struct {
         while (responses.next()) |response| {
             const parsed = (try parseExtensionOffer(wire.trimOws(response))) orelse return error.InvalidExtension;
             if (!parsed.permessage_deflate) return error.InvalidExtension;
+            if (!parsed.client_no_context_takeover or !parsed.server_no_context_takeover) return error.InvalidExtension;
+            if (parsed.client_max_window_bits) |bits| if (bits != 15) return error.InvalidExtension;
+            if (parsed.server_max_window_bits) |bits| if (bits != 15) return error.InvalidExtension;
             return parsed;
         }
         return .{};
@@ -476,6 +486,8 @@ fn parseExtensionOffer(value: []const u8) Error!?ExtensionNegotiation {
             out.client_max_window_bits = bits;
         } else if (parseWindowBitsParam(param, "server_max_window_bits")) |bits| {
             out.server_max_window_bits = bits;
+        } else {
+            return error.InvalidExtension;
         }
     }
     if (out.client_max_window_bits) |bits| if (bits < 8 or bits > 15) return error.InvalidExtension;
@@ -556,6 +568,22 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     try std.testing.expect(std.mem.indexOf(u8, accepted.?, "permessage-deflate") != null);
     const response = try ExtensionNegotiation.validateResponse(accepted.?);
     try std.testing.expect(response.permessage_deflate);
+    try std.testing.expect(response.client_no_context_takeover);
+    try std.testing.expect(response.server_no_context_takeover);
+
+    const unsupported_window = try ExtensionNegotiation.accept(
+        allocator,
+        "permessage-deflate; server_max_window_bits=12",
+        true,
+    );
+    try std.testing.expect(unsupported_window == null);
+    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse("permessage-deflate"));
+    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=12",
+    ));
+    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.parseOffer(
+        "permessage-deflate; server_no_context_takeover; x-unknown=1",
+    ));
 
     const payload = "compress me compress me compress me compress me";
     const compressed = try compressMessage(allocator, payload);
