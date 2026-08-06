@@ -7,6 +7,7 @@ const net = std.Io.net;
 pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error || error{
     MissingStreamFrame,
     UnexpectedStream,
+    GoAwayReceived,
 };
 
 const client_control_stream_id: u62 = 2;
@@ -343,6 +344,7 @@ pub const HandshakeClient = struct {
 
     pub fn request(self: *HandshakeClient, request_options: http3.Request) Error!OwnedHandshakeResponse {
         const stream_id = self.next_stream_id;
+        if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         self.next_stream_id += 4;
 
         try sendConnectionSettings(&self.established.connection, &self.control, self.options, client_control_stream_id);
@@ -492,6 +494,7 @@ pub const ProtectedClient = struct {
 
     pub fn request(self: *ProtectedClient, request_options: http3.Request) Error!OwnedProtectedResponse {
         const stream_id = self.next_stream_id;
+        if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         self.next_stream_id += 4;
 
         try sendProtectedSettings(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.next_packet_number, client_control_stream_id);
@@ -850,8 +853,12 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
     try std.testing.expectEqual(@as(?u64, server_control_stream_id), client.control.peer_control_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
-    try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
-    try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
+
+    client.control.peer_goaway_id = client.next_stream_id;
+    try std.testing.expectError(error.GoAwayReceived, client.request(.{
+        .method = "GET",
+        .path = "/after-goaway",
+    }));
 }
 
 test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" {
