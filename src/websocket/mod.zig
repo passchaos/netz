@@ -674,6 +674,42 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     defer allocator.free(repeated_decoded);
     try std.testing.expectEqualStrings(repeated_payload, repeated_decoded);
 
+    var assembler = MessageAssembler.initLimited(allocator, 1024);
+    defer assembler.deinit();
+    const split = repeated_compressed.len / 2;
+    const compressed_first = Frame{
+        .header = .{
+            .fin = false,
+            .rsv1 = true,
+            .opcode = .text,
+            .masked = false,
+            .payload_len = split,
+            .mask_key = null,
+            .header_len = 2,
+        },
+        .payload = repeated_compressed[0..split],
+        .consumed = 2 + split,
+    };
+    try std.testing.expectEqual(@as(?MessageAssembler.Message, null), try assembler.feed(compressed_first));
+    const compressed_tail = Frame{
+        .header = .{
+            .fin = true,
+            .opcode = .continuation,
+            .masked = false,
+            .payload_len = repeated_compressed.len - split,
+            .mask_key = null,
+            .header_len = 2,
+        },
+        .payload = repeated_compressed[split..],
+        .consumed = 2 + repeated_compressed.len - split,
+    };
+    const compressed_message = (try assembler.feed(compressed_tail)).?;
+    defer allocator.free(compressed_message.payload);
+    try std.testing.expect(compressed_message.compressed);
+    const fragmented_decoded = try decompressMessage(allocator, compressed_message.payload, 1024);
+    defer allocator.free(fragmented_decoded);
+    try std.testing.expectEqualStrings(repeated_payload, fragmented_decoded);
+
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try writeFrameExtended(&encoded, allocator, .text, compressed, .{ .rsv1 = true });
