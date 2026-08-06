@@ -143,7 +143,13 @@ pub fn readUtf8(cursor: *wire.Cursor) Error![]const u8 {
 
 fn validateMqttUtf8String(value: []const u8) Error!void {
     if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
-    if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidUtf8;
+    var view = std.unicode.Utf8View.init(value) catch return error.InvalidUtf8;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |codepoint| {
+        if (codepoint == 0 or (codepoint >= 0x01 and codepoint <= 0x1f) or (codepoint >= 0x7f and codepoint <= 0x9f)) {
+            return error.InvalidUtf8;
+        }
+    }
 }
 
 pub fn writeBinary(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
@@ -1529,6 +1535,11 @@ test "MQTT UTF-8 strings reject NUL" {
 
     var raw = [_]u8{ 0, 5, 'h', 'e', 0, 'l', 'o' };
     var cursor = wire.Cursor.init(&raw);
+    try std.testing.expectError(error.InvalidUtf8, readUtf8(&cursor));
+
+    try std.testing.expectError(error.InvalidUtf8, writeUtf8(&out, std.testing.allocator, "bad\x1ftopic"));
+    var del = [_]u8{ 0, 3, 'b', 0x7f, 'd' };
+    cursor = wire.Cursor.init(&del);
     try std.testing.expectError(error.InvalidUtf8, readUtf8(&cursor));
 }
 
