@@ -304,6 +304,7 @@ pub fn parseProperties(allocator: std.mem.Allocator, cursor: *wire.Cursor) Error
             .user_property,
             => Property{ .utf8_pair = .{ .id = id, .key = try readUtf8(&prop_cursor), .value = try readUtf8(&prop_cursor) } },
         };
+        try validateProperty(prop);
         try props.append(allocator, prop);
     }
     return props.toOwnedSlice(allocator);
@@ -365,6 +366,7 @@ pub fn writeProperties(list: *std.ArrayList(u8), allocator: std.mem.Allocator, p
     defer encoded.deinit(allocator);
 
     for (properties) |property| {
+        try validateProperty(property);
         switch (property) {
             .byte => |p| {
                 try encoded.append(allocator, @intFromEnum(p.id));
@@ -400,6 +402,36 @@ pub fn writeProperties(list: *std.ArrayList(u8), allocator: std.mem.Allocator, p
 
     try encodeRemainingLength(list, allocator, encoded.items.len);
     try list.appendSlice(allocator, encoded.items);
+}
+
+fn validateProperty(property: Property) Error!void {
+    switch (property) {
+        .byte => |p| switch (p.id) {
+            .payload_format_indicator,
+            .request_problem_information,
+            .request_response_information,
+            .retain_available,
+            .wildcard_subscription_available,
+            .subscription_identifier_available,
+            .shared_subscription_available,
+            => if (p.value > 1) return error.InvalidProperty,
+            .maximum_qos => if (p.value > @intFromEnum(QoS.at_least_once)) return error.InvalidProperty,
+            else => {},
+        },
+        .two_byte => |p| switch (p.id) {
+            .receive_maximum, .topic_alias => if (p.value == 0) return error.InvalidProperty,
+            else => {},
+        },
+        .four_byte => |p| switch (p.id) {
+            .maximum_packet_size => if (p.value == 0) return error.InvalidProperty,
+            else => {},
+        },
+        .varint => |p| switch (p.id) {
+            .subscription_identifier => if (p.value == 0) return error.InvalidProperty,
+            else => {},
+        },
+        else => {},
+    }
 }
 
 pub const Connect = struct {
@@ -1253,6 +1285,54 @@ test "MQTT connect and publish parse" {
     defer alias_only.deinit(allocator);
     try std.testing.expectEqualStrings("", alias_only.topic);
     try std.testing.expectEqual(@as(?u16, 2), topicAlias(alias_only.properties));
+}
+
+test "MQTT v5 property values are validated" {
+    const allocator = std.testing.allocator;
+
+    var invalid_write: std.ArrayList(u8) = .empty;
+    defer invalid_write.deinit(allocator);
+    try std.testing.expectError(error.InvalidProperty, writeProperties(&invalid_write, allocator, &.{
+        .{ .two_byte = .{ .id = .receive_maximum, .value = 0 } },
+    }));
+
+    const Cases = struct {
+        fn expectInvalid(bytes: []const u8) !void {
+            var cursor = wire.Cursor.init(bytes);
+            try std.testing.expectError(error.InvalidProperty, parseProperties(std.testing.allocator, &cursor));
+        }
+    };
+
+    var invalid_receive_maximum: std.ArrayList(u8) = .empty;
+    defer invalid_receive_maximum.deinit(allocator);
+    try encodeRemainingLength(&invalid_receive_maximum, allocator, 3);
+    try invalid_receive_maximum.appendSlice(allocator, &.{ @intFromEnum(PropertyId.receive_maximum), 0, 0 });
+    try Cases.expectInvalid(invalid_receive_maximum.items);
+
+    var invalid_max_packet: std.ArrayList(u8) = .empty;
+    defer invalid_max_packet.deinit(allocator);
+    try encodeRemainingLength(&invalid_max_packet, allocator, 5);
+    try invalid_max_packet.append(allocator, @intFromEnum(PropertyId.maximum_packet_size));
+    try wire.appendInt(&invalid_max_packet, allocator, u32, 0, .big);
+    try Cases.expectInvalid(invalid_max_packet.items);
+
+    var invalid_topic_alias: std.ArrayList(u8) = .empty;
+    defer invalid_topic_alias.deinit(allocator);
+    try encodeRemainingLength(&invalid_topic_alias, allocator, 3);
+    try invalid_topic_alias.appendSlice(allocator, &.{ @intFromEnum(PropertyId.topic_alias), 0, 0 });
+    try Cases.expectInvalid(invalid_topic_alias.items);
+
+    var invalid_retain_available: std.ArrayList(u8) = .empty;
+    defer invalid_retain_available.deinit(allocator);
+    try encodeRemainingLength(&invalid_retain_available, allocator, 2);
+    try invalid_retain_available.appendSlice(allocator, &.{ @intFromEnum(PropertyId.retain_available), 2 });
+    try Cases.expectInvalid(invalid_retain_available.items);
+
+    var invalid_max_qos: std.ArrayList(u8) = .empty;
+    defer invalid_max_qos.deinit(allocator);
+    try encodeRemainingLength(&invalid_max_qos, allocator, 2);
+    try invalid_max_qos.appendSlice(allocator, &.{ @intFromEnum(PropertyId.maximum_qos), 2 });
+    try Cases.expectInvalid(invalid_max_qos.items);
 }
 
 test "MQTT CONNECT validates flags and will topic" {

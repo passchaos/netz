@@ -317,7 +317,12 @@ pub const Connection = struct {
         }
         if (self.protocol == .v5 and mqtt.maximumQoS(options.properties) == null) {
             if (options.maximum_qos) |maximum_qos| {
-                try properties.append(self.allocator, .{ .byte = .{ .id = .maximum_qos, .value = @intFromEnum(maximum_qos) } });
+                // MQTT 5 Maximum QoS can only advertise a restriction to QoS 0
+                // or QoS 1.  QoS 2 support is the default, so do not encode the
+                // property when the configured maximum is exactly_once.
+                if (maximum_qos != .exactly_once) {
+                    try properties.append(self.allocator, .{ .byte = .{ .id = .maximum_qos, .value = @intFromEnum(maximum_qos) } });
+                }
             }
         }
         if (self.protocol == .v5 and mqtt.retainAvailable(options.properties) == null and !options.retain_available) {
