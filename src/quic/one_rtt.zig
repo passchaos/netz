@@ -5185,6 +5185,8 @@ test "QUIC 1-RTT DATAGRAM enforces negotiation and frame-size limits" {
     try std.testing.expectEqual(@as(?usize, 6), limited.maxDatagramPayloadSize());
     try std.testing.expectError(error.DatagramTooLarge, limited.sendDatagram("1234567"));
     try std.testing.expectError(error.InvalidFrame, limited.validateDatagramFrame(.{ .data = "1234567", .length_present = true }));
+    try limited.validateDatagramFrame(.{ .data = "1234567", .length_present = false });
+    try std.testing.expectError(error.InvalidFrame, limited.validateDatagramFrame(.{ .data = "12345678", .length_present = false }));
 }
 
 test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
