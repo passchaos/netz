@@ -33,6 +33,8 @@ pub const Limits = struct {
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
     max_header_fields: usize = 256,
+    header_table_size: usize = http2.Hpack.default_dynamic_table_size,
+    max_concurrent_streams: ?u32 = null,
     max_header_list_size: usize = default_max_header_list_size,
     /// Advertise RFC 8441 SETTINGS_ENABLE_CONNECT_PROTOCOL.  It is disabled by
     /// default because peers may start tunnelling arbitrary bytes on streams
@@ -271,6 +273,7 @@ pub const Connection = struct {
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
+    peer_max_concurrent_streams: ?u32 = null,
     peer_enable_connect_protocol: bool = false,
     last_peer_client_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
@@ -990,6 +993,7 @@ pub const Connection = struct {
                     self.peer_max_frame_size = setting.value;
                 },
                 .max_header_list_size => self.peer_max_header_list_size = setting.value,
+                .max_concurrent_streams => self.peer_max_concurrent_streams = setting.value,
                 .header_table_size => self.hpack_encoder.setMaxDynamicTableSize(self.allocator, setting.value),
                 .enable_connect_protocol => {
                     if (setting.value > 1) return error.InvalidSetting;
@@ -1292,8 +1296,14 @@ fn writeFrame(
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
-    var settings_buf: [3]http2.Setting = undefined;
+    var settings_buf: [5]http2.Setting = undefined;
     var count: usize = 0;
+    settings_buf[count] = .{ .id = .header_table_size, .value = @intCast(@min(limits.header_table_size, std.math.maxInt(u32))) };
+    count += 1;
+    if (limits.max_concurrent_streams) |max_streams| {
+        settings_buf[count] = .{ .id = .max_concurrent_streams, .value = max_streams };
+        count += 1;
+    }
     settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) };
     count += 1;
     if (limits.enable_connect_protocol) {
@@ -4107,8 +4117,12 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
 
     try connection.applySettings(&.{
         .{ .id = .max_frame_size, .value = 32_768 },
+        .{ .id = .max_concurrent_streams, .value = 7 },
+        .{ .id = .header_table_size, .value = 128 },
     });
     try std.testing.expectEqual(@as(usize, 32_768), connection.peer_max_frame_size);
+    try std.testing.expectEqual(@as(?u32, 7), connection.peer_max_concurrent_streams);
+    try std.testing.expectEqual(@as(usize, 128), connection.hpack_encoder.dynamic_table.size_limit);
 
     try connection.applySettings(&.{
         .{ .id = .enable_connect_protocol, .value = 0 },
@@ -4207,7 +4221,7 @@ test "HTTP/2 runtime enforces header list size limits" {
     try std.testing.expectError(error.MessageTooLarge, connection.writeHeaders(1, &oversized, true));
 }
 
-test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" {
+test "HTTP/2 runtime advertises configured initial SETTINGS" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -4221,6 +4235,8 @@ test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" 
         allocator: std.mem.Allocator,
         io: std.Io,
         listener: *net.Server,
+        header_table_size: ?u32 = null,
+        max_concurrent_streams: ?u32 = null,
         max_header_list_size: ?u32 = null,
         enable_push: ?u32 = null,
         enable_connect_protocol: ?u32 = null,
@@ -4242,6 +4258,8 @@ test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" 
             const settings = try http2.parseSettings(shared.allocator, frame.frame.payload);
             defer shared.allocator.free(settings);
             for (settings) |setting| switch (setting.id) {
+                .header_table_size => shared.header_table_size = setting.value,
+                .max_concurrent_streams => shared.max_concurrent_streams = setting.value,
                 .max_header_list_size => shared.max_header_list_size = setting.value,
                 .enable_push => shared.enable_push = setting.value,
                 .enable_connect_protocol => shared.enable_connect_protocol = setting.value,
@@ -4255,10 +4273,17 @@ test "HTTP/2 runtime advertises local max header list size in initial SETTINGS" 
 
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    try writeInitialSettings(allocator, io, stream, .{ .max_header_list_size = 4096, .enable_connect_protocol = true }, .client);
+    try writeInitialSettings(allocator, io, stream, .{
+        .header_table_size = 1024,
+        .max_concurrent_streams = 11,
+        .max_header_list_size = 4096,
+        .enable_connect_protocol = true,
+    }, .client);
 
     thread.join();
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(?u32, 1024), shared.header_table_size);
+    try std.testing.expectEqual(@as(?u32, 11), shared.max_concurrent_streams);
     try std.testing.expectEqual(@as(?u32, 4096), shared.max_header_list_size);
     try std.testing.expectEqual(@as(?u32, 0), shared.enable_push);
     try std.testing.expectEqual(@as(?u32, 1), shared.enable_connect_protocol);
