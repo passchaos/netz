@@ -2124,6 +2124,147 @@ pub const sctp = struct {
         ack: void,
     };
 
+    pub const ReassembledMessage = struct {
+        stream_id: u16,
+        stream_sequence_number: u16,
+        unordered: bool,
+        payload_protocol_identifier: PayloadProtocolIdentifier,
+        data: []u8,
+
+        pub fn deinit(self: *ReassembledMessage, allocator: std.mem.Allocator) void {
+            allocator.free(self.data);
+            self.* = undefined;
+        }
+    };
+
+    pub const Reassembler = struct {
+        allocator: std.mem.Allocator,
+        max_buffered: usize = 256 * 1024,
+        fragments: std.ArrayList(OwnedFragment) = .empty,
+        buffered_bytes: usize = 0,
+
+        const OwnedFragment = struct {
+            chunk: DataChunk,
+            data: []u8,
+        };
+
+        pub fn init(allocator: std.mem.Allocator, max_buffered: usize) Reassembler {
+            return .{ .allocator = allocator, .max_buffered = max_buffered };
+        }
+
+        pub fn deinit(self: *Reassembler) void {
+            for (self.fragments.items) |fragment| self.allocator.free(fragment.data);
+            self.fragments.deinit(self.allocator);
+            self.* = undefined;
+        }
+
+        pub fn push(self: *Reassembler, chunk: DataChunk) Error!?ReassembledMessage {
+            if (chunk.beginning and chunk.ending) {
+                const owned = try self.allocator.dupe(u8, chunk.user_data);
+                return .{
+                    .stream_id = chunk.stream_id,
+                    .stream_sequence_number = chunk.stream_sequence_number,
+                    .unordered = chunk.unordered,
+                    .payload_protocol_identifier = chunk.payload_protocol_identifier,
+                    .data = owned,
+                };
+            }
+
+            try self.storeFragment(chunk);
+            return try self.tryReassemble(chunk.stream_id, chunk.stream_sequence_number, chunk.unordered);
+        }
+
+        fn storeFragment(self: *Reassembler, chunk: DataChunk) Error!void {
+            const next_buffered = std.math.add(usize, self.buffered_bytes, chunk.user_data.len) catch return error.InvalidSctpPacket;
+            if (next_buffered > self.max_buffered) return error.InvalidSctpPacket;
+
+            for (self.fragments.items) |fragment| {
+                if (fragment.chunk.tsn == chunk.tsn) return;
+            }
+
+            const data = try self.allocator.dupe(u8, chunk.user_data);
+            errdefer self.allocator.free(data);
+            try self.fragments.append(self.allocator, .{ .chunk = copyChunkWithData(chunk, data), .data = data });
+            self.buffered_bytes = next_buffered;
+        }
+
+        fn tryReassemble(self: *Reassembler, stream_id: u16, stream_sequence_number: u16, unordered: bool) Error!?ReassembledMessage {
+            var begin_index: ?usize = null;
+            var end_index: ?usize = null;
+            for (self.fragments.items, 0..) |fragment, i| {
+                if (!sameMessage(fragment.chunk, stream_id, stream_sequence_number, unordered)) continue;
+                if (fragment.chunk.beginning) begin_index = i;
+                if (fragment.chunk.ending) end_index = i;
+            }
+            const begin = begin_index orelse return null;
+            _ = end_index orelse return null;
+
+            var current_tsn = self.fragments.items[begin].chunk.tsn;
+            var total_len: usize = 0;
+            const ppid = self.fragments.items[begin].chunk.payload_protocol_identifier;
+            while (true) : (current_tsn +%= 1) {
+                const index = self.findFragmentIndex(current_tsn, stream_id, stream_sequence_number, unordered) orelse return null;
+                const fragment = self.fragments.items[index];
+                if (fragment.chunk.payload_protocol_identifier != ppid) return error.InvalidSctpPacket;
+                total_len = std.math.add(usize, total_len, fragment.data.len) catch return error.InvalidSctpPacket;
+                if (fragment.chunk.ending) break;
+            }
+
+            var data = try self.allocator.alloc(u8, total_len);
+            errdefer self.allocator.free(data);
+            var out_pos: usize = 0;
+            current_tsn = self.fragments.items[begin].chunk.tsn;
+            while (true) : (current_tsn +%= 1) {
+                const index = self.findFragmentIndex(current_tsn, stream_id, stream_sequence_number, unordered).?;
+                const fragment = self.fragments.items[index];
+                @memcpy(data[out_pos .. out_pos + fragment.data.len], fragment.data);
+                out_pos += fragment.data.len;
+                if (fragment.chunk.ending) break;
+            }
+
+            self.removeMessageFragments(stream_id, stream_sequence_number, unordered);
+            return .{
+                .stream_id = stream_id,
+                .stream_sequence_number = stream_sequence_number,
+                .unordered = unordered,
+                .payload_protocol_identifier = ppid,
+                .data = data,
+            };
+        }
+
+        fn findFragmentIndex(self: Reassembler, tsn: u32, stream_id: u16, stream_sequence_number: u16, unordered: bool) ?usize {
+            for (self.fragments.items, 0..) |fragment, i| {
+                if (fragment.chunk.tsn == tsn and sameMessage(fragment.chunk, stream_id, stream_sequence_number, unordered)) return i;
+            }
+            return null;
+        }
+
+        fn removeMessageFragments(self: *Reassembler, stream_id: u16, stream_sequence_number: u16, unordered: bool) void {
+            var i: usize = 0;
+            while (i < self.fragments.items.len) {
+                if (sameMessage(self.fragments.items[i].chunk, stream_id, stream_sequence_number, unordered)) {
+                    const removed = self.fragments.swapRemove(i);
+                    self.buffered_bytes -= removed.data.len;
+                    self.allocator.free(removed.data);
+                    continue;
+                }
+                i += 1;
+            }
+        }
+
+        fn sameMessage(chunk: DataChunk, stream_id: u16, stream_sequence_number: u16, unordered: bool) bool {
+            return chunk.stream_id == stream_id and
+                chunk.stream_sequence_number == stream_sequence_number and
+                chunk.unordered == unordered;
+        }
+
+        fn copyChunkWithData(chunk: DataChunk, data: []const u8) DataChunk {
+            var out = chunk;
+            out.user_data = data;
+            return out;
+        }
+    };
+
     pub fn parsePacket(allocator: std.mem.Allocator, bytes: []const u8, verify_checksum: bool) Error!ParsedPacket {
         if (bytes.len < 12) return error.BufferTooShort;
         if (verify_checksum and !try validChecksum(bytes)) return error.BadSctpChecksum;
@@ -2792,6 +2933,79 @@ test "RTCP NACK tracker detects RTP gaps and wraparound" {
     wrap.observe(0xffff);
     wrap.observe(0);
     try std.testing.expectEqual(@as(usize, 0), wrap.pendingCount());
+}
+
+test "SCTP DATA reassembler handles fragmented messages" {
+    const allocator = std.testing.allocator;
+    var reassembler = sctp.Reassembler.init(allocator, 16);
+    defer reassembler.deinit();
+
+    try std.testing.expect((try reassembler.push(.{
+        .tsn = 2,
+        .stream_id = 1,
+        .stream_sequence_number = 7,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = false,
+        .ending = false,
+        .user_data = "llo ",
+    })) == null);
+
+    try std.testing.expect((try reassembler.push(.{
+        .tsn = 1,
+        .stream_id = 1,
+        .stream_sequence_number = 7,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = true,
+        .ending = false,
+        .user_data = "he",
+    })) == null);
+
+    var message = (try reassembler.push(.{
+        .tsn = 3,
+        .stream_id = 1,
+        .stream_sequence_number = 7,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = false,
+        .ending = true,
+        .user_data = "world",
+    })).?;
+    defer message.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 1), message.stream_id);
+    try std.testing.expectEqual(@as(u16, 7), message.stream_sequence_number);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string, message.payload_protocol_identifier);
+    try std.testing.expectEqualStrings("hello world", message.data);
+    try std.testing.expectEqual(@as(usize, 0), reassembler.buffered_bytes);
+
+    var single = (try reassembler.push(.{
+        .tsn = 4,
+        .stream_id = 2,
+        .stream_sequence_number = 0,
+        .payload_protocol_identifier = .webrtc_binary,
+        .beginning = true,
+        .ending = true,
+        .user_data = &.{ 1, 2, 3 },
+    })).?;
+    defer single.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, single.data);
+
+    try std.testing.expect((try reassembler.push(.{
+        .tsn = 5,
+        .stream_id = 3,
+        .stream_sequence_number = 1,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = true,
+        .ending = false,
+        .user_data = "12345",
+    })) == null);
+    try std.testing.expectError(error.InvalidSctpPacket, reassembler.push(.{
+        .tsn = 6,
+        .stream_id = 3,
+        .stream_sequence_number = 1,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = false,
+        .ending = false,
+        .user_data = "too-large-for-window",
+    }));
 }
 
 test "SCTP DATA packet and DCEP channel messages" {

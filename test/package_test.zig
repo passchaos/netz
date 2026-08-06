@@ -433,6 +433,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.sdp, "findExtMapInSession"));
     try std.testing.expectEqualStrings("urn:ietf:params:rtp-hdrext:sdes:mid", netz.webrtc.sdp.sdes_mid_uri);
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "DataChunk"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "Reassembler"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ReassembledMessage"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeDataPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "parseDcepMessage"));
     try std.testing.expectEqual(@as(usize, 2048), (netz.webrtc.runtime.Limits{}).max_datagram_size);
