@@ -98,6 +98,7 @@ pub const Server = struct {
             .stream = stream,
             .role = .server,
             .limits = self.limits,
+            .awaiting_settings_ack = true,
         };
         connection.applyLocalLimits();
         try connection.applySettings(peer_settings);
@@ -209,6 +210,7 @@ pub const Client = struct {
             .stream = stream,
             .role = .client,
             .limits = limits,
+            .awaiting_settings_ack = true,
         };
         connection.applyLocalLimits();
         errdefer connection.close();
@@ -298,6 +300,7 @@ pub const Connection = struct {
     peer_max_header_list_size: usize = std.math.maxInt(usize),
     peer_max_concurrent_streams: ?u32 = null,
     peer_enable_connect_protocol: bool = false,
+    awaiting_settings_ack: bool = false,
     last_peer_client_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
     local_goaway_last_stream_id: ?u31 = null,
@@ -1031,7 +1034,10 @@ pub const Connection = struct {
     fn handleConnectionFrame(self: *Connection, frame: http2.Frame) Error!bool {
         switch (frame.header.frame_type) {
             .settings => {
-                if ((frame.header.flags & flag_ack) == 0) {
+                if ((frame.header.flags & flag_ack) != 0) {
+                    if (!self.awaiting_settings_ack) return error.InvalidFrame;
+                    self.awaiting_settings_ack = false;
+                } else {
                     const settings = try http2.parseSettings(self.allocator, frame.payload);
                     defer self.allocator.free(settings);
                     try self.applySettings(settings);
@@ -5275,6 +5281,31 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     }));
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(1)).value);
+}
+
+test "HTTP/2 rejects unexpected SETTINGS ACK" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    const ack = http2.Frame{
+        .header = .{ .length = 0, .frame_type = .settings, .flags = flag_ack, .stream_id = 0 },
+        .payload = &.{},
+    };
+    try std.testing.expectError(error.InvalidFrame, connection.handleConnectionFrame(ack));
+    connection.awaiting_settings_ack = true;
+    try std.testing.expect(try connection.handleConnectionFrame(ack));
+    try std.testing.expect(!connection.awaiting_settings_ack);
+    try std.testing.expectError(error.InvalidFrame, connection.handleConnectionFrame(ack));
 }
 
 test "HTTP/2 sendGoAway enforces non-increasing boundaries" {
