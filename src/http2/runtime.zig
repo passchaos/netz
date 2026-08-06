@@ -25,6 +25,7 @@ const flag_end_stream: u8 = 0x1;
 const flag_ack: u8 = 0x1;
 const flag_end_headers: u8 = 0x4;
 const default_flow_window: i64 = 65_535;
+const max_flow_window: i64 = std.math.maxInt(i31);
 const default_max_frame_size: usize = 16 * 1024;
 const max_max_frame_size: usize = 16_777_215;
 const default_max_header_list_size: usize = 16 * 1024;
@@ -252,8 +253,14 @@ pub const FlowWindow = struct {
         self.value -= delta;
     }
 
-    pub fn update(self: *FlowWindow, increment: u31) void {
-        self.value = std.math.add(i64, self.value, increment) catch std.math.maxInt(i64);
+    pub fn update(self: *FlowWindow, increment: u31) Error!void {
+        const next = std.math.add(i64, self.value, increment) catch return error.FlowControlViolation;
+        // RFC 9113 requires a FLOW_CONTROL_ERROR when a WINDOW_UPDATE would
+        // make a connection or stream flow-control window exceed 2^31-1.  Do
+        // not saturate here: a saturated window lets peers continue after a
+        // protocol violation and hides bugs in local capacity accounting.
+        if (next > max_flow_window) return error.FlowControlViolation;
+        self.value = next;
     }
 
     pub fn adjust(self: *FlowWindow, delta: i64) void {
@@ -620,9 +627,9 @@ pub const Connection = struct {
 
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
         if (stream_id == 0) {
-            self.recv_connection_window.update(increment);
+            try self.recv_connection_window.update(increment);
         } else {
-            (try self.recvStreamWindow(stream_id)).update(increment);
+            try (try self.recvStreamWindow(stream_id)).update(increment);
         }
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
@@ -648,7 +655,7 @@ pub const Connection = struct {
         // credit for the Pad Length byte and padding octets as well.
         const charged_len = frame.payload.len;
         try self.recv_connection_window.receive(charged_len);
-        errdefer self.recv_connection_window.update(@intCast(charged_len));
+        errdefer self.recv_connection_window.update(@intCast(charged_len)) catch unreachable;
         try (try self.recvStreamWindow(stream_id)).receive(charged_len);
         return data;
     }
@@ -677,9 +684,9 @@ pub const Connection = struct {
             }
             const update = try http2.WindowUpdatePayload.parse(frame.frame);
             if (update.stream_id == 0) {
-                self.send_connection_window.update(update.increment);
+                try self.send_connection_window.update(update.increment);
             } else {
-                (try self.sendStreamWindow(update.stream_id)).update(update.increment);
+                try (try self.sendStreamWindow(update.stream_id)).update(update.increment);
             }
             return .{ .frame = frame, .window_update = update };
         }
@@ -848,9 +855,9 @@ pub const Connection = struct {
             .window_update => {
                 const update = try http2.WindowUpdatePayload.parse(frame);
                 if (update.stream_id == 0) {
-                    self.send_connection_window.update(update.increment);
+                    try self.send_connection_window.update(update.increment);
                 } else {
-                    (try self.sendStreamWindow(update.stream_id)).update(update.increment);
+                    try (try self.sendStreamWindow(update.stream_id)).update(update.increment);
                 }
                 return true;
             },
@@ -955,10 +962,10 @@ pub const Connection = struct {
 
     fn writeDataChunk(self: *Connection, stream_id: u31, payload: []const u8, end_stream: bool) Error!void {
         try self.send_connection_window.reserve(payload.len);
-        errdefer self.send_connection_window.update(@intCast(payload.len));
+        errdefer self.send_connection_window.update(@intCast(payload.len)) catch unreachable;
         const stream_window = try self.sendStreamWindow(stream_id);
         try stream_window.reserve(payload.len);
-        errdefer stream_window.update(@intCast(payload.len));
+        errdefer stream_window.update(@intCast(payload.len)) catch unreachable;
 
         try writeFrame(
             self.allocator,
@@ -3903,9 +3910,12 @@ test "HTTP/2 flow window blocks and updates" {
     try std.testing.expectEqual(@as(i64, 0), window.value);
     try std.testing.expectEqual(@as(usize, 0), window.available());
     try std.testing.expectError(error.FlowControlBlocked, window.reserve(1));
-    window.update(8);
+    try window.update(8);
     try window.reserve(3);
     try std.testing.expectEqual(@as(i64, 5), window.value);
+    window.value = max_flow_window;
+    try std.testing.expectError(error.FlowControlViolation, window.update(1));
+    try std.testing.expectEqual(max_flow_window, window.value);
 
     var recv = FlowWindow{ .value = 2 };
     try std.testing.expectError(error.FlowControlViolation, recv.receive(3));
@@ -3944,7 +3954,7 @@ test "HTTP/2 padded DATA charges full frame payload to receive windows" {
     try std.testing.expectEqual(@as(i64, 5), connection.recv_connection_window.value);
     try std.testing.expectEqual(@as(i64, 4), (try connection.recvStreamWindow(1)).value);
 
-    (try connection.recvStreamWindow(1)).update(1);
+    try (try connection.recvStreamWindow(1)).update(1);
     const data = try connection.receiveDataPayload(1, padded_frame);
     try std.testing.expectEqualStrings("ok", data.data);
     try std.testing.expectEqual(@as(i64, 0), connection.recv_connection_window.value);
