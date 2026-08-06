@@ -218,6 +218,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "largestAcknowledged"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "sentWithEcn"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckEcnCounters"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckEcnFrame"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckCoversSentPackets"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "ackRttSample"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectPacketThresholdLoss"));
@@ -235,6 +236,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "packetThresholdCandidate"));
     try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "packetNumberCandidate"));
     try std.testing.expect(@hasDecl(netz.quic.congestion, "Controller"));
+    try std.testing.expect(@hasDecl(netz.quic.congestion.Controller, "onExplicitCongestion"));
     try std.testing.expect(@hasDecl(netz.quic.congestion.Controller, "onPersistentCongestion"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation, "State"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "pendingChallengeCount"));

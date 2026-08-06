@@ -85,6 +85,21 @@ pub const Controller = struct {
         self.congestion_recovery_start_time_ns = now_ns orelse lost_sent_time_ns;
     }
 
+    pub fn onExplicitCongestion(self: *Controller, event_time_ns: ?u64) void {
+        // RFC 9002 treats an increase in the peer-reported ECN-CE counter as a
+        // congestion signal equivalent to packet loss, but no packet bytes are
+        // removed from bytes_in_flight.  If already recovering, s2n-quic/quicz
+        // suppress another cutback until a later ACK exits the recovery epoch.
+        if (self.congestion_recovery_start_time_ns != null) return;
+
+        const reduced = self.congestion_window * 7 / 10;
+        const minimum = minimumWindow(self.max_datagram_size);
+        self.congestion_window = @max(reduced, minimum);
+        self.slow_start_threshold = self.congestion_window;
+        self.congestion_avoidance_bytes_acked = 0;
+        self.congestion_recovery_start_time_ns = event_time_ns orelse 0;
+    }
+
     pub fn onPersistentCongestion(self: *Controller) void {
         self.congestion_window = minimumWindow(self.max_datagram_size);
         self.slow_start_threshold = self.congestion_window;
@@ -145,6 +160,34 @@ test "QUIC congestion controller suppresses repeated recovery losses and ACK gro
     try std.testing.expectEqual(@as(usize, 8400), cc.bytes_in_flight);
     try std.testing.expectEqual(recovery_window, cc.congestion_window);
 
+    cc.onAckedAt(8400, 300);
+    try std.testing.expectEqual(@as(usize, 0), cc.bytes_in_flight);
+    try std.testing.expectEqual(@as(?u64, null), cc.congestion_recovery_start_time_ns);
+    try std.testing.expect(cc.congestion_window > recovery_window);
+}
+
+test "QUIC congestion controller reacts to explicit ECN congestion once per recovery" {
+    var cc = Controller.init(1200);
+    try cc.reserve(6000);
+
+    cc.onExplicitCongestion(200);
+    const recovery_window = cc.congestion_window;
+    try std.testing.expectEqual(@as(usize, 6000), cc.bytes_in_flight);
+    try std.testing.expectEqual(@as(usize, 8400), recovery_window);
+    try std.testing.expectEqual(recovery_window, cc.slow_start_threshold);
+    try std.testing.expectEqual(@as(?u64, 200), cc.congestion_recovery_start_time_ns);
+
+    cc.onExplicitCongestion(250);
+    try std.testing.expectEqual(recovery_window, cc.congestion_window);
+
+    // ACKing packets that were sent before the ECN congestion event only
+    // clears bytes in flight.  It must not exit recovery or grow cwnd.
+    cc.onAckedAt(6000, 100);
+    try std.testing.expectEqual(@as(usize, 0), cc.bytes_in_flight);
+    try std.testing.expectEqual(recovery_window, cc.congestion_window);
+    try std.testing.expectEqual(@as(?u64, 200), cc.congestion_recovery_start_time_ns);
+
+    try cc.reserve(8400);
     cc.onAckedAt(8400, 300);
     try std.testing.expectEqual(@as(usize, 0), cc.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, null), cc.congestion_recovery_start_time_ns);

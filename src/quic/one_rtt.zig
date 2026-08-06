@@ -779,6 +779,9 @@ pub const Connection = struct {
                 .ack => {
                     if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
                     const acked = try self.sent.applyAckDetailed(frame.ack);
+                    if (acked.ecn_ce_delta > 0) {
+                        self.congestion.onExplicitCongestion(now_ns);
+                    }
                     self.congestion.onAckedAt(acked.bytes, acked.largest_sent_time_ns);
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
                     if (lost.bytes > 0) {
@@ -883,7 +886,7 @@ pub const Connection = struct {
                     // same validate-before-mutate boundary for malformed
                     // multi-frame packets.
                     try self.sent.validateAckCoversSentPackets(ack);
-                    if (ack.ecn_counts) |ecn_counts| try self.sent.validateAckEcnCounters(ecn_counts);
+                    try self.sent.validateAckEcnFrame(ack);
                 },
                 .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_data_total),
                 .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_data_total),
@@ -2448,6 +2451,114 @@ test "QUIC 1-RTT connection validates ACK_ECN counters" {
     try std.testing.expect(!client.sent.packets.items[1].acknowledged);
     try std.testing.expectEqual(bytes_in_flight, client.congestion.bytes_in_flight);
     try std.testing.expectEqual(@as(u64, 0), client.sent.latest_ecn_counts.ect1_count);
+}
+
+test "QUIC 1-RTT ACK_ECN CE increase enters congestion recovery" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x2a, 0x2c, 0x2e, 0x30 };
+    const server_cid = [_]u8{ 0x31, 0x33, 0x35, 0x37 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x63} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x64} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+
+    try client.sendWithEcnAt(&[_]quic.Frame{.{ .ping = {} }}, .ect0, 100);
+    const initial_window = client.congestion.congestion_window;
+    try sendFrames(&server_endpoint, client_endpoint.address(), server_keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+            .ecn_counts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 1 },
+        } }},
+    });
+
+    var ack = try client.receivePacketAt(1_000);
+    defer ack.deinit(allocator);
+    const recovery_window = client.congestion.congestion_window;
+    try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
+    try std.testing.expectEqual(@max(initial_window * 7 / 10, quic.congestion.minimumWindow(client.config.max_datagram_size)), recovery_window);
+    try std.testing.expectEqual(recovery_window, client.congestion.slow_start_threshold);
+    try std.testing.expectEqual(@as(?u64, 1_000), client.congestion.congestion_recovery_start_time_ns);
+    try std.testing.expectEqual(@as(u64, 1), client.sent.latest_ecn_counts.ecn_ce_count);
+}
+
+test "QUIC 1-RTT ACK_ECN CE increase respects congestion recovery" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x42, 0x44, 0x46, 0x48 };
+    const server_cid = [_]u8{ 0x49, 0x4b, 0x4d, 0x4f };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x73} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x74} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+
+    try client.sendWithEcnAt(&[_]quic.Frame{.{ .ping = {} }}, .ect0, 100); // packet 0
+    try client.sendWithEcnAt(&[_]quic.Frame{.{ .ping = {} }}, .ect0, 200); // packet 1
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), server_keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+            .ecn_counts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 1 },
+        } }},
+    });
+    var first_ack = try client.receivePacketAt(1_000);
+    defer first_ack.deinit(allocator);
+    const recovery_window = client.congestion.congestion_window;
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), server_keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 1,
+        .frames = &[_]quic.Frame{.{ .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+            .ecn_counts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 2 },
+        } }},
+    });
+    var second_ack = try client.receivePacketAt(1_500);
+    defer second_ack.deinit(allocator);
+    try std.testing.expectEqual(recovery_window, client.congestion.congestion_window);
+    try std.testing.expectEqual(@as(u64, 2), client.sent.latest_ecn_counts.ecn_ce_count);
 }
 
 test "QUIC 1-RTT connection performs key update and clears ACK gate" {
