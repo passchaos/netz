@@ -115,7 +115,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
   XOR-MAPPED-ADDRESS helpers, ICE candidates, SDP parsing with DTLS fingerprint
   and ICE credential extraction, DTLS record headers, RTP packets/extensions/padding, RTCP
-  sender/receiver reports plus receiver-report statistics, PLI/NACK feedback and RTP sequence-gap NACK tracking, SCTP DATA packet parsing/writing, CRC32C validation, and DCEP DataChannel OPEN/ACK codecs, plus
+  sender/receiver reports plus sender/receiver-report statistics, PLI/NACK feedback and RTP sequence-gap NACK tracking, SCTP DATA packet parsing/writing, CRC32C validation, and DCEP DataChannel OPEN/ACK codecs, plus
   blocking UDP STUN binding, RTP/RTCP packet, and same-socket STUN/DTLS/RTP/RTCP
   peer runtimes with a `std.Io.async` concurrent receive helper
 

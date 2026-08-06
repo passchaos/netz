@@ -352,6 +352,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "validateFingerprint"));
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "BindingRequestOptions"));
     try std.testing.expect(@hasDecl(netz.webrtc, "rtcp"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "SenderStats"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "ntpTimestamp"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "ReceiverReport"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "ReceiverStats"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "PictureLossIndication"));

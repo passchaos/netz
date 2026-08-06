@@ -998,6 +998,45 @@ pub const rtcp = struct {
         pairs: []NackPair,
     };
 
+    pub const SenderStats = struct {
+        ssrc: u32 = 0,
+        packet_count: u32 = 0,
+        octet_count: u32 = 0,
+        last_rtp_timestamp: u32 = 0,
+        initialized: bool = false,
+
+        pub fn observe(self: *SenderStats, packet: rtp.Packet) void {
+            if (!self.initialized) {
+                self.initialized = true;
+                self.ssrc = packet.header.ssrc;
+            }
+            self.last_rtp_timestamp = packet.header.timestamp;
+            self.packet_count +|= 1;
+            self.octet_count +|= @intCast(@min(packet.payload.len, @as(usize, std.math.maxInt(u32))));
+        }
+
+        pub fn senderReport(self: SenderStats, now_ns: u64, report_blocks: []ReportBlock) SenderReport {
+            const ntp = ntpTimestamp(now_ns);
+            return .{
+                .sender_ssrc = self.ssrc,
+                .ntp_timestamp_msw = ntp.msw,
+                .ntp_timestamp_lsw = ntp.lsw,
+                .rtp_timestamp = self.last_rtp_timestamp,
+                .sender_packet_count = self.packet_count,
+                .sender_octet_count = self.octet_count,
+                .report_blocks = report_blocks,
+            };
+        }
+    };
+
+    pub fn ntpTimestamp(unix_time_ns: u64) struct { msw: u32, lsw: u32 } {
+        const ntp_epoch_offset_seconds: u64 = 2_208_988_800;
+        const seconds = unix_time_ns / std.time.ns_per_s + ntp_epoch_offset_seconds;
+        const fractional_ns = unix_time_ns % std.time.ns_per_s;
+        const fraction = (fractional_ns << 32) / std.time.ns_per_s;
+        return .{ .msw = @truncate(seconds), .lsw = @truncate(fraction) };
+    }
+
     pub const ReceiverStats = struct {
         ssrc: u32 = 0,
         clock_rate: u32 = 90_000,
@@ -1880,6 +1919,37 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
     try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
+}
+
+test "RTCP sender stats builds sender report" {
+    const allocator = std.testing.allocator;
+    var stats = rtcp.SenderStats{};
+
+    inline for (.{ 10, 11 }) |seq| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        try rtp.writePacket(&bytes, allocator, .{
+            .payload_type = 96,
+            .sequence_number = seq,
+            .timestamp = @as(u32, seq) * 3000,
+            .ssrc = 0x11223344,
+        }, "abcd");
+        var packet = try rtp.Packet.parse(allocator, bytes.items);
+        defer packet.deinit(allocator);
+        stats.observe(packet);
+    }
+
+    const ntp = rtcp.ntpTimestamp(1_500_000_000);
+    try std.testing.expectEqual(@as(u32, 2_208_988_801), ntp.msw);
+    try std.testing.expectEqual(@as(u32, 0x8000_0000), ntp.lsw);
+
+    const report = stats.senderReport(1_500_000_000, &.{});
+    try std.testing.expectEqual(@as(u32, 0x11223344), report.sender_ssrc);
+    try std.testing.expectEqual(@as(u32, 33_000), report.rtp_timestamp);
+    try std.testing.expectEqual(@as(u32, 2), report.sender_packet_count);
+    try std.testing.expectEqual(@as(u32, 8), report.sender_octet_count);
+    try std.testing.expectEqual(ntp.msw, report.ntp_timestamp_msw);
+    try std.testing.expectEqual(ntp.lsw, report.ntp_timestamp_lsw);
 }
 
 test "RTCP receiver stats builds receiver report block" {
