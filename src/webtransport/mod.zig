@@ -10,6 +10,8 @@ pub const Error = wire.Error || error{
     InvalidSessionId,
     InvalidCapsule,
     InvalidStreamType,
+    WebTransportNotNegotiated,
+    DatagramsNotNegotiated,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
 
@@ -24,6 +26,10 @@ pub const Setting = struct {
     pub const enable_datagram: http3.Setting = .{ .id = @intFromEnum(http3.SettingId.h3_datagram), .value = 1 };
     pub const enable_connect_protocol: http3.Setting = .{ .id = @intFromEnum(http3.SettingId.enable_connect_protocol), .value = 1 };
 };
+
+pub const default_initial_max_data: u64 = 64 * 1024;
+pub const default_initial_max_streams_uni: u64 = 16;
+pub const default_initial_max_streams_bidi: u64 = 16;
 
 pub const SessionId = struct {
     value: u62,
@@ -178,6 +184,43 @@ pub const Datagram = struct {
     }
 };
 
+pub fn enabled(settings: http3.Settings) bool {
+    return settings.enable_webtransport or settings.webtransport_max_sessions != 0;
+}
+
+pub fn datagramsEnabled(settings: http3.Settings) bool {
+    return settings.h3_datagram;
+}
+
+pub fn defaultSettings(settings: http3.Settings) http3.Settings {
+    var out = settings;
+    out.enable_connect_protocol = true;
+    out.h3_datagram = true;
+    out.enable_webtransport = true;
+    if (out.webtransport_max_sessions == 0) out.webtransport_max_sessions = 1;
+    if (out.webtransport_initial_max_data == 0) out.webtransport_initial_max_data = default_initial_max_data;
+    if (out.webtransport_initial_max_streams_uni == 0) out.webtransport_initial_max_streams_uni = default_initial_max_streams_uni;
+    if (out.webtransport_initial_max_streams_bidi == 0) out.webtransport_initial_max_streams_bidi = default_initial_max_streams_bidi;
+    return out;
+}
+
+pub fn ensureNegotiated(local: http3.Settings, peer: http3.Settings) Error!void {
+    if (!local.enable_connect_protocol or !peer.enable_connect_protocol) return error.WebTransportNotNegotiated;
+    if (!enabled(local) or !enabled(peer)) return error.WebTransportNotNegotiated;
+}
+
+pub fn ensureDatagramsNegotiated(local: http3.Settings, peer: http3.Settings) Error!void {
+    try ensureNegotiated(local, peer);
+    if (!datagramsEnabled(local) or !datagramsEnabled(peer)) return error.DatagramsNotNegotiated;
+}
+
+pub fn maxDatagramPayloadSize(quic_payload_size: ?usize, session_id: SessionId) ?usize {
+    const payload_size = quic_payload_size orelse return null;
+    const quarter_stream_id_len = quic.varint.length(session_id.quarterStreamId()) catch return null;
+    if (quarter_stream_id_len >= payload_size) return null;
+    return payload_size - quarter_stream_id_len;
+}
+
 pub fn connectHeaders(authority: []const u8, path: []const u8, origin: []const u8) [5]http3.Qpack.HeaderField {
     return .{
         .{ .name = ":method", .value = "CONNECT" },
@@ -234,6 +277,23 @@ test "WebTransport session state tracks lifecycle and datagram counters" {
     try std.testing.expect(state.closed);
     try std.testing.expectEqual(@as(?u32, 42), state.close_code);
     try std.testing.expectError(error.InvalidSessionId, state.recordDatagramSent(.init(0)));
+}
+
+test "WebTransport settings negotiation and datagram budget" {
+    const local = defaultSettings(.{});
+    const peer = http3.Settings{
+        .enable_connect_protocol = true,
+        .h3_datagram = true,
+        .webtransport_max_sessions = 4,
+    };
+    try ensureDatagramsNegotiated(local, peer);
+    try std.testing.expect(enabled(peer));
+    try std.testing.expectEqual(@as(?usize, 1199), maxDatagramPayloadSize(1200, .init(0)));
+    try std.testing.expectEqual(@as(?usize, 1198), maxDatagramPayloadSize(1200, .init(256)));
+    try std.testing.expectError(error.DatagramsNotNegotiated, ensureDatagramsNegotiated(local, .{
+        .enable_connect_protocol = true,
+        .webtransport_max_sessions = 1,
+    }));
 }
 
 test {

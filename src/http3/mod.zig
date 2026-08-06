@@ -77,7 +77,17 @@ pub const SettingId = enum(u64) {
     qpack_blocked_streams = 0x07,
     enable_connect_protocol = 0x08,
     h3_datagram = 0x33,
+    /// Legacy WebTransport enable/max-session identifier seen in older
+    /// WebTransport drafts and retained by earlier netz releases.  Peers in
+    /// the wild disagree on whether this identifier is a boolean enable bit or
+    /// a session count, so Settings.fromList accepts either non-zero form.
     webtransport_max_sessions = 0x2b603742,
+    enable_webtransport = 0x2c7cf000,
+    webtransport_max_sessions_draft = 0xc671706a,
+    webtransport_max_sessions_v13 = 0x14e9cd29,
+    webtransport_initial_max_data = 0x2b61,
+    webtransport_initial_max_streams_uni = 0x2b64,
+    webtransport_initial_max_streams_bidi = 0x2b65,
     _,
 };
 
@@ -92,7 +102,11 @@ pub const Settings = struct {
     qpack_blocked_streams: u64 = 0,
     enable_connect_protocol: bool = false,
     h3_datagram: bool = false,
+    enable_webtransport: bool = false,
     webtransport_max_sessions: u64 = 0,
+    webtransport_initial_max_data: u64 = 0,
+    webtransport_initial_max_streams_uni: u64 = 0,
+    webtransport_initial_max_streams_bidi: u64 = 0,
 
     pub fn fromList(settings: []const Setting) Settings {
         var out: Settings = .{};
@@ -103,7 +117,27 @@ pub const Settings = struct {
                 @intFromEnum(SettingId.qpack_blocked_streams) => out.qpack_blocked_streams = setting.value,
                 @intFromEnum(SettingId.enable_connect_protocol) => out.enable_connect_protocol = setting.value != 0,
                 @intFromEnum(SettingId.h3_datagram) => out.h3_datagram = setting.value != 0,
-                @intFromEnum(SettingId.webtransport_max_sessions) => out.webtransport_max_sessions = setting.value,
+                @intFromEnum(SettingId.enable_webtransport) => out.enable_webtransport = setting.value != 0,
+                @intFromEnum(SettingId.webtransport_max_sessions) => {
+                    if (setting.value != 0) out.enable_webtransport = true;
+                    // Older drafts used this identifier inconsistently: some
+                    // peers send it as a boolean enable bit, while older netz
+                    // used it as the session count.  Preserve a real count
+                    // received under newer identifiers if this legacy bit
+                    // arrives later in the SETTINGS payload.
+                    if (setting.value > 1 or out.webtransport_max_sessions == 0) {
+                        out.webtransport_max_sessions = setting.value;
+                    }
+                },
+                @intFromEnum(SettingId.webtransport_max_sessions_draft),
+                @intFromEnum(SettingId.webtransport_max_sessions_v13),
+                => {
+                    out.webtransport_max_sessions = setting.value;
+                    if (setting.value != 0) out.enable_webtransport = true;
+                },
+                @intFromEnum(SettingId.webtransport_initial_max_data) => out.webtransport_initial_max_data = setting.value,
+                @intFromEnum(SettingId.webtransport_initial_max_streams_uni) => out.webtransport_initial_max_streams_uni = setting.value,
+                @intFromEnum(SettingId.webtransport_initial_max_streams_bidi) => out.webtransport_initial_max_streams_bidi = setting.value,
                 else => {}, // RFC 9114 requires unknown settings to be ignored.
             }
         }
@@ -116,7 +150,23 @@ pub const Settings = struct {
         if (self.qpack_blocked_streams != 0) try writeSetting(list, allocator, .qpack_blocked_streams, self.qpack_blocked_streams);
         if (self.enable_connect_protocol) try writeSetting(list, allocator, .enable_connect_protocol, 1);
         if (self.h3_datagram) try writeSetting(list, allocator, .h3_datagram, 1);
-        if (self.webtransport_max_sessions != 0) try writeSetting(list, allocator, .webtransport_max_sessions, self.webtransport_max_sessions);
+        const webtransport_enabled = self.enable_webtransport or self.webtransport_max_sessions != 0;
+        if (webtransport_enabled) {
+            // Emit both legacy enable identifiers.  The historical netz name
+            // for 0x2b603742 is kept for source compatibility, but writing a
+            // boolean value here avoids peers that validate it as an enable bit
+            // rejecting counts greater than one.  The concrete max-session
+            // count is emitted below under the newer identifiers.
+            try writeSetting(list, allocator, .webtransport_max_sessions, 1);
+            try writeSetting(list, allocator, .enable_webtransport, 1);
+        }
+        if (self.webtransport_max_sessions != 0) {
+            try writeSetting(list, allocator, .webtransport_max_sessions_draft, self.webtransport_max_sessions);
+            try writeSetting(list, allocator, .webtransport_max_sessions_v13, self.webtransport_max_sessions);
+        }
+        if (self.webtransport_initial_max_data != 0) try writeSetting(list, allocator, .webtransport_initial_max_data, self.webtransport_initial_max_data);
+        if (self.webtransport_initial_max_streams_uni != 0) try writeSetting(list, allocator, .webtransport_initial_max_streams_uni, self.webtransport_initial_max_streams_uni);
+        if (self.webtransport_initial_max_streams_bidi != 0) try writeSetting(list, allocator, .webtransport_initial_max_streams_bidi, self.webtransport_initial_max_streams_bidi);
     }
 };
 
@@ -497,6 +547,7 @@ fn validateSetting(id: u64, value: u64, seen: []const Setting) Error!void {
         0x00, 0x02, 0x03, 0x04, 0x05 => return error.InvalidSetting,
         @intFromEnum(SettingId.enable_connect_protocol),
         @intFromEnum(SettingId.h3_datagram),
+        @intFromEnum(SettingId.enable_webtransport),
         => if (value > 1) return error.InvalidSetting,
         else => {},
     }

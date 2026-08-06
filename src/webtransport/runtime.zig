@@ -61,7 +61,7 @@ pub const ProtectedServer = struct {
         limits: Limits,
         config: http3.runtime.ProtectedConfig,
     ) Error!ProtectedServer {
-        return .{ .h3 = try .bind(allocator, io, bind_address, limits.http3, config) };
+        return .{ .h3 = try .bind(allocator, io, bind_address, limits.http3, webTransportProtectedConfig(config)) };
     }
 
     pub fn deinit(self: *ProtectedServer) void {
@@ -80,12 +80,15 @@ pub const ProtectedServer = struct {
         if (!std.mem.eql(u8, findHeader(request.request.headers, ":protocol") orelse "", "webtransport")) {
             return error.InvalidConnect;
         }
+        try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
+        if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
         try self.h3.sendResponse(request.from, request.stream_id, .{ .status = 200 });
         return .{ .request = request, .session_id = session_id };
     }
 
     pub fn receiveDatagram(self: *ProtectedServer) Error!OwnedProtectedDatagram {
+        try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         return receiveProtectedDatagramFromEndpoint(
             &self.h3.quic_server.endpoint,
             self.h3.config.receive_keys,
@@ -96,6 +99,7 @@ pub const ProtectedServer = struct {
     }
 
     pub fn sendDatagram(self: *ProtectedServer, to: net.IpAddress, session_id: webtransport.SessionId, payload: []const u8) Error!void {
+        try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         try sendProtectedDatagramFromEndpoint(
             &self.h3.quic_server.endpoint,
             to,
@@ -118,7 +122,7 @@ pub const HandshakeServer = struct {
         limits: Limits,
         options: http3.runtime.HandshakeServerOptions,
     ) Error!HandshakeServer {
-        return .{ .h3 = try .bind(allocator, io, bind_address, limits.http3, options) };
+        return .{ .h3 = try .bind(allocator, io, bind_address, limits.http3, webTransportHandshakeServerOptions(options)) };
     }
 
     pub fn deinit(self: *HandshakeServer) void {
@@ -140,7 +144,9 @@ pub const HandshakeServer = struct {
         if (!std.mem.eql(u8, findHeader(request.request.headers, ":protocol") orelse "", "webtransport")) {
             return error.InvalidConnect;
         }
+        try webtransport.ensureDatagramsNegotiated(session.options.local_settings, session.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
+        if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
         try session.sendResponse(request.stream_id, .{ .status = 200 });
         return .{ .h3 = session, .request = request, .session_id = session_id };
     }
@@ -179,15 +185,27 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
+        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
     }
 
     pub fn receiveManyDatagrams(self: *AcceptedHandshakeSession, count: usize) Error!OwnedHandshakeDatagramBatch {
+        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
     }
 
     pub fn sendDatagram(self: *AcceptedHandshakeSession, payload: []const u8) Error!void {
+        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         try sendHandshakeDatagramFromConnection(&self.h3.established.connection, self.session_id, payload);
+    }
+
+    pub fn maxDatagramPayloadSize(self: AcceptedHandshakeSession) ?usize {
+        return webtransport.maxDatagramPayloadSize(self.h3.established.connection.maxDatagramPayloadSize(), self.session_id);
+    }
+
+    pub fn datagramsNegotiated(self: AcceptedHandshakeSession) bool {
+        webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer) catch return false;
+        return true;
     }
 };
 
@@ -205,13 +223,14 @@ pub const ClientSession = struct {
         var h3_client = try http3.runtime.Client.connect(allocator, io, local_address, server, options.limits.http3);
         errdefer h3_client.deinit();
 
-        _ = options.origin;
+        var header_buf: [2]http3.Qpack.HeaderField = undefined;
+        const headers = connectRequestHeaders(options.origin, &header_buf);
         var response = try h3_client.request(.{
             .method = "CONNECT",
             .path = options.path,
             .scheme = "https",
             .authority = options.authority,
-            .headers = &.{.{ .name = ":protocol", .value = "webtransport" }},
+            .headers = headers,
         });
         defer response.deinit(allocator);
         if (response.response.status < 200 or response.response.status >= 300) return error.InvalidConnect;
@@ -248,18 +267,20 @@ pub const HandshakeClientSession = struct {
         server: net.IpAddress,
         options: HandshakeConnectOptions,
     ) Error!HandshakeClientSession {
-        var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, options.h3);
+        var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportHandshakeClientOptions(options.h3));
         errdefer h3_client.deinit();
-        _ = options.origin;
+        var header_buf: [2]http3.Qpack.HeaderField = undefined;
+        const headers = connectRequestHeaders(options.origin, &header_buf);
         var response = try h3_client.request(.{
             .method = "CONNECT",
             .path = options.path,
             .scheme = "https",
             .authority = options.authority,
-            .headers = &.{.{ .name = ":protocol", .value = "webtransport" }},
+            .headers = headers,
         });
         defer response.deinit(allocator);
         if (response.response.status < 200 or response.response.status >= 300) return error.InvalidConnect;
+        try webtransport.ensureDatagramsNegotiated(h3_client.options.local_settings, h3_client.control.settings.peer);
         return .{ .h3 = h3_client, .session_id = .init(0) };
     }
 
@@ -269,15 +290,27 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
+        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         try sendHandshakeDatagramFromConnection(&self.h3.established.connection, self.session_id, payload);
     }
 
     pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
+        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveHandshakeDatagramFromConnection(&self.h3.established.connection);
     }
 
     pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
+        try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(&self.h3.established.connection, count);
+    }
+
+    pub fn maxDatagramPayloadSize(self: HandshakeClientSession) ?usize {
+        return webtransport.maxDatagramPayloadSize(self.h3.established.connection.maxDatagramPayloadSize(), self.session_id);
+    }
+
+    pub fn datagramsNegotiated(self: HandshakeClientSession) bool {
+        webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer) catch return false;
+        return true;
     }
 };
 
@@ -292,18 +325,20 @@ pub const ProtectedClientSession = struct {
         server: net.IpAddress,
         options: ProtectedConnectOptions,
     ) Error!ProtectedClientSession {
-        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, options.config);
+        var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportProtectedConfig(options.config));
         errdefer h3_client.deinit();
-        _ = options.origin;
+        var header_buf: [2]http3.Qpack.HeaderField = undefined;
+        const headers = connectRequestHeaders(options.origin, &header_buf);
         var response = try h3_client.request(.{
             .method = "CONNECT",
             .path = options.path,
             .scheme = "https",
             .authority = options.authority,
-            .headers = &.{.{ .name = ":protocol", .value = "webtransport" }},
+            .headers = headers,
         });
         defer response.deinit(allocator);
         if (response.response.status < 200 or response.response.status >= 300) return error.InvalidConnect;
+        try webtransport.ensureDatagramsNegotiated(h3_client.config.local_settings, h3_client.control.settings.peer);
         return .{ .h3 = h3_client, .session_id = .init(0) };
     }
 
@@ -313,6 +348,7 @@ pub const ProtectedClientSession = struct {
     }
 
     pub fn sendDatagram(self: *ProtectedClientSession, payload: []const u8) Error!void {
+        try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         try sendProtectedDatagramFromEndpoint(
             &self.h3.quic_client.endpoint,
             self.h3.quic_client.peer,
@@ -325,6 +361,7 @@ pub const ProtectedClientSession = struct {
     }
 
     pub fn receiveDatagram(self: *ProtectedClientSession) Error!OwnedProtectedDatagram {
+        try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         return receiveProtectedDatagramFromEndpoint(
             &self.h3.quic_client.endpoint,
             self.h3.config.receive_keys,
@@ -332,6 +369,11 @@ pub const ProtectedClientSession = struct {
             &self.h3.expected_packet_number,
             self.h3.config.max_frames_per_packet,
         );
+    }
+
+    pub fn datagramsNegotiated(self: ProtectedClientSession) bool {
+        webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer) catch return false;
+        return true;
     }
 };
 
@@ -357,6 +399,36 @@ pub const HandshakeConnectOptions = struct {
     limits: Limits = .{},
     h3: http3.runtime.HandshakeClientOptions,
 };
+
+fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig) http3.runtime.ProtectedConfig {
+    var out = config;
+    out.local_settings = webtransport.defaultSettings(out.local_settings);
+    return out;
+}
+
+fn webTransportHandshakeServerOptions(options: http3.runtime.HandshakeServerOptions) http3.runtime.HandshakeServerOptions {
+    var out = options;
+    out.session.local_settings = webtransport.defaultSettings(out.session.local_settings);
+    return out;
+}
+
+fn webTransportHandshakeClientOptions(options: http3.runtime.HandshakeClientOptions) http3.runtime.HandshakeClientOptions {
+    var out = options;
+    out.session.local_settings = webtransport.defaultSettings(out.session.local_settings);
+    return out;
+}
+
+fn connectRequestHeaders(origin: []const u8, out: *[2]http3.Qpack.HeaderField) []const http3.Qpack.HeaderField {
+    out[0] = .{ .name = ":protocol", .value = "webtransport" };
+    // Keep the historical "/" default from ConnectOptions as "not supplied";
+    // real WebTransport clients can pass an Origin value and have it carried in
+    // the CONNECT request for server-side policy checks.
+    if (origin.len != 0 and !std.mem.eql(u8, origin, "/")) {
+        out[1] = .{ .name = "origin", .value = origin };
+        return out[0..2];
+    }
+    return out[0..1];
+}
 
 pub const OwnedDatagram = struct {
     quic_datagram: quic.runtime.OwnedDatagram,
@@ -491,7 +563,6 @@ fn drainQueuedHandshakeDatagrams(connection: *quic.one_rtt.Connection, datagrams
 }
 
 fn receiveManyHandshakeDatagrams(connection: *quic.one_rtt.Connection, count: usize) Error!OwnedHandshakeDatagramBatch {
-    var group: std.Io.Group = .init;
     const datagrams = try connection.endpoint.allocator.alloc(?OwnedHandshakeDatagram, count);
     errdefer connection.endpoint.allocator.free(datagrams);
     @memset(datagrams, null);
@@ -502,32 +573,21 @@ fn receiveManyHandshakeDatagrams(connection: *quic.one_rtt.Connection, count: us
     const filled = try drainQueuedHandshakeDatagrams(connection, datagrams);
     if (filled == count) return .{ .allocator = connection.endpoint.allocator, .datagrams = datagrams, .errors = errors };
 
+    // A QUIC connection owns packet-number, ACK, flow-control, and DATAGRAM
+    // queue state.  Unlike independent endpoint receives, multiple concurrent
+    // receivePacket() calls on the same Connection would race those mutable
+    // invariants.  Batch reception therefore drains one connection
+    // sequentially while still returning the ergonomic batch/error shape used
+    // by the higher-level runtime.
     for (datagrams[filled..], errors[filled..]) |*datagram, *err_slot| {
-        const task = HandshakeDatagramTask{
-            .connection = connection,
-            .datagram = datagram,
-            .err = err_slot,
+        datagram.* = receiveHandshakeDatagramFromConnection(connection) catch |err| {
+            err_slot.* = err;
+            break;
         };
-        group.async(connection.endpoint.io, HandshakeDatagramTask.run, .{task});
+        err_slot.* = null;
     }
-
-    try group.await(connection.endpoint.io);
     return .{ .allocator = connection.endpoint.allocator, .datagrams = datagrams, .errors = errors };
 }
-
-const HandshakeDatagramTask = struct {
-    connection: *quic.one_rtt.Connection,
-    datagram: *?OwnedHandshakeDatagram,
-    err: *?anyerror,
-
-    fn run(task: HandshakeDatagramTask) std.Io.Cancelable!void {
-        task.datagram.* = receiveHandshakeDatagramFromConnection(task.connection) catch |err| {
-            task.err.* = err;
-            return;
-        };
-        task.err.* = null;
-    }
-};
 
 fn sendProtectedDatagramFromEndpoint(
     endpoint: *quic.runtime.Endpoint,

@@ -120,9 +120,10 @@ starts with deterministic parsers, serializers, and state helpers for:
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
   datagram mapping, session lifecycle/counter state, plus a cleartext
   development runtime over the HTTP/3 dev transport, a protected QUIC 1-RTT
-  runtime over protected HTTP/3, and a handshake-backed protected runtime that
-  uses QUIC 1-RTT DATAGRAM send/receive queues with a `std.Io.async` datagram
-  receive helper
+  runtime over protected HTTP/3 with automatic WebTransport/H3 DATAGRAM
+  SETTINGS advertisement and negotiation checks, and a handshake-backed
+  protected runtime that uses QUIC 1-RTT DATAGRAM send/receive queues with
+  WebTransport payload-size accounting and batch receive helpers
 - WebRTC building blocks: STUN, ICE connectivity-check helpers with
   USERNAME/PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE plus
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
@@ -149,7 +150,10 @@ protected HTTP/3 runtime uses the QUIC 1-RTT short-packet API for SETTINGS
 control streams and request/response STREAM frames. WebTransport has the
 cleartext development transport, a protected runtime that performs CONNECT over
 protected HTTP/3 and datagrams over protected QUIC 1-RTT packets, and a
-handshake-backed protected session API.
+handshake-backed protected session API. The protected WebTransport runtimes
+enable CONNECT, H3 DATAGRAM, WebTransport max-sessions, and draft-13
+per-session stream/data credit SETTINGS by default, then reject DATAGRAM send or
+receive calls if the peer did not negotiate the matching capabilities.
 
 ## Build
 
@@ -210,6 +214,28 @@ defer ws.close();
 try ws.sendText("hello");
 var frame = try ws.receiveFrame();
 defer frame.deinit(allocator);
+```
+
+Handshake-backed WebTransport sessions expose the negotiated DATAGRAM budget so
+callers can avoid sending a payload the underlying QUIC peer will reject:
+
+```zig
+var session = try netz.webtransport.runtime.HandshakeClientSession.connect(
+    allocator,
+    io,
+    .{ .ip4 = .loopback(0) },
+    server_addr,
+    .{
+        .authority = "localhost",
+        .path = "/wt",
+        .h3 = handshake_options,
+    },
+);
+defer session.deinit();
+
+if (session.maxDatagramPayloadSize()) |limit| {
+    if ("hello".len <= limit) try session.sendDatagram("hello");
+}
 ```
 
 ## Design notes

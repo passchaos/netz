@@ -102,6 +102,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http3.Response, "trailers"));
     try std.testing.expect(@hasField(netz.http3.DecodedRequest, "trailers"));
     try std.testing.expect(@hasField(netz.http3.DecodedResponse, "body_storage"));
+    try std.testing.expect(@hasField(netz.http3.Settings, "enable_webtransport"));
+    try std.testing.expect(@hasField(netz.http3.Settings, "webtransport_initial_max_data"));
+    try std.testing.expectEqual(@as(u64, 0x14e9cd29), @intFromEnum(netz.http3.SettingId.webtransport_max_sessions_v13));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedConfig, "local_settings"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "control"));
     try std.testing.expect(@hasField(netz.http3.runtime.HandshakeClient, "control"));
@@ -379,11 +382,16 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.connection_router.Router, "routeDatagramFrom"));
     try std.testing.expect(netz.webtransport.SessionId.init(0).isClientInitiatedBidirectional());
     try std.testing.expect(@hasDecl(netz.webtransport, "SessionState"));
+    try std.testing.expect(@hasDecl(netz.webtransport, "defaultSettings"));
+    try std.testing.expect(@hasDecl(netz.webtransport, "ensureDatagramsNegotiated"));
+    try std.testing.expectEqual(@as(?usize, 1199), netz.webtransport.maxDatagramPayloadSize(1200, .init(0)));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.webtransport.runtime.Limits{}).http3.quic.max_datagram_size);
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "ProtectedClientSession"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "HandshakeClientSession"));
     try std.testing.expect(@hasField(netz.webtransport.runtime.OwnedHandshakeDatagram, "bytes"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "receiveManyDatagrams"));
+    try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "maxDatagramPayloadSize"));
+    try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "datagramsNegotiated"));
     try std.testing.expectEqual(@as(u32, 0x2112A442), netz.webrtc.stun.magic_cookie);
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "writeIceBindingRequest"));
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "validateMessageIntegrity"));
