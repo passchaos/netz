@@ -137,6 +137,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_receive_max_streams_uni"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));

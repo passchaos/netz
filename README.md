@@ -50,6 +50,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   to RESET_STREAM response handling,
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
+  stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling,
   protected 0-RTT long-header packet seal/open and frame datagram helpers with
   0-RTT packet-type restrictions,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only

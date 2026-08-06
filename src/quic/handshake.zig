@@ -95,6 +95,10 @@ pub const OneRttConfig = struct {
             .initial_receive_max_stream_data_bidi_local = @min(self.initial_receive_max_stream_data, local_transport_parameters.initial_max_stream_data_bidi_local),
             .initial_receive_max_stream_data_bidi_remote = @min(self.initial_receive_max_stream_data, local_transport_parameters.initial_max_stream_data_bidi_remote),
             .initial_receive_max_stream_data_uni = @min(self.initial_receive_max_stream_data, local_transport_parameters.initial_max_stream_data_uni),
+            .initial_send_max_streams_bidi = peer_transport_parameters.initial_max_streams_bidi,
+            .initial_send_max_streams_uni = peer_transport_parameters.initial_max_streams_uni,
+            .initial_receive_max_streams_bidi = local_transport_parameters.initial_max_streams_bidi,
+            .initial_receive_max_streams_uni = local_transport_parameters.initial_max_streams_uni,
             .stream_receive_window = self.stream_receive_window,
             .max_datagram_size = @min(
                 self.max_datagram_size,
