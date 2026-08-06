@@ -869,6 +869,7 @@ fn validateServerHandshake(
     client_key: []const u8,
     offered_protocols: []const []const u8,
 ) Error!?[]u8 {
+    if (response.version != .http_1_1) return error.InvalidHandshake;
     const upgrade = response.header("upgrade") orelse return error.MissingHeader;
     if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
     const connection = response.header("connection") orelse return error.MissingHeader;
@@ -1286,6 +1287,63 @@ test "WebSocket client rejects unoffered subprotocol" {
         .host = "127.0.0.1",
         .target = "/bad-subprotocol",
         .protocols = &.{"superchat"},
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket client rejects HTTP/1.0 upgrade responses" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var http_conn = try server_ptr.http.accept();
+            defer http_conn.close();
+            var head = try readHttpHead(server_ptr.http.allocator, http_conn.io, http_conn.stream, server_ptr.limits.max_head_bytes);
+            defer head.deinit(server_ptr.http.allocator);
+            var request = try http1.parseRequest(server_ptr.http.allocator, head.head, .{});
+            defer request.deinit(server_ptr.http.allocator);
+            const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
+            const accept = websocket.acceptKey(key);
+            var response: std.ArrayList(u8) = .empty;
+            defer response.deinit(server_ptr.http.allocator);
+            try response.appendSlice(server_ptr.http.allocator, "HTTP/1.0 101 Switching Protocols\r\n");
+            try response.appendSlice(server_ptr.http.allocator, "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ");
+            try response.appendSlice(server_ptr.http.allocator, &accept);
+            try response.appendSlice(server_ptr.http.allocator, "\r\n\r\n");
+            try writeAll(http_conn.io, http_conn.stream, response.items);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    try std.testing.expectError(error.InvalidHandshake, Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/http10-response",
         .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
     }));
 

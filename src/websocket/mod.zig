@@ -342,6 +342,7 @@ pub fn acceptKey(client_key: []const u8) [28]u8 {
 
 pub fn validateClientHandshake(req: http1.Request) Error!void {
     if (req.method != .GET) return error.InvalidHandshake;
+    if (req.version != .http_1_1) return error.InvalidHandshake;
     const upgrade = req.header("upgrade") orelse return error.MissingHeader;
     if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
     const connection = req.header("connection") orelse return error.MissingHeader;
@@ -531,6 +532,11 @@ test "WebSocket handshake validation" {
     var req = try http1.parseRequest(allocator, raw, .{});
     defer req.deinit(allocator);
     try validateClientHandshake(req);
+
+    const http10 = "GET /chat HTTP/1.0\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var http10_req = try http1.parseRequest(allocator, http10, .{});
+    defer http10_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(http10_req));
 }
 
 test "WebSocket strict frame validation" {
