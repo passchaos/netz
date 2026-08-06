@@ -30,6 +30,9 @@ const max_max_frame_size: usize = 16_777_215;
 const default_max_header_list_size: usize = 16 * 1024;
 
 pub const Limits = struct {
+    /// Local allocation/test ceiling for any inbound or outbound frame payload.
+    /// `max_frame_size` below is the HTTP/2 SETTINGS_MAX_FRAME_SIZE value that
+    /// can be advertised to peers and must stay within RFC 9113 bounds.
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
     max_header_fields: usize = 256,
@@ -51,6 +54,7 @@ pub const Server = struct {
     limits: Limits = .{},
 
     pub fn listen(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
+        try validateLocalLimits(limits);
         return .{
             .io = io,
             .allocator = allocator,
@@ -187,6 +191,7 @@ fn ServeTask(comptime HandlerContext: type) type {
 
 pub const Client = struct {
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Connection {
+        try validateLocalLimits(limits);
         const stream = try address.connect(io, .{ .mode = .stream });
         errdefer stream.close(io);
 
@@ -1308,7 +1313,13 @@ fn writeFrame(
     try writeAll(io, stream, encoded.items);
 }
 
+fn validateLocalLimits(limits: Limits) Error!void {
+    if (limits.initial_window_size > std.math.maxInt(i31)) return error.InvalidSetting;
+    if (limits.max_frame_size < default_max_frame_size or limits.max_frame_size > max_max_frame_size) return error.InvalidSetting;
+}
+
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
+    try validateLocalLimits(limits);
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
     var settings_buf: [7]http2.Setting = undefined;
@@ -1322,7 +1333,7 @@ fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.St
         count += 1;
     }
     if (limits.max_frame_size != default_max_frame_size) {
-        settings_buf[count] = .{ .id = .max_frame_size, .value = @intCast(@min(limits.max_frame_size, max_max_frame_size)) };
+        settings_buf[count] = .{ .id = .max_frame_size, .value = @intCast(limits.max_frame_size) };
         count += 1;
     }
     settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) };
@@ -4280,6 +4291,22 @@ test "HTTP/2 readFrame enforces inbound SETTINGS_MAX_FRAME_SIZE before payload r
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 runtime rejects invalid local SETTINGS limits" {
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .initial_window_size = @as(u32, std.math.maxInt(i31)) + 1,
+    }));
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .max_frame_size = default_max_frame_size - 1,
+    }));
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .max_frame_size = max_max_frame_size + 1,
+    }));
+    try validateLocalLimits(.{
+        .initial_window_size = std.math.maxInt(i31),
+        .max_frame_size = max_max_frame_size,
+    });
 }
 
 test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
