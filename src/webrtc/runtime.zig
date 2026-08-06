@@ -76,6 +76,14 @@ pub const Peer = struct {
         return self.endpoint.receiveRtcpPacket();
     }
 
+    pub fn sendSrtcpPacket(self: *Peer, to: net.IpAddress, context: *webrtc.srtp.Context, packet: webrtc.rtcp.Packet) Error!void {
+        try self.endpoint.sendSrtcpPacket(to, context, packet);
+    }
+
+    pub fn receiveSrtcpPacket(self: *Peer, context: *webrtc.srtp.Context) Error!SrtcpDatagram {
+        return self.endpoint.receiveSrtcpPacket(context);
+    }
+
     pub fn sendDtlsRecord(self: *Peer, to: net.IpAddress, options: webrtc.dtls.WriteOptions, fragment: []const u8) Error!void {
         try self.endpoint.sendDtlsRecord(to, options, fragment);
     }
@@ -223,6 +231,13 @@ pub const PeerEndpoint = struct {
         try self.sendBytes(to, encoded.items);
     }
 
+    pub fn sendSrtcpPacket(self: *PeerEndpoint, to: net.IpAddress, context: *webrtc.srtp.Context, packet: webrtc.rtcp.Packet) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try context.protectRtcpPacket(&encoded, self.allocator, packet);
+        try self.sendBytes(to, encoded.items);
+    }
+
     pub fn receiveRtpPacket(self: *PeerEndpoint) Error!RtpDatagram {
         while (true) {
             var raw = try self.receiveRaw();
@@ -262,6 +277,20 @@ pub const PeerEndpoint = struct {
             var parsed = try webrtc.rtcp.parsePacket(self.allocator, raw.bytes);
             errdefer parsed.deinit(self.allocator);
             return .{ .from = raw.from, .bytes = raw.bytes, .packet = parsed.packet };
+        }
+    }
+
+    pub fn receiveSrtcpPacket(self: *PeerEndpoint, context: *webrtc.srtp.Context) Error!SrtcpDatagram {
+        while (true) {
+            var raw = try self.receiveRaw();
+            errdefer raw.deinit(self.allocator);
+            if (!looksLikeRtcp(raw.bytes)) {
+                raw.deinit(self.allocator);
+                continue;
+            }
+            var authenticated = try context.unprotectRtcp(self.allocator, raw.bytes);
+            errdefer authenticated.deinit(self.allocator);
+            return .{ .from = raw.from, .bytes = raw.bytes, .authenticated = authenticated };
         }
     }
 
@@ -490,6 +519,18 @@ pub const SrtpDatagram = struct {
     authenticated: webrtc.srtp.AuthenticatedRtp,
 
     pub fn deinit(self: *SrtpDatagram, allocator: std.mem.Allocator) void {
+        self.authenticated.deinit(allocator);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+pub const SrtcpDatagram = struct {
+    from: net.IpAddress,
+    bytes: []u8,
+    authenticated: webrtc.srtp.AuthenticatedRtcp,
+
+    pub fn deinit(self: *SrtcpDatagram, allocator: std.mem.Allocator) void {
         self.authenticated.deinit(allocator);
         allocator.free(self.bytes);
         self.* = undefined;
@@ -970,6 +1011,48 @@ test "WebRTC RTP runtime sends and receives packets over UDP" {
     try std.testing.expectEqual(@as(u16, 2), response.packet.header.sequence_number);
     try std.testing.expectEqual(@as(u32, 320), response.packet.header.timestamp);
     try std.testing.expectEqualStrings("server-frame", response.packet.payload);
+}
+
+test "WebRTC peer runtime sends authenticated SRTCP and rejects replay" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const auth_key = [_]u8{0x5a} ** webrtc.srtp.hmac_sha1_len;
+    var sender_context = webrtc.srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+    var receiver_context = webrtc.srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+
+    var receiver = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer receiver.deinit();
+    var sender = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer sender.deinit();
+
+    try sender.sendSrtcpPacket(receiver.address(), &sender_context, .{ .picture_loss_indication = .{
+        .sender_ssrc = 0x01020304,
+        .media_ssrc = 0x11121314,
+    } });
+
+    var protected = try receiver.receiveSrtcpPacket(&receiver_context);
+    defer protected.deinit(allocator);
+    try std.testing.expect(protected.from.eql(&sender.address()));
+    try std.testing.expectEqual(@as(u31, 0), protected.authenticated.verified.index);
+    try std.testing.expectEqual(@as(u32, 0x11121314), protected.authenticated.rtcp.picture_loss_indication.media_ssrc);
+
+    var replay_bytes: std.ArrayList(u8) = .empty;
+    defer replay_bytes.deinit(allocator);
+    try sender_context.protectRtcpPacket(&replay_bytes, allocator, .{ .picture_loss_indication = .{
+        .sender_ssrc = 0x01020304,
+        .media_ssrc = 0x22222222,
+    } });
+    try sender.endpoint.sendBytes(receiver.address(), replay_bytes.items);
+    var first = try receiver.receiveSrtcpPacket(&receiver_context);
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x22222222), first.authenticated.rtcp.picture_loss_indication.media_ssrc);
+
+    try sender.endpoint.sendBytes(receiver.address(), replay_bytes.items);
+    try std.testing.expectError(error.SrtpReplay, receiver.receiveSrtcpPacket(&receiver_context));
 }
 
 test "WebRTC peer runtime sends authenticated SRTP and rejects replay" {

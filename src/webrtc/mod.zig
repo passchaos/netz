@@ -1237,6 +1237,8 @@ pub const srtp = struct {
         keys: KeyingMaterial,
         rollover: RolloverCounter = .{},
         replay: ReplayWindow = .{},
+        srtcp_send_index: u31 = 0,
+        srtcp_replay: ReplayWindow = .{},
 
         pub fn protectRtp(self: *Context, list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet: []const u8) Error!void {
             const sequence_number = try rtpSequenceNumber(packet);
@@ -1274,6 +1276,45 @@ pub const srtp = struct {
             errdefer packet.deinit(allocator);
             return .{ .verified = verified, .rtp = packet };
         }
+
+        pub fn protectRtcp(self: *Context, list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet: []const u8) Error!void {
+            if (packet.len < 8 or (packet[0] & 0xc0) != 0x80) return error.InvalidSrtpPacket;
+            try list.appendSlice(allocator, packet);
+            const index = self.srtcp_send_index;
+            self.srtcp_send_index +%= 1;
+            try wire.appendInt(list, allocator, u32, index, .big);
+            try appendRtcpAuthTag(list, allocator, self.keys.auth_key, packet, index);
+        }
+
+        pub fn protectRtcpPacket(self: *Context, list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet: rtcp.Packet) Error!void {
+            var raw: std.ArrayList(u8) = .empty;
+            defer raw.deinit(allocator);
+            try rtcp.writePacket(&raw, allocator, packet);
+            try self.protectRtcp(list, allocator, raw.items);
+        }
+
+        pub fn verifyRtcp(self: *Context, protected_packet: []const u8) Error!VerifiedRtcp {
+            if (protected_packet.len <= 4 + auth_tag_len_80) return error.InvalidSrtpPacket;
+            const auth_start = protected_packet.len - auth_tag_len_80;
+            const index_start = auth_start - 4;
+            const packet = protected_packet[0..index_start];
+            const raw_index = std.mem.readInt(u32, protected_packet[index_start..auth_start][0..4], .big);
+            const encrypted = (raw_index & 0x8000_0000) != 0;
+            if (encrypted) return error.InvalidSrtpPacket;
+            const index: u31 = @truncate(raw_index & 0x7fff_ffff);
+            var expected: [auth_tag_len_80]u8 = undefined;
+            rtcpAuthTag(&expected, self.keys.auth_key, packet, index);
+            if (!std.crypto.timing_safe.eql([auth_tag_len_80]u8, expected, protected_packet[auth_start..][0..auth_tag_len_80].*)) return error.BadSrtpAuthTag;
+            try self.srtcp_replay.accept(index);
+            return .{ .packet = packet, .index = index, .encrypted = encrypted };
+        }
+
+        pub fn unprotectRtcp(self: *Context, allocator: std.mem.Allocator, protected_packet: []const u8) Error!AuthenticatedRtcp {
+            const verified = try self.verifyRtcp(protected_packet);
+            var parsed = try rtcp.parsePacket(allocator, verified.packet);
+            errdefer parsed.deinit(allocator);
+            return .{ .verified = verified, .rtcp = parsed.packet };
+        }
     };
 
     pub const VerifiedRtp = struct {
@@ -1288,6 +1329,22 @@ pub const srtp = struct {
 
         pub fn deinit(self: *AuthenticatedRtp, allocator: std.mem.Allocator) void {
             self.rtp.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
+    pub const VerifiedRtcp = struct {
+        packet: []const u8,
+        index: u31,
+        encrypted: bool = false,
+    };
+
+    pub const AuthenticatedRtcp = struct {
+        verified: VerifiedRtcp,
+        rtcp: rtcp.Packet,
+
+        pub fn deinit(self: *AuthenticatedRtcp, allocator: std.mem.Allocator) void {
+            self.rtcp.deinit(allocator);
             self.* = undefined;
         }
     };
@@ -1307,9 +1364,26 @@ pub const srtp = struct {
         @memcpy(out[0..], full[0..auth_tag_len_80]);
     }
 
+    pub fn rtcpAuthTag(out: *[auth_tag_len_80]u8, auth_key: []const u8, packet: []const u8, index: u31) void {
+        var index_bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &index_bytes, index, .big);
+        var full: [hmac_sha1_len]u8 = undefined;
+        var hmac = std.crypto.auth.hmac.HmacSha1.init(auth_key);
+        hmac.update(packet);
+        hmac.update(&index_bytes);
+        hmac.final(&full);
+        @memcpy(out[0..], full[0..auth_tag_len_80]);
+    }
+
     fn appendAuthTag(list: *std.ArrayList(u8), allocator: std.mem.Allocator, auth_key: []const u8, packet: []const u8, roc: u32) Error!void {
         var tag: [auth_tag_len_80]u8 = undefined;
         authTag(&tag, auth_key, packet, roc);
+        try list.appendSlice(allocator, &tag);
+    }
+
+    fn appendRtcpAuthTag(list: *std.ArrayList(u8), allocator: std.mem.Allocator, auth_key: []const u8, packet: []const u8, index: u31) Error!void {
+        var tag: [auth_tag_len_80]u8 = undefined;
+        rtcpAuthTag(&tag, auth_key, packet, index);
         try list.appendSlice(allocator, &tag);
     }
 
@@ -3200,6 +3274,34 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectError(error.InvalidRtpPacket, rtp.writeOneByteHeaderExtensions(&two_byte_extensions, allocator, &.{
         .{ .id = 15, .data = "reserved" },
     }));
+}
+
+test "SRTCP NULL_HMAC_SHA1_80 authenticates index and rejects replay" {
+    const allocator = std.testing.allocator;
+    const auth_key = [_]u8{0x24} ** srtp.hmac_sha1_len;
+    var sender = srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+    var receiver = srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try sender.protectRtcpPacket(&encoded, allocator, .{ .picture_loss_indication = .{
+        .sender_ssrc = 0x01020304,
+        .media_ssrc = 0x11121314,
+    } });
+
+    var auth = try receiver.unprotectRtcp(allocator, encoded.items);
+    defer auth.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 0), auth.verified.index);
+    try std.testing.expect(!auth.verified.encrypted);
+    try std.testing.expectEqual(@as(u32, 0x01020304), auth.rtcp.picture_loss_indication.sender_ssrc);
+
+    try std.testing.expectError(error.SrtpReplay, receiver.verifyRtcp(encoded.items));
+
+    var tampered = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x55;
+    var fresh = srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+    try std.testing.expectError(error.BadSrtpAuthTag, fresh.verifyRtcp(tampered));
 }
 
 test "SRTP NULL_HMAC_SHA1_80 authenticates ROC and rejects replay" {

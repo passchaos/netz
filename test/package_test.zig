@@ -423,6 +423,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.srtp, "Context"));
     try std.testing.expect(@hasDecl(netz.webrtc.srtp.Context, "protectRtpPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.srtp.Context, "unprotectRtp"));
+    try std.testing.expect(@hasDecl(netz.webrtc.srtp.Context, "protectRtcpPacket"));
+    try std.testing.expect(@hasDecl(netz.webrtc.srtp.Context, "unprotectRtcp"));
     try std.testing.expectEqual(@as(usize, 10), netz.webrtc.srtp.auth_tag_len_80);
     try std.testing.expect(@hasDecl(netz.webrtc.sdp, "extractFingerprint"));
     try std.testing.expect(@hasDecl(netz.webrtc.sdp, "extractIceCredentials"));
@@ -457,8 +459,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "DtlsDatagram"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "RtcpDatagram"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime, "SrtpDatagram"));
+    try std.testing.expect(@hasDecl(netz.webrtc.runtime, "SrtcpDatagram"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "sendSrtpPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveSrtpPacket"));
+    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "sendSrtcpPacket"));
+    try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveSrtcpPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "sendRtcpPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "receiveRtcpPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.runtime.Peer, "iceBindingRequest"));

@@ -129,9 +129,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
   XOR-MAPPED-ADDRESS helpers, ICE candidates, SDP parsing with DTLS fingerprint,
   ICE credential, BUNDLE-aware media selection, and RTP `extmap` extraction, DTLS record headers, RTP packets/extensions/padding, RTCP
-  RFC 5285 one-byte/two-byte header extension codecs for MID/RID/TWCC/absolute-send-time style metadata, sender/receiver reports plus sender/receiver-report statistics, PLI/NACK/TWCC feedback and RTP sequence-gap NACK tracking, SRTP NULL_HMAC_SHA1_80 RTP authentication with ROC tracking and replay-window checks, SCTP INIT/INIT-ACK/COOKIE-ECHO/COOKIE-ACK, HEARTBEAT/SHUTDOWN lifecycle, RE-CONFIG stream reset, FORWARD-TSN partial-reliability, and DATA/SACK packet parsing/writing, DATA fragment reassembly with receive-buffer limits, CRC32C validation, and DCEP DataChannel OPEN/ACK codecs, plus
-  blocking UDP STUN binding, RTP/SRTP/RTCP packet, and same-socket STUN/DTLS/RTP/RTCP
-  peer runtimes with SRTP send/receive helpers and a `std.Io.async` concurrent receive helper
+  RFC 5285 one-byte/two-byte header extension codecs for MID/RID/TWCC/absolute-send-time style metadata, sender/receiver reports plus sender/receiver-report statistics, PLI/NACK/TWCC feedback and RTP sequence-gap NACK tracking, SRTP/SRTCP NULL_HMAC_SHA1_80 authentication with ROC/SRTCP-index tracking and replay-window checks, SCTP INIT/INIT-ACK/COOKIE-ECHO/COOKIE-ACK, HEARTBEAT/SHUTDOWN lifecycle, RE-CONFIG stream reset, FORWARD-TSN partial-reliability, and DATA/SACK packet parsing/writing, DATA fragment reassembly with receive-buffer limits, CRC32C validation, and DCEP DataChannel OPEN/ACK codecs, plus
+  blocking UDP STUN binding, RTP/SRTP/RTCP/SRTCP packet, and same-socket STUN/DTLS/RTP/RTCP
+  peer runtimes with SRTP/SRTCP send/receive helpers and a `std.Io.async` concurrent receive helper
 
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1,
