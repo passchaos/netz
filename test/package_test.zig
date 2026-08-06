@@ -284,6 +284,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveManyConcurrent"));
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveRoutedBytes"));
     try std.testing.expect(@hasDecl(netz.quic.connection_router, "Router"));
+    try std.testing.expect(@hasField(netz.quic.connection_router.Route, "peer_address"));
+    try std.testing.expect(@hasField(netz.quic.connection_router.Route, "active_migration_disabled"));
+    try std.testing.expect(@hasDecl(netz.quic.connection_router.Router, "routeDatagramFrom"));
     try std.testing.expect(netz.webtransport.SessionId.init(0).isClientInitiatedBidirectional());
     try std.testing.expect(@hasDecl(netz.webtransport, "SessionState"));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.webtransport.runtime.Limits{}).http3.quic.max_datagram_size);

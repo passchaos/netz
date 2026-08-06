@@ -221,7 +221,7 @@ pub const Endpoint = struct {
     pub fn receiveRoutedBytes(self: *Endpoint, router: quic.connection_router.Router) Error!RoutedBytes {
         var raw = try self.receiveBytes();
         errdefer raw.deinit(self.allocator);
-        const routed = (try router.routeDatagram(raw.bytes)) orelse return error.NoConnectionRoute;
+        const routed = (try router.routeDatagramFrom(raw.from, raw.bytes)) orelse return error.NoConnectionRoute;
         return .{ .datagram = raw, .route = routed.route, .destination_connection_id = routed.destination_connection_id };
     }
 
@@ -232,7 +232,7 @@ pub const Endpoint = struct {
     ) Error!RoutedBytes {
         var raw = try self.receiveBytesHandlingVersionNegotiation(supported_versions);
         errdefer raw.deinit(self.allocator);
-        const routed = (try router.routeDatagram(raw.bytes)) orelse return error.NoConnectionRoute;
+        const routed = (try router.routeDatagramFrom(raw.from, raw.bytes)) orelse return error.NoConnectionRoute;
         return .{ .datagram = raw, .route = routed.route, .destination_connection_id = routed.destination_connection_id };
     }
 

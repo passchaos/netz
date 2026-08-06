@@ -2,15 +2,20 @@ const std = @import("std");
 
 pub const max_connection_id_len = 20;
 
+const net = std.Io.net;
+
 pub const Error = error{
     InvalidConnectionId,
     InvalidPacket,
     DuplicateConnectionId,
+    ActiveMigrationDisabled,
 } || std.mem.Allocator.Error;
 
 pub const Route = struct {
     connection_index: usize,
     sequence_number: u64 = 0,
+    peer_address: ?net.IpAddress = null,
+    active_migration_disabled: bool = false,
 };
 
 pub const RoutedDatagram = struct {
@@ -81,11 +86,17 @@ pub const Router = struct {
     }
 
     pub fn routeDatagram(self: Router, packet: []const u8) Error!?RoutedDatagram {
+        return try self.routeDatagramFrom(null, packet);
+    }
+
+    pub fn routeDatagramFrom(self: Router, from: ?net.IpAddress, packet: []const u8) Error!?RoutedDatagram {
         if (packet.len == 0) return error.InvalidPacket;
-        return if ((packet[0] & 0x80) != 0)
+        const routed = if ((packet[0] & 0x80) != 0)
             try self.routeLongHeaderDatagram(packet)
         else
             self.routeShortHeaderDatagram(packet);
+        if (routed) |candidate| try validateRoutePath(candidate.route, from);
+        return routed;
     }
 
     fn routeLongHeaderDatagram(self: Router, packet: []const u8) Error!?RoutedDatagram {
@@ -119,6 +130,13 @@ pub const Router = struct {
         return self.map.count();
     }
 };
+
+fn validateRoutePath(route: Route, from: ?net.IpAddress) Error!void {
+    if (!route.active_migration_disabled) return;
+    const expected = route.peer_address orelse return;
+    const actual = from orelse return;
+    if (!expected.eql(&actual)) return error.ActiveMigrationDisabled;
+}
 
 test "QUIC connection router maps and retires connection IDs" {
     const allocator = std.testing.allocator;
@@ -162,6 +180,33 @@ test "QUIC connection router routes short and long header datagrams" {
     try std.testing.expectEqualStrings("abc", long_route.destination_connection_id);
 
     try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&.{ 0x40, 'z', 'z' }));
+}
+
+test "QUIC connection router rejects changed paths when migration disabled" {
+    const allocator = std.testing.allocator;
+    var router = Router.init(allocator);
+    defer router.deinit();
+
+    const path_a = net.IpAddress{ .ip4 = .loopback(1111) };
+    const path_b = net.IpAddress{ .ip4 = .loopback(2222) };
+    try router.register("abc", .{
+        .connection_index = 1,
+        .peer_address = path_a,
+        .active_migration_disabled = true,
+    });
+
+    const short = [_]u8{ 0x40, 'a', 'b', 'c', 0x00 };
+    const routed = (try router.routeDatagramFrom(path_a, &short)).?;
+    try std.testing.expectEqual(@as(usize, 1), routed.route.connection_index);
+    try std.testing.expectError(error.ActiveMigrationDisabled, router.routeDatagramFrom(path_b, &short));
+
+    try router.register("def", .{
+        .connection_index = 2,
+        .peer_address = path_a,
+        .active_migration_disabled = false,
+    });
+    const migrated = [_]u8{ 0x40, 'd', 'e', 'f', 0x00 };
+    try std.testing.expect((try router.routeDatagramFrom(path_b, &migrated)) != null);
 }
 
 test "QUIC connection router validates CID lengths" {
