@@ -205,6 +205,7 @@ pub const SentPacket = struct {
     bytes: usize = 0,
     ecn: EcnCodepoint = .not_ect,
     sent_time_ns: ?u64 = null,
+    pmtu_probe_size: ?usize = null,
 };
 
 pub const EcnCodepoint = enum {
@@ -242,12 +243,17 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn sentAt(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64) !void {
+        try self.sentAtWithPmtu(packet_number, ack_eliciting, bytes, ecn, sent_time_ns, null);
+    }
+
+    pub fn sentAtWithPmtu(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize) !void {
         try self.packets.append(self.allocator, .{
             .packet_number = packet_number,
             .ack_eliciting = ack_eliciting,
             .bytes = bytes,
             .ecn = ecn,
             .sent_time_ns = sent_time_ns,
+            .pmtu_probe_size = pmtu_probe_size,
         });
         switch (ecn) {
             .not_ect => {},
@@ -291,6 +297,7 @@ pub const SentPacketTracker = struct {
         largest_packet_number: ?u64 = null,
         largest_sent_time_ns: ?u64 = null,
         ecn_ce_delta: u64 = 0,
+        largest_pmtu_probe_size: ?usize = null,
 
         fn add(self: *AckResult, other: AckResult) void {
             self.packets += other.packets;
@@ -298,13 +305,14 @@ pub const SentPacketTracker = struct {
             self.bytes += other.bytes;
             self.ect0_packets += other.ect0_packets;
             self.ect1_packets += other.ect1_packets;
-            if (other.largest_packet_number) |packet_number| self.observe(packet_number, other.largest_sent_time_ns);
+            if (other.largest_packet_number) |packet_number| self.observe(packet_number, other.largest_sent_time_ns, other.largest_pmtu_probe_size);
         }
 
-        fn observe(self: *AckResult, packet_number: u64, sent_time_ns: ?u64) void {
+        fn observe(self: *AckResult, packet_number: u64, sent_time_ns: ?u64, pmtu_probe_size: ?usize) void {
             if (self.largest_packet_number == null or packet_number > self.largest_packet_number.?) {
                 self.largest_packet_number = packet_number;
                 self.largest_sent_time_ns = sent_time_ns;
+                self.largest_pmtu_probe_size = pmtu_probe_size;
             }
         }
     };
@@ -491,7 +499,7 @@ pub const SentPacketTracker = struct {
             if (packet.acknowledged or packet.lost or packet.packet_number > largest_lost) continue;
             packet.lost = true;
             lost.packets += 1;
-            lost.observe(packet.packet_number, packet.sent_time_ns);
+            lost.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
             if (packet.ack_eliciting) {
                 lost.ack_eliciting_packets += 1;
                 lost.bytes += packet.bytes;
@@ -512,7 +520,7 @@ pub const SentPacketTracker = struct {
             if (now_ns < lost_time) continue;
             packet.lost = true;
             lost.packets += 1;
-            lost.observe(packet.packet_number, packet.sent_time_ns);
+            lost.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
             if (packet.ack_eliciting) {
                 lost.ack_eliciting_packets += 1;
                 lost.bytes += packet.bytes;
@@ -622,7 +630,7 @@ pub const SentPacketTracker = struct {
             if (!packet.acknowledged and packet.packet_number >= start and packet.packet_number <= end) {
                 packet.acknowledged = true;
                 result.packets += 1;
-                result.observe(packet.packet_number, packet.sent_time_ns);
+                result.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
                 if (packet.ack_eliciting) {
                     result.ack_eliciting_packets += 1;
                     if (!packet.lost) result.bytes += packet.bytes;

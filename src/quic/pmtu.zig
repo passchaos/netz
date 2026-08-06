@@ -142,17 +142,17 @@ test "QUIC PMTUD validates maximum probe immediately" {
 
 test "QUIC PMTUD lowers ceiling after repeated losses" {
     var state = State.init(.{ .enabled = true, .max_probe_size = 1500, .is_ipv6 = true, .max_probe_failures = 2 });
-    const first = state.probeSize(60_000).?;
+    const first = state.probeSize(max_ipv6_udp_payload_size).?;
     try std.testing.expectEqual(max_ipv6_udp_payload_size, first);
     state.onProbeSent(first);
-    state.onProbeLost(first, 60_000);
+    state.onProbeLost(first, max_ipv6_udp_payload_size);
     try std.testing.expect(state.shouldProbe());
-    try std.testing.expectEqual(first, state.probeSize(60_000).?);
+    try std.testing.expectEqual(first, state.probeSize(max_ipv6_udp_payload_size).?);
     state.onProbeSent(first);
-    state.onProbeLost(first, 60_000);
+    state.onProbeLost(first, max_ipv6_udp_payload_size);
     try std.testing.expectEqual(first, state.failed_size);
     try std.testing.expect(state.shouldProbe());
-    const next = state.probeSize(60_000).?;
+    const next = state.probeSize(max_ipv6_udp_payload_size).?;
     try std.testing.expect(next < first);
     try std.testing.expect(next > min_udp_payload_size);
 }

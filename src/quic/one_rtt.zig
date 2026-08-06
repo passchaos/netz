@@ -112,6 +112,8 @@ pub const ConnectionConfig = struct {
     local_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
     peer_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
     peer_max_ack_delay_ms: u64 = quic.default_max_ack_delay_ms,
+    enable_pmtud: bool = false,
+    pmtud_max_probe_size: usize = quic.pmtu.max_ipv4_udp_payload_size,
 };
 
 const StreamFlowEntry = struct {
@@ -233,6 +235,7 @@ pub const Connection = struct {
     peer_address_validated: bool = true,
     peer_address_bytes_received: usize = 0,
     peer_address_bytes_sent: usize = 0,
+    pmtud: quic.pmtu.State = .{},
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -243,6 +246,7 @@ pub const Connection = struct {
             .recovery = .init(endpoint.allocator),
             .congestion = .init(config.max_datagram_size),
             .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
+            .pmtud = .init(.{ .enabled = config.enable_pmtud, .max_probe_size = config.pmtud_max_probe_size }),
             .path_validation = .init(endpoint.allocator),
             .send_flow = .init(config.initial_send_max_data),
             .recv_flow = try .init(config.initial_receive_max_data, config.receive_window),
@@ -381,6 +385,41 @@ pub const Connection = struct {
         self.next_packet_number += 1;
     }
 
+    pub fn pmtudCurrentSize(self: Connection) usize {
+        return self.pmtud.currentSize();
+    }
+
+    pub fn pmtudShouldProbe(self: Connection) bool {
+        return self.pmtud.shouldProbe();
+    }
+
+    pub fn sendPmtuProbeAt(self: *Connection, peer_max_udp_payload: usize, sent_time_ns: ?u64) Error!?usize {
+        const probe_size = self.pmtud.probeSize(peer_max_udp_payload) orelse return null;
+        if (probe_size > self.config.max_datagram_size) return error.DatagramTooLarge;
+
+        const packet_number = self.next_packet_number;
+        const packet_number_len: u8 = 4;
+        const overhead = 1 + self.config.peer_connection_id.len + packet_number_len + quic.protection.aead_tag_len;
+        if (probe_size <= overhead + 1) return null;
+        const target_payload_len = probe_size - overhead;
+
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.endpoint.allocator);
+        try (quic.Frame{ .ping = {} }).write(&payload, self.endpoint.allocator);
+        try payload.appendNTimes(self.endpoint.allocator, @intFromEnum(quic.FrameType.padding), target_payload_len - payload.items.len);
+
+        try self.congestion.reserve(payload.items.len);
+        errdefer self.congestion.discard(payload.items.len);
+        try self.recovery.trackSent(packet_number, payload.items);
+        errdefer _ = self.recovery.forgetPacketNumber(packet_number);
+        try self.sent.sentAtWithPmtu(packet_number, true, payload.items.len, .not_ect, sent_time_ns, probe_size);
+        errdefer _ = self.sent.forget(packet_number);
+        try self.sendPayloadPacketWithPacketNumberLen(packet_number, payload.items, packet_number_len);
+        self.next_packet_number += 1;
+        self.pmtud.onProbeSent(probe_size);
+        return probe_size;
+    }
+
     pub fn peerAddressValidated(self: Connection) bool {
         return self.peer_address_validated;
     }
@@ -424,12 +463,20 @@ pub const Connection = struct {
     }
 
     fn sendPayloadPacket(self: *Connection, packet_number: u64, payload: []const u8) Error!void {
+        try self.sendPayloadPacketWithPacketNumberLen(
+            packet_number,
+            payload,
+            quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload.len),
+        );
+    }
+
+    fn sendPayloadPacketWithPacketNumberLen(self: *Connection, packet_number: u64, payload: []const u8, packet_number_len: u8) Error!void {
         try self.reserveAntiAmplification(payload.len);
         errdefer self.releaseAntiAmplification(payload.len);
         try sendPayload(self.endpoint, self.config.peer, self.send_key_phase.currentKeys(), .{
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = packet_number,
-            .packet_number_len = quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload.len),
+            .packet_number_len = packet_number_len,
             .spin_bit = self.nextSpinBit(),
             .key_phase = self.send_key_phase.currentKeyPhase(),
             .payload = payload,
@@ -468,6 +515,9 @@ pub const Connection = struct {
         const lost = self.sent.detectTimeThresholdLoss(now_ns, loss_delay_ns, largest);
         if (lost.bytes > 0) {
             self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
+            if (lost.largest_pmtu_probe_size) |probe_size| {
+                self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
+            }
             _ = self.applyPersistentCongestionIfDetected();
         }
         for (self.sent.packets.items) |packet| {
@@ -948,6 +998,9 @@ pub const Connection = struct {
                         else => return err,
                     };
                     if (acked.ack_eliciting_packets > 0) self.pto_count = 0;
+                    if (acked.largest_pmtu_probe_size) |probe_size| {
+                        self.pmtud.onProbeAcked(probe_size, self.config.max_datagram_size);
+                    }
                     if (acked.ecn_ce_delta > 0) {
                         self.congestion.onExplicitCongestion(now_ns);
                     }
@@ -955,12 +1008,18 @@ pub const Connection = struct {
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
                     if (lost.bytes > 0) {
                         self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
+                        if (lost.largest_pmtu_probe_size) |probe_size| {
+                            self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
+                        }
                         _ = self.applyPersistentCongestionIfDetected();
                     }
                     if (now_ns) |now| {
                         const timed_lost = self.sent.detectTimeThresholdLoss(now, self.rtt_stats.lossDelay(), frame.ack.largest_acknowledged);
                         if (timed_lost.bytes > 0) {
                             self.congestion.onLostAt(timed_lost.bytes, timed_lost.largest_sent_time_ns, now);
+                            if (timed_lost.largest_pmtu_probe_size) |probe_size| {
+                                self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
+                            }
                             _ = self.applyPersistentCongestionIfDetected();
                         }
                     }
@@ -2956,6 +3015,112 @@ test "QUIC 1-RTT connection accepts delayed previous-key packets until discard" 
         .route = route,
         .destination_connection_id = &server_cid,
     }));
+}
+
+test "QUIC 1-RTT connection sends and validates PMTU probes" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd };
+    const server_cid = [_]u8{ 0xbe, 0xbf, 0xc0, 0xc1 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xba} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+        .max_datagram_size = 1400,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .max_datagram_size = 1400,
+    });
+    defer server.deinit();
+
+    try std.testing.expect(client.pmtudShouldProbe());
+    const probe_size = (try client.sendPmtuProbeAt(1300, 10)).?;
+    try std.testing.expectEqual(@as(usize, 1300), probe_size);
+    try std.testing.expect(!client.pmtudShouldProbe());
+
+    var raw = try server_endpoint.receiveBytes();
+    defer raw.deinit(allocator);
+    try std.testing.expectEqual(probe_size, raw.bytes.len);
+    var received = try openReceivedBytes(
+        &server_endpoint,
+        raw.from,
+        raw.bytes,
+        keys,
+        server.config.local_connection_id.len,
+        server.expected_packet_number,
+        server.config.max_frames_per_packet,
+    );
+    defer received.deinit(allocator);
+    try server.applyReceivedFrames(received.packet.packet_number, received.frames, null, .not_ect);
+    try std.testing.expectEqual(@as(u64, 0), received.packet.packet_number);
+    try std.testing.expectEqual(@as(usize, 1300), client.sent.packets.items[0].pmtu_probe_size.?);
+
+    const ack_frame = try server.received.ackFrame(allocator, 0);
+    defer allocator.free(ack_frame.ranges);
+    const ack_frames = [_]quic.Frame{.{ .ack = ack_frame }};
+    try client.applyReceivedFrames(99, &ack_frames, null, .not_ect);
+    try std.testing.expectEqual(@as(usize, 1300), client.pmtudCurrentSize());
+}
+
+test "QUIC 1-RTT PMTU probe loss lowers next probe size" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xbb} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pmtu-local",
+        .peer_connection_id = "pmtu-peer",
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1400,
+        .max_datagram_size = 1500,
+    });
+    defer connection.deinit();
+    connection.pmtud.max_probe_failures = 2;
+
+    const probe_size = (try connection.sendPmtuProbeAt(1400, 100)).?;
+    connection.sent.packets.items[0].lost = false;
+    const lost1 = connection.sent.detectTimeThresholdLoss(1_000, 1, 0);
+    if (lost1.largest_pmtu_probe_size) |size| connection.pmtud.onProbeLost(size, connection.config.max_datagram_size);
+    try std.testing.expect(connection.pmtudShouldProbe());
+    try std.testing.expectEqual(probe_size, connection.pmtud.probeSize(1400).?);
+
+    connection.pmtud.onProbeSent(probe_size);
+    connection.pmtud.onProbeLost(probe_size, 1400);
+    try std.testing.expect(connection.pmtudShouldProbe());
+    const next = connection.pmtud.probeSize(1400).?;
+    try std.testing.expect(next < probe_size);
+    try std.testing.expect(next > quic.pmtu.min_udp_payload_size);
 }
 
 test "QUIC 1-RTT connection enforces anti-amplification budget" {

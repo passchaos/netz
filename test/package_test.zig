@@ -147,6 +147,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_ack_delay_exponent"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_ack_delay_exponent"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_max_ack_delay_ms"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_pmtud"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "pmtud_max_probe_size"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id.PeerPool, "addWithLimit"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
@@ -209,6 +211,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "recordPeerAddressBytesReceived"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "recordPeerAddressDatagramReceived"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "antiAmplificationLimitRemaining"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendPmtuProbeAt"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "pmtudCurrentSize"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "pmtudShouldProbe"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "idleTimeoutDeadlineMillis"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkIdleTimeout"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closing"));
