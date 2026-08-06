@@ -424,7 +424,7 @@ pub const Connection = struct {
                         .method = method,
                         .path = findHeader(headers, ":path") orelse "",
                         .scheme = findHeader(headers, ":scheme") orelse "",
-                        .authority = findHeader(headers, ":authority"),
+                        .authority = requestAuthority(headers),
                         .protocol = protocol,
                     };
                 },
@@ -535,7 +535,7 @@ pub const Connection = struct {
                         .method = method,
                         .path = findHeader(headers, ":path") orelse "",
                         .scheme = findHeader(headers, ":scheme") orelse "",
-                        .authority = findHeader(headers, ":authority"),
+                        .authority = requestAuthority(headers),
                         .protocol = protocol,
                         .body = try body.toOwnedSlice(self.allocator),
                         .trailers = trailers,
@@ -1632,6 +1632,7 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
     var authority_value: ?[]const u8 = null;
     var protocol_value: ?[]const u8 = null;
     var status_value: ?[]const u8 = null;
+    var host_value: ?[]const u8 = null;
 
     for (headers) |header| {
         try validateHeaderName(header.name);
@@ -1673,6 +1674,10 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
                 else => return error.InvalidHeader,
             }
         }
+        if (std.ascii.eqlIgnoreCase(header.name, "host")) {
+            if (host_value != null) return error.InvalidHeader;
+            host_value = header.value;
+        }
     }
 
     switch (kind) {
@@ -1680,9 +1685,20 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
             if (!seen_method) return error.MissingPseudoHeader;
             const method_present = method_value orelse return error.MissingPseudoHeader;
             if (method_present.len == 0) return error.InvalidHeader;
-            if (scheme_value) |scheme| if (scheme.len == 0) return error.InvalidHeader;
-            if (path_value) |path| if (path.len == 0) return error.InvalidHeader;
-            if (authority_value) |authority| if (authority.len == 0) return error.InvalidHeader;
+            if (scheme_value) |scheme| try validateUriScheme(scheme);
+            if (path_value) |path| try validateUriPath(method_present, path);
+            if (authority_value) |authority| try validateRequestAuthority(authority);
+            if (host_value) |host| try validateRequestAuthority(host);
+            if (authority_value) |authority| {
+                if (host_value) |host| {
+                    // RFC 9113 allows translating HTTP/1 Host into HTTP/2, but
+                    // an HTTP/2 block that carries both names must not describe
+                    // two different authorities.  Hyper/h2 builds a single URI
+                    // authority; reject disagreement before forwarding can pick
+                    // a different origin than application code observes.
+                    if (!std.ascii.eqlIgnoreCase(authority, host)) return error.InvalidHeader;
+                }
+            }
             if (protocol_value) |protocol| {
                 if (protocol.len == 0) return error.InvalidHeader;
                 const method = method_value orelse return error.MissingPseudoHeader;
@@ -1722,6 +1738,67 @@ fn validateHeaderValue(value: []const u8) Error!void {
     }
 }
 
+fn validateUriScheme(scheme: []const u8) Error!void {
+    if (scheme.len == 0) return error.InvalidHeader;
+    if (!std.ascii.isAlphabetic(scheme[0])) return error.InvalidHeader;
+    for (scheme[1..]) |byte| {
+        if (!(std.ascii.isAlphanumeric(byte) or byte == '+' or byte == '-' or byte == '.')) return error.InvalidHeader;
+    }
+}
+
+fn validateUriPath(method: []const u8, path: []const u8) Error!void {
+    if (path.len == 0) return error.InvalidHeader;
+    if (std.mem.eql(u8, path, "*")) {
+        if (!std.ascii.eqlIgnoreCase(method, "OPTIONS")) return error.InvalidHeader;
+        return;
+    }
+    if (path[0] != '/' and path[0] != '?') return error.InvalidHeader;
+    var saw_fragment = false;
+    for (path) |byte| {
+        if (byte <= 0x20 or byte == 0x7f) return error.InvalidHeader;
+        if (byte == '\\') return error.InvalidHeader;
+        if (byte == '#') saw_fragment = true;
+    }
+    // URI fragments identify client-side secondary resources and are not sent
+    // in request-targets.  Reject instead of accepting/truncating so origin
+    // servers and intermediaries do not disagree on cache keys.
+    if (saw_fragment) return error.InvalidHeader;
+}
+
+fn validateRequestAuthority(authority: []const u8) Error!void {
+    if (authority.len == 0) return error.InvalidHeader;
+    for (authority) |byte| {
+        if (byte <= 0x20 or byte == 0x7f or byte == '/' or byte == '\\' or byte == '?' or byte == '#' or byte == '@') return error.InvalidHeader;
+    }
+
+    if (authority[0] == '[') {
+        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
+        if (end <= 1) return error.InvalidHeader;
+        if (end + 1 < authority.len and authority[end + 1] != ':') return error.InvalidHeader;
+        if (end + 1 == authority.len) return;
+        try validateAuthorityPort(authority[end + 2 ..]);
+        return;
+    }
+
+    if (std.mem.indexOfScalar(u8, authority, '[') != null or
+        std.mem.indexOfScalar(u8, authority, ']') != null) return error.InvalidHeader;
+    const first_colon = std.mem.indexOfScalar(u8, authority, ':');
+    if (first_colon) |colon| {
+        if (colon == 0) return error.InvalidHeader;
+        if (std.mem.indexOfScalar(u8, authority[colon + 1 ..], ':') != null) return error.InvalidHeader;
+        try validateAuthorityPort(authority[colon + 1 ..]);
+    }
+}
+
+fn validateAuthorityPort(port: []const u8) Error!void {
+    if (port.len == 0) return error.InvalidHeader;
+    for (port) |byte| {
+        if (!std.ascii.isDigit(byte)) return error.InvalidHeader;
+    }
+    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.InvalidHeader;
+    if (parsed_port > std.math.maxInt(u16)) return error.InvalidHeader;
+}
+
 fn validHeaderNameByte(byte: u8) bool {
     return std.ascii.isLower(byte) or std.ascii.isDigit(byte) or switch (byte) {
         '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~', ':' => true,
@@ -1756,7 +1833,7 @@ fn markOnce(seen: *bool) Error!void {
 }
 
 fn validateConnectAuthority(authority: []const u8) Error!void {
-    if (authority.len == 0) return error.InvalidHeader;
+    try validateRequestAuthority(authority);
     const port: []const u8 = if (authority[0] == '[') blk: {
         const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
         if (end <= 1 or end + 2 > authority.len or authority[end + 1] != ':') return error.InvalidHeader;
@@ -1767,11 +1844,7 @@ fn validateConnectAuthority(authority: []const u8) Error!void {
         if (std.mem.indexOfScalar(u8, authority[0..colon], ':') != null) return error.InvalidHeader;
         break :blk authority[colon + 1 ..];
     };
-    for (port) |byte| {
-        if (!std.ascii.isDigit(byte)) return error.InvalidHeader;
-    }
-    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.InvalidHeader;
-    if (parsed_port > std.math.maxInt(u16)) return error.InvalidHeader;
+    try validateAuthorityPort(port);
 }
 
 fn connectionSpecificHeaderName(name: []const u8) bool {
@@ -1851,6 +1924,11 @@ fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]con
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
     }
     return null;
+}
+
+fn requestAuthority(headers: []const http2.Hpack.HeaderField) ?[]const u8 {
+    if (findHeader(headers, ":authority")) |authority| return authority;
+    return findHeader(headers, "host");
 }
 
 fn readExact(io: std.Io, stream: net.Stream, buffer: []u8) ReadExactError!void {
@@ -3705,6 +3783,70 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = "connection", .value = "keep-alive" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connection_header, .request));
+
+    const host_only = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/host-only" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "host", .value = "example.com" },
+    };
+    try validateHeaderBlock(&host_only, .request);
+    try std.testing.expectEqualStrings("example.com", requestAuthority(&host_only).?);
+
+    const matching_authorities = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/matching-authorities" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "EXAMPLE.com:443" },
+        .{ .name = "host", .value = "example.COM:443" },
+    };
+    try validateHeaderBlock(&matching_authorities, .request);
+
+    const mismatched_authorities = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/mismatched-authorities" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "origin.example" },
+        .{ .name = "host", .value = "proxy.example" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&mismatched_authorities, .request));
+
+    const invalid_scheme = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/invalid-scheme" },
+        .{ .name = ":scheme", .value = "https://" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_scheme, .request));
+
+    const invalid_path = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "relative" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_path, .request));
+
+    const fragment_path = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/resource#fragment" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&fragment_path, .request));
+
+    const invalid_authority = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/invalid-authority" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "user@example.com" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_authority, .request));
+
+    const invalid_authority_port = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/invalid-authority-port" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com:65536" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_authority_port, .request));
 
     const bad_response_value = [_]http2.Hpack.HeaderField{
         .{ .name = ":status", .value = "200" },
