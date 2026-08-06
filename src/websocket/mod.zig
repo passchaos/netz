@@ -353,6 +353,7 @@ pub fn validateClientHandshake(req: http1.Request) Error!void {
     if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
     const key = try requiredSingletonHeader(req.headers, "sec-websocket-key");
     try validateClientKey(key);
+    try validateClientSubprotocolHeaders(req.headers);
 }
 
 fn requiredSingletonHeader(headers: []const http1.Header, name: []const u8) Error![]const u8 {
@@ -383,6 +384,31 @@ pub fn validateClientKey(key: []const u8) Error!void {
     if (key.len != 24) return error.InvalidHandshake;
     var nonce: [16]u8 = undefined;
     std.base64.standard.Decoder.decode(&nonce, key) catch return error.InvalidHandshake;
+}
+
+fn validateClientSubprotocolHeaders(headers: []const http1.Header) Error!void {
+    for (headers) |header| {
+        if (!header.eqlName("sec-websocket-protocol")) continue;
+        var protocols = std.mem.splitScalar(u8, header.value, ',');
+        while (protocols.next()) |raw_protocol| {
+            if (!validSubprotocolToken(wire.trimOws(raw_protocol))) return error.InvalidHandshake;
+        }
+    }
+}
+
+pub fn validSubprotocolToken(protocol: []const u8) bool {
+    if (protocol.len == 0) return false;
+    for (protocol) |byte| {
+        if (!isTchar(byte)) return false;
+    }
+    return true;
+}
+
+fn isTchar(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or switch (byte) {
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
+    };
 }
 
 pub fn writeServerHandshake(
@@ -423,6 +449,7 @@ fn validateServerHandshakeHeaders(headers: []const wire.Header) !void {
         if (header.eqlName("sec-websocket-protocol")) {
             if (saw_protocol) return error.InvalidHandshake;
             saw_protocol = true;
+            if (!validSubprotocolToken(wire.trimOws(header.value))) return error.InvalidHandshake;
         } else if (header.eqlName("sec-websocket-extensions")) {
             if (saw_extensions) return error.InvalidHandshake;
             saw_extensions = true;
@@ -624,6 +651,21 @@ test "WebSocket handshake validation" {
     var duplicate_host_req = try http1.parseRequest(allocator, duplicate_host, .{});
     defer duplicate_host_req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(duplicate_host_req));
+
+    const valid_protocols = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: chat.v1, super-chat\r\n\r\n";
+    var valid_protocols_req = try http1.parseRequest(allocator, valid_protocols, .{});
+    defer valid_protocols_req.deinit(allocator);
+    try validateClientHandshake(valid_protocols_req);
+
+    const invalid_protocol = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: chat.v1, bad protocol\r\n\r\n";
+    var invalid_protocol_req = try http1.parseRequest(allocator, invalid_protocol, .{});
+    defer invalid_protocol_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(invalid_protocol_req));
+
+    const empty_protocol = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: chat.v1,\r\n\r\n";
+    var empty_protocol_req = try http1.parseRequest(allocator, empty_protocol, .{});
+    defer empty_protocol_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(empty_protocol_req));
 }
 
 test "WebSocket strict frame validation" {
@@ -832,6 +874,12 @@ test "WebSocket server handshake writer validates generated response" {
             .{ .name = "Sec-WebSocket-Protocol", .value = "chat.v1" },
             .{ .name = "Sec-WebSocket-Protocol", .value = "chat.v2" },
         },
+    ));
+    try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
+        &response,
+        allocator,
+        "dGhlIHNhbXBsZSBub25jZQ==",
+        &.{.{ .name = "Sec-WebSocket-Protocol", .value = "bad protocol" }},
     ));
     try std.testing.expectError(error.MalformedHeader, writeServerHandshake(
         &response,

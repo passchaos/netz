@@ -67,7 +67,7 @@ pub const Server = struct {
         if (head.extra.len != 0) return error.InvalidHandshake;
 
         const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
-        const selected_protocol = try selectSubprotocol(self.http.allocator, request.header("sec-websocket-protocol"), options.protocols);
+        const selected_protocol = try selectHttp1Subprotocol(self.http.allocator, request.headers, options.protocols);
         errdefer if (selected_protocol) |protocol| self.http.allocator.free(protocol);
         const selected_extension = try websocket.ExtensionNegotiation.accept(
             self.http.allocator,
@@ -208,7 +208,7 @@ pub const Client = struct {
         defer protocol_value.deinit(allocator);
         if (options.protocols.len != 0) {
             for (options.protocols, 0..) |protocol, index| {
-                if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+                if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
                 if (index != 0) try protocol_value.appendSlice(allocator, ", ");
                 try protocol_value.appendSlice(allocator, protocol);
             }
@@ -691,7 +691,7 @@ pub const H2Client = struct {
         defer protocol_value.deinit(allocator);
         if (options.protocols.len != 0) {
             for (options.protocols, 0..) |protocol, index| {
-                if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+                if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
                 if (index != 0) try protocol_value.appendSlice(allocator, ", ");
                 try protocol_value.appendSlice(allocator, protocol);
             }
@@ -887,7 +887,7 @@ fn validateServerHandshake(
     _ = try websocket.ExtensionNegotiation.validateResponse(try optionalSingletonHeader(response.headers, "sec-websocket-extensions"));
     if (try optionalSingletonHeader(response.headers, "sec-websocket-protocol")) |selected| {
         const protocol = wire.trimOws(selected);
-        if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+        if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
         for (offered_protocols) |offered| {
             if (std.mem.eql(u8, protocol, offered)) return try allocator.dupe(u8, protocol);
         }
@@ -931,7 +931,7 @@ fn validateH2ServerHandshake(
 ) Error!?[]u8 {
     if (try optionalH2SingletonHeader(headers, "sec-websocket-protocol")) |selected| {
         const protocol = wire.trimOws(selected);
-        if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+        if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
         for (offered_protocols) |offered| {
             if (std.mem.eql(u8, protocol, offered)) return try allocator.dupe(u8, protocol);
         }
@@ -962,34 +962,48 @@ fn findH2Header(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]c
 }
 
 fn selectSubprotocol(allocator: std.mem.Allocator, requested_header: ?[]const u8, supported: []const []const u8) Error!?[]u8 {
-    for (supported) |protocol| {
-        if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
-    }
+    try validateSupportedSubprotocols(supported);
     const raw_requested = requested_header orelse return null;
-    var requested = std.mem.splitScalar(u8, raw_requested, ',');
-    while (requested.next()) |raw| {
-        const candidate = wire.trimOws(raw);
-        if (!validSubprotocolToken(candidate)) return error.InvalidSubprotocol;
-        for (supported) |protocol| {
-            if (std.mem.eql(u8, candidate, protocol)) return try allocator.dupe(u8, protocol);
-        }
-    }
+    var selected: ?[]const u8 = null;
+    try considerSubprotocolHeader(raw_requested, supported, &selected);
+    if (selected) |protocol| return try allocator.dupe(u8, protocol);
     return null;
 }
 
-fn validSubprotocolToken(protocol: []const u8) bool {
-    if (protocol.len == 0) return false;
-    for (protocol) |byte| {
-        if (!isTchar(byte)) return false;
+fn selectHttp1Subprotocol(allocator: std.mem.Allocator, headers: []const http1.Header, supported: []const []const u8) Error!?[]u8 {
+    try validateSupportedSubprotocols(supported);
+    var selected: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!header.eqlName("sec-websocket-protocol")) continue;
+        // Sec-WebSocket-Protocol has 1#token grammar.  HTTP/1 field lines may
+        // arrive split rather than coalesced, so validate all occurrences and
+        // choose the first client-preferred protocol we support instead of
+        // silently ignoring later field lines.
+        try considerSubprotocolHeader(header.value, supported, &selected);
     }
-    return true;
+    if (selected) |protocol| return try allocator.dupe(u8, protocol);
+    return null;
 }
 
-fn isTchar(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => false,
-    };
+fn validateSupportedSubprotocols(supported: []const []const u8) Error!void {
+    for (supported) |protocol| {
+        if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
+    }
+}
+
+fn considerSubprotocolHeader(raw_requested: []const u8, supported: []const []const u8, selected: *?[]const u8) Error!void {
+    var requested = std.mem.splitScalar(u8, raw_requested, ',');
+    while (requested.next()) |raw| {
+        const candidate = wire.trimOws(raw);
+        if (!websocket.validSubprotocolToken(candidate)) return error.InvalidSubprotocol;
+        if (selected.* != null) continue;
+        for (supported) |protocol| {
+            if (std.mem.eql(u8, candidate, protocol)) {
+                selected.* = protocol;
+                break;
+            }
+        }
+    }
 }
 
 fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
@@ -1043,6 +1057,32 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
     var duplicate_extensions_response = try http1.parseResponse(allocator, duplicate_extensions, .{});
     defer duplicate_extensions_response.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, duplicate_extensions_response, client_key, &.{}));
+}
+
+test "WebSocket server negotiates split subprotocol request headers" {
+    const allocator = std.testing.allocator;
+
+    const selected = (try selectHttp1Subprotocol(
+        allocator,
+        &.{
+            .{ .name = "Sec-WebSocket-Protocol", .value = "unknown" },
+            .{ .name = "Sec-WebSocket-Protocol", .value = "chat.v2, chat.v1" },
+        },
+        &.{ "chat.v1", "chat.v2" },
+    )).?;
+    defer allocator.free(selected);
+    try std.testing.expectEqualStrings("chat.v2", selected);
+
+    try std.testing.expectError(error.InvalidSubprotocol, selectHttp1Subprotocol(
+        allocator,
+        &.{.{ .name = "Sec-WebSocket-Protocol", .value = "chat.v1, bad protocol" }},
+        &.{"chat.v1"},
+    ));
+    try std.testing.expectError(error.InvalidSubprotocol, selectHttp1Subprotocol(
+        allocator,
+        &.{.{ .name = "Sec-WebSocket-Protocol", .value = "chat.v1" }},
+        &.{"bad supported"},
+    ));
 }
 
 test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
