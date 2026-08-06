@@ -202,7 +202,9 @@ pub const Client = struct {
         const host_name = try net.HostName.init(host);
         const stream = try host_name.connect(io, port, .{ .mode = .stream });
         errdefer stream.close(io);
-        return connectStream(allocator, io, stream, options);
+        var connect_options = options;
+        if (connect_options.host.len == 0) connect_options.host = host;
+        return connectStream(allocator, io, stream, connect_options);
     }
 
     fn connectStream(
@@ -274,7 +276,9 @@ pub const Client = struct {
 };
 
 pub const ConnectOptions = struct {
-    host: []const u8,
+    /// HTTP Host authority for the WebSocket opening handshake.  `connectHost`
+    /// defaults this to its resolved host name when left empty.
+    host: []const u8 = "",
     target: []const u8 = "/",
     protocols: []const []const u8 = &.{},
     enable_permessage_deflate: bool = false,
@@ -1329,7 +1333,6 @@ test "WebSocket client connects by host name" {
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{
-        .host = "localhost",
         .target = "/dns",
         .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
     });

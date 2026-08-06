@@ -220,7 +220,7 @@ var ws = try netz.websocket.runtime.Client.connectHost(
     io,
     "localhost",
     8080,
-    .{ .host = "localhost", .target = "/chat" },
+    .{ .target = "/chat" },
 );
 defer ws.close();
 
