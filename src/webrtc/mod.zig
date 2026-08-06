@@ -1867,7 +1867,7 @@ pub const rtcp = struct {
         const packet_len = header.packetLen();
         if (bytes.len < packet_len) return error.BufferTooShort;
         if (packet_len < 4) return error.InvalidRtcpPacket;
-        const payload = bytes[4..packet_len];
+        const payload = try payloadWithoutPadding(header, bytes[0..packet_len]);
 
         const packet: Packet = switch (header.packet_type) {
             .sender_report => .{ .sender_report = try parseSenderReport(allocator, header, payload) },
@@ -1888,6 +1888,22 @@ pub const rtcp = struct {
             else => .{ .unknown = .{ .header = header, .payload = payload } },
         };
         return .{ .packet = packet, .consumed = packet_len };
+    }
+
+    fn payloadWithoutPadding(header: Header, packet: []const u8) Error![]const u8 {
+        const packet_len = header.packetLen();
+        if (packet.len < packet_len) return error.BufferTooShort;
+        var payload = packet[4..packet_len];
+        if (!header.padding) return payload;
+        if (payload.len == 0) return error.InvalidRtcpPacket;
+        const padding_len = payload[payload.len - 1];
+        // Pion/rtcp keeps the P bit in the common header and individual packet
+        // parsers strip the trailing padding octets before decoding control
+        // fields.  Validate the generic RTCP padding contract here so fixed
+        // length packets (RR/PLI/FIR/TWCC) do not see padding bytes as payload.
+        if (padding_len == 0 or padding_len > payload.len) return error.InvalidRtcpPacket;
+        payload = payload[0 .. payload.len - padding_len];
+        return payload;
     }
 
     pub fn writePacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet: Packet) Error!void {
@@ -3907,6 +3923,23 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 0x0a0b0c0d), rr.packet.receiver_report.sender_ssrc);
     try std.testing.expectEqual(@as(u24, 3), rr.packet.receiver_report.report_blocks[0].cumulative_lost);
     try std.testing.expectEqual(@as(u32, 44), rr.packet.receiver_report.report_blocks[0].interarrival_jitter);
+
+    var padded_rr: std.ArrayList(u8) = .empty;
+    defer padded_rr.deinit(allocator);
+    try padded_rr.append(allocator, 0xa0); // V=2, P=1, RC=0.
+    try padded_rr.append(allocator, @intFromEnum(rtcp.PacketType.receiver_report));
+    try wire.appendInt(&padded_rr, allocator, u16, 2, .big); // 12-byte packet: 4 header + 4 body + 4 padding.
+    try wire.appendInt(&padded_rr, allocator, u32, 0x01020304, .big);
+    try padded_rr.appendSlice(allocator, &.{ 0, 0, 0, 4 });
+    var padded = try rtcp.parsePacket(allocator, padded_rr.items);
+    defer padded.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, padded_rr.items.len), padded.consumed);
+    try std.testing.expectEqual(@as(u32, 0x01020304), padded.packet.receiver_report.sender_ssrc);
+
+    padded_rr.items[padded_rr.items.len - 1] = 0;
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, padded_rr.items));
+    padded_rr.items[padded_rr.items.len - 1] = 9;
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, padded_rr.items));
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, .{ .picture_loss_indication = .{
