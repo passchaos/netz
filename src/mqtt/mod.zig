@@ -305,6 +305,7 @@ pub fn parseProperties(allocator: std.mem.Allocator, cursor: *wire.Cursor) Error
             => Property{ .utf8_pair = .{ .id = id, .key = try readUtf8(&prop_cursor), .value = try readUtf8(&prop_cursor) } },
         };
         try validateProperty(prop);
+        try validatePropertyNotDuplicate(prop, props.items);
         try props.append(allocator, prop);
     }
     return props.toOwnedSlice(allocator);
@@ -365,8 +366,9 @@ pub fn writeProperties(list: *std.ArrayList(u8), allocator: std.mem.Allocator, p
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
 
-    for (properties) |property| {
+    for (properties, 0..) |property, index| {
         try validateProperty(property);
+        try validatePropertyNotDuplicate(property, properties[0..index]);
         switch (property) {
             .byte => |p| {
                 try encoded.append(allocator, @intFromEnum(p.id));
@@ -432,6 +434,23 @@ fn validateProperty(property: Property) Error!void {
         },
         else => {},
     }
+}
+
+fn validatePropertyNotDuplicate(property: Property, previous: []const Property) Error!void {
+    const id = propertyId(property);
+    if (repeatableProperty(id)) return;
+    for (previous) |prior| {
+        if (propertyId(prior) == id) return error.InvalidProperty;
+    }
+}
+
+fn repeatableProperty(id: PropertyId) bool {
+    return switch (id) {
+        .user_property,
+        .subscription_identifier,
+        => true,
+        else => false,
+    };
 }
 
 pub const Connect = struct {
@@ -1333,6 +1352,25 @@ test "MQTT v5 property values are validated" {
     try encodeRemainingLength(&invalid_max_qos, allocator, 2);
     try invalid_max_qos.appendSlice(allocator, &.{ @intFromEnum(PropertyId.maximum_qos), 2 });
     try Cases.expectInvalid(invalid_max_qos.items);
+
+    var duplicate_receive_maximum: std.ArrayList(u8) = .empty;
+    defer duplicate_receive_maximum.deinit(allocator);
+    try encodeRemainingLength(&duplicate_receive_maximum, allocator, 6);
+    try duplicate_receive_maximum.appendSlice(allocator, &.{ @intFromEnum(PropertyId.receive_maximum), 0, 1 });
+    try duplicate_receive_maximum.appendSlice(allocator, &.{ @intFromEnum(PropertyId.receive_maximum), 0, 2 });
+    try Cases.expectInvalid(duplicate_receive_maximum.items);
+
+    var duplicate_write: std.ArrayList(u8) = .empty;
+    defer duplicate_write.deinit(allocator);
+    try std.testing.expectError(error.InvalidProperty, writeProperties(&duplicate_write, allocator, &.{
+        .{ .four_byte = .{ .id = .maximum_packet_size, .value = 1024 } },
+        .{ .four_byte = .{ .id = .maximum_packet_size, .value = 2048 } },
+    }));
+
+    try writeProperties(&duplicate_write, allocator, &.{
+        .{ .utf8_pair = .{ .id = .user_property, .key = "a", .value = "1" } },
+        .{ .utf8_pair = .{ .id = .user_property, .key = "b", .value = "2" } },
+    });
 }
 
 test "MQTT CONNECT validates flags and will topic" {
