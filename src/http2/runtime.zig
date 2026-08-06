@@ -224,6 +224,11 @@ pub const Role = enum {
 pub const FlowWindow = struct {
     value: i64 = default_flow_window,
 
+    pub fn available(self: FlowWindow) usize {
+        if (self.value <= 0) return 0;
+        return std.math.cast(usize, self.value) orelse std.math.maxInt(usize);
+    }
+
     pub fn reserve(self: *FlowWindow, amount: usize) Error!void {
         const delta = std.math.cast(i64, amount) orelse return error.MessageTooLarge;
         if (delta > self.value) return error.FlowControlBlocked;
@@ -683,12 +688,6 @@ pub const Connection = struct {
     }
 
     fn writeData(self: *Connection, stream_id: u31, data: []const u8, end_stream: bool) Error!void {
-        try self.send_connection_window.reserve(data.len);
-        errdefer self.send_connection_window.update(@intCast(data.len));
-        const stream_window = try self.sendStreamWindow(stream_id);
-        try stream_window.reserve(data.len);
-        errdefer stream_window.update(@intCast(data.len));
-
         const chunk_size = self.outboundFramePayloadLimit();
         if (data.len == 0) {
             try writeFrame(
@@ -705,17 +704,62 @@ pub const Connection = struct {
 
         var offset: usize = 0;
         while (offset < data.len) {
-            const end = @min(data.len, offset + chunk_size);
-            try writeFrame(
-                self.allocator,
-                self.io,
-                self.stream,
-                .data,
-                if (end_stream and end == data.len) flag_end_stream else 0,
-                stream_id,
-                data[offset..end],
+            const stream_window = try self.sendStreamWindow(stream_id);
+            const available = @min(
+                data.len - offset,
+                chunk_size,
+                self.send_connection_window.available(),
+                stream_window.available(),
             );
+            if (available == 0) {
+                try self.waitForSendCapacity(stream_id);
+                continue;
+            }
+            const end = offset + available;
+            try self.writeDataChunk(stream_id, data[offset..end], end_stream and end == data.len);
             offset = end;
+        }
+    }
+
+    fn writeDataChunk(self: *Connection, stream_id: u31, payload: []const u8, end_stream: bool) Error!void {
+        try self.send_connection_window.reserve(payload.len);
+        errdefer self.send_connection_window.update(@intCast(payload.len));
+        const stream_window = try self.sendStreamWindow(stream_id);
+        try stream_window.reserve(payload.len);
+        errdefer stream_window.update(@intCast(payload.len));
+
+        try writeFrame(
+            self.allocator,
+            self.io,
+            self.stream,
+            .data,
+            if (end_stream) flag_end_stream else 0,
+            stream_id,
+            payload,
+        );
+    }
+
+    fn waitForSendCapacity(self: *Connection, stream_id: u31) Error!void {
+        while (self.send_connection_window.available() == 0 or (try self.sendStreamWindow(stream_id)).available() == 0) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            defer frame.deinit(self.allocator);
+            if (try self.handleConnectionFrame(frame.frame)) continue;
+            switch (frame.frame.header.frame_type) {
+                .goaway => {
+                    const goaway = try http2.GoAwayPayload.parse(frame.frame);
+                    self.peer_goaway_last_stream_id = goaway.last_stream_id;
+                    if (stream_id > goaway.last_stream_id) return error.ConnectionGoAway;
+                },
+                .rst_stream => {
+                    const reset = try http2.ResetStreamPayload.parse(frame.frame);
+                    if (reset.stream_id == stream_id) return error.StreamReset;
+                },
+                // This blocking runtime does not keep a general-purpose frame
+                // reorder buffer.  While waiting for flow-control credit, only
+                // connection management frames and same-stream reset/GOAWAY can
+                // be consumed safely; application frames would otherwise be lost.
+                else => return error.UnexpectedFrame,
+            }
         }
     }
 
@@ -3260,8 +3304,10 @@ test "HTTP/2 extended CONNECT requires peer opt-in" {
 
 test "HTTP/2 flow window blocks and updates" {
     var window = FlowWindow{ .value = 4 };
+    try std.testing.expectEqual(@as(usize, 4), window.available());
     try window.reserve(4);
     try std.testing.expectEqual(@as(i64, 0), window.value);
+    try std.testing.expectEqual(@as(usize, 0), window.available());
     try std.testing.expectError(error.FlowControlBlocked, window.reserve(1));
     window.update(8);
     try window.reserve(3);
@@ -3271,6 +3317,94 @@ test "HTTP/2 flow window blocks and updates" {
     try std.testing.expectError(error.FlowControlViolation, recv.receive(3));
     try recv.receive(2);
     try std.testing.expectEqual(@as(i64, 0), recv.value);
+}
+
+test "HTTP/2 DATA send waits for WINDOW_UPDATE capacity" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            while (true) {
+                var headers = try readFrame(server_ptr.allocator, server_ptr.io, connection.stream, server_ptr.limits);
+                defer headers.deinit(server_ptr.allocator);
+                if (try connection.handleConnectionFrame(headers.frame)) continue;
+                try std.testing.expectEqual(http2.FrameType.headers, headers.frame.header.frame_type);
+                try std.testing.expectEqual(@as(u31, 1), headers.frame.header.stream_id);
+                try std.testing.expect((headers.frame.header.flags & flag_end_stream) == 0);
+                break;
+            }
+
+            var first = try readFrame(server_ptr.allocator, server_ptr.io, connection.stream, server_ptr.limits);
+            defer first.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(http2.FrameType.data, first.frame.header.frame_type);
+            const first_data = try http2.DataPayload.parse(first.frame);
+            try std.testing.expectEqualStrings("hello", first_data.data);
+            try std.testing.expect((first.frame.header.flags & flag_end_stream) == 0);
+
+            // h2/hyper style senders park DATA behind flow control.  Once both
+            // connection and stream credit are restored, the blocked request
+            // can continue without the application retrying the send.
+            try connection.sendWindowUpdate(0, 64);
+            try connection.sendWindowUpdate(1, 64);
+
+            var second = try readFrame(server_ptr.allocator, server_ptr.io, connection.stream, server_ptr.limits);
+            defer second.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(http2.FrameType.data, second.frame.header.frame_type);
+            const second_data = try http2.DataPayload.parse(second.frame);
+            try std.testing.expectEqualStrings(" world", second_data.data);
+            try std.testing.expect((second.frame.header.flags & flag_end_stream) != 0);
+
+            try connection.writeResponse(1, .{ .status = 200, .body = "ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    client.send_connection_window.value = 5;
+    (try client.sendStreamWindow(1)).value = 5;
+
+    var response = try client.request(.{
+        .method = "POST",
+        .path = "/flow-wait",
+        .authority = "localhost",
+        .body = "hello world",
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {

@@ -63,6 +63,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.Hpack, "decodeHuffman"));
     try std.testing.expect(@hasDecl(netz.http2.Hpack, "freeDecodedFields"));
     try std.testing.expect(@hasDecl(netz.http2.runtime, "FlowWindow"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.FlowWindow, "available"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "sendResetStream"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "readResetStream"));
     const stream_reset_error: netz.http2.runtime.Error = error.StreamReset;
