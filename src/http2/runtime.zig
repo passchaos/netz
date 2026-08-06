@@ -597,7 +597,10 @@ pub const Connection = struct {
         while (true) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
-            if (frame.frame.header.frame_type != .ping) continue;
+            if (frame.frame.header.frame_type != .ping) {
+                if (try self.handleConnectionFrame(frame.frame)) continue;
+                continue;
+            }
             if ((frame.frame.header.flags & flag_ack) == 0) {
                 const ping_payload = try http2.PingPayload.parse(frame.frame);
                 try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
@@ -611,7 +614,10 @@ pub const Connection = struct {
         while (true) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
-            if (frame.frame.header.frame_type != .ping) continue;
+            if (frame.frame.header.frame_type != .ping) {
+                if (try self.handleConnectionFrame(frame.frame)) continue;
+                continue;
+            }
             const ping_payload = try http2.PingPayload.parse(frame.frame);
             if ((frame.frame.header.flags & flag_ack) != 0) continue;
             try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
@@ -2210,6 +2216,58 @@ test "HTTP/2 readPing ignores ACK frames" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 2, 3, 5, 7, 11, 13, 17, 19 }, &shared.observed);
+}
+
+test "HTTP/2 ping helpers handle interleaved control frames" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            try connection.sendWindowUpdate(0, 321);
+            const observed = try connection.readPing();
+            try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, &observed);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const ack = try client.ping(.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, &ack);
+    try std.testing.expectEqual(@as(i64, default_flow_window + 321), client.send_connection_window.value);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 readWindowUpdate handles interleaved PING" {
