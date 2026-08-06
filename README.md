@@ -12,7 +12,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, and unsupported transfer-coding and HTTP/1.0 transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
-  persistence and a `std.Io.async` concurrent server helper
+  persistence, optional Host synthesis, host-name DNS connect helpers, and a
+  `std.Io.async` concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder with RFC 7541 Huffman strings plus
   dynamic-table indexing/size-update state for long-lived runtimes with local decoder table-size enforcement and automatic
@@ -109,15 +110,15 @@ starts with deterministic parsers, serializers, and state helpers for:
   validation attempts, and validate the new path on a matching PATH_RESPONSE,
   plus a blocking UDP endpoint runtime for frame datagrams with a
   `std.Io.async` concurrent receive helper
-- WebSocket handshakes with Host authority and nonce validation, frame masking, strict frame/control
+- WebSocket handshakes with Host authority, body-framing rejection, duplicate-subprotocol and nonce validation, frame masking, strict frame/control
   validation including control/continuation RSV rejection, close payload checks, fragmented message assembly with aggregate
   message-size limits, automatic PING→PONG and close echo/completed-close short-circuit handling,
-  outbound text/close/control-frame validation,
+  outbound text/close/control-frame validation plus codec-level invalid-frame write rejection,
   subprotocol token validation and split-header negotiation, optional permessage-deflate negotiation with
   no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus rejection of
-  unsupported extension parameters/window sizes and compressed fragmented sends, serialized connection writes, a blocking TCP
+  unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
-  server helper, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
+  server helper and host-name DNS connect helpers, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
   `:protocol = websocket`, subprotocols, and permessage-deflate over an h2 DATA tunnel
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
   username/password payload support, PUBLISH,
@@ -194,10 +195,11 @@ var threaded = std.Io.Threaded.init(allocator, .{});
 defer threaded.deinit();
 const io = threaded.io();
 
-var client = try netz.http1.runtime.Client.connect(
+var client = try netz.http1.runtime.Client.connectHost(
     allocator,
     io,
-    try std.Io.net.IpAddress.parse("127.0.0.1", 8080),
+    "localhost",
+    8080,
     .{},
 );
 defer client.close();
@@ -205,7 +207,7 @@ defer client.close();
 var response = try client.request(.{
     .method = .GET,
     .target = "/",
-    .headers = &.{.{ .name = "Host", .value = "localhost" }},
+    .host = "localhost",
 });
 defer response.deinit(allocator);
 ```
@@ -213,10 +215,11 @@ defer response.deinit(allocator);
 WebSocket can upgrade over the same TCP layer:
 
 ```zig
-var ws = try netz.websocket.runtime.Client.connect(
+var ws = try netz.websocket.runtime.Client.connectHost(
     allocator,
     io,
-    try std.Io.net.IpAddress.parse("127.0.0.1", 8080),
+    "localhost",
+    8080,
     .{ .host = "localhost", .target = "/chat" },
 );
 defer ws.close();
