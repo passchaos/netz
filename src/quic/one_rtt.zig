@@ -12,6 +12,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     StreamStateError,
     EcnDisabled,
     AntiAmplificationLimited,
+    ActiveMigrationDisabled,
 };
 
 pub const SendOptions = struct {
@@ -114,6 +115,7 @@ pub const ConnectionConfig = struct {
     peer_max_ack_delay_ms: u64 = quic.default_max_ack_delay_ms,
     enable_pmtud: bool = false,
     pmtud_max_probe_size: usize = quic.pmtu.max_ipv4_udp_payload_size,
+    peer_disable_active_migration: bool = false,
 };
 
 const StreamFlowEntry = struct {
@@ -674,7 +676,12 @@ pub const Connection = struct {
         try self.path_validation.queueChallenge(data);
     }
 
+    pub fn peerActiveMigrationDisabled(self: Connection) bool {
+        return self.config.peer_disable_active_migration;
+    }
+
     pub fn beginPeerMigration(self: *Connection, new_peer: net.IpAddress, challenge: [8]u8) Error!void {
+        if (self.config.peer_disable_active_migration) return error.ActiveMigrationDisabled;
         self.config.peer = new_peer;
         self.peer_address_validated = false;
         self.peer_address_bytes_received = 0;
@@ -3400,6 +3407,36 @@ test "QUIC 1-RTT path validation timeout retries then fails" {
     try std.testing.expectEqual(@as(usize, 1), try client.checkPathValidationTimeouts(250));
     try std.testing.expectEqual(@as(usize, 0), client.path_validation.pendingChallengeCount());
     try std.testing.expectEqual(@as(usize, 1), client.path_validation.failedChallengeCount());
+}
+
+test "QUIC 1-RTT beginPeerMigration obeys disable_active_migration" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer peer_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xee} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .peer_disable_active_migration = true,
+    });
+    defer connection.deinit();
+
+    try std.testing.expect(connection.peerActiveMigrationDisabled());
+    try std.testing.expectError(error.ActiveMigrationDisabled, connection.beginPeerMigration(peer_endpoint.address(), [_]u8{0} ** 8));
+    try std.testing.expect(connection.peerAddressValidated());
+    try std.testing.expectEqual(endpoint.address(), connection.config.peer);
+    try std.testing.expectEqual(@as(usize, 0), connection.path_validation.pendingChallengeCount());
 }
 
 test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {

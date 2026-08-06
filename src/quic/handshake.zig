@@ -110,6 +110,7 @@ pub const OneRttConfig = struct {
             .local_ack_delay_exponent = local_transport_parameters.ack_delay_exponent,
             .peer_ack_delay_exponent = peer_transport_parameters.ack_delay_exponent,
             .peer_max_ack_delay_ms = peer_transport_parameters.max_ack_delay,
+            .peer_disable_active_migration = peer_transport_parameters.disable_active_migration,
         };
     }
 };
@@ -726,6 +727,7 @@ test "QUIC integrated handshake applies negotiated transport parameters" {
     server_tp.max_idle_timeout = 40;
     server_tp.ack_delay_exponent = 7;
     server_tp.max_ack_delay = 45;
+    server_tp.disable_active_migration = true;
     server_tp.initial_max_data = 40;
     server_tp.initial_max_stream_data_bidi_local = 21;
     server_tp.initial_max_stream_data_bidi_remote = 22;
