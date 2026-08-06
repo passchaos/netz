@@ -206,6 +206,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "processStatelessResetDatagram"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ackRttSample"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "updateRttFromAck"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "persistentCongestionPeriod"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "CloseState"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamResetInfo"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));
@@ -221,6 +222,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "ackRttSample"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectPacketThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectTimeThresholdLoss"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "persistentCongestionPeriod"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "timeThresholdLossDeadline"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "sentAt"));
     try std.testing.expect(@hasDecl(netz.quic.stream_state, "RecvState"));
@@ -238,6 +240,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "pendingChallengeCount"));
     try std.testing.expect(@hasDecl(netz.quic.rtt, "Stats"));
     try std.testing.expect(@hasDecl(netz.quic.rtt, "decodeAckDelayNanos"));
+    try std.testing.expect(@hasDecl(netz.quic.rtt.Stats, "updateAt"));
+    try std.testing.expect(@hasDecl(netz.quic.rtt.Stats, "onPersistentCongestion"));
     try std.testing.expectEqual(@as(u64, 100_000_000), netz.quic.rtt.default_initial_rtt_ns);
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveManyConcurrent"));
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveRoutedBytes"));

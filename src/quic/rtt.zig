@@ -14,6 +14,12 @@ pub const Stats = struct {
     min_rtt: u64 = 0,
     max_ack_delay: u64 = default_max_ack_delay_ns,
     has_measurement: bool = false,
+    /// Receive timestamp of the first RTT sample in the current measurement
+    /// epoch.  Persistent congestion detection must not begin before this
+    /// point; after persistent congestion, s2n-quic resets the epoch so the
+    /// next RTT sample becomes the new min/smoothed baseline.
+    first_rtt_sample_time_ns: ?u64 = null,
+    reset_on_next_sample: bool = false,
 
     pub fn init(max_ack_delay_ns: u64) Stats {
         return .{ .max_ack_delay = max_ack_delay_ns };
@@ -26,15 +32,24 @@ pub const Stats = struct {
     /// handshake is confirmed, then capped by the peer's max_ack_delay and only
     /// subtracted when it cannot reduce the sample below min_rtt.
     pub fn update(self: *Stats, send_delta_ns: u64, ack_delay_ns: u64, handshake_confirmed: bool) void {
+        self.updateAt(send_delta_ns, ack_delay_ns, handshake_confirmed, null);
+    }
+
+    pub fn updateAt(self: *Stats, send_delta_ns: u64, ack_delay_ns: u64, handshake_confirmed: bool, sample_time_ns: ?u64) void {
         if (send_delta_ns == 0) return;
         self.latest_rtt = send_delta_ns;
 
-        if (!self.has_measurement) {
+        if (!self.has_measurement or self.reset_on_next_sample) {
+            if (sample_time_ns) |sample_time| self.first_rtt_sample_time_ns = sample_time;
             self.min_rtt = send_delta_ns;
             self.smoothed_rtt = send_delta_ns;
             self.rtt_var = send_delta_ns / 2;
             self.has_measurement = true;
+            self.reset_on_next_sample = false;
             return;
+        }
+        if (self.first_rtt_sample_time_ns == null) {
+            if (sample_time_ns) |sample_time| self.first_rtt_sample_time_ns = sample_time;
         }
 
         self.min_rtt = @min(self.min_rtt, send_delta_ns);
@@ -72,7 +87,12 @@ pub const Stats = struct {
     }
 
     pub fn persistentCongestionThreshold(self: Stats) u64 {
-        return self.pto(true) * default_persistent_congestion_threshold;
+        return std.math.mul(u64, self.pto(true), default_persistent_congestion_threshold) catch std.math.maxInt(u64);
+    }
+
+    pub fn onPersistentCongestion(self: *Stats) void {
+        self.first_rtt_sample_time_ns = null;
+        self.reset_on_next_sample = true;
     }
 };
 
@@ -124,6 +144,26 @@ test "QUIC RTT estimator loss and persistent congestion thresholds" {
     stats.update(120_000_000, 0, true);
     try std.testing.expect(stats.lossDelay() >= 120_000_000);
     try std.testing.expectEqual(stats.pto(true) * 3, stats.persistentCongestionThreshold());
+}
+
+test "QUIC RTT estimator tracks sample epochs across persistent congestion" {
+    var stats = Stats{};
+    stats.updateAt(100_000_000, 0, true, 1_000);
+    try std.testing.expectEqual(@as(?u64, 1_000), stats.first_rtt_sample_time_ns);
+
+    stats.updateAt(50_000_000, 0, true, 2_000);
+    try std.testing.expectEqual(@as(u64, 50_000_000), stats.min_rtt);
+    try std.testing.expectEqual(@as(?u64, 1_000), stats.first_rtt_sample_time_ns);
+
+    stats.onPersistentCongestion();
+    try std.testing.expectEqual(@as(?u64, null), stats.first_rtt_sample_time_ns);
+    try std.testing.expect(stats.reset_on_next_sample);
+
+    stats.updateAt(200_000_000, 0, true, 3_000);
+    try std.testing.expectEqual(@as(u64, 200_000_000), stats.min_rtt);
+    try std.testing.expectEqual(@as(u64, 200_000_000), stats.smoothed_rtt);
+    try std.testing.expectEqual(@as(?u64, 3_000), stats.first_rtt_sample_time_ns);
+    try std.testing.expect(!stats.reset_on_next_sample);
 }
 
 test "QUIC ACK delay decoding applies negotiated exponent" {

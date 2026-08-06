@@ -209,6 +209,7 @@ pub const Connection = struct {
     spin_bit_value: bool = false,
     last_activity_ms: ?u64 = null,
     idle_timed_out: bool = false,
+    last_persistent_congestion_packet_number: ?u64 = null,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -383,7 +384,10 @@ pub const Connection = struct {
     pub fn retransmitTimeThresholdLoss(self: *Connection, now_ns: u64, loss_delay_ns: u64) Error!bool {
         const largest = self.sent.largestAcknowledged() orelse return false;
         const lost = self.sent.detectTimeThresholdLoss(now_ns, loss_delay_ns, largest);
-        if (lost.bytes > 0) self.congestion.onLost(lost.bytes);
+        if (lost.bytes > 0) {
+            self.congestion.onLost(lost.bytes);
+            _ = self.applyPersistentCongestionIfDetected();
+        }
         for (self.sent.packets.items) |packet| {
             if (!packet.lost) continue;
             const candidate = self.recovery.packetNumberCandidate(packet.packet_number) orelse continue;
@@ -575,8 +579,19 @@ pub const Connection = struct {
 
     pub fn updateRttFromAck(self: *Connection, ack: quic.AckFrame, now_ns: u64) Error!bool {
         const sample = try self.ackRttSample(ack, now_ns) orelse return false;
-        self.rtt_stats.update(sample.latest_rtt_ns, sample.ack_delay_ns, self.handshake_confirmed);
+        self.rtt_stats.updateAt(sample.latest_rtt_ns, sample.ack_delay_ns, self.handshake_confirmed, now_ns);
         return true;
+    }
+
+    pub fn persistentCongestionPeriod(self: Connection) ?quic.packet_space.SentPacketTracker.PersistentCongestionPeriod {
+        const largest = self.sent.largestAcknowledged() orelse return null;
+        const period = self.sent.persistentCongestionPeriod(
+            self.rtt_stats.first_rtt_sample_time_ns,
+            largest,
+            self.last_persistent_congestion_packet_number,
+        ) orelse return null;
+        if (period.durationNs() <= self.rtt_stats.persistentCongestionThreshold()) return null;
+        return period;
     }
 
     pub fn effectiveIdleTimeoutMillis(self: Connection) ?u64 {
@@ -765,7 +780,10 @@ pub const Connection = struct {
                     const acked = try self.sent.applyAckDetailed(frame.ack);
                     self.congestion.onAcked(acked.bytes);
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
-                    if (lost.bytes > 0) self.congestion.onLost(lost.bytes);
+                    if (lost.bytes > 0) {
+                        self.congestion.onLost(lost.bytes);
+                        _ = self.applyPersistentCongestionIfDetected();
+                    }
                     _ = try self.recovery.applyAck(frame.ack);
                     if (self.pending_key_update_ack_threshold) |threshold| {
                         if (self.hasAcknowledgedPacketAtOrAbove(threshold)) {
@@ -1158,6 +1176,14 @@ pub const Connection = struct {
             .now_ms = now_ms,
             .pto_ms = pto_ms,
         });
+    }
+
+    fn applyPersistentCongestionIfDetected(self: *Connection) bool {
+        const period = self.persistentCongestionPeriod() orelse return false;
+        self.congestion.onPersistentCongestion();
+        self.rtt_stats.onPersistentCongestion();
+        self.last_persistent_congestion_packet_number = period.end_packet_number;
+        return true;
     }
 
     pub fn consumeReceived(self: *Connection, amount: u64) ?quic.Frame {
@@ -3450,6 +3476,99 @@ test "QUIC 1-RTT connection retransmits packet-threshold losses" {
     try std.testing.expectEqual(@as(u64, 2), second_ack.frames[0].ack.first_ack_range);
     try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
     try std.testing.expectEqual(@as(u64, 2), client.recovery.pending.items[0].packet_numbers.items[0]);
+}
+
+test "QUIC 1-RTT connection applies persistent congestion response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x6a, 0x6b, 0x6c, 0x6d };
+    const server_cid = [_]u8{ 0x6e, 0x6f, 0x70, 0x71 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x6c} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 0);
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    try server.sendAck(0);
+
+    var first_ack = try client.receivePacketAt(100_000_000);
+    defer first_ack.deinit(allocator);
+    try std.testing.expect(client.rtt_stats.has_measurement);
+    try std.testing.expectEqual(@as(?u64, 100_000_000), client.rtt_stats.first_rtt_sample_time_ns);
+
+    try client.sendAt(&ping, 200_000_000); // packet 1, first lost boundary after the RTT sample.
+    try client.sendAt(&ping, 500_000_000); // packet 2, interior lost packet.
+    try client.sendAt(&ping, 1_200_000_000); // packet 3, last lost boundary.
+    try client.sendAt(&ping, 1_300_000_000); // packet 4, largest acknowledged.
+
+    for (0..3) |_| {
+        var dropped = try server_endpoint.receiveBytes();
+        dropped.deinit(allocator);
+    }
+    var acknowledged = try server.receivePacket();
+    defer acknowledged.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 4), acknowledged.packet.packet_number);
+
+    client.congestion.congestion_window = 24_000;
+    client.congestion.slow_start_threshold = 24_000;
+    try server.sendAck(0);
+
+    var ack = try client.receivePacketAt(1_400_000_000);
+    defer ack.deinit(allocator);
+    client.congestion.congestion_window = 24_000;
+    client.congestion.slow_start_threshold = 24_000;
+    try std.testing.expect(try client.retransmitTimeThresholdLoss(1_400_000_000, client.rtt_stats.lossDelay()));
+
+    try std.testing.expect(client.sent.packets.items[1].lost);
+    try std.testing.expect(client.sent.packets.items[2].lost);
+    try std.testing.expect(client.sent.packets.items[3].lost);
+    try std.testing.expectEqual(quic.congestion.minimumWindow(client.config.max_datagram_size), client.congestion.congestion_window);
+    try std.testing.expectEqual(@as(?u64, null), client.rtt_stats.first_rtt_sample_time_ns);
+    try std.testing.expectEqual(@as(?u64, 3), client.last_persistent_congestion_packet_number);
+
+    var retransmitted = try server.receivePacket();
+    defer retransmitted.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 5), retransmitted.packet.packet_number);
+
+    const old_min = client.rtt_stats.min_rtt;
+    try client.sendAt(&ping, 1_500_000_000);
+    var sample_packet = try server.receivePacket();
+    defer sample_packet.deinit(allocator);
+    try server.sendAck(0);
+
+    var sample_ack = try client.receivePacketAt(1_700_000_000);
+    defer sample_ack.deinit(allocator);
+    try std.testing.expect(old_min != 200_000_000);
+    try std.testing.expectEqual(@as(u64, 200_000_000), client.rtt_stats.min_rtt);
+    try std.testing.expectEqual(@as(u64, 200_000_000), client.rtt_stats.smoothed_rtt);
+    try std.testing.expectEqual(@as(?u64, 1_700_000_000), client.rtt_stats.first_rtt_sample_time_ns);
 }
 
 test "QUIC 1-RTT connection emits DATA_BLOCKED and applies MAX_DATA" {

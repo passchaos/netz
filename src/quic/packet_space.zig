@@ -269,6 +269,22 @@ pub const SentPacketTracker = struct {
         sent_time_ns: u64,
     };
 
+    pub const PersistentCongestionPeriod = struct {
+        start_packet_number: u64,
+        end_packet_number: u64,
+        start_time_ns: u64,
+        end_time_ns: u64,
+
+        pub fn durationNs(self: PersistentCongestionPeriod) u64 {
+            return self.end_time_ns -| self.start_time_ns;
+        }
+    };
+
+    const PersistentCongestionBuilder = struct {
+        period: PersistentCongestionPeriod,
+        previous_packet_number: u64,
+    };
+
     pub fn applyAck(self: *SentPacketTracker, ack: quic.AckFrame) Error!usize {
         return (try self.applyAckDetailed(ack)).packets;
     }
@@ -402,6 +418,74 @@ pub const SentPacketTracker = struct {
         return deadline;
     }
 
+    /// Return the longest contiguous lost-packet period that can establish
+    /// RFC 9002 persistent congestion.
+    ///
+    /// This mirrors the production-stack pattern used by s2n-quic/quicz:
+    /// persistent congestion is based on packet send times, starts only after
+    /// an RTT sample has been observed, permits non-ack-eliciting packets inside
+    /// the lost run, but requires the start and end packets of the measured
+    /// period to be ack-eliciting.  `after_packet_number` lets callers suppress
+    /// duplicate reports after they have already applied the congestion response
+    /// for a period ending at or before that packet number.
+    pub fn persistentCongestionPeriod(
+        self: SentPacketTracker,
+        first_rtt_sample_time_ns: ?u64,
+        largest_acknowledged: ?u64,
+        after_packet_number: ?u64,
+    ) ?PersistentCongestionPeriod {
+        const first_sample_time = first_rtt_sample_time_ns orelse return null;
+
+        var best: ?PersistentCongestionPeriod = null;
+        var current: ?PersistentCongestionBuilder = null;
+        for (self.packets.items) |packet| {
+            if (largest_acknowledged) |largest| {
+                if (packet.packet_number > largest) break;
+            }
+
+            if (packet.acknowledged or !packet.lost) {
+                current = null;
+                continue;
+            }
+
+            const sent_time = packet.sent_time_ns orelse {
+                current = null;
+                continue;
+            };
+            if (sent_time < first_sample_time) {
+                current = null;
+                continue;
+            }
+
+            if (current) |*builder| {
+                if (isImmediatelyBefore(builder.previous_packet_number, packet.packet_number)) {
+                    builder.previous_packet_number = packet.packet_number;
+                    if (packet.ack_eliciting) {
+                        builder.period.end_packet_number = packet.packet_number;
+                        builder.period.end_time_ns = sent_time;
+                        considerPersistentCongestionPeriod(&best, builder.period, after_packet_number);
+                    }
+                    continue;
+                }
+                current = null;
+            }
+
+            if (packet.ack_eliciting) {
+                current = .{
+                    .period = .{
+                        .start_packet_number = packet.packet_number,
+                        .end_packet_number = packet.packet_number,
+                        .start_time_ns = sent_time,
+                        .end_time_ns = sent_time,
+                    },
+                    .previous_packet_number = packet.packet_number,
+                };
+            }
+        }
+
+        return best;
+    }
+
     fn markRange(self: *SentPacketTracker, start: u64, end: u64) AckResult {
         var result: AckResult = .{};
         for (self.packets.items) |*packet| {
@@ -449,6 +533,27 @@ pub const SentPacketTracker = struct {
     fn observeAcknowledged(self: *SentPacketTracker, packet_number: u64) void {
         if (self.largest_acknowledged == null or packet_number > self.largest_acknowledged.?) {
             self.largest_acknowledged = packet_number;
+        }
+    }
+
+    fn considerPersistentCongestionPeriod(
+        best: *?PersistentCongestionPeriod,
+        period: PersistentCongestionPeriod,
+        after_packet_number: ?u64,
+    ) void {
+        if (period.start_packet_number == period.end_packet_number) return;
+        if (after_packet_number) |after| {
+            if (period.end_packet_number <= after) return;
+        }
+
+        const current_best = best.* orelse {
+            best.* = period;
+            return;
+        };
+        const duration = period.durationNs();
+        const best_duration = current_best.durationNs();
+        if (duration > best_duration or (duration == best_duration and period.end_packet_number > current_best.end_packet_number)) {
+            best.* = period;
         }
     }
 };
@@ -674,6 +779,58 @@ test "QUIC sent packet tracker detects time-threshold loss" {
     const remaining = sent.detectTimeThresholdLoss(1_000, 150, 2);
     try std.testing.expectEqual(@as(usize, 2), remaining.packets);
     try std.testing.expectEqual(@as(?u64, null), sent.timeThresholdLossDeadline(150, 2));
+}
+
+test "QUIC sent packet tracker finds persistent congestion periods" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(0, true, 1200, .not_ect, 100); // before the first RTT sample epoch.
+    try sent.sentAt(1, true, 1200, .not_ect, 1_000);
+    try sent.sentAt(2, false, 0, .not_ect, 2_000);
+    try sent.sentAt(3, true, 1200, .not_ect, 4_000);
+    try sent.sentAt(4, true, 1200, .not_ect, 9_000);
+    try sent.sentAt(5, true, 1200, .not_ect, 10_000);
+    _ = sent.markAcknowledged(5);
+
+    for (sent.packets.items[0..5]) |*packet| packet.lost = true;
+
+    try std.testing.expectEqual(
+        @as(?SentPacketTracker.PersistentCongestionPeriod, null),
+        sent.persistentCongestionPeriod(null, sent.largestAcknowledged(), null),
+    );
+
+    const period = sent.persistentCongestionPeriod(500, sent.largestAcknowledged(), null).?;
+    try std.testing.expectEqual(@as(u64, 1), period.start_packet_number);
+    try std.testing.expectEqual(@as(u64, 4), period.end_packet_number);
+    try std.testing.expectEqual(@as(u64, 1_000), period.start_time_ns);
+    try std.testing.expectEqual(@as(u64, 9_000), period.end_time_ns);
+    try std.testing.expectEqual(@as(u64, 8_000), period.durationNs());
+
+    try std.testing.expect(sent.persistentCongestionPeriod(500, sent.largestAcknowledged(), 3) != null);
+    try std.testing.expectEqual(
+        @as(?SentPacketTracker.PersistentCongestionPeriod, null),
+        sent.persistentCongestionPeriod(500, sent.largestAcknowledged(), 4),
+    );
+}
+
+test "QUIC persistent congestion period requires ack-eliciting boundaries" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(0, false, 0, .not_ect, 1_000);
+    try sent.sentAt(1, true, 1200, .not_ect, 8_000);
+    try sent.sentAt(2, true, 1200, .not_ect, 9_000);
+    _ = sent.markAcknowledged(2);
+    sent.packets.items[0].lost = true;
+    sent.packets.items[1].lost = true;
+
+    try std.testing.expectEqual(
+        @as(?SentPacketTracker.PersistentCongestionPeriod, null),
+        sent.persistentCongestionPeriod(0, sent.largestAcknowledged(), null),
+    );
 }
 
 test "QUIC sent packet tracker detects packet-threshold loss" {
