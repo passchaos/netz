@@ -147,6 +147,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id.PeerPool, "addWithLimit"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
+    try std.testing.expectEqual(netz.quic.varint.max_value, netz.quic.protection.max_packet_number);
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLenForPayload"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "initial_salt_v2"));

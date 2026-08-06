@@ -25,6 +25,7 @@ pub const hp_key_len = aes_128_key_len;
 pub const aead_tag_len = Aes128Gcm.tag_length;
 pub const header_protection_sample_len = 16;
 pub const header_protection_mask_len = 5;
+pub const max_packet_number: u64 = varint.max_value;
 
 pub const Error = varint.Error || error{
     InvalidInitialPacket,
@@ -422,6 +423,7 @@ pub fn protectAes128Payload(
     ciphertext: []u8,
     tag: *[aead_tag_len]u8,
 ) Error!void {
+    try validatePacketNumber(packet_number);
     if (ciphertext.len != plaintext.len) return error.InvalidPayloadLength;
     const nonce = packetProtectionNonce(keys.iv, packet_number);
     Aes128Gcm.encrypt(ciphertext, tag, plaintext, associated_data, nonce, keys.key);
@@ -435,6 +437,7 @@ pub fn openAes128Payload(
     tag: [aead_tag_len]u8,
     plaintext: []u8,
 ) Error!void {
+    try validatePacketNumber(packet_number);
     if (plaintext.len != ciphertext.len) return error.InvalidPayloadLength;
     const nonce = packetProtectionNonce(keys.iv, packet_number);
     try Aes128Gcm.decrypt(plaintext, ciphertext, tag, associated_data, nonce, keys.key);
@@ -541,7 +544,7 @@ pub fn openInitialPacket(
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
-    const packet_number = reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
+    const packet_number = try reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
     const packet_end = pn_offset + protected_len;
     const ciphertext = bytes[payload_offset .. packet_end - aead_tag_len];
     const tag = bytes[packet_end - aead_tag_len .. packet_end][0..aead_tag_len].*;
@@ -631,7 +634,7 @@ pub fn openHandshakePacket(
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
-    const packet_number = reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
+    const packet_number = try reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
     const packet_end = pn_offset + protected_len;
     const ciphertext = bytes[payload_offset .. packet_end - aead_tag_len];
     const tag = bytes[packet_end - aead_tag_len .. packet_end][0..aead_tag_len].*;
@@ -718,7 +721,7 @@ pub fn openZeroRttPacket(
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
-    const packet_number = reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
+    const packet_number = try reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
     const packet_end = pn_offset + protected_len;
     const ciphertext = bytes[payload_offset .. packet_end - aead_tag_len];
     const tag = bytes[packet_end - aead_tag_len .. packet_end][0..aead_tag_len].*;
@@ -827,7 +830,7 @@ pub fn openShortPacket(
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     const payload_offset = pn_offset + pn_len;
     if (bytes.len < payload_offset + aead_tag_len) return error.InvalidInitialPacket;
-    const packet_number = reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
+    const packet_number = try reconstructPacketNumber(expected_packet_number, bytes[pn_offset..payload_offset]);
     const ciphertext = bytes[payload_offset .. bytes.len - aead_tag_len];
     const tag = bytes[bytes.len - aead_tag_len ..][0..aead_tag_len].*;
     const payload = try allocator.alloc(u8, ciphertext.len);
@@ -977,14 +980,22 @@ fn validatePacketNumberLen(packet_number_len: u8) Error!void {
     if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacketNumberLength;
 }
 
+fn validatePacketNumber(packet_number: u64) Error!void {
+    if (packet_number > max_packet_number) return error.InvalidPacketNumber;
+}
+
 fn appendTruncatedPacketNumber(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet_number: u64, packet_number_len: u8) Error!void {
     try validatePacketNumberLen(packet_number_len);
+    try validatePacketNumber(packet_number);
     var full: [8]u8 = undefined;
     std.mem.writeInt(u64, &full, packet_number, .big);
     try list.appendSlice(allocator, full[8 - packet_number_len ..]);
 }
 
-fn reconstructPacketNumber(expected_packet_number: u64, packet_number_bytes: []const u8) u64 {
+fn reconstructPacketNumber(expected_packet_number: u64, packet_number_bytes: []const u8) Error!u64 {
+    if (packet_number_bytes.len == 0 or packet_number_bytes.len > 4) return error.InvalidPacketNumberLength;
+    if (expected_packet_number > max_packet_number + 1) return error.InvalidPacketNumber;
+
     var truncated: u64 = 0;
     for (packet_number_bytes) |byte| truncated = (truncated << 8) | byte;
     const pn_nbits: u6 = @intCast(packet_number_bytes.len * 8);
@@ -992,11 +1003,14 @@ fn reconstructPacketNumber(expected_packet_number: u64, packet_number_bytes: []c
     const pn_hwin = pn_win / 2;
     const pn_mask = pn_win - 1;
     var candidate = (expected_packet_number & ~pn_mask) | truncated;
-    if (candidate + pn_hwin <= expected_packet_number and candidate < (std.math.maxInt(u62) - pn_win)) {
-        candidate += pn_win;
-    } else if (candidate > expected_packet_number + pn_hwin and candidate >= pn_win) {
-        candidate -= pn_win;
+    const candidate_plus_half = std.math.add(u64, candidate, pn_hwin) catch std.math.maxInt(u64);
+    if (candidate_plus_half <= expected_packet_number) {
+        candidate = std.math.add(u64, candidate, pn_win) catch return error.InvalidPacketNumber;
+    } else {
+        const expected_plus_half = std.math.add(u64, expected_packet_number, pn_hwin) catch std.math.maxInt(u64);
+        if (candidate > expected_plus_half and candidate >= pn_win) candidate -= pn_win;
     }
+    if (candidate > max_packet_number) return error.InvalidPacketNumber;
     return candidate;
 }
 
@@ -1117,7 +1131,7 @@ test "QUIC packet number length follows RFC 9000 adaptive encoding" {
     try std.testing.expectEqual(@as(u8, 1), packetNumberLen(0xabe8b3 + 1, 0xabe8b3));
     try std.testing.expectEqual(@as(u8, 2), packetNumberLen(0xac5c02, 0xabe8b3));
     try std.testing.expectEqual(@as(u8, 3), packetNumberLen(0xace8fe, 0xabe8b3));
-    try std.testing.expectEqual(@as(u8, 4), packetNumberLen(std.math.maxInt(u62), 0));
+    try std.testing.expectEqual(@as(u8, 4), packetNumberLen(max_packet_number, 0));
 }
 
 test "QUIC packet number length grows for tiny unpadded payloads" {
@@ -1125,6 +1139,25 @@ test "QUIC packet number length grows for tiny unpadded payloads" {
     try std.testing.expectEqual(@as(u8, 3), packetNumberLenForPayload(1, 0, 1));
     try std.testing.expectEqual(@as(u8, 2), packetNumberLenForPayload(1, 0, 2));
     try std.testing.expectEqual(@as(u8, 1), packetNumberLenForPayload(1, 0, 3));
+}
+
+test "QUIC packet number reconstruction validates bounds" {
+    try std.testing.expectEqual(
+        @as(u64, 0xa82f9b32),
+        try reconstructPacketNumber(0xa82f30ea + 1, &[_]u8{ 0x9b, 0x32 }),
+    );
+    try std.testing.expectEqual(@as(u64, 0xff), try reconstructPacketNumber(0x100, &[_]u8{0xff}));
+    try std.testing.expectEqual(@as(u64, 0x200), try reconstructPacketNumber(0x180, &[_]u8{0x00}));
+    try std.testing.expectEqual(@as(u64, 0x1f0), try reconstructPacketNumber(0x250, &[_]u8{0xf0}));
+    try std.testing.expectEqual(
+        max_packet_number,
+        try reconstructPacketNumber(max_packet_number + 1, &[_]u8{ 0xff, 0xff, 0xff, 0xff }),
+    );
+
+    try std.testing.expectError(error.InvalidPacketNumberLength, reconstructPacketNumber(0, &[_]u8{}));
+    try std.testing.expectError(error.InvalidPacketNumberLength, reconstructPacketNumber(0, &[_]u8{ 0, 0, 0, 0, 0 }));
+    try std.testing.expectError(error.InvalidPacketNumber, reconstructPacketNumber(max_packet_number + 2, &[_]u8{0}));
+    try std.testing.expectError(error.InvalidPacketNumber, reconstructPacketNumber(max_packet_number, &[_]u8{0}));
 }
 
 test "QUIC Initial packet seal/open roundtrip" {
