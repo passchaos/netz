@@ -7,8 +7,16 @@ pub const initial_salt_v1 = [_]u8{
     0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a,
 };
 
+pub const initial_salt_v2 = [_]u8{
+    0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93,
+    0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd, 0x2e, 0xd9,
+};
+
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+
+const version_1_wire: u32 = 0x00000001;
+const version_2_wire: u32 = 0x6b3343cf;
 
 pub const secret_len = HkdfSha256.prk_length;
 pub const aes_128_key_len = Aes128Gcm.key_length;
@@ -43,6 +51,32 @@ pub const InitialSecrets = struct {
     initial_secret: [secret_len]u8,
     client: PacketProtectionKeys,
     server: PacketProtectionKeys,
+};
+
+const HkdfLabels = struct {
+    key: []const u8,
+    iv: []const u8,
+    hp: []const u8,
+    ku: []const u8,
+};
+
+const hkdf_labels_v1 = HkdfLabels{
+    .key = "quic key",
+    .iv = "quic iv",
+    .hp = "quic hp",
+    .ku = "quic ku",
+};
+
+const hkdf_labels_v2 = HkdfLabels{
+    .key = "quicv2 key",
+    .iv = "quicv2 iv",
+    .hp = "quicv2 hp",
+    .ku = "quicv2 ku",
+};
+
+const ProtectionProfile = struct {
+    salt: *const [initial_salt_v1.len]u8,
+    labels: HkdfLabels,
 };
 
 pub const InitialPacketOptions = struct {
@@ -259,27 +293,44 @@ pub const Aes128KeyPhaseState = struct {
 };
 
 pub fn deriveInitialSecrets(client_initial_dcid: []const u8) InitialSecrets {
-    const initial_secret = HkdfSha256.extract(&initial_salt_v1, client_initial_dcid);
+    return deriveInitialSecretsForVersion(version_1_wire, client_initial_dcid);
+}
+
+pub fn deriveInitialSecretsForVersion(version: u32, client_initial_dcid: []const u8) InitialSecrets {
+    const profile = protectionProfile(version);
+    const initial_secret = HkdfSha256.extract(profile.salt, client_initial_dcid);
     const client_secret = hkdfExpandLabel(initial_secret, "client in", secret_len);
     const server_secret = hkdfExpandLabel(initial_secret, "server in", secret_len);
     return .{
         .initial_secret = initial_secret,
-        .client = deriveAes128Keys(client_secret),
-        .server = deriveAes128Keys(server_secret),
+        .client = deriveAes128KeysWithLabels(client_secret, profile.labels),
+        .server = deriveAes128KeysWithLabels(server_secret, profile.labels),
     };
 }
 
 pub fn deriveAes128Keys(secret: [secret_len]u8) PacketProtectionKeys {
+    return deriveAes128KeysWithLabels(secret, hkdf_labels_v1);
+}
+
+pub fn deriveAes128KeysForVersion(version: u32, secret: [secret_len]u8) PacketProtectionKeys {
+    return deriveAes128KeysWithLabels(secret, protectionProfile(version).labels);
+}
+
+fn deriveAes128KeysWithLabels(secret: [secret_len]u8, labels: HkdfLabels) PacketProtectionKeys {
     return .{
         .secret = secret,
-        .key = hkdfExpandLabel(secret, "quic key", aes_128_key_len),
-        .iv = hkdfExpandLabel(secret, "quic iv", iv_len),
-        .hp = hkdfExpandLabel(secret, "quic hp", hp_key_len),
+        .key = hkdfExpandLabel(secret, labels.key, aes_128_key_len),
+        .iv = hkdfExpandLabel(secret, labels.iv, iv_len),
+        .hp = hkdfExpandLabel(secret, labels.hp, hp_key_len),
     };
 }
 
 pub fn nextAes128TrafficSecret(secret: [secret_len]u8) [secret_len]u8 {
-    return hkdfExpandLabel(secret, "quic ku", secret_len);
+    return nextAes128TrafficSecretForVersion(version_1_wire, secret);
+}
+
+pub fn nextAes128TrafficSecretForVersion(version: u32, secret: [secret_len]u8) [secret_len]u8 {
+    return hkdfExpandLabel(secret, protectionProfile(version).labels.ku, secret_len);
 }
 
 /// Derive the next QUIC 1-RTT packet-protection generation.
@@ -289,8 +340,12 @@ pub fn nextAes128TrafficSecret(secret: [secret_len]u8) [secret_len]u8 {
 /// retained for the life of the connection so the key phase bit itself remains
 /// protected consistently across generations.
 pub fn nextAes128PacketProtectionKeys(current: PacketProtectionKeys) PacketProtectionKeys {
-    const next_secret = nextAes128TrafficSecret(current.secret);
-    var next = deriveAes128Keys(next_secret);
+    return nextAes128PacketProtectionKeysForVersion(version_1_wire, current);
+}
+
+pub fn nextAes128PacketProtectionKeysForVersion(version: u32, current: PacketProtectionKeys) PacketProtectionKeys {
+    const next_secret = nextAes128TrafficSecretForVersion(version, current.secret);
+    var next = deriveAes128KeysForVersion(version, next_secret);
     next.hp = current.hp;
     return next;
 }
@@ -404,7 +459,7 @@ pub fn sealInitialPacket(
     errdefer out.deinit(allocator);
 
     const pn_len = @as(usize, options.packet_number_len);
-    const first_byte: u8 = 0xc0 | @as(u8, @intCast(pn_len - 1));
+    const first_byte: u8 = longHeaderFirstByte(options.version, .initial, options.packet_number_len);
     try out.append(allocator, first_byte);
     var version_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_bytes, options.version, .big);
@@ -442,8 +497,9 @@ pub fn openInitialPacket(
     if (bytes.len < 7 or (bytes[0] & 0x80) == 0) return error.InvalidInitialPacket;
 
     var cursor = wire.Cursor.init(bytes);
-    _ = try cursor.readByte();
+    const protected_first_byte = try cursor.readByte();
     const version = try cursor.readInt(u32, .big);
+    if (protectedLongPacketType(protected_first_byte, version) != .initial) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
     const dcid = try cursor.readSlice(dcid_len);
     const scid_len = try cursor.readByte();
@@ -455,6 +511,7 @@ pub fn openInitialPacket(
     if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
+    if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .initial) return error.InvalidInitialPacket;
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
@@ -496,7 +553,7 @@ pub fn sealHandshakePacket(
     errdefer out.deinit(allocator);
 
     const pn_len = @as(usize, options.packet_number_len);
-    const first_byte: u8 = 0xe0 | @as(u8, @intCast(pn_len - 1));
+    const first_byte: u8 = longHeaderFirstByte(options.version, .handshake, options.packet_number_len);
     try out.append(allocator, first_byte);
     var version_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_bytes, options.version, .big);
@@ -529,11 +586,12 @@ pub fn openHandshakePacket(
 ) Error!OpenedHandshakePacket {
     var bytes = try allocator.dupe(u8, packet);
     defer allocator.free(bytes);
-    if (bytes.len < 7 or (bytes[0] & 0xf0) != 0xe0) return error.InvalidInitialPacket;
+    if (bytes.len < 7 or (bytes[0] & 0x80) == 0) return error.InvalidInitialPacket;
 
     var cursor = wire.Cursor.init(bytes);
-    _ = try cursor.readByte();
+    const protected_first_byte = try cursor.readByte();
     const version = try cursor.readInt(u32, .big);
+    if (protectedLongPacketType(protected_first_byte, version) != .handshake) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
     const dcid = try cursor.readSlice(dcid_len);
     const scid_len = try cursor.readByte();
@@ -543,7 +601,7 @@ pub fn openHandshakePacket(
     if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
-    if ((bytes[0] & 0xf0) != 0xe0) return error.InvalidInitialPacket;
+    if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .handshake) return error.InvalidInitialPacket;
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
@@ -759,9 +817,31 @@ fn peekShortPacketKeyPhase(
     return (bytes[0] & 0x04) != 0;
 }
 
+fn protectionProfile(version: u32) ProtectionProfile {
+    if (version == version_2_wire) {
+        return .{ .salt = &initial_salt_v2, .labels = hkdf_labels_v2 };
+    }
+    return .{ .salt = &initial_salt_v1, .labels = hkdf_labels_v1 };
+}
+
+fn longHeaderFirstByte(version: u32, packet_type: ProtectedLongPacketType, packet_number_len: u8) u8 {
+    const type_bits: u8 = if (version == version_2_wire) switch (packet_type) {
+        .retry => 0,
+        .initial => 1,
+        .zero_rtt => 2,
+        .handshake => 3,
+    } else switch (packet_type) {
+        .initial => 0,
+        .zero_rtt => 1,
+        .handshake => 2,
+        .retry => 3,
+    };
+    return 0xc0 | (type_bits << 4) | @as(u8, @intCast(packet_number_len - 1));
+}
+
 fn protectedLongPacketType(first_byte: u8, version: u32) ProtectedLongPacketType {
     const bits: u2 = @truncate((first_byte >> 4) & 0x03);
-    if (version == 0x6b3343cf) {
+    if (version == version_2_wire) {
         return switch (bits) {
             0 => .retry,
             1 => .initial,
@@ -873,6 +953,22 @@ test "QUIC AES key update derives next traffic keys and retains header protectio
     try std.testing.expectEqualSlices(u8, &keys.hp, &next.hp);
 }
 
+test "QUIC v2 Initial secrets use v2 salt and labels" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const v1 = deriveInitialSecrets(&dcid);
+    const v2 = deriveInitialSecretsForVersion(version_2_wire, &dcid);
+
+    try std.testing.expect(!std.mem.eql(u8, &v1.initial_secret, &v2.initial_secret));
+    try std.testing.expect(!std.mem.eql(u8, &v1.client.key, &v2.client.key));
+    try std.testing.expect(!std.mem.eql(u8, &v1.client.iv, &v2.client.iv));
+    try std.testing.expect(!std.mem.eql(u8, &v1.client.hp, &v2.client.hp));
+
+    const base = [_]u8{0x46} ** secret_len;
+    const v1_next = nextAes128TrafficSecret(base);
+    const v2_next = nextAes128TrafficSecretForVersion(version_2_wire, base);
+    try std.testing.expect(!std.mem.eql(u8, &v1_next, &v2_next));
+}
+
 test "QUIC key phase state advances and expires retained previous keys" {
     const keys = deriveAes128Keys([_]u8{0x45} ** secret_len);
     var state = Aes128KeyPhaseState.init(keys, false);
@@ -945,6 +1041,52 @@ test "QUIC Initial packet seal/open roundtrip" {
     defer allocator.free(tampered);
     tampered[tampered.len - 1] ^= 0x01;
     try std.testing.expectError(error.AuthenticationFailed, openInitialPacket(allocator, keys, tampered, 0));
+}
+
+test "QUIC v2 Initial and Handshake packet seal/open roundtrip" {
+    const allocator = std.testing.allocator;
+    const version = version_2_wire;
+    const dcid = [_]u8{ 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28 };
+    const scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const initial_keys = deriveInitialSecretsForVersion(version, &dcid).client;
+    const initial = try sealInitialPacket(allocator, initial_keys, .{
+        .version = version,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 1,
+        .packet_number_len = 2,
+        .payload = "v2 initial",
+    });
+    defer allocator.free(initial);
+    const initial_info = try peekProtectedLongPacketInfo(initial);
+    try std.testing.expectEqual(version, initial_info.version);
+    try std.testing.expectEqual(ProtectedLongPacketType.initial, initial_info.packet_type);
+
+    var opened_initial = try openInitialPacket(allocator, initial_keys, initial, 0);
+    defer opened_initial.deinit(allocator);
+    try std.testing.expectEqual(version, opened_initial.version);
+    try std.testing.expectEqual(@as(u64, 1), opened_initial.packet_number);
+    try std.testing.expectEqualStrings("v2 initial", opened_initial.payload);
+
+    const handshake_keys = deriveAes128KeysForVersion(version, [_]u8{0x57} ** secret_len);
+    const handshake = try sealHandshakePacket(allocator, handshake_keys, .{
+        .version = version,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 2,
+        .packet_number_len = 2,
+        .payload = "v2 handshake",
+    });
+    defer allocator.free(handshake);
+    const handshake_info = try peekProtectedLongPacketInfo(handshake);
+    try std.testing.expectEqual(version, handshake_info.version);
+    try std.testing.expectEqual(ProtectedLongPacketType.handshake, handshake_info.packet_type);
+
+    var opened_handshake = try openHandshakePacket(allocator, handshake_keys, handshake, 0);
+    defer opened_handshake.deinit(allocator);
+    try std.testing.expectEqual(version, opened_handshake.version);
+    try std.testing.expectEqual(@as(u64, 2), opened_handshake.packet_number);
+    try std.testing.expectEqualStrings("v2 handshake", opened_handshake.payload);
 }
 
 test "QUIC Handshake packet seal/open roundtrip" {

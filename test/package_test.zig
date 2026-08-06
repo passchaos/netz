@@ -141,9 +141,13 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLenForPayload"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "initial_salt_v2"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "deriveInitialSecretsForVersion"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "deriveAes128KeysForVersion"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "peekProtectedLongPacketInfo"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "ProtectedLongPacketInfo"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "nextAes128PacketProtectionKeys"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "nextAes128PacketProtectionKeysForVersion"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "Aes128KeyPhaseState"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "openShortPacketWithKeyUpdate"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendFrames"));

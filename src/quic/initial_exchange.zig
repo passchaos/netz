@@ -10,6 +10,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_str
 pub const min_initial_udp_datagram_size: usize = 1200;
 
 pub const SendInitialOptions = struct {
+    version: u32 = quic.Version.version_1.wireValue(),
     destination_connection_id: []const u8,
     source_connection_id: []const u8,
     token: []const u8 = &.{},
@@ -92,6 +93,7 @@ pub fn sendCoalescedInitialHandshakeCrypto(
         handshake_options.max_crypto_frame_data_len,
     );
     const handshake_packet = try quic.protection.sealHandshakePacket(endpoint.allocator, handshake_keys, .{
+        .version = handshake_options.version,
         .destination_connection_id = handshake_options.destination_connection_id,
         .source_connection_id = handshake_options.source_connection_id,
         .packet_number = handshake_options.packet_number,
@@ -124,6 +126,7 @@ fn sealInitialCryptoPacket(
 
     while (true) {
         const packet = try quic.protection.sealInitialPacket(allocator, keys, .{
+            .version = options.version,
             .destination_connection_id = options.destination_connection_id,
             .source_connection_id = options.source_connection_id,
             .token = options.token,
@@ -168,6 +171,7 @@ pub fn sendHandshakeCrypto(
         options.max_crypto_frame_data_len,
     );
     const packet = try quic.protection.sealHandshakePacket(endpoint.allocator, keys, .{
+        .version = options.version,
         .destination_connection_id = options.destination_connection_id,
         .source_connection_id = options.source_connection_id,
         .packet_number = options.packet_number,
@@ -404,6 +408,48 @@ test "QUIC Initial CRYPTO sender pads datagrams to requested minimum" {
     var opened = try openInitialCrypto(&server.endpoint, raw.from, raw.bytes, keys, 0, 1024);
     defer opened.deinit(allocator);
     try std.testing.expectEqualStrings("hello", opened.crypto_data);
+}
+
+test "QUIC Initial CRYPTO exchange supports QUIC v2 packet protection" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try quic.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 4096,
+    });
+    defer server.deinit();
+
+    var client = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .max_datagram_size = 4096,
+    });
+    defer client.deinit();
+
+    const version = quic.Version.version_2.wireValue();
+    const dcid = [_]u8{ 0xba, 0xdc, 0x0f, 0xfe, 0xe0, 0xdd, 0xf0, 0x0d };
+    const scid = [_]u8{ 0x01, 0x03, 0x03, 0x07 };
+    const keys = quic.protection.deriveInitialSecretsForVersion(version, &dcid).client;
+
+    try sendInitialCrypto(&client.endpoint, server.address(), keys, .{
+        .version = version,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 0,
+        .crypto_data = "v2 client hello",
+    });
+
+    var raw = try server.endpoint.receiveBytes();
+    defer raw.deinit(allocator);
+    const info = try quic.protection.peekProtectedLongPacketInfo(raw.bytes);
+    try std.testing.expectEqual(version, info.version);
+    try std.testing.expectEqual(quic.protection.ProtectedLongPacketType.initial, info.packet_type);
+
+    var opened = try openInitialCrypto(&server.endpoint, raw.from, raw.bytes, keys, 0, 1024);
+    defer opened.deinit(allocator);
+    try std.testing.expectEqual(version, opened.packet.version);
+    try std.testing.expectEqualStrings("v2 client hello", opened.crypto_data);
 }
 
 test "QUIC long-header CRYPTO receive rejects forbidden frame contexts" {
