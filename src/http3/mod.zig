@@ -1117,6 +1117,9 @@ fn contentLength(headers: []const Qpack.HeaderField) Error!?usize {
         while (parts.next()) |raw_part| {
             const part = std.mem.trim(u8, raw_part, " \t");
             if (part.len == 0) return error.InvalidContentLength;
+            for (part) |byte| {
+                if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
+            }
             const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
             if (found) |existing| {
                 if (existing != parsed) return error.InvalidContentLength;
@@ -1768,6 +1771,21 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try (Frame{ .frame_type = FrameType.data, .payload = "oops", .consumed = 0 }).write(&data_first, allocator);
     try std.testing.expectError(error.ExpectedHeadersFrame, decodeRequest(allocator, data_first.items));
 
+    var signed_length_request: std.ArrayList(u8) = .empty;
+    defer signed_length_request.deinit(allocator);
+    var signed_block: std.ArrayList(u8) = .empty;
+    defer signed_block.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&signed_block, allocator, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/signed-length" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = "content-length", .value = "+4" },
+    });
+    try (Frame{ .frame_type = FrameType.headers, .payload = signed_block.items, .consumed = 0 }).write(&signed_length_request, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "1234", .consumed = 0 }).write(&signed_length_request, allocator);
+    try std.testing.expectError(error.InvalidContentLength, decodeRequest(allocator, signed_length_request.items));
+
     var invalid_length: std.ArrayList(u8) = .empty;
     defer invalid_length.deinit(allocator);
     var header_block: std.ArrayList(u8) = .empty;
@@ -1789,6 +1807,17 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "099" }});
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&low_status, allocator);
     try std.testing.expectError(error.InvalidStatus, decodeResponse(allocator, low_status.items));
+
+    var signed_length_response: std.ArrayList(u8) = .empty;
+    defer signed_length_response.deinit(allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "+4" },
+    });
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&signed_length_response, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "1234", .consumed = 0 }).write(&signed_length_response, allocator);
+    try std.testing.expectError(error.InvalidContentLength, decodeResponse(allocator, signed_length_response.items));
 
     var no_content_body: std.ArrayList(u8) = .empty;
     defer no_content_body.deinit(allocator);
