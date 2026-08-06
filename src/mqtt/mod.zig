@@ -384,6 +384,13 @@ pub fn topicAlias(properties: []const Property) ?u16 {
     return null;
 }
 
+fn payloadFormatIsUtf8(properties: []const Property) bool {
+    for (properties) |property| {
+        if (property == .byte and property.byte.id == .payload_format_indicator) return property.byte.value == 1;
+    }
+    return false;
+}
+
 pub fn topicAliasMaximum(properties: []const Property) ?u16 {
     for (properties) |property| {
         if (property == .two_byte and property.two_byte.id == .topic_alias_maximum) return property.two_byte.value;
@@ -800,6 +807,8 @@ pub const Publish = struct {
         if (topic.len == 0) {
             if (protocol != .v5 or topicAlias(props) == null) return error.InvalidTopic;
         } else try validateTopicName(topic);
+        const payload = cursor.buf[cursor.pos..];
+        if (payloadFormatIsUtf8(props) and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
         return .{
             .dup = (fixed.flags & 0x08) != 0,
             .qos = qos,
@@ -807,7 +816,7 @@ pub const Publish = struct {
             .topic = topic,
             .packet_id = packet_id,
             .properties = props,
-            .payload = cursor.buf[cursor.pos..],
+            .payload = payload,
         };
     }
 };
@@ -1491,6 +1500,7 @@ pub fn writePublish(
     if (topic.len == 0) {
         if (protocol != .v5 or topicAlias(options.properties) == null) return error.InvalidTopic;
     } else try validateTopicName(topic);
+    if (protocol == .v5 and payloadFormatIsUtf8(options.properties) and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
     if (options.qos == .at_most_once) {
         if (options.packet_id != null) return error.InvalidPacketIdentifier;
     } else if (options.packet_id == null or options.packet_id.? == 0) {
@@ -1609,6 +1619,19 @@ test "MQTT connect and publish parse" {
     try std.testing.expectError(error.InvalidPacketIdentifier, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "bad", .{ .qos = .at_least_once }));
     try std.testing.expectError(error.InvalidPacketIdentifier, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "bad", .{ .qos = .at_least_once, .packet_id = 0 }));
     try std.testing.expectError(error.InvalidPacketIdentifier, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "bad", .{ .packet_id = 7 }));
+
+    try std.testing.expectError(error.InvalidUtf8, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "\xff", .{
+        .properties = &.{.{ .byte = .{ .id = .payload_format_indicator, .value = 1 } }},
+    }));
+
+    var invalid_payload = std.ArrayList(u8).empty;
+    defer invalid_payload.deinit(allocator);
+    try writePublish(&invalid_payload, allocator, .v5, "sensors/temp", "ok", .{
+        .properties = &.{.{ .byte = .{ .id = .payload_format_indicator, .value = 1 } }},
+    });
+    invalid_payload.items[invalid_payload.items.len - 2] = 0xff;
+    invalid_payload.items[invalid_payload.items.len - 1] = 0xff;
+    try std.testing.expectError(error.InvalidUtf8, Publish.parse(allocator, .v5, invalid_payload.items));
 
     var alias_only_bytes: std.ArrayList(u8) = .empty;
     defer alias_only_bytes.deinit(allocator);
