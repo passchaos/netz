@@ -612,8 +612,10 @@ pub const AckPacket = struct {
 
         var reason_code: u8 = 0;
         if (!cursor.eof()) reason_code = try cursor.readByte();
+        try validateAckReasonCode(fixed.packet_type, reason_code);
         const props = if (!cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
+        try validateAckProperties(fixed.packet_type, props);
         if (!cursor.eof()) return error.InvalidPacketType;
         return .{ .packet_type = fixed.packet_type, .packet_id = packet_id, .reason_code = reason_code, .properties = props };
     }
@@ -632,6 +634,13 @@ pub const AckPacket = struct {
             .puback, .pubrec, .pubrel, .pubcomp, .unsuback => {},
             else => return error.InvalidPacketType,
         }
+        if (protocol == .v3_1_1) {
+            if (reason_code != 0) return error.InvalidReasonCode;
+            if (properties.len != 0) return error.InvalidProperty;
+        } else {
+            try validateAckReasonCode(packet_type, reason_code);
+            try validateAckProperties(packet_type, properties);
+        }
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
         try wire.appendInt(&variable, allocator, u16, packet_id, .big);
@@ -642,7 +651,55 @@ pub const AckPacket = struct {
         try (FixedHeader{ .packet_type = packet_type, .flags = packet_type.defaultFlags(), .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
         try list.appendSlice(allocator, variable.items);
     }
+
+    pub fn accepted(self: AckPacket) bool {
+        return self.reason_code < 0x80;
+    }
 };
+
+fn validateAckReasonCode(packet_type: PacketType, reason_code: u8) Error!void {
+    switch (packet_type) {
+        .puback, .pubrec => switch (reason_code) {
+            0x00, // Success.
+            0x10, // No matching subscribers.
+            0x80, // Unspecified error.
+            0x83, // Implementation specific error.
+            0x87, // Not authorized.
+            0x90, // Topic Name invalid.
+            0x91, // Packet Identifier in use.
+            0x97, // Quota exceeded.
+            0x99, // Payload format invalid.
+            => {},
+            else => return error.InvalidReasonCode,
+        },
+        .pubrel, .pubcomp => switch (reason_code) {
+            0x00, // Success.
+            0x92, // Packet Identifier not found.
+            => {},
+            else => return error.InvalidReasonCode,
+        },
+        .unsuback => try validateUnsubAckReason(reason_code),
+        else => return error.InvalidPacketType,
+    }
+}
+
+fn validateAckProperties(packet_type: PacketType, properties: []const Property) Error!void {
+    switch (packet_type) {
+        .puback, .pubrec, .pubrel, .pubcomp, .unsuback => {},
+        else => return error.InvalidPacketType,
+    }
+    var saw_reason_string = false;
+    for (properties) |property| {
+        switch (propertyId(property)) {
+            .reason_string => {
+                if (saw_reason_string) return error.InvalidProperty;
+                saw_reason_string = true;
+            },
+            .user_property => {},
+            else => return error.InvalidProperty,
+        }
+    }
+}
 
 pub const Subscription = struct {
     topic_filter: []const u8,
@@ -1263,6 +1320,24 @@ test "MQTT connack ack and ping controls" {
     try std.testing.expectEqual(PacketType.puback, puback.packet_type);
     try std.testing.expectEqual(@as(u16, 42), puback.packet_id);
     try std.testing.expectEqual(@as(u8, 0x10), puback.reason_code);
+    try std.testing.expect(puback.accepted());
+
+    puback_bytes.clearRetainingCapacity();
+    try AckPacket.write(&puback_bytes, allocator, .v5, .puback, 43, 0x80, &.{
+        .{ .utf8 = .{ .id = .reason_string, .value = "quota" } },
+        .{ .utf8_pair = .{ .id = .user_property, .key = "trace", .value = "puback-negative" } },
+    });
+    puback.deinit(allocator);
+    puback = try AckPacket.parse(allocator, .v5, puback_bytes.items);
+    try std.testing.expectEqual(@as(u8, 0x80), puback.reason_code);
+    try std.testing.expect(!puback.accepted());
+    try std.testing.expectEqualStrings("quota", puback.properties[0].utf8.value);
+
+    try std.testing.expectError(error.InvalidReasonCode, AckPacket.write(&puback_bytes, allocator, .v5, .pubrel, 44, 0x10, &.{}));
+    try std.testing.expectError(error.InvalidProperty, AckPacket.write(&puback_bytes, allocator, .v5, .puback, 44, 0, &.{
+        .{ .two_byte = .{ .id = .topic_alias, .value = 1 } },
+    }));
+    try std.testing.expectError(error.InvalidReasonCode, AckPacket.write(&puback_bytes, allocator, .v3_1_1, .puback, 44, 0x80, &.{}));
 
     var ping: std.ArrayList(u8) = .empty;
     defer ping.deinit(allocator);

@@ -10,6 +10,7 @@ pub const Error = mqtt.Error || error{
     ConnectRefused,
     InflightFull,
     OutgoingPacketTooLarge,
+    PublishRefused,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -365,15 +366,18 @@ pub const Connection = struct {
                     var ack = try self.readPubAck();
                     defer ack.deinit(self.allocator);
                     if (ack.ack.packet_id != id) return error.UnexpectedPacket;
+                    if (!ack.ack.accepted()) return error.PublishRefused;
                 },
                 .exactly_once => {
                     var pubrec = try self.readPubRec();
                     defer pubrec.deinit(self.allocator);
                     if (pubrec.ack.packet_id != id) return error.UnexpectedPacket;
+                    if (!pubrec.ack.accepted()) return error.PublishRefused;
                     try self.writePubRel(id, 0);
                     var pubcomp = try self.readPubComp();
                     defer pubcomp.deinit(self.allocator);
                     if (pubcomp.ack.packet_id != id) return error.UnexpectedPacket;
+                    if (!pubcomp.ack.accepted()) return error.PublishRefused;
                 },
             }
         }
@@ -390,7 +394,7 @@ pub const Connection = struct {
     }
 
     pub fn writePubAck(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
-        try self.writeAckPacket(.puback, packet_id, reason_code);
+        try self.writeAckPacket(.puback, packet_id, reason_code, &.{});
     }
 
     pub fn readPubAck(self: *Connection) Error!OwnedAck {
@@ -398,7 +402,7 @@ pub const Connection = struct {
     }
 
     pub fn writePubRec(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
-        try self.writeAckPacket(.pubrec, packet_id, reason_code);
+        try self.writeAckPacket(.pubrec, packet_id, reason_code, &.{});
     }
 
     pub fn readPubRec(self: *Connection) Error!OwnedAck {
@@ -406,7 +410,7 @@ pub const Connection = struct {
     }
 
     pub fn writePubRel(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
-        try self.writeAckPacket(.pubrel, packet_id, reason_code);
+        try self.writeAckPacket(.pubrel, packet_id, reason_code, &.{});
     }
 
     pub fn readPubRel(self: *Connection) Error!OwnedAck {
@@ -414,17 +418,33 @@ pub const Connection = struct {
     }
 
     pub fn writePubComp(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
-        try self.writeAckPacket(.pubcomp, packet_id, reason_code);
+        try self.writeAckPacket(.pubcomp, packet_id, reason_code, &.{});
     }
 
     pub fn readPubComp(self: *Connection) Error!OwnedAck {
         return self.readAck(.pubcomp);
     }
 
-    fn writeAckPacket(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_code: u8) Error!void {
+    pub fn writePubAckWithProperties(self: *Connection, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
+        try self.writeAckPacket(.puback, packet_id, reason_code, properties);
+    }
+
+    pub fn writePubRecWithProperties(self: *Connection, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
+        try self.writeAckPacket(.pubrec, packet_id, reason_code, properties);
+    }
+
+    pub fn writePubRelWithProperties(self: *Connection, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
+        try self.writeAckPacket(.pubrel, packet_id, reason_code, properties);
+    }
+
+    pub fn writePubCompWithProperties(self: *Connection, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
+        try self.writeAckPacket(.pubcomp, packet_id, reason_code, properties);
+    }
+
+    fn writeAckPacket(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
-        try mqtt.AckPacket.write(&encoded, self.allocator, self.protocol, packet_type, packet_id, reason_code, &.{});
+        try mqtt.AckPacket.write(&encoded, self.allocator, self.protocol, packet_type, packet_id, reason_code, properties);
         try self.writePacket(encoded.items);
     }
 
@@ -1048,6 +1068,58 @@ test "MQTT connection enforces peer publish capabilities" {
 
     try std.testing.expectError(error.InvalidQoS, connection.publish("topic", "payload", .{ .qos = .at_least_once }));
     try std.testing.expectError(error.InvalidProperty, connection.publish("topic", "payload", .{ .retain = true }));
+}
+
+test "MQTT runtime surfaces negative publish acknowledgements" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_packet_size = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var accepted = try server_ptr.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(server_ptr.allocator);
+
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("negative/topic", publish.publish.topic);
+            try std.testing.expectEqualStrings("reject me", publish.publish.payload);
+            try std.testing.expectEqual(mqtt.QoS.at_least_once, publish.publish.qos);
+            try accepted.connection.writePubAckWithProperties(publish.publish.packet_id.?, 0x80, &.{
+                .{ .utf8 = .{ .id = .reason_string, .value = "negative ack" } },
+                .{ .utf8_pair = .{ .id = .user_property, .key = "trace", .value = "puback-negative" } },
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .protocol = .v5,
+        .client_id = "negative-ack-client",
+        .limits = .{ .max_packet_size = 4096 },
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.PublishRefused, client.publish("negative/topic", "reject me", .{ .qos = .at_least_once }));
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "MQTT async std.Io server handles concurrent clients" {

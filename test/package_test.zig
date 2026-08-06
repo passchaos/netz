@@ -129,11 +129,16 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasField(netz.mqtt.runtime.Connection, "max_outgoing_inflight"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubAck"));
+    try std.testing.expect(@hasDecl(netz.mqtt.AckPacket, "accepted"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubAckWithProperties"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubRecWithProperties"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubRec"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubRec"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubRel"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubRelWithProperties"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubRel"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubComp"));
+    try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubCompWithProperties"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubComp"));
     try std.testing.expect(@hasDecl(netz.mqtt, "Unsubscribe"));
     try std.testing.expect(@hasDecl(netz.mqtt, "UnsubAck"));
