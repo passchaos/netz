@@ -1171,6 +1171,8 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
                     if (std.mem.eql(u8, header.name, ":status")) {
                         if (header.value.len != 3) return error.InvalidStatus;
                         for (header.value) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
+                        const parsed_status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
+                        if (parsed_status < 100) return error.InvalidStatus;
                     }
                 },
                 .trailers => return error.InvalidHeader,
@@ -1757,6 +1759,13 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&invalid_length, allocator);
     try (Frame{ .frame_type = FrameType.data, .payload = "1234", .consumed = 0 }).write(&invalid_length, allocator);
     try std.testing.expectError(error.InvalidContentLength, decodeRequest(allocator, invalid_length.items));
+
+    var low_status: std.ArrayList(u8) = .empty;
+    defer low_status.deinit(allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "099" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&low_status, allocator);
+    try std.testing.expectError(error.InvalidStatus, decodeResponse(allocator, low_status.items));
 
     var bad_order: std.ArrayList(u8) = .empty;
     defer bad_order.deinit(allocator);
