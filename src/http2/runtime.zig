@@ -598,7 +598,7 @@ pub const Connection = struct {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .ping) {
-                if (try self.handleConnectionFrame(frame.frame)) continue;
+                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) continue;
                 continue;
             }
             if ((frame.frame.header.flags & flag_ack) == 0) {
@@ -615,7 +615,7 @@ pub const Connection = struct {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .ping) {
-                if (try self.handleConnectionFrame(frame.frame)) continue;
+                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) continue;
                 continue;
             }
             const ping_payload = try http2.PingPayload.parse(frame.frame);
@@ -645,7 +645,7 @@ pub const Connection = struct {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .goaway) {
-                if (try self.handleConnectionFrame(frame.frame)) {
+                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
                     frame.deinit(self.allocator);
                     continue;
                 }
@@ -672,7 +672,7 @@ pub const Connection = struct {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .rst_stream) {
-                if (try self.handleConnectionFrame(frame.frame)) {
+                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
                     frame.deinit(self.allocator);
                     continue;
                 }
@@ -828,7 +828,7 @@ pub const Connection = struct {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .window_update) {
-                if (try self.handleConnectionFrame(frame.frame)) {
+                if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
                     frame.deinit(self.allocator);
                     continue;
                 }
@@ -1018,6 +1018,14 @@ pub const Connection = struct {
         for (response_headers) |header| try fields.append(self.allocator, header);
         try validateHeaderBlock(fields.items, .response);
         try self.writeHeaders(stream_id, fields.items, end_stream);
+    }
+
+    fn handleConnectionOrGoAwayFrame(self: *Connection, frame: http2.Frame) Error!bool {
+        if (frame.header.frame_type == .goaway) {
+            try self.recordPeerGoAway(try http2.GoAwayPayload.parse(frame));
+            return true;
+        }
+        return self.handleConnectionFrame(frame);
     }
 
     fn handleConnectionFrame(self: *Connection, frame: http2.Frame) Error!bool {
@@ -2336,6 +2344,51 @@ test "HTTP/2 readWindowUpdate handles interleaved PING" {
     try std.testing.expectEqual(@as(u31, 0), update.window_update.stream_id);
     try std.testing.expectEqual(@as(u31, 777), update.window_update.increment);
     try std.testing.expectEqual(@as(i64, default_flow_window + 777), client.send_connection_window.value);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 readWindowUpdate records interleaved GOAWAY" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            try connection.sendGoAway(3, .no_error, "draining");
+            try connection.sendWindowUpdate(0, 99);
+            _ = try connection.readPing();
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+
+    var update = try client.readWindowUpdate();
+    defer update.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 99), update.window_update.increment);
+    try std.testing.expectEqual(@as(?u31, 3), client.peer_goaway_last_stream_id);
+    _ = try client.ping(.{ 0, 1, 0, 1, 0, 1, 0, 1 });
 
     thread.join();
     if (shared.err) |err| return err;
