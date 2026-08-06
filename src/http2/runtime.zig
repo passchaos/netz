@@ -633,7 +633,9 @@ pub const Connection = struct {
                 frame.deinit(self.allocator);
                 continue;
             }
-            return .{ .frame = frame, .goaway = try http2.GoAwayPayload.parse(frame.frame) };
+            const goaway = try http2.GoAwayPayload.parse(frame.frame);
+            try self.recordPeerGoAway(goaway);
+            return .{ .frame = frame, .goaway = goaway };
         }
     }
 
@@ -703,7 +705,7 @@ pub const Connection = struct {
         }
     }
 
-    fn handleGoAwayForStream(self: *Connection, stream_id: u31, goaway: http2.GoAwayPayload) Error!void {
+    fn recordPeerGoAway(self: *Connection, goaway: http2.GoAwayPayload) Error!void {
         if (self.peer_goaway_last_stream_id) |last| {
             // RFC 9113 §6.8: endpoints may send more than one GOAWAY, but the
             // last-stream-id value must not increase.  h2 rejects an increasing
@@ -712,6 +714,10 @@ pub const Connection = struct {
             if (goaway.last_stream_id > last) return error.InvalidFrame;
         }
         self.peer_goaway_last_stream_id = goaway.last_stream_id;
+    }
+
+    fn handleGoAwayForStream(self: *Connection, stream_id: u31, goaway: http2.GoAwayPayload) Error!void {
+        try self.recordPeerGoAway(goaway);
         if (stream_id > goaway.last_stream_id) {
             self.releaseLocalStream(stream_id);
             return error.ConnectionGoAway;
@@ -4935,6 +4941,28 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     }));
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(1)).value);
+}
+
+test "HTTP/2 readGoAway records monotonic peer boundary" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try connection.recordPeerGoAway(.{ .last_stream_id = 7, .error_code = .no_error, .debug_data = &.{} });
+    try std.testing.expectEqual(@as(?u31, 7), connection.peer_goaway_last_stream_id);
+    try connection.recordPeerGoAway(.{ .last_stream_id = 5, .error_code = .no_error, .debug_data = &.{} });
+    try std.testing.expectEqual(@as(?u31, 5), connection.peer_goaway_last_stream_id);
+    try std.testing.expectError(error.InvalidFrame, connection.recordPeerGoAway(.{ .last_stream_id = 7, .error_code = .no_error, .debug_data = &.{} }));
+    try std.testing.expectEqual(@as(?u31, 5), connection.peer_goaway_last_stream_id);
 }
 
 test "HTTP/2 stream window helpers reject connection stream id" {
