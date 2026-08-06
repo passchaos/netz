@@ -467,14 +467,12 @@ pub fn compressMessage(allocator: std.mem.Allocator, payload: []const u8) Error!
     defer allocator.free(history);
     var compressor = try std.compress.flate.Compress.init(&output_writer.writer, history, .raw, std.compress.flate.Compress.Options.default);
     try compressor.writer.writeAll(payload);
-    // Zig 0.16 does not expose a dedicated zlib Z_SYNC_FLUSH mode.  Finish a
-    // self-contained raw DEFLATE message, then clear the BFINAL bit on the
-    // first block so the receiver-side RFC 7692 tail restoration
-    // (00 00 ff ff) cleanly terminates the message without carrying context.
+    // Zig 0.16 does not expose a dedicated zlib Z_SYNC_FLUSH mode.  Use a
+    // self-contained raw DEFLATE stream per message instead; negotiation always
+    // enables no-context-takeover, so carrying an independent final block is a
+    // deterministic compromise until a true sync-flush encoder is available.
     try std.compress.flate.Compress.finish(&compressor);
-    const compressed = try output_writer.toOwnedSlice();
-    if (compressed.len != 0) compressed[0] &= 0xfe;
-    return compressed;
+    return output_writer.toOwnedSlice();
 }
 
 pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []const u8, max_message_bytes: usize) Error![]u8 {
