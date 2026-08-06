@@ -545,7 +545,17 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
     var len_buf: [32]u8 = undefined;
     var trailer_value: std.ArrayList(u8) = .empty;
     defer trailer_value.deinit(allocator);
-    try appendDefaultedHeaders(&headers, allocator, options.headers, options.body.len, options.trailers, use_chunked, true, &len_buf, &trailer_value);
+    try appendDefaultedHeaders(
+        &headers,
+        allocator,
+        options.headers,
+        options.body.len,
+        options.trailers,
+        use_chunked,
+        shouldDefaultRequestContentLength(options.method, options.body.len, options.trailers),
+        &len_buf,
+        &trailer_value,
+    );
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -640,6 +650,14 @@ fn appendDefaultedHeaders(
         const rendered = std.fmt.bufPrint(len_buf, "{}", .{body_len}) catch unreachable;
         try list.append(allocator, .{ .name = "Content-Length", .value = rendered });
     }
+}
+
+fn shouldDefaultRequestContentLength(method: http1.Method, body_len: usize, trailers: []const http1.Header) bool {
+    if (body_len != 0 or trailers.len != 0) return true;
+    return switch (method) {
+        .GET, .HEAD, .CONNECT => false,
+        else => true,
+    };
 }
 
 fn chunkedWriteFraming(version: http1.Version, headers: []const http1.Header, trailers: []const http1.Header) Error!bool {
@@ -2260,6 +2278,79 @@ test "HTTP/1 runtime does not default Connection close on writes" {
         &trailer_value,
     );
     try std.testing.expectEqualStrings("close", wire.findHeader(headers.items, "connection").?);
+}
+
+test "HTTP/1 request writers default Content-Length by method" {
+    try std.testing.expect(!shouldDefaultRequestContentLength(.GET, 0, &.{}));
+    try std.testing.expect(!shouldDefaultRequestContentLength(.HEAD, 0, &.{}));
+    try std.testing.expect(!shouldDefaultRequestContentLength(.CONNECT, 0, &.{}));
+    try std.testing.expect(shouldDefaultRequestContentLength(.POST, 0, &.{}));
+    try std.testing.expect(shouldDefaultRequestContentLength(.GET, 1, &.{}));
+    try std.testing.expect(shouldDefaultRequestContentLength(.GET, 0, &.{.{ .name = "x-trailer", .value = "ok" }}));
+}
+
+test "HTTP/1 request writer omits zero Content-Length for bodyless safe methods" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            const stream = try shared.listener.accept(shared.io);
+            defer stream.close(shared.io);
+
+            var first = try readRequestFromStream(shared.allocator, shared.io, stream, .{
+                .max_head_bytes = 4096,
+                .max_body_bytes = 4096,
+            }, .{});
+            defer first.deinit(shared.allocator);
+            try std.testing.expectEqual(http1.Method.GET, first.request.method);
+            try std.testing.expect(first.request.header("content-length") == null);
+
+            var second = try readRequestFromStream(shared.allocator, shared.io, stream, .{
+                .max_head_bytes = 4096,
+                .max_body_bytes = 4096,
+            }, .{});
+            defer second.deinit(shared.allocator);
+            try std.testing.expectEqual(http1.Method.POST, second.request.method);
+            try std.testing.expectEqualStrings("0", second.request.header("content-length").?);
+        }
+    };
+
+    var shared = Shared{ .allocator = allocator, .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeRequestToStream(allocator, io, stream, .{
+        .method = .GET,
+        .target = "/safe",
+        .headers = &.{.{ .name = "Host", .value = "example" }},
+    });
+    try writeRequestToStream(allocator, io, stream, .{
+        .method = .POST,
+        .target = "/entity",
+        .headers = &.{.{ .name = "Host", .value = "example" }},
+    });
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 runtime target length rejects ambiguous head framing" {
