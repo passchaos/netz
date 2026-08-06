@@ -808,11 +808,38 @@ pub const sdp = struct {
     }
 
     fn parseFingerprint(raw: []const u8) Error!Fingerprint {
-        var parts = std.mem.splitScalar(u8, raw, ' ');
+        var parts = std.mem.tokenizeAny(u8, raw, " \t");
         const algorithm = parts.next() orelse return error.InvalidFingerprint;
         const value = parts.next() orelse return error.InvalidFingerprint;
-        if (algorithm.len == 0 or value.len == 0 or parts.next() != null) return error.InvalidFingerprint;
+        if (parts.next() != null) return error.InvalidFingerprint;
+        const digest_len = fingerprintDigestLen(algorithm) orelse return error.InvalidFingerprint;
+        try validateColonHexFingerprint(value, digest_len);
         return .{ .algorithm = algorithm, .value = value };
+    }
+
+    fn fingerprintDigestLen(algorithm: []const u8) ?usize {
+        // Pion/webrtc-go emits SHA-256 fingerprints and validates received
+        // fingerprints through pion/dtls' hash registry.  Keep the SDP parser
+        // strict about the IANA hash textual names that are useful for DTLS
+        // fingerprints instead of accepting arbitrary labels that would later
+        // make certificate pinning silently impossible.
+        if (std.ascii.eqlIgnoreCase(algorithm, "sha-1")) return 20;
+        if (std.ascii.eqlIgnoreCase(algorithm, "sha-224")) return 28;
+        if (std.ascii.eqlIgnoreCase(algorithm, "sha-256")) return 32;
+        if (std.ascii.eqlIgnoreCase(algorithm, "sha-384")) return 48;
+        if (std.ascii.eqlIgnoreCase(algorithm, "sha-512")) return 64;
+        return null;
+    }
+
+    fn validateColonHexFingerprint(value: []const u8, digest_len: usize) Error!void {
+        if (digest_len == 0) return error.InvalidFingerprint;
+        const expected_len = std.math.sub(usize, std.math.mul(usize, digest_len, 3) catch return error.InvalidFingerprint, 1) catch return error.InvalidFingerprint;
+        if (value.len != expected_len) return error.InvalidFingerprint;
+        for (0..digest_len) |index| {
+            const offset = index * 3;
+            if (!std.ascii.isHex(value[offset]) or !std.ascii.isHex(value[offset + 1])) return error.InvalidFingerprint;
+            if (index + 1 != digest_len and value[offset + 2] != ':') return error.InvalidFingerprint;
+        }
     }
 
     fn bundleId(session: Session) ?[]const u8 {
@@ -3534,18 +3561,18 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "t=0 0\r\n" ++
         "a=group:BUNDLE 1 0\r\n" ++
         "a=extmap:9 " ++ sdp.audio_level_uri ++ "\r\n" ++
-        "a=fingerprint:sha-256 SESSION-FINGERPRINT\r\n" ++
+        "a=fingerprint:sha-256 11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:10:20:30:40:50:60:70:80:90:A0:B0:C0:D0:E0:F0:01\r\n" ++
         "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
         "a=mid:0\r\n" ++
         "a=ice-ufrag:wrong\r\n" ++
         "a=ice-pwd:wrong-pwd\r\n" ++
-        "a=fingerprint:sha-256 AUDIO-FINGERPRINT\r\n" ++
+        "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r\n" ++
         "a=extmap:2/sendonly " ++ sdp.abs_send_time_uri ++ "\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
         "a=mid:1\r\n" ++
         "a=ice-ufrag:bundle-ufrag\r\n" ++
         "a=ice-pwd:bundle-pwd\r\n" ++
-        "a=fingerprint:sha-256 BUNDLE-FINGERPRINT\r\n" ++
+        "a=fingerprint:sha-256 01:23:45:67:89:AB:CD:EF:FE:DC:BA:98:76:54:32:10:11:33:55:77:99:BB:DD:FF:00:22:44:66:88:AA:CC:EE\r\n" ++
         "a=extmap-allow-mixed\r\n" ++
         "a=extmap:3/recvonly " ++ sdp.transport_cc_uri ++ " appdata\r\n" ++
         "a=extmap:4 " ++ sdp.sdes_mid_uri ++ "\r\n";
@@ -3554,7 +3581,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
 
     const fingerprint = try sdp.extractFingerprint(session);
     try std.testing.expectEqualStrings("sha-256", fingerprint.algorithm);
-    try std.testing.expectEqualStrings("SESSION-FINGERPRINT", fingerprint.value);
+    try std.testing.expectEqualStrings("11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:10:20:30:40:50:60:70:80:90:A0:B0:C0:D0:E0:F0:01", fingerprint.value);
 
     const creds = try sdp.extractIceCredentials(session);
     try std.testing.expectEqualStrings("bundle-ufrag", creds.ufrag);
@@ -3591,11 +3618,11 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=mid:data\r\n" ++
         "a=ice-ufrag:media-ufrag\r\n" ++
         "a=ice-pwd:media-pwd\r\n" ++
-        "a=fingerprint:sha-256 MEDIA-FINGERPRINT\r\n";
+        "a=fingerprint:sha-256 75:74:5A:A6:A4:E5:52:F4:A7:67:4C:01:C7:EE:91:3F:21:3D:A2:E3:53:7B:6F:30:86:F2:30:AA:65:FB:04:24\r\n";
     var media_session = try sdp.parse(allocator, media_only);
     defer media_session.deinit(allocator);
     const media_fingerprint = try sdp.extractFingerprint(media_session);
-    try std.testing.expectEqualStrings("MEDIA-FINGERPRINT", media_fingerprint.value);
+    try std.testing.expectEqualStrings("75:74:5A:A6:A4:E5:52:F4:A7:67:4C:01:C7:EE:91:3F:21:3D:A2:E3:53:7B:6F:30:86:F2:30:AA:65:FB:04:24", media_fingerprint.value);
     const media_creds = try sdp.extractIceCredentials(media_session);
     try std.testing.expectEqualStrings("media-ufrag", media_creds.ufrag);
 }
@@ -3613,6 +3640,20 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
         "a=fingerprint:sha-256-only\r\n");
     defer bad_fingerprint.deinit(allocator);
     try std.testing.expectError(error.InvalidFingerprint, sdp.extractFingerprint(bad_fingerprint));
+
+    var unsupported_fingerprint = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=fingerprint:md5 11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00\r\n");
+    defer unsupported_fingerprint.deinit(allocator);
+    try std.testing.expectError(error.InvalidFingerprint, sdp.extractFingerprint(unsupported_fingerprint));
+
+    var malformed_fingerprint = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=fingerprint:sha-256 75745AA6A4E552F4A7674C01C7EE913F213DA2E3537B6F3086F230AA65FB0424\r\n");
+    defer malformed_fingerprint.deinit(allocator);
+    try std.testing.expectError(error.InvalidFingerprint, sdp.extractFingerprint(malformed_fingerprint));
 
     var missing_pwd = try sdp.parse(allocator, "v=0\r\n" ++
         "s=-\r\n" ++
