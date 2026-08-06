@@ -621,12 +621,10 @@ fn appendDefaultedHeaders(
     trailer_value: *std.ArrayList(u8),
 ) Error!void {
     var has_content_length = false;
-    var has_connection = false;
     var has_transfer_encoding = false;
     var has_trailer = false;
     for (headers) |header| {
         if (header.eqlName("content-length")) has_content_length = true;
-        if (header.eqlName("connection")) has_connection = true;
         if (header.eqlName("transfer-encoding")) has_transfer_encoding = true;
         if (header.eqlName("trailer")) has_trailer = true;
         if (use_chunked and header.eqlName("content-length")) continue;
@@ -642,7 +640,6 @@ fn appendDefaultedHeaders(
         const rendered = std.fmt.bufPrint(len_buf, "{}", .{body_len}) catch unreachable;
         try list.append(allocator, .{ .name = "Content-Length", .value = rendered });
     }
-    if (!has_connection) try list.append(allocator, .{ .name = "Connection", .value = "close" });
 }
 
 fn chunkedWriteFraming(version: http1.Version, headers: []const http1.Header, trailers: []const http1.Header) Error!bool {
@@ -2157,6 +2154,34 @@ test "HTTP/1 runtime does not default Content-Length for status-forbidden respon
     try std.testing.expectEqual(@as(u16, 204), response.response.status);
     try std.testing.expect(response.response.header("content-length") == null);
     try std.testing.expectEqualStrings("", response.response.body);
+}
+
+test "HTTP/1 runtime does not default Connection close on writes" {
+    const allocator = std.testing.allocator;
+
+    var len_buf: [32]u8 = undefined;
+    var trailer_value: std.ArrayList(u8) = .empty;
+    defer trailer_value.deinit(allocator);
+    var headers: std.ArrayList(http1.Header) = .empty;
+    defer headers.deinit(allocator);
+
+    try appendDefaultedHeaders(&headers, allocator, &.{}, 0, &.{}, false, true, &len_buf, &trailer_value);
+    try std.testing.expect(wire.findHeader(headers.items, "connection") == null);
+    try std.testing.expectEqualStrings("0", wire.findHeader(headers.items, "content-length").?);
+
+    headers.clearRetainingCapacity();
+    try appendDefaultedHeaders(
+        &headers,
+        allocator,
+        &.{.{ .name = "Connection", .value = "close" }},
+        0,
+        &.{},
+        false,
+        true,
+        &len_buf,
+        &trailer_value,
+    );
+    try std.testing.expectEqualStrings("close", wire.findHeader(headers.items, "connection").?);
 }
 
 test "HTTP/1 runtime target length rejects ambiguous head framing" {

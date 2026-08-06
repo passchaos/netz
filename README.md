@@ -11,8 +11,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   server-side `Expect: 100-continue` handling even when body bytes are pre-read, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, and unsupported transfer-coding rejection,
-  and a blocking `std.Io.net` TCP client/server runtime with a `std.Io.async`
-  concurrent server helper
+  and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
+  persistence and a `std.Io.async` concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder with RFC 7541 Huffman strings plus
   dynamic-table indexing/size-update state for long-lived runtimes with local decoder table-size enforcement and automatic
