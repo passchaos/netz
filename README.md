@@ -56,7 +56,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,
-  transport-parameter-derived idle timeout deadline tracking,
+  transport-parameter-derived idle timeout deadline tracking and explicit
+  peer-address validation hooks with RFC 9000 3x anti-amplification send
+  budget enforcement for unvalidated server paths,
   1-RTT key-update derivation and key-phase state with ACK gating and retained
   previous receive/send generations for reordered short-header packets,
   NewReno-style congestion-window and bytes-in-flight send admission wired into
