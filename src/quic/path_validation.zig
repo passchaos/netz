@@ -29,6 +29,15 @@ pub const State = struct {
         self.* = undefined;
     }
 
+    pub fn clone(self: State, allocator: std.mem.Allocator) Error!State {
+        var out = State.init(allocator);
+        errdefer out.deinit();
+        try out.pending_responses.appendSlice(allocator, self.pending_responses.items);
+        try out.pending_challenges.appendSlice(allocator, self.pending_challenges.items);
+        try out.outstanding_challenges.appendSlice(allocator, self.outstanding_challenges.items);
+        return out;
+    }
+
     pub fn queueChallenge(self: *State, data: [8]u8) Error!void {
         for (self.pending_challenges.items) |challenge| {
             if (std.mem.eql(u8, &challenge.data, &data)) return;

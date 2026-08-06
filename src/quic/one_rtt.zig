@@ -694,6 +694,8 @@ pub const Connection = struct {
         defer recv_streams.deinit(self.endpoint.allocator);
         var peer_connection_ids = self.peer_connection_ids;
         var local_connection_ids = self.local_connection_ids;
+        var path_validation = try self.path_validation.clone(self.endpoint.allocator);
+        defer path_validation.deinit();
 
         for (frames) |frame| {
             switch (frame) {
@@ -724,6 +726,15 @@ pub const Connection = struct {
                     );
                 },
                 .retire_connection_id => |retire| try local_connection_ids.retire(retire.sequence_number),
+                .path_challenge => |path_challenge| try path_validation.receiveChallenge(path_challenge.data),
+                .path_response => |path_response| try path_validation.receiveResponse(path_response.data),
+                .new_token => |new_token| {
+                    if (self.config.local_endpoint == .server) return error.InvalidFrame;
+                    if (new_token.token.len == 0) return error.InvalidFrame;
+                },
+                .handshake_done => {
+                    if (self.config.local_endpoint == .server) return error.InvalidFrame;
+                },
                 else => {},
             }
         }
@@ -1703,6 +1714,65 @@ test "QUIC 1-RTT connection preflights CID frames before receive-side effects" {
     try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
     try std.testing.expectEqual(@as(usize, 1), client.peer_connection_ids.count());
+}
+
+test "QUIC 1-RTT connection preflights role and path control frames before receive-side effects" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x49, 0x4a, 0x4b, 0x4c };
+    const server_cid = [_]u8{ 0x4d, 0x4e, 0x4f, 0x50 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x79} ** quic.protection.secret_len);
+
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{ .stream_id = 0, .data = "before-role-error", .fin = false } },
+            .{ .handshake_done = {} },
+        },
+    });
+
+    try std.testing.expectError(error.InvalidFrame, server.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 0), server.expected_packet_number);
+    try std.testing.expect(!server.handshakeConfirmed());
+
+    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{ .stream_id = 0, .data = "before-path-error", .fin = false } },
+            .{ .path_response = .{ .data = [_]u8{0xaa} ** 8 } },
+        },
+    });
+
+    try std.testing.expectError(error.UnknownPathResponse, server.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 0), server.expected_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
 }
 
 test "QUIC 1-RTT connection models idle timeout deadlines" {
