@@ -24,6 +24,7 @@ pub const Error = varint.Error || error{
     InvalidPacketNumber,
     InvalidPacketNumberLength,
     InvalidPayloadLength,
+    KeyUpdateError,
 } || std.crypto.errors.AuthenticationError || std.mem.Allocator.Error;
 
 pub const HeaderForm = enum {
@@ -116,6 +117,130 @@ pub const OpenedShortPacket = struct {
     }
 };
 
+pub const OpenedShortPacketWithKeyUpdate = struct {
+    packet: OpenedShortPacket,
+    /// True only when the packet authenticated with the pre-derived next key
+    /// generation. Delayed packets opened with a retained previous generation
+    /// keep this false so connection state does not advance twice.
+    peer_initiated_key_update: bool = false,
+
+    pub fn deinit(self: *OpenedShortPacketWithKeyUpdate, allocator: std.mem.Allocator) void {
+        self.packet.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const ShortPacketKeyUpdateKeys = struct {
+    current: PacketProtectionKeys,
+    next: PacketProtectionKeys,
+    current_key_phase: bool,
+    previous: ?PacketProtectionKeys = null,
+    previous_key_phase: ?bool = null,
+    discarded_previous_key_phase: ?bool = null,
+};
+
+/// Directional 1-RTT key-phase state.
+///
+/// Mature QUIC stacks keep packet-protection key update state next to the
+/// connection, not in a raw packet codec.  This type captures the reusable
+/// crypto portion: current/next key generations, a retained previous
+/// generation for reordered packets, and the key phase bit that is visible in
+/// short headers after header protection is removed.
+pub const Aes128KeyPhaseState = struct {
+    current: PacketProtectionKeys,
+    next: PacketProtectionKeys,
+    current_key_phase: bool,
+    key_update_count: u64 = 0,
+    previous: ?PacketProtectionKeys = null,
+    previous_key_phase: ?bool = null,
+    previous_discard_deadline_nanos: ?i64 = null,
+    discarded_previous_key_phase: ?bool = null,
+
+    pub fn init(current: PacketProtectionKeys, current_key_phase: bool) Aes128KeyPhaseState {
+        return .{
+            .current = current,
+            .next = nextAes128PacketProtectionKeys(current),
+            .current_key_phase = current_key_phase,
+        };
+    }
+
+    pub fn currentKeys(self: Aes128KeyPhaseState) PacketProtectionKeys {
+        return self.current;
+    }
+
+    pub fn currentKeyPhase(self: Aes128KeyPhaseState) bool {
+        return self.current_key_phase;
+    }
+
+    pub fn keyUpdateCount(self: Aes128KeyPhaseState) u64 {
+        return self.key_update_count;
+    }
+
+    pub fn previousKeyGeneration(self: Aes128KeyPhaseState) ?u64 {
+        if (self.previous == null) return null;
+        return self.key_update_count -% 1;
+    }
+
+    pub fn retainsKeyGeneration(self: Aes128KeyPhaseState, generation: u64) bool {
+        if (generation == self.key_update_count) return true;
+        if (generation == self.key_update_count +| 1) return true;
+        if (self.previousKeyGeneration()) |previous_generation| {
+            return generation == previous_generation;
+        }
+        return false;
+    }
+
+    pub fn keyUpdateKeys(self: Aes128KeyPhaseState) ShortPacketKeyUpdateKeys {
+        return .{
+            .current = self.current,
+            .next = self.next,
+            .current_key_phase = self.current_key_phase,
+            .previous = self.previous,
+            .previous_key_phase = self.previous_key_phase,
+            .discarded_previous_key_phase = self.discarded_previous_key_phase,
+        };
+    }
+
+    pub fn initiateKeyUpdate(self: *Aes128KeyPhaseState) void {
+        self.advance();
+    }
+
+    pub fn updateAfterReceiving(self: *Aes128KeyPhaseState, peer_key_phase: bool) bool {
+        if (peer_key_phase == self.current_key_phase) return false;
+        self.advance();
+        return true;
+    }
+
+    pub fn schedulePreviousDiscard(self: *Aes128KeyPhaseState, deadline_nanos: i64) void {
+        if (self.previous == null) return;
+        self.previous_discard_deadline_nanos = deadline_nanos;
+    }
+
+    pub fn previousDiscardDeadline(self: Aes128KeyPhaseState) ?i64 {
+        return self.previous_discard_deadline_nanos;
+    }
+
+    pub fn discardExpiredPrevious(self: *Aes128KeyPhaseState, now_nanos: i64) bool {
+        const deadline = self.previous_discard_deadline_nanos orelse return false;
+        if (now_nanos < deadline) return false;
+        self.discarded_previous_key_phase = self.previous_key_phase;
+        self.previous = null;
+        self.previous_key_phase = null;
+        self.previous_discard_deadline_nanos = null;
+        return true;
+    }
+
+    fn advance(self: *Aes128KeyPhaseState) void {
+        self.previous = self.current;
+        self.previous_key_phase = self.current_key_phase;
+        self.previous_discard_deadline_nanos = null;
+        self.current = self.next;
+        self.next = nextAes128PacketProtectionKeys(self.current);
+        self.current_key_phase = !self.current_key_phase;
+        self.key_update_count +|= 1;
+    }
+};
+
 pub fn deriveInitialSecrets(client_initial_dcid: []const u8) InitialSecrets {
     const initial_secret = HkdfSha256.extract(&initial_salt_v1, client_initial_dcid);
     const client_secret = hkdfExpandLabel(initial_secret, "client in", secret_len);
@@ -134,6 +259,23 @@ pub fn deriveAes128Keys(secret: [secret_len]u8) PacketProtectionKeys {
         .iv = hkdfExpandLabel(secret, "quic iv", iv_len),
         .hp = hkdfExpandLabel(secret, "quic hp", hp_key_len),
     };
+}
+
+pub fn nextAes128TrafficSecret(secret: [secret_len]u8) [secret_len]u8 {
+    return hkdfExpandLabel(secret, "quic ku", secret_len);
+}
+
+/// Derive the next QUIC 1-RTT packet-protection generation.
+///
+/// RFC 9001 key updates derive a new traffic secret with the `quic ku` label.
+/// The packet protection key and IV change, while the header-protection key is
+/// retained for the life of the connection so the key phase bit itself remains
+/// protected consistently across generations.
+pub fn nextAes128PacketProtectionKeys(current: PacketProtectionKeys) PacketProtectionKeys {
+    const next_secret = nextAes128TrafficSecret(current.secret);
+    var next = deriveAes128Keys(next_secret);
+    next.hp = current.hp;
+    return next;
 }
 
 pub fn hkdfExpandLabel(secret: [secret_len]u8, label: []const u8, comptime len: usize) [len]u8 {
@@ -278,7 +420,7 @@ pub fn openInitialPacket(
     packet: []const u8,
     expected_packet_number: u64,
 ) Error!OpenedInitialPacket {
-    var bytes = try allocator.dupe(u8, packet);
+    const bytes = try allocator.dupe(u8, packet);
     defer allocator.free(bytes);
     if (bytes.len < 7 or (bytes[0] & 0x80) == 0) return error.InvalidInitialPacket;
 
@@ -447,7 +589,7 @@ pub fn openShortPacket(
     expected_packet_number: u64,
 ) Error!OpenedShortPacket {
     if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
-    var bytes = try allocator.dupe(u8, packet);
+    const bytes = try allocator.dupe(u8, packet);
     defer allocator.free(bytes);
     if (bytes.len < 1 + destination_connection_id_len + 1 + aead_tag_len or (bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) {
         return error.InvalidInitialPacket;
@@ -472,6 +614,44 @@ pub fn openShortPacket(
         .packet_number = packet_number,
         .key_phase = key_phase,
         .payload = payload,
+    };
+}
+
+pub fn openShortPacketWithKeyUpdate(
+    allocator: std.mem.Allocator,
+    keys: ShortPacketKeyUpdateKeys,
+    packet: []const u8,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+) Error!OpenedShortPacketWithKeyUpdate {
+    const key_phase = try peekShortPacketKeyPhase(allocator, keys.current.hp, packet, destination_connection_id_len);
+    if (key_phase == keys.current_key_phase) {
+        return .{
+            .packet = try openShortPacket(allocator, keys.current, packet, destination_connection_id_len, expected_packet_number),
+            .peer_initiated_key_update = false,
+        };
+    }
+
+    const next_packet = openShortPacket(allocator, keys.next, packet, destination_connection_id_len, expected_packet_number) catch |next_err| {
+        if (next_err == error.OutOfMemory) return next_err;
+        if (keys.previous) |previous| {
+            if (keys.previous_key_phase) |previous_key_phase| {
+                if (key_phase == previous_key_phase) {
+                    return .{
+                        .packet = try openShortPacket(allocator, previous, packet, destination_connection_id_len, expected_packet_number),
+                        .peer_initiated_key_update = false,
+                    };
+                }
+            }
+        }
+        if (keys.discarded_previous_key_phase) |discarded_previous_key_phase| {
+            if (key_phase == discarded_previous_key_phase) return error.KeyUpdateError;
+        }
+        return next_err;
+    };
+    return .{
+        .packet = next_packet,
+        .peer_initiated_key_update = true,
     };
 }
 
@@ -506,6 +686,24 @@ pub fn removeHeaderProtection(
     for (packet[pn_offset .. pn_offset + pn_len], 0..) |*byte, i| {
         byte.* ^= mask[i + 1];
     }
+}
+
+fn peekShortPacketKeyPhase(
+    allocator: std.mem.Allocator,
+    hp_key: [hp_key_len]u8,
+    packet: []const u8,
+    destination_connection_id_len: usize,
+) Error!bool {
+    if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
+    const bytes = try allocator.dupe(u8, packet);
+    defer allocator.free(bytes);
+    if (bytes.len < 1 + destination_connection_id_len + 1 + aead_tag_len or (bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) {
+        return error.InvalidInitialPacket;
+    }
+    const pn_offset = 1 + destination_connection_id_len;
+    try removeHeaderProtection(hp_key, .short, bytes, pn_offset);
+    if ((bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) return error.InvalidInitialPacket;
+    return (bytes[0] & 0x04) != 0;
 }
 
 fn validatePacketNumberLen(packet_number_len: u8) Error!void {
@@ -590,6 +788,45 @@ test "QUIC AES payload protection roundtrip" {
     var bad_tag = tag;
     bad_tag[0] ^= 0xff;
     try std.testing.expectError(error.AuthenticationFailed, openAes128Payload(keys, 2, ad, &ciphertext, bad_tag, &opened));
+}
+
+test "QUIC AES key update derives next traffic keys and retains header protection" {
+    const keys = deriveAes128Keys([_]u8{0x44} ** secret_len);
+    const next_secret = nextAes128TrafficSecret(keys.secret);
+    const next = nextAes128PacketProtectionKeys(keys);
+
+    try std.testing.expectEqualSlices(u8, &next_secret, &next.secret);
+    try std.testing.expect(!std.mem.eql(u8, &keys.secret, &next.secret));
+    try std.testing.expect(!std.mem.eql(u8, &keys.key, &next.key));
+    try std.testing.expect(!std.mem.eql(u8, &keys.iv, &next.iv));
+    try std.testing.expectEqualSlices(u8, &keys.hp, &next.hp);
+}
+
+test "QUIC key phase state advances and expires retained previous keys" {
+    const keys = deriveAes128Keys([_]u8{0x45} ** secret_len);
+    var state = Aes128KeyPhaseState.init(keys, false);
+
+    try std.testing.expect(!state.currentKeyPhase());
+    try std.testing.expectEqual(@as(u64, 0), state.keyUpdateCount());
+    try std.testing.expect(state.retainsKeyGeneration(0));
+    try std.testing.expect(state.retainsKeyGeneration(1));
+    try std.testing.expect(!state.retainsKeyGeneration(2));
+
+    state.initiateKeyUpdate();
+    try std.testing.expect(state.currentKeyPhase());
+    try std.testing.expectEqual(@as(u64, 1), state.keyUpdateCount());
+    try std.testing.expectEqual(@as(?u64, 0), state.previousKeyGeneration());
+    try std.testing.expect(state.retainsKeyGeneration(0));
+    try std.testing.expect(state.retainsKeyGeneration(1));
+    try std.testing.expect(state.retainsKeyGeneration(2));
+    try std.testing.expectEqual(@as(?bool, false), state.keyUpdateKeys().previous_key_phase);
+
+    state.schedulePreviousDiscard(100);
+    try std.testing.expectEqual(@as(?i64, 100), state.previousDiscardDeadline());
+    try std.testing.expect(!state.discardExpiredPrevious(99));
+    try std.testing.expect(state.discardExpiredPrevious(100));
+    try std.testing.expectEqual(@as(?u64, null), state.previousKeyGeneration());
+    try std.testing.expect(!state.retainsKeyGeneration(0));
 }
 
 test "QUIC packet number length follows RFC 9000 adaptive encoding" {
@@ -682,4 +919,50 @@ test "QUIC 1-RTT short packet seal/open roundtrip" {
     try std.testing.expectEqual(@as(u64, 9), opened.packet_number);
     try std.testing.expectEqualSlices(u8, &dcid, opened.destination_connection_id);
     try std.testing.expectEqualStrings(payload, opened.payload);
+}
+
+test "QUIC short packet key update opens next and retained previous generations" {
+    const allocator = std.testing.allocator;
+    const keys = deriveAes128Keys([_]u8{0xa7} ** secret_len);
+    const next = nextAes128PacketProtectionKeys(keys);
+    const dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+
+    const old_packet = try sealShortPacket(allocator, keys, .{
+        .destination_connection_id = &dcid,
+        .packet_number = 7,
+        .packet_number_len = 4,
+        .key_phase = false,
+        .payload = "old-generation",
+    });
+    defer allocator.free(old_packet);
+
+    const updated_packet = try sealShortPacket(allocator, next, .{
+        .destination_connection_id = &dcid,
+        .packet_number = 8,
+        .packet_number_len = 4,
+        .key_phase = true,
+        .payload = "next-generation",
+    });
+    defer allocator.free(updated_packet);
+
+    var receiver = Aes128KeyPhaseState.init(keys, false);
+    var opened_next = try openShortPacketWithKeyUpdate(allocator, receiver.keyUpdateKeys(), updated_packet, dcid.len, 0);
+    defer opened_next.deinit(allocator);
+    try std.testing.expect(opened_next.peer_initiated_key_update);
+    try std.testing.expect(opened_next.packet.key_phase);
+    try std.testing.expectEqualStrings("next-generation", opened_next.packet.payload);
+    try std.testing.expect(receiver.updateAfterReceiving(opened_next.packet.key_phase));
+
+    var delayed_old = try openShortPacketWithKeyUpdate(allocator, receiver.keyUpdateKeys(), old_packet, dcid.len, 0);
+    defer delayed_old.deinit(allocator);
+    try std.testing.expect(!delayed_old.peer_initiated_key_update);
+    try std.testing.expect(!delayed_old.packet.key_phase);
+    try std.testing.expectEqualStrings("old-generation", delayed_old.packet.payload);
+
+    receiver.schedulePreviousDiscard(1_000);
+    try std.testing.expect(receiver.discardExpiredPrevious(1_000));
+    try std.testing.expectError(
+        error.KeyUpdateError,
+        openShortPacketWithKeyUpdate(allocator, receiver.keyUpdateKeys(), old_packet, dcid.len, 0),
+    );
 }

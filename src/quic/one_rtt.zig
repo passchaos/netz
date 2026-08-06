@@ -30,6 +30,7 @@ pub const ReceivedPacket = struct {
     from: net.IpAddress,
     packet: quic.protection.OpenedShortPacket,
     frames: []quic.Frame,
+    peer_initiated_key_update: bool = false,
 
     pub fn deinit(self: *ReceivedPacket, allocator: std.mem.Allocator) void {
         quic.deinitOwnedFrameSlice(self.frames, allocator);
@@ -129,6 +130,9 @@ pub const Connection = struct {
     stream_send_flows: std.ArrayList(StreamFlowEntry) = .empty,
     stream_recv_flows: std.ArrayList(StreamRecvFlowEntry) = .empty,
     close_info: ?CloseInfo = null,
+    send_key_phase: quic.protection.Aes128KeyPhaseState,
+    receive_key_phase: quic.protection.Aes128KeyPhaseState,
+    pending_key_update_ack_threshold: ?u64 = null,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -141,6 +145,8 @@ pub const Connection = struct {
             .path_validation = .init(endpoint.allocator),
             .send_flow = .init(config.initial_send_max_data),
             .recv_flow = try .init(config.initial_receive_max_data, config.receive_window),
+            .send_key_phase = .init(config.send_keys, false),
+            .receive_key_phase = .init(config.receive_keys, false),
         };
         try connection.local_connection_ids.registerInitial(config.local_connection_id, [_]u8{0} ** 16);
         try connection.peer_connection_ids.add(0, config.peer_connection_id, [_]u8{0} ** 16);
@@ -247,10 +253,11 @@ pub const Connection = struct {
     }
 
     fn sendPayloadPacket(self: *Connection, packet_number: u64, payload: []const u8) Error!void {
-        try sendPayload(self.endpoint, self.config.peer, self.config.send_keys, .{
+        try sendPayload(self.endpoint, self.config.peer, self.send_key_phase.currentKeys(), .{
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = packet_number,
             .packet_number_len = quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload.len),
+            .key_phase = self.send_key_phase.currentKeyPhase(),
             .payload = payload,
         });
     }
@@ -287,6 +294,11 @@ pub const Connection = struct {
     pub fn markPacketAcknowledged(self: *Connection, packet_number: u64) bool {
         const marked_sent = self.sent.markAcknowledged(packet_number);
         const removed_recovery = self.recovery.acknowledgePacketNumber(packet_number);
+        if (marked_sent) {
+            if (self.pending_key_update_ack_threshold) |threshold| {
+                if (packet_number >= threshold) self.pending_key_update_ack_threshold = null;
+            }
+        }
         return marked_sent or removed_recovery;
     }
 
@@ -390,31 +402,91 @@ pub const Connection = struct {
         return self.peer_connection_ids.detectStatelessReset(datagram);
     }
 
+    pub fn localOneRttKeyPhase(self: Connection) bool {
+        return self.send_key_phase.currentKeyPhase();
+    }
+
+    pub fn peerOneRttKeyPhase(self: Connection) bool {
+        return self.receive_key_phase.currentKeyPhase();
+    }
+
+    pub fn localOneRttKeyUpdateCount(self: Connection) u64 {
+        return self.send_key_phase.keyUpdateCount();
+    }
+
+    pub fn peerOneRttKeyUpdateCount(self: Connection) u64 {
+        return self.receive_key_phase.keyUpdateCount();
+    }
+
+    pub fn pendingOneRttKeyUpdateAckThreshold(self: Connection) ?u64 {
+        return self.pending_key_update_ack_threshold;
+    }
+
+    pub fn localOneRttRetainsKeyGeneration(self: Connection, generation: u64) bool {
+        return self.send_key_phase.retainsKeyGeneration(generation);
+    }
+
+    pub fn peerOneRttRetainsKeyGeneration(self: Connection, generation: u64) bool {
+        return self.receive_key_phase.retainsKeyGeneration(generation);
+    }
+
+    pub fn initiateKeyUpdate(self: *Connection) Error!void {
+        if (self.close_info != null) return error.ConnectionClosed;
+        if (self.pending_key_update_ack_threshold != null) return error.InvalidPacket;
+        self.send_key_phase.initiateKeyUpdate();
+        self.pending_key_update_ack_threshold = self.next_packet_number;
+    }
+
+    pub fn schedulePreviousOneRttKeyDiscard(self: *Connection, deadline_nanos: i64) void {
+        self.send_key_phase.schedulePreviousDiscard(deadline_nanos);
+        self.receive_key_phase.schedulePreviousDiscard(deadline_nanos);
+    }
+
+    pub fn oneRttKeyDiscardDeadline(self: Connection) ?i64 {
+        var deadline: ?i64 = self.send_key_phase.previousDiscardDeadline();
+        if (self.receive_key_phase.previousDiscardDeadline()) |peer_deadline| {
+            if (deadline == null or peer_deadline < deadline.?) deadline = peer_deadline;
+        }
+        return deadline;
+    }
+
+    pub fn discardExpiredOneRttKeys(self: *Connection, now_nanos: i64) bool {
+        var discarded = self.send_key_phase.discardExpiredPrevious(now_nanos);
+        discarded = self.receive_key_phase.discardExpiredPrevious(now_nanos) or discarded;
+        return discarded;
+    }
+
     pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
-        var packet = try receive(
+        var packet = try receiveWithKeyUpdate(
             self.endpoint,
-            self.config.receive_keys,
+            self.receive_key_phase.keyUpdateKeys(),
             self.config.local_connection_id.len,
             self.expected_packet_number,
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFrames(packet.packet.packet_number, packet.frames);
+        if (packet.peer_initiated_key_update) {
+            _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
+        }
         return packet;
     }
 
     pub fn receiveRoutedDatagram(self: *Connection, routed: quic.runtime.RoutedBytes) Error!ReceivedPacket {
-        var packet = try openReceivedBytes(
+        var packet = try openReceivedBytesWithKeyUpdate(
             self.endpoint,
             routed.datagram.from,
             routed.datagram.bytes,
-            self.config.receive_keys,
+            self.receive_key_phase.keyUpdateKeys(),
             routed.destination_connection_id.len,
             self.expected_packet_number,
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFrames(packet.packet.packet_number, packet.frames);
+        if (packet.peer_initiated_key_update) {
+            _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
+        }
         return packet;
     }
 
@@ -431,6 +503,11 @@ pub const Connection = struct {
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
                     if (lost.bytes > 0) self.congestion.onLost(lost.bytes);
                     _ = try self.recovery.applyAck(frame.ack);
+                    if (self.pending_key_update_ack_threshold) |threshold| {
+                        if (self.hasAcknowledgedPacketAtOrAbove(threshold)) {
+                            self.pending_key_update_ack_threshold = null;
+                        }
+                    }
                 },
                 .max_data => |max_data| self.send_flow.updateLimit(max_data.maximum_data),
                 .max_stream_data => |max_stream_data| {
@@ -482,6 +559,13 @@ pub const Connection = struct {
                 else => {},
             }
         }
+    }
+
+    fn hasAcknowledgedPacketAtOrAbove(self: Connection, threshold: u64) bool {
+        for (self.sent.packets.items) |packet| {
+            if (packet.acknowledged and packet.packet_number >= threshold) return true;
+        }
+        return false;
     }
 
     fn receiveResetStream(self: *Connection, reset: quic.ResetStreamFrame) Error!void {
@@ -720,6 +804,18 @@ pub fn receive(
     return openReceivedBytes(endpoint, datagram.from, datagram.bytes, keys, destination_connection_id_len, expected_packet_number, max_frames);
 }
 
+pub fn receiveWithKeyUpdate(
+    endpoint: *quic.runtime.Endpoint,
+    keys: quic.protection.ShortPacketKeyUpdateKeys,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+    max_frames: usize,
+) Error!ReceivedPacket {
+    var datagram = try endpoint.receiveBytes();
+    defer datagram.deinit(endpoint.allocator);
+    return openReceivedBytesWithKeyUpdate(endpoint, datagram.from, datagram.bytes, keys, destination_connection_id_len, expected_packet_number, max_frames);
+}
+
 pub fn openReceivedBytes(
     endpoint: *quic.runtime.Endpoint,
     from: net.IpAddress,
@@ -731,6 +827,35 @@ pub fn openReceivedBytes(
 ) Error!ReceivedPacket {
     var packet = try quic.protection.openShortPacket(endpoint.allocator, keys, bytes, destination_connection_id_len, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
+    const frames = try parsePacketFrames(endpoint, packet.payload, max_frames);
+    return .{
+        .from = from,
+        .packet = packet,
+        .frames = frames,
+    };
+}
+
+pub fn openReceivedBytesWithKeyUpdate(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    bytes: []const u8,
+    keys: quic.protection.ShortPacketKeyUpdateKeys,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+    max_frames: usize,
+) Error!ReceivedPacket {
+    var decoded = try quic.protection.openShortPacketWithKeyUpdate(endpoint.allocator, keys, bytes, destination_connection_id_len, expected_packet_number);
+    errdefer decoded.deinit(endpoint.allocator);
+    const frames = try parsePacketFrames(endpoint, decoded.packet.payload, max_frames);
+    return .{
+        .from = from,
+        .packet = decoded.packet,
+        .frames = frames,
+        .peer_initiated_key_update = decoded.peer_initiated_key_update,
+    };
+}
+
+fn parsePacketFrames(endpoint: *quic.runtime.Endpoint, payload: []const u8, max_frames: usize) Error![]quic.Frame {
     var frames: std.ArrayList(quic.Frame) = .empty;
     errdefer {
         quic.deinitOwnedFrameSlice(frames.items, endpoint.allocator);
@@ -738,9 +863,9 @@ pub fn openReceivedBytes(
     }
 
     var pos: usize = 0;
-    while (pos < packet.payload.len) {
+    while (pos < payload.len) {
         if (frames.items.len >= max_frames) return error.MissingFrame;
-        var parsed = try quic.parseFrameOwned(endpoint.allocator, packet.payload[pos..]);
+        var parsed = try quic.parseFrameOwned(endpoint.allocator, payload[pos..]);
         var appended = false;
         defer if (!appended) parsed.deinitOwned(endpoint.allocator);
         try frames.append(endpoint.allocator, parsed.frame);
@@ -748,11 +873,7 @@ pub fn openReceivedBytes(
         pos += parsed.consumed;
     }
     if (frames.items.len == 0) return error.MissingFrame;
-    return .{
-        .from = from,
-        .packet = packet,
-        .frames = try frames.toOwnedSlice(endpoint.allocator),
-    };
+    return frames.toOwnedSlice(endpoint.allocator);
 }
 
 test "QUIC 1-RTT STREAM frame exchange over UDP endpoint" {
@@ -850,6 +971,155 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
     try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
+}
+
+test "QUIC 1-RTT connection performs key update and clears ACK gate" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const server_cid = [_]u8{ 0x45, 0x46, 0x47, 0x48 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x57} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x58} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    try client.initiateKeyUpdate();
+    try std.testing.expect(client.localOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 1), client.localOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingOneRttKeyUpdateAckThreshold());
+    try std.testing.expectError(error.InvalidPacket, client.initiateKeyUpdate());
+
+    const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "updated", .fin = true } }};
+    try client.send(&frames);
+
+    var updated = try server.receivePacket();
+    defer updated.deinit(allocator);
+    try std.testing.expect(updated.peer_initiated_key_update);
+    try std.testing.expect(updated.packet.key_phase);
+    try std.testing.expect(server.peerOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 1), server.peerOneRttKeyUpdateCount());
+    try std.testing.expectEqualStrings("updated", updated.frames[0].stream.data);
+
+    try server.sendAck(0);
+    var ack = try client.receivePacket();
+    defer ack.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), ack.frames[0].ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(?u64, null), client.pendingOneRttKeyUpdateAckThreshold());
+
+    try client.initiateKeyUpdate();
+    try std.testing.expect(!client.localOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 2), client.localOneRttKeyUpdateCount());
+}
+
+test "QUIC 1-RTT connection accepts delayed previous-key packets until discard" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const server_cid = [_]u8{ 0x35, 0x36, 0x37, 0x38 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x5a} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x5b} ** quic.protection.secret_len);
+    const next_client_keys = quic.protection.nextAes128PacketProtectionKeys(client_keys);
+
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    const old_payload = try encodeFrames(allocator, &[_]quic.Frame{.{ .ping = {} }});
+    defer allocator.free(old_payload);
+    const old_packet = try quic.protection.sealShortPacket(allocator, client_keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .packet_number_len = 4,
+        .key_phase = false,
+        .payload = old_payload,
+    });
+    defer allocator.free(old_packet);
+
+    const updated_payload = try encodeFrames(allocator, &[_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 1,
+        .data = "new",
+        .fin = false,
+    } }});
+    defer allocator.free(updated_payload);
+    const updated_packet = try quic.protection.sealShortPacket(allocator, next_client_keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 1,
+        .packet_number_len = 4,
+        .key_phase = true,
+        .payload = updated_payload,
+    });
+    defer allocator.free(updated_packet);
+
+    const route = quic.connection_router.Route{ .connection_index = 0 };
+    var updated = try server.receiveRoutedDatagram(.{
+        .datagram = .{ .from = client_endpoint.address(), .bytes = updated_packet },
+        .route = route,
+        .destination_connection_id = &server_cid,
+    });
+    defer updated.deinit(allocator);
+    try std.testing.expect(updated.peer_initiated_key_update);
+    try std.testing.expect(server.peerOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 1), server.peerOneRttKeyUpdateCount());
+    try std.testing.expect(server.peerOneRttRetainsKeyGeneration(0));
+
+    var delayed_old = try server.receiveRoutedDatagram(.{
+        .datagram = .{ .from = client_endpoint.address(), .bytes = old_packet },
+        .route = route,
+        .destination_connection_id = &server_cid,
+    });
+    defer delayed_old.deinit(allocator);
+    try std.testing.expect(!delayed_old.peer_initiated_key_update);
+    try std.testing.expect(!delayed_old.packet.key_phase);
+    try std.testing.expect(server.peerOneRttKeyPhase());
+
+    server.schedulePreviousOneRttKeyDiscard(10);
+    try std.testing.expectEqual(@as(?i64, 10), server.oneRttKeyDiscardDeadline());
+    try std.testing.expect(server.discardExpiredOneRttKeys(10));
+    try std.testing.expect(!server.peerOneRttRetainsKeyGeneration(0));
+    try std.testing.expectError(error.KeyUpdateError, server.receiveRoutedDatagram(.{
+        .datagram = .{ .from = client_endpoint.address(), .bytes = old_packet },
+        .route = route,
+        .destination_connection_id = &server_cid,
+    }));
 }
 
 test "QUIC 1-RTT connection enforces congestion send window" {
