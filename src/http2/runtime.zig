@@ -463,7 +463,7 @@ pub const Connection = struct {
         response_headers: []const http2.Hpack.HeaderField,
     ) Error!void {
         if (self.role != .server) return error.UnexpectedFrame;
-        if (status < 300) return error.InvalidStatus;
+        if (status < 300 or statusIsInformational(status)) return error.InvalidStatus;
         try self.writeExtendedConnectResponse(stream_id, status, response_headers, true);
         self.releasePeerStream(stream_id);
     }
@@ -551,6 +551,7 @@ pub const Connection = struct {
         if (self.role != .server) return error.UnexpectedFrame;
         var status_buf: [3]u8 = undefined;
         if (options.status < 100 or options.status > 999) return error.InvalidStatus;
+        if (statusIsInformational(options.status)) return error.InvalidStatus;
         try validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
         const semantics = self.responseSemanticsFor(stream_id, options);
         try validateResponseBodyForRequestSemantics(options.status, semantics, options.headers, options.body, options.trailers);
@@ -569,6 +570,24 @@ pub const Connection = struct {
             if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
         }
         self.releasePeerStream(stream_id);
+    }
+
+    pub fn writeInformationalResponse(self: *Connection, stream_id: u31, status_code: u16, headers: []const http2.Hpack.HeaderField) Error!void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (!statusIsInformational(status_code)) return error.InvalidStatus;
+        try validateResponseBodyForStatus(status_code, headers, &.{}, &.{});
+        var status_buf: [3]u8 = undefined;
+        const status = std.fmt.bufPrint(&status_buf, "{}", .{status_code}) catch return error.InvalidStatus;
+        var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+        defer fields.deinit(self.allocator);
+        try fields.append(self.allocator, .{ .name = ":status", .value = status });
+        for (headers) |header| try fields.append(self.allocator, header);
+        try validateHeaderBlock(fields.items, .response);
+        // HTTP/2 informational responses never end the stream; the final
+        // response HEADERS still owns END_STREAM/body/trailer semantics.  This
+        // mirrors h2's send_informational path rather than abusing the final
+        // writeResponse helper.
+        try self.writeHeaders(stream_id, fields.items, false);
     }
 
     pub fn ping(self: *Connection, data: [8]u8) Error![8]u8 {
@@ -1956,7 +1975,11 @@ fn validateResponseBodyForRequestSemantics(
 }
 
 fn informationalResponseToSkip(status: u16) bool {
-    return status >= 100 and status < 200 and status != 101;
+    return statusIsInformational(status);
+}
+
+fn statusIsInformational(status: u16) bool {
+    return status >= 100 and status < 200;
 }
 
 fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
@@ -2961,10 +2984,11 @@ test "HTTP/2 client skips informational responses before final response" {
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("/interim-h2", request.path);
 
-            try connection.writeHeaders(request.stream_id, &.{
-                .{ .name = ":status", .value = "103" },
-                .{ .name = "link", .value = "</style.css>; rel=preload" },
-            }, false);
+            try connection.writeInformationalResponse(request.stream_id, 103, &.{.{ .name = "link", .value = "</style.css>; rel=preload" }});
+            // h2 treats every 1xx status as informational.  HTTP/2 should not
+            // switch protocols on 101 like HTTP/1.1; the client keeps waiting
+            // for the final response HEADERS on the same stream.
+            try connection.writeInformationalResponse(request.stream_id, 101, &.{});
             try connection.writeResponse(request.stream_id, .{ .body = "final" });
         }
     };
@@ -4347,6 +4371,7 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     try std.testing.expectError(error.InvalidContentLength, validateResponseBodyForStatus(204, &.{.{ .name = "content-length", .value = "0" }}, "", &.{}));
     try validateResponseBodyForStatus(304, &.{.{ .name = "content-length", .value = "123" }}, "", &.{});
     try std.testing.expectError(error.InvalidContentLength, validateResponseBodyForStatus(304, &.{}, "body", &.{}));
+    try std.testing.expectError(error.InvalidContentLength, validateResponseBodyForStatus(103, &.{.{ .name = "content-length", .value = "0" }}, "", &.{}));
 
     var connection = Connection{
         .io = undefined,
@@ -4363,6 +4388,13 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(1, .{
         .status = 204,
         .body = "body",
+    }));
+    try std.testing.expectError(error.InvalidStatus, connection.writeResponse(1, .{
+        .status = 103,
+    }));
+    try std.testing.expectError(error.InvalidStatus, connection.writeInformationalResponse(1, 200, &.{}));
+    try std.testing.expectError(error.InvalidContentLength, connection.writeInformationalResponse(1, 103, &.{
+        .{ .name = "content-length", .value = "0" },
     }));
 }
 
