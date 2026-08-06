@@ -511,6 +511,7 @@ pub const Connection = struct {
                                     if ((data_frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
                                     trailers = try self.readHeaderBlock(data_frame.frame);
                                     try validateHeaderBlock(trailers, .request_trailers);
+                                    try validateContentLength(headers, body.items.len);
                                     break;
                                 },
                                 .rst_stream => return error.StreamReset,
@@ -3617,6 +3618,71 @@ test "HTTP/2 runtime validates request content-length" {
     };
     try client.writeHeaders(1, &fields, false);
     try client.writeData(1, "ping", true);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
+}
+
+test "HTTP/2 runtime validates request content-length before accepting trailers" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+
+            var request = connection.readRequest() catch |err| {
+                if (err == error.InvalidContentLength) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            request.deinit(shared.server.allocator);
+            shared.err = error.InvalidContentLength;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const fields = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/bad-length-trailers" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "content-length", .value = "5" },
+    };
+    try client.writeHeaders(1, &fields, false);
+    try client.writeData(1, "ping", false);
+    try client.writeHeaders(1, &.{.{ .name = "request-checksum", .value = "ok" }}, true);
 
     thread.join();
     if (shared.err) |err| return err;
