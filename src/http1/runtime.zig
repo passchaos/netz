@@ -992,6 +992,9 @@ fn contentLengthFromHead(head: []const u8) Error!?usize {
         while (parts.next()) |raw_part| {
             const part = wire.trimOws(raw_part);
             if (part.len == 0) return error.InvalidContentLength;
+            for (part) |byte| {
+                if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
+            }
             const parsed = std.fmt.parseInt(usize, part, 10) catch |err| switch (err) {
                 error.InvalidCharacter => return error.InvalidContentLength,
                 error.Overflow => return error.ContentLengthOverflow,
@@ -2155,6 +2158,10 @@ test "HTTP/1 runtime target length rejects ambiguous head framing" {
     const coalesced = "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello";
     const coalesced_head_end = std.mem.indexOf(u8, coalesced, "\r\n\r\n").?;
     try std.testing.expectEqual(coalesced.len, try messageTargetLength(coalesced, coalesced_head_end, 1024, null));
+
+    const signed_length = "HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello";
+    const signed_length_head_end = std.mem.indexOf(u8, signed_length, "\r\n\r\n").?;
+    try std.testing.expectError(error.InvalidContentLength, messageTargetLength(signed_length, signed_length_head_end, 1024, null));
 
     const unsupported_te = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
     const unsupported_te_head_end = std.mem.indexOf(u8, unsupported_te, "\r\n\r\n").?;
