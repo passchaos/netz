@@ -198,7 +198,6 @@ pub const Client = struct {
         var headers: std.ArrayList(http1.Header) = .empty;
         defer headers.deinit(allocator);
         try headers.appendSlice(allocator, &.{
-            .{ .name = "Host", .value = options.host },
             .{ .name = "Upgrade", .value = "websocket" },
             .{ .name = "Connection", .value = "Upgrade" },
             .{ .name = "Sec-WebSocket-Key", .value = &key },
@@ -223,6 +222,7 @@ pub const Client = struct {
         try http1_runtime.writeRequestToStream(allocator, io, stream, .{
             .method = .GET,
             .target = options.target,
+            .host = options.host,
             .headers = headers.items,
         });
 
