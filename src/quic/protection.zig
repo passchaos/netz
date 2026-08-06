@@ -541,6 +541,7 @@ pub fn openInitialPacket(
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .initial) return error.InvalidInitialPacket;
+    try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
@@ -631,6 +632,7 @@ pub fn openHandshakePacket(
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .handshake) return error.InvalidInitialPacket;
+    try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
@@ -718,6 +720,7 @@ pub fn openZeroRttPacket(
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .zero_rtt) return error.InvalidInitialPacket;
+    try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
     const payload_offset = pn_offset + pn_len;
@@ -825,6 +828,7 @@ pub fn openShortPacket(
     const pn_offset = 1 + destination_connection_id_len;
     try removeHeaderProtection(keys.hp, .short, bytes, pn_offset);
     if ((bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) return error.InvalidInitialPacket;
+    try validateShortHeaderReservedBits(bytes[0]);
     const spin_bit = (bytes[0] & 0x20) != 0;
     const key_phase = (bytes[0] & 0x04) != 0;
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
@@ -933,6 +937,7 @@ fn peekShortPacketKeyPhase(
     const pn_offset = 1 + destination_connection_id_len;
     try removeHeaderProtection(hp_key, .short, bytes, pn_offset);
     if ((bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) return error.InvalidInitialPacket;
+    try validateShortHeaderReservedBits(bytes[0]);
     return (bytes[0] & 0x04) != 0;
 }
 
@@ -982,6 +987,21 @@ fn validatePacketNumberLen(packet_number_len: u8) Error!void {
 
 fn validatePacketNumber(packet_number: u64) Error!void {
     if (packet_number > max_packet_number) return error.InvalidPacketNumber;
+}
+
+fn validateLongHeaderReservedBits(first_byte: u8) Error!void {
+    // RFC 9000 §17.2: long headers have two reserved bits (0x0c) that are
+    // covered by header protection.  Mature stacks such as s2n-quic and
+    // quic-zig fail these packets after removing header protection and before
+    // accepting payload bytes.
+    if ((first_byte & 0x0c) != 0) return error.InvalidInitialPacket;
+}
+
+fn validateShortHeaderReservedBits(first_byte: u8) Error!void {
+    // RFC 9000 §17.3.1: short headers have reserved bits 0x18 once header
+    // protection is removed.  Treating them as a packet error here prevents
+    // malformed 1-RTT packets from reaching frame parsing or key-update state.
+    if ((first_byte & 0x18) != 0) return error.InvalidInitialPacket;
 }
 
 fn appendTruncatedPacketNumber(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet_number: u64, packet_number_len: u8) Error!void {
@@ -1375,6 +1395,67 @@ test "QUIC short packet preserves spin bit" {
     defer opened.deinit(allocator);
     try std.testing.expect(opened.spin_bit);
     try std.testing.expectEqualStrings("spin", opened.payload);
+}
+
+test "QUIC packet protection rejects reserved header bits after unprotect" {
+    const allocator = std.testing.allocator;
+
+    {
+        const dcid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+        const scid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+        const keys = deriveInitialSecrets(&dcid).client;
+        const payload = "initial reserved bits";
+        const packet_number: u64 = 4;
+        const packet_number_len: u8 = 4;
+
+        var packet: std.ArrayList(u8) = .empty;
+        errdefer packet.deinit(allocator);
+        try packet.append(allocator, longHeaderFirstByte(version_1_wire, .initial, packet_number_len) | 0x04);
+        try wire.appendInt(&packet, allocator, u32, version_1_wire, .big);
+        try packet.append(allocator, @intCast(dcid.len));
+        try packet.appendSlice(allocator, &dcid);
+        try packet.append(allocator, @intCast(scid.len));
+        try packet.appendSlice(allocator, &scid);
+        try varint.encode(&packet, allocator, 0);
+        try varint.encode(&packet, allocator, packet_number_len + payload.len + aead_tag_len);
+        const pn_offset = packet.items.len;
+        try appendTruncatedPacketNumber(&packet, allocator, packet_number, packet_number_len);
+        const payload_offset = packet.items.len;
+        try packet.resize(allocator, payload_offset + payload.len + aead_tag_len);
+        const ciphertext = packet.items[payload_offset .. payload_offset + payload.len];
+        const tag = packet.items[payload_offset + payload.len ..][0..aead_tag_len];
+        try protectAes128Payload(keys, packet_number, packet.items[0..payload_offset], payload, ciphertext, tag);
+        try applyHeaderProtection(keys.hp, .long, packet.items, pn_offset);
+
+        const malformed = try packet.toOwnedSlice(allocator);
+        defer allocator.free(malformed);
+        try std.testing.expectError(error.InvalidInitialPacket, openInitialPacket(allocator, keys, malformed, 0));
+    }
+
+    {
+        const keys = deriveAes128Keys([_]u8{0x9b} ** secret_len);
+        const dcid = [_]u8{ 0x01, 0x23, 0x45, 0x67 };
+        const payload = "short reserved bits";
+        const packet_number: u64 = 5;
+        const packet_number_len: u8 = 4;
+
+        var packet: std.ArrayList(u8) = .empty;
+        errdefer packet.deinit(allocator);
+        try packet.append(allocator, 0x40 | 0x08 | @as(u8, packet_number_len - 1));
+        try packet.appendSlice(allocator, &dcid);
+        const pn_offset = packet.items.len;
+        try appendTruncatedPacketNumber(&packet, allocator, packet_number, packet_number_len);
+        const payload_offset = packet.items.len;
+        try packet.resize(allocator, payload_offset + payload.len + aead_tag_len);
+        const ciphertext = packet.items[payload_offset .. payload_offset + payload.len];
+        const tag = packet.items[payload_offset + payload.len ..][0..aead_tag_len];
+        try protectAes128Payload(keys, packet_number, packet.items[0..payload_offset], payload, ciphertext, tag);
+        try applyHeaderProtection(keys.hp, .short, packet.items, pn_offset);
+
+        const malformed = try packet.toOwnedSlice(allocator);
+        defer allocator.free(malformed);
+        try std.testing.expectError(error.InvalidInitialPacket, openShortPacket(allocator, keys, malformed, dcid.len, 0));
+    }
 }
 
 test "QUIC short packet key update opens next and retained previous generations" {
