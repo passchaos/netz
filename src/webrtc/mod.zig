@@ -2164,6 +2164,24 @@ pub const sctp = struct {
         value: []const u8,
     };
 
+    pub const HeartbeatChunk = struct {
+        info: []const u8,
+
+        pub fn parse(chunk: Chunk) Error!HeartbeatChunk {
+            if ((chunk.chunk_type != .heartbeat and chunk.chunk_type != .heartbeat_ack) or chunk.flags != 0 or chunk.value.len == 0) return error.InvalidSctpPacket;
+            return .{ .info = chunk.value };
+        }
+    };
+
+    pub const ShutdownChunk = struct {
+        cumulative_tsn_ack: u32,
+
+        pub fn parse(chunk: Chunk) Error!ShutdownChunk {
+            if (chunk.chunk_type != .shutdown or chunk.flags != 0 or chunk.value.len != 4) return error.InvalidSctpPacket;
+            return .{ .cumulative_tsn_ack = std.mem.readInt(u32, chunk.value[0..4], .big) };
+        }
+    };
+
     pub const InitChunk = struct {
         initiate_tag: u32,
         advertised_receiver_window_credit: u32,
@@ -2535,6 +2553,78 @@ pub const sctp = struct {
         try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
     }
 
+    pub fn writeHeartbeatPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, ack: bool, info: []const u8) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeHeartbeatChunk(list, allocator, ack, info);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeHeartbeatChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: bool, info: []const u8) Error!void {
+        if (info.len == 0) return error.InvalidSctpPacket;
+        const chunk_len = 4 + info.len;
+        if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try list.append(allocator, @intFromEnum(if (ack) ChunkType.heartbeat_ack else ChunkType.heartbeat));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        try list.appendSlice(allocator, info);
+        try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
+    }
+
+    pub fn writeShutdownPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, cumulative_tsn_ack: u32) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeShutdownChunk(list, allocator, cumulative_tsn_ack);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeShutdownChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, cumulative_tsn_ack: u32) Error!void {
+        try list.append(allocator, @intFromEnum(ChunkType.shutdown));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, 8, .big);
+        try wire.appendInt(list, allocator, u32, cumulative_tsn_ack, .big);
+    }
+
+    pub fn writeShutdownAckPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeShutdownAckChunk(list, allocator);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeShutdownAckChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        try list.append(allocator, @intFromEnum(ChunkType.shutdown_ack));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, 4, .big);
+    }
+
+    pub fn writeShutdownCompletePacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, t_bit: bool) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeShutdownCompleteChunk(list, allocator, t_bit);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeShutdownCompleteChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, t_bit: bool) Error!void {
+        try list.append(allocator, @intFromEnum(ChunkType.shutdown_complete));
+        try list.append(allocator, if (t_bit) 0x01 else 0x00);
+        try wire.appendInt(list, allocator, u16, 4, .big);
+    }
+
+    pub fn validateEmptyControlChunk(chunk: Chunk, expected: ChunkType) Error!void {
+        if (chunk.chunk_type != expected or chunk.value.len != 0) return error.InvalidSctpPacket;
+        switch (expected) {
+            .shutdown_ack => if (chunk.flags != 0) return error.InvalidSctpPacket,
+            .shutdown_complete => if ((chunk.flags & ~@as(u8, 0x01)) != 0) return error.InvalidSctpPacket,
+            .cookie_ack => if (chunk.flags != 0) return error.InvalidSctpPacket,
+            else => return error.InvalidSctpPacket,
+        }
+    }
+
     pub fn writeCookieEchoPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, cookie: []const u8) Error!void {
         const start = list.items.len;
         try writePacketHeader(list, allocator, options);
@@ -2574,7 +2664,7 @@ pub const sctp = struct {
     }
 
     pub fn validateCookieAck(chunk: Chunk) Error!void {
-        if (chunk.chunk_type != .cookie_ack or chunk.flags != 0 or chunk.value.len != 0) return error.InvalidSctpPacket;
+        try validateEmptyControlChunk(chunk, .cookie_ack);
     }
 
     pub fn writeForwardTsnPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, forward_tsn: ForwardTsnChunk) Error!void {
@@ -3389,6 +3479,55 @@ test "RTCP NACK tracker detects RTP gaps and wraparound" {
     wrap.observe(0xffff);
     wrap.observe(0);
     try std.testing.expectEqual(@as(usize, 0), wrap.pendingCount());
+}
+
+test "SCTP HEARTBEAT and SHUTDOWN lifecycle packets" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try sctp.writeHeartbeatPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, false, "heartbeat-info");
+    try std.testing.expect(try sctp.validChecksum(encoded.items));
+    var heartbeat_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer heartbeat_packet.deinit(allocator);
+    const heartbeat = try sctp.HeartbeatChunk.parse(heartbeat_packet.chunks[0]);
+    try std.testing.expectEqualStrings("heartbeat-info", heartbeat.info);
+    const heartbeat_info = try allocator.dupe(u8, heartbeat.info);
+    defer allocator.free(heartbeat_info);
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeHeartbeatPacket(&encoded, allocator, .{ .source_port = 5000, .destination_port = 5000, .verification_tag = 0x01020304 }, true, heartbeat_info);
+    var heartbeat_ack_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer heartbeat_ack_packet.deinit(allocator);
+    try std.testing.expectEqual(sctp.ChunkType.heartbeat_ack, heartbeat_ack_packet.chunks[0].chunk_type);
+    const heartbeat_ack = try sctp.HeartbeatChunk.parse(heartbeat_ack_packet.chunks[0]);
+    try std.testing.expectEqualStrings("heartbeat-info", heartbeat_ack.info);
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeShutdownPacket(&encoded, allocator, .{ .source_port = 5000, .destination_port = 5000, .verification_tag = 0x01020304 }, 12345);
+    var shutdown_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer shutdown_packet.deinit(allocator);
+    const shutdown = try sctp.ShutdownChunk.parse(shutdown_packet.chunks[0]);
+    try std.testing.expectEqual(@as(u32, 12345), shutdown.cumulative_tsn_ack);
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeShutdownAckPacket(&encoded, allocator, .{ .source_port = 5000, .destination_port = 5000, .verification_tag = 0x01020304 });
+    var shutdown_ack_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer shutdown_ack_packet.deinit(allocator);
+    try sctp.validateEmptyControlChunk(shutdown_ack_packet.chunks[0], .shutdown_ack);
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeShutdownCompletePacket(&encoded, allocator, .{ .source_port = 5000, .destination_port = 5000, .verification_tag = 0x01020304 }, true);
+    var shutdown_complete_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer shutdown_complete_packet.deinit(allocator);
+    try sctp.validateEmptyControlChunk(shutdown_complete_packet.chunks[0], .shutdown_complete);
+    try std.testing.expectEqual(@as(u8, 1), shutdown_complete_packet.chunks[0].flags);
+
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeHeartbeatChunk(&encoded, allocator, false, ""));
 }
 
 test "SCTP FORWARD-TSN packet roundtrip" {
