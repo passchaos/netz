@@ -19,6 +19,9 @@ pub const Error = wire.Error || error{
     InvalidDtlsRecord,
     InvalidRtpPacket,
     InvalidRtcpPacket,
+    InvalidSrtpPacket,
+    BadSrtpAuthTag,
+    SrtpReplay,
     InvalidSctpPacket,
     BadSctpChecksum,
     UnsupportedAddressFamily,
@@ -906,6 +909,182 @@ pub const rtp = struct {
             try list.appendNTimes(allocator, 0, options.padding_len - 1);
             try list.append(allocator, options.padding_len);
         }
+    }
+};
+
+pub const srtp = struct {
+    pub const auth_tag_len_80: usize = 10;
+    pub const hmac_sha1_len: usize = 20;
+    pub const default_replay_window_size: u7 = 64;
+
+    pub const ProtectionProfile = enum {
+        /// RFC 3711 NULL cipher with HMAC-SHA1-80 authentication.  This is not
+        /// the default profile browsers negotiate today, but it is the smallest
+        /// useful SRTP building block: RTP stays parseable while authentication,
+        /// ROC handling, and replay protection are exercised exactly like a real
+        /// SRTP session.  AEAD profiles can layer on the same context/replay
+        /// model once AES-GCM record protection is added.
+        null_hmac_sha1_80,
+    };
+
+    pub const KeyingMaterial = struct {
+        auth_key: []const u8,
+        salt: []const u8 = &.{},
+    };
+
+    pub const RolloverCounter = struct {
+        roc: u32 = 0,
+        highest_seq: ?u16 = null,
+
+        pub fn estimate(self: RolloverCounter, sequence_number: u16) u32 {
+            const highest = self.highest_seq orelse return self.roc;
+            if (highest < 0x8000) {
+                if (sequence_number > highest and sequence_number - highest > 0x8000) {
+                    return if (self.roc == 0) 0 else self.roc - 1;
+                }
+                return self.roc;
+            }
+            if (highest > sequence_number and highest - sequence_number > 0x8000) return self.roc +% 1;
+            return self.roc;
+        }
+
+        pub fn update(self: *RolloverCounter, sequence_number: u16, estimated_roc: u32) void {
+            const highest = self.highest_seq orelse {
+                self.highest_seq = sequence_number;
+                self.roc = estimated_roc;
+                return;
+            };
+            if (estimated_roc > self.roc) {
+                self.roc = estimated_roc;
+                self.highest_seq = sequence_number;
+                return;
+            }
+            if (estimated_roc == self.roc and rtpSeqNewer(sequence_number, highest)) {
+                self.highest_seq = sequence_number;
+            }
+        }
+    };
+
+    pub const ReplayWindow = struct {
+        max_index: ?u64 = null,
+        bitmap: u64 = 0,
+        window_size: u7 = default_replay_window_size,
+
+        pub fn accept(self: *ReplayWindow, packet_index: u64) Error!void {
+            // RFC 3711 replay protection is a sliding packet-index window.  A
+            // u64 bitmap keeps this allocation-free for the common WebRTC
+            // windows (Pion/webrtc-go defaults are also small fixed windows);
+            // clamp oversized caller input so shift counts always stay valid.
+            const window_size = @min(@as(u7, 64), @max(@as(u7, 1), self.window_size));
+            const max_index = self.max_index orelse {
+                self.max_index = packet_index;
+                self.bitmap = 1;
+                return;
+            };
+            if (packet_index > max_index) {
+                const shift = @min(packet_index - max_index, 64);
+                self.bitmap = if (shift >= 64) 0 else self.bitmap << @intCast(shift);
+                self.bitmap |= 1;
+                self.max_index = packet_index;
+                return;
+            }
+
+            const delta = max_index - packet_index;
+            if (delta >= window_size) return error.SrtpReplay;
+            const mask = @as(u64, 1) << @intCast(delta);
+            if ((self.bitmap & mask) != 0) return error.SrtpReplay;
+            self.bitmap |= mask;
+        }
+    };
+
+    pub const Context = struct {
+        profile: ProtectionProfile = .null_hmac_sha1_80,
+        keys: KeyingMaterial,
+        rollover: RolloverCounter = .{},
+        replay: ReplayWindow = .{},
+
+        pub fn protectRtp(self: *Context, list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet: []const u8) Error!void {
+            const sequence_number = try rtpSequenceNumber(packet);
+            const roc = self.rollover.estimate(sequence_number);
+            try list.appendSlice(allocator, packet);
+            try appendAuthTag(list, allocator, self.keys.auth_key, packet, roc);
+            self.rollover.update(sequence_number, roc);
+        }
+
+        pub fn protectRtpPacket(self: *Context, list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: rtp.WriteOptions, payload: []const u8) Error!void {
+            var packet: std.ArrayList(u8) = .empty;
+            defer packet.deinit(allocator);
+            try rtp.writePacket(&packet, allocator, options, payload);
+            try self.protectRtp(list, allocator, packet.items);
+        }
+
+        pub fn verifyRtp(self: *Context, protected_packet: []const u8) Error!VerifiedRtp {
+            if (protected_packet.len <= auth_tag_len_80) return error.InvalidSrtpPacket;
+            const packet = protected_packet[0 .. protected_packet.len - auth_tag_len_80];
+            const tag = protected_packet[protected_packet.len - auth_tag_len_80 ..];
+            const sequence_number = try rtpSequenceNumber(packet);
+            const roc = self.rollover.estimate(sequence_number);
+            var expected: [auth_tag_len_80]u8 = undefined;
+            authTag(&expected, self.keys.auth_key, packet, roc);
+            if (!std.crypto.timing_safe.eql([auth_tag_len_80]u8, expected, tag[0..auth_tag_len_80].*)) return error.BadSrtpAuthTag;
+            const index = packetIndex(roc, sequence_number);
+            try self.replay.accept(index);
+            self.rollover.update(sequence_number, roc);
+            return .{ .packet = packet, .roc = roc, .packet_index = index };
+        }
+
+        pub fn unprotectRtp(self: *Context, allocator: std.mem.Allocator, protected_packet: []const u8) Error!AuthenticatedRtp {
+            const verified = try self.verifyRtp(protected_packet);
+            var packet = try rtp.Packet.parse(allocator, verified.packet);
+            errdefer packet.deinit(allocator);
+            return .{ .verified = verified, .rtp = packet };
+        }
+    };
+
+    pub const VerifiedRtp = struct {
+        packet: []const u8,
+        roc: u32,
+        packet_index: u64,
+    };
+
+    pub const AuthenticatedRtp = struct {
+        verified: VerifiedRtp,
+        rtp: rtp.Packet,
+
+        pub fn deinit(self: *AuthenticatedRtp, allocator: std.mem.Allocator) void {
+            self.rtp.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
+    pub fn packetIndex(roc: u32, sequence_number: u16) u64 {
+        return (@as(u64, roc) << 16) | sequence_number;
+    }
+
+    pub fn authTag(out: *[auth_tag_len_80]u8, auth_key: []const u8, packet: []const u8, roc: u32) void {
+        var roc_bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &roc_bytes, roc, .big);
+        var full: [hmac_sha1_len]u8 = undefined;
+        var hmac = std.crypto.auth.hmac.HmacSha1.init(auth_key);
+        hmac.update(packet);
+        hmac.update(&roc_bytes);
+        hmac.final(&full);
+        @memcpy(out[0..], full[0..auth_tag_len_80]);
+    }
+
+    fn appendAuthTag(list: *std.ArrayList(u8), allocator: std.mem.Allocator, auth_key: []const u8, packet: []const u8, roc: u32) Error!void {
+        var tag: [auth_tag_len_80]u8 = undefined;
+        authTag(&tag, auth_key, packet, roc);
+        try list.appendSlice(allocator, &tag);
+    }
+
+    fn rtpSequenceNumber(packet: []const u8) Error!u16 {
+        if (packet.len < 12 or (packet[0] & 0xc0) != 0x80) return error.InvalidSrtpPacket;
+        return std.mem.readInt(u16, packet[2..4], .big);
+    }
+
+    fn rtpSeqNewer(a: u16, b: u16) bool {
+        return a != b and ((a -% b) < 0x8000);
     }
 };
 
@@ -1865,6 +2044,63 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(u16, 0xbede), packet.extension.?.profile);
     try std.testing.expectEqualStrings("opus", packet.payload);
     try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
+}
+
+test "SRTP NULL_HMAC_SHA1_80 authenticates ROC and rejects replay" {
+    const allocator = std.testing.allocator;
+    const auth_key = [_]u8{0x42} ** srtp.hmac_sha1_len;
+    var sender = srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+    var receiver = srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try sender.protectRtpPacket(&first, allocator, .{
+        .payload_type = 111,
+        .sequence_number = 0xfffe,
+        .timestamp = 90_000,
+        .ssrc = 0x01020304,
+    }, "first");
+    var first_rtp = try receiver.unprotectRtp(allocator, first.items);
+    defer first_rtp.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), first_rtp.verified.roc);
+    try std.testing.expectEqual(@as(u64, 0xfffe), first_rtp.verified.packet_index);
+    try std.testing.expectEqualStrings("first", first_rtp.rtp.payload);
+
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try sender.protectRtpPacket(&second, allocator, .{
+        .payload_type = 111,
+        .sequence_number = 0xffff,
+        .timestamp = 90_960,
+        .ssrc = 0x01020304,
+    }, "second");
+    var second_rtp = try receiver.unprotectRtp(allocator, second.items);
+    defer second_rtp.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), second_rtp.verified.roc);
+
+    var wrapped: std.ArrayList(u8) = .empty;
+    defer wrapped.deinit(allocator);
+    try sender.protectRtpPacket(&wrapped, allocator, .{
+        .payload_type = 111,
+        .sequence_number = 0,
+        .timestamp = 91_920,
+        .ssrc = 0x01020304,
+    }, "wrapped");
+    var wrapped_rtp = try receiver.unprotectRtp(allocator, wrapped.items);
+    defer wrapped_rtp.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), wrapped_rtp.verified.roc);
+    try std.testing.expectEqual(@as(u64, 0x1_0000), wrapped_rtp.verified.packet_index);
+    try std.testing.expectEqualStrings("wrapped", wrapped_rtp.rtp.payload);
+
+    // The replay window is checked after authentication, so duplicates with a
+    // valid tag are rejected without letting an attacker advance the ROC state.
+    try std.testing.expectError(error.SrtpReplay, receiver.verifyRtp(first.items));
+
+    var tampered = try allocator.dupe(u8, second.items);
+    defer allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+    var fresh_receiver = srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+    try std.testing.expectError(error.BadSrtpAuthTag, fresh_receiver.verifyRtp(tampered));
 }
 
 test "RTCP receiver report and feedback packets" {

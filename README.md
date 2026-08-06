@@ -129,9 +129,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
   XOR-MAPPED-ADDRESS helpers, ICE candidates, SDP parsing with DTLS fingerprint
   and ICE credential extraction, DTLS record headers, RTP packets/extensions/padding, RTCP
-  sender/receiver reports plus sender/receiver-report statistics, PLI/NACK feedback and RTP sequence-gap NACK tracking, SCTP DATA packet parsing/writing, CRC32C validation, and DCEP DataChannel OPEN/ACK codecs, plus
-  blocking UDP STUN binding, RTP/RTCP packet, and same-socket STUN/DTLS/RTP/RTCP
-  peer runtimes with a `std.Io.async` concurrent receive helper
+  sender/receiver reports plus sender/receiver-report statistics, PLI/NACK feedback and RTP sequence-gap NACK tracking, SRTP NULL_HMAC_SHA1_80 RTP authentication with ROC tracking and replay-window checks, SCTP DATA packet parsing/writing, CRC32C validation, and DCEP DataChannel OPEN/ACK codecs, plus
+  blocking UDP STUN binding, RTP/SRTP/RTCP packet, and same-socket STUN/DTLS/RTP/RTCP
+  peer runtimes with SRTP send/receive helpers and a `std.Io.async` concurrent receive helper
 
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1,
