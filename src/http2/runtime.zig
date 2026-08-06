@@ -580,9 +580,8 @@ pub const Connection = struct {
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .ping) continue;
             const ping_payload = try http2.PingPayload.parse(frame.frame);
-            if ((frame.frame.header.flags & flag_ack) == 0) {
-                try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
-            }
+            if ((frame.frame.header.flags & flag_ack) != 0) continue;
+            try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
             return ping_payload.data;
         }
     }
@@ -1842,6 +1841,56 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
     try std.testing.expectEqualStrings("done", goaway.goaway.debug_data);
+}
+
+test "HTTP/2 readPing ignores ACK frames" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        observed: [8]u8 = undefined,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server, &shared.observed) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server, observed: *[8]u8) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            observed.* = try connection.readPing();
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try writeFrame(allocator, io, client.stream, .ping, flag_ack, 0, &.{ 1, 1, 1, 1, 1, 1, 1, 1 });
+    try writeFrame(allocator, io, client.stream, .ping, 0, 0, &.{ 2, 3, 5, 7, 11, 13, 17, 19 });
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 2, 3, 5, 7, 11, 13, 17, 19 }, &shared.observed);
 }
 
 test "HTTP/2 runtime sends and receives RST_STREAM" {
