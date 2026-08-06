@@ -1458,7 +1458,10 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
                 if (!std.ascii.eqlIgnoreCase(method, "CONNECT")) return error.InvalidHeader;
                 if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
             } else if (method_value) |method| {
-                if (!std.ascii.eqlIgnoreCase(method, "CONNECT") and (!seen_scheme or !seen_path)) return error.MissingPseudoHeader;
+                if (std.ascii.eqlIgnoreCase(method, "CONNECT")) {
+                    if (!seen_authority) return error.MissingPseudoHeader;
+                    if (seen_scheme or seen_path) return error.InvalidHeader;
+                } else if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
             }
         },
         .response => if (!seen_status) return error.MissingPseudoHeader,
@@ -3236,6 +3239,19 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .authority = "localhost",
         .headers = &.{.{ .name = ":status", .value = "200" }},
     }));
+
+    const connect_missing_authority = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+    };
+    try std.testing.expectError(error.MissingPseudoHeader, validateHeaderBlock(&connect_missing_authority, .request));
+
+    const connect_with_path_scheme = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":authority", .value = "example.com:443" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connect_with_path_scheme, .request));
 }
 
 test "HTTP/2 async std.Io server handles concurrent h2c clients" {
