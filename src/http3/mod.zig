@@ -297,7 +297,12 @@ pub const ControlState = struct {
                 self.peer_max_push_id = push_id;
             },
             FrameType.cancel_push => _ = try parseSingleVarintPayload(frame.payload),
-            FrameType.priority_update_request, FrameType.priority_update_push => {
+            FrameType.priority_update_request => {
+                const priority_update = try parsePriorityUpdatePayload(frame.payload);
+                try validateRequestStreamId(priority_update.prioritized_element_id);
+                self.latest_priority_update = priority_update;
+            },
+            FrameType.priority_update_push => {
                 self.latest_priority_update = try parsePriorityUpdatePayload(frame.payload);
             },
             FrameType.data, FrameType.headers, FrameType.push_promise => return error.UnexpectedFrame,
@@ -477,6 +482,7 @@ pub fn writePriorityUpdateFrame(
     request_stream_id: u64,
     priority: Priority,
 ) Error!void {
+    try validateRequestStreamId(request_stream_id);
     var field_value_buf: [16]u8 = undefined;
     const field_value = priority.serialize(&field_value_buf);
     try writePriorityUpdateFrameRaw(list, allocator, FrameType.priority_update_request, request_stream_id, field_value);
@@ -501,6 +507,10 @@ pub fn parsePriorityUpdatePayload(payload: []const u8) Error!PriorityUpdatePaylo
     var cursor = wire.Cursor.init(payload);
     const id = try quic.varint.decode(&cursor);
     return .{ .prioritized_element_id = id, .field_value = payload[cursor.pos..] };
+}
+
+fn validateRequestStreamId(stream_id: u64) Error!void {
+    if ((stream_id & 0x3) != 0) return error.UnexpectedFrame;
 }
 
 pub fn validatePushPromise(control: ControlState, push_id: u64) Error!void {
@@ -1295,6 +1305,13 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
     try control.applyControlStreamBytes(allocator, settings_payload.items);
     try control.applyFrame(allocator, frame);
     try std.testing.expectEqual(@as(u64, 8), control.latest_priority_update.?.prioritized_element_id);
+
+    try std.testing.expectError(error.UnexpectedFrame, writePriorityUpdateFrame(&encoded, allocator, 1, parsed));
+    var invalid_priority: std.ArrayList(u8) = .empty;
+    defer invalid_priority.deinit(allocator);
+    try writePriorityUpdateFrameRaw(&invalid_priority, allocator, FrameType.priority_update_request, 1, "u=1");
+    const invalid_frame = try Frame.parse(invalid_priority.items);
+    try std.testing.expectError(error.UnexpectedFrame, control.applyFrame(allocator, invalid_frame));
 }
 
 test "HTTP/3 control stream rejects request frames" {
