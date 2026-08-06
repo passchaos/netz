@@ -722,7 +722,7 @@ fn validateTransportInteger(id: TransportParameterId, value: u64) Error!void {
             if (value > max_idle_timeout_ms_cap) return error.InvalidTransportParameter;
         },
         .max_udp_payload_size => {
-            if (value < 1200 or value > default_max_udp_payload_size) return error.InvalidTransportParameter;
+            if (value < 1200) return error.InvalidTransportParameter;
         },
         .initial_max_streams_bidi, .initial_max_streams_uni => {
             if (value > max_stream_count) return error.InvalidTransportParameter;
@@ -1719,6 +1719,12 @@ test "QUIC typed transport parameters roundtrip and validate" {
     defer invalid_udp.deinit(allocator);
     try encodeTransportParameter(&invalid_udp, allocator, @intFromEnum(TransportParameterId.max_udp_payload_size), &.{1});
     try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, invalid_udp.items, .client));
+
+    var jumbo_udp: std.ArrayList(u8) = .empty;
+    defer jumbo_udp.deinit(allocator);
+    try encodeIntegerTransportParameter(&jumbo_udp, allocator, .max_udp_payload_size, default_max_udp_payload_size + 1);
+    const decoded_jumbo_udp = try parseTransportParametersTyped(allocator, jumbo_udp.items, .client);
+    try std.testing.expectEqual(default_max_udp_payload_size + 1, decoded_jumbo_udp.max_udp_payload_size);
 
     var max_idle_ok: std.ArrayList(u8) = .empty;
     defer max_idle_ok.deinit(allocator);
