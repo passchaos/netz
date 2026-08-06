@@ -2311,7 +2311,9 @@ pub const sctp = struct {
         cookie_echo = 10,
         cookie_ack = 11,
         reconfig = 130,
+        i_data = 64,
         forward_tsn = 192,
+        i_forward_tsn = 194,
         shutdown_complete = 14,
         _,
     };
@@ -2370,9 +2372,12 @@ pub const sctp = struct {
         beginning: bool = true,
         ending: bool = true,
         immediate_sack: bool = false,
+        interleaved: bool = false,
         tsn: u32,
         stream_id: u16,
-        stream_sequence_number: u16,
+        stream_sequence_number: u16 = 0,
+        message_identifier: u32 = 0,
+        fragment_sequence_number: u32 = 0,
         payload_protocol_identifier: PayloadProtocolIdentifier,
         user_data: []const u8,
 
@@ -2384,9 +2389,8 @@ pub const sctp = struct {
         }
 
         pub fn parse(chunk: Chunk) Error!DataChunk {
-            if (chunk.chunk_type != .data) return error.InvalidSctpPacket;
             if ((chunk.flags & 0xf0) != 0 or chunk.value.len < 12) return error.InvalidSctpPacket;
-            return .{
+            const base = DataChunk{
                 .immediate_sack = (chunk.flags & 0x08) != 0,
                 .unordered = (chunk.flags & 0x04) != 0,
                 .beginning = (chunk.flags & 0x02) != 0,
@@ -2394,8 +2398,41 @@ pub const sctp = struct {
                 .tsn = std.mem.readInt(u32, chunk.value[0..4], .big),
                 .stream_id = std.mem.readInt(u16, chunk.value[4..6], .big),
                 .stream_sequence_number = std.mem.readInt(u16, chunk.value[6..8], .big),
-                .payload_protocol_identifier = @enumFromInt(std.mem.readInt(u32, chunk.value[8..12], .big)),
-                .user_data = chunk.value[12..],
+                .payload_protocol_identifier = .webrtc_binary,
+                .user_data = &.{},
+            };
+            return switch (chunk.chunk_type) {
+                .data => .{
+                    .immediate_sack = base.immediate_sack,
+                    .unordered = base.unordered,
+                    .beginning = base.beginning,
+                    .ending = base.ending,
+                    .tsn = base.tsn,
+                    .stream_id = base.stream_id,
+                    .stream_sequence_number = base.stream_sequence_number,
+                    .payload_protocol_identifier = @enumFromInt(std.mem.readInt(u32, chunk.value[8..12], .big)),
+                    .user_data = chunk.value[12..],
+                },
+                .i_data => blk: {
+                    if (chunk.value.len < 16) return error.InvalidSctpPacket;
+                    const mid = std.mem.readInt(u32, chunk.value[8..12], .big);
+                    const ppid_or_fsn = std.mem.readInt(u32, chunk.value[12..16], .big);
+                    break :blk .{
+                        .immediate_sack = base.immediate_sack,
+                        .unordered = base.unordered,
+                        .beginning = base.beginning,
+                        .ending = base.ending,
+                        .interleaved = true,
+                        .tsn = base.tsn,
+                        .stream_id = base.stream_id,
+                        .stream_sequence_number = @truncate(mid),
+                        .message_identifier = mid,
+                        .fragment_sequence_number = if (base.beginning) 0 else ppid_or_fsn,
+                        .payload_protocol_identifier = if (base.beginning) @enumFromInt(ppid_or_fsn) else @enumFromInt(@as(u32, 0)),
+                        .user_data = chunk.value[16..],
+                    };
+                },
+                else => return error.InvalidSctpPacket,
             };
         }
     };
@@ -2871,7 +2908,7 @@ pub const sctp = struct {
             }
 
             try self.storeFragment(chunk);
-            return try self.tryReassemble(chunk.stream_id, chunk.stream_sequence_number, chunk.unordered);
+            return try self.tryReassemble(chunk);
         }
 
         fn storeFragment(self: *Reassembler, chunk: DataChunk) Error!void {
@@ -2888,61 +2925,91 @@ pub const sctp = struct {
             self.buffered_bytes = next_buffered;
         }
 
-        fn tryReassemble(self: *Reassembler, stream_id: u16, stream_sequence_number: u16, unordered: bool) Error!?ReassembledMessage {
+        fn tryReassemble(self: *Reassembler, target: DataChunk) Error!?ReassembledMessage {
             var begin_index: ?usize = null;
             var end_index: ?usize = null;
             for (self.fragments.items, 0..) |fragment, i| {
-                if (!sameMessage(fragment.chunk, stream_id, stream_sequence_number, unordered)) continue;
+                if (!sameMessage(fragment.chunk, target)) continue;
                 if (fragment.chunk.beginning) begin_index = i;
                 if (fragment.chunk.ending) end_index = i;
             }
             const begin = begin_index orelse return null;
             _ = end_index orelse return null;
 
-            var current_tsn = self.fragments.items[begin].chunk.tsn;
             var total_len: usize = 0;
-            const ppid = self.fragments.items[begin].chunk.payload_protocol_identifier;
-            while (true) : (current_tsn +%= 1) {
-                const index = self.findFragmentIndex(current_tsn, stream_id, stream_sequence_number, unordered) orelse return null;
-                const fragment = self.fragments.items[index];
-                if (fragment.chunk.payload_protocol_identifier != ppid) return error.InvalidSctpPacket;
-                total_len = std.math.add(usize, total_len, fragment.data.len) catch return error.InvalidSctpPacket;
-                if (fragment.chunk.ending) break;
+            const begin_chunk = self.fragments.items[begin].chunk;
+            const ppid = begin_chunk.payload_protocol_identifier;
+            if (begin_chunk.interleaved) {
+                var fsn: u32 = 0;
+                while (true) : (fsn +%= 1) {
+                    const index = self.findFragmentByFsn(begin_chunk, fsn) orelse return null;
+                    const fragment = self.fragments.items[index];
+                    if (fragment.chunk.beginning and fsn != 0) return error.InvalidSctpPacket;
+                    total_len = std.math.add(usize, total_len, fragment.data.len) catch return error.InvalidSctpPacket;
+                    if (fragment.chunk.ending) break;
+                }
+            } else {
+                var current_tsn = begin_chunk.tsn;
+                while (true) : (current_tsn +%= 1) {
+                    const index = self.findFragmentIndex(current_tsn, begin_chunk) orelse return null;
+                    const fragment = self.fragments.items[index];
+                    if (fragment.chunk.payload_protocol_identifier != ppid) return error.InvalidSctpPacket;
+                    total_len = std.math.add(usize, total_len, fragment.data.len) catch return error.InvalidSctpPacket;
+                    if (fragment.chunk.ending) break;
+                }
             }
 
             var data = try self.allocator.alloc(u8, total_len);
             errdefer self.allocator.free(data);
             var out_pos: usize = 0;
-            current_tsn = self.fragments.items[begin].chunk.tsn;
-            while (true) : (current_tsn +%= 1) {
-                const index = self.findFragmentIndex(current_tsn, stream_id, stream_sequence_number, unordered).?;
-                const fragment = self.fragments.items[index];
-                @memcpy(data[out_pos .. out_pos + fragment.data.len], fragment.data);
-                out_pos += fragment.data.len;
-                if (fragment.chunk.ending) break;
+            if (begin_chunk.interleaved) {
+                var fsn: u32 = 0;
+                while (true) : (fsn +%= 1) {
+                    const index = self.findFragmentByFsn(begin_chunk, fsn).?;
+                    const fragment = self.fragments.items[index];
+                    @memcpy(data[out_pos .. out_pos + fragment.data.len], fragment.data);
+                    out_pos += fragment.data.len;
+                    if (fragment.chunk.ending) break;
+                }
+            } else {
+                var current_tsn = begin_chunk.tsn;
+                while (true) : (current_tsn +%= 1) {
+                    const index = self.findFragmentIndex(current_tsn, begin_chunk).?;
+                    const fragment = self.fragments.items[index];
+                    @memcpy(data[out_pos .. out_pos + fragment.data.len], fragment.data);
+                    out_pos += fragment.data.len;
+                    if (fragment.chunk.ending) break;
+                }
             }
 
-            self.removeMessageFragments(stream_id, stream_sequence_number, unordered);
+            self.removeMessageFragments(begin_chunk);
             return .{
-                .stream_id = stream_id,
-                .stream_sequence_number = stream_sequence_number,
-                .unordered = unordered,
+                .stream_id = begin_chunk.stream_id,
+                .stream_sequence_number = begin_chunk.stream_sequence_number,
+                .unordered = begin_chunk.unordered,
                 .payload_protocol_identifier = ppid,
                 .data = data,
             };
         }
 
-        fn findFragmentIndex(self: Reassembler, tsn: u32, stream_id: u16, stream_sequence_number: u16, unordered: bool) ?usize {
+        fn findFragmentIndex(self: Reassembler, tsn: u32, target: DataChunk) ?usize {
             for (self.fragments.items, 0..) |fragment, i| {
-                if (fragment.chunk.tsn == tsn and sameMessage(fragment.chunk, stream_id, stream_sequence_number, unordered)) return i;
+                if (fragment.chunk.tsn == tsn and sameMessage(fragment.chunk, target)) return i;
             }
             return null;
         }
 
-        fn removeMessageFragments(self: *Reassembler, stream_id: u16, stream_sequence_number: u16, unordered: bool) void {
+        fn findFragmentByFsn(self: Reassembler, target: DataChunk, fsn: u32) ?usize {
+            for (self.fragments.items, 0..) |fragment, i| {
+                if (fragment.chunk.fragment_sequence_number == fsn and sameMessage(fragment.chunk, target)) return i;
+            }
+            return null;
+        }
+
+        fn removeMessageFragments(self: *Reassembler, target: DataChunk) void {
             var i: usize = 0;
             while (i < self.fragments.items.len) {
-                if (sameMessage(self.fragments.items[i].chunk, stream_id, stream_sequence_number, unordered)) {
+                if (sameMessage(self.fragments.items[i].chunk, target)) {
                     const removed = self.fragments.swapRemove(i);
                     self.buffered_bytes -= removed.data.len;
                     self.allocator.free(removed.data);
@@ -2952,10 +3019,13 @@ pub const sctp = struct {
             }
         }
 
-        fn sameMessage(chunk: DataChunk, stream_id: u16, stream_sequence_number: u16, unordered: bool) bool {
-            return chunk.stream_id == stream_id and
-                chunk.stream_sequence_number == stream_sequence_number and
-                chunk.unordered == unordered;
+        fn sameMessage(chunk: DataChunk, target: DataChunk) bool {
+            if (chunk.interleaved != target.interleaved) return false;
+            if (chunk.stream_id != target.stream_id or chunk.unordered != target.unordered) return false;
+            return if (chunk.interleaved)
+                chunk.message_identifier == target.message_identifier
+            else
+                chunk.stream_sequence_number == target.stream_sequence_number;
         }
 
         fn copyChunkWithData(chunk: DataChunk, data: []const u8) DataChunk {
@@ -3263,16 +3333,32 @@ pub const sctp = struct {
     }
 
     pub fn writeDataChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunk: DataChunk) Error!void {
-        const value_len = 12 + chunk.user_data.len;
+        const value_len = (if (chunk.interleaved) @as(usize, 16) else @as(usize, 12)) + chunk.user_data.len;
         const chunk_len = 4 + value_len;
         if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
-        try list.append(allocator, @intFromEnum(ChunkType.data));
+        try list.append(allocator, @intFromEnum(if (chunk.interleaved) ChunkType.i_data else ChunkType.data));
         try list.append(allocator, chunk.flags());
         try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
         try wire.appendInt(list, allocator, u32, chunk.tsn, .big);
         try wire.appendInt(list, allocator, u16, chunk.stream_id, .big);
-        try wire.appendInt(list, allocator, u16, chunk.stream_sequence_number, .big);
-        try wire.appendInt(list, allocator, u32, @intFromEnum(chunk.payload_protocol_identifier), .big);
+        if (chunk.interleaved) {
+            // RFC 8260 I-DATA replaces SSN with a reserved field plus a
+            // Message Identifier.  The fourth word carries the PPID only on the
+            // beginning fragment; subsequent fragments carry the Fragment
+            // Sequence Number.  Pion/sctp follows the same layout.
+            try wire.appendInt(list, allocator, u16, 0, .big);
+            try wire.appendInt(list, allocator, u32, chunk.message_identifier, .big);
+            try wire.appendInt(
+                list,
+                allocator,
+                u32,
+                if (chunk.beginning) @intFromEnum(chunk.payload_protocol_identifier) else chunk.fragment_sequence_number,
+                .big,
+            );
+        } else {
+            try wire.appendInt(list, allocator, u16, chunk.stream_sequence_number, .big);
+            try wire.appendInt(list, allocator, u32, @intFromEnum(chunk.payload_protocol_identifier), .big);
+        }
         try list.appendSlice(allocator, chunk.user_data);
         try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
     }
@@ -4492,6 +4578,68 @@ test "SCTP DATA reassembler handles fragmented messages" {
         .ending = false,
         .user_data = "too-large-for-window",
     }));
+
+    var interleaved_packet: std.ArrayList(u8) = .empty;
+    defer interleaved_packet.deinit(allocator);
+    try sctp.writeDataPacket(&interleaved_packet, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, &.{
+        .{
+            .interleaved = true,
+            .tsn = 100,
+            .stream_id = 4,
+            .message_identifier = 9,
+            .payload_protocol_identifier = .webrtc_string,
+            .beginning = true,
+            .ending = false,
+            .user_data = "inter",
+        },
+        .{
+            .interleaved = true,
+            .tsn = 102,
+            .stream_id = 4,
+            .message_identifier = 9,
+            .fragment_sequence_number = 2,
+            .payload_protocol_identifier = @enumFromInt(@as(u32, 0)),
+            .beginning = false,
+            .ending = true,
+            .user_data = "data",
+        },
+        .{
+            .interleaved = true,
+            .tsn = 101,
+            .stream_id = 4,
+            .message_identifier = 9,
+            .fragment_sequence_number = 1,
+            .payload_protocol_identifier = @enumFromInt(@as(u32, 0)),
+            .beginning = false,
+            .ending = false,
+            .user_data = "leaved ",
+        },
+    });
+    var parsed_interleaved = try sctp.parsePacket(allocator, interleaved_packet.items, true);
+    defer parsed_interleaved.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), parsed_interleaved.chunks.len);
+    const i_begin = try sctp.DataChunk.parse(parsed_interleaved.chunks[0]);
+    const i_end = try sctp.DataChunk.parse(parsed_interleaved.chunks[1]);
+    const i_middle = try sctp.DataChunk.parse(parsed_interleaved.chunks[2]);
+    try std.testing.expect(i_begin.interleaved);
+    try std.testing.expectEqual(@as(u32, 9), i_begin.message_identifier);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string, i_begin.payload_protocol_identifier);
+    try std.testing.expectEqual(@as(u32, 2), i_end.fragment_sequence_number);
+
+    var i_reassembler = sctp.Reassembler.init(allocator, 64);
+    defer i_reassembler.deinit();
+    try std.testing.expect((try i_reassembler.push(i_end)) == null);
+    try std.testing.expect((try i_reassembler.push(i_begin)) == null);
+    var i_message = (try i_reassembler.push(i_middle)).?;
+    defer i_message.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 4), i_message.stream_id);
+    try std.testing.expectEqual(@as(u16, 9), i_message.stream_sequence_number);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string, i_message.payload_protocol_identifier);
+    try std.testing.expectEqualStrings("interleaved data", i_message.data);
 }
 
 test "SCTP SACK packet roundtrip" {
