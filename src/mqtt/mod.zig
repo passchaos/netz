@@ -756,7 +756,11 @@ pub const Publish = struct {
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const topic = try readUtf8(&cursor);
         const qos = try QoS.fromFlags(fixed.flags);
-        const packet_id = if (qos == .at_most_once) null else try cursor.readInt(u16, .big);
+        const packet_id = if (qos == .at_most_once) null else blk: {
+            const id = try cursor.readInt(u16, .big);
+            if (id == 0) return error.InvalidPacketIdentifier;
+            break :blk id;
+        };
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
         if (protocol == .v5) try validatePropertiesFor(.publish, props);
@@ -989,7 +993,7 @@ pub const SubAck = struct {
         if (protocol == .v5) try validatePropertiesFor(.suback, props);
         const reason_codes = try allocator.dupe(u8, cursor.buf[cursor.pos..]);
         errdefer allocator.free(reason_codes);
-        for (reason_codes) |code| try validateSubAckReason(code);
+        for (reason_codes) |code| try validateSubAckReason(protocol, code);
         cursor.pos = cursor.buf.len;
         if (reason_codes.len == 0) return error.InvalidReasonCode;
         return .{ .packet_id = packet_id, .properties = props, .reason_codes = reason_codes };
@@ -1011,9 +1015,11 @@ pub const SubAck = struct {
         if (protocol == .v5) {
             try validatePropertiesFor(.suback, properties);
             try writeProperties(&variable, allocator, properties);
+        } else if (properties.len != 0) {
+            return error.InvalidProperty;
         }
         for (reason_codes) |code| {
-            try validateSubAckReason(code);
+            try validateSubAckReason(protocol, code);
             try variable.append(allocator, code);
         }
         try (FixedHeader{ .packet_type = .suback, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
@@ -1251,10 +1257,16 @@ fn validateSubscriptionOptions(options: u8) Error!void {
     if (((options >> 4) & 0x03) == 3) return error.InvalidSubscription;
 }
 
-fn validateSubAckReason(code: u8) Error!void {
-    switch (code) {
-        0x00, 0x01, 0x02, 0x80, 0x83, 0x87, 0x8f, 0x91, 0x97, 0x9e, 0xa1, 0xa2 => {},
-        else => return error.InvalidReasonCode,
+fn validateSubAckReason(protocol: ProtocolVersion, code: u8) Error!void {
+    switch (protocol) {
+        .v3_1_1 => switch (code) {
+            0x00, 0x01, 0x02, 0x80 => {},
+            else => return error.InvalidReasonCode,
+        },
+        .v5 => switch (code) {
+            0x00, 0x01, 0x02, 0x80, 0x83, 0x87, 0x8f, 0x91, 0x97, 0x9e, 0xa1, 0xa2 => {},
+            else => return error.InvalidReasonCode,
+        },
     }
 }
 
@@ -1445,10 +1457,19 @@ pub fn writePublish(
     if (topic.len == 0) {
         if (protocol != .v5 or topicAlias(options.properties) == null) return error.InvalidTopic;
     } else try validateTopicName(topic);
+    if (options.qos == .at_most_once) {
+        if (options.packet_id != null) return error.InvalidPacketIdentifier;
+    } else if (options.packet_id == null or options.packet_id.? == 0) {
+        // Like rumqtt and the MQTT spec, QoS 1/2 PUBLISH packets must carry a
+        // non-zero Packet Identifier.  Do not synthesize one in the stateless
+        // writer: runtime connections own packet-id allocation and can avoid
+        // collisions with their in-flight window.
+        return error.InvalidPacketIdentifier;
+    }
     var variable: std.ArrayList(u8) = .empty;
     defer variable.deinit(allocator);
     try writeUtf8(&variable, allocator, topic);
-    if (options.qos != .at_most_once) try wire.appendInt(&variable, allocator, u16, options.packet_id orelse 1, .big);
+    if (options.qos != .at_most_once) try wire.appendInt(&variable, allocator, u16, options.packet_id.?, .big);
     if (protocol == .v5) {
         try validatePropertiesFor(.publish, options.properties);
         try writeProperties(&variable, allocator, options.properties);
@@ -1519,6 +1540,9 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqual(@as(u16, 7), publish.packet_id.?);
     try std.testing.expectEqualStrings("21.5", publish.payload);
     try std.testing.expectEqual(@as(?u16, 2), topicAlias(publish.properties));
+    try std.testing.expectError(error.InvalidPacketIdentifier, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "bad", .{ .qos = .at_least_once }));
+    try std.testing.expectError(error.InvalidPacketIdentifier, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "bad", .{ .qos = .at_least_once, .packet_id = 0 }));
+    try std.testing.expectError(error.InvalidPacketIdentifier, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "bad", .{ .packet_id = 7 }));
 
     var alias_only_bytes: std.ArrayList(u8) = .empty;
     defer alias_only_bytes.deinit(allocator);
@@ -1527,6 +1551,23 @@ test "MQTT connect and publish parse" {
     defer alias_only.deinit(allocator);
     try std.testing.expectEqualStrings("", alias_only.topic);
     try std.testing.expectEqual(@as(?u16, 2), topicAlias(alias_only.properties));
+
+    var invalid_publish: std.ArrayList(u8) = .empty;
+    defer invalid_publish.deinit(allocator);
+    var invalid_variable: std.ArrayList(u8) = .empty;
+    defer invalid_variable.deinit(allocator);
+    try writeUtf8(&invalid_variable, allocator, "sensors/temp");
+    try wire.appendInt(&invalid_variable, allocator, u16, 0, .big);
+    try writeProperties(&invalid_variable, allocator, &.{});
+    try invalid_variable.appendSlice(allocator, "bad");
+    try (FixedHeader{
+        .packet_type = .publish,
+        .flags = @as(u4, @intFromEnum(QoS.at_least_once)) << 1,
+        .remaining_len = invalid_variable.items.len,
+        .header_len = 0,
+    }).write(&invalid_publish, allocator);
+    try invalid_publish.appendSlice(allocator, invalid_variable.items);
+    try std.testing.expectError(error.InvalidPacketIdentifier, Publish.parse(allocator, .v5, invalid_publish.items));
 }
 
 test "MQTT v5 property values are validated" {
@@ -1849,6 +1890,24 @@ test "MQTT subscribe and suback controls" {
     defer suback.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 9), suback.packet_id);
     try std.testing.expectEqualSlices(u8, &reasons, suback.reason_codes);
+
+    suback_bytes.clearRetainingCapacity();
+    try SubAck.write(&suback_bytes, allocator, .v3_1_1, 9, &.{}, &.{0x80});
+    suback.deinit(allocator);
+    suback = try SubAck.parse(allocator, .v3_1_1, suback_bytes.items);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x80}, suback.reason_codes);
+    try std.testing.expectError(error.InvalidReasonCode, SubAck.write(&suback_bytes, allocator, .v3_1_1, 9, &.{}, &.{0x83}));
+
+    var invalid_suback: std.ArrayList(u8) = .empty;
+    defer invalid_suback.deinit(allocator);
+    try (FixedHeader{
+        .packet_type = .suback,
+        .flags = 0,
+        .remaining_len = 3,
+        .header_len = 0,
+    }).write(&invalid_suback, allocator);
+    try invalid_suback.appendSlice(allocator, &.{ 0x00, 0x09, 0x83 });
+    try std.testing.expectError(error.InvalidReasonCode, SubAck.parse(allocator, .v3_1_1, invalid_suback.items));
 }
 
 test "MQTT unsubscribe and unsuback controls" {
