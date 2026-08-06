@@ -1511,6 +1511,16 @@ pub const rtcp = struct {
         report_blocks: []ReportBlock = &.{},
     };
 
+    pub const Goodbye = struct {
+        sources: []u32 = &.{},
+        reason: []const u8 = &.{},
+
+        pub fn deinit(self: *Goodbye, allocator: std.mem.Allocator) void {
+            allocator.free(self.sources);
+            self.* = undefined;
+        }
+    };
+
     pub const SdesItemType = enum(u8) {
         end = 0,
         cname = 1,
@@ -1850,6 +1860,7 @@ pub const rtcp = struct {
     pub const Packet = union(enum) {
         sender_report: SenderReport,
         receiver_report: ReceiverReport,
+        goodbye: Goodbye,
         source_description: SourceDescription,
         picture_loss_indication: PictureLossIndication,
         full_intra_request: FullIntraRequest,
@@ -1861,6 +1872,7 @@ pub const rtcp = struct {
             switch (self.*) {
                 .sender_report => |report| allocator.free(report.report_blocks),
                 .receiver_report => |report| allocator.free(report.report_blocks),
+                .goodbye => |*goodbye| goodbye.deinit(allocator),
                 .source_description => |*sdes| sdes.deinit(allocator),
                 .full_intra_request => |*fir| fir.deinit(allocator),
                 .transport_layer_nack => |nack| allocator.free(nack.pairs),
@@ -1891,6 +1903,7 @@ pub const rtcp = struct {
         const packet: Packet = switch (header.packet_type) {
             .sender_report => .{ .sender_report = try parseSenderReport(allocator, header, payload) },
             .receiver_report => .{ .receiver_report = try parseReceiverReport(allocator, header, payload) },
+            .goodbye => .{ .goodbye = try parseGoodbye(allocator, header, payload) },
             .source_description => .{ .source_description = try parseSourceDescription(allocator, header, payload) },
             .payload_feedback => if (header.count_or_format == payload_feedback_pli)
                 .{ .picture_loss_indication = try parsePictureLossIndication(payload) }
@@ -1929,6 +1942,7 @@ pub const rtcp = struct {
         switch (packet) {
             .sender_report => |report| try writeSenderReport(list, allocator, report),
             .receiver_report => |report| try writeReceiverReport(list, allocator, report),
+            .goodbye => |goodbye| try writeGoodbye(list, allocator, goodbye),
             .source_description => |sdes| try writeSourceDescription(list, allocator, sdes),
             .picture_loss_indication => |pli| try writePictureLossIndication(list, allocator, pli),
             .full_intra_request => |fir| try writeFullIntraRequest(list, allocator, fir),
@@ -2025,6 +2039,26 @@ pub const rtcp = struct {
             .sender_ssrc = sender_ssrc,
             .report_blocks = try parseReportBlocks(allocator, &cursor, report_count),
         };
+    }
+
+    fn parseGoodbye(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!Goodbye {
+        const source_count = @as(usize, header.count_or_format);
+        if (payload.len < source_count * 4) return error.InvalidRtcpPacket;
+        var cursor = wire.Cursor.init(payload);
+        const sources = try allocator.alloc(u32, source_count);
+        errdefer allocator.free(sources);
+        for (sources) |*source| source.* = try cursor.readInt(u32, .big);
+
+        var reason: []const u8 = &.{};
+        if (!cursor.eof()) {
+            const reason_len = try cursor.readByte();
+            if (cursor.remaining() < reason_len) return error.InvalidRtcpPacket;
+            reason = try cursor.readSlice(reason_len);
+            // BYE reason text is followed by zero padding to a 32-bit boundary.
+            // Pion/rtcp ignores the trailing bytes after the counted reason;
+            // keep the same behavior so packets from browsers/Pion round-trip.
+        }
+        return .{ .sources = sources, .reason = reason };
     }
 
     fn parsePictureLossIndication(payload: []const u8) Error!PictureLossIndication {
@@ -2179,6 +2213,20 @@ pub const rtcp = struct {
         try writeHeader(list, allocator, @intCast(report.report_blocks.len), .receiver_report, 4 + report.report_blocks.len * 24);
         try wire.appendInt(list, allocator, u32, report.sender_ssrc, .big);
         for (report.report_blocks) |block| try writeReportBlock(list, allocator, block);
+    }
+
+    fn writeGoodbye(list: *std.ArrayList(u8), allocator: std.mem.Allocator, goodbye: Goodbye) Error!void {
+        if (goodbye.sources.len > 31 or goodbye.reason.len > std.math.maxInt(u8)) return error.InvalidRtcpPacket;
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        for (goodbye.sources) |source| try wire.appendInt(&payload, allocator, u32, source, .big);
+        if (goodbye.reason.len != 0) {
+            try payload.append(allocator, @intCast(goodbye.reason.len));
+            try payload.appendSlice(allocator, goodbye.reason);
+        }
+        try payload.appendNTimes(allocator, 0, (4 - (payload.items.len % 4)) % 4);
+        try writeHeader(list, allocator, @intCast(goodbye.sources.len), .goodbye, payload.items.len);
+        try list.appendSlice(allocator, payload.items);
     }
 
     fn writeSourceDescription(list: *std.ArrayList(u8), allocator: std.mem.Allocator, sdes: SourceDescription) Error!void {
@@ -4190,19 +4238,23 @@ test "RTCP SDES and compound packets" {
     defer encoded.deinit(allocator);
     var sdes_items = [_]rtcp.SdesItem{.{ .item_type = .cname, .value = "alice@example.test" }};
     var sdes_chunks = [_]rtcp.SdesChunk{.{ .ssrc = 0x01020304, .items = &sdes_items }};
+    var bye_sources = [_]u32{0x01020304};
     var packets = [_]rtcp.Packet{
         .{ .receiver_report = .{ .sender_ssrc = 0x01020304 } },
         .{ .source_description = .{ .chunks = &sdes_chunks } },
         .{ .picture_loss_indication = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x11121314 } },
+        .{ .goodbye = .{ .sources = &bye_sources, .reason = "done" } },
     };
 
     try rtcp.writeCompound(&encoded, allocator, &packets);
     const parsed = try rtcp.parseCompound(allocator, encoded.items);
     defer rtcp.freeCompound(allocator, parsed);
-    try std.testing.expectEqual(@as(usize, 3), parsed.len);
+    try std.testing.expectEqual(@as(usize, 4), parsed.len);
     try std.testing.expectEqual(@as(u32, 0x01020304), parsed[0].receiver_report.sender_ssrc);
     try std.testing.expectEqualStrings("alice@example.test", parsed[1].source_description.cname(0x01020304).?);
     try std.testing.expectEqual(@as(u32, 0x11121314), parsed[2].picture_loss_indication.media_ssrc);
+    try std.testing.expectEqual(@as(u32, 0x01020304), parsed[3].goodbye.sources[0]);
+    try std.testing.expectEqualStrings("done", parsed[3].goodbye.reason);
 
     var single = try rtcp.parsePacket(allocator, encoded.items[parsed[0].receiver_report.report_blocks.len..]);
     defer single.deinit(allocator);
@@ -4226,6 +4278,26 @@ test "RTCP SDES and compound packets" {
     try rtcp.writePacket(&encoded, allocator, .{ .picture_loss_indication = .{ .sender_ssrc = 1, .media_ssrc = 2 } });
     try rtcp.writePacket(&encoded, allocator, .{ .source_description = .{ .chunks = &sdes_chunks } });
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parseCompound(allocator, encoded.items));
+
+    encoded.clearRetainingCapacity();
+    var single_bye_sources = [_]u32{0x902f9e2e};
+    try rtcp.writePacket(&encoded, allocator, .{ .goodbye = .{ .sources = &single_bye_sources, .reason = "F" } });
+    var bye = try rtcp.parsePacket(allocator, encoded.items);
+    defer bye.deinit(allocator);
+    switch (bye.packet) {
+        .goodbye => |goodbye| {
+            try std.testing.expectEqual(@as(usize, 1), goodbye.sources.len);
+            try std.testing.expectEqual(@as(u32, 0x902f9e2e), goodbye.sources[0]);
+            try std.testing.expectEqualStrings("F", goodbye.reason);
+        },
+        else => return error.InvalidRtcpPacket,
+    }
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .goodbye = .{
+        .sources = &single_bye_sources,
+        .reason = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    } }));
 }
 
 test "RTCP full intra request feedback" {
