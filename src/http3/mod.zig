@@ -1000,21 +1000,13 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!Deco
 }
 
 pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedResponse {
-    var message = try decodeMessage(allocator, bytes);
+    var message = try decodeResponseMessage(allocator, bytes);
     errdefer message.deinit(allocator);
 
     try validateHeaderBlock(message.headers, .response);
     try validateHeaderBlock(message.trailers, .trailers);
 
-    var status: ?u16 = null;
-    for (message.headers) |header| {
-        if (std.mem.eql(u8, header.name, ":status")) {
-            status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
-            if (status.? < 100 or status.? > 999) return error.InvalidStatus;
-        }
-    }
-
-    const final_status = status orelse return error.MissingStatus;
+    const final_status = try responseStatus(message.headers);
     try validateResponseBodyForStatus(final_status, message.headers, message.body, message.trailers);
     try validateContentLengthForStatus(final_status, message.headers, message.body.len);
 
@@ -1062,6 +1054,35 @@ fn writeHeadersAndData(
         try Qpack.encodeLiteralBlock(&block, allocator, trailers);
         try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, allocator);
     }
+}
+
+fn responseStatus(headers: []const Qpack.HeaderField) Error!u16 {
+    for (headers) |header| {
+        if (!std.mem.eql(u8, header.name, ":status")) continue;
+        const status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
+        if (status < 100 or status > 999) return error.InvalidStatus;
+        return status;
+    }
+    return error.MissingStatus;
+}
+
+fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedMessage {
+    var offset: usize = 0;
+    while (true) {
+        const headers_frame = try Frame.parse(bytes[offset..]);
+        if (headers_frame.frame_type != FrameType.headers) return error.ExpectedHeadersFrame;
+        const headers = try Qpack.decodeLiteralBlock(allocator, headers_frame.payload);
+        defer allocator.free(headers);
+        try validateHeaderBlock(headers, .response);
+        const status = try responseStatus(headers);
+        if (status < 200) {
+            offset += headers_frame.consumed;
+            if (offset >= bytes.len) return error.ExpectedHeadersFrame;
+            continue;
+        }
+        break;
+    }
+    return decodeMessage(allocator, bytes[offset..]);
 }
 
 fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedMessage {
@@ -1819,6 +1840,20 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "099" }});
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&low_status, allocator);
     try std.testing.expectError(error.InvalidStatus, decodeResponse(allocator, low_status.items));
+
+    var informational_response: std.ArrayList(u8) = .empty;
+    defer informational_response.deinit(allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "103" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&informational_response, allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "200" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&informational_response, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "final", .consumed = 0 }).write(&informational_response, allocator);
+    var informational_decoded = try decodeResponse(allocator, informational_response.items);
+    defer informational_decoded.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), informational_decoded.status);
+    try std.testing.expectEqualStrings("final", informational_decoded.body);
 
     var signed_length_response: std.ArrayList(u8) = .empty;
     defer signed_length_response.deinit(allocator);
