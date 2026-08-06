@@ -2369,6 +2369,7 @@ pub const sctp = struct {
         unordered: bool = false,
         beginning: bool = true,
         ending: bool = true,
+        immediate_sack: bool = false,
         tsn: u32,
         stream_id: u16,
         stream_sequence_number: u16,
@@ -2376,15 +2377,17 @@ pub const sctp = struct {
         user_data: []const u8,
 
         pub fn flags(self: DataChunk) u8 {
-            return (if (self.unordered) @as(u8, 0x04) else 0) |
+            return (if (self.immediate_sack) @as(u8, 0x08) else 0) |
+                (if (self.unordered) @as(u8, 0x04) else 0) |
                 (if (self.beginning) @as(u8, 0x02) else 0) |
                 (if (self.ending) @as(u8, 0x01) else 0);
         }
 
         pub fn parse(chunk: Chunk) Error!DataChunk {
             if (chunk.chunk_type != .data) return error.InvalidSctpPacket;
-            if ((chunk.flags & 0xf8) != 0 or chunk.value.len < 12) return error.InvalidSctpPacket;
+            if ((chunk.flags & 0xf0) != 0 or chunk.value.len < 12) return error.InvalidSctpPacket;
             return .{
+                .immediate_sack = (chunk.flags & 0x08) != 0,
                 .unordered = (chunk.flags & 0x04) != 0,
                 .beginning = (chunk.flags & 0x02) != 0,
                 .ending = (chunk.flags & 0x01) != 0,
@@ -4599,6 +4602,27 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expectEqual(@as(u32, 3), dcep.open.reliability_parameter);
     try std.testing.expectEqualStrings("chat", dcep.open.label);
     try std.testing.expectEqualStrings("json", dcep.open.protocol);
+
+    packet_bytes.clearRetainingCapacity();
+    try sctp.writeDataPacket(&packet_bytes, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, &.{.{
+        .immediate_sack = true,
+        .tsn = 11,
+        .stream_id = 2,
+        .stream_sequence_number = 1,
+        .payload_protocol_identifier = .webrtc_string,
+        .user_data = "immediate",
+    }});
+    var immediate_packet = try sctp.parsePacket(allocator, packet_bytes.items, true);
+    defer immediate_packet.deinit(allocator);
+    const immediate_data = try sctp.DataChunk.parse(immediate_packet.chunks[0]);
+    try std.testing.expect(immediate_data.immediate_sack);
+    try std.testing.expect(immediate_data.beginning);
+    try std.testing.expect(immediate_data.ending);
+    try std.testing.expectEqualStrings("immediate", immediate_data.user_data);
 
     var tampered = try allocator.dupe(u8, packet_bytes.items);
     defer allocator.free(tampered);
