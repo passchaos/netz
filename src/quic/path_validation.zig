@@ -30,6 +30,12 @@ pub const State = struct {
     }
 
     pub fn queueChallenge(self: *State, data: [8]u8) Error!void {
+        for (self.pending_challenges.items) |challenge| {
+            if (std.mem.eql(u8, &challenge.data, &data)) return;
+        }
+        for (self.outstanding_challenges.items) |challenge| {
+            if (std.mem.eql(u8, &challenge.data, &data)) return;
+        }
         try self.pending_challenges.append(self.allocator, .{ .data = data });
     }
 
@@ -68,6 +74,10 @@ pub const State = struct {
         return self.pending_responses.items.len;
     }
 
+    pub fn pendingChallengeCount(self: State) usize {
+        return self.pending_challenges.items.len;
+    }
+
     pub fn outstandingChallengeCount(self: State) usize {
         return self.outstanding_challenges.items.len;
     }
@@ -92,4 +102,23 @@ test "QUIC path validation state queues responses and validates challenges" {
     try state.receiveResponse(challenge);
     try std.testing.expectEqual(@as(usize, 0), state.outstandingChallengeCount());
     try std.testing.expectError(error.UnknownPathResponse, state.receiveResponse(challenge));
+}
+
+test "QUIC path validation suppresses duplicate pending and outstanding challenges" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+
+    const challenge = [_]u8{ 9, 8, 7, 6, 5, 4, 3, 2 };
+    try state.queueChallenge(challenge);
+    try state.queueChallenge(challenge);
+    try std.testing.expectEqual(@as(usize, 1), state.pendingChallengeCount());
+
+    _ = try state.nextChallengeFrame();
+    try std.testing.expectEqual(@as(usize, 0), state.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), state.outstandingChallengeCount());
+
+    try state.queueChallenge(challenge);
+    try std.testing.expectEqual(@as(usize, 0), state.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), state.outstandingChallengeCount());
 }

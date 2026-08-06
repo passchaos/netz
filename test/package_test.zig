@@ -204,6 +204,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "packetThresholdCandidate"));
     try std.testing.expect(@hasDecl(netz.quic.congestion, "Controller"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation, "State"));
+    try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "pendingChallengeCount"));
     try std.testing.expect(@hasDecl(netz.quic.rtt, "Stats"));
     try std.testing.expectEqual(@as(u64, 100_000_000), netz.quic.rtt.default_initial_rtt_ns);
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveManyConcurrent"));
