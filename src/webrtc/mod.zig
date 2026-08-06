@@ -124,13 +124,16 @@ pub const stun = struct {
         var attr_cursor = wire.Cursor.init(bytes[20 .. 20 + @as(usize, len)]);
         var attrs: std.ArrayList(Attribute) = .empty;
         errdefer attrs.deinit(allocator);
+        var seen_integrity = false;
         while (!attr_cursor.eof()) {
             const attr_type: AttributeType = @enumFromInt(try attr_cursor.readInt(u16, .big));
             const attr_len = try attr_cursor.readInt(u16, .big);
             const value = try attr_cursor.readSlice(attr_len);
             const padding = (@as(usize, 4) - (attr_len % 4)) % 4;
             try attr_cursor.skip(padding);
+            if (seen_integrity and attr_type != .fingerprint) return error.InvalidStunAttribute;
             try attrs.append(allocator, .{ .attr_type = attr_type, .value = value });
+            if (attr_type == .message_integrity) seen_integrity = true;
         }
         return .{
             .class = decoded_type.class,
@@ -150,12 +153,18 @@ pub const stun = struct {
     ) !void {
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(allocator);
+        var seen_integrity = false;
+        var seen_fingerprint = false;
         for (attrs) |attr| {
+            if (seen_integrity and attr.attr_type != .fingerprint) return error.InvalidStunAttribute;
+            if (seen_fingerprint and attr.attr_type == .message_integrity) return error.InvalidStunAttribute;
             try wire.appendInt(&payload, allocator, u16, @intFromEnum(attr.attr_type), .big);
             try wire.appendInt(&payload, allocator, u16, @intCast(attr.value.len), .big);
             try payload.appendSlice(allocator, attr.value);
             const padding = (4 - (attr.value.len % 4)) % 4;
             try payload.appendNTimes(allocator, 0, padding);
+            if (attr.attr_type == .message_integrity) seen_integrity = true;
+            if (attr.attr_type == .fingerprint) seen_fingerprint = true;
         }
         try wire.appendInt(list, allocator, u16, encodeType(method, class), .big);
         try wire.appendInt(list, allocator, u16, @intCast(payload.items.len), .big);
@@ -3722,6 +3731,42 @@ test "STUN ICE binding request authenticates integrity and fingerprint" {
 
     encoded.items[encoded.items.len - 1] ^= 0xff;
     try std.testing.expectError(error.BadFingerprint, stun.validateFingerprint(encoded.items));
+
+    var invalid_order: std.ArrayList(u8) = .empty;
+    defer invalid_order.deinit(allocator);
+    try std.testing.expectError(error.InvalidStunAttribute, stun.write(&invalid_order, allocator, .request, .binding, tid, &.{
+        .{ .attr_type = .message_integrity, .value = &([_]u8{0} ** stun.message_integrity_len) },
+        .{ .attr_type = .software, .value = "after-integrity" },
+    }));
+    try std.testing.expectError(error.InvalidStunAttribute, stun.write(&invalid_order, allocator, .request, .binding, tid, &.{
+        .{ .attr_type = .fingerprint, .value = &([_]u8{0} ** stun.fingerprint_len) },
+        .{ .attr_type = .message_integrity, .value = &([_]u8{0} ** stun.message_integrity_len) },
+    }));
+
+    invalid_order.clearRetainingCapacity();
+    try stun.write(&invalid_order, allocator, .request, .binding, tid, &.{
+        .{ .attr_type = .message_integrity, .value = &([_]u8{0} ** stun.message_integrity_len) },
+        .{ .attr_type = .fingerprint, .value = &([_]u8{0} ** stun.fingerprint_len) },
+    });
+    var ordered = try stun.parse(allocator, invalid_order.items);
+    defer ordered.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), ordered.attributes.len);
+
+    var malformed_order: std.ArrayList(u8) = .empty;
+    defer malformed_order.deinit(allocator);
+    const malformed_payload_len = 4 + stun.message_integrity_len + 4 + "after".len + 3;
+    try wire.appendInt(&malformed_order, allocator, u16, stun.encodeType(.binding, .request), .big);
+    try wire.appendInt(&malformed_order, allocator, u16, malformed_payload_len, .big);
+    try wire.appendInt(&malformed_order, allocator, u32, stun.magic_cookie, .big);
+    try malformed_order.appendSlice(allocator, &tid);
+    try wire.appendInt(&malformed_order, allocator, u16, @intFromEnum(stun.AttributeType.message_integrity), .big);
+    try wire.appendInt(&malformed_order, allocator, u16, stun.message_integrity_len, .big);
+    try malformed_order.appendNTimes(allocator, 0, stun.message_integrity_len);
+    try wire.appendInt(&malformed_order, allocator, u16, @intFromEnum(stun.AttributeType.software), .big);
+    try wire.appendInt(&malformed_order, allocator, u16, 5, .big);
+    try malformed_order.appendSlice(allocator, "after");
+    try malformed_order.appendNTimes(allocator, 0, 3);
+    try std.testing.expectError(error.InvalidStunAttribute, stun.parse(allocator, malformed_order.items));
 }
 
 test "ICE candidate parser and SDP parser" {
