@@ -337,6 +337,10 @@ pub fn transcriptHash(client_hello: []const u8, server_hello: []const u8) [32]u8
 }
 
 pub fn deriveHandshakeSecrets(shared_secret: [32]u8, transcript_hash: [32]u8) HandshakeSecrets {
+    return deriveHandshakeSecretsForVersion(quic.Version.version_1.wireValue(), shared_secret, transcript_hash);
+}
+
+pub fn deriveHandshakeSecretsForVersion(version: u32, shared_secret: [32]u8, transcript_hash: [32]u8) HandshakeSecrets {
     const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
     const zero_secret = [_]u8{0} ** quic.protection.secret_len;
     const early_secret = HkdfSha256.extract(&zero_secret, &.{});
@@ -349,12 +353,16 @@ pub fn deriveHandshakeSecrets(shared_secret: [32]u8, transcript_hash: [32]u8) Ha
         .handshake_secret = handshake_secret,
         .client_handshake_traffic_secret = client_hs,
         .server_handshake_traffic_secret = server_hs,
-        .client_quic = quic.protection.deriveAes128Keys(client_hs),
-        .server_quic = quic.protection.deriveAes128Keys(server_hs),
+        .client_quic = quic.protection.deriveAes128KeysForVersion(version, client_hs),
+        .server_quic = quic.protection.deriveAes128KeysForVersion(version, server_hs),
     };
 }
 
 pub fn deriveApplicationSecrets(handshake_secret: [32]u8, transcript_hash: [32]u8) ApplicationSecrets {
+    return deriveApplicationSecretsForVersion(quic.Version.version_1.wireValue(), handshake_secret, transcript_hash);
+}
+
+pub fn deriveApplicationSecretsForVersion(version: u32, handshake_secret: [32]u8, transcript_hash: [32]u8) ApplicationSecrets {
     const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
     const zero_secret = [_]u8{0} ** quic.protection.secret_len;
     const empty_hash = std.crypto.tls.emptyHash(std.crypto.hash.sha2.Sha256);
@@ -366,8 +374,8 @@ pub fn deriveApplicationSecrets(handshake_secret: [32]u8, transcript_hash: [32]u
         .master_secret = master_secret,
         .client_application_traffic_secret = client_ap,
         .server_application_traffic_secret = server_ap,
-        .client_quic = quic.protection.deriveAes128Keys(client_ap),
-        .server_quic = quic.protection.deriveAes128Keys(server_ap),
+        .client_quic = quic.protection.deriveAes128KeysForVersion(version, client_ap),
+        .server_quic = quic.protection.deriveAes128KeysForVersion(version, server_ap),
     };
 }
 
@@ -638,6 +646,22 @@ test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
     try std.testing.expectEqualSlices(u8, &client_keys.client_quic.key, &server_keys.client_quic.key);
     try std.testing.expectEqualSlices(u8, &client_keys.server_quic.key, &server_keys.server_quic.key);
     try std.testing.expect(!std.mem.eql(u8, &client_keys.client_quic.key, &client_keys.server_quic.key));
+}
+
+test "QUIC TLS QUIC keys use version-specific packet-protection labels" {
+    const shared = [_]u8{0x33} ** 32;
+    const transcript = [_]u8{0x44} ** 32;
+    const v1 = deriveHandshakeSecretsForVersion(quic.Version.version_1.wireValue(), shared, transcript);
+    const v2 = deriveHandshakeSecretsForVersion(quic.Version.version_2.wireValue(), shared, transcript);
+
+    try std.testing.expectEqualSlices(u8, &v1.handshake_secret, &v2.handshake_secret);
+    try std.testing.expectEqualSlices(u8, &v1.client_handshake_traffic_secret, &v2.client_handshake_traffic_secret);
+    try std.testing.expect(!std.mem.eql(u8, &v1.client_quic.key, &v2.client_quic.key));
+
+    const app_v1 = deriveApplicationSecretsForVersion(quic.Version.version_1.wireValue(), v1.handshake_secret, transcript);
+    const app_v2 = deriveApplicationSecretsForVersion(quic.Version.version_2.wireValue(), v1.handshake_secret, transcript);
+    try std.testing.expectEqualSlices(u8, &app_v1.master_secret, &app_v2.master_secret);
+    try std.testing.expect(!std.mem.eql(u8, &app_v1.client_quic.key, &app_v2.client_quic.key));
 }
 
 test "QUIC TLS ClientHello and ServerHello exchange over protected Initial packets" {

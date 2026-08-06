@@ -113,7 +113,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "openHandshakeCrypto"));
     try std.testing.expect(@hasDecl(netz.quic.tls_client_hello, "writeClientHello"));
     try std.testing.expect(@hasDecl(netz.quic.tls_client_hello, "deriveHandshakeSecrets"));
+    try std.testing.expect(@hasDecl(netz.quic.tls_client_hello, "deriveHandshakeSecretsForVersion"));
     try std.testing.expect(@hasDecl(netz.quic.tls_client_hello, "deriveApplicationSecrets"));
+    try std.testing.expect(@hasDecl(netz.quic.tls_client_hello, "deriveApplicationSecretsForVersion"));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "connect"));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "accept"));
     try std.testing.expect(@hasDecl(netz.quic, "TransportParameters"));
@@ -137,10 +139,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "address_validation_token"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "retry_source_connection_id"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "version"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "address_validation_secrets"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "retry_original_destination_connection_id"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "retry_source_connection_id"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "version"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
@@ -298,6 +302,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "processClient"));
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "ClientState"));
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "ProcessedRetry"));
+    try std.testing.expect(@hasDecl(netz.quic, "version_negotiation"));
+    try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "processClient"));
+    try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "ClientState"));
+    try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "Processed"));
+    try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "selectMutualVersion"));
     try std.testing.expect(@hasDecl(netz.quic.pmtu, "State"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.pmtu.min_udp_payload_size);
     try std.testing.expectEqual(@as(u64, 100_000_000), netz.quic.rtt.default_initial_rtt_ns);

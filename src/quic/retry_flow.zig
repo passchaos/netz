@@ -93,6 +93,7 @@ pub const ClientState = struct {
         original_destination_connection_id: []const u8,
         initial_source_connection_id: []const u8,
     ) Error!ClientState {
+        if (version == .negotiation) return error.InvalidVersionNegotiation;
         try validateClientConnectionId(original_destination_connection_id, false);
         try validateClientConnectionId(initial_source_connection_id, false);
 
@@ -233,6 +234,7 @@ pub fn processClient(
     datagram: []const u8,
     base_options: quic.handshake.ClientOptions,
 ) Error!ProcessedRetry {
+    if (options.version == .negotiation) return error.InvalidVersionNegotiation;
     try validateClientConnectionId(options.original_destination_connection_id, false);
     try validateClientConnectionId(options.initial_source_connection_id, false);
     if (options.server_initial_processed) return error.InitialAlreadyProcessed;
@@ -255,6 +257,7 @@ pub fn processClient(
     // transport-parameter validation.
     const retry_initial_secrets = quic.protection.deriveInitialSecretsForVersion(packet.version, owned_rscid);
     var retry_options = base_options;
+    retry_options.version = options.version;
     retry_options.retry_source_connection_id = owned_rscid;
     retry_options.address_validation_token = owned_token;
     retry_options.client_initial_packet_number = 0;
@@ -281,6 +284,7 @@ test "QUIC Retry flow issues and validates address-bound Retry datagram" {
     const nonce: quic.address_validation_token.Nonce = [_]u8{0x55} ** quic.address_validation_token.nonce_len;
 
     const datagram = try issue(allocator, .{
+        .version = .version_2,
         .original_destination_connection_id = &odcid,
         .client_source_connection_id = &client_scid,
         .retry_source_connection_id = &retry_scid,
@@ -298,7 +302,7 @@ test "QUIC Retry flow issues and validates address-bound Retry datagram" {
         .now_ns = 120,
         .secret = secret,
     }, datagram);
-    try std.testing.expectEqual(quic.Version.version_1.wireValue(), result.packet.version);
+    try std.testing.expectEqual(quic.Version.version_2.wireValue(), result.packet.version);
     try std.testing.expectEqualSlices(u8, &client_scid, result.packet.destination_connection_id);
     try std.testing.expectEqualSlices(u8, &retry_scid, result.packet.source_connection_id);
     try std.testing.expectEqual(quic.address_validation_token.Kind.retry, result.token.kind);
@@ -348,6 +352,7 @@ test "QUIC client Retry processing builds retried Initial inputs" {
     const nonce: quic.address_validation_token.Nonce = [_]u8{0x99} ** quic.address_validation_token.nonce_len;
 
     const datagram = try issue(allocator, .{
+        .version = .version_2,
         .original_destination_connection_id = &odcid,
         .client_source_connection_id = &client_scid,
         .retry_source_connection_id = &retry_scid,
@@ -359,10 +364,11 @@ test "QUIC client Retry processing builds retried Initial inputs" {
     });
     defer allocator.free(datagram);
 
-    var state = try ClientState.init(allocator, .version_1, &odcid, &client_scid);
+    var state = try ClientState.init(allocator, .version_2, &odcid, &client_scid);
     defer state.deinit();
 
     var processed = try state.process(datagram, .{
+        .version = .version_2,
         .original_destination_connection_id = &odcid,
         .local_connection_id = &client_scid,
         .address_validation_token = "cached-new-token",
@@ -376,12 +382,13 @@ test "QUIC client Retry processing builds retried Initial inputs" {
     try std.testing.expectEqualSlices(u8, processed.token, processed.retry_client_options.address_validation_token);
     try std.testing.expectEqualSlices(u8, &odcid, processed.retry_client_options.original_destination_connection_id);
     try std.testing.expectEqualSlices(u8, &retry_scid, processed.retry_client_options.retry_source_connection_id);
+    try std.testing.expectEqual(quic.Version.version_2, processed.retry_client_options.version);
     try std.testing.expectEqual(@as(u64, 0), processed.retry_client_options.client_initial_packet_number);
     try std.testing.expectEqualSlices(u8, processed.token, state.retry_token);
     try std.testing.expectEqualSlices(u8, &retry_scid, state.retry_source_connection_id);
     try std.testing.expectEqualSlices(
         u8,
-        &quic.protection.deriveInitialSecrets(&retry_scid).client.key,
+        &quic.protection.deriveInitialSecretsForVersion(quic.Version.version_2.wireValue(), &retry_scid).client.key,
         &processed.retry_initial_secrets.client.key,
     );
 

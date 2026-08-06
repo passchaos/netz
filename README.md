@@ -36,7 +36,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   endpoint-specific client/server parameter rules, preferred-address parsing,
   max UDP payload/idle-timeout/ACK delay/stream-count bounds), Retry packet codec
   with version-specific integrity-tag verification, plus CRYPTO stream reassembly with duplicate-overlap conflict detection,
-  v1/v2 Initial key/header/payload protection with version-aware salts, HKDF labels, and long-header type bits, protected Initial packet seal/open, long-header packet boundary peeking for coalesced datagrams, Version Negotiation packet codec and endpoint-level unsupported-version responses,
+  v1/v2 Initial key/header/payload protection with version-aware salts, HKDF labels, and long-header type bits, version-specific TLS QUIC packet-protection labels, protected Initial packet seal/open, long-header packet boundary peeking for coalesced datagrams, Version Negotiation packet codec, endpoint-level unsupported-version responses, and client-side Version Negotiation selection/restart helpers,
   Initial CRYPTO byte exchange over UDP with RFC 9000 1200-byte Initial datagram padding/validation, client-carried Initial address tokens, server-side token validation hooks, and server-issued address-validation NEW_TOKEN frames, coalesced Initial+Handshake CRYPTO datagram helpers, HMAC-based
   address-validation token helpers for Retry/NEW_TOKEN with lifetime, version,
   peer-address binding, Retry ODCID/RSCID binding, secret rotation, replay
@@ -47,7 +47,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
   packet server/client Finished flights, and handshake/application secret
-  derivation for QUIC, an integrated minimal client/server handshake that emits
+  derivation for QUIC, an integrated minimal client/server handshake for QUIC v1/v2 that emits
   practical transport parameters and applies negotiated flow-control, stream,
   and UDP-payload limits to established 1-RTT connection objects, stateless reset token helpers,
   packet-number space ACK tracking with bounded duplicate/old packet suppression, ACK range semantic validation, receive-frame semantic preflight before multi-frame side effects, and adaptive truncated packet-number

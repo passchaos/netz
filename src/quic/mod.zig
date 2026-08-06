@@ -22,6 +22,7 @@ pub const rtt = @import("rtt.zig");
 pub const pmtu = @import("pmtu.zig");
 pub const address_validation_token = @import("address_validation_token.zig");
 pub const retry_flow = @import("retry_flow.zig");
+pub const version_negotiation = @import("version_negotiation.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
@@ -1343,6 +1344,7 @@ test {
     _ = pmtu;
     _ = address_validation_token;
     _ = retry_flow;
+    _ = version_negotiation;
 }
 
 test "QUIC long initial header parse" {

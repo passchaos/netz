@@ -20,6 +20,7 @@ pub const ClientOptions = struct {
     /// ID and key-derivation input while preserving the original DCID above for
     /// transport-parameter validation.
     retry_source_connection_id: []const u8 = &.{},
+    version: quic.Version = .version_1,
     server_name: ?[]const u8 = null,
     alpn_protocols: []const []const u8 = &.{"h3"},
     /// Optional raw override for callers that need full control over the TLS
@@ -54,6 +55,7 @@ pub const ServerOptions = struct {
     /// `retry_source_connection_id` transport parameters.
     retry_original_destination_connection_id: []const u8 = &.{},
     retry_source_connection_id: []const u8 = &.{},
+    version: quic.Version = .version_1,
     max_crypto_buffer: usize = 4096,
     max_crypto_frame_data_len: usize = 1024,
     server_initial_packet_number: u64 = 0,
@@ -152,6 +154,7 @@ fn clientInitialDestinationConnectionId(options: ClientOptions) []const u8 {
 }
 
 pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: ClientOptions) Error!EstablishedConnection {
+    if (options.version == .negotiation) return error.InvalidVersionNegotiation;
     if (options.retry_source_connection_id.len != 0 and options.address_validation_token.len == 0) {
         return error.InvalidPacket;
     }
@@ -160,7 +163,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
     const client_public = try quic.tls_client_hello.x25519PublicKey(client_secret);
     const client_random = try random32(endpoint.io, options.random);
     const initial_destination_connection_id = clientInitialDestinationConnectionId(options);
-    const initial_secrets = quic.protection.deriveInitialSecrets(initial_destination_connection_id);
+    const initial_secrets = quic.protection.deriveInitialSecretsForVersion(options.version.wireValue(), initial_destination_connection_id);
 
     var local_transport_parameters = options.local_transport_parameters;
     var encoded_transport_parameters: std.ArrayList(u8) = .empty;
@@ -183,6 +186,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
     });
 
     try quic.initial_exchange.sendInitialCrypto(endpoint, peer, initial_secrets.client, .{
+        .version = options.version.wireValue(),
         .destination_connection_id = initial_destination_connection_id,
         .source_connection_id = options.local_connection_id,
         .token = options.address_validation_token,
@@ -209,7 +213,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
     const parsed_server = try quic.tls_client_hello.parseServerHello(server_initial.crypto_data);
     const shared = try quic.tls_client_hello.x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
     const hs_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data });
-    const handshake = quic.tls_client_hello.deriveHandshakeSecrets(shared, hs_hash);
+    const handshake = quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
 
     var server_handshake = try receiveServerHandshakeCrypto(
         endpoint,
@@ -245,6 +249,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
     try quic.tls_client_hello.writeFinished(&client_finished, endpoint.allocator, client_verify);
 
     try quic.initial_exchange.sendHandshakeCrypto(endpoint, server_initial.from, handshake.client_quic, .{
+        .version = options.version.wireValue(),
         .destination_connection_id = server_initial.packet.source_connection_id,
         .source_connection_id = options.local_connection_id,
         .packet_number = options.client_handshake_packet_number,
@@ -253,7 +258,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
     });
 
     const app_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions, server_flight.finished, client_finished.items });
-    const application = quic.tls_client_hello.deriveApplicationSecrets(handshake.handshake_secret, app_hash);
+    const application = quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
     return try establishedConnection(
         endpoint,
         server_initial.from,
@@ -270,11 +275,12 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
 }
 
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
+    if (options.version == .negotiation) return error.InvalidVersionNegotiation;
     if ((options.retry_original_destination_connection_id.len == 0) != (options.retry_source_connection_id.len == 0)) {
         return error.InvalidPacket;
     }
 
-    var client_initial = try receiveClientInitial(endpoint, 0, options.max_crypto_buffer, options.retry_source_connection_id);
+    var client_initial = try receiveClientInitial(endpoint, 0, options.max_crypto_buffer, options.retry_source_connection_id, options.version);
     defer client_initial.deinit(endpoint.allocator);
     const original_destination_connection_id = serverOriginalDestinationConnectionId(
         client_initial.packet.destination_connection_id,
@@ -304,7 +310,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         .x25519_public_key = server_public,
     });
     const hs_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items });
-    const handshake = quic.tls_client_hello.deriveHandshakeSecrets(shared, hs_hash);
+    const handshake = quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
 
     var local_transport_parameters = options.local_transport_parameters;
     var encoded_transport_parameters: std.ArrayList(u8) = .empty;
@@ -336,6 +342,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         client_initial.from,
         client_initial.initial_secrets.server,
         .{
+            .version = options.version.wireValue(),
             .destination_connection_id = client_initial.packet.source_connection_id,
             .source_connection_id = options.local_connection_id,
             .packet_number = options.server_initial_packet_number,
@@ -345,6 +352,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         },
         handshake.server_quic,
         .{
+            .version = options.version.wireValue(),
             .destination_connection_id = client_initial.packet.source_connection_id,
             .source_connection_id = options.local_connection_id,
             .packet_number = options.server_handshake_packet_number,
@@ -360,7 +368,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     try quic.tls_client_hello.verifyFinished(handshake.client_handshake_traffic_secret, client_finished_hash, client_verify);
 
     const app_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items, server_finished.items, client_finished.crypto_data });
-    const application = quic.tls_client_hello.deriveApplicationSecrets(handshake.handshake_secret, app_hash);
+    const application = quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
     const established = try establishedConnection(
         endpoint,
         client_initial.from,
@@ -399,7 +407,7 @@ fn validateAddressTokenForInitial(
         _ = quic.address_validation_token.validateRetryAnySecret(
             allocator,
             options.address_validation_secrets,
-            .version_1,
+            options.version,
             options.address_validation_now_ns,
             options.address_validation_peer,
             original_destination_connection_id,
@@ -412,7 +420,7 @@ fn validateAddressTokenForInitial(
     _ = quic.address_validation_token.validateAnySecret(
         options.address_validation_secrets,
         .new_token,
-        .version_1,
+        options.version,
         options.address_validation_now_ns,
         options.address_validation_peer,
         token,
@@ -437,6 +445,7 @@ fn receiveClientInitial(
     expected_packet_number: u64,
     max_crypto_buffer: usize,
     retry_destination_connection_id: []const u8,
+    version: quic.Version,
 ) Error!ReceivedClientInitial {
     var datagram = try endpoint.receiveBytes();
     defer datagram.deinit(endpoint.allocator);
@@ -454,7 +463,8 @@ fn receiveClientInitial(
         return error.InvalidInitialPacket;
     }
 
-    const initial_secrets = quic.protection.deriveInitialSecrets(header.destination_connection_id);
+    if (header.version != version.wireValue()) return error.InvalidInitialPacket;
+    const initial_secrets = quic.protection.deriveInitialSecretsForVersion(version.wireValue(), header.destination_connection_id);
     var packet = try quic.protection.openInitialPacket(endpoint.allocator, initial_secrets.client, datagram.bytes, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
 
@@ -870,7 +880,7 @@ test "QUIC integrated handshake succeeds after validated Retry" {
         .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
     });
 
-    var first_initial = try receiveClientInitial(&server_endpoint, 0, 4096, &.{});
+    var first_initial = try receiveClientInitial(&server_endpoint, 0, 4096, &.{}, .version_1);
     defer first_initial.deinit(allocator);
     const retry_datagram = try quic.retry_flow.issue(allocator, .{
         .original_destination_connection_id = first_initial.packet.destination_connection_id,
@@ -1011,7 +1021,7 @@ test "QUIC integrated server rejects invalid first client Initial datagrams" {
     }));
 }
 
-test "QUIC integrated handshake applies negotiated transport parameters" {
+test "QUIC integrated handshake applies negotiated transport parameters over QUIC v2" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1063,6 +1073,7 @@ test "QUIC integrated handshake applies negotiated transport parameters" {
             var established = try accept(endpoint, .{
                 .local_connection_id = cid,
                 .local_transport_parameters = params,
+                .version = .version_2,
                 .random = [_]u8{0x72} ** 32,
                 .x25519_secret_key = [_]u8{0x74} ** 32,
             });
@@ -1088,6 +1099,7 @@ test "QUIC integrated handshake applies negotiated transport parameters" {
         .local_connection_id = &client_cid,
         .server_name = "localhost",
         .local_transport_parameters = client_tp,
+        .version = .version_2,
         .random = [_]u8{0x71} ** 32,
         .x25519_secret_key = [_]u8{0x73} ** 32,
     });
