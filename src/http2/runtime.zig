@@ -1802,6 +1802,7 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
                 const method = method_value orelse return error.MissingPseudoHeader;
                 if (!std.ascii.eqlIgnoreCase(method, "CONNECT")) return error.InvalidHeader;
                 if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
+                if (!seen_authority and host_value == null) return error.MissingPseudoHeader;
             } else if (method_value) |method| {
                 if (std.ascii.eqlIgnoreCase(method, "CONNECT")) {
                     if (!seen_authority) return error.MissingPseudoHeader;
@@ -5024,6 +5025,23 @@ test "HTTP/2 extended CONNECT requires peer opt-in" {
         .{ .name = ":protocol", .value = "web socket" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_protocol_token, .request));
+
+    const missing_extended_authority = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":path", .value = "/chat" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":protocol", .value = "websocket" },
+    };
+    try std.testing.expectError(error.MissingPseudoHeader, validateHeaderBlock(&missing_extended_authority, .request));
+
+    const extended_host_fallback = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":path", .value = "/chat" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":protocol", .value = "websocket" },
+        .{ .name = "host", .value = "example.com" },
+    };
+    try validateHeaderBlock(&extended_host_fallback, .request);
 }
 
 test "HTTP/2 flow window blocks and updates" {
