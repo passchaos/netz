@@ -144,6 +144,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "active_connection_id_limit"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_max_idle_timeout_ms"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_max_idle_timeout_ms"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_ack_delay_exponent"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_ack_delay_exponent"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_max_ack_delay_ms"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id.PeerPool, "addWithLimit"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
@@ -194,6 +197,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closing"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "draining"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkCloseExpired"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "decodedPeerAckDelayNanos"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "CloseState"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamResetInfo"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));
@@ -219,6 +223,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.path_validation, "State"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "pendingChallengeCount"));
     try std.testing.expect(@hasDecl(netz.quic.rtt, "Stats"));
+    try std.testing.expect(@hasDecl(netz.quic.rtt, "decodeAckDelayNanos"));
     try std.testing.expectEqual(@as(u64, 100_000_000), netz.quic.rtt.default_initial_rtt_ns);
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveManyConcurrent"));
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveRoutedBytes"));

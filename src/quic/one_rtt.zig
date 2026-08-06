@@ -102,6 +102,9 @@ pub const ConnectionConfig = struct {
     active_connection_id_limit: usize = quic.default_active_connection_id_limit,
     local_max_idle_timeout_ms: u64 = 0,
     peer_max_idle_timeout_ms: u64 = 0,
+    local_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
+    peer_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
+    peer_max_ack_delay_ms: u64 = quic.default_max_ack_delay_ms,
 };
 
 const StreamFlowEntry = struct {
@@ -525,6 +528,13 @@ pub const Connection = struct {
             return true;
         }
         return false;
+    }
+
+    pub fn decodedPeerAckDelayNanos(self: Connection, ack: quic.AckFrame) Error!u64 {
+        return quic.rtt.decodeAckDelayNanos(ack.ack_delay, self.config.peer_ack_delay_exponent) catch |err| switch (err) {
+            error.InvalidAckDelayExponent => error.InvalidFrame,
+            error.AckDelayOverflow => error.InvalidFrame,
+        };
     }
 
     pub fn effectiveIdleTimeoutMillis(self: Connection) ?u64 {
@@ -2069,6 +2079,34 @@ test "QUIC 1-RTT connection preflights role and path control frames before recei
     try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), server.expected_packet_number);
     try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
+}
+
+test "QUIC 1-RTT connection decodes peer ACK delay" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xd1} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .peer_ack_delay_exponent = 4,
+    });
+    defer connection.deinit();
+
+    const ack = quic.AckFrame{ .largest_acknowledged = 0, .ack_delay = 7, .first_ack_range = 0 };
+    try std.testing.expectEqual(@as(u64, 7 * 16 * 1_000), try connection.decodedPeerAckDelayNanos(ack));
+
+    connection.config.peer_ack_delay_exponent = quic.rtt.max_ack_delay_exponent + 1;
+    try std.testing.expectError(error.InvalidFrame, connection.decodedPeerAckDelayNanos(ack));
 }
 
 test "QUIC 1-RTT connection models idle timeout deadlines" {

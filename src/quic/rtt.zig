@@ -5,6 +5,7 @@ pub const timer_granularity_ns: u64 = 1_000_000;
 pub const default_initial_rtt_ns: u64 = 100_000_000;
 pub const default_max_ack_delay_ns: u64 = 25_000_000;
 pub const default_persistent_congestion_threshold: u64 = 3;
+pub const max_ack_delay_exponent: u64 = 20;
 
 pub const Stats = struct {
     latest_rtt: u64 = 0,
@@ -75,6 +76,17 @@ pub const Stats = struct {
     }
 };
 
+pub fn decodeAckDelayMicros(encoded_ack_delay: u64, ack_delay_exponent: u64) !u64 {
+    if (ack_delay_exponent > max_ack_delay_exponent) return error.InvalidAckDelayExponent;
+    const multiplier = std.math.shl(u64, 1, @as(u6, @intCast(ack_delay_exponent)));
+    return std.math.mul(u64, encoded_ack_delay, multiplier) catch error.AckDelayOverflow;
+}
+
+pub fn decodeAckDelayNanos(encoded_ack_delay: u64, ack_delay_exponent: u64) !u64 {
+    const micros = try decodeAckDelayMicros(encoded_ack_delay, ack_delay_exponent);
+    return std.math.mul(u64, micros, 1_000) catch error.AckDelayOverflow;
+}
+
 test "QUIC RTT estimator initializes and computes PTO" {
     var stats = Stats{};
     try std.testing.expect(!stats.has_measurement);
@@ -112,4 +124,11 @@ test "QUIC RTT estimator loss and persistent congestion thresholds" {
     stats.update(120_000_000, 0, true);
     try std.testing.expect(stats.lossDelay() >= 120_000_000);
     try std.testing.expectEqual(stats.pto(true) * 3, stats.persistentCongestionThreshold());
+}
+
+test "QUIC ACK delay decoding applies negotiated exponent" {
+    try std.testing.expectEqual(@as(u64, 25 * 8), try decodeAckDelayMicros(25, 3));
+    try std.testing.expectEqual(@as(u64, 25 * 8 * 1_000), try decodeAckDelayNanos(25, 3));
+    try std.testing.expectError(error.InvalidAckDelayExponent, decodeAckDelayMicros(1, max_ack_delay_exponent + 1));
+    try std.testing.expectError(error.AckDelayOverflow, decodeAckDelayNanos(std.math.maxInt(u64), 3));
 }
