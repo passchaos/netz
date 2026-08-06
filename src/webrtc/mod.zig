@@ -2643,6 +2643,7 @@ pub const sctp = struct {
             const outbound = try cursor.readInt(u16, .big);
             const inbound = try cursor.readInt(u16, .big);
             const initial_tsn = try cursor.readInt(u32, .big);
+            try validateInitFixedFields(initiate_tag, rwnd, outbound, inbound);
             const parameters = try parseInitParameters(allocator, chunk.value[cursor.pos..]);
             return .{
                 .initiate_tag = initiate_tag,
@@ -3159,6 +3160,7 @@ pub const sctp = struct {
 
     pub fn writeInitChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunk_type: ChunkType, init: InitChunk) Error!void {
         if (chunk_type != .init and chunk_type != .init_ack) return error.InvalidSctpPacket;
+        try validateInitFixedFields(init.initiate_tag, init.advertised_receiver_window_credit, init.outbound_streams, init.inbound_streams);
         var value: std.ArrayList(u8) = .empty;
         defer value.deinit(allocator);
         try wire.appendInt(&value, allocator, u32, init.initiate_tag, .big);
@@ -3174,6 +3176,16 @@ pub const sctp = struct {
         try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
         try list.appendSlice(allocator, value.items);
         try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
+    }
+
+    fn validateInitFixedFields(initiate_tag: u32, advertised_receiver_window_credit: u32, outbound_streams: u16, inbound_streams: u16) Error!void {
+        // RFC 4960/Pion-sctp reject INIT/INIT-ACK chunks that cannot establish
+        // a usable association.  Keeping this at the codec boundary catches
+        // malformed browser/DataChannel handshakes before any association state
+        // is derived from zero tags or zero stream counts.
+        if (initiate_tag == 0) return error.InvalidSctpPacket;
+        if (outbound_streams == 0 or inbound_streams == 0) return error.InvalidSctpPacket;
+        if (advertised_receiver_window_credit < 1500) return error.InvalidSctpPacket;
     }
 
     pub fn writeAbortPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, t_bit: bool, causes: []const ErrorCause) Error!void {
@@ -4688,6 +4700,30 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     try std.testing.expectEqual(sctp.InitParameterType.supported_extensions, init_ack.parameters[1].param_type);
     const parsed_cookie = try allocator.dupe(u8, init_ack.stateCookie().?);
     defer allocator.free(parsed_cookie);
+
+    var invalid_init: std.ArrayList(u8) = .empty;
+    defer invalid_init.deinit(allocator);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeInitChunk(&invalid_init, allocator, .init, .{
+        .initiate_tag = 0,
+        .advertised_receiver_window_credit = 256 * 1024,
+        .outbound_streams = 16,
+        .inbound_streams = 16,
+        .initial_tsn = 1,
+    }));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeInitChunk(&invalid_init, allocator, .init, .{
+        .initiate_tag = 1,
+        .advertised_receiver_window_credit = 1499,
+        .outbound_streams = 16,
+        .inbound_streams = 16,
+        .initial_tsn = 1,
+    }));
+    const invalid_init_chunk = sctp.Chunk{
+        .chunk_type = .init,
+        .flags = 0,
+        .value = &.{ 0, 0, 0, 0, 0, 0, 0x05, 0xdc, 0, 1, 0, 1, 0, 0, 0, 1 },
+        .consumed = 20,
+    };
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.InitChunk.parse(allocator, invalid_init_chunk));
 
     encoded.clearRetainingCapacity();
     try sctp.writeCookieEchoPacket(&encoded, allocator, .{
