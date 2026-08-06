@@ -135,6 +135,7 @@ pub const OneRttConfig = struct {
             .peer_ack_delay_exponent = peer_transport_parameters.ack_delay_exponent,
             .peer_max_ack_delay_ms = peer_transport_parameters.max_ack_delay,
             .peer_disable_active_migration = peer_transport_parameters.disable_active_migration,
+            .peer_preferred_address = peer_transport_parameters.preferred_address,
             .local_max_datagram_frame_size = if (local_transport_parameters.max_datagram_frame_size) |size| std.math.cast(usize, size) orelse std.math.maxInt(usize) else null,
             .peer_max_datagram_frame_size = if (peer_transport_parameters.max_datagram_frame_size) |size| std.math.cast(usize, size) orelse std.math.maxInt(usize) else null,
         };

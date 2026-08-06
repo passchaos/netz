@@ -120,6 +120,7 @@ pub const ConnectionConfig = struct {
     enable_pmtud: bool = false,
     pmtud_max_probe_size: usize = quic.pmtu.max_ipv4_udp_payload_size,
     peer_disable_active_migration: bool = false,
+    peer_preferred_address: ?quic.PreferredAddress = null,
     local_max_datagram_frame_size: ?usize = null,
     peer_max_datagram_frame_size: ?usize = null,
     max_datagram_queue_items: usize = 16,
@@ -782,6 +783,38 @@ pub const Connection = struct {
 
     pub fn peerActiveMigrationDisabled(self: Connection) bool {
         return self.config.peer_disable_active_migration;
+    }
+
+    pub fn peerPreferredAddress(self: Connection) ?quic.PreferredAddress {
+        return self.config.peer_preferred_address;
+    }
+
+    pub fn preferredAddressIp4(preferred: quic.PreferredAddress) ?net.IpAddress {
+        if (preferred.ipv4_port == 0 or allZero(u8, &preferred.ipv4_address)) return null;
+        return .{ .ip4 = .{
+            .bytes = preferred.ipv4_address,
+            .port = preferred.ipv4_port,
+        } };
+    }
+
+    pub fn preferredAddressIp6(preferred: quic.PreferredAddress) ?net.IpAddress {
+        if (preferred.ipv6_port == 0 or allZero(u8, &preferred.ipv6_address)) return null;
+        return .{ .ip6 = .{
+            .bytes = preferred.ipv6_address,
+            .port = preferred.ipv6_port,
+        } };
+    }
+
+    pub fn beginPeerPreferredAddressMigration(self: *Connection, challenge: [8]u8, family: enum { ipv4, ipv6 }) Error!void {
+        const preferred = self.config.peer_preferred_address orelse return error.InvalidTransportParameter;
+        try self.peer_connection_ids.addWithLimit(1, preferred.connection_id, preferred.stateless_reset_token, self.config.active_connection_id_limit);
+        try self.peer_connection_ids.markInUse(1);
+        self.config.peer_connection_id = preferred.connection_id;
+        const new_peer = switch (family) {
+            .ipv4 => preferredAddressIp4(preferred) orelse return error.InvalidTransportParameter,
+            .ipv6 => preferredAddressIp6(preferred) orelse return error.InvalidTransportParameter,
+        };
+        try self.beginPeerMigration(new_peer, challenge);
     }
 
     pub fn beginPeerMigration(self: *Connection, new_peer: net.IpAddress, challenge: [8]u8) Error!void {
@@ -1783,6 +1816,13 @@ fn streamCountForId(stream_id: u64) u64 {
 
 fn maxBufferedForLimit(limit: u64) usize {
     return std.math.cast(usize, limit) orelse std.math.maxInt(usize);
+}
+
+fn allZero(comptime T: type, values: []const T) bool {
+    for (values) |value| {
+        if (value != 0) return false;
+    }
+    return true;
 }
 
 fn closeExpiryMillis(now_ms: ?u64, pto_ms: ?u64) ?u64 {
@@ -3670,6 +3710,65 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     try std.testing.expect(connection.peerAddressValidated());
     try std.testing.expectEqual(@as(usize, 0), connection.path_validation.outstandingChallengeCount());
     try std.testing.expectEqual(@as(?usize, null), connection.antiAmplificationLimitRemaining());
+}
+
+test "QUIC 1-RTT preferred address migration selects address and CID" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var original_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer original_endpoint.deinit();
+    var preferred_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer preferred_endpoint.deinit();
+
+    const local_cid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
+    const peer_cid = [_]u8{ 0xa4, 0xa5, 0xa6, 0xa7 };
+    const preferred_cid = [_]u8{ 0xa8, 0xa9, 0xaa, 0xab };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xa0} ** quic.protection.secret_len);
+
+    const preferred_address = quic.PreferredAddress{
+        .ipv4_address = [_]u8{ 127, 0, 0, 1 },
+        .ipv4_port = preferred_endpoint.address().ip4.port,
+        .connection_id = &preferred_cid,
+        .stateless_reset_token = [_]u8{0x5a} ** 16,
+    };
+    var connection = try Connection.init(&original_endpoint, .{
+        .peer = original_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .peer_preferred_address = preferred_address,
+        .active_connection_id_limit = 4,
+    });
+    defer connection.deinit();
+
+    try std.testing.expect(connection.peerPreferredAddress() != null);
+    try std.testing.expectEqual(preferred_endpoint.address(), Connection.preferredAddressIp4(preferred_address).?);
+    try std.testing.expect(Connection.preferredAddressIp6(preferred_address) == null);
+
+    const challenge = [_]u8{ 0xa0, 1, 2, 3, 4, 5, 6, 7 };
+    try connection.beginPeerPreferredAddressMigration(challenge, .ipv4);
+    try std.testing.expectEqual(preferred_endpoint.address(), connection.config.peer);
+    try std.testing.expectEqualSlices(u8, &preferred_cid, connection.config.peer_connection_id);
+    try std.testing.expectEqual(@as(usize, 2), connection.peer_connection_ids.count());
+    try std.testing.expect(!connection.peerAddressValidated());
+    try std.testing.expectEqual(@as(?usize, 0), connection.antiAmplificationLimitRemaining());
+    var challenge_frame = try connection.path_validation.nextChallengeFrame();
+    try std.testing.expectEqualSlices(u8, &challenge, &challenge_frame.path_challenge.data);
+
+    var missing = try Connection.init(&original_endpoint, .{
+        .peer = original_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+    });
+    defer missing.deinit();
+    try std.testing.expectError(error.InvalidTransportParameter, missing.beginPeerPreferredAddressMigration(challenge, .ipv4));
 }
 
 test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {

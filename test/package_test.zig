@@ -201,6 +201,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_pmtud"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "pmtud_max_probe_size"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_disable_active_migration"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_preferred_address"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_max_datagram_frame_size"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_max_datagram_frame_size"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_datagram_queue_items"));
@@ -267,6 +268,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "peerAddressValidated"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "setPeerAddressValidated"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "beginPeerMigration"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "beginPeerPreferredAddressMigration"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "peerPreferredAddress"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "peerActiveMigrationDisabled"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendPendingPathChallengeAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "pathValidationDeadline"));

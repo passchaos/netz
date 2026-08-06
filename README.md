@@ -94,8 +94,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   delivery, including peer-path binding and active-migration-disabled route
   rejection, NEW_CONNECTION_ID active-limit/duplicate-CID/reset-token validation and RETIRE_CONNECTION_ID lifecycle state wired into
   1-RTT, transport/application CONNECTION_CLOSE state, PATH_CHALLENGE/PATH_RESPONSE validation state with duplicate challenge suppression wired into 1-RTT,
-  peer-migration helpers that honor disable_active_migration, switch the peer
-  address, reset anti-amplification and PMTUD path state, queue PATH_CHALLENGE,
+  peer-migration helpers that honor disable_active_migration, apply a server
+  preferred_address by selecting its CID/reset token and peer IP/port, reset
+  anti-amplification and PMTUD path state, queue PATH_CHALLENGE,
   track path-validation deadlines, retry timed-out challenges, record failed
   validation attempts, and validate the new path on a matching PATH_RESPONSE,
   plus a blocking UDP endpoint runtime for frame datagrams with a
