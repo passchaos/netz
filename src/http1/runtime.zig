@@ -779,7 +779,10 @@ fn readMessageBytesWithContext(
     var scratch: [4096]u8 = undefined;
     var head_end: ?usize = try findHttpHeadEndWithinLimit(bytes.items, limits.max_head_bytes);
     while (head_end == null) {
-        const read_buf = scratch[0..@min(scratch.len, limits.max_head_bytes - bytes.items.len)];
+        // The non-buffered helpers have nowhere to keep bytes that belong to
+        // the next pipelined message.  Read the head one byte at a time until
+        // CRLFCRLF so this API remains safe even without an explicit inbuf.
+        const read_buf = scratch[0..1];
         const n = try readSome(io, stream, read_buf);
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
@@ -801,7 +804,11 @@ fn readMessageBytesWithContext(
     const target_len = while (true) {
         const len = messageTargetLength(bytes.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
             error.BufferTooShort => {
-                const n = try readSome(io, stream, &scratch);
+                const read_buf = if (head_end.? + 4 + limits.max_body_bytes > bytes.items.len)
+                    scratch[0..@min(scratch.len, head_end.? + 4 + limits.max_body_bytes - bytes.items.len)]
+                else
+                    return error.BodyTooLarge;
+                const n = try readSome(io, stream, read_buf);
                 if (n == 0) return error.ConnectionClosed;
                 try bytes.appendSlice(allocator, scratch[0..n]);
                 if (bytes.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
@@ -812,12 +819,12 @@ fn readMessageBytesWithContext(
         break len;
     };
     while (bytes.items.len < target_len) {
-        const n = try readSome(io, stream, &scratch);
+        const read_buf = scratch[0..@min(scratch.len, target_len - bytes.items.len)];
+        const n = try readSome(io, stream, read_buf);
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
         if (bytes.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
     }
-    if (bytes.items.len > target_len) bytes.shrinkRetainingCapacity(target_len);
     return bytes.toOwnedSlice(allocator);
 }
 
@@ -2283,4 +2290,60 @@ test "HTTP/1 runtime enforces header byte limit at delimiter" {
     const incomplete = "GET / HTTP/1.1\r\nHost: example";
     try std.testing.expectEqual(@as(?usize, null), try findHttpHeadEndWithinLimit(incomplete, incomplete.len + 1));
     try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(incomplete, incomplete.len));
+}
+
+test "HTTP/1 non-buffered request reader preserves pipelined bytes on socket" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            const stream = try shared.listener.accept(shared.io);
+            defer stream.close(shared.io);
+
+            var first = try readRequestFromStream(shared.allocator, shared.io, stream, .{
+                .max_head_bytes = 4096,
+                .max_body_bytes = 4096,
+            }, .{});
+            defer first.deinit(shared.allocator);
+            try std.testing.expectEqualStrings("/first", first.request.target);
+            try std.testing.expectEqualStrings("hello", first.request.body);
+
+            var second = try readRequestFromStream(shared.allocator, shared.io, stream, .{
+                .max_head_bytes = 4096,
+                .max_body_bytes = 4096,
+            }, .{});
+            defer second.deinit(shared.allocator);
+            try std.testing.expectEqualStrings("/second", second.request.target);
+            try std.testing.expectEqualStrings("world", second.request.body);
+        }
+    };
+
+    var shared = Shared{ .allocator = allocator, .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAll(io, stream, "POST /first HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\n\r\nhello" ++
+        "POST /second HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\n\r\nworld");
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
