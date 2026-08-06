@@ -896,6 +896,7 @@ pub const Response = struct {
     pub fn headerFields(self: Response, out: []Qpack.HeaderField, status_buf: *[3]u8) Error![]Qpack.HeaderField {
         var count: usize = 0;
         if (self.status < 100 or self.status > 999) return error.InvalidStatus;
+        if (self.status < 200) return error.InvalidStatus;
         const status = std.fmt.bufPrint(status_buf, "{d}", .{self.status}) catch return error.InvalidStatus;
         try appendHeaderField(out, &count, .{ .name = ":status", .value = status });
         for (self.headers) |header| try appendHeaderField(out, &count, header);
@@ -2235,7 +2236,10 @@ test "HTTP/3 response encode decode" {
         .status = 204,
         .body = "body",
     }).write(&encoded, allocator));
-    try std.testing.expectError(error.InvalidContentLength, (Response{
+    try std.testing.expectError(error.InvalidStatus, (Response{
+        .status = 103,
+    }).write(&encoded, allocator));
+    try std.testing.expectError(error.InvalidStatus, (Response{
         .status = 103,
         .headers = &.{.{ .name = "content-length", .value = "0" }},
     }).write(&encoded, allocator));
