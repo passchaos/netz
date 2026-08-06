@@ -451,6 +451,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeHeartbeatPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ShutdownChunk"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeShutdownPacket"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "AbortChunk"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ErrorChunk"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeAbortPacket"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeErrorPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeDataPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "parseDcepMessage"));
     try std.testing.expectEqual(@as(usize, 2048), (netz.webrtc.runtime.Limits{}).max_datagram_size);

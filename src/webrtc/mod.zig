@@ -2207,6 +2207,57 @@ pub const sctp = struct {
         stream_sequence_number: u16,
     };
 
+    pub const ErrorCauseCode = enum(u16) {
+        invalid_stream_identifier = 0x0001,
+        missing_mandatory_parameter = 0x0002,
+        stale_cookie_error = 0x0003,
+        out_of_resource = 0x0004,
+        unresolvable_address = 0x0005,
+        unrecognized_chunk_type = 0x0006,
+        invalid_mandatory_parameter = 0x0007,
+        unrecognized_parameters = 0x0008,
+        no_user_data = 0x0009,
+        cookie_received_while_shutting_down = 0x000a,
+        restart_association_with_new_addresses = 0x000b,
+        user_initiated_abort = 0x000c,
+        protocol_violation = 0x000d,
+        _,
+    };
+
+    pub const ErrorCause = struct {
+        code: ErrorCauseCode,
+        value: []const u8 = &.{},
+    };
+
+    pub const AbortChunk = struct {
+        t_bit: bool = false,
+        causes: []ErrorCause = &.{},
+
+        pub fn deinit(self: *AbortChunk, allocator: std.mem.Allocator) void {
+            allocator.free(self.causes);
+            self.* = undefined;
+        }
+
+        pub fn parse(allocator: std.mem.Allocator, chunk: Chunk) Error!AbortChunk {
+            if (chunk.chunk_type != .abort or (chunk.flags & ~@as(u8, 0x01)) != 0) return error.InvalidSctpPacket;
+            return .{ .t_bit = (chunk.flags & 0x01) != 0, .causes = try parseErrorCauses(allocator, chunk.value) };
+        }
+    };
+
+    pub const ErrorChunk = struct {
+        causes: []ErrorCause,
+
+        pub fn deinit(self: *ErrorChunk, allocator: std.mem.Allocator) void {
+            allocator.free(self.causes);
+            self.* = undefined;
+        }
+
+        pub fn parse(allocator: std.mem.Allocator, chunk: Chunk) Error!ErrorChunk {
+            if (chunk.chunk_type != .error_chunk or chunk.flags != 0) return error.InvalidSctpPacket;
+            return .{ .causes = try parseErrorCauses(allocator, chunk.value) };
+        }
+    };
+
     pub const ForwardTsnChunk = struct {
         new_cumulative_tsn: u32,
         skipped_streams: []SkippedStream = &.{},
@@ -2627,6 +2678,31 @@ pub const sctp = struct {
         try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
     }
 
+    pub fn writeAbortPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, t_bit: bool, causes: []const ErrorCause) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeAbortChunk(list, allocator, t_bit, causes);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeAbortChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, t_bit: bool, causes: []const ErrorCause) Error!void {
+        try writeErrorLikeChunk(list, allocator, .abort, if (t_bit) 0x01 else 0x00, causes);
+    }
+
+    pub fn writeErrorPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, causes: []const ErrorCause) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeErrorChunk(list, allocator, causes);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeErrorChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, causes: []const ErrorCause) Error!void {
+        if (causes.len == 0) return error.InvalidSctpPacket;
+        try writeErrorLikeChunk(list, allocator, .error_chunk, 0, causes);
+    }
+
     pub fn writeHeartbeatPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, ack: bool, info: []const u8) Error!void {
         const start = list.items.len;
         try writePacketHeader(list, allocator, options);
@@ -2874,6 +2950,45 @@ pub const sctp = struct {
         try wire.appendInt(list, allocator, u16, options.destination_port, .big);
         try wire.appendInt(list, allocator, u32, options.verification_tag, .big);
         try wire.appendInt(list, allocator, u32, 0, .little);
+    }
+
+    fn parseErrorCauses(allocator: std.mem.Allocator, bytes: []const u8) Error![]ErrorCause {
+        var cursor = wire.Cursor.init(bytes);
+        var causes: std.ArrayList(ErrorCause) = .empty;
+        errdefer causes.deinit(allocator);
+        while (!cursor.eof()) {
+            if (cursor.remaining() < 4) return error.InvalidSctpPacket;
+            const code: ErrorCauseCode = @enumFromInt(try cursor.readInt(u16, .big));
+            const len = try cursor.readInt(u16, .big);
+            if (len < 4 or cursor.remaining() < len - 4) return error.InvalidSctpPacket;
+            const value = try cursor.readSlice(len - 4);
+            try causes.append(allocator, .{ .code = code, .value = value });
+            try cursor.skip((4 - (len % 4)) % 4);
+        }
+        return causes.toOwnedSlice(allocator);
+    }
+
+    fn writeErrorLikeChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunk_type: ChunkType, flags: u8, causes: []const ErrorCause) Error!void {
+        if (chunk_type != .abort and chunk_type != .error_chunk) return error.InvalidSctpPacket;
+        var value: std.ArrayList(u8) = .empty;
+        defer value.deinit(allocator);
+        for (causes) |cause| try writeErrorCause(&value, allocator, cause);
+        const chunk_len = 4 + value.items.len;
+        if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try list.append(allocator, @intFromEnum(chunk_type));
+        try list.append(allocator, flags);
+        try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        try list.appendSlice(allocator, value.items);
+        try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
+    }
+
+    fn writeErrorCause(list: *std.ArrayList(u8), allocator: std.mem.Allocator, cause: ErrorCause) Error!void {
+        const len = 4 + cause.value.len;
+        if (len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try wire.appendInt(list, allocator, u16, @intFromEnum(cause.code), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(len), .big);
+        try list.appendSlice(allocator, cause.value);
+        try list.appendNTimes(allocator, 0, align4(len) - len);
     }
 
     fn parseInitParameters(allocator: std.mem.Allocator, bytes: []const u8) Error![]InitParameter {
@@ -3581,6 +3696,43 @@ test "RTCP NACK tracker detects RTP gaps and wraparound" {
     wrap.observe(0xffff);
     wrap.observe(0);
     try std.testing.expectEqual(@as(usize, 0), wrap.pendingCount());
+}
+
+test "SCTP ABORT and ERROR causes" {
+    const allocator = std.testing.allocator;
+    const cause_text = "closing association";
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try sctp.writeAbortPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, true, &.{.{ .code = .user_initiated_abort, .value = cause_text }});
+    try std.testing.expect(try sctp.validChecksum(encoded.items));
+    var parsed = try sctp.parsePacket(allocator, encoded.items, true);
+    defer parsed.deinit(allocator);
+    var abort_chunk = try sctp.AbortChunk.parse(allocator, parsed.chunks[0]);
+    defer abort_chunk.deinit(allocator);
+    try std.testing.expect(abort_chunk.t_bit);
+    try std.testing.expectEqual(sctp.ErrorCauseCode.user_initiated_abort, abort_chunk.causes[0].code);
+    try std.testing.expectEqualStrings(cause_text, abort_chunk.causes[0].value);
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeErrorPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, &.{.{ .code = .protocol_violation, .value = "bad chunk" }});
+    var error_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer error_packet.deinit(allocator);
+    var error_chunk = try sctp.ErrorChunk.parse(allocator, error_packet.chunks[0]);
+    defer error_chunk.deinit(allocator);
+    try std.testing.expectEqual(sctp.ErrorCauseCode.protocol_violation, error_chunk.causes[0].code);
+    try std.testing.expectEqualStrings("bad chunk", error_chunk.causes[0].value);
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeErrorChunk(&encoded, allocator, &.{}));
 }
 
 test "SCTP HEARTBEAT and SHUTDOWN lifecycle packets" {
