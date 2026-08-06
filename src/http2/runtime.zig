@@ -814,6 +814,10 @@ pub const Connection = struct {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .window_update) {
+                if (try self.handleConnectionFrame(frame.frame)) {
+                    frame.deinit(self.allocator);
+                    continue;
+                }
                 frame.deinit(self.allocator);
                 continue;
             }
@@ -2206,6 +2210,69 @@ test "HTTP/2 readPing ignores ACK frames" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 2, 3, 5, 7, 11, 13, 17, 19 }, &shared.observed);
+}
+
+test "HTTP/2 readWindowUpdate handles interleaved PING" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            const ping_payload = [_]u8{ 4, 8, 15, 16, 23, 42, 0, 1 };
+            try writeFrame(server_ptr.allocator, server_ptr.io, connection.stream, .ping, 0, 0, &ping_payload);
+            try connection.sendWindowUpdate(0, 777);
+
+            while (true) {
+                var frame = try readFrame(server_ptr.allocator, server_ptr.io, connection.stream, server_ptr.limits);
+                defer frame.deinit(server_ptr.allocator);
+                if (frame.frame.header.frame_type != .ping) continue;
+                try std.testing.expect((frame.frame.header.flags & flag_ack) != 0);
+                try std.testing.expectEqualSlices(u8, &ping_payload, frame.frame.payload);
+                break;
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var update = try client.readWindowUpdate();
+    defer update.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 0), update.window_update.stream_id);
+    try std.testing.expectEqual(@as(u31, 777), update.window_update.increment);
+    try std.testing.expectEqual(@as(i64, default_flow_window + 777), client.send_connection_window.value);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 runtime sends and receives RST_STREAM" {
