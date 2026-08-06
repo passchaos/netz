@@ -183,6 +183,7 @@ pub const Client = struct {
         try writeRequestToStream(self.allocator, self.io, self.stream, .{
             .method = .CONNECT,
             .target = target,
+            .host = target,
             .headers = headers,
         });
         var response = try readResponseFromStreamBufferedForRequest(self.allocator, self.io, self.stream, self.limits, .{}, &self.inbuf, .CONNECT);
@@ -285,6 +286,11 @@ pub const RequestOptions = struct {
     method: http1.Method = .GET,
     target: []const u8 = "/",
     version: http1.Version = .http_1_1,
+    /// Optional authority used to synthesize Host when the caller did not
+    /// provide one explicitly.  HTTP/1.1 requires Host on origin-form requests;
+    /// keeping it in RequestOptions lets the client runtime behave like mature
+    /// stacks without forcing every call site to hand-build a header field.
+    host: ?[]const u8 = null,
     headers: []const http1.Header = &.{},
     body: []const u8 = &.{},
     trailers: []const http1.Header = &.{},
@@ -555,10 +561,13 @@ fn applyCloseDelimitedResponseBody(response: *http1.Response, bytes: []const u8,
 
 pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: RequestOptions) Error!void {
     try http1.validateRequestTargetForMethod(options.method, options.target);
-    try http1.validateHostHeaderBlock(options.version, options.headers);
+    var request_headers: std.ArrayList(http1.Header) = .empty;
+    defer request_headers.deinit(allocator);
+    try appendRequestHeadersWithHost(&request_headers, allocator, options.headers, options.host);
+    try http1.validateHostHeaderBlock(options.version, request_headers.items);
     if (options.method == .CONNECT and (options.body.len != 0 or options.trailers.len != 0)) return error.InvalidContentLength;
-    const use_chunked = try chunkedWriteFraming(options.version, options.headers, options.trailers);
-    try validateDeclaredRequestBodyLength(options.headers, options.body.len, use_chunked);
+    const use_chunked = try chunkedWriteFraming(options.version, request_headers.items, options.trailers);
+    try validateDeclaredRequestBodyLength(request_headers.items, options.body.len, use_chunked);
     var headers: std.ArrayList(http1.Header) = .empty;
     defer headers.deinit(allocator);
     var len_buf: [32]u8 = undefined;
@@ -567,7 +576,7 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
     try appendDefaultedHeaders(
         &headers,
         allocator,
-        options.headers,
+        request_headers.items,
         options.body.len,
         options.trailers,
         use_chunked,
@@ -593,6 +602,22 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
         try encoded.appendSlice(allocator, options.body);
     }
     try writeAll(io, stream, encoded.items);
+}
+
+fn appendRequestHeadersWithHost(
+    list: *std.ArrayList(http1.Header),
+    allocator: std.mem.Allocator,
+    headers: []const http1.Header,
+    host: ?[]const u8,
+) Error!void {
+    var has_host = false;
+    for (headers) |header| {
+        if (header.eqlName("host")) has_host = true;
+        try list.append(allocator, header);
+    }
+    if (!has_host) {
+        if (host) |value| try list.append(allocator, .{ .name = "Host", .value = value });
+    }
 }
 
 pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: ResponseOptions) Error!void {
@@ -1305,6 +1330,7 @@ test "HTTP/1 runtime client and server exchange over TCP" {
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqual(http1.Method.POST, request.request.method);
             try std.testing.expectEqualStrings("/echo", request.request.target);
+            try std.testing.expectEqualStrings("127.0.0.1", request.request.header("host").?);
             try std.testing.expectEqualStrings("ping", request.request.body);
 
             try connection.writeResponse(.{
@@ -1324,7 +1350,7 @@ test "HTTP/1 runtime client and server exchange over TCP" {
     var response = try client.request(.{
         .method = .POST,
         .target = "/echo",
-        .headers = &.{.{ .name = "Host", .value = "127.0.0.1" }},
+        .host = "127.0.0.1",
         .body = "ping",
     });
     defer response.deinit(allocator);
@@ -1370,6 +1396,7 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqual(http1.Method.CONNECT, request.request.method);
             try std.testing.expectEqualStrings("example.com:443", request.request.target);
+            try std.testing.expectEqualStrings("example.com:443", request.request.header("host").?);
 
             var tunnel = try connection.acceptConnectTunnel(request.request, &.{});
             var buf: [64]u8 = undefined;
@@ -1388,7 +1415,7 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
     });
     defer client.close();
 
-    var tunnel = try client.openConnectTunnel("example.com:443", &.{.{ .name = "Host", .value = "example.com:443" }});
+    var tunnel = try client.openConnectTunnel("example.com:443", &.{});
     try tunnel.write("client tunnel bytes");
     var buf: [64]u8 = undefined;
     const n = try tunnel.read(&buf);
