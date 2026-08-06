@@ -16,6 +16,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     DatagramsNotEnabled,
     DatagramQueueFull,
     DatagramBufferTooSmall,
+    AckFrequencyDisabled,
 };
 
 pub const SendOptions = struct {
@@ -122,6 +123,7 @@ pub const ConnectionConfig = struct {
     local_max_datagram_frame_size: ?usize = null,
     peer_max_datagram_frame_size: ?usize = null,
     max_datagram_queue_items: usize = 16,
+    enable_ack_frequency: bool = false,
 };
 
 const StreamFlowEntry = struct {
@@ -248,6 +250,11 @@ pub const Connection = struct {
     datagrams_sent_count: u64 = 0,
     datagrams_received_count: u64 = 0,
     datagrams_dropped_incoming_count: u64 = 0,
+    ack_frequency_next_sequence: u64 = 0,
+    ack_eliciting_threshold: u64 = 1,
+    requested_max_ack_delay: u64 = 0,
+    ack_reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
+    immediate_ack_requested: bool = false,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -401,6 +408,41 @@ pub const Connection = struct {
 
     pub fn datagramsDroppedIncoming(self: Connection) u64 {
         return self.datagrams_dropped_incoming_count;
+    }
+
+    pub fn sendAckFrequency(self: *Connection, ack_eliciting_threshold: u64, request_max_ack_delay: u64, reordering_threshold: u64) Error!u64 {
+        if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
+        const sequence_number = self.ack_frequency_next_sequence;
+        self.ack_frequency_next_sequence +|= 1;
+        const frames = [_]quic.Frame{.{ .ack_frequency = .{
+            .sequence_number = sequence_number,
+            .ack_eliciting_threshold = ack_eliciting_threshold,
+            .request_max_ack_delay = request_max_ack_delay,
+            .reordering_threshold = reordering_threshold,
+        } }};
+        try self.send(&frames);
+        return sequence_number;
+    }
+
+    pub fn sendImmediateAck(self: *Connection) Error!void {
+        if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
+        try self.send(&[_]quic.Frame{.{ .immediate_ack = {} }});
+    }
+
+    pub fn ackFrequencyThreshold(self: Connection) u64 {
+        return self.ack_eliciting_threshold;
+    }
+
+    pub fn requestedMaxAckDelay(self: Connection) u64 {
+        return self.requested_max_ack_delay;
+    }
+
+    pub fn ackReorderingThreshold(self: Connection) u64 {
+        return self.ack_reordering_threshold;
+    }
+
+    pub fn immediateAckRequested(self: Connection) bool {
+        return self.immediate_ack_requested;
     }
 
     fn sendDataBlocked(self: *Connection) Error!void {
@@ -1169,6 +1211,8 @@ pub const Connection = struct {
                 .new_token => |new_token| try self.receiveNewToken(new_token),
                 .handshake_done => try self.receiveHandshakeDone(),
                 .datagram => |datagram| try self.receiveDatagramFrame(datagram),
+                .ack_frequency => |ack_frequency| try self.receiveAckFrequency(ack_frequency),
+                .immediate_ack => self.receiveImmediateAck(),
                 .connection_close => |close| try self.setCloseInfo(.{
                     .application = false,
                     .error_code = close.error_code,
@@ -1259,6 +1303,7 @@ pub const Connection = struct {
                     if (self.config.local_endpoint == .server) return error.InvalidFrame;
                 },
                 .datagram => |datagram| try self.validateDatagramFrame(datagram),
+                .ack_frequency, .immediate_ack => if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled,
                 else => {},
             }
         }
@@ -1433,6 +1478,19 @@ pub const Connection = struct {
         const frame_limit = self.config.local_max_datagram_frame_size orelse return error.InvalidFrame;
         const frame_size = datagramFrameWireSize(datagram) orelse return error.InvalidFrameLength;
         if (frame_size > frame_limit) return error.InvalidFrame;
+    }
+
+    fn receiveAckFrequency(self: *Connection, ack_frequency: quic.AckFrequencyFrame) Error!void {
+        if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
+        if (ack_frequency.sequence_number < self.ack_frequency_next_sequence) return;
+        self.ack_frequency_next_sequence = ack_frequency.sequence_number +| 1;
+        self.ack_eliciting_threshold = @max(@as(u64, 1), ack_frequency.ack_eliciting_threshold);
+        self.requested_max_ack_delay = ack_frequency.request_max_ack_delay;
+        self.ack_reordering_threshold = @max(@as(u64, 1), ack_frequency.reordering_threshold);
+    }
+
+    fn receiveImmediateAck(self: *Connection) void {
+        self.immediate_ack_requested = true;
     }
 
     fn receiveResetStream(self: *Connection, reset: quic.ResetStreamFrame) Error!void {
@@ -5026,4 +5084,84 @@ test "QUIC 1-RTT DATAGRAM enforces negotiation and frame-size limits" {
     try std.testing.expectEqual(@as(?usize, 6), limited.maxDatagramPayloadSize());
     try std.testing.expectError(error.DatagramTooLarge, limited.sendDatagram("1234567"));
     try std.testing.expectError(error.InvalidFrame, limited.validateDatagramFrame(.{ .data = "1234567", .length_present = true }));
+}
+
+test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
+    const server_cid = [_]u8{ 0xf5, 0xf6, 0xf7, 0xf8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xf0} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_ack_frequency = true,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_ack_frequency = true,
+    });
+    defer server.deinit();
+
+    const sequence = try client.sendAckFrequency(4, 12_000, 5);
+    try std.testing.expectEqual(@as(u64, 0), sequence);
+    var frequency = try server.receivePacket();
+    defer frequency.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 4), server.ackFrequencyThreshold());
+    try std.testing.expectEqual(@as(u64, 12_000), server.requestedMaxAckDelay());
+    try std.testing.expectEqual(@as(u64, 5), server.ackReorderingThreshold());
+
+    try client.sendImmediateAck();
+    var immediate = try server.receivePacket();
+    defer immediate.deinit(allocator);
+    try std.testing.expect(server.immediateAckRequested());
+
+    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 2,
+        .frames = &[_]quic.Frame{.{ .ack_frequency = .{
+            .sequence_number = 0,
+            .ack_eliciting_threshold = 99,
+            .request_max_ack_delay = 99,
+            .reordering_threshold = 99,
+        } }},
+    });
+    var stale = try server.receivePacket();
+    defer stale.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 4), server.ackFrequencyThreshold());
+
+    var disabled = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer disabled.deinit();
+    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 3,
+        .frames = &[_]quic.Frame{.{ .immediate_ack = {} }},
+    });
+    try std.testing.expectError(error.AckFrequencyDisabled, disabled.receivePacket());
 }

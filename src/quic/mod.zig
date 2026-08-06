@@ -806,8 +806,10 @@ pub const FrameType = enum(u64) {
     connection_close = 0x1c,
     connection_close_app = 0x1d,
     handshake_done = 0x1e,
+    immediate_ack = 0x1f,
     datagram = 0x30,
     datagram_len = 0x31,
+    ack_frequency = 0xaf,
     _,
 
     pub fn isStream(value: u64) bool {
@@ -922,6 +924,13 @@ pub const DatagramFrame = struct {
     length_present: bool = true,
 };
 
+pub const AckFrequencyFrame = struct {
+    sequence_number: u64,
+    ack_eliciting_threshold: u64,
+    request_max_ack_delay: u64,
+    reordering_threshold: u64,
+};
+
 pub const Frame = union(enum) {
     padding: PaddingFrame,
     ping: void,
@@ -946,7 +955,9 @@ pub const Frame = union(enum) {
     connection_close: ConnectionCloseFrame,
     application_close: ApplicationCloseFrame,
     handshake_done: void,
+    immediate_ack: void,
     datagram: DatagramFrame,
+    ack_frequency: AckFrequencyFrame,
 
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         switch (self) {
@@ -1056,10 +1067,18 @@ pub const Frame = union(enum) {
                 try list.appendSlice(allocator, close.reason_phrase);
             },
             .handshake_done => try varint.encode(list, allocator, @intFromEnum(FrameType.handshake_done)),
+            .immediate_ack => try varint.encode(list, allocator, @intFromEnum(FrameType.immediate_ack)),
             .datagram => |datagram| {
                 try varint.encode(list, allocator, if (datagram.length_present) @intFromEnum(FrameType.datagram_len) else @intFromEnum(FrameType.datagram));
                 if (datagram.length_present) try varint.encode(list, allocator, datagram.data.len);
                 try list.appendSlice(allocator, datagram.data);
+            },
+            .ack_frequency => |ack_frequency| {
+                try varint.encode(list, allocator, @intFromEnum(FrameType.ack_frequency));
+                try varint.encode(list, allocator, ack_frequency.sequence_number);
+                try varint.encode(list, allocator, ack_frequency.ack_eliciting_threshold);
+                try varint.encode(list, allocator, ack_frequency.request_max_ack_delay);
+                try varint.encode(list, allocator, ack_frequency.reordering_threshold);
             },
         }
     }
@@ -1111,6 +1130,8 @@ pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool
             .path_challenge,
             .application_close,
             .datagram,
+            .immediate_ack,
+            .ack_frequency,
             => true,
             // ACK, CRYPTO, CONNECTION_CLOSE, HANDSHAKE_DONE, NEW_TOKEN,
             // RETIRE_CONNECTION_ID, and PATH_RESPONSE are not 0-RTT frames.
@@ -1276,6 +1297,7 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
     }
 
     if (frame_type == @intFromEnum(FrameType.handshake_done)) return .{ .handshake_done = {} };
+    if (frame_type == @intFromEnum(FrameType.immediate_ack)) return .{ .immediate_ack = {} };
 
     if (frame_type == @intFromEnum(FrameType.datagram)) {
         const payload = packet_payload[cursor.pos..];
@@ -1286,6 +1308,15 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
     if (frame_type == @intFromEnum(FrameType.datagram_len)) {
         const len = try usizeFromVarint(try varint.decode(cursor));
         return .{ .datagram = .{ .data = try cursor.readSlice(len), .length_present = true } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.ack_frequency)) {
+        return .{ .ack_frequency = .{
+            .sequence_number = try varint.decode(cursor),
+            .ack_eliciting_threshold = try varint.decode(cursor),
+            .request_max_ack_delay = try varint.decode(cursor),
+            .reordering_threshold = try varint.decode(cursor),
+        } };
     }
 
     return error.UnsupportedFrameType;
@@ -1793,6 +1824,37 @@ test "QUIC ack close datagram and padding frames" {
     const padding = try parseFrame(&.{ 0, 0, 0, @intFromEnum(FrameType.ping) });
     try std.testing.expectEqual(@as(usize, 3), padding.frame.padding.len);
     try std.testing.expectEqual(@as(usize, 3), padding.consumed);
+}
+
+test "QUIC ACK_FREQUENCY and IMMEDIATE_ACK frames" {
+    const allocator = std.testing.allocator;
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (Frame{ .ack_frequency = .{
+        .sequence_number = 9,
+        .ack_eliciting_threshold = 4,
+        .request_max_ack_delay = 2500,
+        .reordering_threshold = 3,
+    } }).write(&encoded, allocator);
+    const parsed = try parseFrame(encoded.items);
+    try std.testing.expectEqual(@as(u64, 9), parsed.frame.ack_frequency.sequence_number);
+    try std.testing.expectEqual(@as(u64, 4), parsed.frame.ack_frequency.ack_eliciting_threshold);
+    try std.testing.expectEqual(@as(u64, 2500), parsed.frame.ack_frequency.request_max_ack_delay);
+    try std.testing.expectEqual(@as(u64, 3), parsed.frame.ack_frequency.reordering_threshold);
+
+    encoded.clearRetainingCapacity();
+    try (Frame{ .immediate_ack = {} }).write(&encoded, allocator);
+    const immediate = try parseFrame(encoded.items);
+    try std.testing.expect(immediate.frame == .immediate_ack);
+
+    try std.testing.expect(frameAllowedInPacketType(.{ .ack_frequency = .{
+        .sequence_number = 0,
+        .ack_eliciting_threshold = 1,
+        .request_max_ack_delay = 0,
+        .reordering_threshold = 1,
+    } }, .zero_rtt));
+    try std.testing.expect(frameAllowedInPacketType(.{ .immediate_ack = {} }, .one_rtt));
 }
 
 test "QUIC frame packet context rules follow RFC 9000" {
