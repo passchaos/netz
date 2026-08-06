@@ -2101,6 +2101,49 @@ pub const sctp = struct {
         }
     };
 
+    pub const GapAckBlock = struct {
+        start: u16,
+        end: u16,
+    };
+
+    pub const SackChunk = struct {
+        cumulative_tsn_ack: u32,
+        advertised_receiver_window_credit: u32,
+        gap_ack_blocks: []GapAckBlock = &.{},
+        duplicate_tsns: []const u32 = &.{},
+
+        pub fn deinit(self: *SackChunk, allocator: std.mem.Allocator) void {
+            allocator.free(self.gap_ack_blocks);
+            if (!isConstEmptyU32(self.duplicate_tsns)) allocator.free(@constCast(self.duplicate_tsns));
+            self.* = undefined;
+        }
+
+        pub fn parse(allocator: std.mem.Allocator, chunk: Chunk) Error!SackChunk {
+            if (chunk.chunk_type != .sack or chunk.flags != 0 or chunk.value.len < 12) return error.InvalidSctpPacket;
+            var cursor = wire.Cursor.init(chunk.value);
+            const cumulative_tsn_ack = try cursor.readInt(u32, .big);
+            const rwnd = try cursor.readInt(u32, .big);
+            const gap_count = try cursor.readInt(u16, .big);
+            const duplicate_count = try cursor.readInt(u16, .big);
+            if (cursor.remaining() != @as(usize, gap_count) * 4 + @as(usize, duplicate_count) * 4) return error.InvalidSctpPacket;
+            const gaps = try allocator.alloc(GapAckBlock, gap_count);
+            errdefer allocator.free(gaps);
+            for (gaps) |*gap| {
+                gap.* = .{ .start = try cursor.readInt(u16, .big), .end = try cursor.readInt(u16, .big) };
+                if (gap.start == 0 or gap.end < gap.start) return error.InvalidSctpPacket;
+            }
+            const duplicates = try allocator.alloc(u32, duplicate_count);
+            errdefer allocator.free(duplicates);
+            for (duplicates) |*tsn| tsn.* = try cursor.readInt(u32, .big);
+            return .{
+                .cumulative_tsn_ack = cumulative_tsn_ack,
+                .advertised_receiver_window_credit = rwnd,
+                .gap_ack_blocks = gaps,
+                .duplicate_tsns = duplicates,
+            };
+        }
+    };
+
     pub const DataChannelType = enum(u8) {
         reliable = 0x00,
         partial_reliable_retransmit = 0x01,
@@ -2292,6 +2335,42 @@ pub const sctp = struct {
         return .{ .header = header, .chunks = try chunks.toOwnedSlice(allocator) };
     }
 
+    pub fn writeSackPacket(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        options: PacketOptions,
+        sack: SackChunk,
+    ) Error!void {
+        const start = list.items.len;
+        try wire.appendInt(list, allocator, u16, options.source_port, .big);
+        try wire.appendInt(list, allocator, u16, options.destination_port, .big);
+        try wire.appendInt(list, allocator, u32, options.verification_tag, .big);
+        try wire.appendInt(list, allocator, u32, 0, .little);
+        try writeSackChunk(list, allocator, sack);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeSackChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, sack: SackChunk) Error!void {
+        if (sack.gap_ack_blocks.len > std.math.maxInt(u16) or sack.duplicate_tsns.len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        const chunk_len = 16 + sack.gap_ack_blocks.len * 4 + sack.duplicate_tsns.len * 4;
+        if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try list.append(allocator, @intFromEnum(ChunkType.sack));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        try wire.appendInt(list, allocator, u32, sack.cumulative_tsn_ack, .big);
+        try wire.appendInt(list, allocator, u32, sack.advertised_receiver_window_credit, .big);
+        try wire.appendInt(list, allocator, u16, @intCast(sack.gap_ack_blocks.len), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(sack.duplicate_tsns.len), .big);
+        for (sack.gap_ack_blocks) |gap| {
+            if (gap.start == 0 or gap.end < gap.start) return error.InvalidSctpPacket;
+            try wire.appendInt(list, allocator, u16, gap.start, .big);
+            try wire.appendInt(list, allocator, u16, gap.end, .big);
+        }
+        for (sack.duplicate_tsns) |tsn| try wire.appendInt(list, allocator, u32, tsn, .big);
+        try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
+    }
+
     pub fn writeDataPacket(
         list: *std.ArrayList(u8),
         allocator: std.mem.Allocator,
@@ -2394,6 +2473,10 @@ pub const sctp = struct {
             },
             else => error.InvalidSctpPacket,
         };
+    }
+
+    fn isConstEmptyU32(value: []const u32) bool {
+        return value.ptr == (&[_]u32{}).ptr and value.len == 0;
     }
 
     fn align4(value: usize) usize {
@@ -3005,6 +3088,50 @@ test "SCTP DATA reassembler handles fragmented messages" {
         .beginning = false,
         .ending = false,
         .user_data = "too-large-for-window",
+    }));
+}
+
+test "SCTP SACK packet roundtrip" {
+    const allocator = std.testing.allocator;
+    var gaps = [_]sctp.GapAckBlock{
+        .{ .start = 2, .end = 4 },
+        .{ .start = 8, .end = 8 },
+    };
+    const duplicates = [_]u32{ 1005, 1006 };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try sctp.writeSackPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x11223344,
+    }, .{
+        .cumulative_tsn_ack = 1000,
+        .advertised_receiver_window_credit = 65_535,
+        .gap_ack_blocks = &gaps,
+        .duplicate_tsns = &duplicates,
+    });
+
+    try std.testing.expect(try sctp.validChecksum(encoded.items));
+    var parsed = try sctp.parsePacket(allocator, encoded.items, true);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), parsed.chunks.len);
+    var sack = try sctp.SackChunk.parse(allocator, parsed.chunks[0]);
+    defer sack.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1000), sack.cumulative_tsn_ack);
+    try std.testing.expectEqual(@as(u32, 65_535), sack.advertised_receiver_window_credit);
+    try std.testing.expectEqual(@as(usize, 2), sack.gap_ack_blocks.len);
+    try std.testing.expectEqual(@as(u16, 2), sack.gap_ack_blocks[0].start);
+    try std.testing.expectEqual(@as(u16, 4), sack.gap_ack_blocks[0].end);
+    try std.testing.expectEqualSlices(u32, &duplicates, sack.duplicate_tsns);
+
+    var bad_gaps = [_]sctp.GapAckBlock{.{ .start = 3, .end = 2 }};
+    var invalid: std.ArrayList(u8) = .empty;
+    defer invalid.deinit(allocator);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeSackChunk(&invalid, allocator, .{
+        .cumulative_tsn_ack = 1,
+        .advertised_receiver_window_credit = 1,
+        .gap_ack_blocks = &bad_gaps,
     }));
 }
 
