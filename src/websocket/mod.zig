@@ -343,6 +343,12 @@ pub fn acceptKey(client_key: []const u8) [28]u8 {
 pub fn validateClientHandshake(req: http1.Request) Error!void {
     if (req.method != .GET) return error.InvalidHandshake;
     if (req.version != .http_1_1) return error.InvalidHandshake;
+    switch (req.body_framing) {
+        .none => {},
+        .content_length => if (req.body.len != 0) return error.InvalidHandshake,
+        .chunked, .close_delimited => return error.InvalidHandshake,
+    }
+    if (req.trailers.len != 0) return error.InvalidHandshake;
     const host = try requiredSingletonHeader(req.headers, "host");
     if (wire.trimOws(host).len == 0) return error.InvalidHandshake;
     http1.validateHostValue(host) catch return error.InvalidHandshake;
@@ -388,13 +394,31 @@ pub fn validateClientKey(key: []const u8) Error!void {
 }
 
 fn validateClientSubprotocolHeaders(headers: []const http1.Header) Error!void {
+    var token_index: usize = 0;
     for (headers) |header| {
         if (!header.eqlName("sec-websocket-protocol")) continue;
         var protocols = std.mem.splitScalar(u8, header.value, ',');
         while (protocols.next()) |raw_protocol| {
-            if (!validSubprotocolToken(wire.trimOws(raw_protocol))) return error.InvalidHandshake;
+            const protocol = wire.trimOws(raw_protocol);
+            if (!validSubprotocolToken(protocol)) return error.InvalidHandshake;
+            if (subprotocolTokenSeenBefore(headers, token_index, protocol)) return error.InvalidHandshake;
+            token_index += 1;
         }
     }
+}
+
+fn subprotocolTokenSeenBefore(headers: []const http1.Header, before_index: usize, candidate: []const u8) bool {
+    var seen: usize = 0;
+    for (headers) |header| {
+        if (!header.eqlName("sec-websocket-protocol")) continue;
+        var protocols = std.mem.splitScalar(u8, header.value, ',');
+        while (protocols.next()) |raw_protocol| {
+            if (seen >= before_index) return false;
+            if (std.mem.eql(u8, wire.trimOws(raw_protocol), candidate)) return true;
+            seen += 1;
+        }
+    }
+    return false;
 }
 
 pub fn validSubprotocolToken(protocol: []const u8) bool {
@@ -690,6 +714,26 @@ test "WebSocket handshake validation" {
     var empty_protocol_req = try http1.parseRequest(allocator, empty_protocol, .{});
     defer empty_protocol_req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(empty_protocol_req));
+
+    const duplicate_protocol = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: chat.v1, chat.v1\r\n\r\n";
+    var duplicate_protocol_req = try http1.parseRequest(allocator, duplicate_protocol, .{});
+    defer duplicate_protocol_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(duplicate_protocol_req));
+
+    const split_duplicate_protocol = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: chat.v1\r\nSec-WebSocket-Protocol: chat.v2, chat.v1\r\n\r\n";
+    var split_duplicate_protocol_req = try http1.parseRequest(allocator, split_duplicate_protocol, .{});
+    defer split_duplicate_protocol_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(split_duplicate_protocol_req));
+
+    const request_body = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nContent-Length: 4\r\n\r\nbody";
+    var request_body_req = try http1.parseRequest(allocator, request_body, .{});
+    defer request_body_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(request_body_req));
+
+    const chunked_request = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+    var chunked_request_req = try http1.parseRequest(allocator, chunked_request, .{});
+    defer chunked_request_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(chunked_request_req));
 }
 
 test "WebSocket strict frame validation" {
