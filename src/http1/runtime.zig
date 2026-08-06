@@ -157,6 +157,7 @@ pub const Client = struct {
     stream: net.Stream,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
+    default_host: ?[]u8 = null,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Client {
         return .{
@@ -175,22 +176,28 @@ pub const Client = struct {
         limits: Limits,
     ) Error!Client {
         const host_name = try net.HostName.init(host);
+        const owned_host = try allocator.dupe(u8, host);
+        errdefer allocator.free(owned_host);
         return .{
             .io = io,
             .allocator = allocator,
             .stream = try host_name.connect(io, port, .{ .mode = .stream }),
             .limits = limits,
+            .default_host = owned_host,
         };
     }
 
     pub fn close(self: *Client) void {
+        if (self.default_host) |host| self.allocator.free(host);
         self.inbuf.deinit(self.allocator);
         self.stream.close(self.io);
         self.* = undefined;
     }
 
     pub fn request(self: *Client, request_options: RequestOptions) Error!OwnedResponse {
-        try writeRequestToStream(self.allocator, self.io, self.stream, request_options);
+        var options = request_options;
+        if (options.host == null) options.host = self.default_host;
+        try writeRequestToStream(self.allocator, self.io, self.stream, options);
         return readResponseFromStreamBufferedForRequest(self.allocator, self.io, self.stream, self.limits, .{}, &self.inbuf, request_options.method);
     }
 
@@ -1488,7 +1495,7 @@ test "HTTP/1 client connects by host name" {
     });
     defer client.close();
 
-    var response = try client.request(.{ .host = "localhost" });
+    var response = try client.request(.{});
     defer response.deinit(allocator);
 
     thread.join();
