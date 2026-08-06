@@ -635,6 +635,13 @@ pub const Connection = struct {
         return self.peer_connection_ids.detectStatelessReset(datagram);
     }
 
+    pub fn processStatelessResetDatagram(self: *Connection, datagram: []const u8, now_ms: ?u64, pto_ms: ?u64) ?u64 {
+        if (self.closed()) return null;
+        const sequence_number = self.detectStatelessReset(datagram) orelse return null;
+        self.enterStatelessResetDraining(now_ms, pto_ms) catch return null;
+        return sequence_number;
+    }
+
     pub fn latestNewToken(self: Connection) ?[]const u8 {
         if (self.stored_new_tokens.items.len == 0) return null;
         return self.stored_new_tokens.items[self.stored_new_tokens.items.len - 1];
@@ -1133,6 +1140,24 @@ pub const Connection = struct {
             .started_ms = close.now_ms,
             .expires_ms = expires_ms,
         };
+    }
+
+    fn enterStatelessResetDraining(self: *Connection, now_ms: ?u64, pto_ms: ?u64) Error!void {
+        if (self.close_info) |*close_info| {
+            close_info.state = .draining;
+            close_info.started_ms = now_ms;
+            close_info.expires_ms = closeExpiryMillis(now_ms, pto_ms);
+            return;
+        }
+        try self.setCloseInfo(.{
+            .application = false,
+            .error_code = 0,
+            .frame_type = 0,
+            .reason_phrase = "stateless reset",
+            .state = .draining,
+            .now_ms = now_ms,
+            .pto_ms = pto_ms,
+        });
     }
 
     pub fn consumeReceived(self: *Connection, amount: u64) ?quic.Frame {
@@ -2757,6 +2782,38 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     var retire_packet = try server.receiveRoutedDatagram(routed);
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
+}
+
+test "QUIC 1-RTT stateless reset enters draining" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe2} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local-cid",
+        .peer_connection_id = "peer-cid",
+    });
+    defer connection.deinit();
+
+    try connection.peer_connection_ids.addWithLimit(1, "reset-cid", [_]u8{0xaa} ** 16, 4);
+    var reset_datagram: std.ArrayList(u8) = .empty;
+    defer reset_datagram.deinit(allocator);
+    try quic.stateless_reset.encode(&reset_datagram, allocator, &.{ 0x40, 1, 2, 3, 4 }, [_]u8{0xaa} ** 16);
+
+    try std.testing.expectEqual(@as(?u64, 1), connection.processStatelessResetDatagram(reset_datagram.items, 10, 25));
+    try std.testing.expect(connection.draining());
+    try std.testing.expectEqual(@as(?u64, 85), connection.closeExpiryDeadlineMillis());
+    try std.testing.expectError(error.ConnectionClosed, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
+    try std.testing.expectEqual(@as(?u64, null), connection.processStatelessResetDatagram(&.{ 0x40, 1, 2 }, 11, 25));
 }
 
 test "QUIC 1-RTT rejects invalid NEW_CONNECTION_ID lifecycle updates" {
