@@ -1032,7 +1032,10 @@ pub const Connection = struct {
                 },
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(frame.frame);
-                    if (reset.stream_id == stream_id) return error.StreamReset;
+                    if (reset.stream_id == stream_id) {
+                        self.releaseLocalStream(stream_id);
+                        return error.StreamReset;
+                    }
                 },
                 // This blocking runtime does not keep a general-purpose frame
                 // reorder buffer.  While waiting for flow-control credit, only
@@ -4333,6 +4336,10 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
     const second = try connection.reserveNextClientStreamId();
     try std.testing.expectEqual(@as(u31, 3), second);
     try std.testing.expectEqual(@as(usize, 1), connection.active_local_streams.items.len);
+    connection.releaseLocalStream(second);
+    try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
+    connection.releaseLocalStream(second);
+    try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
 }
 
 test "HTTP/2 local max concurrent streams limits peer opened streams" {
