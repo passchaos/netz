@@ -120,6 +120,13 @@ const StreamRecvFlowEntry = struct {
     stop_sending_sent: ?StopSendingInfo = null,
 };
 
+const RecvStreamPreflightEntry = struct {
+    stream_id: u64,
+    flow_limit: u64,
+    highest_received_end: u64 = 0,
+    final_size: ?u64 = null,
+};
+
 pub const StreamResetInfo = struct {
     application_error_code: u64,
     final_size: u64,
@@ -682,21 +689,104 @@ pub const Connection = struct {
     }
 
     fn validateReceivedFramePreconditions(self: *Connection, frames: []const quic.Frame) Error!void {
+        var recv_data_total = self.recv_data_total;
+        var recv_streams: std.ArrayList(RecvStreamPreflightEntry) = .empty;
+        defer recv_streams.deinit(self.endpoint.allocator);
+
         for (frames) |frame| {
             switch (frame) {
                 .ack => |ack| {
                     // ACK handling mutates sent-packet, recovery, congestion, and
                     // key-update state.  Validate peer-provided ACK ranges before
-                    // any earlier frame in the same packet can apply receive-side
-                    // effects; mature stacks such as quicz use the same
-                    // validate-before-mutate boundary for malformed multi-frame
-                    // packets.
+                    // any earlier frame in the same packet can apply
+                    // receive-side effects; mature stacks such as quicz use the
+                    // same validate-before-mutate boundary for malformed
+                    // multi-frame packets.
                     try self.sent.validateAckCoversSentPackets(ack);
                     if (ack.ecn_counts) |ecn_counts| try self.sent.validateAckEcnCounters(ecn_counts);
                 },
+                .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_data_total),
+                .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_data_total),
                 else => {},
             }
         }
+    }
+
+    fn validateStreamFramePrecondition(
+        self: *Connection,
+        stream: quic.StreamFrame,
+        recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
+        recv_data_total: *u64,
+    ) Error!void {
+        const recv_stream = try self.preflightRecvStreamEntry(recv_streams, stream.stream_id);
+        const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
+        const stream_end = std.math.add(u64, stream.offset, data_len) catch return error.InvalidFrameLength;
+
+        try preflightApplyFinalSize(recv_stream, stream_end, stream.fin);
+        if (stream_end > recv_stream.flow_limit) return error.FlowControlViolation;
+        try self.preflightRecvCredit(recv_stream, stream_end, recv_data_total);
+    }
+
+    fn validateResetStreamPrecondition(
+        self: *Connection,
+        reset: quic.ResetStreamFrame,
+        recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
+        recv_data_total: *u64,
+    ) Error!void {
+        const recv_stream = try self.preflightRecvStreamEntry(recv_streams, reset.stream_id);
+        try preflightApplyFinalSize(recv_stream, reset.final_size, true);
+        if (reset.final_size > recv_stream.flow_limit) return error.FlowControlViolation;
+        try self.preflightRecvCredit(recv_stream, reset.final_size, recv_data_total);
+    }
+
+    fn preflightRecvStreamEntry(
+        self: *Connection,
+        recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
+        stream_id: u64,
+    ) Error!*RecvStreamPreflightEntry {
+        for (recv_streams.items) |*entry| {
+            if (entry.stream_id == stream_id) return entry;
+        }
+
+        if (self.findRecvStreamEntry(stream_id)) |existing| {
+            try recv_streams.append(self.endpoint.allocator, .{
+                .stream_id = stream_id,
+                .flow_limit = existing.flow.limit,
+                .highest_received_end = existing.highest_received_end,
+                .final_size = existing.final_size,
+            });
+        } else {
+            try self.validatePeerStreamCount(stream_id);
+            try recv_streams.append(self.endpoint.allocator, .{
+                .stream_id = stream_id,
+                .flow_limit = self.initialReceiveStreamDataLimit(stream_id),
+            });
+        }
+        return &recv_streams.items[recv_streams.items.len - 1];
+    }
+
+    fn preflightRecvCredit(
+        self: Connection,
+        recv_stream: *RecvStreamPreflightEntry,
+        end_offset: u64,
+        recv_data_total: *u64,
+    ) Error!void {
+        if (end_offset <= recv_stream.highest_received_end) return;
+        const new_stream_credit = end_offset - recv_stream.highest_received_end;
+        const next_total = std.math.add(u64, recv_data_total.*, new_stream_credit) catch return error.FlowControlViolation;
+        if (next_total > self.recv_flow.limit) return error.FlowControlViolation;
+        recv_data_total.* = next_total;
+        recv_stream.highest_received_end = end_offset;
+    }
+
+    fn preflightApplyFinalSize(recv_stream: *RecvStreamPreflightEntry, final_size: u64, final: bool) Error!void {
+        if (final and final_size < recv_stream.highest_received_end) return error.FinalSizeMismatch;
+        if (recv_stream.final_size) |known| {
+            if (final_size > known) return error.FinalSizeMismatch;
+            if (final and final_size != known) return error.FinalSizeMismatch;
+            return;
+        }
+        if (final) recv_stream.final_size = final_size;
     }
 
     fn receiveMaxStreams(self: *Connection, maximum_streams: u64, direction: enum { bidirectional, unidirectional }) Error!void {
@@ -902,15 +992,20 @@ pub const Connection = struct {
     }
 
     fn recvStreamFlow(self: *Connection, stream_id: u64) Error!*StreamRecvFlowEntry {
-        for (self.stream_recv_flows.items) |*entry| {
-            if (entry.stream_id == stream_id) return entry;
-        }
+        if (self.findRecvStreamEntry(stream_id)) |entry| return entry;
         try self.validatePeerStreamCount(stream_id);
         try self.stream_recv_flows.append(self.endpoint.allocator, .{
             .stream_id = stream_id,
             .flow = try .init(self.initialReceiveStreamDataLimit(stream_id), self.config.stream_receive_window),
         });
         return &self.stream_recv_flows.items[self.stream_recv_flows.items.len - 1];
+    }
+
+    fn findRecvStreamEntry(self: *Connection, stream_id: u64) ?*StreamRecvFlowEntry {
+        for (self.stream_recv_flows.items) |*entry| {
+            if (entry.stream_id == stream_id) return entry;
+        }
+        return null;
     }
 
     fn validatePeerStreamCount(self: Connection, stream_id: u64) Error!void {
@@ -1496,6 +1591,49 @@ test "QUIC 1-RTT connection preflights ACK frames before receive-side effects" {
     });
 
     try std.testing.expectError(error.InvalidAckFrame, client.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), client.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
+}
+
+test "QUIC 1-RTT connection preflights stream frames before receive-side effects" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x29, 0x2a, 0x2b, 0x2c };
+    const server_cid = [_]u8{ 0x2d, 0x2e, 0x2f, 0x30 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x77} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .local_endpoint = .client,
+        .initial_receive_max_streams_bidi = 1,
+    });
+    defer client.deinit();
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{ .stream_id = 1, .data = "first", .fin = false } },
+            .{ .stream = .{ .stream_id = 5, .data = "over-limit", .fin = false } },
+        },
+    });
+
+    try std.testing.expectError(error.StreamLimitExceeded, client.receivePacket());
     try std.testing.expectEqual(@as(u64, 0), client.recv_data_total);
     try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
