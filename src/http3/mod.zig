@@ -1149,7 +1149,7 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
     var path_value: ?[]const u8 = null;
     var authority_value: ?[]const u8 = null;
     var protocol_value: ?[]const u8 = null;
-    var has_host = false;
+    var host_value: ?[]const u8 = null;
 
     for (headers) |header| {
         try validateHeaderName(header.name);
@@ -1179,8 +1179,9 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
         }
         saw_regular = true;
 
-        if (std.mem.eql(u8, header.name, "host") and std.mem.trim(u8, header.value, " \t").len != 0) {
-            has_host = true;
+        if (std.mem.eql(u8, header.name, "host")) {
+            if (host_value != null) return error.InvalidHeader;
+            host_value = header.value;
         }
         if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
         if (std.ascii.eqlIgnoreCase(header.name, "te")) {
@@ -1202,7 +1203,7 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
                 // omits :scheme and :path. Extended CONNECT (:protocol present)
                 // falls through to the regular request-target requirements.
                 if (!seen_authority or seen_scheme or seen_path) return error.InvalidHeader;
-                if (authority_value == null or authority_value.?.len == 0) return error.InvalidHeader;
+                try validateConnectAuthority(authority_value orelse return error.InvalidHeader);
                 return;
             }
             if (seen_protocol) {
@@ -1210,11 +1211,18 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
                 if (!is_connect) return error.InvalidHeader;
             }
             const scheme = scheme_value orelse return error.InvalidHeader;
-            if (scheme.len == 0) return error.InvalidHeader;
+            try validateUriScheme(scheme);
             const path = path_value orelse return error.MissingPath;
-            if (path.len == 0) return error.InvalidHeader;
+            try validateUriPath(method, path);
+            if (authority_value) |authority| try validateRequestAuthority(authority);
+            if (host_value) |host| try validateRequestAuthority(host);
+            if (authority_value) |authority| {
+                if (host_value) |host| {
+                    if (!std.ascii.eqlIgnoreCase(authority, host)) return error.InvalidHeader;
+                }
+            }
             if ((std.mem.eql(u8, scheme, "http") or std.mem.eql(u8, scheme, "https")) and
-                ((authority_value == null or authority_value.?.len == 0) and !has_host))
+                ((authority_value == null or authority_value.?.len == 0) and host_value == null))
             {
                 return error.InvalidHeader;
             }
@@ -1236,6 +1244,74 @@ fn isHttpTchar(byte: u8) bool {
         '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
         else => false,
     };
+}
+
+fn validateUriScheme(scheme: []const u8) Error!void {
+    if (scheme.len == 0) return error.InvalidHeader;
+    if (!std.ascii.isAlphabetic(scheme[0])) return error.InvalidHeader;
+    for (scheme[1..]) |byte| {
+        if (!(std.ascii.isAlphanumeric(byte) or byte == '+' or byte == '-' or byte == '.')) return error.InvalidHeader;
+    }
+}
+
+fn validateUriPath(method: []const u8, path: []const u8) Error!void {
+    if (path.len == 0) return error.InvalidHeader;
+    if (std.mem.eql(u8, path, "*")) {
+        if (!std.ascii.eqlIgnoreCase(method, "OPTIONS")) return error.InvalidHeader;
+        return;
+    }
+    if (path[0] != '/' and path[0] != '?') return error.InvalidHeader;
+    var saw_fragment = false;
+    for (path) |byte| {
+        if (byte <= 0x20 or byte == 0x7f or byte == '\\') return error.InvalidHeader;
+        if (byte == '#') saw_fragment = true;
+    }
+    if (saw_fragment) return error.InvalidHeader;
+}
+
+fn validateRequestAuthority(authority: []const u8) Error!void {
+    if (authority.len == 0) return error.InvalidHeader;
+    for (authority) |byte| {
+        if (byte <= 0x20 or byte == 0x7f or byte == '/' or byte == '\\' or byte == '?' or byte == '#' or byte == '@') return error.InvalidHeader;
+    }
+    if (authority[0] == '[') {
+        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
+        if (end <= 1) return error.InvalidHeader;
+        if (end + 1 < authority.len and authority[end + 1] != ':') return error.InvalidHeader;
+        if (end + 1 == authority.len) return;
+        try validateAuthorityPort(authority[end + 2 ..]);
+        return;
+    }
+    if (std.mem.indexOfScalar(u8, authority, '[') != null or std.mem.indexOfScalar(u8, authority, ']') != null) return error.InvalidHeader;
+    if (std.mem.indexOfScalar(u8, authority, ':')) |colon| {
+        if (colon == 0) return error.InvalidHeader;
+        if (std.mem.indexOfScalar(u8, authority[colon + 1 ..], ':') != null) return error.InvalidHeader;
+        try validateAuthorityPort(authority[colon + 1 ..]);
+    }
+}
+
+fn validateConnectAuthority(authority: []const u8) Error!void {
+    try validateRequestAuthority(authority);
+    const port: []const u8 = if (authority[0] == '[') blk: {
+        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
+        if (end <= 1 or end + 2 > authority.len or authority[end + 1] != ':') return error.InvalidHeader;
+        break :blk authority[end + 2 ..];
+    } else blk: {
+        const colon = std.mem.lastIndexOfScalar(u8, authority, ':') orelse return error.InvalidHeader;
+        if (colon == 0 or colon + 1 >= authority.len) return error.InvalidHeader;
+        if (std.mem.indexOfScalar(u8, authority[0..colon], ':') != null) return error.InvalidHeader;
+        break :blk authority[colon + 1 ..];
+    };
+    try validateAuthorityPort(port);
+}
+
+fn validateAuthorityPort(port: []const u8) Error!void {
+    if (port.len == 0) return error.InvalidHeader;
+    for (port) |byte| {
+        if (!std.ascii.isDigit(byte)) return error.InvalidHeader;
+    }
+    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.InvalidHeader;
+    if (parsed_port > std.math.maxInt(u16)) return error.InvalidHeader;
 }
 
 fn validateHeaderName(name: []const u8) Error!void {
@@ -1789,6 +1865,37 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
     var host_decoded = try decodeRequest(allocator, host_authority.items);
     defer host_decoded.deinit(allocator);
     try std.testing.expectEqualStrings("GET", host_decoded.method);
+
+    var mismatched_authority = std.ArrayList(u8).empty;
+    defer mismatched_authority.deinit(allocator);
+    try Helper.writeRequestBlock(&mismatched_authority, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "origin.example" },
+        .{ .name = "host", .value = "proxy.example" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, mismatched_authority.items));
+
+    var invalid_path = std.ArrayList(u8).empty;
+    defer invalid_path.deinit(allocator);
+    try Helper.writeRequestBlock(&invalid_path, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "relative" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, invalid_path.items));
+
+    var invalid_authority = std.ArrayList(u8).empty;
+    defer invalid_authority.deinit(allocator);
+    try Helper.writeRequestBlock(&invalid_authority, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "user@example.com" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, invalid_authority.items));
 
     var invalid_method_token = std.ArrayList(u8).empty;
     defer invalid_method_token.deinit(allocator);
