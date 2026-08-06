@@ -701,6 +701,7 @@ pub const ConnAck = struct {
         const ack_flags = try cursor.readByte();
         if ((ack_flags & 0xfe) != 0) return error.InvalidFlags;
         const reason_code = try cursor.readByte();
+        try validateConnAckReason(protocol, reason_code);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
         if (protocol == .v5) try validatePropertiesFor(.connack, props);
@@ -720,6 +721,7 @@ pub const ConnAck = struct {
         reason_code: u8,
         properties: []const Property,
     ) Error!void {
+        try validateConnAckReason(protocol, reason_code);
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
         try variable.append(allocator, if (session_present) 0x01 else 0x00);
@@ -1162,6 +1164,7 @@ pub const Disconnect = struct {
         if (protocol == .v3_1_1 and fixed.remaining_len != 0) return error.InvalidPacketType;
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const reason_code = if (!cursor.eof()) try cursor.readByte() else 0;
+        if (protocol == .v5) try validateDisconnectReason(reason_code);
         const props = if (protocol == .v5 and !cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
         if (protocol == .v5) try validatePropertiesFor(.disconnect, props);
@@ -1176,6 +1179,7 @@ pub const Disconnect = struct {
         reason_code: u8,
         properties: []const Property,
     ) Error!void {
+        if (protocol == .v5) try validateDisconnectReason(reason_code);
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
         if (protocol == .v5 and (reason_code != 0 or properties.len != 0)) {
@@ -1257,6 +1261,81 @@ fn validateSubAckReason(code: u8) Error!void {
 fn validateUnsubAckReason(code: u8) Error!void {
     switch (code) {
         0x00, 0x11, 0x80, 0x83, 0x87, 0x8f, 0x91 => {},
+        else => return error.InvalidReasonCode,
+    }
+}
+
+fn validateConnAckReason(protocol: ProtocolVersion, code: u8) Error!void {
+    switch (protocol) {
+        // MQTT 3.1.1 CONNACK uses the legacy "connect return code" table
+        // (0-5). MQTT 5 replaced those numeric failures with the reason-code
+        // registry below, so keep the validation version-aware instead of
+        // accidentally rejecting legitimate v3 refusal packets.
+        .v3_1_1 => switch (code) {
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05 => {},
+            else => return error.InvalidReasonCode,
+        },
+        .v5 => switch (code) {
+            0x00,
+            0x80,
+            0x81,
+            0x82,
+            0x83,
+            0x84,
+            0x85,
+            0x86,
+            0x87,
+            0x88,
+            0x89,
+            0x8a,
+            0x8c,
+            0x90,
+            0x95,
+            0x97,
+            0x99,
+            0x9a,
+            0x9b,
+            0x9c,
+            0x9d,
+            0x9f,
+            => {},
+            else => return error.InvalidReasonCode,
+        },
+    }
+}
+
+fn validateDisconnectReason(code: u8) Error!void {
+    switch (code) {
+        0x00,
+        0x04,
+        0x80,
+        0x81,
+        0x82,
+        0x83,
+        0x87,
+        0x89,
+        0x8b,
+        0x8d,
+        0x8e,
+        0x8f,
+        0x90,
+        0x93,
+        0x94,
+        0x95,
+        0x96,
+        0x97,
+        0x98,
+        0x99,
+        0x9a,
+        0x9b,
+        0x9c,
+        0x9d,
+        0x9e,
+        0x9f,
+        0xa0,
+        0xa1,
+        0xa2,
+        => {},
         else => return error.InvalidReasonCode,
     }
 }
@@ -1693,6 +1772,24 @@ test "MQTT connack ack and ping controls" {
     defer connack.deinit(allocator);
     try std.testing.expect(connack.session_present);
     try std.testing.expectEqual(@as(u8, 0), connack.reason_code);
+    try std.testing.expectError(error.InvalidReasonCode, ConnAck.write(&connack_bytes, allocator, .v5, false, 0x8b, &.{}));
+    connack_bytes.clearRetainingCapacity();
+    try ConnAck.write(&connack_bytes, allocator, .v3_1_1, false, 0x05, &.{});
+    connack.deinit(allocator);
+    connack = try ConnAck.parse(allocator, .v3_1_1, connack_bytes.items);
+    try std.testing.expectEqual(@as(u8, 0x05), connack.reason_code);
+    try std.testing.expectError(error.InvalidReasonCode, ConnAck.write(&connack_bytes, allocator, .v3_1_1, false, 0x80, &.{}));
+
+    var invalid_connack: std.ArrayList(u8) = .empty;
+    defer invalid_connack.deinit(allocator);
+    try (FixedHeader{
+        .packet_type = .connack,
+        .flags = 0,
+        .remaining_len = 3,
+        .header_len = 0,
+    }).write(&invalid_connack, allocator);
+    try invalid_connack.appendSlice(allocator, &.{ 0x00, 0x8b, 0x00 });
+    try std.testing.expectError(error.InvalidReasonCode, ConnAck.parse(allocator, .v5, invalid_connack.items));
 
     var puback_bytes: std.ArrayList(u8) = .empty;
     defer puback_bytes.deinit(allocator);
@@ -1792,6 +1889,23 @@ test "MQTT disconnect control" {
     var disconnect = try Disconnect.parse(allocator, .v5, encoded.items);
     defer disconnect.deinit(allocator);
     try std.testing.expectEqual(@as(u8, 0), disconnect.reason_code);
+    encoded.clearRetainingCapacity();
+    try Disconnect.write(&encoded, allocator, .v5, 0x8d, &.{});
+    disconnect.deinit(allocator);
+    disconnect = try Disconnect.parse(allocator, .v5, encoded.items);
+    try std.testing.expectEqual(@as(u8, 0x8d), disconnect.reason_code);
+    try std.testing.expectError(error.InvalidReasonCode, Disconnect.write(&encoded, allocator, .v5, 0x05, &.{}));
+
+    var invalid: std.ArrayList(u8) = .empty;
+    defer invalid.deinit(allocator);
+    try (FixedHeader{
+        .packet_type = .disconnect,
+        .flags = 0,
+        .remaining_len = 2,
+        .header_len = 0,
+    }).write(&invalid, allocator);
+    try invalid.appendSlice(allocator, &.{ 0x05, 0x00 });
+    try std.testing.expectError(error.InvalidReasonCode, Disconnect.parse(allocator, .v5, invalid.items));
 }
 
 test "MQTT v5 AUTH control" {
