@@ -844,9 +844,10 @@ pub const Connection = struct {
                             continue;
                         }
                         if (responseForbidsBody(status, request_method, extended_connect)) {
-                            const response_content_length = (try contentLength(headers.?)) orelse 0;
+                            const response_content_length = try contentLength(headers.?);
                             const traditional_connect = std.ascii.eqlIgnoreCase(request_method, "CONNECT") and !extended_connect;
-                            if (traditional_connect and response_content_length != 0) return error.InvalidContentLength;
+                            if (traditional_connect and response_content_length != null) return error.InvalidContentLength;
+                            if ((statusIsInformational(status) or status == 204) and response_content_length != null) return error.InvalidContentLength;
                             if (!traditional_connect and (frame.frame.header.flags & flag_end_stream) == 0) {
                                 try self.consumeForbiddenResponseBody(stream_id);
                             }
@@ -4243,6 +4244,19 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
                 return;
             };
 
+            var no_content = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer no_content.deinit(shared.server.allocator);
+            connection.writeHeaders(no_content.stream_id, &.{
+                .{ .name = ":status", .value = "204" },
+                .{ .name = "content-length", .value = "0" },
+            }, true) catch |err| {
+                shared.err = err;
+                return;
+            };
+
             var connect = connection.readRequest() catch |err| {
                 shared.err = err;
                 return;
@@ -4280,6 +4294,12 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
     defer head_response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), head_response.status);
     try std.testing.expectEqualStrings("", head_response.body);
+
+    try std.testing.expectError(error.InvalidContentLength, client.request(.{
+        .method = "GET",
+        .path = "/no-content-cl",
+        .authority = "localhost",
+    }));
 
     var connect_response = try client.request(.{
         .method = "CONNECT",
