@@ -1412,6 +1412,7 @@ pub const rtcp = struct {
     pub const transport_feedback_nack: u5 = 1;
     pub const transport_feedback_twcc: u5 = 15;
     pub const payload_feedback_pli: u5 = 1;
+    pub const payload_feedback_fir: u5 = 4;
 
     pub const Header = struct {
         version: u2,
@@ -1510,6 +1511,22 @@ pub const rtcp = struct {
     pub const PictureLossIndication = struct {
         sender_ssrc: u32,
         media_ssrc: u32,
+    };
+
+    pub const FirEntry = struct {
+        ssrc: u32,
+        sequence_number: u8,
+    };
+
+    pub const FullIntraRequest = struct {
+        sender_ssrc: u32,
+        media_ssrc: u32 = 0,
+        entries: []FirEntry,
+
+        pub fn deinit(self: *FullIntraRequest, allocator: std.mem.Allocator) void {
+            allocator.free(self.entries);
+            self.* = undefined;
+        }
     };
 
     pub const NackPair = struct {
@@ -1789,6 +1806,7 @@ pub const rtcp = struct {
         receiver_report: ReceiverReport,
         source_description: SourceDescription,
         picture_loss_indication: PictureLossIndication,
+        full_intra_request: FullIntraRequest,
         transport_layer_nack: TransportLayerNack,
         transport_wide_cc: TransportWideCc,
         unknown: Unknown,
@@ -1798,6 +1816,7 @@ pub const rtcp = struct {
                 .sender_report => |report| allocator.free(report.report_blocks),
                 .receiver_report => |report| allocator.free(report.report_blocks),
                 .source_description => |*sdes| sdes.deinit(allocator),
+                .full_intra_request => |*fir| fir.deinit(allocator),
                 .transport_layer_nack => |nack| allocator.free(nack.pairs),
                 .transport_wide_cc => |*twcc| twcc.deinit(allocator),
                 else => {},
@@ -1829,6 +1848,8 @@ pub const rtcp = struct {
             .source_description => .{ .source_description = try parseSourceDescription(allocator, header, payload) },
             .payload_feedback => if (header.count_or_format == payload_feedback_pli)
                 .{ .picture_loss_indication = try parsePictureLossIndication(payload) }
+            else if (header.count_or_format == payload_feedback_fir)
+                .{ .full_intra_request = try parseFullIntraRequest(allocator, payload) }
             else
                 .{ .unknown = .{ .header = header, .payload = payload } },
             .transport_feedback => if (header.count_or_format == transport_feedback_nack)
@@ -1848,6 +1869,7 @@ pub const rtcp = struct {
             .receiver_report => |report| try writeReceiverReport(list, allocator, report),
             .source_description => |sdes| try writeSourceDescription(list, allocator, sdes),
             .picture_loss_indication => |pli| try writePictureLossIndication(list, allocator, pli),
+            .full_intra_request => |fir| try writeFullIntraRequest(list, allocator, fir),
             .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
             .transport_wide_cc => |twcc| try writeTransportWideCc(list, allocator, twcc),
             .unknown => |unknown| {
@@ -1924,6 +1946,24 @@ pub const rtcp = struct {
             .sender_ssrc = std.mem.readInt(u32, payload[0..4], .big),
             .media_ssrc = std.mem.readInt(u32, payload[4..8], .big),
         };
+    }
+
+    fn parseFullIntraRequest(allocator: std.mem.Allocator, payload: []const u8) Error!FullIntraRequest {
+        if (payload.len < 8 or ((payload.len - 8) % 8) != 0) return error.InvalidRtcpPacket;
+        var cursor = wire.Cursor.init(payload);
+        const sender_ssrc = try cursor.readInt(u32, .big);
+        const media_ssrc = try cursor.readInt(u32, .big);
+        const entries = try allocator.alloc(FirEntry, cursor.remaining() / 8);
+        errdefer allocator.free(entries);
+        for (entries) |*entry| {
+            entry.* = .{
+                .ssrc = try cursor.readInt(u32, .big),
+                .sequence_number = try cursor.readByte(),
+            };
+            try cursor.skip(3); // Reserved.
+        }
+        if (entries.len == 0) return error.InvalidRtcpPacket;
+        return .{ .sender_ssrc = sender_ssrc, .media_ssrc = media_ssrc, .entries = entries };
     }
 
     fn parseSourceDescription(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!SourceDescription {
@@ -2079,6 +2119,18 @@ pub const rtcp = struct {
         try writeHeader(list, allocator, payload_feedback_pli, .payload_feedback, 8);
         try wire.appendInt(list, allocator, u32, pli.sender_ssrc, .big);
         try wire.appendInt(list, allocator, u32, pli.media_ssrc, .big);
+    }
+
+    fn writeFullIntraRequest(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fir: FullIntraRequest) Error!void {
+        if (fir.entries.len == 0) return error.InvalidRtcpPacket;
+        try writeHeader(list, allocator, payload_feedback_fir, .payload_feedback, 8 + fir.entries.len * 8);
+        try wire.appendInt(list, allocator, u32, fir.sender_ssrc, .big);
+        try wire.appendInt(list, allocator, u32, fir.media_ssrc, .big);
+        for (fir.entries) |entry| {
+            try wire.appendInt(list, allocator, u32, entry.ssrc, .big);
+            try list.append(allocator, entry.sequence_number);
+            try list.appendNTimes(allocator, 0, 3);
+        }
     }
 
     fn writeTransportLayerNack(list: *std.ArrayList(u8), allocator: std.mem.Allocator, nack: TransportLayerNack) Error!void {
@@ -3760,6 +3812,34 @@ test "RTCP SDES and compound packets" {
 
     encoded.clearRetainingCapacity();
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{}));
+}
+
+test "RTCP full intra request feedback" {
+    const allocator = std.testing.allocator;
+    var entries = [_]rtcp.FirEntry{
+        .{ .ssrc = 0x11121314, .sequence_number = 7 },
+        .{ .ssrc = 0x21222324, .sequence_number = 8 },
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try rtcp.writePacket(&encoded, allocator, .{ .full_intra_request = .{
+        .sender_ssrc = 0x01020304,
+        .media_ssrc = 0,
+        .entries = &entries,
+    } });
+
+    var parsed = try rtcp.parsePacket(allocator, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x01020304), parsed.packet.full_intra_request.sender_ssrc);
+    try std.testing.expectEqual(@as(usize, 2), parsed.packet.full_intra_request.entries.len);
+    try std.testing.expectEqual(@as(u32, 0x11121314), parsed.packet.full_intra_request.entries[0].ssrc);
+    try std.testing.expectEqual(@as(u8, 7), parsed.packet.full_intra_request.entries[0].sequence_number);
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .full_intra_request = .{
+        .sender_ssrc = 1,
+        .entries = &.{},
+    } }));
 }
 
 test "RTCP receiver report and feedback packets" {

@@ -417,6 +417,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "parseCompound"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "ReceiverStats"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "PictureLossIndication"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "FullIntraRequest"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "FirEntry"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "TransportLayerNack"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "TransportWideCc"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "TwccPacketResult"));
