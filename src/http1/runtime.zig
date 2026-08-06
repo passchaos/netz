@@ -335,7 +335,7 @@ pub fn readResponseFromStream(
     while (true) {
         const bytes = try readMessageBytes(allocator, io, stream, limits);
         errdefer allocator.free(bytes);
-        var response = try http1.parseResponse(allocator, bytes, options);
+        var response = try parseResponseForRuntime(allocator, bytes, options, null);
         errdefer response.deinit(allocator);
         applyCloseDelimitedResponseBody(&response, bytes, null);
         if (informationalResponseToSkip(response.status)) {
@@ -358,7 +358,7 @@ pub fn readResponseFromStreamForRequest(
     while (true) {
         const bytes = try readMessageBytesForResponse(allocator, io, stream, limits, request_method);
         errdefer allocator.free(bytes);
-        var response = try http1.parseResponseForRequest(allocator, bytes, options, request_method);
+        var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
         applyCloseDelimitedResponseBody(&response, bytes, request_method);
         if (informationalResponseToSkip(response.status)) {
@@ -381,7 +381,7 @@ pub fn readResponseFromStreamBuffered(
     while (true) {
         const bytes = try readMessageBytesBuffered(allocator, io, stream, limits, inbuf);
         errdefer allocator.free(bytes);
-        var response = try http1.parseResponse(allocator, bytes, options);
+        var response = try parseResponseForRuntime(allocator, bytes, options, null);
         errdefer response.deinit(allocator);
         applyCloseDelimitedResponseBody(&response, bytes, null);
         if (informationalResponseToSkip(response.status)) {
@@ -405,7 +405,7 @@ pub fn readResponseFromStreamBufferedForRequest(
     while (true) {
         const bytes = try readMessageBytesBufferedForResponse(allocator, io, stream, limits, inbuf, request_method);
         errdefer allocator.free(bytes);
-        var response = try http1.parseResponseForRequest(allocator, bytes, options, request_method);
+        var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
         applyCloseDelimitedResponseBody(&response, bytes, request_method);
         if (informationalResponseToSkip(response.status)) {
@@ -414,6 +414,116 @@ pub fn readResponseFromStreamBufferedForRequest(
             continue;
         }
         return .{ .bytes = bytes, .response = response };
+    }
+}
+
+fn parseResponseForRuntime(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: http1.ParseOptions,
+    request_method: ?http1.Method,
+) Error!http1.Response {
+    if (request_method) |method| {
+        return http1.parseResponseForRequest(allocator, bytes, options, method) catch |err| switch (err) {
+            error.InvalidTransferEncoding => try parseNonChunkedTransferResponse(allocator, bytes, options, method),
+            else => |e| return e,
+        };
+    }
+    return http1.parseResponse(allocator, bytes, options) catch |err| switch (err) {
+        error.InvalidTransferEncoding => try parseNonChunkedTransferResponse(allocator, bytes, options, null),
+        else => |e| return e,
+    };
+}
+
+fn parseNonChunkedTransferResponse(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: http1.ParseOptions,
+    request_method: ?http1.Method,
+) Error!http1.Response {
+    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
+    const head = bytes[0..head_end];
+    if (responseHeadForbidsBody(head, request_method)) return error.InvalidTransferEncoding;
+    if ((try transferEncodingState(head)) != .non_chunked) return error.InvalidTransferEncoding;
+
+    var sanitized: std.ArrayList(u8) = .empty;
+    errdefer sanitized.deinit(allocator);
+    try appendHeadWithoutHeader(&sanitized, allocator, head, "transfer-encoding");
+    try sanitized.appendSlice(allocator, "\r\n\r\n");
+    const sanitized_storage = try sanitized.toOwnedSlice(allocator);
+    errdefer allocator.free(sanitized_storage);
+
+    var response = if (request_method) |method|
+        try http1.parseResponseForRequest(allocator, sanitized_storage, options, method)
+    else
+        try http1.parseResponse(allocator, sanitized_storage, options);
+    errdefer response.deinit(allocator);
+    try attachRuntimeHeaderStorage(allocator, &response, sanitized_storage);
+    try appendOriginalHeaderLines(allocator, &response, head, "transfer-encoding");
+
+    const body_start = head_end + 4;
+    response.body = bytes[body_start..];
+    response.body_framing = .close_delimited;
+    response.consumed = bytes.len;
+    return response;
+}
+
+fn attachRuntimeHeaderStorage(allocator: std.mem.Allocator, response: *http1.Response, storage: []u8) Error!void {
+    const old = response.header_value_storage;
+    const combined = try allocator.alloc([]u8, old.len + 1);
+    @memcpy(combined[0..old.len], old);
+    combined[old.len] = storage;
+    allocator.free(old);
+    response.header_value_storage = combined;
+}
+
+fn appendOriginalHeaderLines(
+    allocator: std.mem.Allocator,
+    response: *http1.Response,
+    head: []const u8,
+    name: []const u8,
+) Error!void {
+    var count: usize = 0;
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (std.ascii.eqlIgnoreCase(line[0..colon], name)) count += 1;
+    }
+    if (count == 0) return;
+
+    const old = response.headers;
+    const combined = try allocator.alloc(http1.Header, old.len + count);
+    @memcpy(combined[0..old.len], old);
+
+    var out_index = old.len;
+    lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
+        const value = wire.trimOws(line[colon + 1 ..]);
+        try http1.validateHeader(.{ .name = line[0..colon], .value = value });
+        combined[out_index] = .{ .name = line[0..colon], .value = value };
+        out_index += 1;
+    }
+    allocator.free(old);
+    response.headers = combined;
+}
+
+fn appendHeadWithoutHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocator, head: []const u8, name: []const u8) Error!void {
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    const status_line = lines.next() orelse return error.InvalidResponse;
+    try list.appendSlice(allocator, status_line);
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse {
+            try list.appendSlice(allocator, "\r\n");
+            try list.appendSlice(allocator, line);
+            continue;
+        };
+        if (std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
+        try list.appendSlice(allocator, "\r\n");
+        try list.appendSlice(allocator, line);
     }
 }
 
@@ -826,8 +936,13 @@ fn messageTargetLength(bytes: []const u8, head_end: usize, max_body_bytes: usize
     const body_start = head_end + 4;
     const head = bytes[0..head_end];
     if (responseHeadForbidsBody(head, request_method)) return body_start;
-    if (try transferEncodingIsChunked(head)) {
-        return body_start + try chunkedWireLength(bytes[body_start..], max_body_bytes);
+    switch (try transferEncodingState(head)) {
+        .none => {},
+        .chunked => return body_start + try chunkedWireLength(bytes[body_start..], max_body_bytes),
+        .non_chunked => {
+            if (request_method == null) return error.InvalidTransferEncoding;
+            return body_start;
+        },
     }
     if (try contentLengthFromHead(head)) |len| {
         if (len > max_body_bytes) return error.BodyTooLarge;
@@ -836,9 +951,12 @@ fn messageTargetLength(bytes: []const u8, head_end: usize, max_body_bytes: usize
     return body_start;
 }
 
-fn transferEncodingIsChunked(head: []const u8) Error!bool {
+const TransferEncodingState = enum { none, chunked, non_chunked };
+
+fn transferEncodingState(head: []const u8) Error!TransferEncodingState {
     var saw_transfer_encoding = false;
     var saw_chunked = false;
+    var saw_non_chunked = false;
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     _ = lines.next();
     while (lines.next()) |line| {
@@ -849,14 +967,18 @@ fn transferEncodingIsChunked(head: []const u8) Error!bool {
         while (tokens.next()) |raw| {
             const token = wire.trimOws(raw);
             if (token.len == 0) return error.InvalidTransferEncoding;
-            if (!std.ascii.eqlIgnoreCase(token, "chunked")) return error.InvalidTransferEncoding;
-            if (saw_chunked) return error.InvalidTransferEncoding;
-            saw_chunked = true;
+            if (std.ascii.eqlIgnoreCase(token, "chunked")) {
+                if (saw_chunked) return error.InvalidTransferEncoding;
+                saw_chunked = true;
+            } else {
+                saw_non_chunked = true;
+            }
         }
     }
-    if (!saw_transfer_encoding) return false;
+    if (!saw_transfer_encoding) return .none;
+    if (saw_non_chunked) return .non_chunked;
     if (!saw_chunked) return error.InvalidTransferEncoding;
-    return true;
+    return .chunked;
 }
 
 fn contentLengthFromHead(head: []const u8) Error!?usize {
@@ -886,7 +1008,9 @@ fn contentLengthFromHead(head: []const u8) Error!?usize {
 
 fn responseHeadUsesCloseDelimitedBody(head: []const u8, request_method: ?http1.Method) bool {
     if (responseHeadForbidsBody(head, request_method)) return false;
-    if (findHeaderValue(head, "transfer-encoding") != null) return false;
+    const te = transferEncodingState(head) catch return false;
+    if (te == .chunked) return false;
+    if (te == .non_chunked) return true;
     if (findHeaderValue(head, "content-length") != null) return false;
     return true;
 }
@@ -928,7 +1052,7 @@ fn requestHeadIsHttp11(head: []const u8) bool {
 }
 
 fn requestHeadHasBody(head: []const u8) bool {
-    if (transferEncodingIsChunked(head) catch false) return true;
+    if ((transferEncodingState(head) catch .none) == .chunked) return true;
     if (contentLengthFromHead(head) catch null) |len| return len > 0;
     return false;
 }
@@ -1839,6 +1963,67 @@ test "HTTP/1 client reads close-delimited response body" {
 
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expectEqual(http1.BodyFraming.close_delimited, response.response.body_framing);
+    try std.testing.expectEqualStrings("close-delimited-body", response.response.body);
+}
+
+test "HTTP/1 client treats non-chunked response transfer coding as close-delimited" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/te-close-delimited", request.request.target);
+
+            // Hyper treats a response with a non-chunked transfer coding as
+            // close-delimited.  Requests remain strict because accepting
+            // unsupported request transfer codings is a smuggling risk.
+            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 200 OK\r\nTransfer-Encoding: yolo\r\nConnection: close\r\n\r\nclose-delimited-body");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    var response = try client.request(.{
+        .method = .GET,
+        .target = "/te-close-delimited",
+        .headers = &.{.{ .name = "Host", .value = "127.0.0.1" }},
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqual(http1.BodyFraming.close_delimited, response.response.body_framing);
+    try std.testing.expectEqualStrings("yolo", response.response.header("transfer-encoding").?);
     try std.testing.expectEqualStrings("close-delimited-body", response.response.body);
 }
 
