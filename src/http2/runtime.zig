@@ -1526,8 +1526,6 @@ const HeaderBlockKind = enum {
 };
 
 fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlockKind) Error!void {
-    var connection_header_values: std.ArrayList([]const u8) = .empty;
-    defer connection_header_values.deinit(std.heap.page_allocator);
     var saw_regular = false;
     var seen_method = false;
     var seen_scheme = false;
@@ -1567,15 +1565,15 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
         }
         saw_regular = true;
 
-        if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
         if (std.ascii.eqlIgnoreCase(header.name, "connection")) {
             // RFC 9113 inherits the HTTP/1.1 Connection token rule: anything
             // nominated by Connection is connection-specific and forbidden in
-            // HTTP/2.  We reject the block instead of silently stripping so
-            // runtime callers see malformed peers immediately.
-            try connection_header_values.append(std.heap.page_allocator, header.value);
-            continue;
+            // HTTP/2.  Rejecting the field itself is stricter than stripping and
+            // prevents peers from smuggling hop-by-hop semantics through a block
+            // that another endpoint might forward.
+            return error.InvalidHeader;
         }
+        if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
         if (std.ascii.eqlIgnoreCase(header.name, "te")) {
             switch (kind) {
                 .request => if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, header.value, " \t"), "trailers")) return error.InvalidHeader,
@@ -1610,20 +1608,10 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
             const status = status_value orelse return error.MissingPseudoHeader;
             if (status.len != 3) return error.InvalidStatus;
             for (status) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
-            _ = std.fmt.parseInt(u16, status, 10) catch return error.InvalidStatus;
+            const parsed_status = std.fmt.parseInt(u16, status, 10) catch return error.InvalidStatus;
+            if (parsed_status < 100) return error.InvalidStatus;
         },
         .request_trailers, .response_trailers => {},
-    }
-
-    for (connection_header_values.items) |value| {
-        var tokens = std.mem.splitScalar(u8, value, ',');
-        while (tokens.next()) |raw| {
-            const token = std.mem.trim(u8, raw, " \t");
-            if (token.len == 0) return error.InvalidHeader;
-            for (headers) |header| {
-                if (std.ascii.eqlIgnoreCase(header.name, token)) return error.InvalidHeader;
-            }
-        }
     }
 }
 
@@ -3572,6 +3560,19 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = ":status", .value = "20x" },
     };
     try std.testing.expectError(error.InvalidStatus, validateHeaderBlock(&bad_status, .response));
+
+    const low_status = [_]http2.Hpack.HeaderField{
+        .{ .name = ":status", .value = "099" },
+    };
+    try std.testing.expectError(error.InvalidStatus, validateHeaderBlock(&low_status, .response));
+
+    const connection_header = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/connection" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "connection", .value = "keep-alive" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connection_header, .request));
 
     const bad_response_value = [_]http2.Hpack.HeaderField{
         .{ .name = ":status", .value = "200" },

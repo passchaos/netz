@@ -13,6 +13,7 @@ pub const Error = wire.Error || error{
     InvalidVersion,
     InvalidStatus,
     InvalidChunk,
+    InvalidHost,
     InvalidContentLength,
     ConflictingContentLength,
     InvalidTransferEncoding,
@@ -190,7 +191,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     const version_s = parts.next() orelse return error.MalformedStartLine;
     if (parts.next() != null or target.len == 0) return error.MalformedStartLine;
     const method = try Method.parse(method_s);
-    try validateRequestTarget(target);
+    try validateRequestTargetForMethod(method, target);
     const version = try Version.parse(version_s);
 
     var parsed_headers = try parseHeaderLines(allocator, &lines, options);
@@ -530,7 +531,7 @@ pub fn writeRequest(
     headers: []const Header,
     body: []const u8,
 ) !void {
-    try validateRequestTarget(target);
+    try validateRequestTargetForMethod(method, target);
     try list.appendSlice(allocator, method.string());
     try list.append(allocator, ' ');
     try list.appendSlice(allocator, target);
@@ -551,7 +552,7 @@ pub fn writeRequestChecked(
     headers: []const Header,
     body: []const u8,
 ) Error!void {
-    try validateRequestTarget(target);
+    try validateRequestTargetForMethod(method, target);
     try list.appendSlice(allocator, method.string());
     try list.append(allocator, ' ');
     try list.appendSlice(allocator, target);
@@ -661,6 +662,13 @@ pub fn validateRequestTarget(target: []const u8) Error!void {
     }
 }
 
+pub fn validateRequestTargetForMethod(method: Method, target: []const u8) Error!void {
+    switch (method) {
+        .CONNECT => try validateConnectTarget(target),
+        else => try validateRequestTarget(target),
+    }
+}
+
 pub fn validateConnectTarget(target: []const u8) Error!void {
     try validateRequestTarget(target);
     if (target[0] == '/' or target[0] == '*' or std.mem.indexOf(u8, target, "://") != null) return error.MalformedStartLine;
@@ -683,6 +691,56 @@ pub fn validateConnectTarget(target: []const u8) Error!void {
     }
     const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.MalformedStartLine;
     if (parsed_port > std.math.maxInt(u16)) return error.MalformedStartLine;
+}
+
+pub fn validateRequestHost(request: Request) Error!void {
+    return validateHostHeaderBlock(request.version, request.headers);
+}
+
+pub fn validateHostHeaderBlock(version: Version, headers: []const Header) Error!void {
+    var found_host = false;
+    for (headers) |header| {
+        if (!header.eqlName("host")) continue;
+        if (found_host) return error.InvalidHost;
+        found_host = true;
+        try validateHostValue(header.value);
+    }
+    if (version == .http_1_1 and !found_host) return error.InvalidHost;
+}
+
+pub fn validateHostValue(raw_host: []const u8) Error!void {
+    const host = wire.trimOws(raw_host);
+    if (host.len == 0) return error.InvalidHost;
+    if (std.mem.indexOf(u8, host, "://") != null) return error.InvalidHost;
+    for (host) |byte| {
+        // Host is an authority component, not a free-form field value.  Reject
+        // whitespace, path separators and userinfo so proxies/origin servers do
+        // not disagree about which authority was requested.
+        if (byte <= 0x20 or byte == 0x7f or byte == '/' or byte == '\\' or byte == '@') return error.InvalidHost;
+    }
+
+    const port: ?[]const u8 = if (host[0] == '[') blk: {
+        const end = std.mem.indexOfScalar(u8, host, ']') orelse return error.InvalidHost;
+        if (end <= 1) return error.InvalidHost;
+        if (end + 1 == host.len) break :blk null;
+        if (host[end + 1] != ':' or end + 2 >= host.len) return error.InvalidHost;
+        break :blk host[end + 2 ..];
+    } else blk: {
+        const colon = std.mem.lastIndexOfScalar(u8, host, ':') orelse break :blk null;
+        if (colon == 0 or colon + 1 >= host.len) return error.InvalidHost;
+        // IPv6 literals in URI/Host authority form must be bracketed.  Treat an
+        // additional colon before the final separator as an ambiguous authority.
+        if (std.mem.indexOfScalar(u8, host[0..colon], ':') != null) return error.InvalidHost;
+        break :blk host[colon + 1 ..];
+    };
+
+    if (port) |value| {
+        for (value) |byte| {
+            if (!std.ascii.isDigit(byte)) return error.InvalidHost;
+        }
+        const parsed_port = std.fmt.parseInt(u32, value, 10) catch return error.InvalidHost;
+        if (parsed_port > std.math.maxInt(u16)) return error.InvalidHost;
+    }
 }
 
 pub fn validateReasonPhrase(reason: []const u8) Error!void {
@@ -914,6 +972,7 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, validateRequestTarget(""));
     try validateConnectTarget("example.com:443");
     try validateConnectTarget("[2001:db8::1]:443");
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "CONNECT /path HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("/path"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("2001:db8::1:443"));
@@ -933,6 +992,32 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, writeRequestChecked(&encoded, allocator, .GET, "/\r\nHost: evil", .http_1_1, &.{}, ""));
     try std.testing.expectError(error.MalformedStartLine, writeResponseChecked(&encoded, allocator, .http_1_1, 200, "OK\r\nX: evil", &.{}, ""));
     try std.testing.expectError(error.InvalidStatus, writeResponseChecked(&encoded, allocator, .http_1_1, 42, "Nope", &.{}, ""));
+}
+
+test "HTTP/1 validates Host authority rules" {
+    const allocator = std.testing.allocator;
+    const valid = "GET / HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+    var req = try parseRequest(allocator, valid, .{});
+    defer req.deinit(allocator);
+    try validateRequestHost(req);
+
+    const missing = "GET / HTTP/1.1\r\nUser-Agent: demo\r\n\r\n";
+    var missing_req = try parseRequest(allocator, missing, .{});
+    defer missing_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHost, validateRequestHost(missing_req));
+
+    const duplicate = "GET / HTTP/1.1\r\nHost: example.com\r\nHost: other.example\r\n\r\n";
+    var duplicate_req = try parseRequest(allocator, duplicate, .{});
+    defer duplicate_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHost, validateRequestHost(duplicate_req));
+
+    try std.testing.expectError(error.InvalidHost, validateHostValue(""));
+    try std.testing.expectError(error.InvalidHost, validateHostValue("example.com:"));
+    try std.testing.expectError(error.InvalidHost, validateHostValue("example.com:65536"));
+    try std.testing.expectError(error.InvalidHost, validateHostValue("http://example.com"));
+    try std.testing.expectError(error.InvalidHost, validateHostValue("user@example.com"));
+    try std.testing.expectError(error.InvalidHost, validateHostValue("2001:db8::1"));
+    try validateHostValue("[2001:db8::1]:443");
 }
 
 test "HTTP/1 writers reject forbidden response bodies" {

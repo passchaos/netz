@@ -54,7 +54,8 @@ pub const Server = struct {
         defer connection.close();
         var request = try connection.readRequest(.{});
         defer request.deinit(self.allocator);
-        const response = try handler(context, request.request);
+        var response = try handler(context, request.request);
+        if (response.request_method == null) response.request_method = request.request.method;
         try connection.writeResponse(response);
     }
 
@@ -136,10 +137,11 @@ fn ServeTask(comptime HandlerContext: type) type {
             };
             defer request.deinit(connection.allocator);
 
-            const response = task.handler(task.context, request.request) catch |err| {
+            var response = task.handler(task.context, request.request) catch |err| {
                 task.result.* = err;
                 return;
             };
+            if (response.request_method == null) response.request_method = request.request.method;
             connection.writeResponse(response) catch |err| {
                 task.result.* = err;
                 return;
@@ -225,6 +227,7 @@ pub const Connection = struct {
             .status = 200,
             .reason = "Connection Established",
             .headers = response_headers,
+            .request_method = .CONNECT,
         });
         return .{
             .io = self.io,
@@ -294,6 +297,10 @@ pub const ResponseOptions = struct {
     headers: []const http1.Header = &.{},
     body: []const u8 = &.{},
     trailers: []const http1.Header = &.{},
+    /// Optional method of the request this response answers.  HEAD and
+    /// successful CONNECT have method-specific body framing rules that cannot
+    /// be inferred from status/headers alone.
+    request_method: ?http1.Method = null,
 };
 
 pub fn readRequestFromStream(
@@ -307,6 +314,7 @@ pub fn readRequestFromStream(
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
+    try http1.validateRequestHost(request);
     return .{ .bytes = bytes, .request = request };
 }
 
@@ -322,6 +330,7 @@ pub fn readRequestFromStreamBuffered(
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
+    try http1.validateRequestHost(request);
     return .{ .bytes = bytes, .request = request };
 }
 
@@ -538,8 +547,11 @@ fn applyCloseDelimitedResponseBody(response: *http1.Response, bytes: []const u8,
 }
 
 pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: RequestOptions) Error!void {
-    try http1.validateRequestTarget(options.target);
+    try http1.validateRequestTargetForMethod(options.method, options.target);
+    try http1.validateHostHeaderBlock(options.version, options.headers);
+    if (options.method == .CONNECT and (options.body.len != 0 or options.trailers.len != 0)) return error.InvalidContentLength;
     const use_chunked = try chunkedWriteFraming(options.version, options.headers, options.trailers);
+    try validateDeclaredRequestBodyLength(options.headers, options.body.len, use_chunked);
     var headers: std.ArrayList(http1.Header) = .empty;
     defer headers.deinit(allocator);
     var len_buf: [32]u8 = undefined;
@@ -581,6 +593,15 @@ pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: n
     try http1.validateReasonPhrase(options.reason);
     try http1.validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
     const use_chunked = try chunkedWriteFraming(options.version, options.headers, options.trailers);
+    try validateDeclaredResponseBodyLength(
+        options.status,
+        options.request_method,
+        options.headers,
+        options.body.len,
+        options.trailers.len,
+        use_chunked,
+    );
+    const suppress_body = responseWriteSuppressesBody(options.status, options.request_method);
     var headers: std.ArrayList(http1.Header) = .empty;
     defer headers.deinit(allocator);
     var len_buf: [32]u8 = undefined;
@@ -610,7 +631,11 @@ pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: n
     try encoded.appendSlice(allocator, "\r\n");
     try writeHeaderLines(&encoded, allocator, headers.items);
     try encoded.appendSlice(allocator, "\r\n");
-    if (use_chunked) {
+    if (suppress_body) {
+        // HEAD/304/CONNECT response bodies are interpreted out-of-band by HTTP
+        // semantics.  Preserve descriptive headers, but do not put even a
+        // zero-size chunk on the wire.
+    } else if (use_chunked) {
         const chunks = [_][]const u8{options.body};
         try encodeChunkedForRuntime(&encoded, allocator, &chunks, options.trailers);
     } else {
@@ -658,6 +683,60 @@ fn shouldDefaultRequestContentLength(method: http1.Method, body_len: usize, trai
         .GET, .HEAD, .CONNECT => false,
         else => true,
     };
+}
+
+fn validateDeclaredRequestBodyLength(headers: []const http1.Header, body_len: usize, use_chunked: bool) Error!void {
+    if (use_chunked) return;
+    const declared = try http1.contentLength(headers);
+    if (declared) |len| {
+        // Once a caller supplies Content-Length the runtime encoder must ensure
+        // the wire body matches it exactly.  Sending a shorter/longer body leaves
+        // the peer desynchronized and can corrupt the next pipelined message.
+        if (len != body_len) return error.InvalidContentLength;
+    }
+}
+
+fn validateDeclaredResponseBodyLength(
+    status: u16,
+    request_method: ?http1.Method,
+    headers: []const http1.Header,
+    body_len: usize,
+    trailers_len: usize,
+    use_chunked: bool,
+) Error!void {
+    if (request_method) |method| {
+        if (method == .CONNECT and status >= 200 and status < 300) {
+            if (use_chunked) return error.InvalidTransferEncoding;
+            // RFC 9110/9112: a 2xx CONNECT response switches to tunnel mode
+            // immediately after the header section.  Content-Length/TE would be
+            // interpreted differently by different intermediaries, so forbid it
+            // even when the declared length is zero.
+            if (body_len != 0 or (try http1.contentLength(headers)) != null) return error.InvalidContentLength;
+            return;
+        }
+        if (method == .HEAD) {
+            if (trailers_len != 0) return error.InvalidTrailer;
+            if (try http1.contentLength(headers)) |len| {
+                if (body_len != 0 and len != body_len) return error.InvalidContentLength;
+            }
+            return;
+        }
+    }
+    if (use_chunked) return;
+    if (status == 304) return;
+    const declared = try http1.contentLength(headers);
+    if (declared) |len| {
+        if (len != body_len) return error.InvalidContentLength;
+    }
+}
+
+fn responseWriteSuppressesBody(status: u16, request_method: ?http1.Method) bool {
+    if (http1.statusCodeForbidsBody(status)) return true;
+    if (request_method) |method| {
+        if (method == .HEAD) return true;
+        if (method == .CONNECT and status >= 200 and status < 300) return true;
+    }
+    return false;
 }
 
 fn chunkedWriteFraming(version: http1.Version, headers: []const http1.Header, trailers: []const http1.Header) Error!bool {
@@ -1625,12 +1704,12 @@ test "HTTP/1 runtime reuses persistent connection and preserves pipelined bytes"
     try writeRequestToStream(allocator, io, client.stream, .{
         .method = .GET,
         .target = "/one",
-        .headers = &keep_alive,
+        .headers = &.{ keep_alive[0], .{ .name = "Host", .value = "localhost" } },
     });
     try writeRequestToStream(allocator, io, client.stream, .{
         .method = .GET,
         .target = "/two",
-        .headers = &keep_alive,
+        .headers = &.{ keep_alive[0], .{ .name = "Host", .value = "localhost" } },
     });
 
     var first_response = try readResponseFromStreamBuffered(allocator, io, client.stream, client.limits, .{}, &client.inbuf);
@@ -1773,12 +1852,12 @@ test "HTTP/1 client keeps pipelined response after HEAD response headers" {
     try writeRequestToStream(allocator, io, client.stream, .{
         .method = .HEAD,
         .target = "/head",
-        .headers = &keep_alive,
+        .headers = &.{ keep_alive[0], .{ .name = "Host", .value = "localhost" } },
     });
     try writeRequestToStream(allocator, io, client.stream, .{
         .method = .GET,
         .target = "/next",
-        .headers = &keep_alive,
+        .headers = &.{ keep_alive[0], .{ .name = "Host", .value = "localhost" } },
     });
 
     var head_response = try readResponseFromStreamBufferedForRequest(allocator, io, client.stream, client.limits, .{}, &client.inbuf, .HEAD);
@@ -2177,8 +2256,8 @@ test "HTTP/1 status-forbidden body preserves pipelined response without request 
     var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     const keep_alive = [_]http1.Header{.{ .name = "Connection", .value = "keep-alive" }};
-    try writeRequestToStream(allocator, io, client.stream, .{ .target = "/no-content", .headers = &keep_alive });
-    try writeRequestToStream(allocator, io, client.stream, .{ .target = "/next", .headers = &keep_alive });
+    try writeRequestToStream(allocator, io, client.stream, .{ .target = "/no-content", .headers = &.{ keep_alive[0], .{ .name = "Host", .value = "localhost" } } });
+    try writeRequestToStream(allocator, io, client.stream, .{ .target = "/next", .headers = &.{ keep_alive[0], .{ .name = "Host", .value = "localhost" } } });
 
     var first_response = try readResponseFromStreamBuffered(allocator, io, client.stream, client.limits, .{}, &client.inbuf);
     defer first_response.deinit(allocator);
@@ -2351,6 +2430,42 @@ test "HTTP/1 request writer omits zero Content-Length for bodyless safe methods"
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/1 runtime validates outbound request and response framing before writing" {
+    const allocator = std.testing.allocator;
+    const io: std.Io = undefined;
+    const stream: net.Stream = undefined;
+
+    try std.testing.expectError(error.InvalidHost, writeRequestToStream(allocator, io, stream, .{
+        .method = .GET,
+        .target = "/missing-host",
+    }));
+    try std.testing.expectError(error.InvalidContentLength, writeRequestToStream(allocator, io, stream, .{
+        .method = .POST,
+        .target = "/bad-length",
+        .headers = &.{
+            .{ .name = "Host", .value = "example" },
+            .{ .name = "Content-Length", .value = "5" },
+        },
+        .body = "ping",
+    }));
+    try std.testing.expectError(error.InvalidContentLength, writeRequestToStream(allocator, io, stream, .{
+        .method = .CONNECT,
+        .target = "example.com:443",
+        .headers = &.{.{ .name = "Host", .value = "example.com:443" }},
+        .body = "not allowed",
+    }));
+    try std.testing.expectError(error.InvalidContentLength, writeResponseToStream(allocator, io, stream, .{
+        .status = 200,
+        .headers = &.{.{ .name = "Content-Length", .value = "5" }},
+        .body = "pong",
+    }));
+    try std.testing.expectError(error.InvalidContentLength, writeResponseToStream(allocator, io, stream, .{
+        .status = 200,
+        .headers = &.{.{ .name = "Content-Length", .value = "0" }},
+        .request_method = .CONNECT,
+    }));
 }
 
 test "HTTP/1 runtime target length rejects ambiguous head framing" {

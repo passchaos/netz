@@ -391,6 +391,8 @@ pub fn writeServerHandshake(
     client_key: []const u8,
     extra_headers: []const wire.Header,
 ) !void {
+    try validateClientKey(client_key);
+    try validateServerHandshakeHeaders(extra_headers);
     const key = acceptKey(client_key);
     try list.appendSlice(allocator, "HTTP/1.1 101 Switching Protocols\r\n");
     try list.appendSlice(allocator, "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ");
@@ -403,6 +405,30 @@ pub fn writeServerHandshake(
         try list.appendSlice(allocator, "\r\n");
     }
     try list.appendSlice(allocator, "\r\n");
+}
+
+fn validateServerHandshakeHeaders(headers: []const wire.Header) !void {
+    var saw_protocol = false;
+    var saw_extensions = false;
+    for (headers) |header| {
+        try http1.validateHeader(header);
+        if (header.eqlName("upgrade") or
+            header.eqlName("connection") or
+            header.eqlName("sec-websocket-accept"))
+        {
+            // The writer owns these mandatory fields.  Rejecting caller-provided
+            // duplicates keeps the 101 response unambiguous for RFC 6455 clients.
+            return error.InvalidHandshake;
+        }
+        if (header.eqlName("sec-websocket-protocol")) {
+            if (saw_protocol) return error.InvalidHandshake;
+            saw_protocol = true;
+        } else if (header.eqlName("sec-websocket-extensions")) {
+            if (saw_extensions) return error.InvalidHandshake;
+            saw_extensions = true;
+            _ = try ExtensionNegotiation.validateResponse(header.value);
+        }
+    }
 }
 
 pub const MessageAssembler = struct {
@@ -779,6 +805,40 @@ test "WebSocket handshake rejects malformed nonce" {
     var req = try http1.parseRequest(allocator, raw, .{});
     defer req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(req));
+}
+
+test "WebSocket server handshake writer validates generated response" {
+    const allocator = std.testing.allocator;
+    var response: std.ArrayList(u8) = .empty;
+    defer response.deinit(allocator);
+
+    try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
+        &response,
+        allocator,
+        "not-base64",
+        &.{},
+    ));
+    try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
+        &response,
+        allocator,
+        "dGhlIHNhbXBsZSBub25jZQ==",
+        &.{.{ .name = "Sec-WebSocket-Accept", .value = "duplicate" }},
+    ));
+    try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
+        &response,
+        allocator,
+        "dGhlIHNhbXBsZSBub25jZQ==",
+        &.{
+            .{ .name = "Sec-WebSocket-Protocol", .value = "chat.v1" },
+            .{ .name = "Sec-WebSocket-Protocol", .value = "chat.v2" },
+        },
+    ));
+    try std.testing.expectError(error.MalformedHeader, writeServerHandshake(
+        &response,
+        allocator,
+        "dGhlIHNhbXBsZSBub25jZQ==",
+        &.{.{ .name = "X-Test", .value = "ok\r\nInjected: yes" }},
+    ));
 }
 
 test {
