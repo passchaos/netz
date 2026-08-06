@@ -1134,7 +1134,6 @@ pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool
             .streams_blocked_uni,
             .new_connection_id,
             .path_challenge,
-            .application_close,
             .datagram,
             .immediate_ack,
             .ack_frequency,
@@ -1887,7 +1886,8 @@ test "QUIC frame packet context rules follow RFC 9000" {
     try std.testing.expect(!frameAllowedInPacketType(ack, .zero_rtt));
     try std.testing.expect(!frameAllowedInPacketType(crypto, .zero_rtt));
     try std.testing.expect(!frameAllowedInPacketType(.{ .path_response = .{ .data = [_]u8{0} ** 8 } }, .zero_rtt));
-    try std.testing.expect(frameAllowedInPacketType(app_close, .zero_rtt));
+    try std.testing.expect(!frameAllowedInPacketType(app_close, .zero_rtt));
+    try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(app_close, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .handshake_done = {} }, .one_rtt));
     try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(stream, .initial));
 }
