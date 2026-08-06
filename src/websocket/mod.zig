@@ -343,6 +343,8 @@ pub fn acceptKey(client_key: []const u8) [28]u8 {
 pub fn validateClientHandshake(req: http1.Request) Error!void {
     if (req.method != .GET) return error.InvalidHandshake;
     if (req.version != .http_1_1) return error.InvalidHandshake;
+    const host = try requiredSingletonHeader(req.headers, "host");
+    if (wire.trimOws(host).len == 0) return error.InvalidHandshake;
     const upgrade = try requiredSingletonHeader(req.headers, "upgrade");
     if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
     if (!hasHeader(req.headers, "connection")) return error.MissingHeader;
@@ -571,6 +573,21 @@ test "WebSocket handshake validation" {
     var duplicate_key_req = try http1.parseRequest(allocator, duplicate_key, .{});
     defer duplicate_key_req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(duplicate_key_req));
+
+    const missing_host = "GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var missing_host_req = try http1.parseRequest(allocator, missing_host, .{});
+    defer missing_host_req.deinit(allocator);
+    try std.testing.expectError(error.MissingHeader, validateClientHandshake(missing_host_req));
+
+    const empty_host = "GET /chat HTTP/1.1\r\nHost: \t \r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var empty_host_req = try http1.parseRequest(allocator, empty_host, .{});
+    defer empty_host_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(empty_host_req));
+
+    const duplicate_host = "GET /chat HTTP/1.1\r\nHost: example.com\r\nHost: other.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var duplicate_host_req = try http1.parseRequest(allocator, duplicate_host, .{});
+    defer duplicate_host_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(duplicate_host_req));
 }
 
 test "WebSocket strict frame validation" {
