@@ -1238,7 +1238,11 @@ fn readFrame(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limit
     try readExact(io, stream, &header_buf);
     const header = try http2.FrameHeader.parse(&header_buf);
     const payload_len: usize = header.length;
-    if (payload_len > limits.max_frame_payload) return error.MessageTooLarge;
+    // SETTINGS_MAX_FRAME_SIZE is the receive ceiling we advertise to the peer.
+    // Keep the older max_frame_payload guard as a local allocation/test budget,
+    // but enforce the stricter of the two before allocating the payload buffer.
+    const inbound_payload_limit = @min(limits.max_frame_payload, limits.max_frame_size);
+    if (payload_len > inbound_payload_limit) return error.MessageTooLarge;
 
     const bytes = try allocator.alloc(u8, header_buf.len + payload_len);
     errdefer allocator.free(bytes);
@@ -4143,7 +4147,7 @@ test "HTTP/2 SETTINGS_MAX_FRAME_SIZE controls outbound DATA splitting" {
         fn runFallible(shared: *@This()) !void {
             var stream = try shared.listener.accept(shared.io);
             defer stream.close(shared.io);
-            const limits = Limits{ .max_frame_payload = 64 * 1024, .max_body_bytes = 128 * 1024 };
+            const limits = Limits{ .max_frame_payload = 64 * 1024, .max_body_bytes = 128 * 1024, .max_frame_size = 20_000 };
 
             var preface_buf: [http2.connection_preface.len]u8 = undefined;
             try readExact(shared.io, stream, &preface_buf);
@@ -4221,6 +4225,61 @@ test "HTTP/2 SETTINGS_MAX_FRAME_SIZE controls outbound DATA splitting" {
     try std.testing.expectEqual(@as(usize, 20_000), shared.data_lengths[0]);
     try std.testing.expectEqual(@as(usize, 20_000), shared.data_lengths[1]);
     try std.testing.expectEqual(@as(usize, 5_000), shared.data_lengths[2]);
+}
+
+test "HTTP/2 readFrame enforces inbound SETTINGS_MAX_FRAME_SIZE before payload read" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var stream = try shared.listener.accept(shared.io);
+            defer stream.close(shared.io);
+            try std.testing.expectError(error.MessageTooLarge, readFrame(shared.allocator, shared.io, stream, .{
+                .max_frame_payload = 64 * 1024,
+                .max_frame_size = default_max_frame_size,
+            }));
+        }
+    };
+
+    var shared = Shared{ .allocator = allocator, .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    // Send only the header.  A compliant receiver can reject this frame from
+    // the advertised size alone and must not allocate or block waiting for the
+    // oversized payload bytes.
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(allocator);
+    try (http2.FrameHeader{
+        .length = @intCast(default_max_frame_size + 1),
+        .frame_type = .data,
+        .flags = 0,
+        .stream_id = 1,
+    }).write(&raw, allocator);
+    try writeAll(io, stream, raw.items);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
