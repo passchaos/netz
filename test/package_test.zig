@@ -48,6 +48,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http1, "validateRequestTarget"));
     try std.testing.expect(@hasDecl(netz.http1, "validateReasonPhrase"));
     try std.testing.expect(@hasDecl(netz.http1, "validateStatusCode"));
+    try std.testing.expect(@hasDecl(netz.http1, "statusCodeForbidsBody"));
+    try std.testing.expect(@hasDecl(netz.http1, "validateResponseBodyForStatus"));
     try std.testing.expectEqual(@as(usize, 16 * 1024), netz.http1.max_chunk_extension_bytes);
     try std.testing.expectEqual(@as(u64, 9), netz.http2.FrameHeader.encoded_len);
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.http2.runtime.Limits{}).max_body_bytes);

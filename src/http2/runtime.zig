@@ -491,6 +491,7 @@ pub const Connection = struct {
         if (self.role != .server) return error.UnexpectedFrame;
         var status_buf: [3]u8 = undefined;
         if (options.status < 100 or options.status > 999) return error.InvalidStatus;
+        try validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
         const status = std.fmt.bufPrint(&status_buf, "{}", .{options.status}) catch return error.InvalidStatus;
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
@@ -1489,6 +1490,21 @@ fn responseForbidsBody(status: u16, request_method: []const u8, extended_connect
     if (std.ascii.eqlIgnoreCase(request_method, "HEAD")) return true;
     if (!extended_connect and std.ascii.eqlIgnoreCase(request_method, "CONNECT") and status >= 200 and status < 300) return true;
     return false;
+}
+
+fn validateResponseBodyForStatus(
+    status: u16,
+    headers: []const http2.Hpack.HeaderField,
+    body: []const u8,
+    trailers: []const http2.Hpack.HeaderField,
+) Error!void {
+    if (!((status >= 100 and status < 200) or status == 204 or status == 304)) return;
+    if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
+    const declared_content_length = try contentLength(headers);
+    // As in HTTP/1, 304 may describe the selected representation length, but
+    // 1xx and 204 responses terminate at the HEADERS block and must not carry a
+    // Content-Length that could be mistaken for DATA on this stream.
+    if (status != 304 and declared_content_length != null) return error.InvalidContentLength;
 }
 
 fn informationalResponseToSkip(status: u16) bool {
@@ -3444,6 +3460,30 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 writers reject status-forbidden response bodies" {
+    try std.testing.expectError(error.InvalidContentLength, validateResponseBodyForStatus(204, &.{}, "body", &.{}));
+    try std.testing.expectError(error.InvalidContentLength, validateResponseBodyForStatus(204, &.{.{ .name = "content-length", .value = "0" }}, "", &.{}));
+    try validateResponseBodyForStatus(304, &.{.{ .name = "content-length", .value = "123" }}, "", &.{});
+    try std.testing.expectError(error.InvalidContentLength, validateResponseBodyForStatus(304, &.{}, "body", &.{}));
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+    try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(1, .{
+        .status = 204,
+        .body = "body",
+    }));
 }
 
 test "HTTP/2 runtime supports RFC 8441 extended CONNECT" {

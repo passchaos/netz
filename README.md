@@ -5,7 +5,7 @@ starts with deterministic parsers, serializers, and state helpers for:
 
 - HTTP/1.1 requests, responses, header field syntax validation, chunked transfer decoding with extension limits, close-delimited response bodies, runtime chunked
   transfer writing with validated trailer fields, opt-in obsolete folded-field
-  unfolding, request-target/status/reason-phrase start-line validation, keep-alive/upgrade handling, pipelined
+  unfolding, request-target/status/reason-phrase start-line validation, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
   byte buffering for persistent connections, method-aware response body
   handling for HEAD and successful CONNECT, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling, ambiguous body-length rejection
@@ -22,6 +22,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
   validation, HTTP/2 pseudo-header/lowercase field-name validation,
   connection-specific header rejection including `TE` rules,
+  status-forbidden response-body write rejection,
   CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
   open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, and a blocking prior-knowledge h2c client/server runtime with a

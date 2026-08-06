@@ -465,8 +465,21 @@ fn transferEncodingFraming(headers: []const Header) Error!?BodyFraming {
     return .chunked;
 }
 
-fn statusCodeForbidsBody(status: u16) bool {
+pub fn statusCodeForbidsBody(status: u16) bool {
     return (status >= 100 and status < 200) or status == 204 or status == 304;
+}
+
+pub fn validateResponseBodyForStatus(status: u16, headers: []const Header, body: []const u8, trailers: []const Header) Error!void {
+    try validateStatusCode(status);
+    if (!statusCodeForbidsBody(status)) return;
+    if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
+    const declared_content_length = try contentLength(headers);
+    for (headers) |header| {
+        if (header.eqlName("transfer-encoding")) return error.InvalidTransferEncoding;
+    }
+    // 304 may carry Content-Length to describe the selected representation;
+    // 1xx and 204 terminate at the header section and must not carry one.
+    if (status != 304 and declared_content_length != null) return error.InvalidContentLength;
 }
 
 fn responseForbidsBody(status: u16, request_method: ?Method) bool {
@@ -537,6 +550,7 @@ pub fn writeResponse(
 ) !void {
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
+    try validateResponseBodyForStatus(status, headers, body, &.{});
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
     try appendDecimal(list, allocator, status);
@@ -561,6 +575,7 @@ pub fn writeResponseChecked(
 ) Error!void {
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
+    try validateResponseBodyForStatus(status, headers, body, &.{});
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
     try appendDecimalChecked(list, allocator, status);
@@ -848,6 +863,28 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, writeRequestChecked(&encoded, allocator, .GET, "/\r\nHost: evil", .http_1_1, &.{}, ""));
     try std.testing.expectError(error.MalformedStartLine, writeResponseChecked(&encoded, allocator, .http_1_1, 200, "OK\r\nX: evil", &.{}, ""));
     try std.testing.expectError(error.InvalidStatus, writeResponseChecked(&encoded, allocator, .http_1_1, 42, "Nope", &.{}, ""));
+}
+
+test "HTTP/1 writers reject forbidden response bodies" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectError(error.InvalidContentLength, writeResponseChecked(&encoded, allocator, .http_1_1, 204, "No Content", &.{}, "body"));
+    try std.testing.expectError(error.InvalidTransferEncoding, writeResponseChecked(&encoded, allocator, .http_1_1, 204, "No Content", &.{.{
+        .name = "Transfer-Encoding",
+        .value = "chunked",
+    }}, ""));
+    try std.testing.expectError(error.InvalidContentLength, writeResponseChecked(&encoded, allocator, .http_1_1, 204, "No Content", &.{.{
+        .name = "Content-Length",
+        .value = "0",
+    }}, ""));
+
+    try writeResponseChecked(&encoded, allocator, .http_1_1, 304, "Not Modified", &.{.{
+        .name = "Content-Length",
+        .value = "123",
+    }}, "");
+    try std.testing.expect(std.mem.indexOf(u8, encoded.items, "Content-Length: 123\r\n") != null);
 }
 
 test "HTTP/1 chunked codec" {

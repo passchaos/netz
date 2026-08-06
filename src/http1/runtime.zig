@@ -378,7 +378,7 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
     var len_buf: [32]u8 = undefined;
     var trailer_value: std.ArrayList(u8) = .empty;
     defer trailer_value.deinit(allocator);
-    try appendDefaultedHeaders(&headers, allocator, options.headers, options.body.len, options.trailers, use_chunked, &len_buf, &trailer_value);
+    try appendDefaultedHeaders(&headers, allocator, options.headers, options.body.len, options.trailers, use_chunked, true, &len_buf, &trailer_value);
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -402,13 +402,24 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
 pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: ResponseOptions) Error!void {
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
+    try http1.validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
     const use_chunked = try chunkedWriteFraming(options.version, options.headers, options.trailers);
     var headers: std.ArrayList(http1.Header) = .empty;
     defer headers.deinit(allocator);
     var len_buf: [32]u8 = undefined;
     var trailer_value: std.ArrayList(u8) = .empty;
     defer trailer_value.deinit(allocator);
-    try appendDefaultedHeaders(&headers, allocator, options.headers, options.body.len, options.trailers, use_chunked, &len_buf, &trailer_value);
+    try appendDefaultedHeaders(
+        &headers,
+        allocator,
+        options.headers,
+        options.body.len,
+        options.trailers,
+        use_chunked,
+        !http1.statusCodeForbidsBody(options.status),
+        &len_buf,
+        &trailer_value,
+    );
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -438,6 +449,7 @@ fn appendDefaultedHeaders(
     body_len: usize,
     trailers: []const http1.Header,
     use_chunked: bool,
+    add_default_content_length: bool,
     len_buf: *[32]u8,
     trailer_value: *std.ArrayList(u8),
 ) Error!void {
@@ -459,7 +471,7 @@ fn appendDefaultedHeaders(
             try renderTrailerHeaderValue(trailer_value, allocator, trailers);
             try list.append(allocator, .{ .name = "Trailer", .value = trailer_value.items });
         }
-    } else if (!has_content_length) {
+    } else if (add_default_content_length and !has_content_length) {
         const rendered = std.fmt.bufPrint(len_buf, "{}", .{body_len}) catch unreachable;
         try list.append(allocator, .{ .name = "Content-Length", .value = rendered });
     }
@@ -1666,6 +1678,64 @@ test "HTTP/1 status-forbidden body preserves pipelined response without request 
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/1 runtime does not default Content-Length for status-forbidden responses" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            var request = connection.readRequest(.{}) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer request.deinit(shared.server.allocator);
+            connection.writeResponse(.{ .status = 204, .reason = "No Content" }) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    var response = try client.request(.{
+        .target = "/no-content",
+        .headers = &.{.{ .name = "Host", .value = "127.0.0.1" }},
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 204), response.response.status);
+    try std.testing.expect(response.response.header("content-length") == null);
+    try std.testing.expectEqualStrings("", response.response.body);
 }
 
 test "HTTP/1 runtime target length rejects ambiguous head framing" {
