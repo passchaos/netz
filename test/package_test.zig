@@ -146,11 +146,17 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.protection, "deriveAes128KeysForVersion"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "peekProtectedLongPacketInfo"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "ProtectedLongPacketInfo"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "ZeroRttPacketOptions"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "sealZeroRttPacket"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "openZeroRttPacket"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "nextAes128PacketProtectionKeys"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "nextAes128PacketProtectionKeysForVersion"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "Aes128KeyPhaseState"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "openShortPacketWithKeyUpdate"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendFrames"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendZeroRttFrames"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "receiveZeroRtt"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "openZeroRttBytes"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "receiveWithKeyUpdate"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "openReceivedBytesWithKeyUpdate"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "Connection"));

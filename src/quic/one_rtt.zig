@@ -40,6 +40,28 @@ pub const ReceivedPacket = struct {
     }
 };
 
+pub const ZeroRttSendOptions = struct {
+    version: u32 = quic.Version.version_1.wireValue(),
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    packet_number: u64,
+    packet_number_len: u8 = 4,
+    frames: []const quic.Frame,
+};
+
+pub const ReceivedZeroRttPacket = struct {
+    from: net.IpAddress,
+    packet: quic.protection.OpenedZeroRttPacket,
+    frames: []quic.Frame,
+
+    pub fn deinit(self: *ReceivedZeroRttPacket, allocator: std.mem.Allocator) void {
+        quic.deinitOwnedFrameSlice(self.frames, allocator);
+        allocator.free(self.frames);
+        self.packet.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const ConnectionConfig = struct {
     pub const EndpointRole = enum { client, server };
 
@@ -793,6 +815,27 @@ pub fn sendFrames(
     });
 }
 
+pub fn sendZeroRttFrames(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    options: ZeroRttSendOptions,
+) Error!void {
+    for (options.frames) |frame| try quic.validateFrameForPacketType(frame, .zero_rtt);
+    const payload = try encodeFrames(endpoint.allocator, options.frames);
+    defer endpoint.allocator.free(payload);
+    const packet = try quic.protection.sealZeroRttPacket(endpoint.allocator, keys, .{
+        .version = options.version,
+        .destination_connection_id = options.destination_connection_id,
+        .source_connection_id = options.source_connection_id,
+        .packet_number = options.packet_number,
+        .packet_number_len = options.packet_number_len,
+        .payload = payload,
+    });
+    defer endpoint.allocator.free(packet);
+    try endpoint.sendBytes(to, packet);
+}
+
 pub fn encodeFrames(allocator: std.mem.Allocator, frames: []const quic.Frame) Error![]u8 {
     var payload: std.ArrayList(u8) = .empty;
     errdefer payload.deinit(allocator);
@@ -835,6 +878,35 @@ fn countStreamBytes(frames: []const quic.Frame) u64 {
     return total;
 }
 
+pub fn receiveZeroRtt(
+    endpoint: *quic.runtime.Endpoint,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_frames: usize,
+) Error!ReceivedZeroRttPacket {
+    var datagram = try endpoint.receiveBytes();
+    defer datagram.deinit(endpoint.allocator);
+    return openZeroRttBytes(endpoint, datagram.from, datagram.bytes, keys, expected_packet_number, max_frames);
+}
+
+pub fn openZeroRttBytes(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    bytes: []const u8,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_frames: usize,
+) Error!ReceivedZeroRttPacket {
+    var packet = try quic.protection.openZeroRttPacket(endpoint.allocator, keys, bytes, expected_packet_number);
+    errdefer packet.deinit(endpoint.allocator);
+    const frames = try parsePacketFramesForType(endpoint, packet.payload, max_frames, .zero_rtt);
+    return .{
+        .from = from,
+        .packet = packet,
+        .frames = frames,
+    };
+}
+
 pub fn receive(
     endpoint: *quic.runtime.Endpoint,
     keys: quic.protection.PacketProtectionKeys,
@@ -870,7 +942,7 @@ pub fn openReceivedBytes(
 ) Error!ReceivedPacket {
     var packet = try quic.protection.openShortPacket(endpoint.allocator, keys, bytes, destination_connection_id_len, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
-    const frames = try parsePacketFrames(endpoint, packet.payload, max_frames);
+    const frames = try parsePacketFramesForType(endpoint, packet.payload, max_frames, .one_rtt);
     return .{
         .from = from,
         .packet = packet,
@@ -889,7 +961,7 @@ pub fn openReceivedBytesWithKeyUpdate(
 ) Error!ReceivedPacket {
     var decoded = try quic.protection.openShortPacketWithKeyUpdate(endpoint.allocator, keys, bytes, destination_connection_id_len, expected_packet_number);
     errdefer decoded.deinit(endpoint.allocator);
-    const frames = try parsePacketFrames(endpoint, decoded.packet.payload, max_frames);
+    const frames = try parsePacketFramesForType(endpoint, decoded.packet.payload, max_frames, .one_rtt);
     return .{
         .from = from,
         .packet = decoded.packet,
@@ -898,7 +970,12 @@ pub fn openReceivedBytesWithKeyUpdate(
     };
 }
 
-fn parsePacketFrames(endpoint: *quic.runtime.Endpoint, payload: []const u8, max_frames: usize) Error![]quic.Frame {
+fn parsePacketFramesForType(
+    endpoint: *quic.runtime.Endpoint,
+    payload: []const u8,
+    max_frames: usize,
+    packet_type: quic.FramePacketType,
+) Error![]quic.Frame {
     var frames: std.ArrayList(quic.Frame) = .empty;
     errdefer {
         quic.deinitOwnedFrameSlice(frames.items, endpoint.allocator);
@@ -911,6 +988,7 @@ fn parsePacketFrames(endpoint: *quic.runtime.Endpoint, payload: []const u8, max_
         var parsed = try quic.parseFrameOwned(endpoint.allocator, payload[pos..]);
         var appended = false;
         defer if (!appended) parsed.deinitOwned(endpoint.allocator);
+        try quic.validateFrameForPacketType(parsed.frame, packet_type);
         try frames.append(endpoint.allocator, parsed.frame);
         appended = true;
         pos += parsed.consumed;
@@ -961,6 +1039,56 @@ test "QUIC 1-RTT STREAM frame exchange over UDP endpoint" {
     try std.testing.expect(response.from.eql(&server.address()));
     try std.testing.expectEqualSlices(u8, &client_dcid, response.packet.destination_connection_id);
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
+}
+
+test "QUIC 0-RTT long-header frame exchange enforces packet context" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try quic.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server.deinit();
+    var client = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{ .max_datagram_size = 4096 });
+    defer client.deinit();
+
+    const dcid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3 };
+    const scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x8a} ** quic.protection.secret_len);
+
+    try sendZeroRttFrames(&client.endpoint, server.address(), keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "early", .fin = false } }},
+    });
+
+    var received = try receiveZeroRtt(&server.endpoint, keys, 0, 8);
+    defer received.deinit(allocator);
+    try std.testing.expect(received.from.eql(&client.address()));
+    try std.testing.expectEqual(@as(u64, 0), received.packet.packet_number);
+    try std.testing.expectEqualSlices(u8, &dcid, received.packet.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &scid, received.packet.source_connection_id);
+    try std.testing.expectEqualStrings("early", received.frames[0].stream.data);
+
+    try std.testing.expectError(error.InvalidFrame, sendZeroRttFrames(&client.endpoint, server.address(), keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 1,
+        .frames = &[_]quic.Frame{.{ .ack = .{ .largest_acknowledged = 0, .ack_delay = 0, .first_ack_range = 0 } }},
+    }));
+
+    const invalid_payload = try encodeFrames(allocator, &[_]quic.Frame{.{ .crypto = .{ .offset = 0, .data = "forbidden" } }});
+    defer allocator.free(invalid_payload);
+    const invalid_packet = try quic.protection.sealZeroRttPacket(allocator, keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 1,
+        .payload = invalid_payload,
+    });
+    defer allocator.free(invalid_packet);
+    try std.testing.expectError(error.InvalidFrame, openZeroRttBytes(&server.endpoint, client.address(), invalid_packet, keys, 1, 8));
 }
 
 test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
