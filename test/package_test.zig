@@ -165,6 +165,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketTracker"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "default_packet_threshold"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "largestAcknowledged"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckCoversSentPackets"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectPacketThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.stream_state, "RecvState"));
     try std.testing.expect(@hasDecl(netz.quic.flow_control, "SendFlow"));

@@ -168,7 +168,7 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn applyAckDetailed(self: *SentPacketTracker, ack: quic.AckFrame) Error!AckResult {
-        if (ack.largest_acknowledged < ack.first_ack_range) return error.InvalidAckFrame;
+        try self.validateAckCoversSentPackets(ack);
 
         var acked: AckResult = .{};
         var start = ack.largest_acknowledged - ack.first_ack_range;
@@ -184,6 +184,31 @@ pub const SentPacketTracker = struct {
             acked.add(self.markRange(start, end));
         }
         return acked;
+    }
+
+    /// Validate that every packet number named by an ACK range was actually
+    /// sent by this packet-number space.
+    ///
+    /// QUIC peers are allowed to repeat ACKs, so already-acknowledged and lost
+    /// packets still count as sent.  Packet numbers that were never issued are
+    /// a protocol violation; rejecting them before mutating recovery/congestion
+    /// mirrors mature stacks such as quicz/tquic and keeps malicious ACK ranges
+    /// from advancing local state.
+    pub fn validateAckCoversSentPackets(self: SentPacketTracker, ack: quic.AckFrame) Error!void {
+        if (ack.largest_acknowledged < ack.first_ack_range) return error.InvalidAckFrame;
+
+        var start = ack.largest_acknowledged - ack.first_ack_range;
+        var end = ack.largest_acknowledged;
+        try self.validateSentRange(start, end);
+
+        for (ack.ranges) |range| {
+            const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidAckFrame;
+            if (start < skipped) return error.InvalidAckFrame;
+            end = start - skipped;
+            if (end < range.ack_range_length) return error.InvalidAckFrame;
+            start = end - range.ack_range_length;
+            try self.validateSentRange(start, end);
+        }
     }
 
     pub fn detectPacketThresholdLoss(self: *SentPacketTracker, largest_acknowledged: u64, packet_threshold: u64) AckResult {
@@ -213,6 +238,26 @@ pub const SentPacketTracker = struct {
             }
         }
         return result;
+    }
+
+    fn validateSentRange(self: SentPacketTracker, start: u64, end: u64) Error!void {
+        if (start > end) return error.InvalidAckFrame;
+        const span = std.math.add(u64, end - start, 1) catch return error.InvalidAckFrame;
+        if (span > self.packets.items.len) return error.InvalidAckFrame;
+
+        var packet_number = start;
+        while (true) {
+            if (!self.hasSentPacketNumber(packet_number)) return error.InvalidAckFrame;
+            if (packet_number == end) break;
+            packet_number += 1;
+        }
+    }
+
+    fn hasSentPacketNumber(self: SentPacketTracker, packet_number: u64) bool {
+        for (self.packets.items) |packet| {
+            if (packet.packet_number == packet_number) return true;
+        }
+        return false;
     }
 
     fn observeAcknowledged(self: *SentPacketTracker, packet_number: u64) void {
@@ -265,6 +310,32 @@ test "QUIC sent packet tracker applies ACK ranges" {
     try std.testing.expect(sent.packets.items[7].acknowledged);
     try std.testing.expect(sent.packets.items[3].acknowledged);
     try std.testing.expect(!sent.packets.items[9].acknowledged);
+}
+
+test "QUIC sent packet tracker rejects ACK for never-sent packets" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+    try sent.sent(0, true, 1200);
+
+    const unsent_largest = quic.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(unsent_largest));
+    try std.testing.expect(!sent.packets.items[0].acknowledged);
+    try std.testing.expectEqual(@as(?u64, null), sent.largestAcknowledged());
+
+    try sent.sent(2, true, 1200);
+    const gapless_range_with_missing_one = quic.AckFrame{
+        .largest_acknowledged = 2,
+        .ack_delay = 0,
+        .first_ack_range = 2,
+    };
+    try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(gapless_range_with_missing_one));
+    try std.testing.expect(!sent.packets.items[0].acknowledged);
+    try std.testing.expect(!sent.packets.items[1].acknowledged);
 }
 
 test "QUIC sent packet tracker detects packet-threshold loss" {

@@ -973,6 +973,55 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
 }
 
+test "QUIC 1-RTT connection rejects ACK for unsent packet numbers" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_cid = [_]u8{ 0x25, 0x26, 0x27, 0x28 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x51} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x52} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+
+    try client.send(&[_]quic.Frame{.{ .ping = {} }});
+    try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+    const in_flight = client.congestion.bytes_in_flight;
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), server_keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }},
+    });
+
+    try std.testing.expectError(error.InvalidAckFrame, client.receivePacket());
+    try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
+    try std.testing.expect(!client.sent.packets.items[0].acknowledged);
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+    try std.testing.expectEqual(in_flight, client.congestion.bytes_in_flight);
+    try std.testing.expectEqual(@as(?u64, null), client.sent.largestAcknowledged());
+}
+
 test "QUIC 1-RTT connection performs key update and clears ACK gate" {
     const allocator = std.testing.allocator;
 
