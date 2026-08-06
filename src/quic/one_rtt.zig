@@ -159,11 +159,20 @@ pub const CloseInfo = struct {
     error_code: u64,
     frame_type: u64 = 0,
     reason_phrase: []u8,
+    state: CloseState = .closing,
+    started_ms: ?u64 = null,
+    expires_ms: ?u64 = null,
 
     pub fn deinit(self: *CloseInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.reason_phrase);
         self.* = undefined;
     }
+};
+
+pub const CloseState = enum {
+    closing,
+    draining,
+    closed,
 };
 
 pub const Connection = struct {
@@ -240,7 +249,7 @@ pub const Connection = struct {
     }
 
     pub fn sendWithEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
-        if (self.closed()) return error.ConnectionClosed;
+        if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         const stream_bytes = countStreamBytes(frames);
         for (frames) |frame| {
             if (frame != .stream) continue;
@@ -443,26 +452,79 @@ pub const Connection = struct {
     }
 
     pub fn closeTransport(self: *Connection, error_code: u64, frame_type: u64, reason_phrase: []const u8) Error!void {
+        try self.closeTransportAt(error_code, frame_type, reason_phrase, null, null);
+    }
+
+    pub fn closeTransportAt(
+        self: *Connection,
+        error_code: u64,
+        frame_type: u64,
+        reason_phrase: []const u8,
+        now_ms: ?u64,
+        pto_ms: ?u64,
+    ) Error!void {
         const frames = [_]quic.Frame{.{ .connection_close = .{
             .error_code = error_code,
             .frame_type = frame_type,
             .reason_phrase = reason_phrase,
         } }};
         try self.sendTrackedFrames(&frames);
-        try self.setCloseInfo(.{ .application = false, .error_code = error_code, .frame_type = frame_type, .reason_phrase = reason_phrase });
+        try self.setCloseInfo(.{
+            .application = false,
+            .error_code = error_code,
+            .frame_type = frame_type,
+            .reason_phrase = reason_phrase,
+            .state = .closing,
+            .now_ms = now_ms,
+            .pto_ms = pto_ms,
+        });
     }
 
     pub fn closeApplication(self: *Connection, error_code: u64, reason_phrase: []const u8) Error!void {
+        try self.closeApplicationAt(error_code, reason_phrase, null, null);
+    }
+
+    pub fn closeApplicationAt(self: *Connection, error_code: u64, reason_phrase: []const u8, now_ms: ?u64, pto_ms: ?u64) Error!void {
         const frames = [_]quic.Frame{.{ .application_close = .{
             .error_code = error_code,
             .reason_phrase = reason_phrase,
         } }};
         try self.sendTrackedFrames(&frames);
-        try self.setCloseInfo(.{ .application = true, .error_code = error_code, .reason_phrase = reason_phrase });
+        try self.setCloseInfo(.{
+            .application = true,
+            .error_code = error_code,
+            .reason_phrase = reason_phrase,
+            .state = .closing,
+            .now_ms = now_ms,
+            .pto_ms = pto_ms,
+        });
     }
 
     pub fn closed(self: Connection) bool {
-        return self.close_info != null or self.idle_timed_out;
+        if (self.idle_timed_out) return true;
+        return self.close_info != null and self.close_info.?.state == .closed;
+    }
+
+    pub fn closing(self: Connection) bool {
+        return self.close_info != null and self.close_info.?.state == .closing;
+    }
+
+    pub fn draining(self: Connection) bool {
+        return self.close_info != null and self.close_info.?.state == .draining;
+    }
+
+    pub fn closeExpiryDeadlineMillis(self: Connection) ?u64 {
+        return if (self.close_info) |close_info| close_info.expires_ms else null;
+    }
+
+    pub fn checkCloseExpired(self: *Connection, now_ms: u64) bool {
+        if (self.close_info) |*close_info| {
+            const deadline = close_info.expires_ms orelse return false;
+            if (now_ms < deadline) return false;
+            close_info.state = .closed;
+            return true;
+        }
+        return false;
     }
 
     pub fn effectiveIdleTimeoutMillis(self: Connection) ?u64 {
@@ -585,7 +647,7 @@ pub const Connection = struct {
     }
 
     pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
-        if (self.closed()) return error.ConnectionClosed;
+        if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         var packet = try receiveWithKeyUpdate(
             self.endpoint,
             self.receive_key_phase.keyUpdateKeys(),
@@ -603,7 +665,7 @@ pub const Connection = struct {
     }
 
     pub fn receiveRoutedDatagram(self: *Connection, routed: quic.runtime.RoutedBytes) Error!ReceivedPacket {
-        if (self.closed()) return error.ConnectionClosed;
+        if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         var packet = try openReceivedBytesWithKeyUpdate(
             self.endpoint,
             routed.datagram.from,
@@ -673,11 +735,13 @@ pub const Connection = struct {
                     .error_code = close.error_code,
                     .frame_type = close.frame_type,
                     .reason_phrase = close.reason_phrase,
+                    .state = .draining,
                 }),
                 .application_close => |close| try self.setCloseInfo(.{
                     .application = true,
                     .error_code = close.error_code,
                     .reason_phrase = close.reason_phrase,
+                    .state = .draining,
                 }),
                 .stream => |stream| {
                     var recv_stream = try self.recvStreamFlow(stream.stream_id);
@@ -993,13 +1057,20 @@ pub const Connection = struct {
         error_code: u64,
         frame_type: u64 = 0,
         reason_phrase: []const u8,
+        state: CloseState,
+        now_ms: ?u64 = null,
+        pto_ms: ?u64 = null,
     }) Error!void {
         if (self.close_info != null) return;
+        const expires_ms = closeExpiryMillis(close.now_ms, close.pto_ms);
         self.close_info = .{
             .application = close.application,
             .error_code = close.error_code,
             .frame_type = close.frame_type,
             .reason_phrase = try self.endpoint.allocator.dupe(u8, close.reason_phrase),
+            .state = close.state,
+            .started_ms = close.now_ms,
+            .expires_ms = expires_ms,
         };
     }
 
@@ -1162,6 +1233,13 @@ fn streamCountForId(stream_id: u64) u64 {
 
 fn maxBufferedForLimit(limit: u64) usize {
     return std.math.cast(usize, limit) orelse std.math.maxInt(usize);
+}
+
+fn closeExpiryMillis(now_ms: ?u64, pto_ms: ?u64) ?u64 {
+    const now = now_ms orelse return null;
+    const pto = pto_ms orelse return null;
+    const duration = std.math.mul(u64, pto, 3) catch return std.math.maxInt(u64);
+    return std.math.add(u64, now, duration) catch std.math.maxInt(u64);
 }
 
 pub fn sendFrames(
@@ -2679,7 +2757,8 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
     try client.closeTransport(0x100, @intFromEnum(quic.FrameType.stream), "done");
     var close_packet = try server.receivePacket();
     defer close_packet.deinit(allocator);
-    try std.testing.expect(server.closed());
+    try std.testing.expect(server.draining());
+    try std.testing.expect(!server.closed());
     try std.testing.expectEqual(@as(u64, 0x100), server.close_info.?.error_code);
     try std.testing.expectEqualStrings("done", server.close_info.?.reason_phrase);
     try std.testing.expectError(error.ConnectionClosed, server.send(&[_]quic.Frame{.{ .ping = {} }}));
@@ -2711,10 +2790,41 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
     try server2.closeApplication(42, "app done");
     var app_close = try client2.receivePacket();
     defer app_close.deinit(allocator);
-    try std.testing.expect(client2.closed());
+    try std.testing.expect(client2.draining());
+    try std.testing.expect(!client2.closed());
     try std.testing.expect(client2.close_info.?.application);
     try std.testing.expectEqual(@as(u64, 42), client2.close_info.?.error_code);
     try std.testing.expectEqualStrings("app done", client2.close_info.?.reason_phrase);
+}
+
+test "QUIC 1-RTT close lifecycle expires after three PTOs" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xc1} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+    });
+    defer connection.deinit();
+
+    try connection.closeTransportAt(0x10, @intFromEnum(quic.FrameType.stream), "closing", 100, 25);
+    try std.testing.expect(connection.closing());
+    try std.testing.expectEqual(@as(?u64, 175), connection.closeExpiryDeadlineMillis());
+    try std.testing.expectError(error.ConnectionClosed, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
+    try std.testing.expect(!connection.checkCloseExpired(174));
+    try std.testing.expect(connection.closing());
+    try std.testing.expect(connection.checkCloseExpired(175));
+    try std.testing.expect(connection.closed());
 }
 
 test "QUIC 1-RTT connection handles RESET_STREAM final size" {
