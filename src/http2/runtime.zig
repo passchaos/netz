@@ -672,6 +672,14 @@ pub const Connection = struct {
         }
     }
 
+    fn handleGoAwayForStream(self: *Connection, stream_id: u31, goaway: http2.GoAwayPayload) Error!void {
+        self.peer_goaway_last_stream_id = goaway.last_stream_id;
+        if (stream_id > goaway.last_stream_id) {
+            self.releaseLocalStream(stream_id);
+            return error.ConnectionGoAway;
+        }
+    }
+
     fn reservePeerStream(self: *Connection, stream_id: u31) Error!void {
         if (self.limits.max_concurrent_streams) |max_streams| {
             if (self.active_peer_streams.items.len >= max_streams) return error.FlowControlViolation;
@@ -747,8 +755,7 @@ pub const Connection = struct {
             if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
-                self.peer_goaway_last_stream_id = goaway.last_stream_id;
-                if (stream_id > goaway.last_stream_id) return error.ConnectionGoAway;
+                try self.handleGoAwayForStream(stream_id, goaway);
                 continue;
             }
             if (frame.frame.header.stream_id != stream_id) continue;
@@ -817,8 +824,7 @@ pub const Connection = struct {
             if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
-                self.peer_goaway_last_stream_id = goaway.last_stream_id;
-                if (stream_id > goaway.last_stream_id) return error.ConnectionGoAway;
+                try self.handleGoAwayForStream(stream_id, goaway);
                 continue;
             }
             if (frame.frame.header.stream_id != stream_id) continue;
@@ -1027,8 +1033,7 @@ pub const Connection = struct {
             switch (frame.frame.header.frame_type) {
                 .goaway => {
                     const goaway = try http2.GoAwayPayload.parse(frame.frame);
-                    self.peer_goaway_last_stream_id = goaway.last_stream_id;
-                    if (stream_id > goaway.last_stream_id) return error.ConnectionGoAway;
+                    try self.handleGoAwayForStream(stream_id, goaway);
                 },
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(frame.frame);
@@ -1232,8 +1237,7 @@ pub const Tunnel = struct {
             }
             if (frame.frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame.frame);
-                self.connection.peer_goaway_last_stream_id = goaway.last_stream_id;
-                if (self.stream_id > goaway.last_stream_id) return error.ConnectionGoAway;
+                try self.connection.handleGoAwayForStream(self.stream_id, goaway);
                 frame.deinit(self.connection.allocator);
                 continue;
             }
@@ -4339,6 +4343,15 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
     connection.releaseLocalStream(second);
     try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
     connection.releaseLocalStream(second);
+    try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
+
+    const third = try connection.reserveNextClientStreamId();
+    try std.testing.expectEqual(@as(u31, 5), third);
+    try std.testing.expectError(error.ConnectionGoAway, connection.handleGoAwayForStream(third, .{
+        .last_stream_id = 3,
+        .error_code = .no_error,
+        .debug_data = &.{},
+    }));
     try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
 }
 
