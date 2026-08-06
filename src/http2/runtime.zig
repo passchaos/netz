@@ -499,7 +499,7 @@ pub const Connection = struct {
                             var data_frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
                             defer data_frame.deinit(self.allocator);
                             if (try self.handleConnectionFrame(data_frame.frame)) continue;
-                            if (data_frame.frame.header.stream_id != stream_id) continue;
+                            if (data_frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
                             switch (data_frame.frame.header.frame_type) {
                                 .data => {
                                     const data = try self.receiveDataPayload(stream_id, data_frame.frame);
@@ -758,7 +758,7 @@ pub const Connection = struct {
                 try self.handleGoAwayForStream(stream_id, goaway);
                 continue;
             }
-            if (frame.frame.header.stream_id != stream_id) continue;
+            if (frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
             switch (frame.frame.header.frame_type) {
                 .push_promise => return error.InvalidFrame,
                 .headers => {
@@ -827,7 +827,7 @@ pub const Connection = struct {
                 try self.handleGoAwayForStream(stream_id, goaway);
                 continue;
             }
-            if (frame.frame.header.stream_id != stream_id) continue;
+            if (frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
             switch (frame.frame.header.frame_type) {
                 .headers => {
                     const headers = try self.readHeaderBlock(frame.frame);
@@ -1243,7 +1243,7 @@ pub const Tunnel = struct {
             }
             if (frame.frame.header.stream_id != self.stream_id) {
                 frame.deinit(self.connection.allocator);
-                continue;
+                return error.UnexpectedFrame;
             }
             switch (frame.frame.header.frame_type) {
                 .data => {
@@ -1961,6 +1961,61 @@ test "HTTP/2 client request fails when response stream is reset" {
     try std.testing.expectError(error.StreamReset, client.request(.{
         .method = "GET",
         .path = "/reset-response",
+        .authority = "localhost",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client rejects unexpected cross-stream response frames" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/cross-stream", request.path);
+            try writeFrame(server_ptr.allocator, server_ptr.io, connection.stream, .data, flag_end_stream, 3, "wrong-stream");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.UnexpectedFrame, client.request(.{
+        .method = "GET",
+        .path = "/cross-stream",
         .authority = "localhost",
     }));
 
