@@ -220,6 +220,7 @@ pub const Client = struct {
             if (frame.frame.header.frame_type != .settings) return error.UnexpectedFrame;
             if ((frame.frame.header.flags & flag_ack) != 0) {
                 saw_settings_ack = true;
+                connection.awaiting_settings_ack = false;
             } else {
                 saw_server_settings = true;
                 const settings = try http2.parseSettings(allocator, frame.frame.payload);
@@ -5281,6 +5282,45 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     }));
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(1)).value);
+}
+
+test "HTTP/2 client connect clears initial settings ACK wait" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            // The server has not read the client's ACK yet after accept returns.
+            std.testing.expect(connection.awaiting_settings_ack) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    try std.testing.expect(!client.awaiting_settings_ack);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 rejects unexpected SETTINGS ACK" {
