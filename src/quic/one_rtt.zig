@@ -11,6 +11,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     StreamLimitExceeded,
     StreamStateError,
     EcnDisabled,
+    AntiAmplificationLimited,
 };
 
 pub const SendOptions = struct {
@@ -194,6 +195,8 @@ pub const LossDetectionTimerDeadline = struct {
     deadline_ns: u64,
 };
 
+pub const anti_amplification_multiplier: usize = 3;
+
 pub const Connection = struct {
     endpoint: *quic.runtime.Endpoint,
     config: ConnectionConfig,
@@ -227,6 +230,9 @@ pub const Connection = struct {
     idle_timed_out: bool = false,
     last_persistent_congestion_packet_number: ?u64 = null,
     pto_count: u8 = 0,
+    peer_address_validated: bool = true,
+    peer_address_bytes_received: usize = 0,
+    peer_address_bytes_sent: usize = 0,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -375,7 +381,44 @@ pub const Connection = struct {
         self.next_packet_number += 1;
     }
 
+    pub fn peerAddressValidated(self: Connection) bool {
+        return self.peer_address_validated;
+    }
+
+    pub fn setPeerAddressValidated(self: *Connection, validated: bool) void {
+        self.peer_address_validated = validated;
+        if (validated) {
+            self.peer_address_bytes_received = 0;
+            self.peer_address_bytes_sent = 0;
+        }
+    }
+
+    pub fn recordPeerAddressBytesReceived(self: *Connection, bytes: usize) void {
+        if (self.peer_address_validated) return;
+        self.peer_address_bytes_received = std.math.add(usize, self.peer_address_bytes_received, bytes) catch std.math.maxInt(usize);
+    }
+
+    pub fn antiAmplificationLimitRemaining(self: Connection) ?usize {
+        if (self.peer_address_validated) return null;
+        const limit = std.math.mul(usize, self.peer_address_bytes_received, anti_amplification_multiplier) catch std.math.maxInt(usize);
+        if (self.peer_address_bytes_sent >= limit) return 0;
+        return limit - self.peer_address_bytes_sent;
+    }
+
+    fn reserveAntiAmplification(self: *Connection, bytes: usize) Error!void {
+        const remaining = self.antiAmplificationLimitRemaining() orelse return;
+        if (bytes > remaining) return error.AntiAmplificationLimited;
+        self.peer_address_bytes_sent = std.math.add(usize, self.peer_address_bytes_sent, bytes) catch std.math.maxInt(usize);
+    }
+
+    fn releaseAntiAmplification(self: *Connection, bytes: usize) void {
+        if (self.peer_address_validated) return;
+        self.peer_address_bytes_sent -|= bytes;
+    }
+
     fn sendPayloadPacket(self: *Connection, packet_number: u64, payload: []const u8) Error!void {
+        try self.reserveAntiAmplification(payload.len);
+        errdefer self.releaseAntiAmplification(payload.len);
         try sendPayload(self.endpoint, self.config.peer, self.send_key_phase.currentKeys(), .{
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = packet_number,
@@ -2906,6 +2949,55 @@ test "QUIC 1-RTT connection accepts delayed previous-key packets until discard" 
         .route = route,
         .destination_connection_id = &server_cid,
     }));
+}
+
+test "QUIC 1-RTT connection enforces anti-amplification budget" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x9a, 0x9b, 0x9c, 0x9d };
+    const server_cid = [_]u8{ 0x9e, 0x9f, 0xa0, 0xa1 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x9a} ** quic.protection.secret_len);
+
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+    try std.testing.expect(server.peerAddressValidated());
+    server.setPeerAddressValidated(false);
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expectEqual(@as(?usize, 0), server.antiAmplificationLimitRemaining());
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try std.testing.expectError(error.AntiAmplificationLimited, server.sendAt(&ping, 10));
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 0), server.congestion.bytes_in_flight);
+
+    server.recordPeerAddressBytesReceived(10);
+    try std.testing.expectEqual(@as(?usize, 30), server.antiAmplificationLimitRemaining());
+    try server.sendAt(&ping, 20);
+    try std.testing.expectEqual(@as(usize, 1), server.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(?usize, 29), server.antiAmplificationLimitRemaining());
+
+    var sent = try client_endpoint.receiveBytes();
+    defer sent.deinit(allocator);
+    try std.testing.expect(sent.bytes.len > 0);
+
+    server.setPeerAddressValidated(true);
+    try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
 }
 
 test "QUIC 1-RTT connection enforces congestion send window" {
