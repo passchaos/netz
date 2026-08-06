@@ -38,6 +38,7 @@ pub const Server = struct {
             return error.InvalidConnect;
         }
         const session_id = webtransport.SessionId.init(request.stream_id);
+        if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
         try self.h3.sendResponse(request.from, request.stream_id, .{ .status = 200 });
         return .{ .request = request, .session_id = session_id };
     }
@@ -636,6 +637,13 @@ fn findHeader(headers: []const http3.Qpack.HeaderField, name: []const u8) ?[]con
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
     }
     return null;
+}
+
+test "WebTransport cleartext accept validates CONNECT session id direction" {
+    try std.testing.expect(webtransport.SessionId.init(0).isClientInitiatedBidirectional());
+    try std.testing.expect(!webtransport.SessionId.init(1).isClientInitiatedBidirectional());
+    try std.testing.expect(!webtransport.SessionId.init(2).isClientInitiatedBidirectional());
+    try std.testing.expect(!webtransport.SessionId.init(3).isClientInitiatedBidirectional());
 }
 
 test "WebTransport runtime CONNECT and datagrams over HTTP/3 dev runtime" {
