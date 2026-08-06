@@ -884,6 +884,10 @@ fn validateServerHandshake(
     if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
     if (!hasHeader(response.headers, "connection")) return error.MissingHeader;
     if (!headersContainToken(response.headers, "connection", "upgrade")) return error.InvalidHandshake;
+    if ((try http1.contentLength(response.headers)) != null) return error.InvalidHandshake;
+    for (response.headers) |header| {
+        if (header.eqlName("transfer-encoding")) return error.InvalidHandshake;
+    }
     const accept = try requiredSingletonHeader(response.headers, "sec-websocket-accept");
     const expected = websocket.acceptKey(client_key);
     if (!std.mem.eql(u8, accept, &expected)) return error.InvalidHandshake;
@@ -1060,6 +1064,28 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
     var duplicate_extensions_response = try http1.parseResponse(allocator, duplicate_extensions, .{});
     defer duplicate_extensions_response.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, duplicate_extensions_response, client_key, &.{}));
+
+    const content_length_101 =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    var content_length_response = try http1.parseResponse(allocator, content_length_101, .{});
+    defer content_length_response.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, content_length_response, client_key, &.{}));
+
+    const transfer_encoding_101 =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "\r\n";
+    var transfer_encoding_response = try http1.parseResponse(allocator, transfer_encoding_101, .{});
+    defer transfer_encoding_response.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, transfer_encoding_response, client_key, &.{}));
 }
 
 test "WebSocket server negotiates split subprotocol request headers" {
