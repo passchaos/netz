@@ -175,6 +175,25 @@ pub const Client = struct {
         try writeRequestToStream(self.allocator, self.io, self.stream, request_options);
         return readResponseFromStreamBufferedForRequest(self.allocator, self.io, self.stream, self.limits, .{}, &self.inbuf, request_options.method);
     }
+
+    pub fn openConnectTunnel(self: *Client, target: []const u8, headers: []const http1.Header) Error!Tunnel {
+        try writeRequestToStream(self.allocator, self.io, self.stream, .{
+            .method = .CONNECT,
+            .target = target,
+            .headers = headers,
+        });
+        var response = try readResponseFromStreamBufferedForRequest(self.allocator, self.io, self.stream, self.limits, .{}, &self.inbuf, .CONNECT);
+        errdefer response.deinit(self.allocator);
+        if (response.response.status < 200 or response.response.status >= 300) return error.InvalidResponse;
+        if (response.response.body.len != 0 or response.response.trailers.len != 0) return error.InvalidResponse;
+        response.deinit(self.allocator);
+        return .{
+            .io = self.io,
+            .allocator = self.allocator,
+            .stream = self.stream,
+            .inbuf = &self.inbuf,
+        };
+    }
 };
 
 pub const Connection = struct {
@@ -196,6 +215,42 @@ pub const Connection = struct {
 
     pub fn writeResponse(self: *Connection, response: ResponseOptions) Error!void {
         try writeResponseToStream(self.allocator, self.io, self.stream, response);
+    }
+
+    pub fn acceptConnectTunnel(self: *Connection, request: http1.Request, response_headers: []const http1.Header) Error!Tunnel {
+        if (request.method != .CONNECT or request.body.len != 0 or request.trailers.len != 0) return error.InvalidResponse;
+        try writeResponseToStream(self.allocator, self.io, self.stream, .{
+            .status = 200,
+            .reason = "Connection Established",
+            .headers = response_headers,
+        });
+        return .{
+            .io = self.io,
+            .allocator = self.allocator,
+            .stream = self.stream,
+            .inbuf = &self.inbuf,
+        };
+    }
+};
+
+pub const Tunnel = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stream: net.Stream,
+    inbuf: *std.ArrayList(u8),
+
+    pub fn write(self: *Tunnel, bytes: []const u8) Error!void {
+        try writeAll(self.io, self.stream, bytes);
+    }
+
+    pub fn read(self: *Tunnel, buffer: []u8) Error!usize {
+        if (self.inbuf.items.len != 0) {
+            const n = @min(buffer.len, self.inbuf.items.len);
+            @memcpy(buffer[0..n], self.inbuf.items[0..n]);
+            discardPrefix(self.inbuf, n);
+            return n;
+        }
+        return readSome(self.io, self.stream, buffer);
     }
 };
 
@@ -1001,6 +1056,67 @@ test "HTTP/1 runtime client and server exchange over TCP" {
     try std.testing.expectEqual(@as(u16, 201), response.response.status);
     try std.testing.expectEqualStrings("pong", response.response.body);
     try std.testing.expectEqualStrings("text/plain", response.response.header("content-type").?);
+}
+
+test "HTTP/1 runtime opens CONNECT tunnel" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(http1.Method.CONNECT, request.request.method);
+            try std.testing.expectEqualStrings("example.com:443", request.request.target);
+
+            var tunnel = try connection.acceptConnectTunnel(request.request, &.{});
+            var buf: [64]u8 = undefined;
+            const n = try tunnel.read(&buf);
+            try std.testing.expectEqualStrings("client tunnel bytes", buf[0..n]);
+            try tunnel.write("server tunnel bytes");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var tunnel = try client.openConnectTunnel("example.com:443", &.{.{ .name = "Host", .value = "example.com:443" }});
+    try tunnel.write("client tunnel bytes");
+    var buf: [64]u8 = undefined;
+    const n = try tunnel.read(&buf);
+    try std.testing.expectEqualStrings("server tunnel bytes", buf[0..n]);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 server sends 100 Continue before reading expected body" {
