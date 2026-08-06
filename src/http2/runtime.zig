@@ -1019,6 +1019,13 @@ pub const Connection = struct {
                 .max_header_list_size => self.peer_max_header_list_size = setting.value,
                 .max_concurrent_streams => self.peer_max_concurrent_streams = setting.value,
                 .header_table_size => self.hpack_encoder.setMaxDynamicTableSize(self.allocator, setting.value),
+                .enable_push => {
+                    if (setting.value > 1) return error.InvalidSetting;
+                    // RFC 9113 forbids SETTINGS_ENABLE_PUSH in server SETTINGS.
+                    // Clients can send 0 to disable server push; a server-to-client
+                    // occurrence is a connection-level protocol error.
+                    if (self.role == .client) return error.InvalidSetting;
+                },
                 .enable_connect_protocol => {
                     if (setting.value > 1) return error.InvalidSetting;
                     // RFC 8441 uses SETTINGS_ENABLE_CONNECT_PROTOCOL as an
@@ -4386,6 +4393,9 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
     try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
         .{ .id = .initial_window_size, .value = @as(u32, std.math.maxInt(i31)) + 1 },
     }));
+    try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
+        .{ .id = .enable_push, .value = 0 },
+    }));
 
     try connection.applySettings(&.{
         .{ .id = .max_frame_size, .value = 32_768 },
@@ -4408,6 +4418,23 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
         .{ .id = .enable_connect_protocol, .value = 0 },
     }));
     try std.testing.expect(connection.peer_enable_connect_protocol);
+
+    var server_connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        server_connection.send_stream_windows.deinit(std.testing.allocator);
+        server_connection.recv_stream_windows.deinit(std.testing.allocator);
+        server_connection.hpack_decoder.deinit(std.testing.allocator);
+        server_connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+    try server_connection.applySettings(&.{.{ .id = .enable_push, .value = 0 }});
+    try std.testing.expectError(error.InvalidSetting, server_connection.applySettings(&.{
+        .{ .id = .enable_push, .value = 2 },
+    }));
 }
 
 test "HTTP/2 runtime applies local HPACK decoder table limit" {
