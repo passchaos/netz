@@ -515,18 +515,31 @@ pub const MessageAssembler = struct {
 };
 
 pub fn compressMessage(allocator: std.mem.Allocator, payload: []const u8) Error![]u8 {
-    var output_writer = try std.Io.Writer.Allocating.initCapacity(allocator, payload.len + 32);
-    errdefer output_writer.deinit();
-    const history = try allocator.alloc(u8, std.compress.flate.max_window_len * 2);
-    defer allocator.free(history);
-    var compressor = try std.compress.flate.Compress.init(&output_writer.writer, history, .raw, std.compress.flate.Compress.Options.default);
-    try compressor.writer.writeAll(payload);
-    // Zig 0.16 does not expose a dedicated zlib Z_SYNC_FLUSH mode.  Use a
-    // self-contained raw DEFLATE stream per message instead; negotiation always
-    // enables no-context-takeover, so carrying an independent final block is a
-    // deterministic compromise until a true sync-flush encoder is available.
-    try std.compress.flate.Compress.finish(&compressor);
-    return output_writer.toOwnedSlice();
+    var out = try std.ArrayList(u8).initCapacity(allocator, payload.len + 6);
+    errdefer out.deinit(allocator);
+
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        const end = @min(payload.len, offset + std.math.maxInt(u16));
+        const len: u16 = @intCast(end - offset);
+        // RFC 7692 peers expect the message payload to be a raw DEFLATE stream
+        // after Z_SYNC_FLUSH with the trailing 00 00 ff ff removed.  Zig 0.16's
+        // flate writer does not expose sync-flush, so emit legal uncompressed
+        // DEFLATE blocks (BFINAL=0, BTYPE=00) and finish with the first byte of
+        // the empty sync-flush stored block.  Receivers restore the remaining
+        // four octets before inflating.  This favors interoperability over
+        // compression ratio until std exposes a streaming sync-flush encoder.
+        try out.append(allocator, 0x00);
+        try wire.appendInt(&out, allocator, u16, len, .little);
+        try wire.appendInt(&out, allocator, u16, ~len, .little);
+        try out.appendSlice(allocator, payload[offset..end]);
+        offset = end;
+    }
+
+    // Z_SYNC_FLUSH appends an empty non-final stored block: 00 00 00 ff ff.
+    // RFC 7692 removes the final four octets on the wire, leaving this marker.
+    try out.append(allocator, 0x00);
+    return out.toOwnedSlice(allocator);
 }
 
 pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []const u8, max_message_bytes: usize) Error![]u8 {
@@ -759,7 +772,8 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     const payload = "compress me compress me compress me compress me";
     const compressed = try compressMessage(allocator, payload);
     defer allocator.free(compressed);
-    try std.testing.expect(compressed.len < payload.len);
+    try std.testing.expect(std.mem.endsWith(u8, compressed, "\x00"));
+    try std.testing.expect(!std.mem.endsWith(u8, compressed, "\x00\x00\xff\xff"));
     const decoded = try decompressMessage(allocator, compressed, 1024);
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings(payload, decoded);

@@ -114,7 +114,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   message-size limits, automatic PING→PONG and close echo/completed-close short-circuit handling,
   outbound text/close/control-frame validation,
   subprotocol token validation and split-header negotiation, optional permessage-deflate negotiation with
-  no-context-takeover raw-deflate compression/decompression plus rejection of
+  no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus rejection of
   unsupported extension parameters/window sizes and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
   server helper, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
