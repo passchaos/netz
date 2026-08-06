@@ -602,6 +602,8 @@ pub const Connection = struct {
     }
 
     fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame) Error!void {
+        if (!try self.received.wouldRecordFresh(packet_number)) return error.DuplicatePacket;
+        try self.validateReceivedFramePreconditions(frames);
         if (!try self.received.recordFresh(packet_number)) return error.DuplicatePacket;
         if (packet_number >= self.expected_packet_number) {
             self.expected_packet_number = packet_number + 1;
@@ -673,6 +675,24 @@ pub const Connection = struct {
                         self.recv_data_total = next_total;
                         recv_stream.highest_received_end = stream_end;
                     }
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn validateReceivedFramePreconditions(self: *Connection, frames: []const quic.Frame) Error!void {
+        for (frames) |frame| {
+            switch (frame) {
+                .ack => |ack| {
+                    // ACK handling mutates sent-packet, recovery, congestion, and
+                    // key-update state.  Validate peer-provided ACK ranges before
+                    // any earlier frame in the same packet can apply receive-side
+                    // effects; mature stacks such as quicz use the same
+                    // validate-before-mutate boundary for malformed multi-frame
+                    // packets.
+                    try self.sent.validateAckCoversSentPackets(ack);
+                    if (ack.ecn_counts) |ecn_counts| try self.sent.validateAckEcnCounters(ecn_counts);
                 },
                 else => {},
             }
@@ -1433,6 +1453,53 @@ test "QUIC 1-RTT connection drops duplicate packet numbers before frame effects"
     try std.testing.expectError(error.DuplicatePacket, server.receivePacket());
     try std.testing.expectEqual(@as(u64, 4), server.recv_data_total);
     try std.testing.expectEqual(@as(usize, 1), server.received.ranges.items.len);
+}
+
+test "QUIC 1-RTT connection preflights ACK frames before receive-side effects" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x19, 0x1a, 0x1b, 0x1c };
+    const server_cid = [_]u8{ 0x1d, 0x1e, 0x1f, 0x20 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x75} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x76} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .local_endpoint = .client,
+    });
+    defer client.deinit();
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), server_keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{ .stream_id = 1, .data = "poison", .fin = false } },
+            .{ .ack = .{
+                .largest_acknowledged = 0,
+                .ack_delay = 0,
+                .first_ack_range = 0,
+            } },
+        },
+    });
+
+    try std.testing.expectError(error.InvalidAckFrame, client.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), client.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
 }
 
 test "QUIC 1-RTT connection models idle timeout deadlines" {

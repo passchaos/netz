@@ -38,6 +38,22 @@ pub const ReceivedPacketTracker = struct {
         _ = try self.recordFresh(packet_number);
     }
 
+    pub fn wouldRecordFresh(self: ReceivedPacketTracker, packet_number: u64) Error!bool {
+        if (packet_number > quic.varint.max_value) return error.InvalidPacketNumber;
+        if (self.max_ranges == 0) return false;
+        if (self.forgotten_through) |forgotten| {
+            if (packet_number <= forgotten) return false;
+        }
+
+        for (self.ranges.items) |range| {
+            if (packet_number >= range.start and packet_number <= range.end) return false;
+            if (isImmediatelyBefore(range.end, packet_number)) return true;
+            if (isImmediatelyBefore(packet_number, range.start)) return true;
+            if (packet_number > range.end) return true;
+        }
+        return self.ranges.items.len < self.max_ranges;
+    }
+
     /// Record a received packet number, returning whether it is new enough to
     /// process.  Duplicate packets and packet numbers that fell out of the
     /// bounded ACK history return `false`; callers should drop those packets
@@ -402,18 +418,22 @@ test "QUIC packet space drops duplicate and too-old packet numbers" {
     defer received.deinit();
 
     try std.testing.expect(try received.recordFresh(10));
+    try std.testing.expect(!(try received.wouldRecordFresh(10)));
     try std.testing.expect(!(try received.recordFresh(10)));
+    try std.testing.expect(try received.wouldRecordFresh(6));
     try std.testing.expect(try received.recordFresh(6));
     try std.testing.expectEqual(@as(usize, 2), received.ranges.items.len);
 
     // A packet below the retained window is ignored instead of growing the ACK
     // range list without bound.
+    try std.testing.expect(!(try received.wouldRecordFresh(2)));
     try std.testing.expect(!(try received.recordFresh(2)));
     try std.testing.expectEqual(@as(usize, 2), received.ranges.items.len);
     try std.testing.expectEqual(@as(?u64, 2), received.forgotten_through);
 
     // A newer out-of-order range evicts the oldest retained range, matching the
     // bounded ACK history used by quicz/tquic style implementations.
+    try std.testing.expect(try received.wouldRecordFresh(8));
     try std.testing.expect(try received.recordFresh(8));
     try std.testing.expectEqual(@as(usize, 2), received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 10), received.ranges.items[0].start);
