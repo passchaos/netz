@@ -681,6 +681,8 @@ pub fn validateConnectTarget(target: []const u8) Error!void {
     for (port) |byte| {
         if (!std.ascii.isDigit(byte)) return error.MalformedStartLine;
     }
+    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.MalformedStartLine;
+    if (parsed_port > std.math.maxInt(u16)) return error.MalformedStartLine;
 }
 
 pub fn validateReasonPhrase(reason: []const u8) Error!void {
@@ -918,6 +920,7 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("[]:443"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("[2001:db8::1]"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com:"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com:65536"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("https://example.com:443"));
 
     const bad_reason = "HTTP/1.1 200 OK\x01\r\nContent-Length: 0\r\n\r\n";

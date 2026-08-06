@@ -25,7 +25,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   validation with pure-digit Content-Length enforcement, HTTP/2 pseudo-header/lowercase field-name/value validation,
   connection-specific header rejection including `TE` rules,
   status-forbidden response-body write rejection,
-  traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only pseudo-header rules, CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
+  traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
   open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, and a blocking prior-knowledge h2c client/server runtime with a
   `std.Io.async` concurrent server helper

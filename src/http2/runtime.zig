@@ -1498,6 +1498,7 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
                 if (std.ascii.eqlIgnoreCase(method, "CONNECT")) {
                     if (!seen_authority) return error.MissingPseudoHeader;
                     if (seen_scheme or seen_path) return error.InvalidHeader;
+                    try validateConnectAuthority(authority_value.?);
                 } else if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
             }
         },
@@ -1562,6 +1563,25 @@ fn markResponsePseudo(name: []const u8, seen_status: *bool) Error!void {
 fn markOnce(seen: *bool) Error!void {
     if (seen.*) return error.InvalidHeader;
     seen.* = true;
+}
+
+fn validateConnectAuthority(authority: []const u8) Error!void {
+    if (authority.len == 0) return error.InvalidHeader;
+    const port: []const u8 = if (authority[0] == '[') blk: {
+        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
+        if (end <= 1 or end + 2 > authority.len or authority[end + 1] != ':') return error.InvalidHeader;
+        break :blk authority[end + 2 ..];
+    } else blk: {
+        const colon = std.mem.lastIndexOfScalar(u8, authority, ':') orelse return error.InvalidHeader;
+        if (colon == 0 or colon + 1 >= authority.len) return error.InvalidHeader;
+        if (std.mem.indexOfScalar(u8, authority[0..colon], ':') != null) return error.InvalidHeader;
+        break :blk authority[colon + 1 ..];
+    };
+    for (port) |byte| {
+        if (!std.ascii.isDigit(byte)) return error.InvalidHeader;
+    }
+    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.InvalidHeader;
+    if (parsed_port > std.math.maxInt(u16)) return error.InvalidHeader;
 }
 
 fn connectionSpecificHeaderName(name: []const u8) bool {
@@ -3295,6 +3315,24 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = ":path", .value = "/" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connect_with_path_scheme, .request));
+
+    const connect_ipv6 = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":authority", .value = "[2001:db8::1]:443" },
+    };
+    try validateHeaderBlock(&connect_ipv6, .request);
+
+    const connect_no_port = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":authority", .value = "example.com" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connect_no_port, .request));
+
+    const connect_bad_port = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":authority", .value = "example.com:65536" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connect_bad_port, .request));
 
     const empty_method = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "" },
