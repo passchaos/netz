@@ -528,6 +528,14 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn sendAckWithEcn(self: *Connection, ack_delay: u64, ecn_counts: quic.EcnCounts) Error!void {
+        var ack = try self.received.ackFrame(self.endpoint.allocator, ack_delay);
+        defer self.endpoint.allocator.free(ack.ranges);
+        ack.ecn_counts = ecn_counts;
+        const frames = [_]quic.Frame{.{ .ack = ack }};
+        try self.send(&frames);
+    }
+
     pub fn resetStream(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
         const entry = try self.sendStreamEntry(stream_id);
         try self.sendResetStream(stream_id, application_error_code, entry.highest_sent_end);
@@ -822,7 +830,7 @@ pub const Connection = struct {
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns);
+        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns, .not_ect);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -846,7 +854,7 @@ pub const Connection = struct {
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns);
+        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns, .not_ect);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -854,10 +862,30 @@ pub const Connection = struct {
         return packet;
     }
 
-    fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame, now_ns: ?u64) Error!void {
+    pub fn receiveRoutedDatagramWithEcnAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!ReceivedPacket {
+        if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
+        var packet = try openReceivedBytesWithKeyUpdate(
+            self.endpoint,
+            routed.datagram.from,
+            routed.datagram.bytes,
+            self.receive_key_phase.keyUpdateKeys(),
+            routed.destination_connection_id.len,
+            self.expected_packet_number,
+            self.config.max_frames_per_packet,
+        );
+        errdefer packet.deinit(self.endpoint.allocator);
+        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns, ecn);
+        self.updateSpinBitAfterReceive(packet.packet.spin_bit);
+        if (packet.peer_initiated_key_update) {
+            _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
+        }
+        return packet;
+    }
+
+    fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!void {
         if (!try self.received.wouldRecordFresh(packet_number)) return error.DuplicatePacket;
         try self.validateReceivedFramePreconditions(frames);
-        if (!try self.received.recordFresh(packet_number)) return error.DuplicatePacket;
+        if (!try self.received.recordWithEcn(packet_number, ecn)) return error.DuplicatePacket;
         if (packet_number >= self.expected_packet_number) {
             self.expected_packet_number = packet_number + 1;
         }
@@ -2488,6 +2516,71 @@ test "QUIC 1-RTT connection rejects ACK for unsent packet numbers" {
     try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
     try std.testing.expectEqual(in_flight, client.congestion.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, null), client.sent.largestAcknowledged());
+}
+
+test "QUIC 1-RTT connection sends ACK_ECN for received ECN-marked packets" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x8a, 0x8b, 0x8c, 0x8d };
+    const server_cid = [_]u8{ 0x8e, 0x8f, 0x90, 0x91 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x85} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x86} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendWithEcn(&ping, .ect0);
+    try client.sendWithEcn(&ping, .ect1);
+    try client.sendWithEcn(&ping, .ce);
+
+    const marks = [_]quic.packet_space.EcnCodepoint{ .ect0, .ect1, .ce };
+    for (marks) |mark| {
+        var raw = try server_endpoint.receiveBytes();
+        defer raw.deinit(allocator);
+        const routed = quic.runtime.RoutedBytes{
+            .datagram = raw,
+            .route = .{ .connection_index = 0 },
+            .destination_connection_id = &server_cid,
+        };
+        var packet = try server.receiveRoutedDatagramWithEcnAt(routed, null, mark);
+        defer packet.deinit(allocator);
+    }
+    try std.testing.expectEqual(@as(u64, 1), server.received.latestEcnCounts().?.ect0_count);
+    try std.testing.expectEqual(@as(u64, 1), server.received.latestEcnCounts().?.ect1_count);
+    try std.testing.expectEqual(@as(u64, 1), server.received.latestEcnCounts().?.ecn_ce_count);
+
+    try server.sendAck(0);
+    var ack = try client.receivePacket();
+    defer ack.deinit(allocator);
+    const counts = ack.frames[0].ack.ecn_counts orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 1), counts.ect0_count);
+    try std.testing.expectEqual(@as(u64, 1), counts.ect1_count);
+    try std.testing.expectEqual(@as(u64, 1), counts.ecn_ce_count);
 }
 
 test "QUIC 1-RTT connection validates ACK_ECN counters" {

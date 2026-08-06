@@ -24,6 +24,8 @@ pub const ReceivedPacketTracker = struct {
     ranges: std.ArrayList(PacketRange) = .empty,
     max_ranges: usize = 64,
     forgotten_through: ?u64 = null,
+    ecn_counts: quic.EcnCounts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 0 },
+    saw_ecn: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, max_ranges: usize) ReceivedPacketTracker {
         return .{ .allocator = allocator, .max_ranges = max_ranges };
@@ -36,6 +38,12 @@ pub const ReceivedPacketTracker = struct {
 
     pub fn record(self: *ReceivedPacketTracker, packet_number: u64) Error!void {
         _ = try self.recordFresh(packet_number);
+    }
+
+    pub fn recordWithEcn(self: *ReceivedPacketTracker, packet_number: u64, ecn: EcnCodepoint) Error!bool {
+        const fresh = try self.recordFresh(packet_number);
+        if (fresh) self.recordEcn(ecn);
+        return fresh;
     }
 
     pub fn wouldRecordFresh(self: ReceivedPacketTracker, packet_number: u64) Error!bool {
@@ -106,7 +114,30 @@ pub const ReceivedPacketTracker = struct {
             .ack_delay = ack_delay,
             .first_ack_range = largest.len() - 1,
             .ranges = ack_ranges,
+            .ecn_counts = if (self.saw_ecn) self.ecn_counts else null,
         };
+    }
+
+    pub fn recordEcn(self: *ReceivedPacketTracker, ecn: EcnCodepoint) void {
+        switch (ecn) {
+            .not_ect => {},
+            .ect0 => {
+                self.ecn_counts.ect0_count += 1;
+                self.saw_ecn = true;
+            },
+            .ect1 => {
+                self.ecn_counts.ect1_count += 1;
+                self.saw_ecn = true;
+            },
+            .ce => {
+                self.ecn_counts.ecn_ce_count += 1;
+                self.saw_ecn = true;
+            },
+        }
+    }
+
+    pub fn latestEcnCounts(self: ReceivedPacketTracker) ?quic.EcnCounts {
+        return if (self.saw_ecn) self.ecn_counts else null;
     }
 
     fn insertRange(self: *ReceivedPacketTracker, index: usize, range: PacketRange) Error!bool {
@@ -180,6 +211,7 @@ pub const EcnCodepoint = enum {
     not_ect,
     ect0,
     ect1,
+    ce,
 };
 
 pub const SentPacketTracker = struct {
@@ -221,6 +253,7 @@ pub const SentPacketTracker = struct {
             .not_ect => {},
             .ect0 => self.sent_ect0_count += 1,
             .ect1 => self.sent_ect1_count += 1,
+            .ce => {},
         }
     }
 
@@ -598,6 +631,7 @@ pub const SentPacketTracker = struct {
                     .not_ect => {},
                     .ect0 => result.ect0_packets += 1,
                     .ect1 => result.ect1_packets += 1,
+                    .ce => {},
                 }
             }
         }
@@ -689,6 +723,7 @@ pub const SentPacketTracker = struct {
                 .not_ect => {},
                 .ect0 => counts.ect0 += 1,
                 .ect1 => counts.ect1 += 1,
+                .ce => {},
             }
         }
     }

@@ -176,6 +176,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "Connection"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receivePacketAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receiveRoutedDatagramAt"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receiveRoutedDatagramWithEcnAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closeTransport"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendWithEcn"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAt"));
@@ -221,6 +222,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketTracker"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "wouldRecordFresh"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "recordFresh"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "recordWithEcn"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "latestEcnCounts"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "EcnCodepoint"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "default_packet_threshold"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "largestAcknowledged"));
