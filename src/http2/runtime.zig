@@ -1447,6 +1447,7 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
 
     for (headers) |header| {
         try validateHeaderName(header.name);
+        try validateHeaderValue(header.value);
         const pseudo = std.mem.startsWith(u8, header.name, ":");
         if (pseudo) {
             if (saw_regular) return error.InvalidHeader;
@@ -1534,6 +1535,12 @@ fn validateHeaderName(name: []const u8) Error!void {
     for (name) |byte| {
         if (byte >= 'A' and byte <= 'Z') return error.InvalidHeader;
         if (!validHeaderNameByte(byte)) return error.InvalidHeader;
+    }
+}
+
+fn validateHeaderValue(value: []const u8) Error!void {
+    for (value) |byte| {
+        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.InvalidHeader;
     }
 }
 
@@ -3213,6 +3220,12 @@ test "HTTP/2 runtime validates connection-specific headers" {
         .authority = "localhost",
         .trailers = &.{.{ .name = "te", .value = "trailers" }},
     }));
+    try std.testing.expectError(error.InvalidHeader, client.request(.{
+        .method = "GET",
+        .path = "/bad-value",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "x-bad", .value = "ok\r\ninjected: yes" }},
+    }));
 }
 
 test "HTTP/2 runtime validates pseudo headers and lowercase names" {
@@ -3357,6 +3370,12 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = ":status", .value = "20x" },
     };
     try std.testing.expectError(error.InvalidStatus, validateHeaderBlock(&bad_status, .response));
+
+    const bad_response_value = [_]http2.Hpack.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "x-bad", .value = "bad\x7fvalue" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&bad_response_value, .response));
 }
 
 test "HTTP/2 async std.Io server handles concurrent h2c clients" {

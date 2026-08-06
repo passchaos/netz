@@ -22,7 +22,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   outbound frame splitting with DATA sends that wait for WINDOW_UPDATE capacity
   and inbound DATA consumers that restore connection/stream receive capacity,
   frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
-  validation with pure-digit Content-Length enforcement, HTTP/2 pseudo-header/lowercase field-name/value validation,
+  validation with pure-digit Content-Length enforcement, HTTP/2 pseudo-header/lowercase field-name/value and control-character validation,
   connection-specific header rejection including `TE` rules,
   status-forbidden response-body write rejection,
   traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
