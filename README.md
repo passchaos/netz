@@ -114,7 +114,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   outbound text/close/control-frame validation,
   subprotocol negotiation, optional permessage-deflate negotiation with
   no-context-takeover raw-deflate compression/decompression plus rejection of
-  unsupported extension parameters/window sizes, serialized connection writes, a blocking TCP
+  unsupported extension parameters/window sizes and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
   server helper, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
   `:protocol = websocket`, subprotocols, and permessage-deflate over an h2 DATA tunnel

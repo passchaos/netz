@@ -346,6 +346,11 @@ pub const Connection = struct {
         if (self.close_sent) return error.ConnectionClosed;
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
+        // RFC 7692 compresses the whole message and sets RSV1 only on the first
+        // fragment. Our Zig 0.16 raw-deflate shim is intentionally limited to
+        // complete no-context messages, so reject this combination instead of
+        // silently sending uncompressed fragments after negotiating compression.
+        if (self.permessage_deflate) return error.InvalidFrame;
         if (opcode == .text) try validateOutgoingFragmentedText(self.allocator, fragments);
 
         self.send_mutex.lockUncancelable(self.io);
@@ -560,6 +565,7 @@ pub const H2Connection = struct {
         if (self.close_sent) return error.ConnectionClosed;
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
+        if (self.permessage_deflate) return error.InvalidFrame;
         if (opcode == .text) try validateOutgoingFragmentedText(self.allocator, fragments);
 
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
@@ -1611,6 +1617,8 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidUtf8, connection.sendClose(.normal_closure, bad_utf8));
     try std.testing.expectError(error.InvalidCloseCode, connection.sendClose(.no_status_received, ""));
     try std.testing.expectError(error.InvalidControlFrame, connection.sendPing(too_large_control));
+    connection.permessage_deflate = true;
+    try std.testing.expectError(error.InvalidFrame, connection.sendFragmented(.text, &.{ "compressed ", "fragments" }));
 
     var h2 = H2Connection{
         .allocator = allocator,
@@ -1622,6 +1630,8 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidUtf8, h2.sendClose(.normal_closure, bad_utf8));
     try std.testing.expectError(error.InvalidCloseCode, h2.sendClose(.abnormal_closure, ""));
     try std.testing.expectError(error.InvalidControlFrame, h2.sendPong(too_large_control));
+    h2.permessage_deflate = true;
+    try std.testing.expectError(error.InvalidFrame, h2.sendFragmented(.text, &.{ "compressed ", "fragments" }));
 }
 
 test "WebSocket runtimes return closed after close handshake completes" {
