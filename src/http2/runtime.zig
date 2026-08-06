@@ -1434,7 +1434,11 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
     var seen_protocol = false;
     var seen_status = false;
     var method_value: ?[]const u8 = null;
+    var scheme_value: ?[]const u8 = null;
+    var path_value: ?[]const u8 = null;
+    var authority_value: ?[]const u8 = null;
     var protocol_value: ?[]const u8 = null;
+    var status_value: ?[]const u8 = null;
 
     for (headers) |header| {
         try validateHeaderName(header.name);
@@ -1445,9 +1449,15 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
                 .request => {
                     try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority, &seen_protocol);
                     if (std.mem.eql(u8, header.name, ":method")) method_value = header.value;
+                    if (std.mem.eql(u8, header.name, ":scheme")) scheme_value = header.value;
+                    if (std.mem.eql(u8, header.name, ":path")) path_value = header.value;
+                    if (std.mem.eql(u8, header.name, ":authority")) authority_value = header.value;
                     if (std.mem.eql(u8, header.name, ":protocol")) protocol_value = header.value;
                 },
-                .response => try markResponsePseudo(header.name, &seen_status),
+                .response => {
+                    try markResponsePseudo(header.name, &seen_status);
+                    if (std.mem.eql(u8, header.name, ":status")) status_value = header.value;
+                },
                 .request_trailers, .response_trailers => return error.InvalidHeader,
             }
             continue;
@@ -1474,6 +1484,11 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
     switch (kind) {
         .request => {
             if (!seen_method) return error.MissingPseudoHeader;
+            const method_present = method_value orelse return error.MissingPseudoHeader;
+            if (method_present.len == 0) return error.InvalidHeader;
+            if (scheme_value) |scheme| if (scheme.len == 0) return error.InvalidHeader;
+            if (path_value) |path| if (path.len == 0) return error.InvalidHeader;
+            if (authority_value) |authority| if (authority.len == 0) return error.InvalidHeader;
             if (protocol_value) |protocol| {
                 if (protocol.len == 0) return error.InvalidHeader;
                 const method = method_value orelse return error.MissingPseudoHeader;
@@ -1486,7 +1501,13 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
                 } else if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
             }
         },
-        .response => if (!seen_status) return error.MissingPseudoHeader,
+        .response => {
+            if (!seen_status) return error.MissingPseudoHeader;
+            const status = status_value orelse return error.MissingPseudoHeader;
+            if (status.len != 3) return error.InvalidStatus;
+            for (status) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
+            _ = std.fmt.parseInt(u16, status, 10) catch return error.InvalidStatus;
+        },
         .request_trailers, .response_trailers => {},
     }
 
@@ -3274,6 +3295,25 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = ":path", .value = "/" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connect_with_path_scheme, .request));
+
+    const empty_method = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&empty_method, .request));
+
+    const empty_path = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&empty_path, .request));
+
+    const bad_status = [_]http2.Hpack.HeaderField{
+        .{ .name = ":status", .value = "20x" },
+    };
+    try std.testing.expectError(error.InvalidStatus, validateHeaderBlock(&bad_status, .response));
 }
 
 test "HTTP/2 async std.Io server handles concurrent h2c clients" {
