@@ -185,6 +185,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoBackoffCount"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoPeriod"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "retransmitPtoProbesAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "lossDetectionTimerDeadline"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "serviceLossDetectionTimer"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "localOneRttKeyPhase"));
@@ -243,6 +244,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.recovery, "Queue"));
     try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "packetThresholdCandidate"));
     try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "packetNumberCandidate"));
+    try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "ptoCandidateAt"));
     try std.testing.expect(@hasDecl(netz.quic.congestion, "Controller"));
     try std.testing.expect(@hasDecl(netz.quic.congestion.Controller, "onExplicitCongestion"));
     try std.testing.expect(@hasDecl(netz.quic.congestion.Controller, "onPersistentCongestion"));

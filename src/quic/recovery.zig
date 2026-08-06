@@ -90,10 +90,14 @@ pub const Queue = struct {
     }
 
     pub fn ptoCandidate(self: *const Queue) ?Candidate {
-        if (self.pending.items.len == 0) return null;
-        const entry = self.pending.items[0];
+        return self.ptoCandidateAt(0);
+    }
+
+    pub fn ptoCandidateAt(self: *const Queue, group_index: usize) ?Candidate {
+        if (group_index >= self.pending.items.len) return null;
+        const entry = self.pending.items[group_index];
         return .{
-            .group_index = 0,
+            .group_index = group_index,
             .packet_number = entry.newestPacketNumber(),
             .payload = entry.payload,
             .retransmission_count = entry.retransmission_count,
@@ -234,6 +238,24 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
     };
     try std.testing.expectEqual(@as(usize, 1), try queue.applyAck(ack));
     try std.testing.expectEqual(@as(usize, 0), queue.pendingCount());
+}
+
+test "QUIC recovery queue selects PTO candidates by pending group" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    try queue.trackSent(0, "zero");
+    try queue.trackSent(1, "one");
+
+    const first = queue.ptoCandidateAt(0).?;
+    try std.testing.expectEqual(@as(usize, 0), first.group_index);
+    try std.testing.expectEqualStrings("zero", first.payload);
+
+    const second = queue.ptoCandidateAt(1).?;
+    try std.testing.expectEqual(@as(usize, 1), second.group_index);
+    try std.testing.expectEqualStrings("one", second.payload);
+    try std.testing.expect(queue.ptoCandidateAt(2) == null);
 }
 
 test "QUIC recovery queue applies ACK ranges" {

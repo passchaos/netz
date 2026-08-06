@@ -389,10 +389,19 @@ pub const Connection = struct {
     }
 
     pub fn retransmitPtoAt(self: *Connection, now_ns: ?u64) Error!bool {
-        const candidate = self.recovery.ptoCandidate() orelse return false;
-        try self.retransmitCandidateAt(candidate, .pto_probe, now_ns);
-        self.incrementPtoCount();
-        return true;
+        return (try self.retransmitPtoProbesAt(now_ns, 1)) != 0;
+    }
+
+    pub fn retransmitPtoProbesAt(self: *Connection, now_ns: ?u64, max_probes: usize) Error!usize {
+        if (max_probes == 0) return 0;
+        const limit = @min(max_probes, self.recovery.pendingCount());
+        var sent_count: usize = 0;
+        while (sent_count < limit) : (sent_count += 1) {
+            const candidate = self.recovery.ptoCandidateAt(sent_count) orelse break;
+            try self.retransmitCandidateAt(candidate, .pto_probe, now_ns);
+        }
+        if (sent_count != 0) self.incrementPtoCount();
+        return sent_count;
     }
 
     pub fn retransmitPacketThresholdLoss(self: *Connection) Error!bool {
@@ -465,7 +474,7 @@ pub const Connection = struct {
                 _ = try self.retransmitTimeThresholdLoss(now_ns, self.rtt_stats.lossDelay());
             },
             .pto => {
-                _ = try self.retransmitPtoAt(now_ns);
+                _ = try self.retransmitPtoProbesAt(now_ns, 2);
             },
         }
         return deadline;
@@ -3538,6 +3547,65 @@ test "QUIC 1-RTT connection retransmits PTO payload and clears recovery on ACK" 
     try std.testing.expect(client.sent.packets.items[1].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
     try std.testing.expect(!(try client.retransmitPto()));
+}
+
+test "QUIC 1-RTT PTO service sends up to two probes" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xa9} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 10_000_000);
+    try client.sendAt(&ping, 10_000_000);
+    try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
+
+    const serviced = (try client.serviceLossDetectionTimer(210_000_000)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[1].packet_numbers.items.len);
+
+    var original0 = try server.receivePacket();
+    defer original0.deinit(allocator);
+    var original1 = try server.receivePacket();
+    defer original1.deinit(allocator);
+    var probe0 = try server.receivePacket();
+    defer probe0.deinit(allocator);
+    var probe1 = try server.receivePacket();
+    defer probe1.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), original0.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 1), original1.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 2), probe0.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 3), probe1.packet.packet_number);
 }
 
 test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
