@@ -664,9 +664,21 @@ pub fn validateRequestTarget(target: []const u8) Error!void {
 pub fn validateConnectTarget(target: []const u8) Error!void {
     try validateRequestTarget(target);
     if (target[0] == '/' or target[0] == '*' or std.mem.indexOf(u8, target, "://") != null) return error.MalformedStartLine;
-    const colon = std.mem.lastIndexOfScalar(u8, target, ':') orelse return error.MalformedStartLine;
-    if (colon == 0 or colon + 1 >= target.len) return error.MalformedStartLine;
-    for (target[colon + 1 ..]) |byte| {
+
+    const port: []const u8 = if (target[0] == '[') blk: {
+        const end = std.mem.indexOfScalar(u8, target, ']') orelse return error.MalformedStartLine;
+        if (end <= 1 or end + 2 > target.len or target[end + 1] != ':') return error.MalformedStartLine;
+        break :blk target[end + 2 ..];
+    } else blk: {
+        const colon = std.mem.lastIndexOfScalar(u8, target, ':') orelse return error.MalformedStartLine;
+        if (colon == 0 or colon + 1 >= target.len) return error.MalformedStartLine;
+        // Unbracketed IPv6 is ambiguous in authority-form; require RFC 3986
+        // bracket syntax so the final colon is unambiguously the port separator.
+        if (std.mem.indexOfScalar(u8, target[0..colon], ':') != null) return error.MalformedStartLine;
+        break :blk target[colon + 1 ..];
+    };
+
+    for (port) |byte| {
         if (!std.ascii.isDigit(byte)) return error.MalformedStartLine;
     }
 }
@@ -899,8 +911,13 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, validateRequestTarget("/evil\r\nInjected: yes"));
     try std.testing.expectError(error.MalformedStartLine, validateRequestTarget(""));
     try validateConnectTarget("example.com:443");
+    try validateConnectTarget("[2001:db8::1]:443");
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("/path"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("2001:db8::1:443"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("[]:443"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("[2001:db8::1]"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com:"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("https://example.com:443"));
 
     const bad_reason = "HTTP/1.1 200 OK\x01\r\nContent-Length: 0\r\n\r\n";
