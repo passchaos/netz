@@ -67,6 +67,7 @@ pub const ConnectionConfig = struct {
     initial_receive_max_stream_data_uni: ?u64 = null,
     stream_receive_window: u64 = 64 * 1024,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
+    max_stored_new_tokens: usize = 4,
 };
 
 const StreamFlowEntry = struct {
@@ -133,6 +134,8 @@ pub const Connection = struct {
     send_key_phase: quic.protection.Aes128KeyPhaseState,
     receive_key_phase: quic.protection.Aes128KeyPhaseState,
     pending_key_update_ack_threshold: ?u64 = null,
+    stored_new_tokens: std.ArrayList([]u8) = .empty,
+    handshake_confirmed: bool = false,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -160,6 +163,8 @@ pub const Connection = struct {
         self.recovery.deinit();
         self.path_validation.deinit();
         if (self.close_info) |*close_info| close_info.deinit(self.endpoint.allocator);
+        for (self.stored_new_tokens.items) |token| self.endpoint.allocator.free(token);
+        self.stored_new_tokens.deinit(self.endpoint.allocator);
         self.stream_send_flows.deinit(self.endpoint.allocator);
         self.stream_recv_flows.deinit(self.endpoint.allocator);
         self.* = undefined;
@@ -392,6 +397,19 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn sendHandshakeDone(self: *Connection) Error!void {
+        if (self.config.local_endpoint != .server) return error.InvalidFrame;
+        const frames = [_]quic.Frame{.{ .handshake_done = {} }};
+        try self.send(&frames);
+    }
+
+    pub fn sendNewToken(self: *Connection, token: []const u8) Error!void {
+        if (self.config.local_endpoint != .server) return error.InvalidFrame;
+        if (token.len == 0) return error.InvalidFrame;
+        const frames = [_]quic.Frame{.{ .new_token = .{ .token = token } }};
+        try self.send(&frames);
+    }
+
     pub fn switchToNextPeerConnectionId(self: *Connection) bool {
         const entry = self.peer_connection_ids.consumeUnused() orelse return false;
         self.config.peer_connection_id = entry.slice();
@@ -400,6 +418,15 @@ pub const Connection = struct {
 
     pub fn detectStatelessReset(self: Connection, datagram: []const u8) ?u64 {
         return self.peer_connection_ids.detectStatelessReset(datagram);
+    }
+
+    pub fn latestNewToken(self: Connection) ?[]const u8 {
+        if (self.stored_new_tokens.items.len == 0) return null;
+        return self.stored_new_tokens.items[self.stored_new_tokens.items.len - 1];
+    }
+
+    pub fn handshakeConfirmed(self: Connection) bool {
+        return self.handshake_confirmed;
     }
 
     pub fn localOneRttKeyPhase(self: Connection) bool {
@@ -527,6 +554,8 @@ pub const Connection = struct {
                 .path_response => |path_response| try self.path_validation.receiveResponse(path_response.data),
                 .reset_stream => |reset| try self.receiveResetStream(reset),
                 .stop_sending => |stop| try self.receiveStopSending(stop),
+                .new_token => |new_token| try self.receiveNewToken(new_token),
+                .handshake_done => try self.receiveHandshakeDone(),
                 .connection_close => |close| try self.setCloseInfo(.{
                     .application = false,
                     .error_code = close.error_code,
@@ -566,6 +595,20 @@ pub const Connection = struct {
             if (packet.acknowledged and packet.packet_number >= threshold) return true;
         }
         return false;
+    }
+
+    fn receiveNewToken(self: *Connection, new_token: quic.NewTokenFrame) Error!void {
+        if (self.config.local_endpoint == .server) return error.InvalidFrame;
+        if (new_token.token.len == 0) return error.InvalidFrame;
+        if (self.stored_new_tokens.items.len >= self.config.max_stored_new_tokens) return;
+        const owned = try self.endpoint.allocator.dupe(u8, new_token.token);
+        errdefer self.endpoint.allocator.free(owned);
+        try self.stored_new_tokens.append(self.endpoint.allocator, owned);
+    }
+
+    fn receiveHandshakeDone(self: *Connection) Error!void {
+        if (self.config.local_endpoint == .server) return error.InvalidFrame;
+        self.handshake_confirmed = true;
     }
 
     fn receiveResetStream(self: *Connection, reset: quic.ResetStreamFrame) Error!void {
@@ -1386,6 +1429,73 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     var retire_packet = try server.receiveRoutedDatagram(routed);
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
+}
+
+test "QUIC 1-RTT handles server-only NEW_TOKEN and HANDSHAKE_DONE roles" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_cid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0xa4} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0xa5} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .local_endpoint = .client,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try std.testing.expectError(error.InvalidFrame, client.sendHandshakeDone());
+    try std.testing.expectError(error.InvalidFrame, client.sendNewToken("client-token"));
+    try std.testing.expectError(error.InvalidFrame, server.sendNewToken(""));
+
+    try server.sendNewToken("future-token");
+    var token_packet = try client.receivePacket();
+    defer token_packet.deinit(allocator);
+    try std.testing.expectEqualStrings("future-token", client.latestNewToken().?);
+
+    try server.sendHandshakeDone();
+    var done_packet = try client.receivePacket();
+    defer done_packet.deinit(allocator);
+    try std.testing.expect(client.handshakeConfirmed());
+
+    try sendFrames(&client_endpoint, server_endpoint.address(), client_keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .handshake_done = {} }},
+    });
+    try std.testing.expectError(error.InvalidFrame, server.receivePacket());
+    try std.testing.expect(!server.handshakeConfirmed());
+
+    try sendFrames(&client_endpoint, server_endpoint.address(), client_keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 1,
+        .frames = &[_]quic.Frame{.{ .new_token = .{ .token = "illegal" } }},
+    });
+    try std.testing.expectError(error.InvalidFrame, server.receivePacket());
+    try std.testing.expectEqual(@as(?[]const u8, null), server.latestNewToken());
 }
 
 test "QUIC 1-RTT connection closes with transport and application close frames" {

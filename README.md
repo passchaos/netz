@@ -50,6 +50,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   to RESET_STREAM response handling,
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
+  client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
+  role validation for both frames,
   1-RTT key-update derivation and key-phase state with ACK gating and retained
   previous receive/send generations for reordered short-header packets,
   NewReno-style congestion-window and bytes-in-flight send admission wired into
