@@ -602,10 +602,10 @@ pub const Connection = struct {
     }
 
     fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame) Error!void {
+        if (!try self.received.recordFresh(packet_number)) return error.DuplicatePacket;
         if (packet_number >= self.expected_packet_number) {
             self.expected_packet_number = packet_number + 1;
         }
-        try self.received.record(packet_number);
         for (frames) |frame| {
             switch (frame) {
                 .ack => {
@@ -1384,6 +1384,55 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
     try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
+}
+
+test "QUIC 1-RTT connection drops duplicate packet numbers before frame effects" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x11, 0x12, 0x13, 0x14 };
+    const server_cid = [_]u8{ 0x15, 0x16, 0x17, 0x18 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x73} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x74} ** quic.protection.secret_len);
+
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "once", .fin = false } }};
+    try sendFrames(&client_endpoint, server_endpoint.address(), client_keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &frames,
+    });
+    try sendFrames(&client_endpoint, server_endpoint.address(), client_keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &frames,
+    });
+
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), first.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 4), server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 1), server.received.ranges.items.len);
+
+    try std.testing.expectError(error.DuplicatePacket, server.receivePacket());
+    try std.testing.expectEqual(@as(u64, 4), server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 1), server.received.ranges.items.len);
 }
 
 test "QUIC 1-RTT connection models idle timeout deadlines" {

@@ -44,7 +44,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   derivation for QUIC, an integrated minimal client/server handshake that emits
   practical transport parameters and applies negotiated flow-control, stream,
   and UDP-payload limits to established 1-RTT connection objects, stateless reset token helpers,
-  packet-number space ACK tracking with never-sent ACK range rejection and adaptive truncated packet-number
+  packet-number space ACK tracking with bounded duplicate/old packet suppression, ACK range semantic validation, never-sent ACK range rejection, and adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, stream send/receive state with
   duplicate-overlap conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,

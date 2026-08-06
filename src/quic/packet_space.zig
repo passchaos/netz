@@ -4,6 +4,8 @@ const quic = @import("mod.zig");
 pub const Error = error{
     TooManyAckRanges,
     InvalidAckFrame,
+    DuplicatePacket,
+    InvalidPacketNumber,
 } || std.mem.Allocator.Error;
 
 pub const default_packet_threshold: u64 = 3;
@@ -21,6 +23,7 @@ pub const ReceivedPacketTracker = struct {
     allocator: std.mem.Allocator,
     ranges: std.ArrayList(PacketRange) = .empty,
     max_ranges: usize = 64,
+    forgotten_through: ?u64 = null,
 
     pub fn init(allocator: std.mem.Allocator, max_ranges: usize) ReceivedPacketTracker {
         return .{ .allocator = allocator, .max_ranges = max_ranges };
@@ -32,26 +35,36 @@ pub const ReceivedPacketTracker = struct {
     }
 
     pub fn record(self: *ReceivedPacketTracker, packet_number: u64) Error!void {
+        _ = try self.recordFresh(packet_number);
+    }
+
+    /// Record a received packet number, returning whether it is new enough to
+    /// process.  Duplicate packets and packet numbers that fell out of the
+    /// bounded ACK history return `false`; callers should drop those packets
+    /// before applying frame side effects.
+    pub fn recordFresh(self: *ReceivedPacketTracker, packet_number: u64) Error!bool {
+        if (packet_number > quic.varint.max_value) return error.InvalidPacketNumber;
+        if (self.forgotten_through) |forgotten| {
+            if (packet_number <= forgotten) return false;
+        }
+
         for (self.ranges.items, 0..) |*range, i| {
-            if (packet_number >= range.start and packet_number <= range.end) return;
-            if (packet_number == range.end + 1) {
+            if (packet_number >= range.start and packet_number <= range.end) return false;
+            if (isImmediatelyBefore(range.end, packet_number)) {
                 range.end = packet_number;
                 try self.mergeForward(i);
-                return;
+                return true;
             }
-            if (range.start != 0 and packet_number + 1 == range.start) {
+            if (isImmediatelyBefore(packet_number, range.start)) {
                 range.start = packet_number;
                 try self.mergeBackward(i);
-                return;
+                return true;
             }
             if (packet_number > range.end) {
-                if (self.ranges.items.len >= self.max_ranges) return error.TooManyAckRanges;
-                try self.ranges.insert(self.allocator, i, .{ .start = packet_number, .end = packet_number });
-                return;
+                return try self.insertRange(i, .{ .start = packet_number, .end = packet_number });
             }
         }
-        if (self.ranges.items.len >= self.max_ranges) return error.TooManyAckRanges;
-        try self.ranges.append(self.allocator, .{ .start = packet_number, .end = packet_number });
+        return try self.insertRange(self.ranges.items.len, .{ .start = packet_number, .end = packet_number });
     }
 
     pub fn ackFrame(self: ReceivedPacketTracker, allocator: std.mem.Allocator, ack_delay: u64) Error!quic.AckFrame {
@@ -63,7 +76,8 @@ pub const ReceivedPacketTracker = struct {
 
         var previous = largest;
         for (self.ranges.items[1..], 0..) |range, i| {
-            if (previous.start < range.end + 2) return error.InvalidAckFrame;
+            const next_largest_after_gap = std.math.add(u64, range.end, 2) catch return error.InvalidAckFrame;
+            if (previous.start < next_largest_after_gap) return error.InvalidAckFrame;
             ack_ranges[i] = .{
                 .gap = previous.start - range.end - 2,
                 .ack_range_length = range.len() - 1,
@@ -79,11 +93,36 @@ pub const ReceivedPacketTracker = struct {
         };
     }
 
+    fn insertRange(self: *ReceivedPacketTracker, index: usize, range: PacketRange) Error!bool {
+        if (self.max_ranges == 0) return false;
+
+        if (self.ranges.items.len >= self.max_ranges) {
+            if (index == self.ranges.items.len) {
+                self.forgetThrough(range.end);
+                return false;
+            }
+
+            const oldest = self.ranges.items[self.ranges.items.len - 1];
+            self.forgetThrough(oldest.end);
+            _ = self.ranges.orderedRemove(self.ranges.items.len - 1);
+        }
+
+        try self.ranges.insert(self.allocator, index, range);
+        return true;
+    }
+
+    fn forgetThrough(self: *ReceivedPacketTracker, packet_number: u64) void {
+        self.forgotten_through = if (self.forgotten_through) |previous|
+            @max(previous, packet_number)
+        else
+            packet_number;
+    }
+
     fn mergeForward(self: *ReceivedPacketTracker, index: usize) Error!void {
         if (index == 0) return;
         const current = &self.ranges.items[index];
         const previous = &self.ranges.items[index - 1];
-        if (current.end + 1 >= previous.start) {
+        if (rangesOverlapOrAdjacent(current.*, previous.*)) {
             previous.start = @min(previous.start, current.start);
             previous.end = @max(previous.end, current.end);
             _ = self.ranges.orderedRemove(index);
@@ -94,13 +133,22 @@ pub const ReceivedPacketTracker = struct {
         if (index + 1 >= self.ranges.items.len) return;
         const current = &self.ranges.items[index];
         const next = &self.ranges.items[index + 1];
-        if (next.end + 1 >= current.start) {
+        if (rangesOverlapOrAdjacent(next.*, current.*)) {
             current.start = @min(current.start, next.start);
             current.end = @max(current.end, next.end);
             _ = self.ranges.orderedRemove(index + 1);
         }
     }
 };
+
+fn isImmediatelyBefore(previous: u64, next: u64) bool {
+    if (previous == std.math.maxInt(u64)) return false;
+    return previous + 1 == next;
+}
+
+fn rangesOverlapOrAdjacent(lower: PacketRange, higher: PacketRange) bool {
+    return lower.end >= higher.start or isImmediatelyBefore(lower.end, higher.start);
+}
 
 pub const SentPacket = struct {
     packet_number: u64,
@@ -333,7 +381,9 @@ test "QUIC packet space generates ACK ranges" {
     var received = ReceivedPacketTracker.init(allocator, 8);
     defer received.deinit();
 
-    for ([_]u64{ 1, 2, 3, 7, 8, 10 }) |pn| try received.record(pn);
+    for ([_]u64{ 1, 2, 3, 7, 8, 10 }) |pn| {
+        try std.testing.expect(try received.recordFresh(pn));
+    }
     const ack = try received.ackFrame(allocator, 0);
     defer allocator.free(ack.ranges);
 
@@ -344,6 +394,36 @@ test "QUIC packet space generates ACK ranges" {
     try std.testing.expectEqual(@as(u64, 1), ack.ranges[0].ack_range_length); // 7..8
     try std.testing.expectEqual(@as(u64, 2), ack.ranges[1].gap); // missing 4..6
     try std.testing.expectEqual(@as(u64, 2), ack.ranges[1].ack_range_length); // 1..3
+}
+
+test "QUIC packet space drops duplicate and too-old packet numbers" {
+    const allocator = std.testing.allocator;
+    var received = ReceivedPacketTracker.init(allocator, 2);
+    defer received.deinit();
+
+    try std.testing.expect(try received.recordFresh(10));
+    try std.testing.expect(!(try received.recordFresh(10)));
+    try std.testing.expect(try received.recordFresh(6));
+    try std.testing.expectEqual(@as(usize, 2), received.ranges.items.len);
+
+    // A packet below the retained window is ignored instead of growing the ACK
+    // range list without bound.
+    try std.testing.expect(!(try received.recordFresh(2)));
+    try std.testing.expectEqual(@as(usize, 2), received.ranges.items.len);
+    try std.testing.expectEqual(@as(?u64, 2), received.forgotten_through);
+
+    // A newer out-of-order range evicts the oldest retained range, matching the
+    // bounded ACK history used by quicz/tquic style implementations.
+    try std.testing.expect(try received.recordFresh(8));
+    try std.testing.expectEqual(@as(usize, 2), received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 10), received.ranges.items[0].start);
+    try std.testing.expectEqual(@as(u64, 8), received.ranges.items[1].start);
+    try std.testing.expectEqual(@as(?u64, 6), received.forgotten_through);
+
+    try std.testing.expect(!(try received.recordFresh(6)));
+    try std.testing.expect(try received.recordFresh(7));
+    try std.testing.expectEqual(@as(u64, 7), received.ranges.items[1].start);
+    try std.testing.expectEqual(@as(u64, 8), received.ranges.items[1].end);
 }
 
 test "QUIC sent packet tracker applies ACK ranges" {
