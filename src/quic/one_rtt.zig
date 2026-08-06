@@ -674,6 +674,15 @@ pub const Connection = struct {
         try self.path_validation.queueChallenge(data);
     }
 
+    pub fn beginPeerMigration(self: *Connection, new_peer: net.IpAddress, challenge: [8]u8) Error!void {
+        self.config.peer = new_peer;
+        self.peer_address_validated = false;
+        self.peer_address_bytes_received = 0;
+        self.peer_address_bytes_sent = 0;
+        self.pmtud.resetForPath();
+        try self.queuePathChallenge(challenge);
+    }
+
     pub fn sendPendingPathChallenge(self: *Connection) Error!void {
         const frame = try self.path_validation.nextChallengeFrame();
         const frames = [_]quic.Frame{frame};
@@ -1050,7 +1059,10 @@ pub const Connection = struct {
                 },
                 .retire_connection_id => |retire| try self.local_connection_ids.retire(retire.sequence_number),
                 .path_challenge => |path_challenge| try self.path_validation.receiveChallenge(path_challenge.data),
-                .path_response => |path_response| try self.path_validation.receiveResponse(path_response.data),
+                .path_response => |path_response| {
+                    if (!self.path_validation.receiveResponseValidated(path_response.data)) return error.UnknownPathResponse;
+                    self.setPeerAddressValidated(true);
+                },
                 .reset_stream => |reset| try self.receiveResetStream(reset),
                 .stop_sending => |stop| try self.receiveStopSending(stop),
                 .new_token => |new_token| try self.receiveNewToken(new_token),
@@ -3334,6 +3346,56 @@ test "QUIC 1-RTT routed datagrams dispatch to separate connections" {
     }
     try std.testing.expect(saw_a);
     try std.testing.expect(saw_b);
+}
+
+test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var first_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer first_endpoint.deinit();
+    var migrated_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer migrated_endpoint.deinit();
+
+    const local_cid = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
+    const peer_cid = [_]u8{ 0xce, 0xcf, 0xd0, 0xd1 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xcc} ** quic.protection.secret_len);
+
+    var connection = try Connection.init(&first_endpoint, .{
+        .peer = first_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+    });
+    defer connection.deinit();
+    connection.setPeerAddressValidated(true);
+    connection.pmtud.onProbeAcked(1300, 1300);
+    try std.testing.expectEqual(@as(usize, 1300), connection.pmtudCurrentSize());
+
+    const challenge = [_]u8{ 0xc0, 1, 2, 3, 4, 5, 6, 7 };
+    try connection.beginPeerMigration(migrated_endpoint.address(), challenge);
+    try std.testing.expectEqual(migrated_endpoint.address(), connection.config.peer);
+    try std.testing.expect(!connection.peerAddressValidated());
+    try std.testing.expectEqual(@as(?usize, 0), connection.antiAmplificationLimitRemaining());
+    try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, connection.pmtudCurrentSize());
+    try std.testing.expect(connection.pmtudShouldProbe());
+    try std.testing.expectEqual(@as(usize, 1), connection.path_validation.pendingChallengeCount());
+
+    var challenge_frame = try connection.path_validation.nextChallengeFrame();
+    try std.testing.expectEqualSlices(u8, &challenge, &challenge_frame.path_challenge.data);
+    try std.testing.expectEqual(@as(usize, 1), connection.path_validation.outstandingChallengeCount());
+
+    const frames = [_]quic.Frame{.{ .path_response = .{ .data = challenge } }};
+    try connection.applyReceivedFrames(0, &frames, null, .not_ect);
+    try std.testing.expect(connection.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), connection.path_validation.outstandingChallengeCount());
+    try std.testing.expectEqual(@as(?usize, null), connection.antiAmplificationLimitRemaining());
 }
 
 test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {

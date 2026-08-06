@@ -70,13 +70,17 @@ pub const State = struct {
     }
 
     pub fn receiveResponse(self: *State, data: [8]u8) Error!void {
+        if (!self.receiveResponseValidated(data)) return error.UnknownPathResponse;
+    }
+
+    pub fn receiveResponseValidated(self: *State, data: [8]u8) bool {
         for (self.outstanding_challenges.items, 0..) |challenge, i| {
             if (std.mem.eql(u8, &challenge.data, &data)) {
                 _ = self.outstanding_challenges.orderedRemove(i);
-                return;
+                return true;
             }
         }
-        return error.UnknownPathResponse;
+        return false;
     }
 
     pub fn pendingResponseCount(self: State) usize {
