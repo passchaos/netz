@@ -182,6 +182,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "retransmitPacketThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "retransmitTimeThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "timeThresholdLossDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoBackoffCount"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoPeriod"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ptoDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "lossDetectionTimerDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "serviceLossDetectionTimer"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "localOneRttKeyPhase"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "peerOneRttKeyPhase"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "initiateKeyUpdate"));
@@ -208,6 +213,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "updateRttFromAck"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "persistentCongestionPeriod"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "CloseState"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "LossDetectionTimerDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "LossDetectionTimerKind"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamResetInfo"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketTracker"));
@@ -225,6 +232,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectTimeThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "persistentCongestionPeriod"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "timeThresholdLossDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "latestAckElicitingInFlightSentTime"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "sentAt"));
     try std.testing.expect(@hasDecl(netz.quic.stream_state, "RecvState"));
     const stream_conflict_error: netz.quic.stream_state.Error = error.ConflictingStreamData;

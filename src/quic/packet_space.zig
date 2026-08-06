@@ -251,6 +251,7 @@ pub const SentPacketTracker = struct {
 
     pub const AckResult = struct {
         packets: usize = 0,
+        ack_eliciting_packets: usize = 0,
         bytes: usize = 0,
         ect0_packets: usize = 0,
         ect1_packets: usize = 0,
@@ -260,6 +261,7 @@ pub const SentPacketTracker = struct {
 
         fn add(self: *AckResult, other: AckResult) void {
             self.packets += other.packets;
+            self.ack_eliciting_packets += other.ack_eliciting_packets;
             self.bytes += other.bytes;
             self.ect0_packets += other.ect0_packets;
             self.ect1_packets += other.ect1_packets;
@@ -444,7 +446,10 @@ pub const SentPacketTracker = struct {
             packet.lost = true;
             lost.packets += 1;
             lost.observe(packet.packet_number, packet.sent_time_ns);
-            if (packet.ack_eliciting) lost.bytes += packet.bytes;
+            if (packet.ack_eliciting) {
+                lost.ack_eliciting_packets += 1;
+                lost.bytes += packet.bytes;
+            }
         }
         return lost;
     }
@@ -462,7 +467,10 @@ pub const SentPacketTracker = struct {
             packet.lost = true;
             lost.packets += 1;
             lost.observe(packet.packet_number, packet.sent_time_ns);
-            if (packet.ack_eliciting) lost.bytes += packet.bytes;
+            if (packet.ack_eliciting) {
+                lost.ack_eliciting_packets += 1;
+                lost.bytes += packet.bytes;
+            }
         }
         return lost;
     }
@@ -479,6 +487,16 @@ pub const SentPacketTracker = struct {
             if (deadline == null or lost_time < deadline.?) deadline = lost_time;
         }
         return deadline;
+    }
+
+    pub fn latestAckElicitingInFlightSentTime(self: SentPacketTracker) ?u64 {
+        var latest: ?u64 = null;
+        for (self.packets.items) |packet| {
+            if (!packet.ack_eliciting or packet.acknowledged or packet.lost) continue;
+            const sent_time = packet.sent_time_ns orelse continue;
+            if (latest == null or sent_time > latest.?) latest = sent_time;
+        }
+        return latest;
     }
 
     /// Return the longest contiguous lost-packet period that can establish
@@ -559,7 +577,10 @@ pub const SentPacketTracker = struct {
                 packet.acknowledged = true;
                 result.packets += 1;
                 result.observe(packet.packet_number, packet.sent_time_ns);
-                if (packet.ack_eliciting and !packet.lost) result.bytes += packet.bytes;
+                if (packet.ack_eliciting) {
+                    result.ack_eliciting_packets += 1;
+                    if (!packet.lost) result.bytes += packet.bytes;
+                }
                 switch (packet.ecn) {
                     .not_ect => {},
                     .ect0 => result.ect0_packets += 1,
@@ -996,6 +1017,24 @@ test "QUIC sent packet tracker detects time-threshold loss" {
     const remaining = sent.detectTimeThresholdLoss(1_000, 150, 2);
     try std.testing.expectEqual(@as(usize, 2), remaining.packets);
     try std.testing.expectEqual(@as(?u64, null), sent.timeThresholdLossDeadline(150, 2));
+}
+
+test "QUIC sent packet tracker reports latest ack-eliciting in-flight send time" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(0, true, 1200, .not_ect, 100);
+    try sent.sentAt(1, false, 0, .not_ect, 400);
+    try sent.sentAt(2, true, 1200, .not_ect, 300);
+    try sent.sentAt(3, true, 1200, .not_ect, null);
+    try std.testing.expectEqual(@as(?u64, 300), sent.latestAckElicitingInFlightSentTime());
+
+    _ = sent.markAcknowledged(2);
+    try std.testing.expectEqual(@as(?u64, 100), sent.latestAckElicitingInFlightSentTime());
+
+    sent.packets.items[0].lost = true;
+    try std.testing.expectEqual(@as(?u64, null), sent.latestAckElicitingInFlightSentTime());
 }
 
 test "QUIC sent packet tracker finds persistent congestion periods" {

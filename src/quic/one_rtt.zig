@@ -30,6 +30,11 @@ const PayloadSendOptions = struct {
     payload: []const u8,
 };
 
+const RetransmitMode = enum {
+    congestion_controlled,
+    pto_probe,
+};
+
 pub const ReceivedPacket = struct {
     from: net.IpAddress,
     packet: quic.protection.OpenedShortPacket,
@@ -178,6 +183,16 @@ pub const CloseState = enum {
     closed,
 };
 
+pub const LossDetectionTimerKind = enum {
+    loss_time,
+    pto,
+};
+
+pub const LossDetectionTimerDeadline = struct {
+    kind: LossDetectionTimerKind,
+    deadline_ns: u64,
+};
+
 pub const Connection = struct {
     endpoint: *quic.runtime.Endpoint,
     config: ConnectionConfig,
@@ -210,6 +225,7 @@ pub const Connection = struct {
     last_activity_ms: ?u64 = null,
     idle_timed_out: bool = false,
     last_persistent_congestion_packet_number: ?u64 = null,
+    pto_count: u8 = 0,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -369,8 +385,13 @@ pub const Connection = struct {
     }
 
     pub fn retransmitPto(self: *Connection) Error!bool {
+        return self.retransmitPtoAt(null);
+    }
+
+    pub fn retransmitPtoAt(self: *Connection, now_ns: ?u64) Error!bool {
         const candidate = self.recovery.ptoCandidate() orelse return false;
-        try self.retransmitCandidate(candidate, .pto_probe);
+        try self.retransmitCandidateAt(candidate, .pto_probe, now_ns);
+        self.incrementPtoCount();
         return true;
     }
 
@@ -403,7 +424,58 @@ pub const Connection = struct {
         return self.sent.timeThresholdLossDeadline(loss_delay_ns, largest);
     }
 
-    fn retransmitCandidate(self: *Connection, candidate: quic.recovery.Candidate, mode: enum { congestion_controlled, pto_probe }) Error!void {
+    pub fn ptoBackoffCount(self: Connection) u8 {
+        return self.pto_count;
+    }
+
+    pub fn ptoPeriod(self: Connection) u64 {
+        var period = self.rtt_stats.pto(true);
+        var remaining = self.pto_count;
+        while (remaining != 0) : (remaining -= 1) {
+            period = std.math.mul(u64, period, 2) catch return std.math.maxInt(u64);
+        }
+        return @max(period, quic.rtt.timer_granularity_ns);
+    }
+
+    pub fn ptoDeadline(self: Connection) ?u64 {
+        if (self.close_info != null or self.idle_timed_out or self.recovery.pendingCount() == 0) return null;
+        const sent_time = self.sent.latestAckElicitingInFlightSentTime() orelse return null;
+        return std.math.add(u64, sent_time, self.ptoPeriod()) catch std.math.maxInt(u64);
+    }
+
+    pub fn lossDetectionTimerDeadline(self: Connection) ?LossDetectionTimerDeadline {
+        if (self.close_info != null or self.idle_timed_out or self.recovery.pendingCount() == 0) return null;
+
+        const loss_time = self.timeThresholdLossDeadline(self.rtt_stats.lossDelay());
+        const pto_time = self.ptoDeadline();
+        if (loss_time) |loss_deadline| {
+            if (pto_time == null or loss_deadline <= pto_time.?) {
+                return .{ .kind = .loss_time, .deadline_ns = loss_deadline };
+            }
+        }
+        if (pto_time) |pto_deadline| return .{ .kind = .pto, .deadline_ns = pto_deadline };
+        return null;
+    }
+
+    pub fn serviceLossDetectionTimer(self: *Connection, now_ns: u64) Error!?LossDetectionTimerDeadline {
+        const deadline = self.lossDetectionTimerDeadline() orelse return null;
+        if (now_ns < deadline.deadline_ns) return null;
+        switch (deadline.kind) {
+            .loss_time => {
+                _ = try self.retransmitTimeThresholdLoss(now_ns, self.rtt_stats.lossDelay());
+            },
+            .pto => {
+                _ = try self.retransmitPtoAt(now_ns);
+            },
+        }
+        return deadline;
+    }
+
+    fn retransmitCandidate(self: *Connection, candidate: quic.recovery.Candidate, mode: RetransmitMode) Error!void {
+        try self.retransmitCandidateAt(candidate, mode, null);
+    }
+
+    fn retransmitCandidateAt(self: *Connection, candidate: quic.recovery.Candidate, mode: RetransmitMode, sent_time_ns: ?u64) Error!void {
         const packet_number = self.next_packet_number;
         switch (mode) {
             .congestion_controlled => try self.congestion.reserve(candidate.payload.len),
@@ -413,10 +485,14 @@ pub const Connection = struct {
 
         try self.recovery.recordRetransmission(candidate.group_index, packet_number);
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
-        try self.sent.sentAt(packet_number, true, candidate.payload.len, .not_ect, null);
+        try self.sent.sentAt(packet_number, true, candidate.payload.len, .not_ect, sent_time_ns);
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacket(packet_number, candidate.payload);
         self.next_packet_number += 1;
+    }
+
+    fn incrementPtoCount(self: *Connection) void {
+        if (self.pto_count != std.math.maxInt(u8)) self.pto_count += 1;
     }
 
     pub fn markPacketAcknowledged(self: *Connection, packet_number: u64) bool {
@@ -779,6 +855,7 @@ pub const Connection = struct {
                 .ack => {
                     if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
                     const acked = try self.sent.applyAckDetailed(frame.ack);
+                    if (acked.ack_eliciting_packets > 0) self.pto_count = 0;
                     if (acked.ecn_ce_delta > 0) {
                         self.congestion.onExplicitCongestion(now_ns);
                     }
@@ -3461,6 +3538,108 @@ test "QUIC 1-RTT connection retransmits PTO payload and clears recovery on ACK" 
     try std.testing.expect(client.sent.packets.items[1].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
     try std.testing.expect(!(try client.retransmitPto()));
+}
+
+test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const server_cid = [_]u8{ 0x95, 0x96, 0x97, 0x98 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x91} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 10_000_000);
+    try std.testing.expectEqual(@as(u8, 0), client.ptoBackoffCount());
+    try std.testing.expectEqual(@as(u64, 200_000_000), client.ptoPeriod());
+    try std.testing.expectEqual(@as(?u64, 210_000_000), client.ptoDeadline());
+    const first_deadline = client.lossDetectionTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, first_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 210_000_000), first_deadline.deadline_ns);
+
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), try client.serviceLossDetectionTimer(209_999_999));
+    const serviced = (try client.serviceLossDetectionTimer(210_000_000)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
+
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), first.packet.packet_number);
+    var probe = try server.receivePacket();
+    defer probe.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), probe.packet.packet_number);
+    try std.testing.expectEqual(@as(?u64, 610_000_000), client.ptoDeadline());
+
+    try server.sendAck(0);
+    var ack = try client.receivePacket();
+    defer ack.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0), client.ptoBackoffCount());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadline());
+}
+
+test "QUIC 1-RTT loss detection timer reports earliest loss or PTO deadline" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x92} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "timer-local",
+        .peer_connection_id = "timer-peer",
+    });
+    defer connection.deinit();
+
+    connection.rtt_stats.updateAt(100_000_000, 0, true, 100_000_000);
+    try connection.sent.sentAt(0, true, 1200, .not_ect, 0);
+    try connection.recovery.trackSent(0, "zero");
+    try connection.sent.sentAt(1, true, 1200, .not_ect, 200_000_000);
+    try connection.recovery.trackSent(1, "one");
+    _ = connection.sent.markAcknowledged(1);
+
+    const loss_first = connection.lossDetectionTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, loss_first.kind);
+    try std.testing.expectEqual(@as(u64, 112_500_000), loss_first.deadline_ns);
+
+    connection.sent.packets.items[0].lost = true;
+    try connection.sent.sentAt(2, true, 1200, .not_ect, 200_000_000);
+    try connection.recovery.trackSent(2, "two");
+    const pto_first = connection.lossDetectionTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, pto_first.kind);
+    try std.testing.expectEqual(@as(u64, 525_000_000), pto_first.deadline_ns);
 }
 
 test "QUIC 1-RTT connection retransmits time-threshold losses" {
