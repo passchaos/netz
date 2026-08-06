@@ -321,7 +321,7 @@ pub const Connection = struct {
     }
 
     pub fn sendFrame(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
-        if (self.close_sent and opcode != .close) return error.ConnectionClosed;
+        if (self.close_sent) return error.ConnectionClosed;
         try validateOutgoingFramePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
@@ -532,7 +532,7 @@ pub const H2Connection = struct {
     }
 
     pub fn sendFrame(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
-        if (self.close_sent and opcode != .close) return error.ConnectionClosed;
+        if (self.close_sent) return error.ConnectionClosed;
         try validateOutgoingFramePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
@@ -1800,6 +1800,28 @@ test "WebSocket incoming message finalization frees failed payloads" {
         .payload = bad_utf8,
         .compressed = false,
     }, 1024));
+}
+
+test "WebSocket runtimes reject duplicate close sends" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .close_sent = true,
+    };
+    try std.testing.expectError(error.ConnectionClosed, connection.sendFrame(.close, &.{}));
+    try std.testing.expectError(error.ConnectionClosed, connection.sendClose(.normal_closure, "again"));
+
+    var h2 = H2Connection{
+        .allocator = allocator,
+        .tunnel = undefined,
+        .role = .client,
+        .close_sent = true,
+    };
+    try std.testing.expectError(error.ConnectionClosed, h2.sendFrame(.close, &.{}));
+    try std.testing.expectError(error.ConnectionClosed, h2.sendClose(.normal_closure, "again"));
 }
 
 test "WebSocket runtimes return closed after close handshake completes" {
