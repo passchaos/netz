@@ -14,7 +14,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder with RFC 7541 Huffman strings plus
-  dynamic-table indexing/size-update state for long-lived runtimes, PING/GOAWAY/WINDOW_UPDATE connection
+  dynamic-table indexing/size-update state for long-lived runtimes and automatic
+  never-index encoding for sensitive fields, PING/GOAWAY/WINDOW_UPDATE connection
   management including interleaved SETTINGS/PING/WINDOW_UPDATE/PRIORITY handling and GOAWAY propagation during stream reads and post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets, default client server-push opt-out, connection- and stream-level flow-control enforcement including
   SETTINGS_INITIAL_WINDOW_SIZE updates, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation,
   outbound frame splitting with DATA sends that wait for WINDOW_UPDATE capacity

@@ -639,7 +639,8 @@ pub const Hpack = struct {
 
         pub fn encodeBlock(self: *Encoder, list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
             for (fields) |field| {
-                if (!field.never_index) {
+                const never_index = field.never_index or sensitiveHeaderName(field.name);
+                if (!never_index) {
                     if (findStaticIndex(field.name, field.value)) |index| {
                         try encodeInteger(list, allocator, 7, 0x80, index);
                         continue;
@@ -650,15 +651,15 @@ pub const Hpack = struct {
                     }
                 }
 
-                const representation: u8 = if (field.never_index) 0x10 else 0x40;
+                const representation: u8 = if (never_index) 0x10 else 0x40;
                 if (findStaticNameIndex(field.name) orelse self.dynamic_table.findNameIndex(field.name)) |name_index| {
-                    if (field.never_index) {
+                    if (never_index) {
                         try encodeInteger(list, allocator, 4, representation, name_index);
                     } else {
                         try encodeInteger(list, allocator, 6, representation, name_index);
                     }
                 } else {
-                    if (field.never_index) {
+                    if (never_index) {
                         try encodeInteger(list, allocator, 4, representation, 0);
                     } else {
                         try encodeInteger(list, allocator, 6, representation, 0);
@@ -666,7 +667,7 @@ pub const Hpack = struct {
                     try encodeString(list, allocator, field.name);
                 }
                 try encodeString(list, allocator, field.value);
-                if (!field.never_index) try self.dynamic_table.add(allocator, field.name, field.value);
+                if (!never_index) try self.dynamic_table.add(allocator, field.name, field.value);
             }
         }
     };
@@ -685,6 +686,13 @@ pub const Hpack = struct {
             if (std.mem.eql(u8, entry.name, name)) return @intCast(i + 1);
         }
         return null;
+    }
+
+    pub fn sensitiveHeaderName(name: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(name, "authorization") or
+            std.ascii.eqlIgnoreCase(name, "proxy-authorization") or
+            std.ascii.eqlIgnoreCase(name, "cookie") or
+            std.ascii.eqlIgnoreCase(name, "set-cookie");
     }
 
     pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
@@ -1160,6 +1168,32 @@ test "HTTP/2 HPACK static-only encode roundtrip" {
         try std.testing.expectEqualStrings(expected.value, actual.value);
         try std.testing.expectEqual(expected.never_index, actual.never_index);
     }
+}
+
+test "HTTP/2 HPACK never-indexes sensitive fields automatically" {
+    const allocator = std.testing.allocator;
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encoder.encodeBlock(&encoded, allocator, &.{
+        .{ .name = "authorization", .value = "Bearer secret" },
+        .{ .name = "cookie", .value = "sid=secret" },
+        .{ .name = "set-cookie", .value = "sid=secret; HttpOnly" },
+    });
+
+    const decoded = try Hpack.decodeLiteralBlock(allocator, encoded.items);
+    defer Hpack.freeDecodedFields(allocator, decoded);
+    try std.testing.expectEqual(@as(usize, 3), decoded.len);
+    for (decoded) |field| try std.testing.expect(field.never_index);
+    try std.testing.expectEqual(@as(usize, 0), encoder.dynamic_table.entries.items.len);
+
+    try std.testing.expect(Hpack.sensitiveHeaderName("Authorization"));
+    try std.testing.expect(Hpack.sensitiveHeaderName("proxy-authorization"));
+    try std.testing.expect(Hpack.sensitiveHeaderName("cookie"));
+    try std.testing.expect(Hpack.sensitiveHeaderName("set-cookie"));
+    try std.testing.expect(!Hpack.sensitiveHeaderName("x-token"));
 }
 
 test "HTTP/2 HPACK Huffman and dynamic table state" {
