@@ -349,6 +349,7 @@ pub const default_max_udp_payload_size: u64 = 65_527;
 pub const default_ack_delay_exponent: u64 = 3;
 pub const default_max_ack_delay_ms: u64 = 25;
 pub const default_active_connection_id_limit: u64 = 2;
+pub const max_idle_timeout_ms_cap: u64 = @as(u64, 1) << 32;
 pub const max_stream_count: u64 = 1 << 60;
 
 pub const PreferredAddress = struct {
@@ -607,6 +608,9 @@ fn parseTransportInteger(id: TransportParameterId, value: []const u8) Error!u64 
 fn validateTransportInteger(id: TransportParameterId, value: u64) Error!void {
     if (value > varint.max_value) return error.InvalidTransportParameter;
     switch (id) {
+        .max_idle_timeout => {
+            if (value > max_idle_timeout_ms_cap) return error.InvalidTransportParameter;
+        },
         .max_udp_payload_size => {
             if (value < 1200 or value > default_max_udp_payload_size) return error.InvalidTransportParameter;
         },
@@ -1511,6 +1515,18 @@ test "QUIC typed transport parameters roundtrip and validate" {
     defer invalid_udp.deinit(allocator);
     try encodeTransportParameter(&invalid_udp, allocator, @intFromEnum(TransportParameterId.max_udp_payload_size), &.{1});
     try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, invalid_udp.items, .client));
+
+    var max_idle_ok: std.ArrayList(u8) = .empty;
+    defer max_idle_ok.deinit(allocator);
+    try encodeIntegerTransportParameter(&max_idle_ok, allocator, .max_idle_timeout, max_idle_timeout_ms_cap);
+    const decoded_idle = try parseTransportParametersTyped(allocator, max_idle_ok.items, .client);
+    try std.testing.expectEqual(max_idle_timeout_ms_cap, decoded_idle.max_idle_timeout);
+
+    var max_idle_too_large: std.ArrayList(u8) = .empty;
+    defer max_idle_too_large.deinit(allocator);
+    try encodeTransportParameter(&max_idle_too_large, allocator, @intFromEnum(TransportParameterId.max_idle_timeout), &.{ 0xc0, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01 });
+    try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, max_idle_too_large.items, .client));
+    try std.testing.expectError(error.InvalidTransportParameter, encodeIntegerTransportParameter(&max_idle_too_large, allocator, .max_idle_timeout, max_idle_timeout_ms_cap + 1));
 
     var forbidden: std.ArrayList(u8) = .empty;
     defer forbidden.deinit(allocator);

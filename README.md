@@ -34,7 +34,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed
   RFC-defaulted transport-parameter encoding/validation (duplicate detection,
   endpoint-specific client/server parameter rules, preferred-address parsing,
-  max UDP payload/ACK delay/stream-count bounds), Retry packet codec
+  max UDP payload/idle-timeout/ACK delay/stream-count bounds), Retry packet codec
   with version-specific integrity-tag verification, plus CRYPTO stream reassembly with duplicate-overlap conflict detection,
   v1/v2 Initial key/header/payload protection with version-aware salts, HKDF labels, and long-header type bits, protected Initial packet seal/open, long-header packet boundary peeking for coalesced datagrams, Version Negotiation packet codec and endpoint-level unsupported-version responses,
   Initial CRYPTO byte exchange over UDP with RFC 9000 1200-byte Initial datagram padding/validation, coalesced Initial+Handshake CRYPTO datagram helpers, minimal TLS
