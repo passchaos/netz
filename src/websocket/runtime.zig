@@ -60,6 +60,11 @@ pub const Server = struct {
         var request = try http1.parseRequest(self.http.allocator, head.head, .{});
         defer request.deinit(self.http.allocator);
         try websocket.validateClientHandshake(request);
+        // Match tungstenite's server handshake behavior: bytes after the HTTP
+        // request are ambiguous before the upgrade response is committed and
+        // may be request smuggling/junk.  Clients must wait for 101 before
+        // sending WebSocket frames.
+        if (head.extra.len != 0) return error.InvalidHandshake;
 
         const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
         const selected_protocol = try selectSubprotocol(self.http.allocator, request.header("sec-websocket-protocol"), options.protocols);
@@ -80,7 +85,7 @@ pub const Server = struct {
         try websocket.writeServerHandshake(&response, self.http.allocator, key, headers.items);
         try writeAll(http_conn.io, http_conn.stream, response.items);
 
-        var connection = Connection{
+        const connection = Connection{
             .io = http_conn.io,
             .allocator = self.http.allocator,
             .stream = http_conn.stream,
@@ -88,10 +93,8 @@ pub const Server = struct {
             .limits = self.limits,
             .selected_protocol = selected_protocol,
             .permessage_deflate = selected_extension != null,
-            .inbuf = try std.ArrayList(u8).initCapacity(self.http.allocator, head.extra.len),
+            .inbuf = .empty,
         };
-        errdefer connection.inbuf.deinit(connection.allocator);
-        try connection.bufferInitial(head.extra);
         return connection;
     }
 
@@ -1442,6 +1445,65 @@ test "WebSocket client rejects HTTP/1.0 upgrade responses" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebSocket server rejects data sent with HTTP upgrade request" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_expected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept(.{}) catch |err| {
+                if (err == error.InvalidHandshake) {
+                    shared.saw_expected = true;
+                    return;
+                }
+                shared.err = err;
+                return;
+            };
+            connection.close();
+            shared.err = error.InvalidHandshake;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var request: std.ArrayList(u8) = .empty;
+    defer request.deinit(allocator);
+    try request.appendSlice(
+        allocator,
+        "GET /early HTTP/1.1\r\n" ++
+            "Host: localhost\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+            "Sec-WebSocket-Version: 13\r\n" ++
+            "\r\n",
+    );
+    try websocket.writeFrame(&request, allocator, .text, "too early", .{ .mask_key = .{ 1, 2, 3, 4 } });
+    try writeAll(io, stream, request.items);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_expected);
 }
 
 test "WebSocket receiveMessage assembles fragments and handles control frames" {
