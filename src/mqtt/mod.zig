@@ -1408,7 +1408,8 @@ pub fn validatePing(packet: []const u8, response: bool) Error!void {
     const expected: PacketType = if (response) .pingresp else .pingreq;
     if (fixed.packet_type != expected) return error.InvalidPacketType;
     try validateControlFlags(fixed);
-    if (fixed.remaining_len != 0 or packet.len < fixed.header_len) return error.InvalidPacketType;
+    try validatePacketBounds(packet, fixed);
+    if (fixed.remaining_len != 0) return error.InvalidPacketType;
 }
 
 pub fn writeConnect(
@@ -1529,6 +1530,15 @@ test "MQTT UTF-8 strings reject NUL" {
     var raw = [_]u8{ 0, 5, 'h', 'e', 0, 'l', 'o' };
     var cursor = wire.Cursor.init(&raw);
     try std.testing.expectError(error.InvalidUtf8, readUtf8(&cursor));
+}
+
+test "MQTT ping packets reject trailing bytes" {
+    var ping: std.ArrayList(u8) = .empty;
+    defer ping.deinit(std.testing.allocator);
+    try writePing(&ping, std.testing.allocator, false);
+    try validatePing(ping.items, false);
+    try ping.append(std.testing.allocator, 0);
+    try std.testing.expectError(error.InvalidPacketType, validatePing(ping.items, false));
 }
 
 test "MQTT connect and publish parse" {
