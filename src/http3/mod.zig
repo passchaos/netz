@@ -906,6 +906,7 @@ pub const Response = struct {
         const fields = try self.headerFields(&fields_buf, &status_buf);
         try validateHeaderBlock(fields, .response);
         try validateHeaderBlock(self.trailers, .trailers);
+        try validateResponseBodyForStatus(self.status, self.headers, self.body, self.trailers);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 };
@@ -992,7 +993,6 @@ pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!Dec
 
     try validateHeaderBlock(message.headers, .response);
     try validateHeaderBlock(message.trailers, .trailers);
-    try validateContentLength(message.headers, message.body.len);
 
     var status: ?u16 = null;
     for (message.headers) |header| {
@@ -1002,8 +1002,12 @@ pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!Dec
         }
     }
 
+    const final_status = status orelse return error.MissingStatus;
+    try validateResponseBodyForStatus(final_status, message.headers, message.body, message.trailers);
+    try validateContentLengthForStatus(final_status, message.headers, message.body.len);
+
     return .{
-        .status = status orelse return error.MissingStatus,
+        .status = final_status,
         .headers = message.headers,
         .trailers = message.trailers,
         .body = message.body,
@@ -1128,6 +1132,25 @@ fn validateContentLength(headers: []const Qpack.HeaderField, actual: usize) Erro
     if (try contentLength(headers)) |expected| {
         if (expected != actual) return error.InvalidContentLength;
     }
+}
+
+fn validateContentLengthForStatus(status: u16, headers: []const Qpack.HeaderField, actual: usize) Error!void {
+    if (try contentLength(headers)) |expected| {
+        if (status == 304 and actual == 0) return;
+        if (expected != actual) return error.InvalidContentLength;
+    }
+}
+
+fn validateResponseBodyForStatus(
+    status: u16,
+    headers: []const Qpack.HeaderField,
+    body: []const u8,
+    trailers: []const Qpack.HeaderField,
+) Error!void {
+    if (!((status >= 100 and status < 200) or status == 204 or status == 304)) return;
+    if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
+    const declared_content_length = try contentLength(headers);
+    if (status != 304 and declared_content_length != null) return error.InvalidContentLength;
 }
 
 const HeaderBlockKind = enum {
@@ -1767,6 +1790,26 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&low_status, allocator);
     try std.testing.expectError(error.InvalidStatus, decodeResponse(allocator, low_status.items));
 
+    var no_content_body: std.ArrayList(u8) = .empty;
+    defer no_content_body.deinit(allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "204" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&no_content_body, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "body", .consumed = 0 }).write(&no_content_body, allocator);
+    try std.testing.expectError(error.InvalidContentLength, decodeResponse(allocator, no_content_body.items));
+
+    var not_modified_length: std.ArrayList(u8) = .empty;
+    defer not_modified_length.deinit(allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{
+        .{ .name = ":status", .value = "304" },
+        .{ .name = "content-length", .value = "123" },
+    });
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&not_modified_length, allocator);
+    var not_modified = try decodeResponse(allocator, not_modified_length.items);
+    defer not_modified.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 304), not_modified.status);
+
     var bad_order: std.ArrayList(u8) = .empty;
     defer bad_order.deinit(allocator);
     header_block.clearRetainingCapacity();
@@ -2049,6 +2092,18 @@ test "HTTP/3 response encode decode" {
     try std.testing.expectEqualStrings("created", decoded.body);
     try std.testing.expectEqual(@as(usize, 1), decoded.trailers.len);
     try std.testing.expectEqualStrings("checksum", decoded.trailers[0].name);
+    try std.testing.expectError(error.InvalidContentLength, (Response{
+        .status = 204,
+        .body = "body",
+    }).write(&encoded, allocator));
+    try std.testing.expectError(error.InvalidContentLength, (Response{
+        .status = 103,
+        .headers = &.{.{ .name = "content-length", .value = "0" }},
+    }).write(&encoded, allocator));
+    try (Response{
+        .status = 304,
+        .headers = &.{.{ .name = "content-length", .value = "123" }},
+    }).write(&encoded, allocator);
 }
 
 test {
