@@ -120,8 +120,9 @@ starts with deterministic parsers, serializers, and state helpers for:
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata, and
   datagram mapping, session lifecycle/counter state, plus a cleartext
   development runtime over the HTTP/3 dev transport, a protected QUIC 1-RTT
-  runtime over protected HTTP/3, and a handshake-backed protected runtime with
-  a `std.Io.async` datagram receive helper
+  runtime over protected HTTP/3, and a handshake-backed protected runtime that
+  uses QUIC 1-RTT DATAGRAM send/receive queues with a `std.Io.async` datagram
+  receive helper
 - WebRTC building blocks: STUN, ICE connectivity-check helpers with
   USERNAME/PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE plus
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,

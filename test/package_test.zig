@@ -382,6 +382,7 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 65_535), (netz.webtransport.runtime.Limits{}).http3.quic.max_datagram_size);
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "ProtectedClientSession"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "HandshakeClientSession"));
+    try std.testing.expect(@hasField(netz.webtransport.runtime.OwnedHandshakeDatagram, "bytes"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "receiveManyDatagrams"));
     try std.testing.expectEqual(@as(u32, 0x2112A442), netz.webrtc.stun.magic_cookie);
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "writeIceBindingRequest"));

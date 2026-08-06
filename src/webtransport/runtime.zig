@@ -379,11 +379,11 @@ pub const OwnedProtectedDatagram = struct {
 };
 
 pub const OwnedHandshakeDatagram = struct {
-    packet: quic.one_rtt.ReceivedPacket,
+    bytes: []u8,
     datagram: webtransport.Datagram,
 
     pub fn deinit(self: *OwnedHandshakeDatagram, allocator: std.mem.Allocator) void {
-        self.packet.deinit(allocator);
+        allocator.free(self.bytes);
         self.* = undefined;
     }
 };
@@ -453,22 +453,41 @@ fn sendHandshakeDatagramFromConnection(
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(connection.endpoint.allocator);
     try (webtransport.Datagram{ .session_id = session_id, .payload = payload }).write(&encoded, connection.endpoint.allocator);
-    const frames = [_]quic.Frame{.{ .datagram = .{ .data = encoded.items, .length_present = true } }};
-    try connection.send(&frames);
+    try connection.sendDatagram(encoded.items);
 }
 
 fn receiveHandshakeDatagramFromConnection(connection: *quic.one_rtt.Connection) Error!OwnedHandshakeDatagram {
     while (true) {
+        if (try popHandshakeDatagramFromConnection(connection)) |datagram| return datagram;
         var packet = try connection.receivePacket();
-        errdefer packet.deinit(connection.endpoint.allocator);
-        for (packet.frames) |frame| {
-            if (frame == .datagram) {
-                const wt = try webtransport.Datagram.parse(frame.datagram.data);
-                return .{ .packet = packet, .datagram = wt };
-            }
-        }
         packet.deinit(connection.endpoint.allocator);
     }
+}
+
+fn popHandshakeDatagramFromConnection(connection: *quic.one_rtt.Connection) Error!?OwnedHandshakeDatagram {
+    const allocator = connection.endpoint.allocator;
+    const capacity = connection.config.local_max_datagram_frame_size orelse connection.config.max_datagram_size;
+    if (capacity == 0) return null;
+
+    var buffer = try allocator.alloc(u8, capacity);
+    errdefer allocator.free(buffer);
+    const payload = (try connection.popDatagram(buffer)) orelse {
+        allocator.free(buffer);
+        return null;
+    };
+    if (payload.len != buffer.len) buffer = try allocator.realloc(buffer, payload.len);
+    const wt = try webtransport.Datagram.parse(buffer);
+    return .{ .bytes = buffer, .datagram = wt };
+}
+
+fn drainQueuedHandshakeDatagrams(connection: *quic.one_rtt.Connection, datagrams: []?OwnedHandshakeDatagram) Error!usize {
+    var count: usize = 0;
+    while (count < datagrams.len) {
+        const datagram = (try popHandshakeDatagramFromConnection(connection)) orelse break;
+        datagrams[count] = datagram;
+        count += 1;
+    }
+    return count;
 }
 
 fn receiveManyHandshakeDatagrams(connection: *quic.one_rtt.Connection, count: usize) Error!OwnedHandshakeDatagramBatch {
@@ -480,7 +499,10 @@ fn receiveManyHandshakeDatagrams(connection: *quic.one_rtt.Connection, count: us
     errdefer connection.endpoint.allocator.free(errors);
     @memset(errors, null);
 
-    for (datagrams, errors) |*datagram, *err_slot| {
+    const filled = try drainQueuedHandshakeDatagrams(connection, datagrams);
+    if (filled == count) return .{ .allocator = connection.endpoint.allocator, .datagrams = datagrams, .errors = errors };
+
+    for (datagrams[filled..], errors[filled..]) |*datagram, *err_slot| {
         const task = HandshakeDatagramTask{
             .connection = connection,
             .datagram = datagram,
