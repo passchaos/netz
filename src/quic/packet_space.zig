@@ -262,8 +262,28 @@ pub const SentPacketTracker = struct {
         }
     };
 
+    pub const RttSample = struct {
+        latest_rtt_ns: u64,
+        ack_delay_ns: u64,
+        largest_acknowledged: u64,
+        sent_time_ns: u64,
+    };
+
     pub fn applyAck(self: *SentPacketTracker, ack: quic.AckFrame) Error!usize {
         return (try self.applyAckDetailed(ack)).packets;
+    }
+
+    pub fn ackRttSample(self: SentPacketTracker, ack: quic.AckFrame, now_ns: u64, ack_delay_exponent: u64) Error!?RttSample {
+        const packet = self.findSentPacket(ack.largest_acknowledged) orelse return null;
+        if (!packet.ack_eliciting) return null;
+        const sent_time = packet.sent_time_ns orelse return null;
+        const latest_rtt = now_ns -| sent_time;
+        return .{
+            .latest_rtt_ns = latest_rtt,
+            .ack_delay_ns = quic.rtt.decodeAckDelayNanos(ack.ack_delay, ack_delay_exponent) catch return error.InvalidAckFrame,
+            .largest_acknowledged = ack.largest_acknowledged,
+            .sent_time_ns = sent_time,
+        };
     }
 
     pub fn applyAckDetailed(self: *SentPacketTracker, ack: quic.AckFrame) Error!AckResult {
@@ -416,10 +436,14 @@ pub const SentPacketTracker = struct {
     }
 
     fn hasSentPacketNumber(self: SentPacketTracker, packet_number: u64) bool {
+        return self.findSentPacket(packet_number) != null;
+    }
+
+    fn findSentPacket(self: SentPacketTracker, packet_number: u64) ?SentPacket {
         for (self.packets.items) |packet| {
-            if (packet.packet_number == packet_number) return true;
+            if (packet.packet_number == packet_number) return packet;
         }
-        return false;
+        return null;
     }
 
     fn observeAcknowledged(self: *SentPacketTracker, packet_number: u64) void {
@@ -534,6 +558,29 @@ test "QUIC sent packet tracker rejects ACK for never-sent packets" {
     try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(gapless_range_with_missing_one));
     try std.testing.expect(!sent.packets.items[0].acknowledged);
     try std.testing.expect(!sent.packets.items[1].acknowledged);
+}
+
+test "QUIC sent packet tracker derives RTT sample from largest ACK" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(0, true, 1200, .not_ect, 1_000);
+    try sent.sentAt(1, false, 0, .not_ect, 2_000);
+    try sent.sentAt(2, true, 1200, .not_ect, 3_000);
+
+    const sample_ack = quic.AckFrame{ .largest_acknowledged = 2, .ack_delay = 5, .first_ack_range = 0 };
+    const sample = (try sent.ackRttSample(sample_ack, 10_000, 3)).?;
+    try std.testing.expectEqual(@as(u64, 7_000), sample.latest_rtt_ns);
+    try std.testing.expectEqual(@as(u64, 5 * 8 * 1_000), sample.ack_delay_ns);
+    try std.testing.expectEqual(@as(u64, 2), sample.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 3_000), sample.sent_time_ns);
+
+    const ack_only = quic.AckFrame{ .largest_acknowledged = 1, .ack_delay = 0, .first_ack_range = 0 };
+    try std.testing.expectEqual(@as(?SentPacketTracker.RttSample, null), try sent.ackRttSample(ack_only, 10_000, 3));
+
+    const no_time = quic.AckFrame{ .largest_acknowledged = 99, .ack_delay = 0, .first_ack_range = 0 };
+    try std.testing.expectEqual(@as(?SentPacketTracker.RttSample, null), try sent.ackRttSample(no_time, 10_000, 3));
 }
 
 test "QUIC sent packet tracker validates ACK_ECN counters" {

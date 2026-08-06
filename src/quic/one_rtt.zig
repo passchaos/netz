@@ -567,6 +567,10 @@ pub const Connection = struct {
         };
     }
 
+    pub fn ackRttSample(self: Connection, ack: quic.AckFrame, now_ns: u64) Error!?quic.packet_space.SentPacketTracker.RttSample {
+        return try self.sent.ackRttSample(ack, now_ns, self.config.peer_ack_delay_exponent);
+    }
+
     pub fn effectiveIdleTimeoutMillis(self: Connection) ?u64 {
         const local = self.config.local_max_idle_timeout_ms;
         const peer = self.config.peer_max_idle_timeout_ms;

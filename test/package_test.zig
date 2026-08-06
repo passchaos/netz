@@ -201,6 +201,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "draining"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkCloseExpired"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "decodedPeerAckDelayNanos"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ackRttSample"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "CloseState"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamResetInfo"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));
@@ -213,6 +214,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "sentWithEcn"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckEcnCounters"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckCoversSentPackets"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "ackRttSample"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectPacketThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectTimeThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "timeThresholdLossDeadline"));
