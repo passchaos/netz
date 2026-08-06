@@ -4,7 +4,7 @@
 starts with deterministic parsers, serializers, and state helpers for:
 
 - HTTP/1.1 requests, responses, header field syntax validation, chunked transfer decoding with extension limits, close-delimited response bodies, runtime chunked
-  transfer writing with validated trailer fields, keep-alive/upgrade handling, pipelined
+  transfer writing with validated trailer fields, request-target/status/reason-phrase start-line validation, keep-alive/upgrade handling, pipelined
   byte buffering for persistent connections, method-aware response body
   handling for HEAD and successful CONNECT, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling, ambiguous body-length rejection

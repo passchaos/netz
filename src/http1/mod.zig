@@ -182,6 +182,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     const version_s = parts.next() orelse return error.MalformedStartLine;
     if (parts.next() != null or target.len == 0) return error.MalformedStartLine;
     const method = try Method.parse(method_s);
+    try validateRequestTarget(target);
     const version = try Version.parse(version_s);
 
     const headers = try parseHeaderLines(allocator, &lines, options);
@@ -231,10 +232,9 @@ pub fn parseResponseWithContext(
     const version_s = parts.next() orelse return error.MalformedStartLine;
     const status_s = parts.next() orelse return error.MalformedStartLine;
     const reason = if (parts.rest().len > 0) parts.rest() else "";
-    if (status_s.len != 3) return error.InvalidStatus;
-    const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
-    if (status < 100 or status > 999) return error.InvalidStatus;
+    const status = try parseStatusCode(status_s);
     const version = try Version.parse(version_s);
+    try validateReasonPhrase(reason);
 
     const headers = try parseHeaderLines(allocator, &lines, options);
     errdefer allocator.free(headers);
@@ -429,6 +429,7 @@ pub fn writeRequest(
     headers: []const Header,
     body: []const u8,
 ) !void {
+    try validateRequestTarget(target);
     try list.appendSlice(allocator, method.string());
     try list.append(allocator, ' ');
     try list.appendSlice(allocator, target);
@@ -449,6 +450,7 @@ pub fn writeRequestChecked(
     headers: []const Header,
     body: []const u8,
 ) Error!void {
+    try validateRequestTarget(target);
     try list.appendSlice(allocator, method.string());
     try list.append(allocator, ' ');
     try list.appendSlice(allocator, target);
@@ -469,6 +471,8 @@ pub fn writeResponse(
     headers: []const Header,
     body: []const u8,
 ) !void {
+    try validateReasonPhrase(reason);
+    try validateStatusCode(status);
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
     try appendDecimal(list, allocator, status);
@@ -491,6 +495,8 @@ pub fn writeResponseChecked(
     headers: []const Header,
     body: []const u8,
 ) Error!void {
+    try validateReasonPhrase(reason);
+    try validateStatusCode(status);
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
     try appendDecimalChecked(list, allocator, status);
@@ -539,6 +545,37 @@ fn appendDecimalChecked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
 pub fn validateHeader(header: Header) Error!void {
     try validateHeaderName(header.name);
     try validateHeaderValue(header.value);
+}
+
+pub fn validateRequestTarget(target: []const u8) Error!void {
+    if (target.len == 0) return error.MalformedStartLine;
+    for (target) |byte| {
+        // The request target is a single start-line token.  Rejecting SP/HTAB
+        // and all control bytes prevents request-smuggling/start-line injection
+        // while still allowing UTF-8/opaque octets that many origin-form paths
+        // carry in practice.
+        if (byte <= 0x20 or byte == 0x7f) return error.MalformedStartLine;
+    }
+}
+
+pub fn validateReasonPhrase(reason: []const u8) Error!void {
+    for (reason) |byte| {
+        // RFC reason-phrases are human-readable text after the status code.
+        // They may contain SP/HTAB and obs-text, but never CR/LF or other
+        // controls that could append forged fields to the response head.
+        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.MalformedStartLine;
+    }
+}
+
+pub fn validateStatusCode(status: u16) Error!void {
+    if (status < 100 or status > 999) return error.InvalidStatus;
+}
+
+fn parseStatusCode(status_s: []const u8) Error!u16 {
+    if (status_s.len != 3) return error.InvalidStatus;
+    const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
+    try validateStatusCode(status);
+    return status;
 }
 
 pub fn validateHeaderName(name: []const u8) Error!void {
@@ -689,6 +726,25 @@ test "HTTP/1 validates header field syntax" {
     try validateHeader(.{ .name = "X-Custom_123", .value = "text\tvalue" });
     try std.testing.expectError(error.MalformedHeader, validateHeader(.{ .name = "bad:name", .value = "value" }));
     try std.testing.expectError(error.MalformedHeader, validateHeader(.{ .name = "x-test", .value = "bad\x7fvalue" }));
+}
+
+test "HTTP/1 validates start-line components" {
+    const allocator = std.testing.allocator;
+    const bad_target = "GET /bad\tpath HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, bad_target, .{}));
+    try std.testing.expectError(error.MalformedStartLine, validateRequestTarget("/evil\r\nInjected: yes"));
+    try std.testing.expectError(error.MalformedStartLine, validateRequestTarget(""));
+
+    const bad_reason = "HTTP/1.1 200 OK\x01\r\nContent-Length: 0\r\n\r\n";
+    try std.testing.expectError(error.MalformedStartLine, parseResponse(allocator, bad_reason, .{}));
+    try std.testing.expectError(error.MalformedStartLine, validateReasonPhrase("OK\r\nInjected: yes"));
+    try std.testing.expectError(error.InvalidStatus, validateStatusCode(99));
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try std.testing.expectError(error.MalformedStartLine, writeRequestChecked(&encoded, allocator, .GET, "/\r\nHost: evil", .http_1_1, &.{}, ""));
+    try std.testing.expectError(error.MalformedStartLine, writeResponseChecked(&encoded, allocator, .http_1_1, 200, "OK\r\nX: evil", &.{}, ""));
+    try std.testing.expectError(error.InvalidStatus, writeResponseChecked(&encoded, allocator, .http_1_1, 42, "Nope", &.{}, ""));
 }
 
 test "HTTP/1 chunked codec" {

@@ -371,6 +371,7 @@ fn applyCloseDelimitedResponseBody(response: *http1.Response, bytes: []const u8,
 }
 
 pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: RequestOptions) Error!void {
+    try http1.validateRequestTarget(options.target);
     const use_chunked = try chunkedWriteFraming(options.version, options.headers, options.trailers);
     var headers: std.ArrayList(http1.Header) = .empty;
     defer headers.deinit(allocator);
@@ -399,6 +400,8 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
 }
 
 pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: ResponseOptions) Error!void {
+    try http1.validateStatusCode(options.status);
+    try http1.validateReasonPhrase(options.reason);
     const use_chunked = try chunkedWriteFraming(options.version, options.headers, options.trailers);
     var headers: std.ArrayList(http1.Header) = .empty;
     defer headers.deinit(allocator);
