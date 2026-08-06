@@ -323,6 +323,22 @@ pub fn maximumPacketSize(properties: []const Property) ?u32 {
     return null;
 }
 
+pub fn maximumQoS(properties: []const Property) ?QoS {
+    for (properties) |property| {
+        if (property == .byte and property.byte.id == .maximum_qos) {
+            return std.enums.fromInt(QoS, @as(u2, @truncate(property.byte.value))) orelse null;
+        }
+    }
+    return null;
+}
+
+pub fn retainAvailable(properties: []const Property) ?bool {
+    for (properties) |property| {
+        if (property == .byte and property.byte.id == .retain_available) return property.byte.value != 0;
+    }
+    return null;
+}
+
 pub fn serverKeepAlive(properties: []const Property) ?u16 {
     for (properties) |property| {
         if (property == .two_byte and property.two_byte.id == .server_keep_alive) return property.two_byte.value;

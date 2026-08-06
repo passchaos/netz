@@ -91,6 +91,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt, "validTopicName"));
     try std.testing.expect(@hasDecl(netz.mqtt, "validTopicFilter"));
     try std.testing.expect(@hasDecl(netz.mqtt, "topicMatchesFilter"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "maximumQoS"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "retainAvailable"));
     try std.testing.expect(@hasDecl(netz.mqtt, "serverKeepAlive"));
     try std.testing.expect(@hasDecl(netz.mqtt, "receiveMaximum"));
     try std.testing.expect(@hasDecl(netz.mqtt, "maximumPacketSize"));

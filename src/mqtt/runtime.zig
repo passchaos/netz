@@ -66,6 +66,8 @@ pub const Server = struct {
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .topic_alias_maximum = options.topic_alias_maximum,
             .server_keep_alive_seconds = options.server_keep_alive_seconds,
+            .maximum_qos = options.maximum_qos,
+            .retain_available = options.retain_available,
         });
 
         return .{ .connection = connection, .connect = connect };
@@ -155,6 +157,8 @@ pub const AcceptOptions = struct {
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
     server_keep_alive_seconds: ?u16 = null,
+    maximum_qos: ?mqtt.QoS = null,
+    retain_available: bool = true,
 };
 
 pub const AcceptedClient = struct {
@@ -216,6 +220,8 @@ pub const Client = struct {
         if (mqtt.maximumPacketSize(connack.connack.properties)) |maximum_packet_size| connection.peer_max_packet_size = maximum_packet_size;
         if (mqtt.topicAliasMaximum(connack.connack.properties)) |topic_alias_maximum| connection.peer_topic_alias_maximum = topic_alias_maximum;
         if (mqtt.serverKeepAlive(connack.connack.properties)) |server_keep_alive| connection.keep_alive_seconds = server_keep_alive;
+        if (mqtt.maximumQoS(connack.connack.properties)) |maximum_qos| connection.peer_maximum_qos = maximum_qos;
+        if (mqtt.retainAvailable(connack.connack.properties)) |retain_available| connection.peer_retain_available = retain_available;
 
         return connection;
     }
@@ -226,6 +232,8 @@ pub const ConnectOptions = struct {
     client_id: []const u8,
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,
+    peer_maximum_qos: mqtt.QoS = .exactly_once,
+    peer_retain_available: bool = true,
     properties: []const mqtt.Property = &.{},
     will: ?mqtt.LastWill = null,
     username: ?[]const u8 = null,
@@ -242,6 +250,8 @@ pub const ConnAckOptions = struct {
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
     server_keep_alive_seconds: ?u16 = null,
+    maximum_qos: ?mqtt.QoS = null,
+    retain_available: bool = true,
 };
 
 pub const Connection = struct {
@@ -257,6 +267,8 @@ pub const Connection = struct {
     incoming_topic_alias_maximum: u16 = 16,
     peer_topic_alias_maximum: u16 = 0,
     keep_alive_seconds: u16 = 30,
+    peer_maximum_qos: mqtt.QoS = .exactly_once,
+    peer_retain_available: bool = true,
     incoming_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
 
     pub fn close(self: *Connection) void {
@@ -298,6 +310,14 @@ pub const Connection = struct {
                 try properties.append(self.allocator, .{ .two_byte = .{ .id = .server_keep_alive, .value = keep_alive } });
             }
         }
+        if (self.protocol == .v5 and mqtt.maximumQoS(options.properties) == null) {
+            if (options.maximum_qos) |maximum_qos| {
+                try properties.append(self.allocator, .{ .byte = .{ .id = .maximum_qos, .value = @intFromEnum(maximum_qos) } });
+            }
+        }
+        if (self.protocol == .v5 and mqtt.retainAvailable(options.properties) == null and !options.retain_available) {
+            try properties.append(self.allocator, .{ .byte = .{ .id = .retain_available, .value = 0 } });
+        }
         try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
         try self.writePacket(encoded.items);
     }
@@ -320,6 +340,8 @@ pub const Connection = struct {
         defer {
             if (packet_id != null) self.outgoing_inflight -= 1;
         }
+        if (@intFromEnum(options.qos) > @intFromEnum(self.peer_maximum_qos)) return error.InvalidQoS;
+        if (options.retain and !self.peer_retain_available) return error.InvalidProperty;
         if (mqtt.topicAlias(options.properties)) |alias| {
             if (alias == 0 or alias > self.peer_topic_alias_maximum) return error.InvalidProperty;
         }
@@ -783,7 +805,14 @@ test "MQTT runtime client and server exchange over TCP" {
         }
 
         fn runFallible(server_ptr: *Server) !void {
-            var accepted = try server_ptr.accept(.{ .protocol = .v5, .max_outgoing_inflight = 2, .topic_alias_maximum = 4, .server_keep_alive_seconds = 7 });
+            var accepted = try server_ptr.accept(.{
+                .protocol = .v5,
+                .max_outgoing_inflight = 2,
+                .topic_alias_maximum = 4,
+                .server_keep_alive_seconds = 7,
+                .maximum_qos = .exactly_once,
+                .retain_available = false,
+            });
             defer accepted.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("client-1", accepted.connect.connect.client_id);
             try std.testing.expectEqualStrings("status/client-1", accepted.connect.connect.will.?.topic);
@@ -888,6 +917,8 @@ test "MQTT runtime client and server exchange over TCP" {
     try std.testing.expectEqual(@as(usize, 4096), client.peer_max_packet_size);
     try std.testing.expectEqual(@as(u16, 4), client.peer_topic_alias_maximum);
     try std.testing.expectEqual(@as(u16, 7), client.keep_alive_seconds);
+    try std.testing.expectEqual(mqtt.QoS.exactly_once, client.peer_maximum_qos);
+    try std.testing.expect(!client.peer_retain_available);
 
     try client.writeAuth(0x19, &.{
         .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },
@@ -977,6 +1008,20 @@ test "MQTT connection rejects topic aliases beyond negotiated maximum" {
         .payload = "payload",
     };
     try std.testing.expectError(error.InvalidProperty, connection.applyIncomingTopicAlias(&incoming));
+}
+
+test "MQTT connection enforces peer publish capabilities" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .protocol = .v5,
+        .peer_maximum_qos = .at_most_once,
+        .peer_retain_available = false,
+    };
+
+    try std.testing.expectError(error.InvalidQoS, connection.publish("topic", "payload", .{ .qos = .at_least_once }));
+    try std.testing.expectError(error.InvalidProperty, connection.publish("topic", "payload", .{ .retain = true }));
 }
 
 test "MQTT async std.Io server handles concurrent clients" {
