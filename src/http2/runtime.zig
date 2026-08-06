@@ -497,10 +497,8 @@ pub const Connection = struct {
                             if (data_frame.frame.header.stream_id != stream_id) continue;
                             switch (data_frame.frame.header.frame_type) {
                                 .data => {
-                                    const data = try http2.DataPayload.parse(data_frame.frame);
+                                    const data = try self.receiveDataPayload(stream_id, data_frame.frame);
                                     if (body.items.len + data.data.len > self.limits.max_body_bytes) return error.MessageTooLarge;
-                                    try self.recv_connection_window.receive(data.data.len);
-                                    try (try self.recvStreamWindow(stream_id)).receive(data.data.len);
                                     try body.appendSlice(self.allocator, data.data);
                                     try self.maybeReleaseReceivedCapacity(stream_id);
                                     if ((data_frame.frame.header.flags & flag_end_stream) != 0) break;
@@ -643,6 +641,18 @@ pub const Connection = struct {
         }
     }
 
+    fn receiveDataPayload(self: *Connection, stream_id: u31, frame: http2.Frame) Error!http2.DataPayload {
+        const data = try http2.DataPayload.parse(frame);
+        // HTTP/2 flow control charges the whole DATA frame payload, not just
+        // the bytes exposed to the application.  PADDED DATA therefore consumes
+        // credit for the Pad Length byte and padding octets as well.
+        const charged_len = frame.payload.len;
+        try self.recv_connection_window.receive(charged_len);
+        errdefer self.recv_connection_window.update(@intCast(charged_len));
+        try (try self.recvStreamWindow(stream_id)).receive(charged_len);
+        return data;
+    }
+
     fn maybeReleaseReceivedCapacity(self: *Connection, stream_id: u31) Error!void {
         const low_watermark = @as(usize, @intCast(default_flow_window / 2));
         const target = @as(usize, @intCast(default_flow_window));
@@ -727,10 +737,8 @@ pub const Connection = struct {
                 },
                 .data => {
                     if (headers == null) return error.UnexpectedFrame;
-                    const data = try http2.DataPayload.parse(frame.frame);
+                    const data = try self.receiveDataPayload(stream_id, frame.frame);
                     if (body.items.len + data.data.len > self.limits.max_body_bytes) return error.MessageTooLarge;
-                    try self.recv_connection_window.receive(data.data.len);
-                    try (try self.recvStreamWindow(stream_id)).receive(data.data.len);
                     try body.appendSlice(self.allocator, data.data);
                     try self.maybeReleaseReceivedCapacity(stream_id);
                     if ((frame.frame.header.flags & flag_end_stream) != 0) {
@@ -1177,9 +1185,7 @@ pub const Tunnel = struct {
             }
             switch (frame.frame.header.frame_type) {
                 .data => {
-                    const payload = try http2.DataPayload.parse(frame.frame);
-                    try self.connection.recv_connection_window.receive(payload.data.len);
-                    try (try self.connection.recvStreamWindow(self.stream_id)).receive(payload.data.len);
+                    const payload = try self.connection.receiveDataPayload(self.stream_id, frame.frame);
                     try self.connection.maybeReleaseReceivedCapacity(self.stream_id);
                     return .{
                         .frame = frame,
@@ -3905,6 +3911,44 @@ test "HTTP/2 flow window blocks and updates" {
     try std.testing.expectError(error.FlowControlViolation, recv.receive(3));
     try recv.receive(2);
     try std.testing.expectEqual(@as(i64, 0), recv.value);
+}
+
+test "HTTP/2 padded DATA charges full frame payload to receive windows" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .initial_window_size = 4 },
+        .recv_connection_window = .{ .value = 5 },
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    const padded_payload = [_]u8{ 2, 'o', 'k', 0, 0 };
+    const padded_frame = http2.Frame{
+        .header = .{
+            .length = padded_payload.len,
+            .frame_type = .data,
+            .flags = 0x8, // PADDED
+            .stream_id = 1,
+        },
+        .payload = &padded_payload,
+    };
+
+    try std.testing.expectError(error.FlowControlViolation, connection.receiveDataPayload(1, padded_frame));
+    try std.testing.expectEqual(@as(i64, 5), connection.recv_connection_window.value);
+    try std.testing.expectEqual(@as(i64, 4), (try connection.recvStreamWindow(1)).value);
+
+    (try connection.recvStreamWindow(1)).update(1);
+    const data = try connection.receiveDataPayload(1, padded_frame);
+    try std.testing.expectEqualStrings("ok", data.data);
+    try std.testing.expectEqual(@as(i64, 0), connection.recv_connection_window.value);
+    try std.testing.expectEqual(@as(i64, 0), (try connection.recvStreamWindow(1)).value);
 }
 
 test "HTTP/2 DATA send waits for WINDOW_UPDATE capacity" {
