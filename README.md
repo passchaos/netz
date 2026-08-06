@@ -8,7 +8,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   unfolding, request-target/status/reason-phrase start-line validation, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
   byte buffering for persistent connections, method-aware response body
   handling for HEAD and successful CONNECT, interim 1xx response skipping plus
-  server-side `Expect: 100-continue` handling, ambiguous body-length rejection
+  server-side `Expect: 100-continue` handling, pure-digit Content-Length enforcement, ambiguous body-length rejection
   across repeated/coalesced `Content-Length` and unsupported transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with a `std.Io.async`
   concurrent server helper
@@ -20,7 +20,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   outbound frame splitting with DATA sends that wait for WINDOW_UPDATE capacity
   and inbound DATA consumers that restore connection/stream receive capacity,
   frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
-  validation, HTTP/2 pseudo-header/lowercase field-name validation,
+  validation with pure-digit Content-Length enforcement, HTTP/2 pseudo-header/lowercase field-name validation,
   connection-specific header rejection including `TE` rules,
   status-forbidden response-body write rejection,
   CONNECT body rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible

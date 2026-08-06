@@ -1323,6 +1323,9 @@ fn contentLength(headers: []const http2.Hpack.HeaderField) Error!?usize {
         while (parts.next()) |raw_part| {
             const part = std.mem.trim(u8, raw_part, " \t");
             if (part.len == 0) return error.InvalidContentLength;
+            for (part) |byte| {
+                if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
+            }
             const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
             if (found) |existing| {
                 if (existing != parsed) return error.InvalidContentLength;
@@ -3350,7 +3353,7 @@ test "HTTP/2 runtime validates request content-length" {
         .{ .name = ":path", .value = "/bad-length" },
         .{ .name = ":scheme", .value = "https" },
         .{ .name = ":authority", .value = "localhost" },
-        .{ .name = "content-length", .value = "5" },
+        .{ .name = "content-length", .value = "+5" },
     };
     try client.writeHeaders(1, &fields, false);
     try client.writeData(1, "ping", true);

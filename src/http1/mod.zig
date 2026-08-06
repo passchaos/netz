@@ -427,6 +427,12 @@ fn parseContentLengthFieldValue(value: []const u8, previous: ?usize) Error!?usiz
     while (parts.next()) |raw_part| {
         const part = wire.trimOws(raw_part);
         if (part.len == 0) return error.InvalidContentLength;
+        for (part) |byte| {
+            // Be stricter than std.fmt.parseInt: HTTP Content-Length is the
+            // `1*DIGIT` grammar, so a leading '+' must be rejected instead of
+            // being accepted by some numeric parsers and rejected by others.
+            if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
+        }
         const parsed = std.fmt.parseInt(usize, part, 10) catch |err| switch (err) {
             error.InvalidCharacter => return error.InvalidContentLength,
             error.Overflow => return error.ContentLengthOverflow,
@@ -945,6 +951,9 @@ test "HTTP/1 parser rejects ambiguous body lengths" {
     const allocator = std.testing.allocator;
     const conflicting = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!";
     try std.testing.expectError(error.ConflictingContentLength, parseRequest(allocator, conflicting, .{}));
+
+    const plus_prefixed = "POST / HTTP/1.1\r\nContent-Length: +5\r\n\r\nhello";
+    try std.testing.expectError(error.InvalidContentLength, parseRequest(allocator, plus_prefixed, .{}));
 
     const coalesced = "POST / HTTP/1.1\r\nContent-Length: 5, 5\r\n\r\nhello";
     var req = try parseRequest(allocator, coalesced, .{});
