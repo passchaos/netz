@@ -804,7 +804,7 @@ fn validateOutgoingFramePayload(opcode: websocket.Opcode, payload: []const u8) E
         .text, .binary => return error.InvalidFrame,
         .close => try websocket.validateClosePayload(payload),
         .ping, .pong => if (payload.len > 125) return error.InvalidControlFrame,
-        .continuation => {},
+        .continuation => return error.InvalidFrame,
         _ => return error.InvalidFrame,
     }
 }
@@ -1769,6 +1769,7 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidCloseCode, connection.sendClose(.no_status_received, ""));
     try std.testing.expectError(error.InvalidControlFrame, connection.sendPing(too_large_control));
     try std.testing.expectError(error.InvalidFrame, connection.sendFrame(.text, "bypass"));
+    try std.testing.expectError(error.InvalidFrame, connection.sendFrame(.continuation, "bypass"));
     connection.permessage_deflate = true;
     try std.testing.expectError(error.InvalidFrame, connection.sendFragmented(.text, &.{ "compressed ", "fragments" }));
 
@@ -1783,6 +1784,7 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidCloseCode, h2.sendClose(.abnormal_closure, ""));
     try std.testing.expectError(error.InvalidControlFrame, h2.sendPong(too_large_control));
     try std.testing.expectError(error.InvalidFrame, h2.sendFrame(.binary, "bypass"));
+    try std.testing.expectError(error.InvalidFrame, h2.sendFrame(.continuation, "bypass"));
     h2.permessage_deflate = true;
     try std.testing.expectError(error.InvalidFrame, h2.sendFragmented(.text, &.{ "compressed ", "fragments" }));
 }
