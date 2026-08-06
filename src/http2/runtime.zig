@@ -909,6 +909,7 @@ pub const Connection = struct {
                         continue;
                     }
                     if (status < 200 or status > 299) return error.InvalidStatus;
+                    if ((try contentLength(headers)) != null) return error.InvalidContentLength;
                     if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
                     return .{
                         .status = status,
@@ -965,6 +966,9 @@ pub const Connection = struct {
     ) Error!void {
         var status_buf: [3]u8 = undefined;
         if (status_code < 100 or status_code > 999) return error.InvalidStatus;
+        if (status_code >= 200 and status_code < 300 and (try contentLength(response_headers)) != null) {
+            return error.InvalidContentLength;
+        }
         const status = std.fmt.bufPrint(&status_buf, "{}", .{status_code}) catch return error.InvalidStatus;
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
@@ -4290,6 +4294,68 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 client rejects Content-Length on successful CONNECT tunnel" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("CONNECT", request.method);
+
+            // Simulate a non-netz peer that violates RFC 9113/hyper behavior by
+            // putting Content-Length on a successful CONNECT response.  The
+            // bytes after a 2xx CONNECT are tunnel bytes, so representation
+            // framing headers are ambiguous and must be rejected.
+            try connection.writeHeaders(request.stream_id, &.{
+                .{ .name = ":status", .value = "200" },
+                .{ .name = "content-length", .value = "0" },
+            }, false);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.InvalidContentLength, client.openConnectTunnel(.{
+        .method = "CONNECT",
+        .authority = "example.com:443",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 runtime accepts traditional CONNECT DATA tunnel" {
     const allocator = std.testing.allocator;
 
@@ -4396,6 +4462,9 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     try std.testing.expectError(error.InvalidContentLength, connection.writeInformationalResponse(1, 103, &.{
         .{ .name = "content-length", .value = "0" },
     }));
+    try std.testing.expectError(error.InvalidContentLength, connection.writeExtendedConnectResponse(1, 200, &.{
+        .{ .name = "content-length", .value = "0" },
+    }, false));
 }
 
 test "HTTP/2 runtime supports RFC 8441 extended CONNECT" {
