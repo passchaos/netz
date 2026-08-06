@@ -200,6 +200,7 @@ pub fn parseFrameOptions(allocator: std.mem.Allocator, bytes: []const u8, option
 }
 
 fn validateFrameHeader(header: FrameHeader, options: ParseFrameOptions) Error!void {
+    if (header.opcode.isControl() and (header.rsv1 or header.rsv2 or header.rsv3)) return error.UnexpectedRsv;
     if ((header.rsv1 and !options.allow_rsv1) or
         (header.rsv2 and !options.allow_rsv2) or
         (header.rsv3 and !options.allow_rsv3)) return error.UnexpectedRsv;
@@ -540,6 +541,9 @@ test "WebSocket strict frame validation" {
 
     const rsv = "\xc1\x02hi";
     try std.testing.expectError(error.UnexpectedRsv, parseFrameOptions(allocator, rsv, .{}));
+
+    const rsv_ping = "\xc9\x00";
+    try std.testing.expectError(error.UnexpectedRsv, parseFrameOptions(allocator, rsv_ping, .{ .allow_rsv1 = true }));
 
     const bad_utf8 = "\x81\x02\xc0\x80";
     try std.testing.expectError(error.InvalidUtf8, parseFrameOptions(allocator, bad_utf8, .{}));

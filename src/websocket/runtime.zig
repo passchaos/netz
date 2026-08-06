@@ -380,7 +380,6 @@ pub const Connection = struct {
         };
         var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
         errdefer frame.deinit(self.allocator);
-        if (frame.header.rsv1 and (frame.header.opcode.isControl() or frame.header.opcode == .continuation)) return error.UnexpectedRsv;
         self.discardBuffered(frame.consumed);
         return frame;
     }
@@ -595,7 +594,6 @@ pub const H2Connection = struct {
         };
         var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
         errdefer frame.deinit(self.allocator);
-        if (frame.header.rsv1 and (frame.header.opcode.isControl() or frame.header.opcode == .continuation)) return error.UnexpectedRsv;
         self.discardBuffered(frame.consumed);
         return frame;
     }
