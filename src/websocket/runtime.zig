@@ -1529,6 +1529,72 @@ test "WebSocket receiveMessage enforces aggregate fragmented message limit" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket receiveMessage allows in-flight data after initiating close" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+
+            try connection.sendClose(.normal_closure, "draining");
+
+            // Like tungstenite, initiating the close handshake only closes our
+            // write side.  Data already sent by the peer is still readable
+            // until its close acknowledgement arrives.
+            var message = try connection.receiveMessage();
+            defer message.deinit(connection.allocator);
+            try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
+            try std.testing.expectEqualStrings("already in flight", message.payload);
+
+            try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
+            try std.testing.expect(connection.close_sent);
+            try std.testing.expect(connection.close_received);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/close-after-send",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+
+    try client.sendText("already in flight");
+
+    var close = try client.receiveFrame();
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+    try client.sendClose(.normal_closure, "ack");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket runtimes validate outgoing text and close frames" {
     const allocator = std.testing.allocator;
     const bad_utf8 = "\xc0\x80";
