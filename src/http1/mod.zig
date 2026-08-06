@@ -744,10 +744,7 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
             extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
             if (extension_bytes > max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
         }
-        const size = std.fmt.parseInt(usize, wire.trimOws(line[0..semi]), 16) catch |err| switch (err) {
-            error.InvalidCharacter => return error.InvalidChunk,
-            error.Overflow => return error.ChunkSizeOverflow,
-        };
+        const size = try parseChunkSize(line[0..semi]);
         const data_end = std.math.add(usize, pos, size) catch return error.ChunkSizeOverflow;
         const required_end = std.math.add(usize, data_end, 2) catch return error.ChunkSizeOverflow;
         if (bytes.len < required_end) return error.BufferTooShort;
@@ -789,6 +786,21 @@ pub fn validateTrailers(trailers: []const Header) Error!void {
     for (trailers) |trailer| {
         if (!validTrailerFieldName(trailer.name)) return error.InvalidTrailer;
     }
+}
+
+pub fn parseChunkSize(raw_size: []const u8) Error!usize {
+    const part = wire.trimOws(raw_size);
+    if (part.len == 0) return error.InvalidChunk;
+    for (part) |byte| {
+        // RFC 9112 chunk-size is 1*HEXDIG.  std.fmt.parseInt would accept
+        // leading '+', but wire parsers must not because peers and
+        // intermediaries disagreeing here is a request-smuggling primitive.
+        if (!std.ascii.isHex(byte)) return error.InvalidChunk;
+    }
+    return std.fmt.parseInt(usize, part, 16) catch |err| switch (err) {
+        error.InvalidCharacter => error.InvalidChunk,
+        error.Overflow => error.ChunkSizeOverflow,
+    };
 }
 
 fn validTrailerFieldName(name: []const u8) bool {
@@ -951,6 +963,11 @@ test "HTTP/1 chunked extensions are bounded" {
     try raw.appendNTimes(allocator, 'a', max_chunk_extension_bytes + 1);
     try raw.appendSlice(allocator, "\r\nx\r\n0\r\n\r\n");
     try std.testing.expectError(error.ChunkExtensionTooLarge, decodeChunked(allocator, raw.items, .{}));
+
+    try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "\r\n0\r\n\r\n", .{}));
+    try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "+1\r\nx\r\n0\r\n\r\n", .{}));
+    try std.testing.expectError(error.InvalidChunk, parseChunkSize("+a"));
+    try std.testing.expectEqual(@as(usize, 0x1a), try parseChunkSize(" 1A "));
 }
 
 test "HTTP/1 parser decodes chunked transfer bodies" {

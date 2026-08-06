@@ -850,7 +850,7 @@ fn chunkedWireLength(body: []const u8, max_body_bytes: usize) Error!usize {
             extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
             if (extension_bytes > http1.max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
         }
-        const size = std.fmt.parseInt(usize, wire.trimOws(line[0..semi]), 16) catch return error.InvalidChunk;
+        const size = try http1.parseChunkSize(line[0..semi]);
         decoded_total = std.math.add(usize, decoded_total, size) catch return error.BodyTooLarge;
         if (decoded_total > max_body_bytes) return error.BodyTooLarge;
         if (size == 0) {
@@ -1750,4 +1750,8 @@ test "HTTP/1 runtime target length rejects ambiguous head framing" {
     const unsupported_te = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
     const unsupported_te_head_end = std.mem.indexOf(u8, unsupported_te, "\r\n\r\n").?;
     try std.testing.expectError(error.InvalidTransferEncoding, messageTargetLength(unsupported_te, unsupported_te_head_end, 1024, null));
+
+    const signed_chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+5\r\nhello\r\n0\r\n\r\n";
+    const signed_chunk_head_end = std.mem.indexOf(u8, signed_chunk, "\r\n\r\n").?;
+    try std.testing.expectError(error.InvalidChunk, messageTargetLength(signed_chunk, signed_chunk_head_end, 1024, null));
 }

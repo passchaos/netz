@@ -3,7 +3,7 @@
 `netz` is a Zig 0.16 protocol toolkit for modern application networking.  It
 starts with deterministic parsers, serializers, and state helpers for:
 
-- HTTP/1.1 requests, responses, header field syntax validation, chunked transfer decoding with extension limits, close-delimited response bodies, runtime chunked
+- HTTP/1.1 requests, responses, header field syntax validation, chunked transfer decoding with strict chunk-size grammar and extension limits, close-delimited response bodies, runtime chunked
   transfer writing with validated trailer fields, opt-in obsolete folded-field
   unfolding, request-target/status/reason-phrase start-line validation, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
   byte buffering for persistent connections, method-aware response body
