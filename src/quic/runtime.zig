@@ -10,6 +10,8 @@ pub const Error = quic.Error || error{
     NoConnectionRoute,
 } || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.Cancelable;
 
+pub const version_negotiation_response_first_byte: u8 = 0xc0;
+
 pub const Limits = struct {
     max_datagram_size: usize = 65_535,
     max_frames_per_datagram: usize = 256,
@@ -33,6 +35,18 @@ pub const Server = struct {
 
     pub fn receive(self: *Server) Error!OwnedDatagram {
         return self.endpoint.receive();
+    }
+
+    pub fn receiveBytesHandlingVersionNegotiation(self: *Server, supported_versions: []const u32) Error!OwnedBytes {
+        return self.endpoint.receiveBytesHandlingVersionNegotiation(supported_versions);
+    }
+
+    pub fn receiveRoutedBytesHandlingVersionNegotiation(
+        self: *Server,
+        router: quic.connection_router.Router,
+        supported_versions: []const u32,
+    ) Error!RoutedBytes {
+        return self.endpoint.receiveRoutedBytesHandlingVersionNegotiation(router, supported_versions);
     }
 
     pub fn sendFrames(self: *Server, to: net.IpAddress, frames: []const quic.Frame) Error!void {
@@ -106,6 +120,48 @@ pub const Endpoint = struct {
         try self.sendBytes(to, payload.items);
     }
 
+    /// Build a Version Negotiation response for a received unsupported-version
+    /// long-header datagram.
+    ///
+    /// This is intentionally version-independent: it only peeks the invariant
+    /// long-header fields, validates endpoint configuration, and then delegates
+    /// packet serialization to `quic.writeVersionNegotiationPacket`.  Malformed
+    /// or truncated trigger datagrams are dropped by returning `null`, which is
+    /// the safer socket-loop behavior for attacker-controlled UDP input.
+    pub fn versionNegotiationResponse(
+        self: *Endpoint,
+        datagram: []const u8,
+        supported_versions: []const u32,
+    ) Error!?[]u8 {
+        try validateSupportedVersions(supported_versions);
+        const ids = peekUnsupportedVersionConnectionIds(datagram, supported_versions) orelse return null;
+
+        var response: std.ArrayList(u8) = .empty;
+        errdefer response.deinit(self.allocator);
+        try quic.writeVersionNegotiationPacket(&response, self.allocator, .{
+            .first_byte = version_negotiation_response_first_byte,
+            .destination_connection_id = ids.source_connection_id,
+            .source_connection_id = ids.destination_connection_id,
+            .versions = supported_versions,
+        });
+        return try response.toOwnedSlice(self.allocator);
+    }
+
+    /// Send Version Negotiation to `to` when `datagram` is an unsupported QUIC
+    /// long-header packet. Returns `false` for short headers, already-supported
+    /// versions, received Version Negotiation packets, or malformed datagrams.
+    pub fn sendVersionNegotiationIfUnsupported(
+        self: *Endpoint,
+        to: net.IpAddress,
+        datagram: []const u8,
+        supported_versions: []const u32,
+    ) Error!bool {
+        const response = (try self.versionNegotiationResponse(datagram, supported_versions)) orelse return false;
+        defer self.allocator.free(response);
+        try self.sendBytes(to, response);
+        return true;
+    }
+
     pub fn receive(self: *Endpoint) Error!OwnedDatagram {
         var raw = try self.receiveBytes();
         errdefer raw.deinit(self.allocator);
@@ -143,8 +199,38 @@ pub const Endpoint = struct {
         return .{ .from = incoming.from, .bytes = bytes };
     }
 
+    /// Receive the next non-Version-Negotiation-triggering datagram.
+    ///
+    /// Unsupported-version long headers are answered on the same UDP path and
+    /// consumed; the caller receives the next datagram that should continue
+    /// through normal routing/packet processing. This mirrors mature QUIC
+    /// endpoint loops that perform Version Negotiation before CID routing.
+    pub fn receiveBytesHandlingVersionNegotiation(self: *Endpoint, supported_versions: []const u32) Error!OwnedBytes {
+        try validateSupportedVersions(supported_versions);
+        while (true) {
+            var raw = try self.receiveBytes();
+            errdefer raw.deinit(self.allocator);
+            if (try self.sendVersionNegotiationIfUnsupported(raw.from, raw.bytes, supported_versions)) {
+                raw.deinit(self.allocator);
+                continue;
+            }
+            return raw;
+        }
+    }
+
     pub fn receiveRoutedBytes(self: *Endpoint, router: quic.connection_router.Router) Error!RoutedBytes {
         var raw = try self.receiveBytes();
+        errdefer raw.deinit(self.allocator);
+        const routed = (try router.routeDatagram(raw.bytes)) orelse return error.NoConnectionRoute;
+        return .{ .datagram = raw, .route = routed.route, .destination_connection_id = routed.destination_connection_id };
+    }
+
+    pub fn receiveRoutedBytesHandlingVersionNegotiation(
+        self: *Endpoint,
+        router: quic.connection_router.Router,
+        supported_versions: []const u32,
+    ) Error!RoutedBytes {
+        var raw = try self.receiveBytesHandlingVersionNegotiation(supported_versions);
         errdefer raw.deinit(self.allocator);
         const routed = (try router.routeDatagram(raw.bytes)) orelse return error.NoConnectionRoute;
         return .{ .datagram = raw, .route = routed.route, .destination_connection_id = routed.destination_connection_id };
@@ -172,6 +258,58 @@ pub const Endpoint = struct {
         return .{ .allocator = self.allocator, .datagrams = datagrams, .errors = errors };
     }
 };
+
+const LongHeaderConnectionIds = struct {
+    version: u32,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+};
+
+fn validateSupportedVersions(supported_versions: []const u32) Error!void {
+    if (supported_versions.len == 0) return error.InvalidVersionNegotiation;
+    for (supported_versions) |version| {
+        if (version == quic.Version.negotiation.wireValue()) return error.InvalidVersionNegotiation;
+    }
+}
+
+fn versionListContains(supported_versions: []const u32, version: u32) bool {
+    for (supported_versions) |supported| {
+        if (supported == version) return true;
+    }
+    return false;
+}
+
+fn peekUnsupportedVersionConnectionIds(datagram: []const u8, supported_versions: []const u32) ?LongHeaderConnectionIds {
+    if (datagram.len < 5) return null;
+    const first_byte = datagram[0];
+    if ((first_byte & 0x80) == 0) return null;
+    // Valid QUIC packets have the fixed bit set. Dropping fixed-bit-clear
+    // datagrams also avoids replying to random non-QUIC UDP traffic.
+    if ((first_byte & 0x40) == 0) return null;
+
+    const version = std.mem.readInt(u32, datagram[1..5], .big);
+    if (version == quic.Version.negotiation.wireValue()) return null;
+    if (versionListContains(supported_versions, version)) return null;
+
+    if (datagram.len < 6) return null;
+    const dcid_len = datagram[5];
+    if (dcid_len > 20) return null;
+    const dcid_start: usize = 6;
+    const dcid_end = dcid_start + @as(usize, dcid_len);
+    if (datagram.len < dcid_end + 1) return null;
+
+    const scid_len = datagram[dcid_end];
+    if (scid_len > 20) return null;
+    const scid_start = dcid_end + 1;
+    const scid_end = scid_start + @as(usize, scid_len);
+    if (datagram.len < scid_end) return null;
+
+    return .{
+        .version = version,
+        .destination_connection_id = datagram[dcid_start..dcid_end],
+        .source_connection_id = datagram[scid_start..scid_end],
+    };
+}
 
 const ReceiveTask = struct {
     endpoint: *Endpoint,
@@ -292,6 +430,221 @@ test "QUIC UDP endpoint sends and receives frame datagrams" {
     try std.testing.expect(client_received.from.eql(&server.address()));
     try std.testing.expectEqual(@as(usize, 1), client_received.frames.len);
     try std.testing.expectEqualStrings("world", client_received.frames[0].stream.data);
+}
+
+test "QUIC UDP endpoint builds Version Negotiation for unsupported versions" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer endpoint.deinit();
+
+    const supported_versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    const datagram = [_]u8{
+        0xc0,
+        0xfa,
+        0xce,
+        0xb0,
+        0x0c,
+        0x02,
+        0xaa,
+        0xbb,
+        0x03,
+        0x11,
+        0x22,
+        0x33,
+        0x00,
+    };
+
+    const response = (try endpoint.versionNegotiationResponse(&datagram, &supported_versions)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(response);
+
+    var parsed = try quic.parseVersionNegotiationPacket(allocator, response);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(version_negotiation_response_first_byte, parsed.first_byte);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x11, 0x22, 0x33 }, parsed.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, parsed.source_connection_id);
+    try std.testing.expectEqualSlices(u32, &supported_versions, parsed.versions);
+}
+
+test "QUIC UDP endpoint ignores non-triggering Version Negotiation inputs" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer endpoint.deinit();
+
+    const supported_versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    const supported = [_]u8{
+        0xc0,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0x01,
+        0xaa,
+        0x01,
+        0xbb,
+        0x00,
+    };
+    const version_negotiation = [_]u8{
+        0xc0,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0xaa,
+        0x01,
+        0xbb,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+    };
+    const fixed_bit_clear = [_]u8{
+        0x80,
+        0xfa,
+        0xce,
+        0xb0,
+        0x0c,
+        0x01,
+        0xaa,
+        0x01,
+        0xbb,
+        0x00,
+    };
+    const short_header = [_]u8{ 0x40, 0xaa, 0xbb };
+    const truncated = [_]u8{ 0xc0, 0xfa, 0xce, 0xb0, 0x0c, 0x04, 0xaa };
+    const too_long_cid = [_]u8{
+        0xc0,
+        0xfa,
+        0xce,
+        0xb0,
+        0x0c,
+        21,
+    } ++ ([_]u8{0xaa} ** 21);
+
+    try std.testing.expect((try endpoint.versionNegotiationResponse(&supported, &supported_versions)) == null);
+    try std.testing.expect((try endpoint.versionNegotiationResponse(&version_negotiation, &supported_versions)) == null);
+    try std.testing.expect((try endpoint.versionNegotiationResponse(&fixed_bit_clear, &supported_versions)) == null);
+    try std.testing.expect((try endpoint.versionNegotiationResponse(&short_header, &supported_versions)) == null);
+    try std.testing.expect((try endpoint.versionNegotiationResponse(&truncated, &supported_versions)) == null);
+    try std.testing.expect((try endpoint.versionNegotiationResponse(&too_long_cid, &supported_versions)) == null);
+
+    try std.testing.expectError(error.InvalidVersionNegotiation, endpoint.versionNegotiationResponse(&supported, &.{}));
+    try std.testing.expectError(error.InvalidVersionNegotiation, endpoint.versionNegotiationResponse(
+        &supported,
+        &.{quic.Version.negotiation.wireValue()},
+    ));
+}
+
+test "QUIC UDP endpoint sends Version Negotiation before returning next datagram" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer server.deinit();
+
+    var client = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer client.deinit();
+
+    const supported_versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    const unsupported = [_]u8{
+        0xc0,
+        0xfa,
+        0xce,
+        0xb0,
+        0x0c,
+        0x03,
+        's',
+        'r',
+        'v',
+        0x03,
+        'c',
+        'l',
+        'i',
+        0x00,
+    };
+    const supported = [_]u8{
+        0xc0,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0x03,
+        's',
+        'r',
+        'v',
+        0x03,
+        'c',
+        'l',
+        'i',
+        0x00,
+    };
+
+    const Shared = struct {
+        endpoint: *Endpoint,
+        supported_versions: []const u32,
+        received: ?OwnedBytes = null,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.received = shared.endpoint.receiveBytesHandlingVersionNegotiation(shared.supported_versions) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{
+        .endpoint = &server.endpoint,
+        .supported_versions = &supported_versions,
+    };
+    const receiver = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    try client.endpoint.sendBytes(server.address(), &unsupported);
+    var response = try client.endpoint.receiveBytes();
+    defer response.deinit(allocator);
+    try std.testing.expect(response.from.eql(&server.address()));
+
+    var parsed = try quic.parseVersionNegotiationPacket(allocator, response.bytes);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, "cli", parsed.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, "srv", parsed.source_connection_id);
+    try std.testing.expectEqualSlices(u32, &supported_versions, parsed.versions);
+
+    try client.endpoint.sendBytes(server.address(), &supported);
+    receiver.join();
+    if (shared.err) |err| return err;
+    var accepted = shared.received.?;
+    defer accepted.deinit(allocator);
+    try std.testing.expect(accepted.from.eql(&client.address()));
+    try std.testing.expectEqualSlices(u8, &supported, accepted.bytes);
 }
 
 test "QUIC UDP endpoint receives many datagrams with std.Io async" {

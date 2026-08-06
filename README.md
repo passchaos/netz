@@ -35,7 +35,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   endpoint-specific client/server parameter rules, preferred-address parsing,
   max UDP payload/ACK delay/stream-count bounds), Retry packet codec
   with version-specific integrity-tag verification, plus CRYPTO stream reassembly,
-  v1 Initial key/header/payload protection, protected Initial packet seal/open, Version Negotiation packet codec,
+  v1 Initial key/header/payload protection, protected Initial packet seal/open, Version Negotiation packet codec and endpoint-level unsupported-version responses,
   Initial CRYPTO byte exchange over UDP, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
@@ -93,7 +93,8 @@ but practical runtime APIs are being added in priority order. HTTP/1,
 prior-knowledge HTTP/2 (h2c), and WebSocket now include blocking TCP
 client/server runtimes built on Zig 0.16 `std.Io.net`; QUIC has Initial
 protection primitives plus a blocking UDP endpoint runtime for datagram/frame
-transport; MQTT has a blocking TCP client/server runtime for
+transport with endpoint-level Version Negotiation responses for unsupported
+long-header versions; MQTT has a blocking TCP client/server runtime for
 CONNECT/SUBSCRIBE/PUBLISH/PING/DISCONNECT flows, including QoS 1 and QoS 2
 publish acknowledgements. TLS, event loops, congestion control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on
