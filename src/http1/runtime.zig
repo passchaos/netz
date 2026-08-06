@@ -711,7 +711,8 @@ fn readMessageBytesBufferedWithContext(
 }
 
 fn maybeWriteContinue(io: std.Io, stream: net.Stream, head: []const u8, already_buffered_body_bytes: usize, auto_continue: bool) Error!void {
-    if (!auto_continue or already_buffered_body_bytes != 0) return;
+    _ = already_buffered_body_bytes;
+    if (!auto_continue) return;
     if (!requestShouldSendContinue(head)) return;
     try writeAll(io, stream, "HTTP/1.1 100 Continue\r\n\r\n");
 }
@@ -1026,6 +1027,67 @@ test "HTTP/1 server sends 100 Continue before reading expected body" {
     try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", &interim);
 
     try writeAll(io, client.stream, "ping");
+    var response = try readResponseFromStreamBufferedForRequest(allocator, io, client.stream, client.limits, .{}, &client.inbuf, .POST);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("accepted", response.response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 server sends 100 Continue even when body was pre-read" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("ping", request.request.body);
+            try connection.writeResponse(.{ .body = "accepted" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+
+    try writeAll(io, client.stream, "POST /expect HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Expect: 100-continue\r\n" ++
+        "Content-Length: 4\r\n" ++
+        "\r\n" ++
+        "ping");
+    var interim: [25]u8 = undefined;
+    try readExactForTest(io, client.stream, &interim);
+    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", &interim);
+
     var response = try readResponseFromStreamBufferedForRequest(allocator, io, client.stream, client.limits, .{}, &client.inbuf, .POST);
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), response.response.status);

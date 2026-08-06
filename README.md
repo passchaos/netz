@@ -8,7 +8,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   unfolding, request-target/status/reason-phrase start-line validation, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
   byte buffering for persistent connections, method-aware response body
   handling for HEAD and successful CONNECT, interim 1xx response skipping plus
-  server-side `Expect: 100-continue` handling, pure-digit Content-Length enforcement,
+  server-side `Expect: 100-continue` handling even when body bytes are pre-read, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, and unsupported transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with a `std.Io.async`
