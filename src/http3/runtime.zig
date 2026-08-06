@@ -732,7 +732,10 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
             try control.registerControlStream(stream.stream_id);
             try control.applyControlPayload(allocator, stream.data[prefix_cursor.pos..]);
         },
-        .qpack_encoder, .qpack_decoder => try control.registerQpackStream(stream_type, stream.stream_id),
+        .qpack_encoder, .qpack_decoder => {
+            try control.registerQpackStream(stream_type, stream.stream_id);
+            if (stream.data[prefix_cursor.pos..].len != 0) return error.QpackDynamicTableUnsupported;
+        },
         else => return false,
     }
     return true;
@@ -766,6 +769,22 @@ fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
         if (frame == .stream) return frame.stream;
     }
     return null;
+}
+
+test "HTTP/3 runtime rejects non-empty QPACK critical streams" {
+    const allocator = std.testing.allocator;
+    var control = http3.ControlState{};
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try http3.writeQpackEncoderStreamPrefix(&payload, allocator);
+    try payload.append(allocator, 0x3f); // Set Dynamic Table Capacity prefix/instruction byte.
+
+    try std.testing.expectError(error.QpackDynamicTableUnsupported, applyControlStreamFrame(&control, allocator, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .offset = 0,
+        .data = payload.items,
+    }));
+    try std.testing.expectEqual(@as(?u64, client_qpack_encoder_stream_id), control.peer_qpack_encoder_stream_id);
 }
 
 test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
