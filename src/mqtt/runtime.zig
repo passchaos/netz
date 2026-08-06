@@ -55,7 +55,8 @@ pub const Server = struct {
 
         var connect = try connection.readConnect();
         errdefer connect.deinit(self.allocator);
-        try connection.writeConnAck(.{ .session_present = false, .reason_code = options.reason_code });
+        if (mqtt.receiveMaximum(connect.connect.properties)) |receive_maximum| connection.max_outgoing_inflight = receive_maximum;
+        try connection.writeConnAck(.{ .session_present = false, .reason_code = options.reason_code, .max_outgoing_inflight = options.max_outgoing_inflight });
 
         return .{ .connection = connection, .connect = connect };
     }
@@ -172,11 +173,17 @@ pub const Client = struct {
 
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(allocator);
+        var connect_properties: std.ArrayList(mqtt.Property) = .empty;
+        defer connect_properties.deinit(allocator);
+        try connect_properties.appendSlice(allocator, options.properties);
+        if (options.protocol == .v5 and mqtt.receiveMaximum(options.properties) == null) {
+            try connect_properties.append(allocator, .{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
+        }
         try mqtt.writeConnectPacket(&encoded, allocator, options.protocol, .{
             .client_id = options.client_id,
             .clean_start = options.clean_start,
             .keep_alive_seconds = options.keep_alive_seconds,
-            .properties = options.properties,
+            .properties = connect_properties.items,
             .will = options.will,
             .username = options.username,
             .password = options.password,
@@ -186,6 +193,7 @@ pub const Client = struct {
         var connack = try connection.readConnAck();
         defer connack.deinit(allocator);
         if (connack.connack.reason_code != 0) return error.ConnectRefused;
+        if (mqtt.receiveMaximum(connack.connack.properties)) |receive_maximum| connection.max_outgoing_inflight = receive_maximum;
 
         return connection;
     }
@@ -239,7 +247,13 @@ pub const Connection = struct {
     pub fn writeConnAck(self: *Connection, options: ConnAckOptions) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
-        try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, options.properties);
+        var properties: std.ArrayList(mqtt.Property) = .empty;
+        defer properties.deinit(self.allocator);
+        try properties.appendSlice(self.allocator, options.properties);
+        if (self.protocol == .v5 and mqtt.receiveMaximum(options.properties) == null) {
+            try properties.append(self.allocator, .{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
+        }
+        try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
         try writeAll(self.io, self.stream, encoded.items);
     }
 
@@ -696,7 +710,7 @@ test "MQTT runtime client and server exchange over TCP" {
         }
 
         fn runFallible(server_ptr: *Server) !void {
-            var accepted = try server_ptr.accept(.{ .protocol = .v5 });
+            var accepted = try server_ptr.accept(.{ .protocol = .v5, .max_outgoing_inflight = 2 });
             defer accepted.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("client-1", accepted.connect.connect.client_id);
             try std.testing.expectEqualStrings("status/client-1", accepted.connect.connect.will.?.topic);
@@ -704,6 +718,8 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqual(mqtt.QoS.at_least_once, accepted.connect.connect.will.?.qos);
             try std.testing.expectEqualStrings("rumq", accepted.connect.connect.username.?);
             try std.testing.expectEqualStrings("mq", accepted.connect.connect.password.?);
+            try std.testing.expectEqual(@as(?u16, 3), mqtt.receiveMaximum(accepted.connect.connect.properties));
+            try std.testing.expectEqual(@as(u16, 3), accepted.connection.max_outgoing_inflight);
 
             var client_auth = try accepted.connection.readAuth();
             defer client_auth.deinit(server_ptr.allocator);
@@ -775,8 +791,10 @@ test "MQTT runtime client and server exchange over TCP" {
         .username = "rumq",
         .password = "mq",
         .limits = .{ .max_packet_size = 4096 },
+        .max_outgoing_inflight = 3,
     });
     defer client.close();
+    try std.testing.expectEqual(@as(u16, 2), client.max_outgoing_inflight);
 
     try client.writeAuth(0x19, &.{
         .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },

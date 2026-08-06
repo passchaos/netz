@@ -309,6 +309,13 @@ pub fn parseProperties(allocator: std.mem.Allocator, cursor: *wire.Cursor) Error
     return props.toOwnedSlice(allocator);
 }
 
+pub fn receiveMaximum(properties: []const Property) ?u16 {
+    for (properties) |property| {
+        if (property == .two_byte and property.two_byte.id == .receive_maximum) return property.two_byte.value;
+    }
+    return null;
+}
+
 pub fn writeProperties(list: *std.ArrayList(u8), allocator: std.mem.Allocator, properties: []const Property) Error!void {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -1114,6 +1121,7 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqualStrings("client-1", connect.client_id);
     try std.testing.expectEqual(@as(usize, 1), connect.properties.len);
     try std.testing.expectEqual(@as(u16, 10), connect.properties[0].two_byte.value);
+    try std.testing.expectEqual(@as(?u16, 10), receiveMaximum(connect.properties));
     try std.testing.expectEqualStrings("status/client-1", connect.will.?.topic);
     try std.testing.expectEqualStrings("offline", connect.will.?.payload);
     try std.testing.expectEqual(QoS.at_least_once, connect.will.?.qos);
