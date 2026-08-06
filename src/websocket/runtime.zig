@@ -805,7 +805,10 @@ fn validateOutgoingMessagePayload(opcode: websocket.Opcode, payload: []const u8)
 
 fn validateOutgoingFramePayload(opcode: websocket.Opcode, payload: []const u8) Error!void {
     switch (opcode) {
-        .text => if (!std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8,
+        // Data-message validation lives in sendMessage/sendFragmented so a
+        // caller that intentionally uses sendFrame for low-level fixtures keeps
+        // explicit control. Control frames are always validated here because the
+        // runtime should never put an invalid close/ping/pong on the wire.
         .close => try websocket.validateClosePayload(payload),
         .ping, .pong => if (payload.len > 125) return error.InvalidControlFrame,
         else => {},
