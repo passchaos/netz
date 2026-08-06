@@ -58,6 +58,7 @@ pub const Frame = struct {
     pub fn parse(bytes: []const u8) Error!Frame {
         var cursor = wire.Cursor.init(bytes);
         const frame_type = try quic.varint.decode(&cursor);
+        try validateFrameType(frame_type);
         const len = try quic.varint.decode(&cursor);
         const payload_len = std.math.cast(usize, len) orelse return error.IntegerOverflow;
         const payload = try cursor.readSlice(payload_len);
@@ -70,6 +71,18 @@ pub const Frame = struct {
         try list.appendSlice(allocator, self.payload);
     }
 };
+
+fn validateFrameType(frame_type: u64) Error!void {
+    switch (frame_type) {
+        // RFC 9114 §7.2.8 reserves the HTTP/2 frame type code points that have
+        // no HTTP/3 semantics.  tquic and quic-zig reject them as
+        // H3_FRAME_UNEXPECTED rather than treating them as ignorable extension
+        // frames; do the same at the frame parser boundary so every stream
+        // context gets consistent behavior.
+        0x02, 0x06, 0x08, 0x09 => return error.UnexpectedFrame,
+        else => {},
+    }
+}
 
 pub const SettingId = enum(u64) {
     qpack_max_table_capacity = 0x01,
@@ -1313,6 +1326,17 @@ test "HTTP/3 frame settings and qpack literal block" {
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings(":method", decoded[0].name);
     try std.testing.expectEqualStrings("GET", decoded[0].value);
+}
+
+test "HTTP/3 rejects reserved HTTP/2 frame types" {
+    const allocator = std.testing.allocator;
+    const reserved_frame_types = [_]u64{ 0x02, 0x06, 0x08, 0x09 };
+    for (reserved_frame_types) |frame_type| {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try (Frame{ .frame_type = frame_type, .payload = "", .consumed = 0 }).write(&encoded, allocator);
+        try std.testing.expectError(error.UnexpectedFrame, Frame.parse(encoded.items));
+    }
 }
 
 test "HTTP/3 QPACK static name references and literal fallback" {
