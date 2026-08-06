@@ -303,4 +303,8 @@ test "QUIC client Version Negotiation rejects no mutual version" {
     }, datagram));
     try std.testing.expectError(error.InvalidVersionNegotiation, ClientState.init(allocator, .negotiation, &.{.version_1}, &odcid, &client_scid));
     try std.testing.expectError(error.InvalidVersionNegotiation, ClientState.init(allocator, .version_1, &.{.version_2}, &odcid, &client_scid));
+
+    var greased = try ClientState.init(allocator, .version_1, &.{ .version_1, @enumFromInt(0x0a0a0a0a) }, &odcid, &client_scid);
+    defer greased.deinit();
+    try std.testing.expectEqual(@as(usize, 2), greased.available_versions.len);
 }

@@ -335,6 +335,7 @@ pub const TransportParameterId = enum(u64) {
     active_connection_id_limit = 0x0e,
     initial_source_connection_id = 0x0f,
     retry_source_connection_id = 0x10,
+    version_information = 0x11,
     max_datagram_frame_size = 0x20,
     _,
 };
@@ -365,6 +366,35 @@ pub const PreferredAddress = struct {
     stateless_reset_token: [16]u8 = [_]u8{0} ** 16,
 };
 
+/// RFC 9368 version_information transport parameter value.
+///
+/// The available-version list is kept as borrowed network-order bytes so typed
+/// transport-parameter parsing remains allocation-free like the rest of this
+/// module.  Helpers below expose typed iteration for validation and selection.
+pub const VersionInformation = struct {
+    chosen_version: Version,
+    available_versions_wire: []const u8 = &.{},
+
+    pub fn availableVersionCount(self: VersionInformation) usize {
+        return self.available_versions_wire.len / 4;
+    }
+
+    pub fn availableVersionAt(self: VersionInformation, index: usize) ?Version {
+        if (index >= self.availableVersionCount()) return null;
+        const start = index * 4;
+        return @enumFromInt(std.mem.readInt(u32, self.available_versions_wire[start..][0..4], .big));
+    }
+
+    pub fn containsAvailableVersion(self: VersionInformation, version: Version) bool {
+        var i: usize = 0;
+        while (i < self.availableVersionCount()) : (i += 1) {
+            const available = self.availableVersionAt(i) orelse return false;
+            if (available.wireValue() == version.wireValue()) return true;
+        }
+        return false;
+    }
+};
+
 /// Typed QUIC transport parameters with RFC defaults.
 ///
 /// Decoded byte slices borrow from the input buffer, matching the lower-level
@@ -389,6 +419,7 @@ pub const TransportParameters = struct {
     active_connection_id_limit: u64 = default_active_connection_id_limit,
     initial_source_connection_id: ?[]const u8 = null,
     retry_source_connection_id: ?[]const u8 = null,
+    version_information: ?VersionInformation = null,
     max_datagram_frame_size: ?u64 = null,
 };
 
@@ -445,6 +476,9 @@ pub fn encodeTransportParameters(
         try validateTransportConnectionId(cid, false);
         try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.retry_source_connection_id), cid);
     }
+    if (params.version_information) |version_information| {
+        try encodeVersionInformationTransportParameter(list, allocator, version_information);
+    }
     if (params.max_datagram_frame_size) |size| try encodeIntegerTransportParameter(list, allocator, .max_datagram_frame_size, size);
 }
 
@@ -463,6 +497,7 @@ pub fn validateTransportParameters(params: TransportParameters, source: Transpor
     if (params.initial_source_connection_id) |cid| try validateTransportConnectionId(cid, false);
     if (params.retry_source_connection_id) |cid| try validateTransportConnectionId(cid, false);
     if (params.preferred_address) |preferred| try validatePreferredAddress(preferred);
+    if (params.version_information) |version_information| try validateVersionInformation(version_information);
 
     try validateTransportInteger(.max_udp_payload_size, params.max_udp_payload_size);
     try validateTransportInteger(.initial_max_streams_bidi, params.initial_max_streams_bidi);
@@ -536,6 +571,8 @@ pub fn parseTransportParametersTyped(
             if (source == .client) return error.TransportParameterForbidden;
             try validateTransportConnectionId(value, false);
             params.retry_source_connection_id = value;
+        } else if (id == @intFromEnum(TransportParameterId.version_information)) {
+            params.version_information = try parseVersionInformation(value);
         } else if (id == @intFromEnum(TransportParameterId.max_datagram_frame_size)) {
             params.max_datagram_frame_size = try parseTransportInteger(.max_datagram_frame_size, value);
         } else {
@@ -553,6 +590,23 @@ pub fn encodeTransportParameter(list: *std.ArrayList(u8), allocator: std.mem.All
     try varint.encode(list, allocator, id);
     try varint.encode(list, allocator, value.len);
     try list.appendSlice(allocator, value);
+}
+
+pub fn encodeVersionInformationFromVersions(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    chosen_version: Version,
+    available_versions: []const Version,
+) Error!void {
+    try validateChosenVersion(chosen_version);
+    var value: std.ArrayList(u8) = .empty;
+    defer value.deinit(allocator);
+    try wire.appendInt(&value, allocator, u32, chosen_version.wireValue(), .big);
+    for (available_versions) |available| {
+        try validateAvailableVersion(available);
+        try wire.appendInt(&value, allocator, u32, available.wireValue(), .big);
+    }
+    try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.version_information), value.items);
 }
 
 pub fn parseTransportParameters(allocator: std.mem.Allocator, bytes: []const u8) ![]TransportParameter {
@@ -598,6 +652,52 @@ fn encodePreferredAddressTransportParameter(
     try value.appendSlice(allocator, preferred.connection_id);
     try value.appendSlice(allocator, &preferred.stateless_reset_token);
     try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.preferred_address), value.items);
+}
+
+fn encodeVersionInformationTransportParameter(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    version_information: VersionInformation,
+) Error!void {
+    try validateVersionInformation(version_information);
+    var value: std.ArrayList(u8) = .empty;
+    defer value.deinit(allocator);
+    try wire.appendInt(&value, allocator, u32, version_information.chosen_version.wireValue(), .big);
+    try value.appendSlice(allocator, version_information.available_versions_wire);
+    try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.version_information), value.items);
+}
+
+fn parseVersionInformation(value: []const u8) Error!VersionInformation {
+    if (value.len < 4 or (value.len % 4) != 0) return error.InvalidTransportParameterLength;
+    const version_information = VersionInformation{
+        .chosen_version = @enumFromInt(std.mem.readInt(u32, value[0..4], .big)),
+        .available_versions_wire = value[4..],
+    };
+    try validateVersionInformation(version_information);
+    return version_information;
+}
+
+fn validateVersionInformation(version_information: VersionInformation) Error!void {
+    try validateChosenVersion(version_information.chosen_version);
+    if ((version_information.available_versions_wire.len % 4) != 0) return error.InvalidTransportParameterLength;
+    var i: usize = 0;
+    while (i < version_information.availableVersionCount()) : (i += 1) {
+        try validateAvailableVersion(version_information.availableVersionAt(i) orelse return error.InvalidTransportParameterLength);
+    }
+}
+
+fn validateChosenVersion(version: Version) Error!void {
+    if (version.wireValue() == Version.negotiation.wireValue() or isReservedVersionWire(version.wireValue())) {
+        return error.InvalidTransportParameter;
+    }
+}
+
+fn validateAvailableVersion(version: Version) Error!void {
+    if (version.wireValue() == Version.negotiation.wireValue()) return error.InvalidTransportParameter;
+}
+
+pub fn isReservedVersionWire(version: u32) bool {
+    return (version & 0x0f0f0f0f) == 0x0a0a0a0a;
 }
 
 fn parseTransportInteger(id: TransportParameterId, value: []const u8) Error!u64 {
@@ -1531,6 +1631,10 @@ test "QUIC transport parameter parser" {
 test "QUIC typed transport parameters roundtrip and validate" {
     const allocator = std.testing.allocator;
     const client_cid = [_]u8{ 1, 2, 3, 4 };
+    const available_versions_wire = [_]u8{
+        0x00, 0x00, 0x00, 0x01,
+        0x6b, 0x33, 0x43, 0xcf,
+    };
     const params = TransportParameters{
         .max_udp_payload_size = 1400,
         .initial_max_data = 4096,
@@ -1543,6 +1647,10 @@ test "QUIC typed transport parameters roundtrip and validate" {
         .max_ack_delay = 50,
         .active_connection_id_limit = 4,
         .initial_source_connection_id = &client_cid,
+        .version_information = .{
+            .chosen_version = .version_1,
+            .available_versions_wire = &available_versions_wire,
+        },
         .max_datagram_frame_size = 1200,
     };
 
@@ -1559,6 +1667,8 @@ test "QUIC typed transport parameters roundtrip and validate" {
     try std.testing.expectEqual(@as(u64, 4), decoded.active_connection_id_limit);
     try std.testing.expectEqual(@as(?u64, 1200), decoded.max_datagram_frame_size);
     try std.testing.expectEqualSlices(u8, &client_cid, decoded.initial_source_connection_id.?);
+    try std.testing.expectEqual(Version.version_1, decoded.version_information.?.chosen_version);
+    try std.testing.expect(decoded.version_information.?.containsAvailableVersion(.version_2));
 
     var duplicate: std.ArrayList(u8) = .empty;
     defer duplicate.deinit(allocator);
@@ -1582,6 +1692,18 @@ test "QUIC typed transport parameters roundtrip and validate" {
     try encodeTransportParameter(&max_idle_too_large, allocator, @intFromEnum(TransportParameterId.max_idle_timeout), &.{ 0xc0, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01 });
     try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, max_idle_too_large.items, .client));
     try std.testing.expectError(error.InvalidTransportParameter, encodeIntegerTransportParameter(&max_idle_too_large, allocator, .max_idle_timeout, max_idle_timeout_ms_cap + 1));
+
+    var bad_version_info: std.ArrayList(u8) = .empty;
+    defer bad_version_info.deinit(allocator);
+    try encodeTransportParameter(&bad_version_info, allocator, @intFromEnum(TransportParameterId.version_information), &.{ 0, 0, 0 });
+    try std.testing.expectError(error.InvalidTransportParameterLength, parseTransportParametersTyped(allocator, bad_version_info.items, .client));
+    bad_version_info.clearRetainingCapacity();
+    try encodeTransportParameter(&bad_version_info, allocator, @intFromEnum(TransportParameterId.version_information), &.{ 0, 0, 0, 0 });
+    try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, bad_version_info.items, .client));
+    bad_version_info.clearRetainingCapacity();
+    try encodeVersionInformationFromVersions(&bad_version_info, allocator, .version_1, &.{ .version_2, @enumFromInt(0x0a0a0a0a) });
+    const decoded_reserved = try parseTransportParametersTyped(allocator, bad_version_info.items, .client);
+    try std.testing.expect(decoded_reserved.version_information.?.containsAvailableVersion(@enumFromInt(0x0a0a0a0a)));
 
     var forbidden: std.ArrayList(u8) = .empty;
     defer forbidden.deinit(allocator);

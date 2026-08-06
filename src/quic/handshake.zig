@@ -59,6 +59,10 @@ pub const ServerOptions = struct {
     retry_original_destination_connection_id: []const u8 = &.{},
     retry_source_connection_id: []const u8 = &.{},
     version: quic.Version = .version_1,
+    /// Versions this server advertises in RFC 9368 version_information.  If the
+    /// server sends Version Negotiation, keep this aligned with that response so
+    /// clients can authenticate that the selected version was not downgraded.
+    available_versions: []const quic.Version = &.{ .version_1, .version_2 },
     max_crypto_buffer: usize = 4096,
     max_crypto_frame_data_len: usize = 1024,
     server_initial_packet_number: u64 = 0,
@@ -151,6 +155,17 @@ pub const EstablishedConnection = struct {
     }
 };
 
+fn validateConfiguredVersions(version: quic.Version, available_versions: []const quic.Version) Error!void {
+    if (version == .negotiation or quic.isReservedVersionWire(version.wireValue())) return error.InvalidVersionNegotiation;
+    if (available_versions.len == 0) return error.InvalidVersionNegotiation;
+    var contains_chosen = false;
+    for (available_versions) |available| {
+        if (available == .negotiation) return error.InvalidVersionNegotiation;
+        if (available.wireValue() == version.wireValue()) contains_chosen = true;
+    }
+    if (!contains_chosen) return error.InvalidVersionNegotiation;
+}
+
 fn clientInitialDestinationConnectionId(options: ClientOptions) []const u8 {
     if (options.retry_source_connection_id.len != 0) return options.retry_source_connection_id;
     return options.original_destination_connection_id;
@@ -171,7 +186,7 @@ fn connectAttempt(
     options: ClientOptions,
     version_negotiation_processed: bool,
 ) Error!EstablishedConnection {
-    if (options.version == .negotiation) return error.InvalidVersionNegotiation;
+    try validateConfiguredVersions(options.version, options.available_versions);
     if (options.retry_source_connection_id.len != 0 and options.address_validation_token.len == 0) {
         return error.InvalidPacket;
     }
@@ -268,6 +283,9 @@ fn connectAttempt(
         server_initial.packet.source_connection_id,
         options.original_destination_connection_id,
         options.retry_source_connection_id,
+        options.version,
+        options.available_versions,
+        version_negotiation_processed,
     );
     const server_finished = try quic.tls_client_hello.parseFinished(server_flight.finished);
     const server_finished_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions });
@@ -306,7 +324,7 @@ fn connectAttempt(
 }
 
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
-    if (options.version == .negotiation) return error.InvalidVersionNegotiation;
+    try validateConfiguredVersions(options.version, options.available_versions);
     if ((options.retry_original_destination_connection_id.len == 0) != (options.retry_source_connection_id.len == 0)) {
         return error.InvalidPacket;
     }
@@ -327,7 +345,12 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         parsed_client.transport_parameters,
         .client,
     );
-    try validateClientTransportParameters(peer_transport_parameters, client_initial.packet.source_connection_id);
+    try validateClientTransportParameters(
+        peer_transport_parameters,
+        client_initial.packet.source_connection_id,
+        options.version,
+        options.available_versions,
+    );
 
     const server_secret = try secretKey(endpoint.io, options.x25519_secret_key);
     const server_public = try quic.tls_client_hello.x25519PublicKey(server_secret);
@@ -594,13 +617,14 @@ fn clientTransportParameters(
 ) Error![]const u8 {
     if (options.transport_parameters.len != 0) {
         local_transport_parameters.* = try quic.parseTransportParametersTyped(allocator, options.transport_parameters, .client);
-        try validateClientTransportParameters(local_transport_parameters.*, options.local_connection_id);
+        try validateClientTransportParameters(local_transport_parameters.*, options.local_connection_id, options.version, options.available_versions);
         return options.transport_parameters;
     }
 
     local_transport_parameters.initial_source_connection_id = options.local_connection_id;
-    try validateClientTransportParameters(local_transport_parameters.*, options.local_connection_id);
+    try validateClientTransportParameters(local_transport_parameters.*, options.local_connection_id, options.version, options.available_versions);
     try quic.encodeTransportParameters(encoded, allocator, local_transport_parameters.*);
+    try appendVersionInformationIfAbsent(encoded, allocator, local_transport_parameters.*, options.version, options.available_versions);
     return encoded.items;
 }
 
@@ -614,7 +638,7 @@ fn serverTransportParameters(
 ) Error![]const u8 {
     if (options.transport_parameters.len != 0) {
         local_transport_parameters.* = try quic.parseTransportParametersTyped(allocator, options.transport_parameters, .server);
-        try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id, retry_source_connection_id);
+        try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id, retry_source_connection_id, options.version, options.available_versions, false);
         return options.transport_parameters;
     }
 
@@ -623,17 +647,35 @@ fn serverTransportParameters(
     if (retry_source_connection_id.len != 0) {
         local_transport_parameters.retry_source_connection_id = retry_source_connection_id;
     }
-    try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id, retry_source_connection_id);
+    try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id, retry_source_connection_id, options.version, options.available_versions, false);
     try quic.encodeTransportParameters(encoded, allocator, local_transport_parameters.*);
+    try appendVersionInformationIfAbsent(encoded, allocator, local_transport_parameters.*, options.version, options.available_versions);
     return encoded.items;
 }
 
-fn validateClientTransportParameters(params: quic.TransportParameters, initial_source_connection_id: []const u8) Error!void {
+fn appendVersionInformationIfAbsent(
+    encoded: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    params: quic.TransportParameters,
+    version: quic.Version,
+    available_versions: []const quic.Version,
+) Error!void {
+    if (params.version_information != null) return;
+    try quic.encodeVersionInformationFromVersions(encoded, allocator, version, available_versions);
+}
+
+fn validateClientTransportParameters(
+    params: quic.TransportParameters,
+    initial_source_connection_id: []const u8,
+    expected_version: quic.Version,
+    available_versions: []const quic.Version,
+) Error!void {
     try quic.validateTransportParameters(params, .client);
     if (params.initial_source_connection_id == null) return error.InvalidTransportParameter;
     if (!std.mem.eql(u8, params.initial_source_connection_id.?, initial_source_connection_id)) {
         return error.InvalidTransportParameter;
     }
+    try validatePeerVersionInformation(params.version_information, expected_version, available_versions, false);
 }
 
 fn validateServerTransportParameters(
@@ -641,6 +683,9 @@ fn validateServerTransportParameters(
     initial_source_connection_id: []const u8,
     original_destination_connection_id: []const u8,
     retry_source_connection_id: []const u8,
+    expected_version: quic.Version,
+    available_versions: []const quic.Version,
+    version_negotiation_processed: bool,
 ) Error!void {
     try quic.validateTransportParameters(params, .server);
     if (params.initial_source_connection_id == null or params.original_destination_connection_id == null) {
@@ -657,6 +702,27 @@ fn validateServerTransportParameters(
     } else {
         const advertised = params.retry_source_connection_id orelse return error.InvalidTransportParameter;
         if (!std.mem.eql(u8, advertised, retry_source_connection_id)) return error.InvalidTransportParameter;
+    }
+    try validatePeerVersionInformation(params.version_information, expected_version, available_versions, version_negotiation_processed);
+}
+
+fn validatePeerVersionInformation(
+    version_information: ?quic.VersionInformation,
+    expected_version: quic.Version,
+    available_versions: []const quic.Version,
+    version_negotiation_processed: bool,
+) Error!void {
+    const info = version_information orelse {
+        if (version_negotiation_processed and expected_version != .version_1) return error.InvalidTransportParameter;
+        return;
+    };
+    if (info.chosen_version.wireValue() != expected_version.wireValue()) return error.InvalidTransportParameter;
+    if (!info.containsAvailableVersion(expected_version)) return error.InvalidTransportParameter;
+    if (version_negotiation_processed) {
+        for (available_versions) |local| {
+            if (local.wireValue() == expected_version.wireValue()) break;
+            if (info.containsAvailableVersion(local)) return error.InvalidTransportParameter;
+        } else {}
     }
 }
 
@@ -838,6 +904,7 @@ test "QUIC integrated client restarts after Version Negotiation" {
 
             var established = try accept(endpoint, .{
                 .version = .version_2,
+                .available_versions = &.{.version_2},
                 .local_connection_id = cid,
                 .random = [_]u8{0x82} ** 32,
                 .x25519_secret_key = [_]u8{0x84} ** 32,
@@ -878,6 +945,144 @@ test "QUIC integrated client restarts after Version Negotiation" {
     if (shared.err) |err| return err;
 
     try std.testing.expectEqualStrings("VN OK", response.frames[0].stream.data);
+}
+
+test "QUIC integrated client rejects mismatched Version Information after VN" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const original_dcid = [_]u8{ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const client_random = [_]u8{0xc1} ** 32;
+    const client_secret_key = [_]u8{0xc3} ** 32;
+    const server_random = [_]u8{0xc2} ** 32;
+    const server_secret_key = try secretKey(io, [_]u8{0xc4} ** 32);
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        cid: []const u8,
+        server_random: [32]u8,
+        server_secret_key: [32]u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var first_initial = try shared.endpoint.receiveBytes();
+            defer first_initial.deinit(shared.endpoint.allocator);
+            const first_header = try quic.LongHeader.parse(first_initial.bytes);
+
+            const supported_versions = [_]u32{quic.Version.version_2.wireValue()};
+            var vn: std.ArrayList(u8) = .empty;
+            defer vn.deinit(shared.endpoint.allocator);
+            try quic.writeVersionNegotiationPacket(&vn, shared.endpoint.allocator, .{
+                .destination_connection_id = first_header.source_connection_id,
+                .source_connection_id = first_header.destination_connection_id,
+                .versions = &supported_versions,
+            });
+            try shared.endpoint.sendBytes(first_initial.from, vn.items);
+
+            var client_initial = try receiveClientInitial(shared.endpoint, 0, 4096, &.{}, .version_2);
+            defer client_initial.deinit(shared.endpoint.allocator);
+            var parsed_client = try quic.tls_client_hello.parseClientHello(shared.endpoint.allocator, client_initial.crypto_data);
+            defer parsed_client.deinit(shared.endpoint.allocator);
+
+            const server_public = try quic.tls_client_hello.x25519PublicKey(shared.server_secret_key);
+            const shared_secret = try quic.tls_client_hello.x25519SharedSecret(shared.server_secret_key, parsed_client.x25519_public_key);
+
+            var server_hello: std.ArrayList(u8) = .empty;
+            defer server_hello.deinit(shared.endpoint.allocator);
+            try quic.tls_client_hello.writeServerHello(&server_hello, shared.endpoint.allocator, .{
+                .random = shared.server_random,
+                .x25519_public_key = server_public,
+            });
+            const hs_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items });
+            const handshake = quic.tls_client_hello.deriveHandshakeSecretsForVersion(quic.Version.version_2.wireValue(), shared_secret, hs_hash);
+
+            var wrong_tp = quic.practical_transport_parameters;
+            wrong_tp.original_destination_connection_id = client_initial.packet.destination_connection_id;
+            wrong_tp.initial_source_connection_id = shared.cid;
+            wrong_tp.version_information = .{
+                .chosen_version = .version_1,
+                .available_versions_wire = &[_]u8{ 0x00, 0x00, 0x00, 0x01 },
+            };
+            var encoded_tp: std.ArrayList(u8) = .empty;
+            defer encoded_tp.deinit(shared.endpoint.allocator);
+            try quic.encodeTransportParameters(&encoded_tp, shared.endpoint.allocator, wrong_tp);
+
+            var encrypted_extensions: std.ArrayList(u8) = .empty;
+            defer encrypted_extensions.deinit(shared.endpoint.allocator);
+            try quic.tls_client_hello.writeEncryptedExtensions(&encrypted_extensions, shared.endpoint.allocator, "h3", encoded_tp.items);
+            const server_finished_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items });
+            const server_verify = quic.tls_client_hello.computeFinishedVerifyData(handshake.server_handshake_traffic_secret, server_finished_hash);
+            var server_finished: std.ArrayList(u8) = .empty;
+            defer server_finished.deinit(shared.endpoint.allocator);
+            try quic.tls_client_hello.writeFinished(&server_finished, shared.endpoint.allocator, server_verify);
+
+            var server_flight: std.ArrayList(u8) = .empty;
+            defer server_flight.deinit(shared.endpoint.allocator);
+            try server_flight.appendSlice(shared.endpoint.allocator, encrypted_extensions.items);
+            try server_flight.appendSlice(shared.endpoint.allocator, server_finished.items);
+
+            try quic.initial_exchange.sendCoalescedInitialHandshakeCrypto(
+                shared.endpoint,
+                client_initial.from,
+                client_initial.initial_secrets.server,
+                .{
+                    .version = quic.Version.version_2.wireValue(),
+                    .destination_connection_id = client_initial.packet.source_connection_id,
+                    .source_connection_id = shared.cid,
+                    .packet_number = 0,
+                    .crypto_data = server_hello.items,
+                    .max_crypto_frame_data_len = 1024,
+                    .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+                },
+                handshake.server_quic,
+                .{
+                    .version = quic.Version.version_2.wireValue(),
+                    .destination_connection_id = client_initial.packet.source_connection_id,
+                    .source_connection_id = shared.cid,
+                    .packet_number = 0,
+                    .crypto_data = server_flight.items,
+                    .max_crypto_frame_data_len = 1024,
+                },
+            );
+        }
+    };
+
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .cid = &server_cid,
+        .server_random = server_random,
+        .server_secret_key = server_secret_key,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    try std.testing.expectError(error.InvalidTransportParameter, connect(&client_endpoint, server_endpoint.address(), .{
+        .version = .version_1,
+        .available_versions = &.{ .version_2, .version_1 },
+        .original_destination_connection_id = &original_dcid,
+        .local_connection_id = &client_cid,
+        .server_name = "localhost",
+        .random = client_random,
+        .x25519_secret_key = client_secret_key,
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "QUIC client Initial carries address validation token" {
