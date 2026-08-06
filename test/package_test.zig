@@ -227,6 +227,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "sentWithEcn"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckEcnCounters"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckEcnFrame"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "ecnDisabled"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "validateAckCoversSentPackets"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "ackRttSample"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "detectPacketThresholdLoss"));

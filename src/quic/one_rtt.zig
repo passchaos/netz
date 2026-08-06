@@ -10,6 +10,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     StreamStopped,
     StreamLimitExceeded,
     StreamStateError,
+    EcnDisabled,
 };
 
 pub const SendOptions = struct {
@@ -280,6 +281,7 @@ pub const Connection = struct {
 
     pub fn sendWithEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
+        if (ecn != .not_ect and self.sent.ecnDisabled()) return error.EcnDisabled;
         const stream_bytes = countStreamBytes(frames);
         for (frames) |frame| {
             if (frame != .stream) continue;
@@ -863,7 +865,10 @@ pub const Connection = struct {
             switch (frame) {
                 .ack => {
                     if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
-                    const acked = try self.sent.applyAckDetailed(frame.ack);
+                    const acked = self.sent.applyAckDetailed(frame.ack) catch |err| switch (err) {
+                        error.InvalidAckFrame => try self.applyAckWithEcnFailure(frame.ack),
+                        else => return err,
+                    };
                     if (acked.ack_eliciting_packets > 0) self.pto_count = 0;
                     if (acked.ecn_ce_delta > 0) {
                         self.congestion.onExplicitCongestion(now_ns);
@@ -972,7 +977,6 @@ pub const Connection = struct {
                     // same validate-before-mutate boundary for malformed
                     // multi-frame packets.
                     try self.sent.validateAckCoversSentPackets(ack);
-                    try self.sent.validateAckEcnFrame(ack);
                 },
                 .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_data_total),
                 .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_data_total),
@@ -1281,6 +1285,15 @@ pub const Connection = struct {
         self.rtt_stats.onPersistentCongestion();
         self.last_persistent_congestion_packet_number = period.end_packet_number;
         return true;
+    }
+
+    fn applyAckWithEcnFailure(self: *Connection, ack: quic.AckFrame) Error!quic.packet_space.SentPacketTracker.AckResult {
+        if (ack.ecn_counts == null or !self.sent.validateAckEcnFrameWouldFail(ack)) return error.InvalidAckFrame;
+        var plain_ack = ack;
+        plain_ack.ecn_counts = null;
+        const result = try self.sent.applyAckDetailed(plain_ack);
+        self.sent.disableEcnValidation();
+        return result;
     }
 
     pub fn consumeReceived(self: *Connection, amount: u64) ?quic.Frame {
@@ -2533,10 +2546,14 @@ test "QUIC 1-RTT connection validates ACK_ECN counters" {
         } }},
     });
 
-    try std.testing.expectError(error.InvalidAckFrame, client.receivePacket());
-    try std.testing.expect(!client.sent.packets.items[1].acknowledged);
-    try std.testing.expectEqual(bytes_in_flight, client.congestion.bytes_in_flight);
+    var invalid_ecn_ack = try client.receivePacket();
+    defer invalid_ecn_ack.deinit(allocator);
+    try std.testing.expect(client.sent.packets.items[1].acknowledged);
+    try std.testing.expect(client.congestion.bytes_in_flight < bytes_in_flight);
     try std.testing.expectEqual(@as(u64, 0), client.sent.latest_ecn_counts.ect1_count);
+    try std.testing.expect(client.sent.ecnDisabled());
+    try std.testing.expectError(error.EcnDisabled, client.sendWithEcn(&[_]quic.Frame{.{ .ping = {} }}, .ect0));
+    try client.send(&[_]quic.Frame{.{ .ping = {} }});
 }
 
 test "QUIC 1-RTT ACK_ECN CE increase enters congestion recovery" {

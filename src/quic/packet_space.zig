@@ -410,6 +410,11 @@ pub const SentPacketTracker = struct {
         _ = try self.validateAckEcnFrameDetailed(ack);
     }
 
+    pub fn validateAckEcnFrameWouldFail(self: SentPacketTracker, ack: quic.AckFrame) bool {
+        _ = self.validateAckEcnFrameDetailed(ack) catch return true;
+        return false;
+    }
+
     fn validateAckEcnFrameDetailed(self: SentPacketTracker, ack: quic.AckFrame) Error!EcnAckValidation {
         const counts = ack.ecn_counts orelse return .{};
         if (self.ecn_validation_failed) return error.InvalidAckFrame;
@@ -434,6 +439,14 @@ pub const SentPacketTracker = struct {
         if (covered_ect0 < newly_acked.ect0 or covered_ect1 < newly_acked.ect1) return error.InvalidAckFrame;
 
         return .{ .update_counts = true, .ce_delta = ce_delta };
+    }
+
+    pub fn disableEcnValidation(self: *SentPacketTracker) void {
+        self.ecn_validation_failed = true;
+    }
+
+    pub fn ecnDisabled(self: SentPacketTracker) bool {
+        return self.ecn_validation_failed;
     }
 
     pub fn detectPacketThresholdLoss(self: *SentPacketTracker, largest_acknowledged: u64, packet_threshold: u64) AckResult {
