@@ -66,6 +66,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.runtime.FlowWindow, "available"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "sendResetStream"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "readResetStream"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "releaseReceivedCapacity"));
     const stream_reset_error: netz.http2.runtime.Error = error.StreamReset;
     try std.testing.expect(stream_reset_error == error.StreamReset);
     const goaway_error: netz.http2.runtime.Error = error.ConnectionGoAway;

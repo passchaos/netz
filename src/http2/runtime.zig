@@ -363,6 +363,7 @@ pub const Connection = struct {
                                     try self.recv_connection_window.receive(data.data.len);
                                     try (try self.recvStreamWindow(stream_id)).receive(data.data.len);
                                     try body.appendSlice(self.allocator, data.data);
+                                    try self.maybeReleaseReceivedCapacity(stream_id);
                                     if ((data_frame.frame.header.flags & flag_end_stream) != 0) break;
                                 },
                                 .headers => {
@@ -491,6 +492,31 @@ pub const Connection = struct {
         try writeAll(self.io, self.stream, encoded.items);
     }
 
+    pub fn releaseReceivedCapacity(self: *Connection, stream_id: u31, amount: usize) Error!void {
+        if (amount == 0) return;
+        var remaining = amount;
+        while (remaining != 0) {
+            const increment: u31 = @intCast(@min(remaining, std.math.maxInt(u31)));
+            try self.sendWindowUpdate(0, increment);
+            try self.sendWindowUpdate(stream_id, increment);
+            remaining -= increment;
+        }
+    }
+
+    fn maybeReleaseReceivedCapacity(self: *Connection, stream_id: u31) Error!void {
+        const low_watermark = @as(usize, @intCast(default_flow_window / 2));
+        const target = @as(usize, @intCast(default_flow_window));
+        const conn_available = self.recv_connection_window.available();
+        if (conn_available <= low_watermark) {
+            try self.sendWindowUpdate(0, @intCast(target - conn_available));
+        }
+        const stream_window = try self.recvStreamWindow(stream_id);
+        const stream_available = stream_window.available();
+        if (stream_available <= low_watermark) {
+            try self.sendWindowUpdate(stream_id, @intCast(target - stream_available));
+        }
+    }
+
     pub fn readWindowUpdate(self: *Connection) Error!OwnedWindowUpdate {
         while (true) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
@@ -566,6 +592,7 @@ pub const Connection = struct {
                     try self.recv_connection_window.receive(data.data.len);
                     try (try self.recvStreamWindow(stream_id)).receive(data.data.len);
                     try body.appendSlice(self.allocator, data.data);
+                    try self.maybeReleaseReceivedCapacity(stream_id);
                     if ((frame.frame.header.flags & flag_end_stream) != 0) {
                         if (headers) |h| try validateContentLength(h, body.items.len);
                         break;
@@ -3405,6 +3432,99 @@ test "HTTP/2 DATA send waits for WINDOW_UPDATE capacity" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 DATA receive releases WINDOW_UPDATE capacity" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 128 * 1024 },
+    );
+    defer server.deinit();
+
+    const request_body = try allocator.alloc(u8, 40_000);
+    defer allocator.free(request_body);
+    @memset(request_body, 'q');
+
+    const response_body = try allocator.alloc(u8, 40_000);
+    defer allocator.free(response_body);
+    @memset(response_body, 'r');
+
+    const Shared = struct {
+        server: *Server,
+        expected_request: []const u8,
+        response_body: []const u8,
+        response_window_updates: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(shared.server.allocator);
+            try std.testing.expectEqualStrings("/release-capacity", request.path);
+            try std.testing.expectEqualSlices(u8, shared.expected_request, request.body);
+
+            try connection.writeResponse(request.stream_id, .{
+                .status = 200,
+                .body = shared.response_body,
+            });
+
+            var conn_update = try connection.readWindowUpdate();
+            defer conn_update.deinit(shared.server.allocator);
+            try std.testing.expectEqual(@as(u31, 0), conn_update.window_update.stream_id);
+            try std.testing.expect(conn_update.window_update.increment > 0);
+            shared.response_window_updates += 1;
+
+            var stream_update = try connection.readWindowUpdate();
+            defer stream_update.deinit(shared.server.allocator);
+            try std.testing.expectEqual(request.stream_id, stream_update.window_update.stream_id);
+            try std.testing.expect(stream_update.window_update.increment > 0);
+            shared.response_window_updates += 1;
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .expected_request = request_body,
+        .response_body = response_body,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 128 * 1024,
+    });
+    defer client.close();
+
+    var response = try client.request(.{
+        .method = "POST",
+        .path = "/release-capacity",
+        .authority = "localhost",
+        .body = request_body,
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualSlices(u8, response_body, response.body);
+    try std.testing.expect(client.send_connection_window.value > default_flow_window - @as(i64, @intCast(request_body.len)));
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.response_window_updates);
 }
 
 test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
