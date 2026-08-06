@@ -454,6 +454,7 @@ pub fn encodeTransportParameters(
     allocator: std.mem.Allocator,
     params: TransportParameters,
 ) Error!void {
+    try validateMinAckDelayBounds(params.max_ack_delay, params.min_ack_delay);
     if (params.original_destination_connection_id) |cid| {
         try validateTransportConnectionId(cid, false);
         try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.original_destination_connection_id), cid);
@@ -516,6 +517,7 @@ pub fn validateTransportParameters(params: TransportParameters, source: Transpor
     try validateTransportInteger(.active_connection_id_limit, params.active_connection_id_limit);
     if (params.max_datagram_frame_size) |size| try validateTransportInteger(.max_datagram_frame_size, size);
     if (params.min_ack_delay) |delay| try validateTransportInteger(.min_ack_delay, delay);
+    try validateMinAckDelayBounds(params.max_ack_delay, params.min_ack_delay);
 }
 
 pub fn parseTransportParametersTyped(
@@ -744,6 +746,16 @@ fn validateTransportInteger(id: TransportParameterId, value: u64) Error!void {
         },
         else => {},
     }
+}
+
+fn validateMinAckDelayBounds(max_ack_delay_ms: u64, min_ack_delay_us: ?u64) Error!void {
+    const min_ack_delay = min_ack_delay_us orelse return;
+    // ACK_FREQUENCY defines min_ack_delay in microseconds while QUIC's
+    // max_ack_delay transport parameter is in milliseconds.  The extension only
+    // works when the advertised minimum is no larger than the endpoint's own
+    // maximum delayed-ACK timer.
+    const max_ack_delay_us = std.math.mul(u64, max_ack_delay_ms, 1000) catch return error.InvalidTransportParameter;
+    if (min_ack_delay > max_ack_delay_us) return error.InvalidTransportParameter;
 }
 
 fn parsePreferredAddress(value: []const u8) Error!PreferredAddress {
@@ -1716,6 +1728,23 @@ test "QUIC typed transport parameters roundtrip and validate" {
     try std.testing.expectEqualSlices(u8, &client_cid, decoded.initial_source_connection_id.?);
     try std.testing.expectEqual(Version.version_1, decoded.version_information.?.chosen_version);
     try std.testing.expect(decoded.version_information.?.containsAvailableVersion(.version_2));
+
+    var excessive_min_ack_delay: std.ArrayList(u8) = .empty;
+    defer excessive_min_ack_delay.deinit(allocator);
+    try encodeIntegerTransportParameter(&excessive_min_ack_delay, allocator, .max_ack_delay, 25);
+    try encodeIntegerTransportParameter(&excessive_min_ack_delay, allocator, .min_ack_delay, 25_001);
+    try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, excessive_min_ack_delay.items, .client));
+
+    try std.testing.expectError(error.InvalidTransportParameter, validateTransportParameters(.{
+        .max_ack_delay = 10,
+        .min_ack_delay = 10_001,
+    }, .client));
+    var encoded_excessive: std.ArrayList(u8) = .empty;
+    defer encoded_excessive.deinit(allocator);
+    try std.testing.expectError(error.InvalidTransportParameter, encodeTransportParameters(&encoded_excessive, allocator, .{
+        .max_ack_delay = 10,
+        .min_ack_delay = 10_001,
+    }));
 
     var duplicate: std.ArrayList(u8) = .empty;
     defer duplicate.deinit(allocator);
