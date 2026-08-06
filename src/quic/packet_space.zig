@@ -173,6 +173,7 @@ pub const SentPacket = struct {
     lost: bool = false,
     bytes: usize = 0,
     ecn: EcnCodepoint = .not_ect,
+    sent_time_ns: ?u64 = null,
 };
 
 pub const EcnCodepoint = enum {
@@ -204,11 +205,16 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn sentWithEcn(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, ecn: EcnCodepoint) !void {
+        try self.sentAt(packet_number, ack_eliciting, bytes, ecn, null);
+    }
+
+    pub fn sentAt(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64) !void {
         try self.packets.append(self.allocator, .{
             .packet_number = packet_number,
             .ack_eliciting = ack_eliciting,
             .bytes = bytes,
             .ecn = ecn,
+            .sent_time_ns = sent_time_ns,
         });
         switch (ecn) {
             .not_ect => {},
@@ -338,6 +344,23 @@ pub const SentPacketTracker = struct {
         var lost: AckResult = .{};
         for (self.packets.items) |*packet| {
             if (packet.acknowledged or packet.lost or packet.packet_number > largest_lost) continue;
+            packet.lost = true;
+            lost.packets += 1;
+            if (packet.ack_eliciting) lost.bytes += packet.bytes;
+        }
+        return lost;
+    }
+
+    pub fn detectTimeThresholdLoss(self: *SentPacketTracker, now_ns: u64, loss_delay_ns: u64, largest_acknowledged: ?u64) AckResult {
+        var lost: AckResult = .{};
+        for (self.packets.items) |*packet| {
+            if (packet.acknowledged or packet.lost) continue;
+            if (largest_acknowledged) |largest| {
+                if (packet.packet_number > largest) continue;
+            }
+            const sent_time = packet.sent_time_ns orelse continue;
+            const lost_time = std.math.add(u64, sent_time, loss_delay_ns) catch std.math.maxInt(u64);
+            if (now_ns < lost_time) continue;
             packet.lost = true;
             lost.packets += 1;
             if (packet.ack_eliciting) lost.bytes += packet.bytes;
@@ -558,6 +581,33 @@ test "QUIC sent packet tracker disables ECN validation on plain ACK for ECT pack
         .ecn_counts = .{ .ect0_count = 2, .ect1_count = 0, .ecn_ce_count = 0 },
     };
     try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(later_ecn));
+}
+
+test "QUIC sent packet tracker detects time-threshold loss" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(0, true, 1200, .not_ect, 100);
+    try sent.sentAt(1, true, 1200, .not_ect, 180);
+    try sent.sentAt(2, true, 1200, .not_ect, 260);
+
+    const early = sent.detectTimeThresholdLoss(249, 150, 2);
+    try std.testing.expectEqual(@as(usize, 0), early.packets);
+
+    const lost = sent.detectTimeThresholdLoss(250, 150, 2);
+    try std.testing.expectEqual(@as(usize, 1), lost.packets);
+    try std.testing.expectEqual(@as(usize, 1200), lost.bytes);
+    try std.testing.expect(sent.packets.items[0].lost);
+    try std.testing.expect(!sent.packets.items[1].lost);
+
+    // Packets newer than the largest acknowledged packet are not time-threshold
+    // candidates, matching RFC 9002's "earlier than largest acked" rule.
+    const none_for_future = sent.detectTimeThresholdLoss(1_000, 150, 0);
+    try std.testing.expectEqual(@as(usize, 0), none_for_future.packets);
+
+    const remaining = sent.detectTimeThresholdLoss(1_000, 150, 2);
+    try std.testing.expectEqual(@as(usize, 2), remaining.packets);
 }
 
 test "QUIC sent packet tracker detects packet-threshold loss" {
