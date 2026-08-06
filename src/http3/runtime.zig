@@ -41,7 +41,7 @@ pub const Server = struct {
     pub fn receiveRequest(self: *Server) Error!OwnedRequest {
         var datagram = try self.quic_server.receive();
         errdefer datagram.deinit(self.quic_server.endpoint.allocator);
-        const stream = findStreamFrame(datagram.frames) orelse return error.MissingStreamFrame;
+        const stream = try findMessageStreamFrame(datagram.frames) orelse return error.MissingStreamFrame;
         var request = try http3.decodeRequest(self.quic_server.endpoint.allocator, stream.data);
         errdefer request.deinit(self.quic_server.endpoint.allocator);
         return .{
@@ -128,7 +128,7 @@ pub const Client = struct {
         while (true) {
             var datagram = try self.quic_client.receive();
             errdefer datagram.deinit(self.quic_client.endpoint.allocator);
-            const stream = findStreamFrame(datagram.frames) orelse {
+            const stream = (try findMessageStreamFrame(datagram.frames)) orelse {
                 datagram.deinit(self.quic_client.endpoint.allocator);
                 continue;
             };
@@ -477,6 +477,7 @@ pub const ProtectedServer = struct {
             for (packet.frames) |frame| {
                 if (frame != .stream) continue;
                 if (try applyControlStreamFrameForRole(&self.control, self.quic_server.endpoint.allocator, frame.stream, .server)) continue;
+                if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
                 const incoming_id: u62 = @intCast(frame.stream.stream_id);
                 if (!self.control.acceptsLocalRequestStream(incoming_id)) return error.RequestRejected;
                 if (stream_id) |id| {
@@ -569,6 +570,7 @@ pub const ProtectedClient = struct {
             if (from == null) from = packet.from;
             for (packet.frames) |frame| {
                 if (frame == .stream and try applyControlStreamFrameForRole(&self.control, self.quic_client.endpoint.allocator, frame.stream, .client)) continue;
+                if (frame == .stream and (try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
                 if (frame != .stream or frame.stream.stream_id != expected_stream_id) continue;
                 try recv.insert(frame.stream);
                 if (recv.final_size != null and recv.contiguous_end >= recv.final_size.?) {
@@ -652,6 +654,7 @@ fn receiveConnectionStreamBytes(
         for (packet.frames) |frame| {
             if (frame != .stream) continue;
             if (try applyControlStreamFrameForRole(control, connection.endpoint.allocator, frame.stream, role)) continue;
+            if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
             const incoming_id: u62 = @intCast(frame.stream.stream_id);
             if (!control.acceptsLocalRequestStream(incoming_id)) return error.RequestRejected;
             if (stream_id) |id| {
@@ -902,6 +905,31 @@ fn sendProtectedFrames(
         next_packet_number.* += 1;
         offset = end;
     }
+}
+
+const MessageStreamDisposition = enum {
+    request_response,
+    ignore,
+};
+
+fn messageStreamDisposition(stream_id: u64) Error!MessageStreamDisposition {
+    if ((stream_id & 0x02) != 0) return .ignore;
+    // HTTP/3 request/response streams are always client-initiated
+    // bidirectional streams.  Without a negotiated extension, a server-initiated
+    // bidirectional stream is a connection-level H3_STREAM_CREATION_ERROR.
+    if ((stream_id & 0x01) != 0) return error.StreamCreationError;
+    return .request_response;
+}
+
+fn findMessageStreamFrame(frames: []const quic.Frame) Error!?quic.StreamFrame {
+    for (frames) |frame| {
+        if (frame != .stream) continue;
+        switch (try messageStreamDisposition(frame.stream.stream_id)) {
+            .request_response => return frame.stream,
+            .ignore => continue,
+        }
+    }
+    return null;
 }
 
 fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
@@ -1308,6 +1336,58 @@ test "HTTP/3 protected server rejects requests beyond local GOAWAY" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/3 protected runtime rejects server-initiated bidirectional message streams" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xc1, 0x01, 0x02, 0x03 };
+    const server_cid = [_]u8{ 0xc2, 0x01, 0x02, 0x03 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0xc1} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0xc2} ** quic.protection.secret_len);
+
+    var server = try ProtectedServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    var client = try ProtectedClient.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+
+    const invalid = [_]quic.Frame{.{
+        .stream = .{
+            .stream_id = 1, // server-initiated bidirectional: invalid for HTTP/3 messages.
+            .data = "not a request stream",
+            .fin = true,
+        },
+    }};
+    try sendProtectedFrames(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config.send_keys,
+        client.config.peer_connection_id,
+        &client.next_packet_number,
+        &invalid,
+        client.config.max_frames_per_packet,
+    );
+
+    try std.testing.expectError(error.StreamCreationError, server.receiveRequest());
 }
 
 test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" {
