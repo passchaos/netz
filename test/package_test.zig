@@ -139,6 +139,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_receive_max_streams_uni"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_spin_bit"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));
@@ -151,6 +152,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.protection, "ZeroRttPacketOptions"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "sealZeroRttPacket"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "openZeroRttPacket"));
+    try std.testing.expect(@hasField(netz.quic.protection.ShortPacketOptions, "spin_bit"));
+    try std.testing.expect(@hasField(netz.quic.protection.OpenedShortPacket, "spin_bit"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "nextAes128PacketProtectionKeys"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "nextAes128PacketProtectionKeysForVersion"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "Aes128KeyPhaseState"));
@@ -176,6 +179,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendNewToken"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "latestNewToken"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "handshakeConfirmed"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "nextSpinBit"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "resetSpinBit"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamResetInfo"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketTracker"));

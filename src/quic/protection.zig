@@ -175,6 +175,7 @@ pub const ShortPacketOptions = struct {
     destination_connection_id: []const u8,
     packet_number: u64,
     packet_number_len: u8 = 4,
+    spin_bit: bool = false,
     key_phase: bool = false,
     payload: []const u8,
 };
@@ -182,6 +183,7 @@ pub const ShortPacketOptions = struct {
 pub const OpenedShortPacket = struct {
     destination_connection_id: []u8,
     packet_number: u64,
+    spin_bit: bool,
     key_phase: bool,
     payload: []u8,
 
@@ -787,6 +789,7 @@ pub fn sealShortPacket(
     errdefer out.deinit(allocator);
     const pn_len = @as(usize, options.packet_number_len);
     const first_byte: u8 = 0x40 |
+        (if (options.spin_bit) @as(u8, 0x20) else 0) |
         (if (options.key_phase) @as(u8, 0x04) else 0) |
         @as(u8, @intCast(pn_len - 1));
     try out.append(allocator, first_byte);
@@ -819,6 +822,7 @@ pub fn openShortPacket(
     const pn_offset = 1 + destination_connection_id_len;
     try removeHeaderProtection(keys.hp, .short, bytes, pn_offset);
     if ((bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) return error.InvalidInitialPacket;
+    const spin_bit = (bytes[0] & 0x20) != 0;
     const key_phase = (bytes[0] & 0x04) != 0;
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     const payload_offset = pn_offset + pn_len;
@@ -834,6 +838,7 @@ pub fn openShortPacket(
     return .{
         .destination_connection_id = dcid,
         .packet_number = packet_number,
+        .spin_bit = spin_bit,
         .key_phase = key_phase,
         .payload = payload,
     };
@@ -1314,6 +1319,29 @@ test "QUIC 1-RTT short packet seal/open roundtrip" {
     try std.testing.expectEqual(@as(u64, 9), opened.packet_number);
     try std.testing.expectEqualSlices(u8, &dcid, opened.destination_connection_id);
     try std.testing.expectEqualStrings(payload, opened.payload);
+}
+
+test "QUIC short packet preserves spin bit" {
+    const allocator = std.testing.allocator;
+    const keys = deriveAes128Keys([_]u8{0x9a} ** secret_len);
+    const dcid = [_]u8{ 0x01, 0x23, 0x45, 0x67 };
+    const packet = try sealShortPacket(allocator, keys, .{
+        .destination_connection_id = &dcid,
+        .packet_number = 4,
+        .packet_number_len = 2,
+        .spin_bit = true,
+        .key_phase = false,
+        .payload = "spin",
+    });
+    defer allocator.free(packet);
+    // Header protection does not mask the spin bit, so passive observers and
+    // endpoint routing can read it directly from the protected datagram.
+    try std.testing.expect((packet[0] & 0x20) != 0);
+
+    var opened = try openShortPacket(allocator, keys, packet, dcid.len, 0);
+    defer opened.deinit(allocator);
+    try std.testing.expect(opened.spin_bit);
+    try std.testing.expectEqualStrings("spin", opened.payload);
 }
 
 test "QUIC short packet key update opens next and retained previous generations" {

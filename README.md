@@ -53,6 +53,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling,
   protected 0-RTT long-header packet seal/open and frame datagram helpers with
   0-RTT packet-type restrictions,
+  short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,
   1-RTT key-update derivation and key-phase state with ACK gating and retained

@@ -15,6 +15,7 @@ pub const SendOptions = struct {
     destination_connection_id: []const u8,
     packet_number: u64,
     packet_number_len: u8 = 4,
+    spin_bit: bool = false,
     key_phase: bool = false,
     frames: []const quic.Frame,
 };
@@ -23,6 +24,7 @@ const PayloadSendOptions = struct {
     destination_connection_id: []const u8,
     packet_number: u64,
     packet_number_len: u8 = 4,
+    spin_bit: bool = false,
     key_phase: bool = false,
     payload: []const u8,
 };
@@ -95,6 +97,7 @@ pub const ConnectionConfig = struct {
     stream_receive_window: u64 = 64 * 1024,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
     max_stored_new_tokens: usize = 4,
+    enable_spin_bit: bool = false,
 };
 
 const StreamFlowEntry = struct {
@@ -167,6 +170,7 @@ pub const Connection = struct {
     peer_max_streams_uni: u64,
     recv_max_streams_bidi: u64,
     recv_max_streams_uni: u64,
+    spin_bit_value: bool = false,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -297,6 +301,7 @@ pub const Connection = struct {
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = packet_number,
             .packet_number_len = quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload.len),
+            .spin_bit = self.nextSpinBit(),
             .key_phase = self.send_key_phase.currentKeyPhase(),
             .payload = payload,
         });
@@ -528,6 +533,7 @@ pub const Connection = struct {
         );
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFrames(packet.packet.packet_number, packet.frames);
+        self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
         }
@@ -546,6 +552,7 @@ pub const Connection = struct {
         );
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFrames(packet.packet.packet_number, packet.frames);
+        self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
         }
@@ -635,6 +642,22 @@ pub const Connection = struct {
             .bidirectional => self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, maximum_streams),
             .unidirectional => self.peer_max_streams_uni = @max(self.peer_max_streams_uni, maximum_streams),
         }
+    }
+
+    pub fn nextSpinBit(self: Connection) bool {
+        return self.config.enable_spin_bit and self.spin_bit_value;
+    }
+
+    pub fn resetSpinBit(self: *Connection) void {
+        self.spin_bit_value = false;
+    }
+
+    fn updateSpinBitAfterReceive(self: *Connection, peer_spin_bit: bool) void {
+        if (!self.config.enable_spin_bit) return;
+        self.spin_bit_value = switch (self.config.local_endpoint) {
+            .client => !peer_spin_bit,
+            .server => peer_spin_bit,
+        };
     }
 
     fn receiveStreamsBlocked(self: *Connection, maximum_streams: u64, direction: enum { bidirectional, unidirectional }) Error!void {
@@ -888,6 +911,7 @@ pub fn sendFrames(
         .destination_connection_id = options.destination_connection_id,
         .packet_number = options.packet_number,
         .packet_number_len = options.packet_number_len,
+        .spin_bit = options.spin_bit,
         .key_phase = options.key_phase,
         .payload = payload,
     });
@@ -931,6 +955,7 @@ fn sendPayload(
         .destination_connection_id = options.destination_connection_id,
         .packet_number = options.packet_number,
         .packet_number_len = options.packet_number_len,
+        .spin_bit = options.spin_bit,
         .key_phase = options.key_phase,
         .payload = options.payload,
     });
@@ -1117,6 +1142,102 @@ test "QUIC 1-RTT STREAM frame exchange over UDP endpoint" {
     try std.testing.expect(response.from.eql(&server.address()));
     try std.testing.expectEqualSlices(u8, &client_dcid, response.packet.destination_connection_id);
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
+}
+
+test "QUIC 1-RTT spin bit follows enabled single-path policy" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xab} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .local_endpoint = .client,
+        .enable_spin_bit = true,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_spin_bit = true,
+    });
+    defer server.deinit();
+
+    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .spin_bit = true,
+        .frames = &[_]quic.Frame{.{ .ping = {} }},
+    });
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    try std.testing.expect(first.packet.spin_bit);
+    try std.testing.expect(server.nextSpinBit());
+
+    try server.send(&[_]quic.Frame{.{ .ping = {} }});
+    var response = try client.receivePacket();
+    defer response.deinit(allocator);
+    try std.testing.expect(response.packet.spin_bit);
+    try std.testing.expect(!client.nextSpinBit());
+
+    client.resetSpinBit();
+    try std.testing.expect(!client.nextSpinBit());
+}
+
+test "QUIC 1-RTT spin bit remains disabled by default" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const server_cid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xac} ** quic.protection.secret_len);
+
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .spin_bit = true,
+        .frames = &[_]quic.Frame{.{ .ping = {} }},
+    });
+    var packet = try server.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expect(packet.packet.spin_bit);
+    try std.testing.expect(!server.nextSpinBit());
 }
 
 test "QUIC 0-RTT long-header frame exchange enforces packet context" {
