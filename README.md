@@ -109,7 +109,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   validation attempts, and validate the new path on a matching PATH_RESPONSE,
   plus a blocking UDP endpoint runtime for frame datagrams with a
   `std.Io.async` concurrent receive helper
-- WebSocket handshakes, nonce validation, frame masking, strict frame/control
+- WebSocket handshakes with Host authority and nonce validation, frame masking, strict frame/control
   validation including control/continuation RSV rejection, close payload checks, fragmented message assembly with aggregate
   message-size limits, automatic PING→PONG and close echo/completed-close short-circuit handling,
   outbound text/close/control-frame validation,

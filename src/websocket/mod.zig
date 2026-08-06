@@ -345,6 +345,7 @@ pub fn validateClientHandshake(req: http1.Request) Error!void {
     if (req.version != .http_1_1) return error.InvalidHandshake;
     const host = try requiredSingletonHeader(req.headers, "host");
     if (wire.trimOws(host).len == 0) return error.InvalidHandshake;
+    http1.validateHostValue(host) catch return error.InvalidHandshake;
     const upgrade = try requiredSingletonHeader(req.headers, "upgrade");
     if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
     if (!hasHeader(req.headers, "connection")) return error.MissingHeader;
@@ -646,6 +647,16 @@ test "WebSocket handshake validation" {
     var empty_host_req = try http1.parseRequest(allocator, empty_host, .{});
     defer empty_host_req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(empty_host_req));
+
+    const invalid_host = "GET /chat HTTP/1.1\r\nHost: http://example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var invalid_host_req = try http1.parseRequest(allocator, invalid_host, .{});
+    defer invalid_host_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(invalid_host_req));
+
+    const unbracketed_ipv6_host = "GET /chat HTTP/1.1\r\nHost: 2001:db8::1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var unbracketed_ipv6_host_req = try http1.parseRequest(allocator, unbracketed_ipv6_host, .{});
+    defer unbracketed_ipv6_host_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(unbracketed_ipv6_host_req));
 
     const duplicate_host = "GET /chat HTTP/1.1\r\nHost: example.com\r\nHost: other.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
     var duplicate_host_req = try http1.parseRequest(allocator, duplicate_host, .{});
