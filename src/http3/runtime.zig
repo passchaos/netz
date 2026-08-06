@@ -838,6 +838,12 @@ fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.m
             return error.UnexpectedFrame;
         }
     }
+    if (handled and role == .server and control.peer_goaway_id != previous.peer_goaway_id) {
+        validateClientGoAwayPushId(control.peer_goaway_id.?) catch |err| {
+            control.* = previous;
+            return err;
+        };
+    }
     return handled;
 }
 
@@ -965,7 +971,42 @@ test "HTTP/3 client rejects server-only control frames" {
     }, .client));
     try std.testing.expect(client_control.latest_priority_update == null);
 
+    stream_bytes.clearRetainingCapacity();
+    goaway_payload.clearRetainingCapacity();
+    try http3.writeControlStreamPrefix(&stream_bytes, allocator);
+    try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
+    try quic.varint.encode(&goaway_payload, allocator, 1);
+    try (http3.Frame{ .frame_type = http3.FrameType.goaway, .payload = goaway_payload.items, .consumed = 0 }).write(&stream_bytes, allocator);
+
     var server_control = http3.ControlState{};
+    try std.testing.expectError(error.InvalidFrame, applyControlStreamFrameForRole(&server_control, allocator, .{
+        .stream_id = 2,
+        .offset = 0,
+        .fin = false,
+        .data = stream_bytes.items,
+    }, .server));
+    try std.testing.expect(server_control.peer_goaway_id == null);
+
+    stream_bytes.clearRetainingCapacity();
+    goaway_payload.clearRetainingCapacity();
+    try http3.writeControlStreamPrefix(&stream_bytes, allocator);
+    try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
+    try quic.varint.encode(&goaway_payload, allocator, 0);
+    try (http3.Frame{ .frame_type = http3.FrameType.goaway, .payload = goaway_payload.items, .consumed = 0 }).write(&stream_bytes, allocator);
+    try std.testing.expect(try applyControlStreamFrameForRole(&server_control, allocator, .{
+        .stream_id = 2,
+        .offset = 0,
+        .fin = false,
+        .data = stream_bytes.items,
+    }, .server));
+    try std.testing.expectEqual(@as(?u64, 0), server_control.peer_goaway_id);
+
+    stream_bytes.clearRetainingCapacity();
+    try http3.writeControlStreamPrefix(&stream_bytes, allocator);
+    try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
+    try http3.writePriorityUpdateFrame(&stream_bytes, allocator, 0, .{ .urgency = 1 });
+
+    server_control = .{};
     try std.testing.expect(try applyControlStreamFrameForRole(&server_control, allocator, .{
         .stream_id = 2,
         .offset = 0,
