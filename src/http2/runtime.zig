@@ -17,7 +17,7 @@ pub const Error = http2.Error || error{
     ExtendedConnectDisabled,
     StreamReset,
     ConnectionGoAway,
-} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
+} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
 
@@ -198,7 +198,24 @@ pub const Client = struct {
         try validateLocalLimits(limits);
         const stream = try address.connect(io, .{ .mode = .stream });
         errdefer stream.close(io);
+        return connectStream(allocator, io, stream, limits);
+    }
 
+    pub fn connectHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+    ) Error!Connection {
+        try validateLocalLimits(limits);
+        const host_name = try net.HostName.init(host);
+        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        errdefer stream.close(io);
+        return connectStream(allocator, io, stream, limits);
+    }
+
+    fn connectStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!Connection {
         try writeAll(io, stream, http2.connection_preface);
         try writeInitialSettings(allocator, io, stream, limits, .client);
 
@@ -2203,6 +2220,63 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
     try std.testing.expectEqualStrings("done", goaway.goaway.debug_data);
+}
+
+test "HTTP/2 client connects by host name" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("localhost", request.authority.?);
+            try connection.writeResponse(request.stream_id, .{ .body = "h2-dns-ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/dns",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("h2-dns-ok", response.body);
 }
 
 test "HTTP/2 readPing ignores ACK frames" {
