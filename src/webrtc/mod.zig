@@ -2467,6 +2467,12 @@ pub const sctp = struct {
         stream_sequence_number: u16,
     };
 
+    pub const SkippedMessage = struct {
+        stream_id: u16,
+        unordered: bool = false,
+        message_identifier: u32,
+    };
+
     pub const ErrorCauseCode = enum(u16) {
         invalid_stream_identifier = 0x0001,
         missing_mandatory_parameter = 0x0002,
@@ -2541,6 +2547,36 @@ pub const sctp = struct {
                 };
             }
             return .{ .new_cumulative_tsn = new_cumulative_tsn, .skipped_streams = skipped };
+        }
+    };
+
+    pub const IForwardTsnChunk = struct {
+        new_cumulative_tsn: u32,
+        skipped_messages: []SkippedMessage = &.{},
+
+        pub fn deinit(self: *IForwardTsnChunk, allocator: std.mem.Allocator) void {
+            allocator.free(self.skipped_messages);
+            self.* = undefined;
+        }
+
+        pub fn parse(allocator: std.mem.Allocator, chunk: Chunk) Error!IForwardTsnChunk {
+            if (chunk.chunk_type != .i_forward_tsn or chunk.flags != 0 or chunk.value.len < 4 or ((chunk.value.len - 4) % 8) != 0) return error.InvalidSctpPacket;
+            var cursor = wire.Cursor.init(chunk.value);
+            const new_cumulative_tsn = try cursor.readInt(u32, .big);
+            var messages: std.ArrayList(SkippedMessage) = .empty;
+            errdefer messages.deinit(allocator);
+            while (!cursor.eof()) {
+                const stream_id = try cursor.readInt(u16, .big);
+                const flags = try cursor.readInt(u16, .big);
+                if ((flags & ~@as(u16, 0x0001)) != 0) return error.InvalidSctpPacket;
+                const message_identifier = try cursor.readInt(u32, .big);
+                try appendSkippedMessageNormalized(&messages, allocator, .{
+                    .stream_id = stream_id,
+                    .unordered = (flags & 0x0001) != 0,
+                    .message_identifier = message_identifier,
+                });
+            }
+            return .{ .new_cumulative_tsn = new_cumulative_tsn, .skipped_messages = try messages.toOwnedSlice(allocator) };
         }
     };
 
@@ -3257,6 +3293,33 @@ pub const sctp = struct {
         try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
     }
 
+    pub fn writeIForwardTsnPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, forward_tsn: IForwardTsnChunk) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeIForwardTsnChunk(list, allocator, forward_tsn);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeIForwardTsnChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, forward_tsn: IForwardTsnChunk) Error!void {
+        if (forward_tsn.skipped_messages.len > (std.math.maxInt(u16) - 8) / 8) return error.InvalidSctpPacket;
+        var normalized: std.ArrayList(SkippedMessage) = .empty;
+        defer normalized.deinit(allocator);
+        for (forward_tsn.skipped_messages) |message| try appendSkippedMessageNormalized(&normalized, allocator, message);
+
+        const chunk_len = 8 + normalized.items.len * 8;
+        try list.append(allocator, @intFromEnum(ChunkType.i_forward_tsn));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        try wire.appendInt(list, allocator, u32, forward_tsn.new_cumulative_tsn, .big);
+        for (normalized.items) |message| {
+            try wire.appendInt(list, allocator, u16, message.stream_id, .big);
+            try wire.appendInt(list, allocator, u16, if (message.unordered) @as(u16, 1) else @as(u16, 0), .big);
+            try wire.appendInt(list, allocator, u32, message.message_identifier, .big);
+        }
+        try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
+    }
+
     pub fn writeReconfigPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, parameters: []const ReconfigParameter) Error!void {
         if (parameters.len == 0) return error.InvalidSctpPacket;
         const start = list.items.len;
@@ -3508,6 +3571,18 @@ pub const sctp = struct {
 
     fn isConstEmptyU16(value: []const u16) bool {
         return value.ptr == (&[_]u16{}).ptr and value.len == 0;
+    }
+
+    fn appendSkippedMessageNormalized(list: *std.ArrayList(SkippedMessage), allocator: std.mem.Allocator, message: SkippedMessage) Error!void {
+        for (list.items) |*existing| {
+            if (existing.stream_id == message.stream_id and existing.unordered == message.unordered) {
+                if (tsnAfter(message.message_identifier, existing.message_identifier)) {
+                    existing.message_identifier = message.message_identifier;
+                }
+                return;
+            }
+        }
+        try list.append(allocator, message);
     }
 
     fn validateZeroPadding(bytes: []const u8) Error!void {
@@ -4400,6 +4475,42 @@ test "SCTP FORWARD-TSN packet roundtrip" {
     });
     defer empty_forward.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), empty_forward.skipped_streams.len);
+
+    var skipped_messages = [_]sctp.SkippedMessage{
+        .{ .stream_id = 1, .message_identifier = 7 },
+        .{ .stream_id = 1, .message_identifier = 9 },
+        .{ .stream_id = 1, .unordered = true, .message_identifier = 4 },
+        .{ .stream_id = 2, .message_identifier = 3 },
+    };
+    encoded.clearRetainingCapacity();
+    try sctp.writeIForwardTsnPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, .{
+        .new_cumulative_tsn = 9100,
+        .skipped_messages = &skipped_messages,
+    });
+    try std.testing.expect(try sctp.validChecksum(encoded.items));
+    var parsed_interleaved = try sctp.parsePacket(allocator, encoded.items, true);
+    defer parsed_interleaved.deinit(allocator);
+    try std.testing.expectEqual(sctp.ChunkType.i_forward_tsn, parsed_interleaved.chunks[0].chunk_type);
+    var i_forward = try sctp.IForwardTsnChunk.parse(allocator, parsed_interleaved.chunks[0]);
+    defer i_forward.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 9100), i_forward.new_cumulative_tsn);
+    try std.testing.expectEqual(@as(usize, 3), i_forward.skipped_messages.len);
+    try std.testing.expectEqual(@as(u16, 1), i_forward.skipped_messages[0].stream_id);
+    try std.testing.expect(!i_forward.skipped_messages[0].unordered);
+    try std.testing.expectEqual(@as(u32, 9), i_forward.skipped_messages[0].message_identifier);
+    try std.testing.expect(i_forward.skipped_messages[1].unordered);
+
+    encoded.items[23] = 0x02; // Reserved flags in the first I-FORWARD-TSN stream entry.
+    std.mem.writeInt(u32, encoded.items[8..12], 0, .little);
+    const repaired_checksum = try sctp.checksum(encoded.items);
+    std.mem.writeInt(u32, encoded.items[8..12], repaired_checksum, .little);
+    var invalid_interleaved = try sctp.parsePacket(allocator, encoded.items, true);
+    defer invalid_interleaved.deinit(allocator);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.IForwardTsnChunk.parse(allocator, invalid_interleaved.chunks[0]));
 }
 
 test "SCTP RE-CONFIG stream reset request and response" {
