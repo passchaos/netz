@@ -59,6 +59,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   encoding wired into 1-RTT ACK/STREAM exchange, stream send/receive state with
   duplicate-overlap conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,
+  RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,
+  receive queues, max-payload calculation, queue overflow/drop counters, and
+  oversized/disabled DATAGRAM rejection,
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling,

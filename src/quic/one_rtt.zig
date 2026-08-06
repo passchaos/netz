@@ -13,6 +13,9 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     EcnDisabled,
     AntiAmplificationLimited,
     ActiveMigrationDisabled,
+    DatagramsNotEnabled,
+    DatagramQueueFull,
+    DatagramBufferTooSmall,
 };
 
 pub const SendOptions = struct {
@@ -116,6 +119,9 @@ pub const ConnectionConfig = struct {
     enable_pmtud: bool = false,
     pmtud_max_probe_size: usize = quic.pmtu.max_ipv4_udp_payload_size,
     peer_disable_active_migration: bool = false,
+    local_max_datagram_frame_size: ?usize = null,
+    peer_max_datagram_frame_size: ?usize = null,
+    max_datagram_queue_items: usize = 16,
 };
 
 const StreamFlowEntry = struct {
@@ -238,6 +244,10 @@ pub const Connection = struct {
     peer_address_bytes_received: usize = 0,
     peer_address_bytes_sent: usize = 0,
     pmtud: quic.pmtu.State = .{},
+    datagram_recv_queue: std.ArrayList([]u8) = .empty,
+    datagrams_sent_count: u64 = 0,
+    datagrams_received_count: u64 = 0,
+    datagrams_dropped_incoming_count: u64 = 0,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -276,6 +286,8 @@ pub const Connection = struct {
         self.stream_send_flows.deinit(self.endpoint.allocator);
         for (self.stream_recv_flows.items) |*entry| entry.deinit();
         self.stream_recv_flows.deinit(self.endpoint.allocator);
+        for (self.datagram_recv_queue.items) |payload| self.endpoint.allocator.free(payload);
+        self.datagram_recv_queue.deinit(self.endpoint.allocator);
         self.* = undefined;
     }
 
@@ -339,6 +351,56 @@ pub const Connection = struct {
         }
         try self.sendTrackedFramesEcnAt(frames, ecn, sent_time_ns);
         self.noteSentStreams(frames);
+    }
+
+    pub fn datagramSendEnabled(self: Connection) bool {
+        return self.config.peer_max_datagram_frame_size != null;
+    }
+
+    pub fn datagramReceiveEnabled(self: Connection) bool {
+        return self.config.local_max_datagram_frame_size != null;
+    }
+
+    pub fn datagramsEnabled(self: Connection) bool {
+        return self.datagramSendEnabled() and self.datagramReceiveEnabled();
+    }
+
+    pub fn maxDatagramPayloadSize(self: Connection) ?usize {
+        const frame_limit = self.config.peer_max_datagram_frame_size orelse return null;
+        return maxDatagramPayloadForFrameSize(@min(frame_limit, self.config.max_datagram_size));
+    }
+
+    pub fn sendDatagram(self: *Connection, data: []const u8) Error!void {
+        const max_payload = self.maxDatagramPayloadSize() orelse return error.DatagramsNotEnabled;
+        if (data.len > max_payload) return error.DatagramTooLarge;
+        const frames = [_]quic.Frame{.{ .datagram = .{ .data = data, .length_present = true } }};
+        try self.send(&frames);
+        self.datagrams_sent_count +|= 1;
+    }
+
+    pub fn popDatagram(self: *Connection, out: []u8) Error!?[]u8 {
+        if (self.datagram_recv_queue.items.len == 0) return null;
+        const payload = self.datagram_recv_queue.orderedRemove(0);
+        defer self.endpoint.allocator.free(payload);
+        if (payload.len > out.len) return error.DatagramBufferTooSmall;
+        @memcpy(out[0..payload.len], payload);
+        return out[0..payload.len];
+    }
+
+    pub fn datagramReceiveQueueLen(self: Connection) usize {
+        return self.datagram_recv_queue.items.len;
+    }
+
+    pub fn datagramsSent(self: Connection) u64 {
+        return self.datagrams_sent_count;
+    }
+
+    pub fn datagramsReceived(self: Connection) u64 {
+        return self.datagrams_received_count;
+    }
+
+    pub fn datagramsDroppedIncoming(self: Connection) u64 {
+        return self.datagrams_dropped_incoming_count;
     }
 
     fn sendDataBlocked(self: *Connection) Error!void {
@@ -1106,6 +1168,7 @@ pub const Connection = struct {
                 .stop_sending => |stop| try self.receiveStopSending(stop),
                 .new_token => |new_token| try self.receiveNewToken(new_token),
                 .handshake_done => try self.receiveHandshakeDone(),
+                .datagram => |datagram| try self.receiveDatagramFrame(datagram),
                 .connection_close => |close| try self.setCloseInfo(.{
                     .application = false,
                     .error_code = close.error_code,
@@ -1195,6 +1258,7 @@ pub const Connection = struct {
                 .handshake_done => {
                     if (self.config.local_endpoint == .server) return error.InvalidFrame;
                 },
+                .datagram => |datagram| try self.validateDatagramFrame(datagram),
                 else => {},
             }
         }
@@ -1351,6 +1415,24 @@ pub const Connection = struct {
     fn receiveHandshakeDone(self: *Connection) Error!void {
         if (self.config.local_endpoint == .server) return error.InvalidFrame;
         self.handshake_confirmed = true;
+    }
+
+    fn receiveDatagramFrame(self: *Connection, datagram: quic.DatagramFrame) Error!void {
+        try self.validateDatagramFrame(datagram);
+        if (self.datagram_recv_queue.items.len >= self.config.max_datagram_queue_items) {
+            self.datagrams_dropped_incoming_count +|= 1;
+            return;
+        }
+        const owned = try self.endpoint.allocator.dupe(u8, datagram.data);
+        errdefer self.endpoint.allocator.free(owned);
+        try self.datagram_recv_queue.append(self.endpoint.allocator, owned);
+        self.datagrams_received_count +|= 1;
+    }
+
+    fn validateDatagramFrame(self: Connection, datagram: quic.DatagramFrame) Error!void {
+        const frame_limit = self.config.local_max_datagram_frame_size orelse return error.InvalidFrame;
+        const frame_size = datagramFrameWireSize(datagram) orelse return error.InvalidFrameLength;
+        if (frame_size > frame_limit) return error.InvalidFrame;
     }
 
     fn receiveResetStream(self: *Connection, reset: quic.ResetStreamFrame) Error!void {
@@ -1732,6 +1814,29 @@ fn countStreamBytes(frames: []const quic.Frame) u64 {
         if (frame == .stream) total += frame.stream.data.len;
     }
     return total;
+}
+
+fn datagramFrameWireSize(datagram: quic.DatagramFrame) ?usize {
+    const type_len = quic.varint.length(if (datagram.length_present) @intFromEnum(quic.FrameType.datagram_len) else @intFromEnum(quic.FrameType.datagram)) catch return null;
+    var total = std.math.add(usize, type_len, datagram.data.len) catch return null;
+    if (datagram.length_present) {
+        const len_len = quic.varint.length(datagram.data.len) catch return null;
+        total = std.math.add(usize, total, len_len) catch return null;
+    }
+    return total;
+}
+
+fn maxDatagramPayloadForFrameSize(frame_size: usize) ?usize {
+    const type_len = quic.varint.length(@intFromEnum(quic.FrameType.datagram_len)) catch return null;
+    if (frame_size <= type_len) return null;
+    var len_len: usize = 1;
+    while (true) {
+        if (frame_size <= type_len + len_len) return null;
+        const candidate = frame_size - type_len - len_len;
+        const candidate_len = quic.varint.length(candidate) catch return null;
+        if (candidate_len == len_len) return candidate;
+        len_len = candidate_len;
+    }
 }
 
 pub fn receiveZeroRtt(
@@ -4813,4 +4918,112 @@ test "QUIC 1-RTT connection rejects peer-created streams beyond receive limit" {
     });
     try std.testing.expectError(error.StreamLimitExceeded, server.receivePacket());
     try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
+}
+
+test "QUIC 1-RTT DATAGRAM send receive and queue limits" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const server_cid = [_]u8{ 0xd5, 0xd6, 0xd7, 0xd8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xd0} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .max_datagram_queue_items = 2,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .peer_max_datagram_frame_size = 1200,
+        .max_datagram_queue_items = 2,
+    });
+    defer server.deinit();
+
+    try std.testing.expect(client.datagramsEnabled());
+    try std.testing.expect(server.datagramReceiveEnabled());
+    try std.testing.expect((client.maxDatagramPayloadSize() orelse 0) > 1000);
+
+    try client.sendDatagram("one");
+    var received = try server.receivePacket();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), client.datagramsSent());
+    try std.testing.expectEqual(@as(u64, 1), server.datagramsReceived());
+    try std.testing.expectEqual(@as(usize, 1), server.datagramReceiveQueueLen());
+    var out: [16]u8 = undefined;
+    const popped = (try server.popDatagram(&out)).?;
+    try std.testing.expectEqualStrings("one", popped);
+    try std.testing.expectEqual(@as(usize, 0), server.datagramReceiveQueueLen());
+
+    try client.send(&.{
+        .{ .datagram = .{ .data = "two", .length_present = true } },
+        .{ .datagram = .{ .data = "three", .length_present = true } },
+        .{ .datagram = .{ .data = "drop", .length_present = true } },
+    });
+    var queued = try server.receivePacket();
+    defer queued.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 3), server.datagramsReceived());
+    try std.testing.expectEqual(@as(u64, 1), server.datagramsDroppedIncoming());
+    try std.testing.expectEqual(@as(usize, 2), server.datagramReceiveQueueLen());
+
+    try std.testing.expect((try server.popDatagram(&out)) != null);
+    try std.testing.expectError(error.DatagramBufferTooSmall, server.popDatagram(out[0..2]));
+}
+
+test "QUIC 1-RTT DATAGRAM enforces negotiation and frame-size limits" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe0} ** quic.protection.secret_len);
+
+    var no_dgram = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &cid,
+        .peer_connection_id = &cid,
+    });
+    defer no_dgram.deinit();
+    try std.testing.expectError(error.DatagramsNotEnabled, no_dgram.sendDatagram("disabled"));
+
+    var limited = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &cid,
+        .peer_connection_id = &cid,
+        .local_max_datagram_frame_size = 8,
+        .peer_max_datagram_frame_size = 8,
+    });
+    defer limited.deinit();
+    try std.testing.expectEqual(@as(?usize, 6), limited.maxDatagramPayloadSize());
+    try std.testing.expectError(error.DatagramTooLarge, limited.sendDatagram("1234567"));
+    try std.testing.expectError(error.InvalidFrame, limited.validateDatagramFrame(.{ .data = "1234567", .length_present = true }));
 }
