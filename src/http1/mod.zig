@@ -198,6 +198,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     const consumed_head = head_end + 4;
     const parsed_body = try parseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
+    if (parsed_body.framing == .chunked) try parsed_headers.stripContentLength(allocator);
 
     return .{
         .method = method,
@@ -258,6 +259,7 @@ pub fn parseResponseWithContext(
     else
         try parseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
+    if (parsed_body.framing == .chunked) try parsed_headers.stripContentLength(allocator);
 
     return .{
         .version = version,
@@ -282,6 +284,22 @@ const ParsedHeaders = struct {
         freeHeaderValueStorage(allocator, self.value_storage);
         allocator.free(self.headers);
         self.* = undefined;
+    }
+
+    fn stripContentLength(self: *ParsedHeaders, allocator: std.mem.Allocator) Error!void {
+        var kept: usize = 0;
+        var removed = false;
+        for (self.headers) |header| {
+            if (header.eqlName("content-length")) {
+                removed = true;
+                continue;
+            }
+            self.headers[kept] = header;
+            kept += 1;
+        }
+        if (!removed) return;
+        const stripped = try allocator.realloc(self.headers, kept);
+        self.headers = stripped;
     }
 };
 
@@ -937,11 +955,12 @@ test "HTTP/1 chunked extensions are bounded" {
 
 test "HTTP/1 parser decodes chunked transfer bodies" {
     const allocator = std.testing.allocator;
-    const raw = "POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\nDigest: sha-256=demo\r\n\r\nnext";
+    const raw = "POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 999\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\nDigest: sha-256=demo\r\n\r\nnext";
     var req = try parseRequest(allocator, raw, .{});
     defer req.deinit(allocator);
 
     try std.testing.expectEqual(BodyFraming.chunked, req.body_framing);
+    try std.testing.expect(req.header("content-length") == null);
     try std.testing.expectEqualStrings("hello world", req.body);
     try std.testing.expectEqualStrings("sha-256=demo", req.trailers[0].value);
     try std.testing.expectEqual(raw.len - "next".len, req.consumed);
@@ -975,6 +994,13 @@ test "HTTP/1 response body framing helpers" {
     try std.testing.expectEqual(@as(usize, raw.len - "hello".len), resp.consumed);
     try std.testing.expectEqualStrings("", resp.body);
     try std.testing.expect(!resp.keepAlive());
+
+    const chunked = "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nTransfer-Encoding: chunked\r\n\r\n4\r\npong\r\n0\r\n\r\n";
+    var chunked_resp = try parseResponse(allocator, chunked, .{});
+    defer chunked_resp.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.chunked, chunked_resp.body_framing);
+    try std.testing.expect(chunked_resp.header("content-length") == null);
+    try std.testing.expectEqualStrings("pong", chunked_resp.body);
 }
 
 test "HTTP/1 response parsing honors request method body rules" {
