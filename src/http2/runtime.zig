@@ -1204,6 +1204,7 @@ pub const Connection = struct {
     }
 
     fn sendStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
+        if (stream_id == 0) return error.InvalidStreamId;
         for (self.send_stream_windows.items) |*entry| {
             if (entry.stream_id == stream_id) return &entry.window;
         }
@@ -1212,6 +1213,7 @@ pub const Connection = struct {
     }
 
     fn recvStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
+        if (stream_id == 0) return error.InvalidStreamId;
         for (self.recv_stream_windows.items) |*entry| {
             if (entry.stream_id == stream_id) return &entry.window;
         }
@@ -4895,6 +4897,26 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     }));
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(1)).value);
+}
+
+test "HTTP/2 stream window helpers reject connection stream id" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectError(error.InvalidStreamId, connection.sendStreamWindow(0));
+    try std.testing.expectError(error.InvalidStreamId, connection.recvStreamWindow(0));
+    try std.testing.expectEqual(@as(usize, 0), connection.send_stream_windows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.recv_stream_windows.items.len);
 }
 
 test "HTTP/2 local initial window config seeds receive stream windows" {
