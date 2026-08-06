@@ -147,16 +147,20 @@ pub const ExtensionNegotiation = struct {
 
     pub fn validateResponse(header_value: ?[]const u8) Error!ExtensionNegotiation {
         const raw = header_value orelse return .{};
+        var negotiated: ?ExtensionNegotiation = null;
         var responses = std.mem.splitScalar(u8, raw, ',');
         while (responses.next()) |response| {
-            const parsed = (try parseExtensionOffer(wire.trimOws(response))) orelse return error.InvalidExtension;
+            const trimmed = wire.trimOws(response);
+            if (trimmed.len == 0) return error.InvalidExtension;
+            const parsed = (try parseExtensionOffer(trimmed)) orelse return error.InvalidExtension;
             if (!parsed.permessage_deflate) return error.InvalidExtension;
+            if (negotiated != null) return error.InvalidExtension;
             if (!parsed.client_no_context_takeover or !parsed.server_no_context_takeover) return error.InvalidExtension;
             if (parsed.client_max_window_bits) |bits| if (bits != 15) return error.InvalidExtension;
             if (parsed.server_max_window_bits) |bits| if (bits != 15) return error.InvalidExtension;
-            return parsed;
+            negotiated = parsed;
         }
-        return .{};
+        return negotiated orelse error.InvalidExtension;
     }
 };
 
@@ -589,6 +593,12 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse("permessage-deflate"));
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
         "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=12",
+    ));
+    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover, x-unknown",
+    ));
+    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover, permessage-deflate; server_no_context_takeover; client_no_context_takeover",
     ));
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.parseOffer(
         "permessage-deflate; server_no_context_takeover; x-unknown=1",
