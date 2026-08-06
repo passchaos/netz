@@ -121,6 +121,21 @@ pub const Queue = struct {
         return null;
     }
 
+    pub fn packetNumberCandidate(self: *const Queue, packet_number: u64) ?Candidate {
+        for (self.pending.items, 0..) |entry, group_index| {
+            for (entry.packet_numbers.items) |candidate| {
+                if (candidate != packet_number) continue;
+                return .{
+                    .group_index = group_index,
+                    .packet_number = entry.newestPacketNumber(),
+                    .payload = entry.payload,
+                    .retransmission_count = entry.retransmission_count,
+                };
+            }
+        }
+        return null;
+    }
+
     pub fn recordRetransmission(self: *Queue, group_index: usize, packet_number: u64) Error!void {
         if (group_index >= self.pending.items.len) return error.InvalidRetransmission;
         const entry = &self.pending.items[group_index];
@@ -269,4 +284,22 @@ test "QUIC recovery queue schedules packet-threshold loss once per newest copy" 
     };
     try std.testing.expectEqual(@as(usize, 1), try queue.applyAck(ack));
     try std.testing.expectEqual(@as(usize, 2), queue.pendingCount());
+}
+
+test "QUIC recovery queue locates candidate by any packet number copy" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    try queue.trackSent(1, "payload");
+    try queue.recordRetransmission(0, 5);
+
+    const original = queue.packetNumberCandidate(1).?;
+    try std.testing.expectEqual(@as(usize, 0), original.group_index);
+    try std.testing.expectEqual(@as(u64, 5), original.packet_number);
+    try std.testing.expectEqualStrings("payload", original.payload);
+
+    const newest = queue.packetNumberCandidate(5).?;
+    try std.testing.expectEqual(@as(usize, 0), newest.group_index);
+    try std.testing.expect(queue.packetNumberCandidate(99) == null);
 }

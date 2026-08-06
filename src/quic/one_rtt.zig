@@ -252,6 +252,14 @@ pub const Connection = struct {
     }
 
     pub fn sendWithEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
+        try self.sendWithEcnAt(frames, ecn, null);
+    }
+
+    pub fn sendAt(self: *Connection, frames: []const quic.Frame, sent_time_ns: u64) Error!void {
+        try self.sendWithEcnAt(frames, .not_ect, sent_time_ns);
+    }
+
+    pub fn sendWithEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         const stream_bytes = countStreamBytes(frames);
         for (frames) |frame| {
@@ -296,7 +304,7 @@ pub const Connection = struct {
             };
             reserved_streams.items[reserved_index].bytes = frame.stream.data.len;
         }
-        try self.sendTrackedFramesEcn(frames, ecn);
+        try self.sendTrackedFramesEcnAt(frames, ecn, sent_time_ns);
         self.noteSentStreams(frames);
     }
 
@@ -315,6 +323,10 @@ pub const Connection = struct {
     }
 
     fn sendTrackedFramesEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
+        try self.sendTrackedFramesEcnAt(frames, ecn, null);
+    }
+
+    fn sendTrackedFramesEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         const packet_number = self.next_packet_number;
         const payload = try encodeFrames(self.endpoint.allocator, frames);
         defer self.endpoint.allocator.free(payload);
@@ -336,7 +348,7 @@ pub const Connection = struct {
         errdefer {
             if (tracked_recovery) _ = self.recovery.forgetPacketNumber(packet_number);
         }
-        try self.sent.sentWithEcn(packet_number, is_ack_eliciting, if (is_ack_eliciting) payload.len else 0, ecn);
+        try self.sent.sentAt(packet_number, is_ack_eliciting, if (is_ack_eliciting) payload.len else 0, ecn, sent_time_ns);
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacket(packet_number, payload);
         self.next_packet_number += 1;
@@ -366,6 +378,19 @@ pub const Connection = struct {
         return true;
     }
 
+    pub fn retransmitTimeThresholdLoss(self: *Connection, now_ns: u64, loss_delay_ns: u64) Error!bool {
+        const largest = self.sent.largestAcknowledged() orelse return false;
+        const lost = self.sent.detectTimeThresholdLoss(now_ns, loss_delay_ns, largest);
+        if (lost.bytes > 0) self.congestion.onLost(lost.bytes);
+        for (self.sent.packets.items) |packet| {
+            if (!packet.lost) continue;
+            const candidate = self.recovery.packetNumberCandidate(packet.packet_number) orelse continue;
+            try self.retransmitCandidate(candidate, .congestion_controlled);
+            return true;
+        }
+        return false;
+    }
+
     fn retransmitCandidate(self: *Connection, candidate: quic.recovery.Candidate, mode: enum { congestion_controlled, pto_probe }) Error!void {
         const packet_number = self.next_packet_number;
         switch (mode) {
@@ -376,7 +401,7 @@ pub const Connection = struct {
 
         try self.recovery.recordRetransmission(candidate.group_index, packet_number);
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
-        try self.sent.sent(packet_number, true, candidate.payload.len);
+        try self.sent.sentAt(packet_number, true, candidate.payload.len, .not_ect, null);
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacket(packet_number, candidate.payload);
         self.next_packet_number += 1;
@@ -3121,6 +3146,64 @@ test "QUIC 1-RTT connection retransmits PTO payload and clears recovery on ACK" 
     try std.testing.expect(client.sent.packets.items[1].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
     try std.testing.expect(!(try client.retransmitPto()));
+}
+
+test "QUIC 1-RTT connection retransmits time-threshold losses" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x4a, 0x4b, 0x4c, 0x4d };
+    const server_cid = [_]u8{ 0x4e, 0x4f, 0x50, 0x51 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xbe} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 100); // packet 0, deliberately old enough below.
+    try client.sendAt(&ping, 300); // packet 1, used to establish largest acked.
+
+    var dropped = try server_endpoint.receiveBytes();
+    dropped.deinit(allocator);
+    var second = try server.receivePacket();
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), second.packet.packet_number);
+    try server.sendAck(0);
+
+    var ack = try client.receivePacket();
+    defer ack.deinit(allocator);
+    try std.testing.expect(client.sent.packets.items[1].acknowledged);
+    try std.testing.expect(!client.sent.packets.items[0].lost);
+
+    try std.testing.expect(try client.retransmitTimeThresholdLoss(260, 150));
+    try std.testing.expect(client.sent.packets.items[0].lost);
+    var retransmitted = try server.receivePacket();
+    defer retransmitted.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), retransmitted.packet.packet_number);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
 }
 
 test "QUIC 1-RTT connection retransmits packet-threshold losses" {
