@@ -453,6 +453,138 @@ fn repeatableProperty(id: PropertyId) bool {
     };
 }
 
+const PropertyContext = enum {
+    connect,
+    will,
+    connack,
+    publish,
+    subscribe,
+    unsubscribe,
+    suback,
+    ack,
+    disconnect,
+    auth,
+};
+
+fn validatePropertiesFor(context: PropertyContext, properties: []const Property) Error!void {
+    for (properties, 0..) |property, index| {
+        try validateProperty(property);
+        const id = propertyId(property);
+        if (!propertyAllowedInContext(context, id)) return error.InvalidProperty;
+        try validatePropertyNotDuplicateForContext(context, property, properties[0..index]);
+    }
+}
+
+fn validatePropertyNotDuplicateForContext(context: PropertyContext, property: Property, previous: []const Property) Error!void {
+    const id = propertyId(property);
+    if (repeatablePropertyInContext(context, id)) return;
+    for (previous) |prior| {
+        if (propertyId(prior) == id) return error.InvalidProperty;
+    }
+}
+
+fn repeatablePropertyInContext(context: PropertyContext, id: PropertyId) bool {
+    return switch (id) {
+        .user_property => true,
+        // PUBLISH can carry multiple Subscription Identifiers because a message
+        // may match several subscriptions.  SUBSCRIBE itself allows at most one
+        // identifier; every other packet type forbids the property.
+        .subscription_identifier => context == .publish,
+        else => false,
+    };
+}
+
+fn propertyAllowedInContext(context: PropertyContext, id: PropertyId) bool {
+    return switch (context) {
+        .connect => switch (id) {
+            .session_expiry_interval,
+            .receive_maximum,
+            .maximum_packet_size,
+            .topic_alias_maximum,
+            .request_response_information,
+            .request_problem_information,
+            .user_property,
+            .authentication_method,
+            .authentication_data,
+            => true,
+            else => false,
+        },
+        .will => switch (id) {
+            .will_delay_interval,
+            .payload_format_indicator,
+            .message_expiry_interval,
+            .content_type,
+            .response_topic,
+            .correlation_data,
+            .user_property,
+            => true,
+            else => false,
+        },
+        .connack => switch (id) {
+            .session_expiry_interval,
+            .receive_maximum,
+            .maximum_qos,
+            .retain_available,
+            .maximum_packet_size,
+            .assigned_client_identifier,
+            .topic_alias_maximum,
+            .reason_string,
+            .user_property,
+            .wildcard_subscription_available,
+            .subscription_identifier_available,
+            .shared_subscription_available,
+            .server_keep_alive,
+            .response_information,
+            .server_reference,
+            .authentication_method,
+            .authentication_data,
+            => true,
+            else => false,
+        },
+        .publish => switch (id) {
+            .payload_format_indicator,
+            .message_expiry_interval,
+            .topic_alias,
+            .response_topic,
+            .correlation_data,
+            .user_property,
+            .subscription_identifier,
+            .content_type,
+            => true,
+            else => false,
+        },
+        .subscribe => switch (id) {
+            .subscription_identifier,
+            .user_property,
+            => true,
+            else => false,
+        },
+        .unsubscribe => id == .user_property,
+        .suback, .ack => switch (id) {
+            .reason_string,
+            .user_property,
+            => true,
+            else => false,
+        },
+        .disconnect => switch (id) {
+            .session_expiry_interval,
+            .reason_string,
+            .user_property,
+            .server_reference,
+            => true,
+            else => false,
+        },
+        .auth => switch (id) {
+            .authentication_method,
+            .authentication_data,
+            .reason_string,
+            .user_property,
+            => true,
+            else => false,
+        },
+    };
+}
+
 pub const Connect = struct {
     protocol: ProtocolVersion,
     clean_start: bool,
@@ -483,11 +615,13 @@ pub const Connect = struct {
         const keep_alive = try cursor.readInt(u16, .big);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
+        if (protocol == .v5) try validatePropertiesFor(.connect, props);
         const client_id = try readUtf8(&cursor);
         var will: ?LastWill = null;
         if ((connect_flags & 0x04) != 0) {
             const will_props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
             errdefer allocator.free(will_props);
+            if (protocol == .v5) try validatePropertiesFor(.will, will_props);
             const topic = try readUtf8(&cursor);
             try validateTopicName(topic);
             const payload = try readBinary(&cursor);
@@ -569,6 +703,7 @@ pub const ConnAck = struct {
         const reason_code = try cursor.readByte();
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
+        if (protocol == .v5) try validatePropertiesFor(.connack, props);
         if (cursor.remaining() != 0) return error.InvalidPacketType;
         return .{
             .session_present = (ack_flags & 0x01) != 0,
@@ -589,7 +724,10 @@ pub const ConnAck = struct {
         defer variable.deinit(allocator);
         try variable.append(allocator, if (session_present) 0x01 else 0x00);
         try variable.append(allocator, reason_code);
-        if (protocol == .v5) try writeProperties(&variable, allocator, properties);
+        if (protocol == .v5) {
+            try validatePropertiesFor(.connack, properties);
+            try writeProperties(&variable, allocator, properties);
+        }
         try (FixedHeader{ .packet_type = .connack, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
         try list.appendSlice(allocator, variable.items);
     }
@@ -619,6 +757,7 @@ pub const Publish = struct {
         const packet_id = if (qos == .at_most_once) null else try cursor.readInt(u16, .big);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
+        if (protocol == .v5) try validatePropertiesFor(.publish, props);
         if (topic.len == 0) {
             if (protocol != .v5 or topicAlias(props) == null) return error.InvalidTopic;
         } else try validateTopicName(topic);
@@ -739,17 +878,7 @@ fn validateAckProperties(packet_type: PacketType, properties: []const Property) 
         .puback, .pubrec, .pubrel, .pubcomp, .unsuback => {},
         else => return error.InvalidPacketType,
     }
-    var saw_reason_string = false;
-    for (properties) |property| {
-        switch (propertyId(property)) {
-            .reason_string => {
-                if (saw_reason_string) return error.InvalidProperty;
-                saw_reason_string = true;
-            },
-            .user_property => {},
-            else => return error.InvalidProperty,
-        }
-    }
+    try validatePropertiesFor(.ack, properties);
 }
 
 pub const Subscription = struct {
@@ -781,6 +910,7 @@ pub const Subscribe = struct {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
+        if (protocol == .v5) try validatePropertiesFor(.subscribe, props);
 
         var subs: std.ArrayList(Subscription) = .empty;
         errdefer subs.deinit(allocator);
@@ -814,7 +944,10 @@ pub const Subscribe = struct {
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
         try wire.appendInt(&variable, allocator, u16, packet_id, .big);
-        if (protocol == .v5) try writeProperties(&variable, allocator, properties);
+        if (protocol == .v5) {
+            try validatePropertiesFor(.subscribe, properties);
+            try writeProperties(&variable, allocator, properties);
+        }
         for (subscriptions) |subscription| {
             try validateTopicFilter(subscription.topic_filter);
             if (subscription.retain_handling == 3) return error.InvalidSubscription;
@@ -851,6 +984,7 @@ pub const SubAck = struct {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
+        if (protocol == .v5) try validatePropertiesFor(.suback, props);
         const reason_codes = try allocator.dupe(u8, cursor.buf[cursor.pos..]);
         errdefer allocator.free(reason_codes);
         for (reason_codes) |code| try validateSubAckReason(code);
@@ -872,7 +1006,10 @@ pub const SubAck = struct {
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
         try wire.appendInt(&variable, allocator, u16, packet_id, .big);
-        if (protocol == .v5) try writeProperties(&variable, allocator, properties);
+        if (protocol == .v5) {
+            try validatePropertiesFor(.suback, properties);
+            try writeProperties(&variable, allocator, properties);
+        }
         for (reason_codes) |code| {
             try validateSubAckReason(code);
             try variable.append(allocator, code);
@@ -903,6 +1040,7 @@ pub const Unsubscribe = struct {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
+        if (protocol == .v5) try validatePropertiesFor(.unsubscribe, props);
 
         var filters: std.ArrayList([]const u8) = .empty;
         errdefer filters.deinit(allocator);
@@ -928,7 +1066,10 @@ pub const Unsubscribe = struct {
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
         try wire.appendInt(&variable, allocator, u16, packet_id, .big);
-        if (protocol == .v5) try writeProperties(&variable, allocator, properties);
+        if (protocol == .v5) {
+            try validatePropertiesFor(.unsubscribe, properties);
+            try writeProperties(&variable, allocator, properties);
+        }
         for (topic_filters) |filter| {
             try validateTopicFilter(filter);
             try writeUtf8(&variable, allocator, filter);
@@ -967,6 +1108,7 @@ pub const UnsubAck = struct {
         }
         const props = try parseProperties(allocator, &cursor);
         errdefer allocator.free(props);
+        try validatePropertiesFor(.ack, props);
         const reason_codes = try allocator.dupe(u8, cursor.buf[cursor.pos..]);
         errdefer allocator.free(reason_codes);
         for (reason_codes) |code| try validateUnsubAckReason(code);
@@ -989,6 +1131,7 @@ pub const UnsubAck = struct {
         defer variable.deinit(allocator);
         try wire.appendInt(&variable, allocator, u16, packet_id, .big);
         if (protocol == .v5) {
+            try validatePropertiesFor(.ack, properties);
             try writeProperties(&variable, allocator, properties);
             for (reason_codes) |code| {
                 try validateUnsubAckReason(code);
@@ -1021,6 +1164,7 @@ pub const Disconnect = struct {
         const reason_code = if (!cursor.eof()) try cursor.readByte() else 0;
         const props = if (protocol == .v5 and !cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
+        if (protocol == .v5) try validatePropertiesFor(.disconnect, props);
         if (!cursor.eof()) return error.InvalidPacketType;
         return .{ .reason_code = reason_code, .properties = props };
     }
@@ -1036,6 +1180,7 @@ pub const Disconnect = struct {
         defer variable.deinit(allocator);
         if (protocol == .v5 and (reason_code != 0 or properties.len != 0)) {
             try variable.append(allocator, reason_code);
+            try validatePropertiesFor(.disconnect, properties);
             try writeProperties(&variable, allocator, properties);
         }
         try (FixedHeader{ .packet_type = .disconnect, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
@@ -1124,17 +1269,7 @@ fn validateAuthReason(code: u8) Error!void {
 }
 
 fn validateAuthProperties(properties: []const Property) Error!void {
-    for (properties) |property| {
-        const id = propertyId(property);
-        switch (id) {
-            .authentication_method,
-            .authentication_data,
-            .reason_string,
-            .user_property,
-            => {},
-            else => return error.InvalidProperty,
-        }
-    }
+    try validatePropertiesFor(.auth, properties);
 }
 
 fn propertyId(property: Property) PropertyId {
@@ -1189,11 +1324,17 @@ pub fn writeConnectPacket(
     try variable.append(allocator, protocol.byte());
     try variable.append(allocator, connectFlags(options));
     try wire.appendInt(&variable, allocator, u16, options.keep_alive_seconds, .big);
-    if (protocol == .v5) try writeProperties(&variable, allocator, options.properties);
+    if (protocol == .v5) {
+        try validatePropertiesFor(.connect, options.properties);
+        try writeProperties(&variable, allocator, options.properties);
+    }
     try writeUtf8(&variable, allocator, options.client_id);
     if (options.will) |will| {
         try validateTopicName(will.topic);
-        if (protocol == .v5) try writeProperties(&variable, allocator, will.properties);
+        if (protocol == .v5) {
+            try validatePropertiesFor(.will, will.properties);
+            try writeProperties(&variable, allocator, will.properties);
+        }
         try writeUtf8(&variable, allocator, will.topic);
         try writeBinary(&variable, allocator, will.payload);
     }
@@ -1229,7 +1370,10 @@ pub fn writePublish(
     defer variable.deinit(allocator);
     try writeUtf8(&variable, allocator, topic);
     if (options.qos != .at_most_once) try wire.appendInt(&variable, allocator, u16, options.packet_id orelse 1, .big);
-    if (protocol == .v5) try writeProperties(&variable, allocator, options.properties);
+    if (protocol == .v5) {
+        try validatePropertiesFor(.publish, options.properties);
+        try writeProperties(&variable, allocator, options.properties);
+    }
     try variable.appendSlice(allocator, payload);
 
     const flags: u4 = (if (options.dup) @as(u4, 0x8) else 0) |
@@ -1371,6 +1515,126 @@ test "MQTT v5 property values are validated" {
         .{ .utf8_pair = .{ .id = .user_property, .key = "a", .value = "1" } },
         .{ .utf8_pair = .{ .id = .user_property, .key = "b", .value = "2" } },
     });
+}
+
+test "MQTT v5 packet-specific properties are validated" {
+    const allocator = std.testing.allocator;
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectError(error.InvalidProperty, writeConnectPacket(&encoded, allocator, .v5, .{
+        .client_id = "client",
+        .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 1 } }},
+    }));
+    var invalid_will_props = [_]Property{.{ .two_byte = .{ .id = .receive_maximum, .value = 1 } }};
+    try std.testing.expectError(error.InvalidProperty, writeConnectPacket(&encoded, allocator, .v5, .{
+        .client_id = "client",
+        .will = .{
+            .topic = "status/client",
+            .payload = "offline",
+            .properties = &invalid_will_props,
+        },
+    }));
+    try std.testing.expectError(error.InvalidProperty, ConnAck.write(&encoded, allocator, .v5, false, 0, &.{
+        .{ .two_byte = .{ .id = .topic_alias, .value = 1 } },
+    }));
+    try std.testing.expectError(error.InvalidProperty, writePublish(&encoded, allocator, .v5, "topic", "payload", .{
+        .properties = &.{.{ .two_byte = .{ .id = .receive_maximum, .value = 1 } }},
+    }));
+    try std.testing.expectError(error.InvalidProperty, Subscribe.write(&encoded, allocator, .v5, 1, &.{
+        .{ .utf8 = .{ .id = .reason_string, .value = "not allowed" } },
+    }, &.{.{ .topic_filter = "topic" }}));
+    try std.testing.expectError(error.InvalidProperty, Subscribe.write(&encoded, allocator, .v5, 1, &.{
+        .{ .varint = .{ .id = .subscription_identifier, .value = 1 } },
+        .{ .varint = .{ .id = .subscription_identifier, .value = 2 } },
+    }, &.{.{ .topic_filter = "topic" }}));
+    try std.testing.expectError(error.InvalidProperty, Unsubscribe.write(&encoded, allocator, .v5, 1, &.{
+        .{ .varint = .{ .id = .subscription_identifier, .value = 1 } },
+    }, &.{"topic"}));
+    try std.testing.expectError(error.InvalidProperty, SubAck.write(&encoded, allocator, .v5, 1, &.{
+        .{ .two_byte = .{ .id = .receive_maximum, .value = 1 } },
+    }, &.{0}));
+    try std.testing.expectError(error.InvalidProperty, Disconnect.write(&encoded, allocator, .v5, 0, &.{
+        .{ .two_byte = .{ .id = .topic_alias, .value = 1 } },
+    }));
+    try std.testing.expectError(error.InvalidProperty, AckPacket.write(&encoded, allocator, .v5, .puback, 1, 0, &.{
+        .{ .varint = .{ .id = .subscription_identifier, .value = 1 } },
+    }));
+
+    var invalid_connect: std.ArrayList(u8) = .empty;
+    defer invalid_connect.deinit(allocator);
+    var connect_variable: std.ArrayList(u8) = .empty;
+    defer connect_variable.deinit(allocator);
+    try writeUtf8(&connect_variable, allocator, "MQTT");
+    try connect_variable.append(allocator, ProtocolVersion.v5.byte());
+    try connect_variable.append(allocator, 0x02);
+    try wire.appendInt(&connect_variable, allocator, u16, 30, .big);
+    // Topic Alias is a PUBLISH-only property in rumqtt/MQTT v5 and must not be
+    // accepted in CONNECT even though it is well-formed generically.
+    try writeProperties(&connect_variable, allocator, &.{.{ .two_byte = .{ .id = .topic_alias, .value = 1 } }});
+    try writeUtf8(&connect_variable, allocator, "client");
+    try (FixedHeader{
+        .packet_type = .connect,
+        .flags = 0,
+        .remaining_len = connect_variable.items.len,
+        .header_len = 0,
+    }).write(&invalid_connect, allocator);
+    try invalid_connect.appendSlice(allocator, connect_variable.items);
+    try std.testing.expectError(error.InvalidProperty, Connect.parse(allocator, invalid_connect.items));
+
+    var invalid_suback: std.ArrayList(u8) = .empty;
+    defer invalid_suback.deinit(allocator);
+    var suback_variable: std.ArrayList(u8) = .empty;
+    defer suback_variable.deinit(allocator);
+    try wire.appendInt(&suback_variable, allocator, u16, 1, .big);
+    try writeProperties(&suback_variable, allocator, &.{.{ .two_byte = .{ .id = .receive_maximum, .value = 1 } }});
+    try suback_variable.append(allocator, 0x00);
+    try (FixedHeader{
+        .packet_type = .suback,
+        .flags = 0,
+        .remaining_len = suback_variable.items.len,
+        .header_len = 0,
+    }).write(&invalid_suback, allocator);
+    try invalid_suback.appendSlice(allocator, suback_variable.items);
+    try std.testing.expectError(error.InvalidProperty, SubAck.parse(allocator, .v5, invalid_suback.items));
+
+    var duplicate_subscribe: std.ArrayList(u8) = .empty;
+    defer duplicate_subscribe.deinit(allocator);
+    var subscribe_variable: std.ArrayList(u8) = .empty;
+    defer subscribe_variable.deinit(allocator);
+    try wire.appendInt(&subscribe_variable, allocator, u16, 1, .big);
+    try writeProperties(&subscribe_variable, allocator, &.{
+        .{ .varint = .{ .id = .subscription_identifier, .value = 1 } },
+        .{ .varint = .{ .id = .subscription_identifier, .value = 2 } },
+    });
+    try writeUtf8(&subscribe_variable, allocator, "topic");
+    try subscribe_variable.append(allocator, 0);
+    try (FixedHeader{
+        .packet_type = .subscribe,
+        .flags = PacketType.subscribe.defaultFlags(),
+        .remaining_len = subscribe_variable.items.len,
+        .header_len = 0,
+    }).write(&duplicate_subscribe, allocator);
+    try duplicate_subscribe.appendSlice(allocator, subscribe_variable.items);
+    try std.testing.expectError(error.InvalidProperty, Subscribe.parse(allocator, .v5, duplicate_subscribe.items));
+
+    encoded.clearRetainingCapacity();
+    try writePublish(&encoded, allocator, .v5, "topic", "payload", .{
+        .properties = &.{
+            .{ .varint = .{ .id = .subscription_identifier, .value = 1 } },
+            .{ .varint = .{ .id = .subscription_identifier, .value = 2 } },
+        },
+    });
+    var publish = try Publish.parse(allocator, .v5, encoded.items);
+    defer publish.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), publish.properties.len);
+
+    encoded.clearRetainingCapacity();
+    try Subscribe.write(&encoded, allocator, .v5, 1, &.{
+        .{ .varint = .{ .id = .subscription_identifier, .value = 1 } },
+        .{ .utf8_pair = .{ .id = .user_property, .key = "k", .value = "v" } },
+    }, &.{.{ .topic_filter = "topic" }});
 }
 
 test "MQTT CONNECT validates flags and will topic" {
