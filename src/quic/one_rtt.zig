@@ -864,6 +864,26 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn sendAddressValidationToken(
+        self: *Connection,
+        secret: quic.address_validation_token.Secret,
+        issued_ns: i64,
+        lifetime_ns: u64,
+        peer_address: []const u8,
+        nonce: quic.address_validation_token.Nonce,
+    ) Error!void {
+        if (self.config.local_endpoint != .server) return error.InvalidFrame;
+        const token = quic.address_validation_token.encode(self.endpoint.allocator, secret, .{
+            .kind = .new_token,
+            .issued_ns = issued_ns,
+            .lifetime_ns = lifetime_ns,
+            .peer_address = peer_address,
+            .nonce = nonce,
+        }) catch return error.InvalidFrame;
+        defer self.endpoint.allocator.free(token);
+        try self.sendNewToken(token);
+    }
+
     pub fn switchToNextPeerConnectionId(self: *Connection) bool {
         const entry = self.peer_connection_ids.consumeUnused() orelse return false;
         self.config.peer_connection_id = entry.slice();
@@ -3736,6 +3756,15 @@ test "QUIC 1-RTT handles server-only NEW_TOKEN and HANDSHAKE_DONE roles" {
     var token_packet = try client.receivePacket();
     defer token_packet.deinit(allocator);
     try std.testing.expectEqualStrings("future-token", client.latestNewToken().?);
+
+    const secret: quic.address_validation_token.Secret = [_]u8{0xc1} ** quic.address_validation_token.secret_len;
+    const nonce: quic.address_validation_token.Nonce = [_]u8{0xc2} ** quic.address_validation_token.nonce_len;
+    try server.sendAddressValidationToken(secret, 1_000, 5_000, "client-path", nonce);
+    var address_token_packet = try client.receivePacket();
+    defer address_token_packet.deinit(allocator);
+    const issued = client.latestNewToken() orelse return error.TestUnexpectedResult;
+    const validation = try quic.address_validation_token.validate(secret, .new_token, .version_1, 1_100, "client-path", issued);
+    try std.testing.expectEqual(quic.address_validation_token.Kind.new_token, validation.kind);
 
     try server.sendHandshakeDone();
     var done_packet = try client.receivePacket();

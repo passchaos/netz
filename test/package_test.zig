@@ -204,6 +204,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "streamStopped"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendHandshakeDone"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendNewToken"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAddressValidationToken"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "latestNewToken"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "handshakeConfirmed"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "nextSpinBit"));
