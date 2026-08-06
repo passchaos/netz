@@ -86,6 +86,12 @@ fn validateControlFlags(fixed: FixedHeader) Error!void {
     if (fixed.packet_type != .publish and fixed.flags != fixed.packet_type.defaultFlags()) return error.InvalidFlags;
 }
 
+fn validatePacketBounds(packet: []const u8, fixed: FixedHeader) Error!void {
+    const total = std.math.add(usize, fixed.header_len, fixed.remaining_len) catch return error.RemainingLengthTooLarge;
+    if (packet.len < total) return error.BufferTooShort;
+    if (packet.len != total) return error.InvalidPacketType;
+}
+
 pub fn encodeRemainingLength(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: usize) Error!void {
     if (value > 268_435_455) return error.RemainingLengthTooLarge;
     var x = value;
@@ -621,7 +627,7 @@ pub const Connect = struct {
     pub fn parse(allocator: std.mem.Allocator, packet: []const u8) Error!Connect {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .connect or fixed.flags != 0) return error.InvalidFlags;
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const protocol_name = try readUtf8(&cursor);
         if (!std.mem.eql(u8, protocol_name, "MQTT")) return error.InvalidProtocolName;
@@ -713,7 +719,7 @@ pub const ConnAck = struct {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .connack) return error.InvalidPacketType;
         try validateControlFlags(fixed);
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const ack_flags = try cursor.readByte();
         if ((ack_flags & 0xfe) != 0) return error.InvalidFlags;
@@ -769,7 +775,7 @@ pub const Publish = struct {
     pub fn parse(allocator: std.mem.Allocator, protocol: ProtocolVersion, packet: []const u8) Error!Publish {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .publish) return error.InvalidPacketType;
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const topic = try readUtf8(&cursor);
         const qos = try QoS.fromFlags(fixed.flags);
@@ -814,7 +820,7 @@ pub const AckPacket = struct {
             else => return error.InvalidPacketType,
         }
         try validateControlFlags(fixed);
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
@@ -927,7 +933,7 @@ pub const Subscribe = struct {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .subscribe) return error.InvalidPacketType;
         try validateControlFlags(fixed);
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
@@ -1001,7 +1007,7 @@ pub const SubAck = struct {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .suback) return error.InvalidPacketType;
         try validateControlFlags(fixed);
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
@@ -1059,7 +1065,7 @@ pub const Unsubscribe = struct {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .unsubscribe) return error.InvalidPacketType;
         try validateControlFlags(fixed);
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
@@ -1119,7 +1125,7 @@ pub const UnsubAck = struct {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .unsuback) return error.InvalidPacketType;
         try validateControlFlags(fixed);
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
@@ -1183,7 +1189,7 @@ pub const Disconnect = struct {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .disconnect) return error.InvalidPacketType;
         try validateControlFlags(fixed);
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
         if (protocol == .v3_1_1 and fixed.remaining_len != 0) return error.InvalidPacketType;
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const reason_code = if (!cursor.eof()) try cursor.readByte() else 0;
@@ -1229,7 +1235,7 @@ pub const Auth = struct {
         if (fixed.packet_type != .auth) return error.InvalidPacketType;
         try validateControlFlags(fixed);
         if (protocol != .v5) return error.InvalidPacketType;
-        if (packet.len < fixed.header_len + fixed.remaining_len) return error.BufferTooShort;
+        try validatePacketBounds(packet, fixed);
 
         if (fixed.remaining_len == 0) {
             return .{ .reason_code = 0, .properties = try allocator.alloc(Property, 0) };
@@ -1565,6 +1571,11 @@ test "MQTT connect and publish parse" {
     defer publish_bytes.deinit(allocator);
     try writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "21.5", .{ .qos = .at_least_once, .packet_id = 7, .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 2 } }} });
     var publish = try Publish.parse(allocator, .v5, publish_bytes.items);
+    var trailing_publish = try publish_bytes.clone(allocator);
+    defer trailing_publish.deinit(allocator);
+    try trailing_publish.append(allocator, 0);
+    try std.testing.expectError(error.InvalidPacketType, Publish.parse(allocator, .v5, trailing_publish.items));
+
     defer publish.deinit(allocator);
     try std.testing.expectEqual(QoS.at_least_once, publish.qos);
     try std.testing.expectEqual(@as(u16, 7), publish.packet_id.?);
