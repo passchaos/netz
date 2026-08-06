@@ -412,16 +412,7 @@ pub const Connection = struct {
                 else => {
                     const maybe_message = try assembler.feed(frame);
                     if (maybe_message) |message| {
-                        var payload = message.payload;
-                        if (message.compressed) {
-                            payload = try websocket.decompressMessage(self.allocator, message.payload, self.limits.max_message_bytes);
-                            self.allocator.free(message.payload);
-                        }
-                        if (message.opcode == .text and !std.unicode.utf8ValidateSlice(payload)) {
-                            self.allocator.free(payload);
-                            return error.InvalidUtf8;
-                        }
-                        return .{ .opcode = message.opcode, .payload = payload };
+                        return finishIncomingMessage(self.allocator, message, self.limits.max_message_bytes);
                     }
                 },
             }
@@ -625,16 +616,7 @@ pub const H2Connection = struct {
                 else => {
                     const maybe_message = try assembler.feed(frame);
                     if (maybe_message) |message| {
-                        var payload = message.payload;
-                        if (message.compressed) {
-                            payload = try websocket.decompressMessage(self.allocator, message.payload, self.limits.max_message_bytes);
-                            self.allocator.free(message.payload);
-                        }
-                        if (message.opcode == .text and !std.unicode.utf8ValidateSlice(payload)) {
-                            self.allocator.free(payload);
-                            return error.InvalidUtf8;
-                        }
-                        return .{ .opcode = message.opcode, .payload = payload };
+                        return finishIncomingMessage(self.allocator, message, self.limits.max_message_bytes);
                     }
                 },
             }
@@ -819,6 +801,22 @@ fn validateOutgoingFramePayload(opcode: websocket.Opcode, payload: []const u8) E
         .ping, .pong => if (payload.len > 125) return error.InvalidControlFrame,
         else => {},
     }
+}
+
+fn finishIncomingMessage(
+    allocator: std.mem.Allocator,
+    message: websocket.MessageAssembler.Message,
+    max_message_bytes: usize,
+) Error!OwnedMessage {
+    var payload = message.payload;
+    if (message.compressed) {
+        errdefer allocator.free(message.payload);
+        payload = try websocket.decompressMessage(allocator, message.payload, max_message_bytes);
+        allocator.free(message.payload);
+    }
+    errdefer allocator.free(payload);
+    if (message.opcode == .text and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
+    return .{ .opcode = message.opcode, .payload = payload };
 }
 
 fn validateOutgoingFragmentedText(allocator: std.mem.Allocator, fragments: []const []const u8) Error!void {
@@ -1666,6 +1664,24 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidControlFrame, h2.sendPong(too_large_control));
     h2.permessage_deflate = true;
     try std.testing.expectError(error.InvalidFrame, h2.sendFragmented(.text, &.{ "compressed ", "fragments" }));
+}
+
+test "WebSocket incoming message finalization frees failed payloads" {
+    const allocator = std.testing.allocator;
+
+    const bad_deflate = try allocator.dupe(u8, &.{ 0xff, 0xff, 0xff });
+    try std.testing.expectError(error.InvalidFrame, finishIncomingMessage(allocator, .{
+        .opcode = .text,
+        .payload = bad_deflate,
+        .compressed = true,
+    }, 1024));
+
+    const bad_utf8 = try allocator.dupe(u8, "\xc0\x80");
+    try std.testing.expectError(error.InvalidUtf8, finishIncomingMessage(allocator, .{
+        .opcode = .text,
+        .payload = bad_utf8,
+        .compressed = false,
+    }, 1024));
 }
 
 test "WebSocket runtimes return closed after close handshake completes" {
