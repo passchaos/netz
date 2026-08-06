@@ -849,6 +849,7 @@ pub const Frame = union(enum) {
             .padding => |padding| try list.appendNTimes(allocator, @intFromEnum(FrameType.padding), padding.len),
             .ping => try varint.encode(list, allocator, @intFromEnum(FrameType.ping)),
             .ack => |ack| {
+                try validateAckFrame(ack);
                 try varint.encode(list, allocator, if (ack.ecn_counts == null) @intFromEnum(FrameType.ack) else @intFromEnum(FrameType.ack_ecn));
                 try writeAckFields(list, allocator, ack);
             },
@@ -1191,6 +1192,7 @@ fn parseAckFrame(allocator: ?std.mem.Allocator, cursor: *wire.Cursor, has_ecn: b
     const ack_delay = try varint.decode(cursor);
     const range_count = try usizeFromVarint(try varint.decode(cursor));
     const first_ack_range = try varint.decode(cursor);
+    try validateAckRangePayloadFits(cursor.remaining(), range_count, has_ecn);
 
     const ranges: []AckRange = if (allocator) |gpa| try gpa.alloc(AckRange, range_count) else ranges: {
         if (range_count != 0) return error.InvalidAckRange;
@@ -1210,16 +1212,50 @@ fn parseAckFrame(allocator: ?std.mem.Allocator, cursor: *wire.Cursor, has_ecn: b
         .ecn_ce_count = try varint.decode(cursor),
     } else null;
 
-    return .{
+    const ack = AckFrame{
         .largest_acknowledged = largest_acknowledged,
         .ack_delay = ack_delay,
         .first_ack_range = first_ack_range,
         .ranges = ranges,
         .ecn_counts = ecn_counts,
     };
+    try validateAckFrame(ack);
+    return ack;
+}
+
+fn validateAckFrame(ack: AckFrame) Error!void {
+    try validateQuicVarint(ack.largest_acknowledged);
+    try validateQuicVarint(ack.ack_delay);
+    try validateQuicVarint(ack.first_ack_range);
+    const range_count = std.math.cast(u64, ack.ranges.len) orelse return error.InvalidFrameLength;
+    try validateQuicVarint(range_count);
+    if (ack.first_ack_range > ack.largest_acknowledged) return error.InvalidAckRange;
+
+    // ACK ranges are defined by subtracting each encoded range and gap from the
+    // previous range's smallest packet number. Validate those subtractions
+    // explicitly so malformed peers cannot encode a range that wraps below
+    // packet number zero before connection-level ACK processing sees it.
+    var smallest = ack.largest_acknowledged - ack.first_ack_range;
+    for (ack.ranges) |range| {
+        try validateQuicVarint(range.gap);
+        try validateQuicVarint(range.ack_range_length);
+        const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidAckRange;
+        if (smallest < skipped) return error.InvalidAckRange;
+
+        const range_largest = smallest - skipped;
+        if (range.ack_range_length > range_largest) return error.InvalidAckRange;
+        smallest = range_largest - range.ack_range_length;
+    }
+
+    if (ack.ecn_counts) |ecn| {
+        try validateQuicVarint(ecn.ect0_count);
+        try validateQuicVarint(ecn.ect1_count);
+        try validateQuicVarint(ecn.ecn_ce_count);
+    }
 }
 
 fn writeAckFields(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: AckFrame) Error!void {
+    try validateAckFrame(ack);
     try varint.encode(list, allocator, ack.largest_acknowledged);
     try varint.encode(list, allocator, ack.ack_delay);
     try varint.encode(list, allocator, ack.ranges.len);
@@ -1248,6 +1284,17 @@ fn validateEndOffset(offset: u64, data_len: usize) Error!void {
     const data_len_u64 = std.math.cast(u64, data_len) orelse return error.InvalidFrameLength;
     const end = std.math.add(u64, offset, data_len_u64) catch return error.InvalidFrameLength;
     if (end > varint.max_value) return error.InvalidFrameLength;
+}
+
+fn validateQuicVarint(value: u64) Error!void {
+    if (value > varint.max_value) return error.InvalidFrameLength;
+}
+
+fn validateAckRangePayloadFits(remaining: usize, range_count: usize, has_ecn: bool) Error!void {
+    const min_range_bytes = std.math.mul(usize, range_count, 2) catch return error.InvalidFrameLength;
+    const min_ecn_bytes: usize = if (has_ecn) 3 else 0;
+    const min_bytes = std.math.add(usize, min_range_bytes, min_ecn_bytes) catch return error.InvalidFrameLength;
+    if (remaining < min_bytes) return error.InvalidFrameLength;
 }
 
 fn validateStreamCount(maximum_streams: u64) Error!void {
@@ -1685,4 +1732,76 @@ test "QUIC ACK frame owned parser preserves sparse ranges" {
     try std.testing.expectEqual(@as(u64, 1), parsed.frame.ack.ranges[0].ack_range_length);
     try std.testing.expectEqual(@as(u64, 2), parsed.frame.ack.ranges[1].gap);
     try std.testing.expectEqual(@as(u64, 0), parsed.frame.ack.ranges[1].ack_range_length);
+}
+
+test "QUIC ACK frame codec rejects invalid ranges" {
+    const allocator = std.testing.allocator;
+
+    var invalid_out: std.ArrayList(u8) = .empty;
+    defer invalid_out.deinit(allocator);
+    try std.testing.expectError(error.InvalidAckRange, (Frame{ .ack = .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 4,
+    } }).write(&invalid_out, allocator));
+
+    var first_too_long: std.ArrayList(u8) = .empty;
+    defer first_too_long.deinit(allocator);
+    try varint.encode(&first_too_long, allocator, @intFromEnum(FrameType.ack));
+    try varint.encode(&first_too_long, allocator, 3);
+    try varint.encode(&first_too_long, allocator, 0);
+    try varint.encode(&first_too_long, allocator, 0);
+    try varint.encode(&first_too_long, allocator, 4);
+    try std.testing.expectError(error.InvalidAckRange, parseFrame(first_too_long.items));
+
+    const underflow_ranges = [_]AckRange{
+        .{ .gap = 0, .ack_range_length = 0 },
+    };
+    try std.testing.expectError(error.InvalidAckRange, (Frame{ .ack = .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &underflow_ranges,
+    } }).write(&invalid_out, allocator));
+
+    var range_underflow: std.ArrayList(u8) = .empty;
+    defer range_underflow.deinit(allocator);
+    try varint.encode(&range_underflow, allocator, @intFromEnum(FrameType.ack));
+    try varint.encode(&range_underflow, allocator, 1);
+    try varint.encode(&range_underflow, allocator, 0);
+    try varint.encode(&range_underflow, allocator, 1);
+    try varint.encode(&range_underflow, allocator, 0);
+    try varint.encode(&range_underflow, allocator, 0);
+    try varint.encode(&range_underflow, allocator, 0);
+    try std.testing.expectError(error.InvalidAckRange, parseFrameOwned(allocator, range_underflow.items));
+}
+
+test "QUIC ACK_ECN frame codec rejects invalid ranges" {
+    const allocator = std.testing.allocator;
+
+    var first_too_long: std.ArrayList(u8) = .empty;
+    defer first_too_long.deinit(allocator);
+    try varint.encode(&first_too_long, allocator, @intFromEnum(FrameType.ack_ecn));
+    try varint.encode(&first_too_long, allocator, 0);
+    try varint.encode(&first_too_long, allocator, 0);
+    try varint.encode(&first_too_long, allocator, 0);
+    try varint.encode(&first_too_long, allocator, 1);
+    try varint.encode(&first_too_long, allocator, 0);
+    try varint.encode(&first_too_long, allocator, 0);
+    try varint.encode(&first_too_long, allocator, 0);
+    try std.testing.expectError(error.InvalidAckRange, parseFrame(first_too_long.items));
+
+    var range_too_long: std.ArrayList(u8) = .empty;
+    defer range_too_long.deinit(allocator);
+    try varint.encode(&range_too_long, allocator, @intFromEnum(FrameType.ack_ecn));
+    try varint.encode(&range_too_long, allocator, 2);
+    try varint.encode(&range_too_long, allocator, 0);
+    try varint.encode(&range_too_long, allocator, 1);
+    try varint.encode(&range_too_long, allocator, 0);
+    try varint.encode(&range_too_long, allocator, 0);
+    try varint.encode(&range_too_long, allocator, 1);
+    try varint.encode(&range_too_long, allocator, 1);
+    try varint.encode(&range_too_long, allocator, 1);
+    try varint.encode(&range_too_long, allocator, 1);
+    try std.testing.expectError(error.InvalidAckRange, parseFrameOwned(allocator, range_too_long.items));
 }
