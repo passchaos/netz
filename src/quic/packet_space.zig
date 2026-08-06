@@ -291,6 +291,7 @@ pub const SentPacketTracker = struct {
 
     pub fn ackRttSample(self: SentPacketTracker, ack: quic.AckFrame, now_ns: u64, ack_delay_exponent: u64) Error!?RttSample {
         const packet = self.findSentPacket(ack.largest_acknowledged) orelse return null;
+        if (packet.acknowledged) return null;
         if (!packet.ack_eliciting) return null;
         const sent_time = packet.sent_time_ns orelse return null;
         const latest_rtt = now_ns -| sent_time;
@@ -680,6 +681,9 @@ test "QUIC sent packet tracker derives RTT sample from largest ACK" {
     try std.testing.expectEqual(@as(u64, 5 * 8 * 1_000), sample.ack_delay_ns);
     try std.testing.expectEqual(@as(u64, 2), sample.largest_acknowledged);
     try std.testing.expectEqual(@as(u64, 3_000), sample.sent_time_ns);
+
+    _ = sent.markAcknowledged(2);
+    try std.testing.expectEqual(@as(?SentPacketTracker.RttSample, null), try sent.ackRttSample(sample_ack, 11_000, 3));
 
     const ack_only = quic.AckFrame{ .largest_acknowledged = 1, .ack_delay = 0, .first_ack_range = 0 };
     try std.testing.expectEqual(@as(?SentPacketTracker.RttSample, null), try sent.ackRttSample(ack_only, 10_000, 3));

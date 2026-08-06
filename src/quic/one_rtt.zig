@@ -2255,6 +2255,10 @@ test "QUIC 1-RTT connection updates RTT from ACK samples" {
     try std.testing.expect(connection.rtt_stats.has_measurement);
     try std.testing.expectEqual(@as(u64, 100_000_000), connection.rtt_stats.latest_rtt);
     try std.testing.expectEqual(@as(u64, 10_000_000), connection.rtt_stats.max_ack_delay);
+    const acked = try connection.sent.applyAckDetailed(ack);
+    connection.congestion.onAcked(acked.bytes);
+    try std.testing.expect(!(try connection.updateRttFromAck(ack, 102_000_000)));
+    try std.testing.expectEqual(@as(u64, 100_000_000), connection.rtt_stats.latest_rtt);
 
     connection.handshake_confirmed = true;
     try connection.sent.sentAt(1, true, 1200, .not_ect, 201_000_000);
