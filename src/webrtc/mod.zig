@@ -1464,6 +1464,49 @@ pub const rtcp = struct {
         report_blocks: []ReportBlock = &.{},
     };
 
+    pub const SdesItemType = enum(u8) {
+        end = 0,
+        cname = 1,
+        name = 2,
+        email = 3,
+        phone = 4,
+        location = 5,
+        tool = 6,
+        note = 7,
+        private = 8,
+        _,
+    };
+
+    pub const SdesItem = struct {
+        item_type: SdesItemType,
+        value: []const u8,
+    };
+
+    pub const SdesChunk = struct {
+        ssrc: u32,
+        items: []SdesItem,
+    };
+
+    pub const SourceDescription = struct {
+        chunks: []SdesChunk,
+
+        pub fn deinit(self: *SourceDescription, allocator: std.mem.Allocator) void {
+            for (self.chunks) |chunk| allocator.free(chunk.items);
+            allocator.free(self.chunks);
+            self.* = undefined;
+        }
+
+        pub fn cname(self: SourceDescription, ssrc: u32) ?[]const u8 {
+            for (self.chunks) |chunk| {
+                if (chunk.ssrc != ssrc) continue;
+                for (chunk.items) |item| {
+                    if (item.item_type == .cname) return item.value;
+                }
+            }
+            return null;
+        }
+    };
+
     pub const PictureLossIndication = struct {
         sender_ssrc: u32,
         media_ssrc: u32,
@@ -1744,6 +1787,7 @@ pub const rtcp = struct {
     pub const Packet = union(enum) {
         sender_report: SenderReport,
         receiver_report: ReceiverReport,
+        source_description: SourceDescription,
         picture_loss_indication: PictureLossIndication,
         transport_layer_nack: TransportLayerNack,
         transport_wide_cc: TransportWideCc,
@@ -1753,6 +1797,7 @@ pub const rtcp = struct {
             switch (self.*) {
                 .sender_report => |report| allocator.free(report.report_blocks),
                 .receiver_report => |report| allocator.free(report.report_blocks),
+                .source_description => |*sdes| sdes.deinit(allocator),
                 .transport_layer_nack => |nack| allocator.free(nack.pairs),
                 .transport_wide_cc => |*twcc| twcc.deinit(allocator),
                 else => {},
@@ -1781,6 +1826,7 @@ pub const rtcp = struct {
         const packet: Packet = switch (header.packet_type) {
             .sender_report => .{ .sender_report = try parseSenderReport(allocator, header, payload) },
             .receiver_report => .{ .receiver_report = try parseReceiverReport(allocator, header, payload) },
+            .source_description => .{ .source_description = try parseSourceDescription(allocator, header, payload) },
             .payload_feedback => if (header.count_or_format == payload_feedback_pli)
                 .{ .picture_loss_indication = try parsePictureLossIndication(payload) }
             else
@@ -1800,6 +1846,7 @@ pub const rtcp = struct {
         switch (packet) {
             .sender_report => |report| try writeSenderReport(list, allocator, report),
             .receiver_report => |report| try writeReceiverReport(list, allocator, report),
+            .source_description => |sdes| try writeSourceDescription(list, allocator, sdes),
             .picture_loss_indication => |pli| try writePictureLossIndication(list, allocator, pli),
             .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
             .transport_wide_cc => |twcc| try writeTransportWideCc(list, allocator, twcc),
@@ -1808,6 +1855,34 @@ pub const rtcp = struct {
                 try list.appendSlice(allocator, unknown.payload);
             },
         }
+    }
+
+    pub fn parseCompound(allocator: std.mem.Allocator, bytes: []const u8) Error![]Packet {
+        var packets: std.ArrayList(Packet) = .empty;
+        errdefer {
+            for (packets.items) |*packet| packet.deinit(allocator);
+            packets.deinit(allocator);
+        }
+        var pos: usize = 0;
+        while (pos < bytes.len) {
+            var parsed = try parsePacket(allocator, bytes[pos..]);
+            errdefer parsed.deinit(allocator);
+            if (parsed.consumed == 0) return error.InvalidRtcpPacket;
+            try packets.append(allocator, parsed.packet);
+            parsed.packet = undefined;
+            pos += parsed.consumed;
+        }
+        return packets.toOwnedSlice(allocator);
+    }
+
+    pub fn freeCompound(allocator: std.mem.Allocator, packets: []Packet) void {
+        for (packets) |*packet| packet.deinit(allocator);
+        allocator.free(packets);
+    }
+
+    pub fn writeCompound(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packets: []const Packet) Error!void {
+        if (packets.len == 0) return error.InvalidRtcpPacket;
+        for (packets) |packet| try writePacket(list, allocator, packet);
     }
 
     fn parseSenderReport(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!SenderReport {
@@ -1849,6 +1924,35 @@ pub const rtcp = struct {
             .sender_ssrc = std.mem.readInt(u32, payload[0..4], .big),
             .media_ssrc = std.mem.readInt(u32, payload[4..8], .big),
         };
+    }
+
+    fn parseSourceDescription(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!SourceDescription {
+        const chunk_count = @as(usize, header.count_or_format);
+        var cursor = wire.Cursor.init(payload);
+        const chunks = try allocator.alloc(SdesChunk, chunk_count);
+        errdefer {
+            for (chunks) |chunk| allocator.free(chunk.items);
+            allocator.free(chunks);
+        }
+        for (chunks) |*chunk| {
+            if (cursor.remaining() < 4) return error.InvalidRtcpPacket;
+            const chunk_start = cursor.pos;
+            const ssrc = try cursor.readInt(u32, .big);
+            var items: std.ArrayList(SdesItem) = .empty;
+            errdefer items.deinit(allocator);
+            while (true) {
+                const typ: SdesItemType = @enumFromInt(try cursor.readByte());
+                if (typ == .end) break;
+                const len = try cursor.readByte();
+                const value = try cursor.readSlice(len);
+                try items.append(allocator, .{ .item_type = typ, .value = value });
+            }
+            const consumed = cursor.pos - chunk_start;
+            try cursor.skip((4 - (consumed % 4)) % 4);
+            chunk.* = .{ .ssrc = ssrc, .items = try items.toOwnedSlice(allocator) };
+        }
+        if (!cursor.eof()) return error.InvalidRtcpPacket;
+        return .{ .chunks = chunks };
     }
 
     fn parseTransportLayerNack(allocator: std.mem.Allocator, payload: []const u8) Error!TransportLayerNack {
@@ -1948,6 +2052,27 @@ pub const rtcp = struct {
         try writeHeader(list, allocator, @intCast(report.report_blocks.len), .receiver_report, 4 + report.report_blocks.len * 24);
         try wire.appendInt(list, allocator, u32, report.sender_ssrc, .big);
         for (report.report_blocks) |block| try writeReportBlock(list, allocator, block);
+    }
+
+    fn writeSourceDescription(list: *std.ArrayList(u8), allocator: std.mem.Allocator, sdes: SourceDescription) Error!void {
+        if (sdes.chunks.len == 0 or sdes.chunks.len > 31) return error.InvalidRtcpPacket;
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        for (sdes.chunks) |chunk| {
+            const start = payload.items.len;
+            try wire.appendInt(&payload, allocator, u32, chunk.ssrc, .big);
+            for (chunk.items) |item| {
+                if (item.item_type == .end or item.value.len > std.math.maxInt(u8)) return error.InvalidRtcpPacket;
+                try payload.append(allocator, @intFromEnum(item.item_type));
+                try payload.append(allocator, @intCast(item.value.len));
+                try payload.appendSlice(allocator, item.value);
+            }
+            try payload.append(allocator, @intFromEnum(SdesItemType.end));
+            const consumed = payload.items.len - start;
+            try payload.appendNTimes(allocator, 0, (4 - (consumed % 4)) % 4);
+        }
+        try writeHeader(list, allocator, @intCast(sdes.chunks.len), .source_description, payload.items.len);
+        try list.appendSlice(allocator, payload.items);
     }
 
     fn writePictureLossIndication(list: *std.ArrayList(u8), allocator: std.mem.Allocator, pli: PictureLossIndication) Error!void {
@@ -3607,6 +3732,34 @@ test "SRTP NULL_HMAC_SHA1_80 authenticates ROC and rejects replay" {
     tampered[tampered.len - 1] ^= 0x01;
     var fresh_receiver = srtp.Context{ .keys = .{ .auth_key = &auth_key } };
     try std.testing.expectError(error.BadSrtpAuthTag, fresh_receiver.verifyRtp(tampered));
+}
+
+test "RTCP SDES and compound packets" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var sdes_items = [_]rtcp.SdesItem{.{ .item_type = .cname, .value = "alice@example.test" }};
+    var sdes_chunks = [_]rtcp.SdesChunk{.{ .ssrc = 0x01020304, .items = &sdes_items }};
+    var packets = [_]rtcp.Packet{
+        .{ .receiver_report = .{ .sender_ssrc = 0x01020304 } },
+        .{ .source_description = .{ .chunks = &sdes_chunks } },
+        .{ .picture_loss_indication = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x11121314 } },
+    };
+
+    try rtcp.writeCompound(&encoded, allocator, &packets);
+    const parsed = try rtcp.parseCompound(allocator, encoded.items);
+    defer rtcp.freeCompound(allocator, parsed);
+    try std.testing.expectEqual(@as(usize, 3), parsed.len);
+    try std.testing.expectEqual(@as(u32, 0x01020304), parsed[0].receiver_report.sender_ssrc);
+    try std.testing.expectEqualStrings("alice@example.test", parsed[1].source_description.cname(0x01020304).?);
+    try std.testing.expectEqual(@as(u32, 0x11121314), parsed[2].picture_loss_indication.media_ssrc);
+
+    var single = try rtcp.parsePacket(allocator, encoded.items[parsed[0].receiver_report.report_blocks.len..]);
+    defer single.deinit(allocator);
+    try std.testing.expect(single.consumed > 0);
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{}));
 }
 
 test "RTCP receiver report and feedback packets" {
