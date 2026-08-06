@@ -2016,6 +2016,8 @@ pub const sctp = struct {
         error_chunk = 9,
         cookie_echo = 10,
         cookie_ack = 11,
+        reconfig = 130,
+        forward_tsn = 192,
         shutdown_complete = 14,
         _,
     };
@@ -2098,6 +2100,59 @@ pub const sctp = struct {
                 .payload_protocol_identifier = @enumFromInt(std.mem.readInt(u32, chunk.value[8..12], .big)),
                 .user_data = chunk.value[12..],
             };
+        }
+    };
+
+    pub const InitParameterType = enum(u16) {
+        state_cookie = 0x0007,
+        supported_extensions = 0x8008,
+        forward_tsn_supported = 0xc000,
+        supported_address_types = 0x000c,
+        _,
+    };
+
+    pub const InitParameter = struct {
+        param_type: InitParameterType,
+        value: []const u8,
+    };
+
+    pub const InitChunk = struct {
+        initiate_tag: u32,
+        advertised_receiver_window_credit: u32,
+        outbound_streams: u16,
+        inbound_streams: u16,
+        initial_tsn: u32,
+        parameters: []InitParameter = &.{},
+
+        pub fn deinit(self: *InitChunk, allocator: std.mem.Allocator) void {
+            allocator.free(self.parameters);
+            self.* = undefined;
+        }
+
+        pub fn parse(allocator: std.mem.Allocator, chunk: Chunk) Error!InitChunk {
+            if ((chunk.chunk_type != .init and chunk.chunk_type != .init_ack) or chunk.flags != 0 or chunk.value.len < 16) return error.InvalidSctpPacket;
+            var cursor = wire.Cursor.init(chunk.value);
+            const initiate_tag = try cursor.readInt(u32, .big);
+            const rwnd = try cursor.readInt(u32, .big);
+            const outbound = try cursor.readInt(u16, .big);
+            const inbound = try cursor.readInt(u16, .big);
+            const initial_tsn = try cursor.readInt(u32, .big);
+            const parameters = try parseInitParameters(allocator, chunk.value[cursor.pos..]);
+            return .{
+                .initiate_tag = initiate_tag,
+                .advertised_receiver_window_credit = rwnd,
+                .outbound_streams = outbound,
+                .inbound_streams = inbound,
+                .initial_tsn = initial_tsn,
+                .parameters = parameters,
+            };
+        }
+
+        pub fn stateCookie(self: InitChunk) ?[]const u8 {
+            for (self.parameters) |parameter| {
+                if (parameter.param_type == .state_cookie) return parameter.value;
+            }
+            return null;
         }
     };
 
@@ -2335,6 +2390,81 @@ pub const sctp = struct {
         return .{ .header = header, .chunks = try chunks.toOwnedSlice(allocator) };
     }
 
+    pub fn writeInitPacket(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        options: PacketOptions,
+        is_ack: bool,
+        init: InitChunk,
+    ) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeInitChunk(list, allocator, if (is_ack) .init_ack else .init, init);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeInitChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunk_type: ChunkType, init: InitChunk) Error!void {
+        if (chunk_type != .init and chunk_type != .init_ack) return error.InvalidSctpPacket;
+        var value: std.ArrayList(u8) = .empty;
+        defer value.deinit(allocator);
+        try wire.appendInt(&value, allocator, u32, init.initiate_tag, .big);
+        try wire.appendInt(&value, allocator, u32, init.advertised_receiver_window_credit, .big);
+        try wire.appendInt(&value, allocator, u16, init.outbound_streams, .big);
+        try wire.appendInt(&value, allocator, u16, init.inbound_streams, .big);
+        try wire.appendInt(&value, allocator, u32, init.initial_tsn, .big);
+        for (init.parameters) |parameter| try writeInitParameter(&value, allocator, parameter);
+        const chunk_len = 4 + value.items.len;
+        if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try list.append(allocator, @intFromEnum(chunk_type));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        try list.appendSlice(allocator, value.items);
+        try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
+    }
+
+    pub fn writeCookieEchoPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, cookie: []const u8) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeCookieEchoChunk(list, allocator, cookie);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeCookieEchoChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, cookie: []const u8) Error!void {
+        if (cookie.len == 0) return error.InvalidSctpPacket;
+        const chunk_len = 4 + cookie.len;
+        if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try list.append(allocator, @intFromEnum(ChunkType.cookie_echo));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        try list.appendSlice(allocator, cookie);
+        try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
+    }
+
+    pub fn writeCookieAckPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeCookieAckChunk(list, allocator);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeCookieAckChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        try list.append(allocator, @intFromEnum(ChunkType.cookie_ack));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, 4, .big);
+    }
+
+    pub fn cookieEchoValue(chunk: Chunk) Error![]const u8 {
+        if (chunk.chunk_type != .cookie_echo or chunk.flags != 0 or chunk.value.len == 0) return error.InvalidSctpPacket;
+        return chunk.value;
+    }
+
+    pub fn validateCookieAck(chunk: Chunk) Error!void {
+        if (chunk.chunk_type != .cookie_ack or chunk.flags != 0 or chunk.value.len != 0) return error.InvalidSctpPacket;
+    }
+
     pub fn writeSackPacket(
         list: *std.ArrayList(u8),
         allocator: std.mem.Allocator,
@@ -2342,10 +2472,7 @@ pub const sctp = struct {
         sack: SackChunk,
     ) Error!void {
         const start = list.items.len;
-        try wire.appendInt(list, allocator, u16, options.source_port, .big);
-        try wire.appendInt(list, allocator, u16, options.destination_port, .big);
-        try wire.appendInt(list, allocator, u32, options.verification_tag, .big);
-        try wire.appendInt(list, allocator, u32, 0, .little);
+        try writePacketHeader(list, allocator, options);
         try writeSackChunk(list, allocator, sack);
         const value = try checksum(list.items[start..]);
         std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
@@ -2379,10 +2506,7 @@ pub const sctp = struct {
     ) Error!void {
         if (chunks.len == 0) return error.InvalidSctpPacket;
         const start = list.items.len;
-        try wire.appendInt(list, allocator, u16, options.source_port, .big);
-        try wire.appendInt(list, allocator, u16, options.destination_port, .big);
-        try wire.appendInt(list, allocator, u32, options.verification_tag, .big);
-        try wire.appendInt(list, allocator, u32, 0, .little);
+        try writePacketHeader(list, allocator, options);
         for (chunks) |chunk| try writeDataChunk(list, allocator, chunk);
 
         // SCTP stores the CRC32C checksum in little-endian form and computes it
@@ -2422,6 +2546,39 @@ pub const sctp = struct {
         const expected = try checksum(bytes);
         const actual = std.mem.readInt(u32, bytes[8..12], .little);
         return expected == actual;
+    }
+
+    fn writePacketHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions) Error!void {
+        try wire.appendInt(list, allocator, u16, options.source_port, .big);
+        try wire.appendInt(list, allocator, u16, options.destination_port, .big);
+        try wire.appendInt(list, allocator, u32, options.verification_tag, .big);
+        try wire.appendInt(list, allocator, u32, 0, .little);
+    }
+
+    fn parseInitParameters(allocator: std.mem.Allocator, bytes: []const u8) Error![]InitParameter {
+        var cursor = wire.Cursor.init(bytes);
+        var params: std.ArrayList(InitParameter) = .empty;
+        errdefer params.deinit(allocator);
+        while (!cursor.eof()) {
+            if (cursor.remaining() < 4) return error.InvalidSctpPacket;
+            const param_type: InitParameterType = @enumFromInt(try cursor.readInt(u16, .big));
+            const len = try cursor.readInt(u16, .big);
+            if (len < 4 or cursor.remaining() < len - 4) return error.InvalidSctpPacket;
+            const value = try cursor.readSlice(len - 4);
+            try params.append(allocator, .{ .param_type = param_type, .value = value });
+            const padding = (4 - (len % 4)) % 4;
+            try cursor.skip(padding);
+        }
+        return params.toOwnedSlice(allocator);
+    }
+
+    fn writeInitParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameter: InitParameter) Error!void {
+        const len = 4 + parameter.value.len;
+        if (len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try wire.appendInt(list, allocator, u16, @intFromEnum(parameter.param_type), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(len), .big);
+        try list.appendSlice(allocator, parameter.value);
+        try list.appendNTimes(allocator, 0, align4(len) - len);
     }
 
     pub fn dataChannelPayloadProtocol(is_string: bool, len: usize) PayloadProtocolIdentifier {
@@ -3016,6 +3173,67 @@ test "RTCP NACK tracker detects RTP gaps and wraparound" {
     wrap.observe(0xffff);
     wrap.observe(0);
     try std.testing.expectEqual(@as(usize, 0), wrap.pendingCount());
+}
+
+test "SCTP INIT cookie echo and cookie ack packets" {
+    const allocator = std.testing.allocator;
+    const cookie = "state-cookie";
+    const extensions = [_]u8{ @intFromEnum(sctp.ChunkType.reconfig), @intFromEnum(sctp.ChunkType.forward_tsn) };
+    var params = [_]sctp.InitParameter{
+        .{ .param_type = .state_cookie, .value = cookie },
+        .{ .param_type = .supported_extensions, .value = &extensions },
+    };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try sctp.writeInitPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0,
+    }, true, .{
+        .initiate_tag = 0x01020304,
+        .advertised_receiver_window_credit = 256 * 1024,
+        .outbound_streams = 16,
+        .inbound_streams = 16,
+        .initial_tsn = 0x10203040,
+        .parameters = &params,
+    });
+    try std.testing.expect(try sctp.validChecksum(encoded.items));
+    var parsed = try sctp.parsePacket(allocator, encoded.items, true);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(sctp.ChunkType.init_ack, parsed.chunks[0].chunk_type);
+    var init_ack = try sctp.InitChunk.parse(allocator, parsed.chunks[0]);
+    defer init_ack.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x01020304), init_ack.initiate_tag);
+    try std.testing.expectEqual(@as(u16, 16), init_ack.outbound_streams);
+    try std.testing.expectEqual(@as(u32, 0x10203040), init_ack.initial_tsn);
+    try std.testing.expectEqualStrings(cookie, init_ack.stateCookie().?);
+    try std.testing.expectEqual(sctp.InitParameterType.supported_extensions, init_ack.parameters[1].param_type);
+    const parsed_cookie = try allocator.dupe(u8, init_ack.stateCookie().?);
+    defer allocator.free(parsed_cookie);
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeCookieEchoPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = init_ack.initiate_tag,
+    }, parsed_cookie);
+    var cookie_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer cookie_packet.deinit(allocator);
+    try std.testing.expectEqual(sctp.ChunkType.cookie_echo, cookie_packet.chunks[0].chunk_type);
+    try std.testing.expectEqualStrings(cookie, try sctp.cookieEchoValue(cookie_packet.chunks[0]));
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeCookieAckPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = init_ack.initiate_tag,
+    });
+    var ack_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer ack_packet.deinit(allocator);
+    try sctp.validateCookieAck(ack_packet.chunks[0]);
+
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeCookieEchoChunk(&encoded, allocator, ""));
 }
 
 test "SCTP DATA reassembler handles fragmented messages" {
