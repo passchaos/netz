@@ -289,7 +289,7 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn receiveRequest(self: *HandshakeServerSession) Error!OwnedHandshakeRequest {
-        const assembled = try receiveConnectionStreamBytes(&self.established.connection, null, self.options, &self.control);
+        const assembled = try receiveConnectionStreamBytes(&self.established.connection, null, self.options, &self.control, .server);
         errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
         var request = try http3.decodeRequest(self.established.connection.endpoint.allocator, assembled.bytes);
         errdefer request.deinit(self.established.connection.endpoint.allocator);
@@ -358,7 +358,7 @@ pub const HandshakeClient = struct {
 
         try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, client_control_stream_id);
         try sendConnectionMessage(&self.established.connection, stream_id, request_options, self.options);
-        const assembled = try receiveConnectionStreamBytes(&self.established.connection, stream_id, self.options, &self.control);
+        const assembled = try receiveConnectionStreamBytes(&self.established.connection, stream_id, self.options, &self.control, .client);
         errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
         var response = try http3.decodeResponse(self.established.connection.endpoint.allocator, assembled.bytes);
         errdefer response.deinit(self.established.connection.endpoint.allocator);
@@ -476,7 +476,7 @@ pub const ProtectedServer = struct {
 
             for (packet.frames) |frame| {
                 if (frame != .stream) continue;
-                if (try applyControlStreamFrame(&self.control, self.quic_server.endpoint.allocator, frame.stream)) continue;
+                if (try applyControlStreamFrameForRole(&self.control, self.quic_server.endpoint.allocator, frame.stream, .server)) continue;
                 const incoming_id: u62 = @intCast(frame.stream.stream_id);
                 if (!self.control.acceptsLocalRequestStream(incoming_id)) return error.RequestRejected;
                 if (stream_id) |id| {
@@ -568,7 +568,7 @@ pub const ProtectedClient = struct {
             self.expected_packet_number = packet.packet.packet_number + 1;
             if (from == null) from = packet.from;
             for (packet.frames) |frame| {
-                if (frame == .stream and try applyControlStreamFrame(&self.control, self.quic_client.endpoint.allocator, frame.stream)) continue;
+                if (frame == .stream and try applyControlStreamFrameForRole(&self.control, self.quic_client.endpoint.allocator, frame.stream, .client)) continue;
                 if (frame != .stream or frame.stream.stream_id != expected_stream_id) continue;
                 try recv.insert(frame.stream);
                 if (recv.final_size != null and recv.contiguous_end >= recv.final_size.?) {
@@ -637,6 +637,7 @@ fn receiveConnectionStreamBytes(
     expected_stream_id: ?u62,
     options: HandshakeSessionOptions,
     control: *http3.ControlState,
+    role: ControlStreamRole,
 ) Error!AssembledStream {
     var recv: ?quic.stream_state.RecvState = null;
     defer if (recv) |*state| state.deinit();
@@ -650,7 +651,7 @@ fn receiveConnectionStreamBytes(
 
         for (packet.frames) |frame| {
             if (frame != .stream) continue;
-            if (try applyControlStreamFrame(control, connection.endpoint.allocator, frame.stream)) continue;
+            if (try applyControlStreamFrameForRole(control, connection.endpoint.allocator, frame.stream, role)) continue;
             const incoming_id: u62 = @intCast(frame.stream.stream_id);
             if (!control.acceptsLocalRequestStream(incoming_id)) return error.RequestRejected;
             if (stream_id) |id| {
@@ -813,6 +814,27 @@ fn sendProtectedSettings(
     );
 }
 
+const ControlStreamRole = enum {
+    client,
+    server,
+};
+
+fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.mem.Allocator, stream: quic.StreamFrame, role: ControlStreamRole) Error!bool {
+    const previous = control.*;
+    const previous_priority_present = previous.latest_priority_update != null;
+    const handled = try applyControlStreamFrame(control, allocator, stream);
+    if (handled and role == .client) {
+        // MAX_PUSH_ID and PRIORITY_UPDATE are client-to-server control frames.
+        // A client receiving them from a server must treat the frame as
+        // unexpected; restore state so callers can recover or close cleanly.
+        if (control.peer_max_push_id != previous.peer_max_push_id or (control.latest_priority_update != null) != previous_priority_present) {
+            control.* = previous;
+            return error.UnexpectedFrame;
+        }
+    }
+    return handled;
+}
+
 fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allocator, stream: quic.StreamFrame) Error!bool {
     // HTTP/3 control and QPACK streams are unidirectional QUIC streams.  Offset
     // zero carries the stream type varint; subsequent frames on an already
@@ -886,6 +908,47 @@ test "HTTP/3 server GOAWAY validates request stream ids" {
     try std.testing.expectError(error.InvalidFrame, validateServerGoAwayStreamId(3));
     try validateClientGoAwayPushId(0);
     try std.testing.expectError(error.InvalidFrame, validateClientGoAwayPushId(1));
+}
+
+test "HTTP/3 client rejects server-only control frames" {
+    const allocator = std.testing.allocator;
+
+    var stream_bytes: std.ArrayList(u8) = .empty;
+    defer stream_bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&stream_bytes, allocator);
+    try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
+    try http3.writeMaxPushIdFrame(&stream_bytes, allocator, 4);
+
+    var client_control = http3.ControlState{};
+    try std.testing.expectError(error.UnexpectedFrame, applyControlStreamFrameForRole(&client_control, allocator, .{
+        .stream_id = 3,
+        .offset = 0,
+        .fin = false,
+        .data = stream_bytes.items,
+    }, .client));
+    try std.testing.expect(client_control.peer_max_push_id == null);
+
+    stream_bytes.clearRetainingCapacity();
+    try http3.writeControlStreamPrefix(&stream_bytes, allocator);
+    try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
+    try http3.writePriorityUpdateFrame(&stream_bytes, allocator, 0, .{ .urgency = 1 });
+    client_control = .{};
+    try std.testing.expectError(error.UnexpectedFrame, applyControlStreamFrameForRole(&client_control, allocator, .{
+        .stream_id = 3,
+        .offset = 0,
+        .fin = false,
+        .data = stream_bytes.items,
+    }, .client));
+    try std.testing.expect(client_control.latest_priority_update == null);
+
+    var server_control = http3.ControlState{};
+    try std.testing.expect(try applyControlStreamFrameForRole(&server_control, allocator, .{
+        .stream_id = 2,
+        .offset = 0,
+        .fin = false,
+        .data = stream_bytes.items,
+    }, .server));
+    try std.testing.expect(server_control.latest_priority_update != null);
 }
 
 test "HTTP/3 connection control frames advance control stream offset" {
