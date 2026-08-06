@@ -892,16 +892,28 @@ pub const Frame = union(enum) {
                 try varint.encode(list, allocator, max_stream_data.stream_id);
                 try varint.encode(list, allocator, max_stream_data.maximum_stream_data);
             },
-            .max_streams_bidi => |max_streams| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.max_streams_bidi), max_streams.maximum_streams),
-            .max_streams_uni => |max_streams| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.max_streams_uni), max_streams.maximum_streams),
+            .max_streams_bidi => |max_streams| {
+                try validateStreamCount(max_streams.maximum_streams);
+                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.max_streams_bidi), max_streams.maximum_streams);
+            },
+            .max_streams_uni => |max_streams| {
+                try validateStreamCount(max_streams.maximum_streams);
+                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.max_streams_uni), max_streams.maximum_streams);
+            },
             .data_blocked => |blocked| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.data_blocked), blocked.maximum_data),
             .stream_data_blocked => |blocked| {
                 try varint.encode(list, allocator, @intFromEnum(FrameType.stream_data_blocked));
                 try varint.encode(list, allocator, blocked.stream_id);
                 try varint.encode(list, allocator, blocked.maximum_stream_data);
             },
-            .streams_blocked_bidi => |blocked| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.streams_blocked_bidi), blocked.maximum_streams),
-            .streams_blocked_uni => |blocked| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.streams_blocked_uni), blocked.maximum_streams),
+            .streams_blocked_bidi => |blocked| {
+                try validateStreamCount(blocked.maximum_streams);
+                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.streams_blocked_bidi), blocked.maximum_streams);
+            },
+            .streams_blocked_uni => |blocked| {
+                try validateStreamCount(blocked.maximum_streams);
+                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.streams_blocked_uni), blocked.maximum_streams);
+            },
             .new_connection_id => |new_connection_id| {
                 try validateConnectionIdLen(new_connection_id.connection_id.len);
                 if (new_connection_id.retire_prior_to > new_connection_id.sequence_number) return error.InvalidFrame;
@@ -1082,8 +1094,8 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.max_streams_bidi)) return .{ .max_streams_bidi = .{ .maximum_streams = try varint.decode(cursor) } };
-    if (frame_type == @intFromEnum(FrameType.max_streams_uni)) return .{ .max_streams_uni = .{ .maximum_streams = try varint.decode(cursor) } };
+    if (frame_type == @intFromEnum(FrameType.max_streams_bidi)) return .{ .max_streams_bidi = .{ .maximum_streams = try parseStreamCount(cursor) } };
+    if (frame_type == @intFromEnum(FrameType.max_streams_uni)) return .{ .max_streams_uni = .{ .maximum_streams = try parseStreamCount(cursor) } };
     if (frame_type == @intFromEnum(FrameType.data_blocked)) return .{ .data_blocked = .{ .maximum_data = try varint.decode(cursor) } };
 
     if (frame_type == @intFromEnum(FrameType.stream_data_blocked)) {
@@ -1093,8 +1105,8 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.streams_blocked_bidi)) return .{ .streams_blocked_bidi = .{ .maximum_streams = try varint.decode(cursor) } };
-    if (frame_type == @intFromEnum(FrameType.streams_blocked_uni)) return .{ .streams_blocked_uni = .{ .maximum_streams = try varint.decode(cursor) } };
+    if (frame_type == @intFromEnum(FrameType.streams_blocked_bidi)) return .{ .streams_blocked_bidi = .{ .maximum_streams = try parseStreamCount(cursor) } };
+    if (frame_type == @intFromEnum(FrameType.streams_blocked_uni)) return .{ .streams_blocked_uni = .{ .maximum_streams = try parseStreamCount(cursor) } };
 
     if (frame_type == @intFromEnum(FrameType.new_connection_id)) {
         const sequence_number = try varint.decode(cursor);
@@ -1232,6 +1244,16 @@ fn validateEndOffset(offset: u64, data_len: usize) Error!void {
     const data_len_u64 = std.math.cast(u64, data_len) orelse return error.InvalidFrameLength;
     const end = std.math.add(u64, offset, data_len_u64) catch return error.InvalidFrameLength;
     if (end > varint.max_value) return error.InvalidFrameLength;
+}
+
+fn validateStreamCount(maximum_streams: u64) Error!void {
+    if (maximum_streams > max_stream_count) return error.InvalidFrame;
+}
+
+fn parseStreamCount(cursor: *wire.Cursor) Error!u64 {
+    const maximum_streams = try varint.decode(cursor);
+    try validateStreamCount(maximum_streams);
+    return maximum_streams;
 }
 
 fn validateConnectionIdLen(len: usize) Error!void {
@@ -1599,6 +1621,24 @@ test "QUIC frame packet context rules follow RFC 9000" {
     try std.testing.expect(frameAllowedInPacketType(app_close, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .handshake_done = {} }, .one_rtt));
     try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(stream, .initial));
+}
+
+test "QUIC stream-count control frames reject values above RFC limit" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectError(error.InvalidFrame, (Frame{ .max_streams_bidi = .{ .maximum_streams = max_stream_count + 1 } }).write(&encoded, allocator));
+    try std.testing.expectError(error.InvalidFrame, (Frame{ .streams_blocked_uni = .{ .maximum_streams = max_stream_count + 1 } }).write(&encoded, allocator));
+
+    try varint.encode(&encoded, allocator, @intFromEnum(FrameType.max_streams_uni));
+    try varint.encode(&encoded, allocator, max_stream_count + 1);
+    try std.testing.expectError(error.InvalidFrame, parseFrame(encoded.items));
+
+    encoded.clearRetainingCapacity();
+    try varint.encode(&encoded, allocator, @intFromEnum(FrameType.streams_blocked_bidi));
+    try varint.encode(&encoded, allocator, max_stream_count + 1);
+    try std.testing.expectError(error.InvalidFrame, parseFrame(encoded.items));
 }
 
 test "QUIC ACK frame owned parser preserves sparse ranges" {
