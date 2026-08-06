@@ -177,6 +177,7 @@ pub const Client = struct {
     }
 
     pub fn openConnectTunnel(self: *Client, target: []const u8, headers: []const http1.Header) Error!Tunnel {
+        try http1.validateConnectTarget(target);
         try writeRequestToStream(self.allocator, self.io, self.stream, .{
             .method = .CONNECT,
             .target = target,
@@ -219,6 +220,7 @@ pub const Connection = struct {
 
     pub fn acceptConnectTunnel(self: *Connection, request: http1.Request, response_headers: []const http1.Header) Error!Tunnel {
         if (request.method != .CONNECT or request.body.len != 0 or request.trailers.len != 0) return error.InvalidResponse;
+        try http1.validateConnectTarget(request.target);
         try writeResponseToStream(self.allocator, self.io, self.stream, .{
             .status = 200,
             .reason = "Connection Established",
@@ -1117,6 +1119,8 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
 
     thread.join();
     if (shared.err) |err| return err;
+
+    try std.testing.expectError(error.MalformedStartLine, client.openConnectTunnel("/not-authority", &.{}));
 }
 
 test "HTTP/1 server sends 100 Continue before reading expected body" {

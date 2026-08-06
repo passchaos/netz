@@ -49,6 +49,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http1, "validateTrailers"));
     try std.testing.expect(@hasDecl(netz.http1, "validateHeader"));
     try std.testing.expect(@hasDecl(netz.http1, "validateRequestTarget"));
+    try std.testing.expect(@hasDecl(netz.http1, "validateConnectTarget"));
     try std.testing.expect(@hasDecl(netz.http1, "validateReasonPhrase"));
     try std.testing.expect(@hasDecl(netz.http1, "validateStatusCode"));
     try std.testing.expect(@hasDecl(netz.http1, "statusCodeForbidsBody"));
