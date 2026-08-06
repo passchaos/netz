@@ -437,6 +437,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "DataChunk"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "Reassembler"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ReassembledMessage"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ReceiveState"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "SackChunk"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeSackPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "InitChunk"));

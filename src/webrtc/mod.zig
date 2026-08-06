@@ -2490,6 +2490,130 @@ pub const sctp = struct {
         }
     };
 
+    pub const ReceiveState = struct {
+        allocator: std.mem.Allocator,
+        cumulative_tsn_ack: u32,
+        advertised_receiver_window_credit: u32 = 256 * 1024,
+        received: std.ArrayList(u32) = .empty,
+        duplicates: std.ArrayList(u32) = .empty,
+        max_tracked: usize = 4096,
+
+        pub fn init(allocator: std.mem.Allocator, initial_cumulative_tsn: u32, advertised_receiver_window_credit: u32) ReceiveState {
+            return .{
+                .allocator = allocator,
+                .cumulative_tsn_ack = initial_cumulative_tsn,
+                .advertised_receiver_window_credit = advertised_receiver_window_credit,
+            };
+        }
+
+        pub fn deinit(self: *ReceiveState) void {
+            self.received.deinit(self.allocator);
+            self.duplicates.deinit(self.allocator);
+            self.* = undefined;
+        }
+
+        pub fn observeData(self: *ReceiveState, chunk: DataChunk) Error!void {
+            try self.observeTsn(chunk.tsn);
+        }
+
+        pub fn observeForwardTsn(self: *ReceiveState, forward_tsn: ForwardTsnChunk) void {
+            if (tsnAfter(forward_tsn.new_cumulative_tsn, self.cumulative_tsn_ack)) {
+                self.cumulative_tsn_ack = forward_tsn.new_cumulative_tsn;
+                self.dropAckedTracked();
+                self.advanceCumulativeAck();
+            }
+        }
+
+        pub fn sack(self: ReceiveState, allocator: std.mem.Allocator) Error!SackChunk {
+            const sorted = try allocator.dupe(u32, self.received.items);
+            defer allocator.free(sorted);
+            std.mem.sort(u32, sorted, {}, tsnLessThan);
+
+            var gaps: std.ArrayList(GapAckBlock) = .empty;
+            errdefer gaps.deinit(allocator);
+            var i: usize = 0;
+            while (i < sorted.len) {
+                const start_tsn = sorted[i];
+                if (!tsnAfter(start_tsn, self.cumulative_tsn_ack)) {
+                    i += 1;
+                    continue;
+                }
+                const start_delta = start_tsn -% self.cumulative_tsn_ack;
+                if (start_delta == 0 or start_delta > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+                var end_tsn = start_tsn;
+                i += 1;
+                while (i < sorted.len and sorted[i] == end_tsn +% 1) : (i += 1) {
+                    end_tsn = sorted[i];
+                }
+                const end_delta = end_tsn -% self.cumulative_tsn_ack;
+                if (end_delta > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+                try gaps.append(allocator, .{ .start = @intCast(start_delta), .end = @intCast(end_delta) });
+            }
+
+            const dups = try allocator.dupe(u32, self.duplicates.items);
+            errdefer allocator.free(dups);
+            return .{
+                .cumulative_tsn_ack = self.cumulative_tsn_ack,
+                .advertised_receiver_window_credit = self.advertised_receiver_window_credit,
+                .gap_ack_blocks = try gaps.toOwnedSlice(allocator),
+                .duplicate_tsns = dups,
+            };
+        }
+
+        pub fn clearDuplicates(self: *ReceiveState) void {
+            self.duplicates.clearRetainingCapacity();
+        }
+
+        fn observeTsn(self: *ReceiveState, tsn: u32) Error!void {
+            if (!tsnAfter(tsn, self.cumulative_tsn_ack)) {
+                try self.noteDuplicate(tsn);
+                return;
+            }
+            for (self.received.items) |existing| {
+                if (existing == tsn) {
+                    try self.noteDuplicate(tsn);
+                    return;
+                }
+            }
+            if (self.received.items.len >= self.max_tracked) return error.InvalidSctpPacket;
+            try self.received.append(self.allocator, tsn);
+            self.advanceCumulativeAck();
+        }
+
+        fn noteDuplicate(self: *ReceiveState, tsn: u32) Error!void {
+            if (self.duplicates.items.len >= self.max_tracked) return;
+            try self.duplicates.append(self.allocator, tsn);
+        }
+
+        fn advanceCumulativeAck(self: *ReceiveState) void {
+            while (true) {
+                const next = self.cumulative_tsn_ack +% 1;
+                var found_index: ?usize = null;
+                for (self.received.items, 0..) |tsn, i| {
+                    if (tsn == next) {
+                        found_index = i;
+                        break;
+                    }
+                }
+                if (found_index) |index| {
+                    _ = self.received.swapRemove(index);
+                    self.cumulative_tsn_ack = next;
+                } else break;
+            }
+        }
+
+        fn dropAckedTracked(self: *ReceiveState) void {
+            var i: usize = 0;
+            while (i < self.received.items.len) {
+                if (!tsnAfter(self.received.items[i], self.cumulative_tsn_ack)) {
+                    _ = self.received.swapRemove(i);
+                    continue;
+                }
+                i += 1;
+            }
+        }
+    };
+
     pub const Reassembler = struct {
         allocator: std.mem.Allocator,
         max_buffered: usize = 256 * 1024,
@@ -3131,6 +3255,15 @@ pub const sctp = struct {
         return value.ptr == (&[_]u32{}).ptr and value.len == 0;
     }
 
+    fn tsnAfter(a: u32, b: u32) bool {
+        return a != b and ((a -% b) < 0x8000_0000);
+    }
+
+    fn tsnLessThan(_: void, a: u32, b: u32) bool {
+        if (a == b) return false;
+        return ((a -% b) > 0x8000_0000);
+    }
+
     fn align4(value: usize) usize {
         return (value + 3) & ~@as(usize, 3);
     }
@@ -3696,6 +3829,47 @@ test "RTCP NACK tracker detects RTP gaps and wraparound" {
     wrap.observe(0xffff);
     wrap.observe(0);
     try std.testing.expectEqual(@as(usize, 0), wrap.pendingCount());
+}
+
+test "SCTP receive state generates SACK gaps and duplicates" {
+    const allocator = std.testing.allocator;
+    var state = sctp.ReceiveState.init(allocator, 1000, 4096);
+    defer state.deinit();
+
+    try state.observeData(.{ .tsn = 1002, .stream_id = 0, .stream_sequence_number = 0, .payload_protocol_identifier = .webrtc_string, .user_data = &.{} });
+    var sack = try state.sack(allocator);
+    defer sack.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1000), sack.cumulative_tsn_ack);
+    try std.testing.expectEqual(@as(usize, 1), sack.gap_ack_blocks.len);
+    try std.testing.expectEqual(@as(u16, 2), sack.gap_ack_blocks[0].start);
+    try std.testing.expectEqual(@as(u16, 2), sack.gap_ack_blocks[0].end);
+
+    try state.observeData(.{ .tsn = 1001, .stream_id = 0, .stream_sequence_number = 0, .payload_protocol_identifier = .webrtc_string, .user_data = &.{} });
+    sack.deinit(allocator);
+    sack = try state.sack(allocator);
+    try std.testing.expectEqual(@as(u32, 1002), sack.cumulative_tsn_ack);
+    try std.testing.expectEqual(@as(usize, 0), sack.gap_ack_blocks.len);
+
+    try state.observeData(.{ .tsn = 1002, .stream_id = 0, .stream_sequence_number = 0, .payload_protocol_identifier = .webrtc_string, .user_data = &.{} });
+    sack.deinit(allocator);
+    sack = try state.sack(allocator);
+    try std.testing.expectEqualSlices(u32, &.{1002}, sack.duplicate_tsns);
+    state.clearDuplicates();
+
+    try state.observeData(.{ .tsn = 1005, .stream_id = 0, .stream_sequence_number = 0, .payload_protocol_identifier = .webrtc_string, .user_data = &.{} });
+    try state.observeData(.{ .tsn = 1006, .stream_id = 0, .stream_sequence_number = 0, .payload_protocol_identifier = .webrtc_string, .user_data = &.{} });
+    sack.deinit(allocator);
+    sack = try state.sack(allocator);
+    try std.testing.expectEqual(@as(u32, 1002), sack.cumulative_tsn_ack);
+    try std.testing.expectEqual(@as(usize, 1), sack.gap_ack_blocks.len);
+    try std.testing.expectEqual(@as(u16, 3), sack.gap_ack_blocks[0].start);
+    try std.testing.expectEqual(@as(u16, 4), sack.gap_ack_blocks[0].end);
+
+    state.observeForwardTsn(.{ .new_cumulative_tsn = 1004 });
+    sack.deinit(allocator);
+    sack = try state.sack(allocator);
+    try std.testing.expectEqual(@as(u32, 1006), sack.cumulative_tsn_ack);
+    try std.testing.expectEqual(@as(usize, 0), sack.gap_ack_blocks.len);
 }
 
 test "SCTP ABORT and ERROR causes" {
