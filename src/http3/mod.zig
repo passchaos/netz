@@ -841,9 +841,12 @@ pub const Request = struct {
 
     pub fn headerFields(self: Request, out: []Qpack.HeaderField) Error![]Qpack.HeaderField {
         var count: usize = 0;
+        const extended_connect = std.mem.eql(u8, self.method, "CONNECT") and requestHasProtocolPseudo(self.headers);
         try appendHeaderField(out, &count, .{ .name = ":method", .value = self.method });
-        try appendHeaderField(out, &count, .{ .name = ":path", .value = self.path });
-        try appendHeaderField(out, &count, .{ .name = ":scheme", .value = self.scheme });
+        if (!std.mem.eql(u8, self.method, "CONNECT") or extended_connect) {
+            try appendHeaderField(out, &count, .{ .name = ":path", .value = self.path });
+            try appendHeaderField(out, &count, .{ .name = ":scheme", .value = self.scheme });
+        }
         if (self.authority) |authority| try appendHeaderField(out, &count, .{ .name = ":authority", .value = authority });
         for (self.headers) |header| try appendHeaderField(out, &count, header);
         return out[0..count];
@@ -857,6 +860,13 @@ pub const Request = struct {
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 };
+
+fn requestHasProtocolPseudo(headers: []const Qpack.HeaderField) bool {
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.name, ":protocol")) return true;
+    }
+    return false;
+}
 
 pub const Response = struct {
     status: u16,
@@ -942,16 +952,18 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!Deco
 
     var method: ?[]const u8 = null;
     var path: ?[]const u8 = null;
-    var scheme: []const u8 = "https";
+    var scheme: ?[]const u8 = null;
     var authority: ?[]const u8 = null;
     for (message.headers) |header| {
         if (std.mem.eql(u8, header.name, ":method")) method = header.value else if (std.mem.eql(u8, header.name, ":path")) path = header.value else if (std.mem.eql(u8, header.name, ":scheme")) scheme = header.value else if (std.mem.eql(u8, header.name, ":authority")) authority = header.value;
     }
+    const method_value = method orelse return error.MissingMethod;
+    const plain_connect = std.mem.eql(u8, method_value, "CONNECT") and !requestHasProtocolPseudo(message.headers);
 
     return .{
-        .method = method orelse return error.MissingMethod,
-        .path = path orelse return error.MissingPath,
-        .scheme = scheme,
+        .method = method_value,
+        .path = path orelse if (plain_connect) "" else return error.MissingPath,
+        .scheme = scheme orelse if (plain_connect) "" else return error.InvalidHeader,
         .authority = authority,
         .headers = message.headers,
         .trailers = message.trailers,
@@ -1119,21 +1131,42 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
     var seen_authority = false;
     var seen_protocol = false;
     var seen_status = false;
+    var method_value: ?[]const u8 = null;
+    var scheme_value: ?[]const u8 = null;
+    var path_value: ?[]const u8 = null;
+    var authority_value: ?[]const u8 = null;
+    var has_host = false;
 
     for (headers) |header| {
         try validateHeaderName(header.name);
+        try validateHeaderValue(header.value);
         const pseudo = std.mem.startsWith(u8, header.name, ":");
         if (pseudo) {
             if (saw_regular) return error.InvalidHeader;
             switch (kind) {
-                .request => try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority, &seen_protocol),
-                .response => try markResponsePseudo(header.name, &seen_status),
+                .request => {
+                    try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority, &seen_protocol);
+                    if (std.mem.eql(u8, header.name, ":method")) method_value = header.value;
+                    if (std.mem.eql(u8, header.name, ":scheme")) scheme_value = header.value;
+                    if (std.mem.eql(u8, header.name, ":path")) path_value = header.value;
+                    if (std.mem.eql(u8, header.name, ":authority")) authority_value = header.value;
+                },
+                .response => {
+                    try markResponsePseudo(header.name, &seen_status);
+                    if (std.mem.eql(u8, header.name, ":status")) {
+                        if (header.value.len != 3) return error.InvalidStatus;
+                        for (header.value) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
+                    }
+                },
                 .trailers => return error.InvalidHeader,
             }
             continue;
         }
         saw_regular = true;
 
+        if (std.mem.eql(u8, header.name, "host") and std.mem.trim(u8, header.value, " \t").len != 0) {
+            has_host = true;
+        }
         if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
         if (std.ascii.eqlIgnoreCase(header.name, "te")) {
             switch (kind) {
@@ -1145,9 +1178,28 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
 
     switch (kind) {
         .request => {
-            if (!seen_method) return error.MissingMethod;
-            if (!seen_path) return error.MissingPath;
-            if (!seen_scheme) return error.InvalidHeader;
+            const method = method_value orelse return error.MissingMethod;
+            if (method.len == 0) return error.InvalidHeader;
+            const is_connect = std.mem.eql(u8, method, "CONNECT");
+            if (is_connect and !seen_protocol) {
+                // RFC 9114 preserves the HTTP CONNECT authority-form special
+                // case: traditional CONNECT carries :method and :authority, but
+                // omits :scheme and :path. Extended CONNECT (:protocol present)
+                // falls through to the regular request-target requirements.
+                if (!seen_authority or seen_scheme or seen_path) return error.InvalidHeader;
+                if (authority_value == null or authority_value.?.len == 0) return error.InvalidHeader;
+                return;
+            }
+            if (seen_protocol and !is_connect) return error.InvalidHeader;
+            const scheme = scheme_value orelse return error.InvalidHeader;
+            if (scheme.len == 0) return error.InvalidHeader;
+            const path = path_value orelse return error.MissingPath;
+            if (path.len == 0) return error.InvalidHeader;
+            if ((std.mem.eql(u8, scheme, "http") or std.mem.eql(u8, scheme, "https")) and
+                ((authority_value == null or authority_value.?.len == 0) and !has_host))
+            {
+                return error.InvalidHeader;
+            }
         },
         .response => if (!seen_status) return error.MissingStatus,
         .trailers => {},
@@ -1165,6 +1217,12 @@ fn validateHeaderName(name: []const u8) Error!void {
     }
     for (name) |byte| {
         if (!validHeaderNameByte(byte)) return error.InvalidHeader;
+    }
+}
+
+fn validateHeaderValue(value: []const u8) Error!void {
+    for (value) |byte| {
+        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.InvalidHeader;
     }
 }
 
@@ -1520,6 +1578,7 @@ test "HTTP/3 message aggregates DATA frames and trailing HEADERS" {
         .{ .name = ":method", .value = "POST" },
         .{ .name = ":path", .value = "/multi" },
         .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
         .{ .name = "content-length", .value = "11" },
     });
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&encoded, allocator);
@@ -1557,6 +1616,7 @@ test "HTTP/3 message rejects bad frame order and content length" {
         .{ .name = ":method", .value = "POST" },
         .{ .name = ":path", .value = "/bad-length" },
         .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
         .{ .name = "content-length", .value = "5" },
     });
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&invalid_length, allocator);
@@ -1610,6 +1670,7 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
         .{ .name = ":method", .value = "GET" },
         .{ .name = ":path", .value = "/" },
         .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
     };
 
     var uppercase: std.ArrayList(u8) = .empty;
@@ -1658,11 +1719,87 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
         .{ .name = ":method", .value = "GET" },
         .{ .name = ":path", .value = "/" },
         .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
         .{ .name = "te", .value = "trailers" },
     });
     var decoded = try decodeRequest(allocator, good_te.items);
     defer decoded.deinit(allocator);
     try std.testing.expectEqualStrings("GET", decoded.method);
+
+    var missing_authority = std.ArrayList(u8).empty;
+    defer missing_authority.deinit(allocator);
+    try Helper.writeRequestBlock(&missing_authority, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, missing_authority.items));
+
+    var host_authority = std.ArrayList(u8).empty;
+    defer host_authority.deinit(allocator);
+    try Helper.writeRequestBlock(&host_authority, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "host", .value = "example.com" },
+    });
+    var host_decoded = try decodeRequest(allocator, host_authority.items);
+    defer host_decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("GET", host_decoded.method);
+
+    var empty_path = std.ArrayList(u8).empty;
+    defer empty_path.deinit(allocator);
+    try Helper.writeRequestBlock(&empty_path, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, empty_path.items));
+
+    var plain_connect = std.ArrayList(u8).empty;
+    defer plain_connect.deinit(allocator);
+    try (Request{
+        .method = "CONNECT",
+        .path = "/must-be-omitted",
+        .authority = "proxy.example.com:443",
+    }).write(&plain_connect, allocator);
+    var connect_decoded = try decodeRequest(allocator, plain_connect.items);
+    defer connect_decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("CONNECT", connect_decoded.method);
+    try std.testing.expectEqualStrings("", connect_decoded.path);
+    try std.testing.expectEqualStrings("", connect_decoded.scheme);
+
+    var extended_connect_missing_target = std.ArrayList(u8).empty;
+    defer extended_connect_missing_target.deinit(allocator);
+    try Helper.writeRequestBlock(&extended_connect_missing_target, allocator, &.{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":protocol", .value = "webtransport" },
+        .{ .name = ":authority", .value = "example.com" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, extended_connect_missing_target.items));
+
+    var bad_protocol_method = std.ArrayList(u8).empty;
+    defer bad_protocol_method.deinit(allocator);
+    try Helper.writeRequestBlock(&bad_protocol_method, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":protocol", .value = "webtransport" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, bad_protocol_method.items));
+
+    var bad_value = std.ArrayList(u8).empty;
+    defer bad_value.deinit(allocator);
+    try Helper.writeRequestBlock(&bad_value, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = "x-bad", .value = "ok\r\ninjected: yes" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, bad_value.items));
 
     var pseudo_trailer: std.ArrayList(u8) = .empty;
     defer pseudo_trailer.deinit(allocator);

@@ -1268,7 +1268,7 @@ test "HTTP/3 handshake server rejects requests beyond local GOAWAY" {
     defer client.deinit();
 
     try sendConnectionSettings(&client.established.connection, &client.control, &client.control_send, client.options, client_control_stream_id);
-    try sendConnectionMessage(&client.established.connection, 0, http3.Request{ .method = "GET", .path = "/rejected" }, client.options);
+    try sendConnectionMessage(&client.established.connection, 0, http3.Request{ .method = "GET", .path = "/rejected", .authority = "localhost" }, client.options);
 
     thread.join();
     if (shared.err) |err| return err;
@@ -1327,7 +1327,7 @@ test "HTTP/3 protected server rejects requests beyond local GOAWAY" {
     try sendProtectedSettings(&client.quic_client.endpoint, client.quic_client.peer, client.config, &client.control, &client.control_send, &client.next_packet_number, client_control_stream_id);
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    try (http3.Request{ .method = "GET", .path = "/rejected" }).write(&encoded, allocator);
+    try (http3.Request{ .method = "GET", .path = "/rejected", .authority = "localhost" }).write(&encoded, allocator);
     var send_state = quic.stream_state.SendState.init(0);
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(allocator);
