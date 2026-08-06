@@ -210,9 +210,13 @@ pub const Client = struct {
     ) Error!Connection {
         try validateLocalLimits(limits);
         const host_name = try net.HostName.init(host);
+        const owned_host = try allocator.dupe(u8, host);
+        errdefer allocator.free(owned_host);
         const stream = try host_name.connect(io, port, .{ .mode = .stream });
         errdefer stream.close(io);
-        return connectStream(allocator, io, stream, limits);
+        var connection = try connectStream(allocator, io, stream, limits);
+        connection.default_authority = owned_host;
+        return connection;
     }
 
     fn connectStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!Connection {
@@ -325,8 +329,10 @@ pub const Connection = struct {
     last_peer_client_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
     local_goaway_last_stream_id: ?u31 = null,
+    default_authority: ?[]u8 = null,
 
     pub fn close(self: *Connection) void {
+        if (self.default_authority) |authority| self.allocator.free(authority);
         self.send_stream_windows.deinit(self.allocator);
         self.recv_stream_windows.deinit(self.allocator);
         self.active_local_streams.deinit(self.allocator);
@@ -340,51 +346,55 @@ pub const Connection = struct {
 
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
         if (self.role != .client) return error.UnexpectedFrame;
+        var request_options = options;
+        if (request_options.authority == null) request_options.authority = self.default_authority;
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
-        const method_is_connect = std.ascii.eqlIgnoreCase(options.method, "CONNECT");
-        const extended_connect = options.protocol != null;
-        if (method_is_connect and !extended_connect and (options.body.len != 0 or options.trailers.len != 0)) {
+        const method_is_connect = std.ascii.eqlIgnoreCase(request_options.method, "CONNECT");
+        const extended_connect = request_options.protocol != null;
+        if (method_is_connect and !extended_connect and (request_options.body.len != 0 or request_options.trailers.len != 0)) {
             return error.InvalidContentLength;
         }
-        try fields.append(self.allocator, .{ .name = ":method", .value = options.method });
+        try fields.append(self.allocator, .{ .name = ":method", .value = request_options.method });
         if (!method_is_connect or extended_connect) {
-            try fields.append(self.allocator, .{ .name = ":path", .value = options.path });
-            try fields.append(self.allocator, .{ .name = ":scheme", .value = options.scheme });
+            try fields.append(self.allocator, .{ .name = ":path", .value = request_options.path });
+            try fields.append(self.allocator, .{ .name = ":scheme", .value = request_options.scheme });
         }
-        if (options.protocol) |protocol| {
+        if (request_options.protocol) |protocol| {
             if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
             try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
         }
-        if (options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
-        for (options.headers) |header| try fields.append(self.allocator, header);
+        if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
+        for (request_options.headers) |header| try fields.append(self.allocator, header);
         try validateHeaderBlock(fields.items, .request);
-        try validateHeaderBlock(options.trailers, .request_trailers);
+        try validateHeaderBlock(request_options.trailers, .request_trailers);
 
         const stream_id = try self.reserveNextClientStreamId();
         errdefer self.releaseLocalStream(stream_id);
-        try self.writeHeaders(stream_id, fields.items, options.body.len == 0 and options.trailers.len == 0);
-        if (options.body.len != 0) try self.writeData(stream_id, options.body, options.trailers.len == 0);
-        if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
-        return self.readResponse(stream_id, options.method, extended_connect);
+        try self.writeHeaders(stream_id, fields.items, request_options.body.len == 0 and request_options.trailers.len == 0);
+        if (request_options.body.len != 0) try self.writeData(stream_id, request_options.body, request_options.trailers.len == 0);
+        if (request_options.trailers.len != 0) try self.writeHeaders(stream_id, request_options.trailers, true);
+        return self.readResponse(stream_id, request_options.method, extended_connect);
     }
 
     pub fn openExtendedConnect(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
         if (self.role != .client) return error.UnexpectedFrame;
-        if (!std.ascii.eqlIgnoreCase(options.method, "CONNECT")) return error.InvalidHeader;
-        const protocol = options.protocol orelse return error.InvalidHeader;
+        var request_options = options;
+        if (request_options.authority == null) request_options.authority = self.default_authority;
+        if (!std.ascii.eqlIgnoreCase(request_options.method, "CONNECT")) return error.InvalidHeader;
+        const protocol = request_options.protocol orelse return error.InvalidHeader;
         if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
-        if (options.body.len != 0 or options.trailers.len != 0) return error.InvalidContentLength;
+        if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
         try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
-        try fields.append(self.allocator, .{ .name = ":path", .value = options.path });
-        try fields.append(self.allocator, .{ .name = ":scheme", .value = options.scheme });
+        try fields.append(self.allocator, .{ .name = ":path", .value = request_options.path });
+        try fields.append(self.allocator, .{ .name = ":scheme", .value = request_options.scheme });
         try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
-        if (options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
-        for (options.headers) |header| try fields.append(self.allocator, header);
+        if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
+        for (request_options.headers) |header| try fields.append(self.allocator, header);
         try validateHeaderBlock(fields.items, .request);
 
         const stream_id = try self.reserveNextClientStreamId();
@@ -398,15 +408,17 @@ pub const Connection = struct {
 
     pub fn openConnectTunnel(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
         if (self.role != .client) return error.UnexpectedFrame;
-        if (!std.ascii.eqlIgnoreCase(options.method, "CONNECT") or options.protocol != null) return error.InvalidHeader;
-        if (options.authority == null) return error.MissingPseudoHeader;
-        if (options.body.len != 0 or options.trailers.len != 0) return error.InvalidContentLength;
+        var request_options = options;
+        if (request_options.authority == null) request_options.authority = self.default_authority;
+        if (!std.ascii.eqlIgnoreCase(request_options.method, "CONNECT") or request_options.protocol != null) return error.InvalidHeader;
+        if (request_options.authority == null) return error.MissingPseudoHeader;
+        if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
         try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
-        try fields.append(self.allocator, .{ .name = ":authority", .value = options.authority.? });
-        for (options.headers) |header| try fields.append(self.allocator, header);
+        try fields.append(self.allocator, .{ .name = ":authority", .value = request_options.authority.? });
+        for (request_options.headers) |header| try fields.append(self.allocator, header);
         try validateHeaderBlock(fields.items, .request);
 
         const stream_id = try self.reserveNextClientStreamId();
@@ -2270,7 +2282,6 @@ test "HTTP/2 client connects by host name" {
     var response = try client.request(.{
         .method = "GET",
         .path = "/dns",
-        .authority = "localhost",
     });
     defer response.deinit(allocator);
 
