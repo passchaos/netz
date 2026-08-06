@@ -5348,6 +5348,48 @@ test "HTTP/2 client connect handles interleaved PING before settings" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 server clears settings ACK on first control read" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            try std.testing.expect(connection.awaiting_settings_ack);
+
+            const observed = try connection.readPing();
+            try std.testing.expectEqualSlices(u8, &[_]u8{ 3, 1, 4, 1, 5, 9, 2, 6 }, &observed);
+            try std.testing.expect(!connection.awaiting_settings_ack);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    _ = try client.ping(.{ 3, 1, 4, 1, 5, 9, 2, 6 });
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 client connect clears initial settings ACK wait" {
     const allocator = std.testing.allocator;
 
