@@ -105,6 +105,8 @@ pub const OneRttConfig = struct {
                 std.math.cast(usize, peer_transport_parameters.max_udp_payload_size) orelse std.math.maxInt(usize),
             ),
             .active_connection_id_limit = std.math.cast(usize, local_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
+            .local_max_idle_timeout_ms = local_transport_parameters.max_idle_timeout,
+            .peer_max_idle_timeout_ms = peer_transport_parameters.max_idle_timeout,
         };
     }
 };
@@ -709,12 +711,14 @@ test "QUIC integrated handshake applies negotiated transport parameters" {
     const server_cid = [_]u8{ 0xf0, 0xf1, 0xf2, 0xf3 };
 
     var client_tp = quic.practical_transport_parameters;
+    client_tp.max_idle_timeout = 70;
     client_tp.initial_max_data = 30;
     client_tp.initial_max_stream_data_bidi_local = 11;
     client_tp.initial_max_stream_data_bidi_remote = 12;
     client_tp.initial_max_stream_data_uni = 13;
 
     var server_tp = quic.practical_transport_parameters;
+    server_tp.max_idle_timeout = 40;
     server_tp.initial_max_data = 40;
     server_tp.initial_max_stream_data_bidi_local = 21;
     server_tp.initial_max_stream_data_bidi_remote = 22;
@@ -747,6 +751,7 @@ test "QUIC integrated handshake applies negotiated transport parameters" {
             try std.testing.expectEqual(@as(u64, 40), established.connection.recv_flow.limit);
             try std.testing.expectEqual(@as(?u64, 11), established.connection.config.initial_send_max_stream_data_bidi_local);
             try std.testing.expectEqual(@as(?u64, 21), established.connection.config.initial_receive_max_stream_data_bidi_local);
+            try std.testing.expectEqual(@as(?u64, 40), established.connection.effectiveIdleTimeoutMillis());
         }
     };
 
@@ -768,6 +773,7 @@ test "QUIC integrated handshake applies negotiated transport parameters" {
     try std.testing.expectEqual(@as(u64, 30), established.connection.recv_flow.limit);
     try std.testing.expectEqual(@as(?u64, 22), established.connection.config.initial_send_max_stream_data_bidi_remote);
     try std.testing.expectEqual(@as(?u64, 11), established.connection.config.initial_receive_max_stream_data_bidi_local);
+    try std.testing.expectEqual(@as(?u64, 40), established.connection.effectiveIdleTimeoutMillis());
     try std.testing.expectEqual(@as(usize, 1200), established.connection.congestion.max_datagram_size);
     try std.testing.expectError(error.FlowControlBlocked, established.connection.send(&[_]quic.Frame{.{ .stream = .{
         .stream_id = 0,

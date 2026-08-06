@@ -99,6 +99,8 @@ pub const ConnectionConfig = struct {
     max_stored_new_tokens: usize = 4,
     enable_spin_bit: bool = false,
     active_connection_id_limit: usize = quic.default_active_connection_id_limit,
+    local_max_idle_timeout_ms: u64 = 0,
+    peer_max_idle_timeout_ms: u64 = 0,
 };
 
 const StreamFlowEntry = struct {
@@ -172,6 +174,8 @@ pub const Connection = struct {
     recv_max_streams_bidi: u64,
     recv_max_streams_uni: u64,
     spin_bit_value: bool = false,
+    last_activity_ms: ?u64 = null,
+    idle_timed_out: bool = false,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -215,7 +219,7 @@ pub const Connection = struct {
     }
 
     pub fn sendWithEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
-        if (self.close_info != null) return error.ConnectionClosed;
+        if (self.closed()) return error.ConnectionClosed;
         const stream_bytes = countStreamBytes(frames);
         for (frames) |frame| {
             if (frame != .stream) continue;
@@ -437,7 +441,34 @@ pub const Connection = struct {
     }
 
     pub fn closed(self: Connection) bool {
-        return self.close_info != null;
+        return self.close_info != null or self.idle_timed_out;
+    }
+
+    pub fn effectiveIdleTimeoutMillis(self: Connection) ?u64 {
+        const local = self.config.local_max_idle_timeout_ms;
+        const peer = self.config.peer_max_idle_timeout_ms;
+        if (local == 0 and peer == 0) return null;
+        if (local == 0) return peer;
+        if (peer == 0) return local;
+        return @min(local, peer);
+    }
+
+    pub fn markActivity(self: *Connection, now_ms: u64) void {
+        if (self.idle_timed_out) return;
+        self.last_activity_ms = now_ms;
+    }
+
+    pub fn idleTimeoutDeadlineMillis(self: Connection) ?u64 {
+        const timeout = self.effectiveIdleTimeoutMillis() orelse return null;
+        const last_activity = self.last_activity_ms orelse return null;
+        return std.math.add(u64, last_activity, timeout) catch std.math.maxInt(u64);
+    }
+
+    pub fn checkIdleTimeout(self: *Connection, now_ms: u64) bool {
+        const deadline = self.idleTimeoutDeadlineMillis() orelse return false;
+        if (now_ms < deadline) return false;
+        self.idle_timed_out = true;
+        return true;
     }
 
     pub fn sendNewConnectionId(self: *Connection, connection_id: []const u8, stateless_reset_token: [16]u8) Error!void {
@@ -533,6 +564,7 @@ pub const Connection = struct {
     }
 
     pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
+        if (self.closed()) return error.ConnectionClosed;
         var packet = try receiveWithKeyUpdate(
             self.endpoint,
             self.receive_key_phase.keyUpdateKeys(),
@@ -550,6 +582,7 @@ pub const Connection = struct {
     }
 
     pub fn receiveRoutedDatagram(self: *Connection, routed: quic.runtime.RoutedBytes) Error!ReceivedPacket {
+        if (self.closed()) return error.ConnectionClosed;
         var packet = try openReceivedBytesWithKeyUpdate(
             self.endpoint,
             routed.datagram.from,
@@ -1351,6 +1384,39 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
     try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
+}
+
+test "QUIC 1-RTT connection models idle timeout deadlines" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x77} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .local_max_idle_timeout_ms = 100,
+        .peer_max_idle_timeout_ms = 250,
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(@as(?u64, 100), connection.effectiveIdleTimeoutMillis());
+    try std.testing.expectEqual(@as(?u64, null), connection.idleTimeoutDeadlineMillis());
+    connection.markActivity(10);
+    try std.testing.expectEqual(@as(?u64, 110), connection.idleTimeoutDeadlineMillis());
+    try std.testing.expect(!connection.checkIdleTimeout(109));
+    try std.testing.expect(!connection.closed());
+    try std.testing.expect(connection.checkIdleTimeout(110));
+    try std.testing.expect(connection.closed());
+    try std.testing.expectError(error.ConnectionClosed, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
 }
 
 test "QUIC 1-RTT connection rejects ACK for unsent packet numbers" {

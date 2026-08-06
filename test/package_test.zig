@@ -141,6 +141,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_receive_max_streams_uni"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_spin_bit"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "active_connection_id_limit"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_max_idle_timeout_ms"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_max_idle_timeout_ms"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id.PeerPool, "addWithLimit"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
@@ -184,6 +186,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "handshakeConfirmed"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "nextSpinBit"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "resetSpinBit"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "effectiveIdleTimeoutMillis"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "idleTimeoutDeadlineMillis"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkIdleTimeout"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamResetInfo"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketTracker"));
