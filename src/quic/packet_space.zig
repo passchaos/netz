@@ -108,12 +108,23 @@ pub const SentPacket = struct {
     acknowledged: bool = false,
     lost: bool = false,
     bytes: usize = 0,
+    ecn: EcnCodepoint = .not_ect,
+};
+
+pub const EcnCodepoint = enum {
+    not_ect,
+    ect0,
+    ect1,
 };
 
 pub const SentPacketTracker = struct {
     allocator: std.mem.Allocator,
     packets: std.ArrayList(SentPacket) = .empty,
     largest_acknowledged: ?u64 = null,
+    latest_ecn_counts: quic.EcnCounts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 0 },
+    ecn_validation_failed: bool = false,
+    sent_ect0_count: u64 = 0,
+    sent_ect1_count: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) SentPacketTracker {
         return .{ .allocator = allocator };
@@ -125,7 +136,21 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn sent(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize) !void {
-        try self.packets.append(self.allocator, .{ .packet_number = packet_number, .ack_eliciting = ack_eliciting, .bytes = bytes });
+        try self.sentWithEcn(packet_number, ack_eliciting, bytes, .not_ect);
+    }
+
+    pub fn sentWithEcn(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, ecn: EcnCodepoint) !void {
+        try self.packets.append(self.allocator, .{
+            .packet_number = packet_number,
+            .ack_eliciting = ack_eliciting,
+            .bytes = bytes,
+            .ecn = ecn,
+        });
+        switch (ecn) {
+            .not_ect => {},
+            .ect0 => self.sent_ect0_count += 1,
+            .ect1 => self.sent_ect1_count += 1,
+        }
     }
 
     pub fn forget(self: *SentPacketTracker, packet_number: u64) bool {
@@ -169,6 +194,7 @@ pub const SentPacketTracker = struct {
 
     pub fn applyAckDetailed(self: *SentPacketTracker, ack: quic.AckFrame) Error!AckResult {
         try self.validateAckCoversSentPackets(ack);
+        if (ack.ecn_counts) |ecn_counts| try self.validateAckEcnCounters(ecn_counts);
 
         var acked: AckResult = .{};
         var start = ack.largest_acknowledged - ack.first_ack_range;
@@ -183,6 +209,7 @@ pub const SentPacketTracker = struct {
             start = end - range.ack_range_length;
             acked.add(self.markRange(start, end));
         }
+        if (ack.ecn_counts) |ecn_counts| self.latest_ecn_counts = ecn_counts;
         return acked;
     }
 
@@ -209,6 +236,23 @@ pub const SentPacketTracker = struct {
             start = end - range.ack_range_length;
             try self.validateSentRange(start, end);
         }
+    }
+
+    pub fn validateAckEcnCounters(self: SentPacketTracker, counts: quic.EcnCounts) Error!void {
+        if (self.ecn_validation_failed) return error.InvalidAckFrame;
+        if (counts.ect0_count < self.latest_ecn_counts.ect0_count or
+            counts.ect1_count < self.latest_ecn_counts.ect1_count or
+            counts.ecn_ce_count < self.latest_ecn_counts.ecn_ce_count)
+        {
+            return error.InvalidAckFrame;
+        }
+
+        const sent_ect0 = self.sent_ect0_count;
+        const sent_ect1 = self.sent_ect1_count;
+        const total_ect = std.math.add(u64, sent_ect0, sent_ect1) catch return error.InvalidAckFrame;
+        if (counts.ect0_count > sent_ect0) return error.InvalidAckFrame;
+        if (counts.ect1_count > sent_ect1) return error.InvalidAckFrame;
+        if (counts.ecn_ce_count > total_ect) return error.InvalidAckFrame;
     }
 
     pub fn detectPacketThresholdLoss(self: *SentPacketTracker, largest_acknowledged: u64, packet_threshold: u64) AckResult {
@@ -336,6 +380,42 @@ test "QUIC sent packet tracker rejects ACK for never-sent packets" {
     try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(gapless_range_with_missing_one));
     try std.testing.expect(!sent.packets.items[0].acknowledged);
     try std.testing.expect(!sent.packets.items[1].acknowledged);
+}
+
+test "QUIC sent packet tracker validates ACK_ECN counters" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+    try sent.sentWithEcn(0, true, 1200, .ect0);
+
+    const valid_ecn = quic.AckFrame{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ecn_counts = .{
+            .ect0_count = 1,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    };
+    const acked = try sent.applyAckDetailed(valid_ecn);
+    try std.testing.expectEqual(@as(usize, 1), acked.packets);
+    try std.testing.expectEqual(@as(u64, 1), sent.latest_ecn_counts.ect0_count);
+
+    try sent.sentWithEcn(1, true, 1200, .ect1);
+    const excessive_ecn = quic.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ecn_counts = .{
+            .ect0_count = 1,
+            .ect1_count = 2,
+            .ecn_ce_count = 0,
+        },
+    };
+    try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(excessive_ecn));
+    try std.testing.expect(!sent.packets.items[1].acknowledged);
+    try std.testing.expectEqual(@as(u64, 0), sent.latest_ecn_counts.ect1_count);
 }
 
 test "QUIC sent packet tracker detects packet-threshold loss" {

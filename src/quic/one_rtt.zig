@@ -210,6 +210,10 @@ pub const Connection = struct {
     }
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
+        try self.sendWithEcn(frames, .not_ect);
+    }
+
+    pub fn sendWithEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
         if (self.close_info != null) return error.ConnectionClosed;
         const stream_bytes = countStreamBytes(frames);
         for (frames) |frame| {
@@ -254,7 +258,7 @@ pub const Connection = struct {
             };
             reserved_streams.items[reserved_index].bytes = frame.stream.data.len;
         }
-        try self.sendTrackedFrames(frames);
+        try self.sendTrackedFramesEcn(frames, ecn);
         self.noteSentStreams(frames);
     }
 
@@ -269,6 +273,10 @@ pub const Connection = struct {
     }
 
     fn sendTrackedFrames(self: *Connection, frames: []const quic.Frame) Error!void {
+        try self.sendTrackedFramesEcn(frames, .not_ect);
+    }
+
+    fn sendTrackedFramesEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
         const packet_number = self.next_packet_number;
         const payload = try encodeFrames(self.endpoint.allocator, frames);
         defer self.endpoint.allocator.free(payload);
@@ -290,7 +298,7 @@ pub const Connection = struct {
         errdefer {
             if (tracked_recovery) _ = self.recovery.forgetPacketNumber(packet_number);
         }
-        try self.sent.sent(packet_number, is_ack_eliciting, if (is_ack_eliciting) payload.len else 0);
+        try self.sent.sentWithEcn(packet_number, is_ack_eliciting, if (is_ack_eliciting) payload.len else 0, ecn);
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacket(packet_number, payload);
         self.next_packet_number += 1;
@@ -1390,6 +1398,68 @@ test "QUIC 1-RTT connection rejects ACK for unsent packet numbers" {
     try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
     try std.testing.expectEqual(in_flight, client.congestion.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, null), client.sent.largestAcknowledged());
+}
+
+test "QUIC 1-RTT connection validates ACK_ECN counters" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x2a, 0x2b, 0x2c, 0x2d };
+    const server_cid = [_]u8{ 0x2e, 0x2f, 0x30, 0x31 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x53} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x54} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+
+    try client.sendWithEcn(&[_]quic.Frame{.{ .ping = {} }}, .ect0);
+    try sendFrames(&server_endpoint, client_endpoint.address(), server_keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+            .ecn_counts = .{ .ect0_count = 1, .ect1_count = 0, .ecn_ce_count = 0 },
+        } }},
+    });
+
+    var valid = try client.receivePacket();
+    defer valid.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), client.sent.latest_ecn_counts.ect0_count);
+    try std.testing.expect(client.sent.packets.items[0].acknowledged);
+
+    try client.sendWithEcn(&[_]quic.Frame{.{ .ping = {} }}, .ect1);
+    const bytes_in_flight = client.congestion.bytes_in_flight;
+    try sendFrames(&server_endpoint, client_endpoint.address(), server_keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 1,
+        .frames = &[_]quic.Frame{.{ .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+            .ecn_counts = .{ .ect0_count = 1, .ect1_count = 2, .ecn_ce_count = 0 },
+        } }},
+    });
+
+    try std.testing.expectError(error.InvalidAckFrame, client.receivePacket());
+    try std.testing.expect(!client.sent.packets.items[1].acknowledged);
+    try std.testing.expectEqual(bytes_in_flight, client.congestion.bytes_in_flight);
+    try std.testing.expectEqual(@as(u64, 0), client.sent.latest_ecn_counts.ect1_count);
 }
 
 test "QUIC 1-RTT connection performs key update and clears ACK gate" {
