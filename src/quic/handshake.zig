@@ -154,14 +154,33 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
         .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
     });
 
-    var server_initial = try quic.initial_exchange.receiveInitialCrypto(endpoint, initial_secrets.server, 0, options.max_crypto_buffer);
+    var server_datagram = try endpoint.receiveBytes();
+    defer server_datagram.deinit(endpoint.allocator);
+    const server_initial_info = try quic.protection.peekProtectedLongPacketInfo(server_datagram.bytes);
+    if (server_initial_info.packet_type != .initial) return error.InvalidHandshakeFlight;
+
+    var server_initial = try quic.initial_exchange.openInitialCrypto(
+        endpoint,
+        server_datagram.from,
+        server_datagram.bytes[0..server_initial_info.len],
+        initial_secrets.server,
+        0,
+        options.max_crypto_buffer,
+    );
     defer server_initial.deinit(endpoint.allocator);
     const parsed_server = try quic.tls_client_hello.parseServerHello(server_initial.crypto_data);
     const shared = try quic.tls_client_hello.x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
     const hs_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data });
     const handshake = quic.tls_client_hello.deriveHandshakeSecrets(shared, hs_hash);
 
-    var server_handshake = try quic.initial_exchange.receiveHandshakeCrypto(endpoint, handshake.server_quic, 0, options.max_crypto_buffer);
+    var server_handshake = try receiveServerHandshakeCrypto(
+        endpoint,
+        server_initial.from,
+        server_datagram.bytes[server_initial_info.len..],
+        handshake.server_quic,
+        0,
+        options.max_crypto_buffer,
+    );
     defer server_handshake.deinit(endpoint.allocator);
     const server_flight = try splitServerFlight(server_handshake.crypto_data);
     const encrypted_extensions = try quic.tls_client_hello.parseEncryptedExtensions(server_flight.encrypted_extensions);
@@ -239,14 +258,6 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     const hs_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items });
     const handshake = quic.tls_client_hello.deriveHandshakeSecrets(shared, hs_hash);
 
-    try quic.initial_exchange.sendInitialCrypto(endpoint, client_initial.from, client_initial.initial_secrets.server, .{
-        .destination_connection_id = client_initial.packet.source_connection_id,
-        .source_connection_id = options.local_connection_id,
-        .packet_number = options.server_initial_packet_number,
-        .crypto_data = server_hello.items,
-        .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
-    });
-
     var local_transport_parameters = options.local_transport_parameters;
     var encoded_transport_parameters: std.ArrayList(u8) = .empty;
     defer encoded_transport_parameters.deinit(endpoint.allocator);
@@ -271,13 +282,26 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     defer server_flight.deinit(endpoint.allocator);
     try server_flight.appendSlice(endpoint.allocator, encrypted_extensions.items);
     try server_flight.appendSlice(endpoint.allocator, server_finished.items);
-    try quic.initial_exchange.sendHandshakeCrypto(endpoint, client_initial.from, handshake.server_quic, .{
-        .destination_connection_id = client_initial.packet.source_connection_id,
-        .source_connection_id = options.local_connection_id,
-        .packet_number = options.server_handshake_packet_number,
-        .crypto_data = server_flight.items,
-        .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
-    });
+    try quic.initial_exchange.sendCoalescedInitialHandshakeCrypto(
+        endpoint,
+        client_initial.from,
+        client_initial.initial_secrets.server,
+        .{
+            .destination_connection_id = client_initial.packet.source_connection_id,
+            .source_connection_id = options.local_connection_id,
+            .packet_number = options.server_initial_packet_number,
+            .crypto_data = server_hello.items,
+            .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+        },
+        handshake.server_quic,
+        .{
+            .destination_connection_id = client_initial.packet.source_connection_id,
+            .source_connection_id = options.local_connection_id,
+            .packet_number = options.server_handshake_packet_number,
+            .crypto_data = server_flight.items,
+            .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+        },
+    );
 
     var client_finished = try quic.initial_exchange.receiveHandshakeCrypto(endpoint, handshake.client_quic, 0, options.max_crypto_buffer);
     defer client_finished.deinit(endpoint.allocator);
@@ -344,6 +368,30 @@ fn receiveClientInitial(endpoint: *quic.runtime.Endpoint, expected_packet_number
         .crypto_data = crypto_data,
         .initial_secrets = initial_secrets,
     };
+}
+
+fn receiveServerHandshakeCrypto(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    coalesced_tail: []const u8,
+    handshake_keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_crypto_buffer: usize,
+) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
+    if (coalesced_tail.len == 0) {
+        return quic.initial_exchange.receiveHandshakeCrypto(endpoint, handshake_keys, expected_packet_number, max_crypto_buffer);
+    }
+
+    const info = try quic.protection.peekProtectedLongPacketInfo(coalesced_tail);
+    if (info.packet_type != .handshake or info.len != coalesced_tail.len) return error.InvalidHandshakeFlight;
+    return quic.initial_exchange.openHandshakeCrypto(
+        endpoint,
+        from,
+        coalesced_tail[0..info.len],
+        handshake_keys,
+        expected_packet_number,
+        max_crypto_buffer,
+    );
 }
 
 fn establishedConnection(
