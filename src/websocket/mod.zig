@@ -288,15 +288,9 @@ pub fn writeFrameExtended(
     allocator: std.mem.Allocator,
     opcode: Opcode,
     payload: []const u8,
-    options: struct {
-        fin: bool = true,
-        mask_key: ?[4]u8 = null,
-        rsv1: bool = false,
-        rsv2: bool = false,
-        rsv3: bool = false,
-    },
+    options: WriteFrameOptions,
 ) !void {
-    if (opcode.isControl() and (!options.fin or payload.len > 125)) return error.InvalidControlFrame;
+    try validateOutgoingFrame(opcode, payload, options);
     const b0: u8 = (if (options.fin) @as(u8, 0x80) else 0) |
         (if (options.rsv1) @as(u8, 0x40) else 0) |
         (if (options.rsv2) @as(u8, 0x20) else 0) |
@@ -321,6 +315,39 @@ pub fn writeFrameExtended(
     } else {
         try list.appendSlice(allocator, payload);
     }
+}
+
+const WriteFrameOptions = struct {
+    fin: bool = true,
+    mask_key: ?[4]u8 = null,
+    rsv1: bool = false,
+    rsv2: bool = false,
+    rsv3: bool = false,
+};
+
+fn validateOutgoingFrame(
+    opcode: Opcode,
+    payload: []const u8,
+    options: WriteFrameOptions,
+) Error!void {
+    _ = options.mask_key;
+    switch (opcode) {
+        .continuation, .text, .binary, .close, .ping, .pong => {},
+        _ => return error.InvalidOpcode,
+    }
+    if (opcode.isControl()) {
+        if (!options.fin or payload.len > 125) return error.InvalidControlFrame;
+        if (options.rsv1 or options.rsv2 or options.rsv3) return error.UnexpectedRsv;
+    }
+    if (opcode == .continuation and (options.rsv1 or options.rsv2 or options.rsv3)) return error.UnexpectedRsv;
+
+    // The codec writer is often used directly in tests and simple tools, so it
+    // should not be able to emit frames that its peer-side parser would reject.
+    // Fragmented text can split a UTF-8 sequence across frames and compressed
+    // text is not UTF-8 until inflated, so validate only uncompressed final text
+    // frames here; the runtime validates whole fragmented messages separately.
+    if (opcode == .text and options.fin and !options.rsv1 and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
+    if (opcode == .close) try validateClosePayload(payload);
 }
 
 pub fn applyMask(payload: []u8, mask_key: [4]u8, offset: usize) void {
@@ -758,6 +785,17 @@ test "WebSocket strict frame validation" {
 
     const bad_utf8 = "\x81\x02\xc0\x80";
     try std.testing.expectError(error.InvalidUtf8, parseFrameOptions(allocator, bad_utf8, .{}));
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try std.testing.expectError(error.InvalidOpcode, writeFrame(&encoded, allocator, @enumFromInt(0x3), "", .{}));
+    try std.testing.expectError(error.InvalidControlFrame, writeFrameExtended(&encoded, allocator, .ping, "", .{ .fin = false }));
+    try std.testing.expectError(error.UnexpectedRsv, writeFrameExtended(&encoded, allocator, .ping, "", .{ .rsv1 = true }));
+    try std.testing.expectError(error.UnexpectedRsv, writeFrameExtended(&encoded, allocator, .continuation, "", .{ .rsv1 = true }));
+    var bad_close = [_]u8{ 0x03, 0xed };
+    try std.testing.expectError(error.InvalidCloseCode, writeFrame(&encoded, allocator, .close, &bad_close, .{}));
+    var invalid_text = [_]u8{ 0xc0, 0x80 };
+    try std.testing.expectError(error.InvalidUtf8, writeFrame(&encoded, allocator, .text, &invalid_text, .{}));
 }
 
 test "WebSocket close payload validation" {
