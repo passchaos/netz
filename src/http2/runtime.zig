@@ -599,7 +599,7 @@ pub const Connection = struct {
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .ping) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) continue;
-                continue;
+                return error.UnexpectedFrame;
             }
             if ((frame.frame.header.flags & flag_ack) == 0) {
                 const ping_payload = try http2.PingPayload.parse(frame.frame);
@@ -616,7 +616,7 @@ pub const Connection = struct {
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .ping) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) continue;
-                continue;
+                return error.UnexpectedFrame;
             }
             const ping_payload = try http2.PingPayload.parse(frame.frame);
             if ((frame.frame.header.flags & flag_ack) != 0) continue;
@@ -650,7 +650,7 @@ pub const Connection = struct {
                     continue;
                 }
                 frame.deinit(self.allocator);
-                continue;
+                return error.UnexpectedFrame;
             }
             const goaway = try http2.GoAwayPayload.parse(frame.frame);
             try self.recordPeerGoAway(goaway);
@@ -677,7 +677,7 @@ pub const Connection = struct {
                     continue;
                 }
                 frame.deinit(self.allocator);
-                continue;
+                return error.UnexpectedFrame;
             }
             return .{ .frame = frame, .reset = try http2.ResetStreamPayload.parse(frame.frame) };
         }
@@ -833,7 +833,7 @@ pub const Connection = struct {
                     continue;
                 }
                 frame.deinit(self.allocator);
-                continue;
+                return error.UnexpectedFrame;
             }
             const update = try http2.WindowUpdatePayload.parse(frame.frame);
             if (update.stream_id == 0) {
@@ -2284,6 +2284,27 @@ test "HTTP/2 ping helpers handle interleaved control frames" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 wait helpers reject unbuffered application frames" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    const data_frame = http2.Frame{
+        .header = .{ .length = 1, .frame_type = .data, .flags = 0, .stream_id = 1 },
+        .payload = "x",
+    };
+    try std.testing.expect(!try connection.handleConnectionOrGoAwayFrame(data_frame));
 }
 
 test "HTTP/2 readWindowUpdate handles interleaved PING" {
