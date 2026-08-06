@@ -253,9 +253,11 @@ if (session.maxDatagramPayloadSize()) |limit| {
   mutation/unmasking (for example WebSocket frame payloads).
 - Public structs expose decoded wire values and avoid hidden allocation; objects
   that allocate provide explicit `deinit` methods.
-- The HTTP/2 HPACK and HTTP/3 QPACK helpers are bootstrap literal codecs.  They
-  intentionally reject dynamic-table/Huffman encodings until a dedicated table
-  implementation is added.
+- The HTTP/2 HPACK helper maintains per-connection dynamic table state and RFC
+  7541 Huffman strings; the stateless literal convenience helpers remain
+  intentionally conservative.  HTTP/3 QPACK is still bootstrap/stateless and
+  rejects dynamic-table instructions until a full encoder/decoder stream state
+  machine is added.
 - WebRTC support covers signaling/transport wire primitives (STUN, ICE, SDP,
   DTLS/RTP/SCTP headers), forming a foundation for peer-connection state
   machines and SRTP/SCTP data-channel layers.
