@@ -971,7 +971,17 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!Deco
     var scheme: ?[]const u8 = null;
     var authority: ?[]const u8 = null;
     for (message.headers) |header| {
-        if (std.mem.eql(u8, header.name, ":method")) method = header.value else if (std.mem.eql(u8, header.name, ":path")) path = header.value else if (std.mem.eql(u8, header.name, ":scheme")) scheme = header.value else if (std.mem.eql(u8, header.name, ":authority")) authority = header.value;
+        if (std.mem.eql(u8, header.name, ":method")) {
+            method = header.value;
+        } else if (std.mem.eql(u8, header.name, ":path")) {
+            path = header.value;
+        } else if (std.mem.eql(u8, header.name, ":scheme")) {
+            scheme = header.value;
+        } else if (std.mem.eql(u8, header.name, ":authority")) {
+            authority = header.value;
+        } else if (std.ascii.eqlIgnoreCase(header.name, "host") and authority == null) {
+            authority = header.value;
+        }
     }
     const method_value = method orelse return error.MissingMethod;
     const plain_connect = std.mem.eql(u8, method_value, "CONNECT") and !requestHasProtocolPseudo(message.headers);
@@ -1964,6 +1974,7 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
     var host_decoded = try decodeRequest(allocator, host_authority.items);
     defer host_decoded.deinit(allocator);
     try std.testing.expectEqualStrings("GET", host_decoded.method);
+    try std.testing.expectEqualStrings("example.com", host_decoded.authority.?);
 
     var mismatched_authority = std.ArrayList(u8).empty;
     defer mismatched_authority.deinit(allocator);
