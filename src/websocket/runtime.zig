@@ -359,6 +359,7 @@ pub const Connection = struct {
     }
 
     pub fn receiveFrame(self: *Connection) Error!websocket.Frame {
+        if (self.close_sent and self.close_received) return error.ConnectionClosed;
         try self.ensureBuffered(2);
         const second = self.inbuf.items[1];
         var header_len: usize = 2;
@@ -573,6 +574,7 @@ pub const H2Connection = struct {
     }
 
     pub fn receiveFrame(self: *H2Connection) Error!websocket.Frame {
+        if (self.close_sent and self.close_received) return error.ConnectionClosed;
         try self.ensureBuffered(2);
         const second = self.inbuf.items[1];
         var header_len: usize = 2;
@@ -1434,6 +1436,30 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidUtf8, h2.sendClose(.normal_closure, bad_utf8));
     try std.testing.expectError(error.InvalidCloseCode, h2.sendClose(.abnormal_closure, ""));
     try std.testing.expectError(error.InvalidControlFrame, h2.sendPong(too_large_control));
+}
+
+test "WebSocket runtimes return closed after close handshake completes" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .close_sent = true,
+        .close_received = true,
+    };
+    try std.testing.expectError(error.ConnectionClosed, connection.receiveFrame());
+    try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
+
+    var h2 = H2Connection{
+        .allocator = allocator,
+        .tunnel = undefined,
+        .role = .client,
+        .close_sent = true,
+        .close_received = true,
+    };
+    try std.testing.expectError(error.ConnectionClosed, h2.receiveFrame());
+    try std.testing.expectError(error.ConnectionClosed, h2.receiveMessage());
 }
 
 test "WebSocket async std.Io server handles concurrent clients" {
