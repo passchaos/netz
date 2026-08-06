@@ -507,16 +507,28 @@ fn parseExtensionOffer(value: []const u8) Error!?ExtensionNegotiation {
     const name = wire.trimOws(parts.next() orelse return null);
     if (!std.ascii.eqlIgnoreCase(name, "permessage-deflate")) return null;
     var out = ExtensionNegotiation{ .permessage_deflate = true };
+    var saw_client_no_context_takeover = false;
+    var saw_server_no_context_takeover = false;
+    var saw_client_max_window_bits = false;
+    var saw_server_max_window_bits = false;
     while (parts.next()) |raw_param| {
         const param = wire.trimOws(raw_param);
         if (param.len == 0) return error.InvalidExtension;
         if (std.ascii.eqlIgnoreCase(param, "client_no_context_takeover")) {
+            if (saw_client_no_context_takeover) return error.InvalidExtension;
+            saw_client_no_context_takeover = true;
             out.client_no_context_takeover = true;
         } else if (std.ascii.eqlIgnoreCase(param, "server_no_context_takeover")) {
+            if (saw_server_no_context_takeover) return error.InvalidExtension;
+            saw_server_no_context_takeover = true;
             out.server_no_context_takeover = true;
         } else if (parseWindowBitsParam(param, "client_max_window_bits")) |bits| {
+            if (saw_client_max_window_bits) return error.InvalidExtension;
+            saw_client_max_window_bits = true;
             out.client_max_window_bits = bits;
         } else if (parseWindowBitsParam(param, "server_max_window_bits")) |bits| {
+            if (saw_server_max_window_bits) return error.InvalidExtension;
+            saw_server_max_window_bits = true;
             out.server_max_window_bits = bits;
         } else {
             return error.InvalidExtension;
@@ -657,6 +669,12 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     ));
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.parseOffer(
         "permessage-deflate; server_no_context_takeover; x-unknown=1",
+    ));
+    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.parseOffer(
+        "permessage-deflate; client_no_context_takeover; client_no_context_takeover",
+    ));
+    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.parseOffer(
+        "permessage-deflate; server_max_window_bits=15; server_max_window_bits=15",
     ));
 
     const payload = "compress me compress me compress me compress me";
