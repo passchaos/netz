@@ -21,6 +21,9 @@ pub const ClientOptions = struct {
     /// transport-parameter validation.
     retry_source_connection_id: []const u8 = &.{},
     version: quic.Version = .version_1,
+    /// Versions this client is willing to retry with if the server answers the
+    /// first Initial with Version Negotiation.  Preference order is preserved.
+    available_versions: []const quic.Version = &.{ .version_1, .version_2 },
     server_name: ?[]const u8 = null,
     alpn_protocols: []const []const u8 = &.{"h3"},
     /// Optional raw override for callers that need full control over the TLS
@@ -153,7 +156,21 @@ fn clientInitialDestinationConnectionId(options: ClientOptions) []const u8 {
     return options.original_destination_connection_id;
 }
 
+fn isVersionNegotiationDatagram(bytes: []const u8) bool {
+    if (bytes.len < 5 or (bytes[0] & 0x80) == 0) return false;
+    return std.mem.readInt(u32, bytes[1..5], .big) == quic.Version.negotiation.wireValue();
+}
+
 pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: ClientOptions) Error!EstablishedConnection {
+    return connectAttempt(endpoint, peer, options, false);
+}
+
+fn connectAttempt(
+    endpoint: *quic.runtime.Endpoint,
+    peer: net.IpAddress,
+    options: ClientOptions,
+    version_negotiation_processed: bool,
+) Error!EstablishedConnection {
     if (options.version == .negotiation) return error.InvalidVersionNegotiation;
     if (options.retry_source_connection_id.len != 0 and options.address_validation_token.len == 0) {
         return error.InvalidPacket;
@@ -198,6 +215,20 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
 
     var server_datagram = try endpoint.receiveBytes();
     defer server_datagram.deinit(endpoint.allocator);
+    if (isVersionNegotiationDatagram(server_datagram.bytes)) {
+        var negotiated = (try quic.version_negotiation.processClient(endpoint.allocator, .{
+            .chosen_version = options.version,
+            .available_versions = options.available_versions,
+            .original_destination_connection_id = options.original_destination_connection_id,
+            .initial_source_connection_id = options.local_connection_id,
+            .initial_sent = true,
+            .retry_processed = options.retry_source_connection_id.len != 0,
+            .version_negotiation_processed = version_negotiation_processed,
+        }, server_datagram.bytes)) orelse return error.InvalidHandshakeFlight;
+        defer negotiated.deinit(endpoint.allocator);
+        return connectAttempt(endpoint, peer, negotiated.clientOptions(options), true);
+    }
+
     const server_initial_info = try quic.protection.peekProtectedLongPacketInfo(server_datagram.bytes);
     if (server_initial_info.packet_type != .initial) return error.InvalidHandshakeFlight;
 
@@ -759,6 +790,94 @@ test "QUIC integrated handshake establishes 1-RTT stream exchange" {
     if (shared.err) |err| return err;
 
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
+}
+
+test "QUIC integrated client restarts after Version Negotiation" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const original_dcid = [_]u8{ 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+    const client_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const server_cid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        cid: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.endpoint, shared.cid) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(endpoint: *quic.runtime.Endpoint, cid: []const u8) !void {
+            var first_initial = try endpoint.receiveBytes();
+            defer first_initial.deinit(endpoint.allocator);
+            const first_header = try quic.LongHeader.parse(first_initial.bytes);
+            try std.testing.expectEqual(quic.PacketType.initial, first_header.packet_type);
+            try std.testing.expectEqual(quic.Version.version_1.wireValue(), first_header.version);
+
+            const supported_versions = [_]u32{quic.Version.version_2.wireValue()};
+            var vn: std.ArrayList(u8) = .empty;
+            defer vn.deinit(endpoint.allocator);
+            try quic.writeVersionNegotiationPacket(&vn, endpoint.allocator, .{
+                .destination_connection_id = first_header.source_connection_id,
+                .source_connection_id = first_header.destination_connection_id,
+                .versions = &supported_versions,
+            });
+            try endpoint.sendBytes(first_initial.from, vn.items);
+
+            var established = try accept(endpoint, .{
+                .version = .version_2,
+                .local_connection_id = cid,
+                .random = [_]u8{0x82} ** 32,
+                .x25519_secret_key = [_]u8{0x84} ** 32,
+            });
+            defer established.deinit();
+            try std.testing.expectEqualStrings("h3", established.alpn);
+
+            var request = try established.connection.receivePacket();
+            defer request.deinit(endpoint.allocator);
+            try std.testing.expectEqualStrings("GET /vn", request.frames[0].stream.data);
+
+            const response = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "VN OK", .fin = true } }};
+            try established.connection.send(&response);
+        }
+    };
+
+    var shared = Shared{ .endpoint = &server_endpoint, .cid = &server_cid };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try connect(&client_endpoint, server_endpoint.address(), .{
+        .version = .version_1,
+        .available_versions = &.{ .version_2, .version_1 },
+        .original_destination_connection_id = &original_dcid,
+        .local_connection_id = &client_cid,
+        .server_name = "localhost",
+        .random = [_]u8{0x81} ** 32,
+        .x25519_secret_key = [_]u8{0x83} ** 32,
+    });
+    defer established.deinit();
+    try std.testing.expectEqualStrings("h3", established.alpn);
+
+    const request = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "GET /vn", .fin = true } }};
+    try established.connection.send(&request);
+    var response = try established.connection.receivePacket();
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqualStrings("VN OK", response.frames[0].stream.data);
 }
 
 test "QUIC client Initial carries address validation token" {

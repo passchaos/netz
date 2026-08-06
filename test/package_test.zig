@@ -140,6 +140,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "address_validation_token"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "retry_source_connection_id"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "version"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "available_versions"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "address_validation_secrets"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "retry_original_destination_connection_id"));
