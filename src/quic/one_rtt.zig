@@ -699,6 +699,10 @@ pub const Connection = struct {
     }
 
     pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
+        return self.receivePacketAt(null);
+    }
+
+    pub fn receivePacketAt(self: *Connection, now_ns: ?u64) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         var packet = try receiveWithKeyUpdate(
             self.endpoint,
@@ -708,7 +712,7 @@ pub const Connection = struct {
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames);
+        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -717,6 +721,10 @@ pub const Connection = struct {
     }
 
     pub fn receiveRoutedDatagram(self: *Connection, routed: quic.runtime.RoutedBytes) Error!ReceivedPacket {
+        return self.receiveRoutedDatagramAt(routed, null);
+    }
+
+    pub fn receiveRoutedDatagramAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         var packet = try openReceivedBytesWithKeyUpdate(
             self.endpoint,
@@ -728,7 +736,7 @@ pub const Connection = struct {
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames);
+        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -736,7 +744,7 @@ pub const Connection = struct {
         return packet;
     }
 
-    fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame) Error!void {
+    fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame, now_ns: ?u64) Error!void {
         if (!try self.received.wouldRecordFresh(packet_number)) return error.DuplicatePacket;
         try self.validateReceivedFramePreconditions(frames);
         if (!try self.received.recordFresh(packet_number)) return error.DuplicatePacket;
@@ -746,6 +754,7 @@ pub const Connection = struct {
         for (frames) |frame| {
             switch (frame) {
                 .ack => {
+                    if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
                     const acked = try self.sent.applyAckDetailed(frame.ack);
                     self.congestion.onAcked(acked.bytes);
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
@@ -2121,6 +2130,50 @@ test "QUIC 1-RTT connection preflights role and path control frames before recei
     try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), server.expected_packet_number);
     try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
+}
+
+test "QUIC 1-RTT receivePacketAt updates RTT from ACK" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
+    const server_cid = [_]u8{ 0xde, 0xdf, 0xe0, 0xe1 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xd3} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .peer_ack_delay_exponent = 3,
+    });
+    defer client.deinit();
+
+    try client.sent.sentAt(0, true, 1200, .not_ect, 1_000_000);
+    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 5,
+            .first_ack_range = 0,
+        } }},
+    });
+
+    var packet = try client.receivePacketAt(101_000_000);
+    defer packet.deinit(allocator);
+    try std.testing.expect(client.rtt_stats.has_measurement);
+    try std.testing.expectEqual(@as(u64, 100_000_000), client.rtt_stats.latest_rtt);
+    try std.testing.expect(client.sent.packets.items[0].acknowledged);
 }
 
 test "QUIC 1-RTT connection updates RTT from ACK samples" {
