@@ -402,6 +402,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "validateMessageIntegrity"));
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "validateFingerprint"));
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "BindingRequestOptions"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "HeaderExtensionElement"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "parseHeaderExtensionElements"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "writeOneByteHeaderExtensions"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "writeTwoByteHeaderExtensions"));
+    try std.testing.expect(@hasDecl(netz.webrtc.rtp, "transportWideSequenceNumber"));
+    try std.testing.expectEqual(@as(u16, 0xbede), netz.webrtc.rtp.one_byte_header_extension_profile);
     try std.testing.expect(@hasDecl(netz.webrtc, "rtcp"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "SenderStats"));
     try std.testing.expect(@hasDecl(netz.webrtc.rtcp, "ntpTimestamp"));

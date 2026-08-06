@@ -773,10 +773,128 @@ pub const dtls = struct {
 };
 
 pub const rtp = struct {
+    pub const one_byte_header_extension_profile: u16 = 0xbede;
+    pub const two_byte_header_extension_profile: u16 = 0x1000;
+
     pub const Extension = struct {
         profile: u16,
         data: []const u8,
     };
+
+    pub const HeaderExtensionElement = struct {
+        id: u8,
+        data: []const u8,
+    };
+
+    pub const HeaderExtensionFormat = enum {
+        one_byte,
+        two_byte,
+    };
+
+    pub fn headerExtensionFormat(profile: u16) ?HeaderExtensionFormat {
+        if (profile == one_byte_header_extension_profile) return .one_byte;
+        if ((profile & 0xfff0) == two_byte_header_extension_profile) return .two_byte;
+        return null;
+    }
+
+    pub fn parseHeaderExtensionElements(allocator: std.mem.Allocator, extension: Extension) Error![]HeaderExtensionElement {
+        return switch (headerExtensionFormat(extension.profile) orelse return error.InvalidRtpPacket) {
+            .one_byte => parseOneByteHeaderExtensions(allocator, extension.data),
+            .two_byte => parseTwoByteHeaderExtensions(allocator, extension.data),
+        };
+    }
+
+    pub fn freeHeaderExtensionElements(allocator: std.mem.Allocator, elements: []HeaderExtensionElement) void {
+        allocator.free(elements);
+    }
+
+    pub fn findHeaderExtension(elements: []const HeaderExtensionElement, id: u8) ?[]const u8 {
+        for (elements) |element| {
+            if (element.id == id) return element.data;
+        }
+        return null;
+    }
+
+    pub fn parseOneByteHeaderExtensions(allocator: std.mem.Allocator, data: []const u8) Error![]HeaderExtensionElement {
+        var elements: std.ArrayList(HeaderExtensionElement) = .empty;
+        errdefer elements.deinit(allocator);
+
+        var pos: usize = 0;
+        while (pos < data.len) {
+            const header = data[pos];
+            pos += 1;
+            if (header == 0) continue; // 0 bytes are padding in both RFC5285 forms.
+            const id = header >> 4;
+            if (id == 15) return error.InvalidRtpPacket; // Reserved by RFC 5285.
+            const len = @as(usize, header & 0x0f) + 1;
+            if (pos + len > data.len) return error.InvalidRtpPacket;
+            try elements.append(allocator, .{ .id = id, .data = data[pos .. pos + len] });
+            pos += len;
+        }
+        return elements.toOwnedSlice(allocator);
+    }
+
+    pub fn parseTwoByteHeaderExtensions(allocator: std.mem.Allocator, data: []const u8) Error![]HeaderExtensionElement {
+        var elements: std.ArrayList(HeaderExtensionElement) = .empty;
+        errdefer elements.deinit(allocator);
+
+        var pos: usize = 0;
+        while (pos < data.len) {
+            const id = data[pos];
+            pos += 1;
+            if (id == 0) continue; // Single-byte padding.
+            if (pos >= data.len) return error.InvalidRtpPacket;
+            const len = data[pos];
+            pos += 1;
+            if (pos + len > data.len) return error.InvalidRtpPacket;
+            try elements.append(allocator, .{ .id = id, .data = data[pos .. pos + len] });
+            pos += len;
+        }
+        return elements.toOwnedSlice(allocator);
+    }
+
+    pub fn writeOneByteHeaderExtensions(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        elements: []const HeaderExtensionElement,
+    ) Error!void {
+        const start = list.items.len;
+        for (elements) |element| {
+            if (element.id == 0 or element.id >= 15 or element.data.len == 0 or element.data.len > 16) {
+                return error.InvalidRtpPacket;
+            }
+            try list.append(allocator, (@as(u8, element.id) << 4) | @as(u8, @intCast(element.data.len - 1)));
+            try list.appendSlice(allocator, element.data);
+        }
+        try padHeaderExtensionData(list, allocator, start);
+    }
+
+    pub fn writeTwoByteHeaderExtensions(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        elements: []const HeaderExtensionElement,
+    ) Error!void {
+        const start = list.items.len;
+        for (elements) |element| {
+            if (element.id == 0 or element.data.len > std.math.maxInt(u8)) return error.InvalidRtpPacket;
+            try list.append(allocator, element.id);
+            try list.append(allocator, @intCast(element.data.len));
+            try list.appendSlice(allocator, element.data);
+        }
+        try padHeaderExtensionData(list, allocator, start);
+    }
+
+    pub fn transportWideSequenceNumber(elements: []const HeaderExtensionElement, id: u8) Error!?u16 {
+        const value = findHeaderExtension(elements, id) orelse return null;
+        if (value.len != 2) return error.InvalidRtpPacket;
+        return std.mem.readInt(u16, value[0..2], .big);
+    }
+
+    pub fn absoluteSendTime24(elements: []const HeaderExtensionElement, id: u8) Error!?u24 {
+        const value = findHeaderExtension(elements, id) orelse return null;
+        if (value.len != 3) return error.InvalidRtpPacket;
+        return (@as(u24, value[0]) << 16) | (@as(u24, value[1]) << 8) | value[2];
+    }
 
     pub const Header = struct {
         version: u2,
@@ -909,6 +1027,11 @@ pub const rtp = struct {
             try list.appendNTimes(allocator, 0, options.padding_len - 1);
             try list.append(allocator, options.padding_len);
         }
+    }
+
+    fn padHeaderExtensionData(list: *std.ArrayList(u8), allocator: std.mem.Allocator, start: usize) Error!void {
+        const len = list.items.len - start;
+        try list.appendNTimes(allocator, 0, (4 - (len % 4)) % 4);
     }
 };
 
@@ -2025,6 +2148,15 @@ test "RTP and DTLS record parsers" {
 
 test "RTP packet extension padding and writer" {
     const allocator = std.testing.allocator;
+    var one_byte_extensions: std.ArrayList(u8) = .empty;
+    defer one_byte_extensions.deinit(allocator);
+    try rtp.writeOneByteHeaderExtensions(&one_byte_extensions, allocator, &.{
+        .{ .id = 1, .data = "m" },
+        .{ .id = 3, .data = &.{ 0x12, 0x34 } },
+        .{ .id = 4, .data = &.{ 0x01, 0x02, 0x03 } },
+    });
+    try std.testing.expectEqual(@as(usize, 0), one_byte_extensions.items.len % 4);
+
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try rtp.writePacket(&encoded, allocator, .{
@@ -2033,7 +2165,7 @@ test "RTP packet extension padding and writer" {
         .sequence_number = 10,
         .timestamp = 99,
         .ssrc = 0x01020304,
-        .extension = .{ .profile = 0xbede, .data = &.{ 0x10, 0x00, 0x00, 0x00 } },
+        .extension = .{ .profile = rtp.one_byte_header_extension_profile, .data = one_byte_extensions.items },
         .padding_len = 4,
     }, "opus");
 
@@ -2042,8 +2174,31 @@ test "RTP packet extension padding and writer" {
     try std.testing.expect(packet.header.marker);
     try std.testing.expectEqual(@as(u7, 111), packet.header.payload_type);
     try std.testing.expectEqual(@as(u16, 0xbede), packet.extension.?.profile);
+    const parsed_extensions = try rtp.parseHeaderExtensionElements(allocator, packet.extension.?);
+    defer rtp.freeHeaderExtensionElements(allocator, parsed_extensions);
+    try std.testing.expectEqualStrings("m", rtp.findHeaderExtension(parsed_extensions, 1).?);
+    try std.testing.expectEqual(@as(?u16, 0x1234), try rtp.transportWideSequenceNumber(parsed_extensions, 3));
+    try std.testing.expectEqual(@as(?u24, 0x010203), try rtp.absoluteSendTime24(parsed_extensions, 4));
     try std.testing.expectEqualStrings("opus", packet.payload);
     try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
+
+    var two_byte_extensions: std.ArrayList(u8) = .empty;
+    defer two_byte_extensions.deinit(allocator);
+    try rtp.writeTwoByteHeaderExtensions(&two_byte_extensions, allocator, &.{
+        .{ .id = 16, .data = "rid" },
+        .{ .id = 20, .data = &.{} },
+    });
+    const parsed_two = try rtp.parseHeaderExtensionElements(allocator, .{
+        .profile = rtp.two_byte_header_extension_profile,
+        .data = two_byte_extensions.items,
+    });
+    defer rtp.freeHeaderExtensionElements(allocator, parsed_two);
+    try std.testing.expectEqualStrings("rid", rtp.findHeaderExtension(parsed_two, 16).?);
+    try std.testing.expectEqual(@as(usize, 0), rtp.findHeaderExtension(parsed_two, 20).?.len);
+
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.writeOneByteHeaderExtensions(&two_byte_extensions, allocator, &.{
+        .{ .id = 15, .data = "reserved" },
+    }));
 }
 
 test "SRTP NULL_HMAC_SHA1_80 authenticates ROC and rejects replay" {
