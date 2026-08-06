@@ -391,6 +391,7 @@ pub const Connection = struct {
         for (self.sent.packets.items) |packet| {
             if (!packet.lost) continue;
             const candidate = self.recovery.packetNumberCandidate(packet.packet_number) orelse continue;
+            if (candidate.packet_number != packet.packet_number) continue;
             try self.retransmitCandidate(candidate, .congestion_controlled);
             return true;
         }
@@ -3399,6 +3400,8 @@ test "QUIC 1-RTT connection retransmits time-threshold losses" {
     var retransmitted = try server.receivePacket();
     defer retransmitted.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 2), retransmitted.packet.packet_number);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
+    try std.testing.expect(!(try client.retransmitTimeThresholdLoss(1_000, 150)));
     try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
 }
 
