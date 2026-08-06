@@ -363,51 +363,233 @@ pub const Qpack = struct {
         value: []const u8,
     };
 
+    const StaticEntry = struct {
+        name: []const u8,
+        value: []const u8,
+    };
+
+    // RFC 9204 Appendix A static table.  Keeping the full table makes the
+    // bootstrap encoder interoperate with peers that use common indexed field
+    // lines without introducing dynamic-table state or head-of-line blocking.
+    pub const static_table = [_]StaticEntry{
+        .{ .name = ":authority", .value = "" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = "age", .value = "0" },
+        .{ .name = "content-disposition", .value = "" },
+        .{ .name = "content-length", .value = "0" },
+        .{ .name = "cookie", .value = "" },
+        .{ .name = "date", .value = "" },
+        .{ .name = "etag", .value = "" },
+        .{ .name = "if-modified-since", .value = "" },
+        .{ .name = "if-none-match", .value = "" },
+        .{ .name = "last-modified", .value = "" },
+        .{ .name = "link", .value = "" },
+        .{ .name = "location", .value = "" },
+        .{ .name = "referer", .value = "" },
+        .{ .name = "set-cookie", .value = "" },
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":method", .value = "DELETE" },
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":method", .value = "HEAD" },
+        .{ .name = ":method", .value = "OPTIONS" },
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":method", .value = "PUT" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":status", .value = "103" },
+        .{ .name = ":status", .value = "200" },
+        .{ .name = ":status", .value = "304" },
+        .{ .name = ":status", .value = "404" },
+        .{ .name = ":status", .value = "503" },
+        .{ .name = "accept", .value = "*/*" },
+        .{ .name = "accept", .value = "application/dns-message" },
+        .{ .name = "accept-encoding", .value = "gzip, deflate, br" },
+        .{ .name = "accept-ranges", .value = "bytes" },
+        .{ .name = "access-control-allow-headers", .value = "cache-control" },
+        .{ .name = "access-control-allow-headers", .value = "content-type" },
+        .{ .name = "access-control-allow-origin", .value = "*" },
+        .{ .name = "cache-control", .value = "max-age=0" },
+        .{ .name = "cache-control", .value = "max-age=2592000" },
+        .{ .name = "cache-control", .value = "max-age=604800" },
+        .{ .name = "cache-control", .value = "no-cache" },
+        .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "cache-control", .value = "public, max-age=31536000" },
+        .{ .name = "content-encoding", .value = "br" },
+        .{ .name = "content-encoding", .value = "gzip" },
+        .{ .name = "content-type", .value = "application/dns-message" },
+        .{ .name = "content-type", .value = "application/javascript" },
+        .{ .name = "content-type", .value = "application/json" },
+        .{ .name = "content-type", .value = "application/x-www-form-urlencoded" },
+        .{ .name = "content-type", .value = "image/gif" },
+        .{ .name = "content-type", .value = "image/jpeg" },
+        .{ .name = "content-type", .value = "image/png" },
+        .{ .name = "content-type", .value = "text/css" },
+        .{ .name = "content-type", .value = "text/html; charset=utf-8" },
+        .{ .name = "content-type", .value = "text/plain" },
+        .{ .name = "content-type", .value = "text/plain;charset=utf-8" },
+        .{ .name = "range", .value = "bytes=0-" },
+        .{ .name = "strict-transport-security", .value = "max-age=31536000" },
+        .{ .name = "strict-transport-security", .value = "max-age=31536000; includesubdomains" },
+        .{ .name = "strict-transport-security", .value = "max-age=31536000; includesubdomains; preload" },
+        .{ .name = "vary", .value = "accept-encoding" },
+        .{ .name = "vary", .value = "origin" },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+        .{ .name = "x-xss-protection", .value = "1; mode=block" },
+        .{ .name = ":status", .value = "100" },
+        .{ .name = ":status", .value = "204" },
+        .{ .name = ":status", .value = "206" },
+        .{ .name = ":status", .value = "302" },
+        .{ .name = ":status", .value = "400" },
+        .{ .name = ":status", .value = "403" },
+        .{ .name = ":status", .value = "421" },
+        .{ .name = ":status", .value = "425" },
+        .{ .name = ":status", .value = "500" },
+        .{ .name = "accept-language", .value = "" },
+        .{ .name = "access-control-allow-credentials", .value = "FALSE" },
+        .{ .name = "access-control-allow-credentials", .value = "TRUE" },
+        .{ .name = "access-control-allow-headers", .value = "*" },
+        .{ .name = "access-control-allow-methods", .value = "get" },
+        .{ .name = "access-control-allow-methods", .value = "get, post, options" },
+        .{ .name = "access-control-allow-methods", .value = "options" },
+        .{ .name = "access-control-expose-headers", .value = "content-length" },
+        .{ .name = "access-control-request-headers", .value = "content-type" },
+        .{ .name = "access-control-request-method", .value = "get" },
+        .{ .name = "access-control-request-method", .value = "post" },
+        .{ .name = "alt-svc", .value = "clear" },
+        .{ .name = "authorization", .value = "" },
+        .{ .name = "content-security-policy", .value = "script-src 'none'; object-src 'none'; base-uri 'none'" },
+        .{ .name = "early-data", .value = "1" },
+        .{ .name = "expect-ct", .value = "" },
+        .{ .name = "forwarded", .value = "" },
+        .{ .name = "if-range", .value = "" },
+        .{ .name = "origin", .value = "" },
+        .{ .name = "purpose", .value = "prefetch" },
+        .{ .name = "server", .value = "" },
+        .{ .name = "timing-allow-origin", .value = "*" },
+        .{ .name = "upgrade-insecure-requests", .value = "1" },
+        .{ .name = "user-agent", .value = "" },
+        .{ .name = "x-forwarded-for", .value = "" },
+        .{ .name = "x-frame-options", .value = "deny" },
+        .{ .name = "x-frame-options", .value = "sameorigin" },
+    };
+
+    pub fn staticEntry(index: usize) ?HeaderField {
+        if (index >= static_table.len) return null;
+        const entry = static_table[index];
+        return .{ .name = entry.name, .value = entry.value };
+    }
+
+    fn findStaticMatch(name: []const u8, value: []const u8) ?struct { index: u64, full_match: bool } {
+        var name_match: ?u64 = null;
+        for (static_table, 0..) |entry, i| {
+            if (std.mem.eql(u8, entry.name, name)) {
+                if (std.mem.eql(u8, entry.value, value)) return .{ .index = @intCast(i), .full_match = true };
+                if (name_match == null) name_match = @intCast(i);
+            }
+        }
+        if (name_match) |index| return .{ .index = index, .full_match = false };
+        return null;
+    }
+
     pub fn encodePrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator, required_insert_count: u64, base: u64) !void {
         try quic.varint.encode(list, allocator, required_insert_count);
         try quic.varint.encode(list, allocator, base);
     }
 
-    /// Minimal QPACK encoder for deterministic tests and bootstrap clients. It
-    /// emits literal field lines without Huffman coding or dynamic references,
-    /// which keeps decoding stateless and avoids head-of-line blocking.
+    /// Stateless QPACK encoder for deterministic clients. It uses the static
+    /// table and literal fields only, so it remains safe with zero dynamic-table
+    /// capacity while interoperating with peers that expect common static refs.
     pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
         try encodePrefix(list, allocator, 0, 0);
         for (fields) |field| {
-            try list.append(allocator, 0x20); // literal field line with literal name, no indexing
-            try encodeString(list, allocator, field.name);
-            try encodeString(list, allocator, field.value);
+            if (findStaticMatch(field.name, field.value)) |match| {
+                if (match.full_match) {
+                    try encodePrefixedInteger(list, allocator, 6, 0xc0, match.index);
+                } else {
+                    try encodePrefixedInteger(list, allocator, 4, 0x50, match.index);
+                    try encodeString(list, allocator, field.value);
+                }
+            } else {
+                try encodePrefixedInteger(list, allocator, 3, 0x20, field.name.len);
+                try list.appendSlice(allocator, field.name);
+                try encodeString(list, allocator, field.value);
+            }
         }
     }
 
     pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
         var cursor = wire.Cursor.init(block);
-        const required_insert_count = try quic.varint.decode(&cursor);
-        const base = try quic.varint.decode(&cursor);
+        const required_insert_count = try decodePrefixedInteger(&cursor, 8, try cursor.readByte());
+        const base = try decodePrefixedInteger(&cursor, 7, try cursor.readByte());
         if (required_insert_count != 0 or base != 0) return error.QpackDynamicTableUnsupported;
 
         var fields: std.ArrayList(HeaderField) = .empty;
         errdefer fields.deinit(allocator);
         while (!cursor.eof()) {
             const first = try cursor.readByte();
-            if ((first & 0xe0) != 0x20) return error.QpackDynamicTableUnsupported;
-            const name = try decodeString(&cursor);
-            const value = try decodeString(&cursor);
-            try fields.append(allocator, .{ .name = name, .value = value });
+            if ((first & 0xc0) == 0xc0) {
+                const index = try decodePrefixedInteger(&cursor, 6, first);
+                const entry = staticEntry(index) orelse return error.InvalidFrame;
+                try fields.append(allocator, entry);
+            } else if ((first & 0xc0) == 0x40) {
+                const is_static = (first & 0x10) != 0;
+                const index = try decodePrefixedInteger(&cursor, 4, first);
+                const value = try decodeString(&cursor);
+                if (!is_static) return error.QpackDynamicTableUnsupported;
+                const entry = staticEntry(index) orelse return error.InvalidFrame;
+                try fields.append(allocator, .{ .name = entry.name, .value = value });
+            } else if ((first & 0xe0) == 0x20) {
+                const name_len = try decodePrefixedInteger(&cursor, 3, first);
+                if ((first & 0x08) != 0) return error.QpackDynamicTableUnsupported;
+                const name = try cursor.readSlice(name_len);
+                const value = try decodeString(&cursor);
+                try fields.append(allocator, .{ .name = name, .value = value });
+            } else {
+                return error.QpackDynamicTableUnsupported;
+            }
         }
         return fields.toOwnedSlice(allocator);
     }
 
     fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
-        if (value.len > 0x7f) return error.InvalidFrame;
-        try list.append(allocator, @intCast(value.len));
+        try encodePrefixedInteger(list, allocator, 7, 0x00, value.len);
         try list.appendSlice(allocator, value);
     }
 
     fn decodeString(cursor: *wire.Cursor) ![]const u8 {
         const first = try cursor.readByte();
         if ((first & 0x80) != 0) return error.QpackDynamicTableUnsupported;
-        return cursor.readSlice(first & 0x7f);
+        const len = try decodePrefixedInteger(cursor, 7, first);
+        return cursor.readSlice(len);
+    }
+
+    fn encodePrefixedInteger(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime prefix_bits: u4, first_prefix: u8, value: u64) !void {
+        const max_prefix: u8 = @intCast((@as(u16, 1) << prefix_bits) - 1);
+        if (value < max_prefix) {
+            try list.append(allocator, first_prefix | @as(u8, @intCast(value)));
+            return;
+        }
+        try list.append(allocator, first_prefix | max_prefix);
+        var remaining = value - max_prefix;
+        while (remaining >= 128) {
+            try list.append(allocator, @as(u8, @intCast(remaining & 0x7f)) | 0x80);
+            remaining >>= 7;
+        }
+        try list.append(allocator, @intCast(remaining));
+    }
+
+    fn decodePrefixedInteger(cursor: *wire.Cursor, comptime prefix_bits: u4, first: u8) !usize {
+        const max_prefix: u8 = @intCast((@as(u16, 1) << prefix_bits) - 1);
+        var value: usize = first & max_prefix;
+        if (value < max_prefix) return value;
+        var shift: u6 = 0;
+        while (true) {
+            const byte = try cursor.readByte();
+            value = std.math.add(usize, value, (@as(usize, byte & 0x7f) << shift)) catch return error.IntegerOverflow;
+            if ((byte & 0x80) == 0) return value;
+            shift += 7;
+            if (shift >= @bitSizeOf(usize)) return error.IntegerOverflow;
+        }
     }
 };
 
@@ -827,10 +1009,33 @@ test "HTTP/3 frame settings and qpack literal block" {
     defer block.deinit(allocator);
     const fields = [_]Qpack.HeaderField{ .{ .name = ":method", .value = "GET" }, .{ .name = ":path", .value = "/" } };
     try Qpack.encodeLiteralBlock(&block, allocator, &fields);
+    try std.testing.expectEqual(@as(u8, 0xd1), block.items[2]); // static index 17, :method GET
+    try std.testing.expectEqual(@as(u8, 0xc1), block.items[3]); // static index 1, :path /
     const decoded = try Qpack.decodeLiteralBlock(allocator, block.items);
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings(":method", decoded[0].name);
     try std.testing.expectEqualStrings("GET", decoded[0].value);
+}
+
+test "HTTP/3 QPACK static name references and literal fallback" {
+    const allocator = std.testing.allocator;
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    const fields = [_]Qpack.HeaderField{
+        .{ .name = "content-type", .value = "application/problem+json" },
+        .{ .name = "x-custom", .value = "value" },
+    };
+    try Qpack.encodeLiteralBlock(&block, allocator, &fields);
+    try std.testing.expectEqual(@as(u8, 0x5f), block.items[2]); // static name ref with extended index, content-type
+
+    const decoded = try Qpack.decodeLiteralBlock(allocator, block.items);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings("content-type", decoded[0].name);
+    try std.testing.expectEqualStrings("application/problem+json", decoded[0].value);
+    try std.testing.expectEqualStrings("x-custom", decoded[1].name);
+    try std.testing.expectEqualStrings("value", decoded[1].value);
+    try std.testing.expectEqualStrings(":status", Qpack.staticEntry(25).?.name);
+    try std.testing.expectEqualStrings("200", Qpack.staticEntry(25).?.value);
 }
 
 test "HTTP/3 typed settings state tracks negotiation" {

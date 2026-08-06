@@ -24,7 +24,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID payload codecs,
   request/response message decoding with ordered HEADERS/DATA/trailer handling,
   HTTP/3 pseudo-header/lowercase field-name and connection-specific header validation,
-  DATA-frame aggregation, content-length validation, stateless QPACK literal helpers, a cleartext development runtime over the QUIC
+  DATA-frame aggregation, content-length validation, stateless QPACK helpers with RFC 9204 static-table references plus literal fallback, a cleartext development runtime over the QUIC
   UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with STREAM frame
   splitting/reassembly and SETTINGS exchange, and a handshake-backed protected
   client/server runtime, plus a `std.Io.async` request receive helper for the
