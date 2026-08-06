@@ -732,7 +732,7 @@ pub const H2Client = struct {
 
         const selected_protocol = try validateH2ServerHandshake(allocator, response.headers, options.protocols);
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
-        const selected_extension = try websocket.ExtensionNegotiation.validateResponse(findH2Header(response.headers, "sec-websocket-extensions"));
+        const selected_extension = try websocket.ExtensionNegotiation.validateResponse(try optionalH2SingletonHeader(response.headers, "sec-websocket-extensions"));
         if (selected_extension.permessage_deflate and !options.enable_permessage_deflate) return error.InvalidExtension;
         const tunnel = response.tunnel;
         response.tunnel = undefined;
@@ -757,14 +757,14 @@ pub const H2Server = struct {
     ) Error!H2Connection {
         var request = try connection.readExtendedConnectRequest("websocket");
         errdefer request.deinit(allocator);
-        const version = findH2Header(request.headers, "sec-websocket-version") orelse return error.MissingHeader;
+        const version = try requiredH2SingletonHeader(request.headers, "sec-websocket-version");
         if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
 
-        const selected_protocol = try selectSubprotocol(allocator, findH2Header(request.headers, "sec-websocket-protocol"), options.protocols);
+        const selected_protocol = try selectSubprotocol(allocator, try optionalH2SingletonHeader(request.headers, "sec-websocket-protocol"), options.protocols);
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
         const selected_extension = try websocket.ExtensionNegotiation.accept(
             allocator,
-            findH2Header(request.headers, "sec-websocket-extensions"),
+            try optionalH2SingletonHeader(request.headers, "sec-websocket-extensions"),
             options.enable_permessage_deflate,
         );
         defer if (selected_extension) |extension| allocator.free(extension);
@@ -927,7 +927,7 @@ fn validateH2ServerHandshake(
     headers: []const http2.Hpack.HeaderField,
     offered_protocols: []const []const u8,
 ) Error!?[]u8 {
-    if (findH2Header(headers, "sec-websocket-protocol")) |selected| {
+    if (try optionalH2SingletonHeader(headers, "sec-websocket-protocol")) |selected| {
         const protocol = wire.trimOws(selected);
         if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
         for (offered_protocols) |offered| {
@@ -936,6 +936,20 @@ fn validateH2ServerHandshake(
         return error.InvalidSubprotocol;
     }
     return null;
+}
+
+fn requiredH2SingletonHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) Error![]const u8 {
+    return (try optionalH2SingletonHeader(headers, name)) orelse error.MissingHeader;
+}
+
+fn optionalH2SingletonHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) Error!?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, name)) continue;
+        if (found != null) return error.InvalidHandshake;
+        found = header.value;
+    }
+    return found;
 }
 
 fn findH2Header(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
@@ -1015,6 +1029,26 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
     var duplicate_response = try http1.parseResponse(allocator, duplicate_accept, .{});
     defer duplicate_response.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, duplicate_response, client_key, &.{}));
+}
+
+test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
+    const duplicate_request_version = [_]http2.Hpack.HeaderField{
+        .{ .name = "sec-websocket-version", .value = "13" },
+        .{ .name = "sec-websocket-version", .value = "13" },
+    };
+    try std.testing.expectError(error.InvalidHandshake, requiredH2SingletonHeader(&duplicate_request_version, "sec-websocket-version"));
+
+    const duplicate_response_protocol = [_]http2.Hpack.HeaderField{
+        .{ .name = "sec-websocket-protocol", .value = "chat.v1" },
+        .{ .name = "sec-websocket-protocol", .value = "chat.v1" },
+    };
+    try std.testing.expectError(error.InvalidHandshake, validateH2ServerHandshake(std.testing.allocator, &duplicate_response_protocol, &.{"chat.v1"}));
+
+    const duplicate_extensions = [_]http2.Hpack.HeaderField{
+        .{ .name = "sec-websocket-extensions", .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover" },
+        .{ .name = "sec-websocket-extensions", .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover" },
+    };
+    try std.testing.expectError(error.InvalidHandshake, optionalH2SingletonHeader(&duplicate_extensions, "sec-websocket-extensions"));
 }
 
 test "WebSocket runtime client and server exchange over TCP" {
