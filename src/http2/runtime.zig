@@ -1659,6 +1659,9 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
         }
         saw_regular = true;
 
+        if (kind == .request_trailers or kind == .response_trailers) {
+            if (forbiddenTrailerFieldName(header.name)) return error.InvalidHeader;
+        }
         if (std.ascii.eqlIgnoreCase(header.name, "connection")) {
             // RFC 9113 inherits the HTTP/1.1 Connection token rule: anything
             // nominated by Connection is connection-specific and forbidden in
@@ -1874,6 +1877,21 @@ fn connectionSpecificHeaderName(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "proxy-connection") or
         std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
         std.ascii.eqlIgnoreCase(name, "upgrade");
+}
+
+fn forbiddenTrailerFieldName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "authorization") or
+        std.ascii.eqlIgnoreCase(name, "cache-control") or
+        std.ascii.eqlIgnoreCase(name, "content-encoding") or
+        std.ascii.eqlIgnoreCase(name, "content-length") or
+        std.ascii.eqlIgnoreCase(name, "content-range") or
+        std.ascii.eqlIgnoreCase(name, "content-type") or
+        std.ascii.eqlIgnoreCase(name, "host") or
+        std.ascii.eqlIgnoreCase(name, "max-forwards") or
+        std.ascii.eqlIgnoreCase(name, "set-cookie") or
+        std.ascii.eqlIgnoreCase(name, "trailer") or
+        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
+        std.ascii.eqlIgnoreCase(name, "te");
 }
 
 fn responseForbidsBody(status: u16, request_method: []const u8, extended_connect: bool) bool {
@@ -3643,6 +3661,13 @@ test "HTTP/2 runtime validates connection-specific headers" {
         .trailers = &.{.{ .name = "te", .value = "trailers" }},
     }));
     try std.testing.expectError(error.InvalidHeader, client.request(.{
+        .method = "POST",
+        .path = "/bad-trailer-content-length",
+        .authority = "localhost",
+        .body = "hello",
+        .trailers = &.{.{ .name = "content-length", .value = "5" }},
+    }));
+    try std.testing.expectError(error.InvalidHeader, client.request(.{
         .method = "GET",
         .path = "/bad-value",
         .authority = "localhost",
@@ -3898,6 +3923,16 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = "x-bad", .value = "bad\x7fvalue" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&bad_response_value, .response));
+
+    const invalid_request_trailer = [_]http2.Hpack.HeaderField{
+        .{ .name = "content-type", .value = "text/plain" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_request_trailer, .request_trailers));
+
+    const invalid_response_trailer = [_]http2.Hpack.HeaderField{
+        .{ .name = "set-cookie", .value = "a=b" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_response_trailer, .response_trailers));
 }
 
 test "HTTP/2 async std.Io server handles concurrent h2c clients" {
