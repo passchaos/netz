@@ -9,6 +9,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     FinalSizeMismatch,
     StreamStopped,
     StreamLimitExceeded,
+    StreamStateError,
 };
 
 pub const SendOptions = struct {
@@ -711,6 +712,9 @@ pub const Connection = struct {
                 },
                 .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_data_total),
                 .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_data_total),
+                .stream_data_blocked => |blocked| try self.validateStreamReceiveFrameId(blocked.stream_id),
+                .max_stream_data => |max_stream_data| try self.validateStreamSendControlId(max_stream_data.stream_id),
+                .stop_sending => |stop| try self.validateStreamSendControlId(stop.stream_id),
                 .new_connection_id => |new_connection_id| {
                     // CID frames mutate fixed-size pools and can fail because of
                     // duplicate CIDs/tokens or active_connection_id_limit. Apply
@@ -746,6 +750,7 @@ pub const Connection = struct {
         recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
         recv_data_total: *u64,
     ) Error!void {
+        try self.validateStreamReceiveFrameId(stream.stream_id);
         const recv_stream = try self.preflightRecvStreamEntry(recv_streams, stream.stream_id);
         const data_len = std.math.cast(u64, stream.data.len) orelse return error.InvalidFrameLength;
         const stream_end = std.math.add(u64, stream.offset, data_len) catch return error.InvalidFrameLength;
@@ -761,6 +766,7 @@ pub const Connection = struct {
         recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
         recv_data_total: *u64,
     ) Error!void {
+        try self.validateStreamReceiveFrameId(reset.stream_id);
         const recv_stream = try self.preflightRecvStreamEntry(recv_streams, reset.stream_id);
         try preflightApplyFinalSize(recv_stream, reset.final_size, true);
         if (reset.final_size > recv_stream.flow_limit) return error.FlowControlViolation;
@@ -1021,6 +1027,7 @@ pub const Connection = struct {
 
     fn recvStreamFlow(self: *Connection, stream_id: u64) Error!*StreamRecvFlowEntry {
         if (self.findRecvStreamEntry(stream_id)) |entry| return entry;
+        try self.validateStreamReceiveFrameId(stream_id);
         try self.validatePeerStreamCount(stream_id);
         try self.stream_recv_flows.append(self.endpoint.allocator, .{
             .stream_id = stream_id,
@@ -1034,6 +1041,28 @@ pub const Connection = struct {
             if (entry.stream_id == stream_id) return entry;
         }
         return null;
+    }
+
+    fn validateStreamReceiveFrameId(self: *Connection, stream_id: u64) Error!void {
+        if (!streamHasReceiveSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            // STREAM/RESET/STREAM_DATA_BLOCKED on a locally initiated
+            // bidirectional stream is valid only after the local endpoint has
+            // opened that stream.  This matches the state checks in quicz/tquic
+            // and prevents a peer from creating local stream IDs on our behalf.
+            if (self.findSendStreamEntry(stream_id) == null) return error.StreamStateError;
+            return;
+        }
+        try self.validatePeerStreamCount(stream_id);
+    }
+
+    fn validateStreamSendControlId(self: *Connection, stream_id: u64) Error!void {
+        if (!streamHasSendSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            if (self.findSendStreamEntry(stream_id) == null) return error.StreamStateError;
+            return;
+        }
+        try self.validatePeerStreamCount(stream_id);
     }
 
     fn validatePeerStreamCount(self: Connection, stream_id: u64) Error!void {
@@ -1075,6 +1104,14 @@ fn streamInitiatedByLocal(local_endpoint: ConnectionConfig.EndpointRole, stream_
         .client => client_initiated,
         .server => !client_initiated,
     };
+}
+
+fn streamHasSendSide(local_endpoint: ConnectionConfig.EndpointRole, stream_id: u64) bool {
+    return streamDirection(stream_id) == .bidirectional or streamInitiatedByLocal(local_endpoint, stream_id);
+}
+
+fn streamHasReceiveSide(local_endpoint: ConnectionConfig.EndpointRole, stream_id: u64) bool {
+    return streamDirection(stream_id) == .bidirectional or !streamInitiatedByLocal(local_endpoint, stream_id);
 }
 
 fn streamDirection(stream_id: u64) enum { bidirectional, unidirectional } {
@@ -1507,6 +1544,7 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
         .send_keys = server_keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -1552,6 +1590,7 @@ test "QUIC 1-RTT connection drops duplicate packet numbers before frame effects"
         .send_keys = server_keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -1666,6 +1705,85 @@ test "QUIC 1-RTT connection preflights stream frames before receive-side effects
     try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
+}
+
+test "QUIC 1-RTT connection rejects invalid unidirectional stream controls before effects" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x31, 0x3a, 0x3b, 0x3c };
+    const server_cid = [_]u8{ 0x35, 0x3e, 0x3f, 0x40 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x7a} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .local_endpoint = .client,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{ .stream_id = 1, .data = "before-max-stream-error", .fin = false } },
+            // Server-initiated unidirectional stream 3 is receive-only for the
+            // client, so MAX_STREAM_DATA/STOP_SENDING are stream-state errors.
+            .{ .max_stream_data = .{ .stream_id = 3, .maximum_stream_data = 64 } },
+        },
+    });
+    try std.testing.expectError(error.StreamStateError, client.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), client.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 1,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{ .stream_id = 1, .data = "before-stop-error", .fin = false } },
+            .{ .stop_sending = .{ .stream_id = 3, .application_error_code = 7 } },
+        },
+    });
+    try std.testing.expectError(error.StreamStateError, client.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), client.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
+
+    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{ .stream_id = 0, .data = "before-blocked-error", .fin = false } },
+            // Server-initiated unidirectional stream 3 is send-only for the
+            // server, so STREAM_DATA_BLOCKED is invalid on its receive side.
+            .{ .stream_data_blocked = .{ .stream_id = 3, .maximum_stream_data = 64 } },
+        },
+    });
+    try std.testing.expectError(error.StreamStateError, server.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
 }
 
 test "QUIC 1-RTT connection preflights CID frames before receive-side effects" {
@@ -1950,6 +2068,7 @@ test "QUIC 1-RTT connection performs key update and clears ACK gate" {
         .send_keys = server_keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2005,6 +2124,7 @@ test "QUIC 1-RTT connection accepts delayed previous-key packets until discard" 
         .send_keys = server_keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2128,6 +2248,7 @@ test "QUIC 1-RTT routed datagrams dispatch to separate connections" {
         .send_keys = keys_a,
         .local_connection_id = &server_a_cid,
         .peer_connection_id = &client_a_cid,
+        .local_endpoint = .server,
     });
     defer server_a.deinit();
     var server_b = try Connection.init(&server_endpoint, .{
@@ -2136,6 +2257,7 @@ test "QUIC 1-RTT routed datagrams dispatch to separate connections" {
         .send_keys = keys_b,
         .local_connection_id = &server_b_cid,
         .peer_connection_id = &client_b_cid,
+        .local_endpoint = .server,
     });
     defer server_b.deinit();
 
@@ -2212,6 +2334,7 @@ test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {
         .send_keys = keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2259,6 +2382,7 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
         .send_keys = keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2448,6 +2572,7 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
         .send_keys = keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2479,6 +2604,7 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
         .send_keys = keys,
         .local_connection_id = &s2,
         .peer_connection_id = &c2,
+        .local_endpoint = .server,
     });
     defer server2.deinit();
 
@@ -2521,6 +2647,7 @@ test "QUIC 1-RTT connection handles RESET_STREAM final size" {
         .send_keys = keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2585,6 +2712,7 @@ test "QUIC 1-RTT connection answers STOP_SENDING with RESET_STREAM" {
         .send_keys = keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2642,6 +2770,7 @@ test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {
         .send_keys = server_keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2712,6 +2841,7 @@ test "QUIC 1-RTT connection retransmits PTO payload and clears recovery on ACK" 
         .peer_connection_id = &client_cid,
         .initial_receive_max_data = 4,
         .initial_receive_max_stream_data = 4,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2776,6 +2906,7 @@ test "QUIC 1-RTT connection retransmits packet-threshold losses" {
         .send_keys = server_keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2856,6 +2987,7 @@ test "QUIC 1-RTT connection emits DATA_BLOCKED and applies MAX_DATA" {
         .send_keys = server_keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2911,6 +3043,7 @@ test "QUIC 1-RTT connection handles stream-level flow control" {
         .peer_connection_id = &client_cid,
         .initial_receive_max_stream_data = 6,
         .stream_receive_window = 6,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
@@ -2967,6 +3100,7 @@ test "QUIC 1-RTT connection enforces stream count limits and MAX_STREAMS" {
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
         .initial_receive_max_streams_bidi = 2,
+        .local_endpoint = .server,
     });
     defer server.deinit();
 
