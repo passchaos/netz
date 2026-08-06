@@ -22,6 +22,7 @@ pub const ClientOptions = struct {
     /// `local_transport_parameters` plus the required connection-id parameter.
     transport_parameters: []const u8 = &.{},
     local_transport_parameters: quic.TransportParameters = quic.practical_transport_parameters,
+    address_validation_token: []const u8 = &.{},
     max_crypto_buffer: usize = 4096,
     max_crypto_frame_data_len: usize = 1024,
     client_initial_packet_number: u64 = 0,
@@ -39,6 +40,9 @@ pub const ServerOptions = struct {
     /// connection-id parameters derived from the received Initial packet.
     transport_parameters: []const u8 = &.{},
     local_transport_parameters: quic.TransportParameters = quic.practical_transport_parameters,
+    address_validation_secrets: []const quic.address_validation_token.Secret = &.{},
+    address_validation_peer: []const u8 = &.{},
+    address_validation_now_ns: i64 = 0,
     max_crypto_buffer: usize = 4096,
     max_crypto_frame_data_len: usize = 1024,
     server_initial_packet_number: u64 = 0,
@@ -160,6 +164,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
     try quic.initial_exchange.sendInitialCrypto(endpoint, peer, initial_secrets.client, .{
         .destination_connection_id = options.original_destination_connection_id,
         .source_connection_id = options.local_connection_id,
+        .token = options.address_validation_token,
         .packet_number = options.client_initial_packet_number,
         .crypto_data = client_hello.items,
         .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
@@ -245,6 +250,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
     var client_initial = try receiveClientInitial(endpoint, 0, options.max_crypto_buffer);
     defer client_initial.deinit(endpoint.allocator);
+    try validateAddressTokenForInitial(client_initial.packet.token, options);
 
     var parsed_client = try quic.tls_client_hello.parseClientHello(endpoint.allocator, client_initial.crypto_data);
     defer parsed_client.deinit(endpoint.allocator);
@@ -324,7 +330,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
 
     const app_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items, server_finished.items, client_finished.crypto_data });
     const application = quic.tls_client_hello.deriveApplicationSecrets(handshake.handshake_secret, app_hash);
-    return try establishedConnection(
+    const established = try establishedConnection(
         endpoint,
         client_initial.from,
         application.client_quic,
@@ -337,6 +343,20 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         peer_transport_parameters,
         alpn,
     );
+    return established;
+}
+
+fn validateAddressTokenForInitial(token: []const u8, options: ServerOptions) Error!void {
+    if (token.len == 0) return;
+    if (options.address_validation_secrets.len == 0 or options.address_validation_peer.len == 0) return;
+    _ = quic.address_validation_token.validateAnySecret(
+        options.address_validation_secrets,
+        .new_token,
+        .version_1,
+        options.address_validation_now_ns,
+        options.address_validation_peer,
+        token,
+    ) catch return error.InvalidPacket;
 }
 
 const ReceivedClientInitial = struct {
@@ -648,6 +668,75 @@ test "QUIC integrated handshake establishes 1-RTT stream exchange" {
     if (shared.err) |err| return err;
 
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
+}
+
+test "QUIC client Initial carries address validation token" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const original_dcid = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17 };
+    const client_cid = [_]u8{ 0x20, 0x21, 0x22, 0x23 };
+    const secret: quic.address_validation_token.Secret = [_]u8{0x4a} ** quic.address_validation_token.secret_len;
+    const token = try quic.address_validation_token.encode(allocator, secret, .{
+        .kind = .new_token,
+        .issued_ns = 1_000,
+        .lifetime_ns = 5_000,
+        .peer_address = "client-path",
+        .nonce = [_]u8{0x5b} ** quic.address_validation_token.nonce_len,
+    });
+    defer allocator.free(token);
+
+    const secrets = quic.protection.deriveInitialSecrets(&original_dcid);
+    const random = [_]u8{0x21} ** 32;
+    const secret_key = [_]u8{0x22} ** 32;
+    const public_key = try quic.tls_client_hello.x25519PublicKey(try secretKey(io, secret_key));
+    var params = quic.practical_transport_parameters;
+    params.initial_source_connection_id = &client_cid;
+    var encoded_tp: std.ArrayList(u8) = .empty;
+    defer encoded_tp.deinit(allocator);
+    try quic.encodeTransportParameters(&encoded_tp, allocator, params);
+
+    var client_hello: std.ArrayList(u8) = .empty;
+    defer client_hello.deinit(allocator);
+    try quic.tls_client_hello.writeClientHello(&client_hello, allocator, .{
+        .random = random,
+        .x25519_public_key = public_key,
+        .server_name = "localhost",
+        .alpn_protocols = &.{"h3"},
+        .transport_parameters = encoded_tp.items,
+    });
+
+    try quic.initial_exchange.sendInitialCrypto(&client_endpoint, server_endpoint.address(), secrets.client, .{
+        .destination_connection_id = &original_dcid,
+        .source_connection_id = &client_cid,
+        .token = token,
+        .packet_number = 0,
+        .crypto_data = client_hello.items,
+        .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+    });
+
+    var raw = try server_endpoint.receiveBytes();
+    defer raw.deinit(allocator);
+    var opened = try quic.initial_exchange.openInitialCrypto(&server_endpoint, raw.from, raw.bytes, secrets.client, 0, 4096);
+    defer opened.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, token, opened.packet.token);
+    const validated = try quic.address_validation_token.validateAnySecret(
+        &[_]quic.address_validation_token.Secret{secret},
+        .new_token,
+        .version_1,
+        1_100,
+        "client-path",
+        opened.packet.token,
+    );
+    try std.testing.expectEqual(quic.address_validation_token.Kind.new_token, validated.kind);
 }
 
 test "QUIC integrated server rejects invalid first client Initial datagrams" {

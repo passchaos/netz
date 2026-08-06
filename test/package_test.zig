@@ -135,7 +135,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "writeRetryPacket"));
     try std.testing.expect(@hasDecl(netz.quic, "verifyRetryIntegrityTag"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "local_transport_parameters"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "address_validation_token"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "local_transport_parameters"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "address_validation_secrets"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
