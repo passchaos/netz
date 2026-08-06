@@ -461,6 +461,10 @@ fn validateProperty(property: Property) Error!void {
             .subscription_identifier => if (p.value == 0) return error.InvalidProperty,
             else => {},
         },
+        .utf8 => |p| switch (p.id) {
+            .response_topic => validateTopicName(p.value) catch return error.InvalidProperty,
+            else => {},
+        },
         else => {},
     }
 }
@@ -1660,6 +1664,14 @@ test "MQTT v5 property values are validated" {
     try invalid_max_packet.append(allocator, @intFromEnum(PropertyId.maximum_packet_size));
     try wire.appendInt(&invalid_max_packet, allocator, u32, 0, .big);
     try Cases.expectInvalid(invalid_max_packet.items);
+
+    var invalid_response_topic: std.ArrayList(u8) = .empty;
+    defer invalid_response_topic.deinit(allocator);
+    try encodeRemainingLength(&invalid_response_topic, allocator, 12);
+    try invalid_response_topic.append(allocator, @intFromEnum(PropertyId.response_topic));
+    try wire.appendInt(&invalid_response_topic, allocator, u16, 9, .big);
+    try invalid_response_topic.appendSlice(allocator, "reply/+/x");
+    try Cases.expectInvalid(invalid_response_topic.items);
 
     var invalid_topic_alias: std.ArrayList(u8) = .empty;
     defer invalid_topic_alias.deinit(allocator);
