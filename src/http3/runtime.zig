@@ -281,6 +281,7 @@ pub const HandshakeServerSession = struct {
     established: quic.handshake.EstablishedConnection,
     options: HandshakeSessionOptions,
     control: http3.ControlState = .{},
+    control_send: quic.stream_state.SendState = quic.stream_state.SendState.init(server_control_stream_id),
 
     pub fn deinit(self: *HandshakeServerSession) void {
         self.established.deinit();
@@ -301,8 +302,13 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
-        try sendConnectionSettings(&self.established.connection, &self.control, self.options, server_control_stream_id);
+        try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, server_control_stream_id);
         try sendConnectionMessage(&self.established.connection, stream_id, response, self.options);
+    }
+
+    pub fn sendGoAway(self: *HandshakeServerSession, stream_id: u64) Error!void {
+        try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, server_control_stream_id);
+        try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
     }
 };
 
@@ -313,6 +319,7 @@ pub const HandshakeClient = struct {
     established: quic.handshake.EstablishedConnection,
     options: HandshakeSessionOptions,
     control: http3.ControlState = .{},
+    control_send: quic.stream_state.SendState = quic.stream_state.SendState.init(client_control_stream_id),
     next_stream_id: u62 = 0,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, options: HandshakeClientOptions) Error!HandshakeClient {
@@ -348,13 +355,18 @@ pub const HandshakeClient = struct {
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         self.next_stream_id += 4;
 
-        try sendConnectionSettings(&self.established.connection, &self.control, self.options, client_control_stream_id);
+        try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, client_control_stream_id);
         try sendConnectionMessage(&self.established.connection, stream_id, request_options, self.options);
         const assembled = try receiveConnectionStreamBytes(&self.established.connection, stream_id, self.options, &self.control);
         errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
         var response = try http3.decodeResponse(self.established.connection.endpoint.allocator, assembled.bytes);
         errdefer response.deinit(self.established.connection.endpoint.allocator);
         return .{ .stream_bytes = assembled.bytes, .response = response };
+    }
+
+    pub fn sendGoAway(self: *HandshakeClient, stream_id: u64) Error!void {
+        try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, client_control_stream_id);
+        try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
     }
 };
 
@@ -386,6 +398,7 @@ pub const ProtectedServer = struct {
     quic_server: quic.runtime.Server,
     config: ProtectedConfig,
     control: http3.ControlState = .{},
+    control_send: quic.stream_state.SendState = quic.stream_state.SendState.init(server_control_stream_id),
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
 
@@ -416,7 +429,7 @@ pub const ProtectedServer = struct {
     }
 
     pub fn sendResponse(self: *ProtectedServer, to: net.IpAddress, stream_id: u62, response: http3.Response) Error!void {
-        try sendProtectedSettings(&self.quic_server.endpoint, to, self.config, &self.control, &self.next_packet_number, server_control_stream_id);
+        try sendProtectedSettings(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, server_control_stream_id);
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
         try response.write(&encoded, self.quic_server.endpoint.allocator);
@@ -433,6 +446,11 @@ pub const ProtectedServer = struct {
             frames.items,
             self.config.max_frames_per_packet,
         );
+    }
+
+    pub fn sendGoAway(self: *ProtectedServer, to: net.IpAddress, stream_id: u64) Error!void {
+        try sendProtectedSettings(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, server_control_stream_id);
+        try sendProtectedControlFrame(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, .goaway, stream_id);
     }
 
     fn receiveStreamBytes(self: *ProtectedServer, expected_stream_id: ?u62) Error!AssembledStream {
@@ -481,6 +499,7 @@ pub const ProtectedClient = struct {
     quic_client: quic.runtime.Client,
     config: ProtectedConfig,
     control: http3.ControlState = .{},
+    control_send: quic.stream_state.SendState = quic.stream_state.SendState.init(client_control_stream_id),
     next_stream_id: u62 = 0,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
@@ -499,7 +518,7 @@ pub const ProtectedClient = struct {
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         self.next_stream_id += 4;
 
-        try sendProtectedSettings(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.next_packet_number, client_control_stream_id);
+        try sendProtectedSettings(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, client_control_stream_id);
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_client.endpoint.allocator);
         try request_options.write(&encoded, self.quic_client.endpoint.allocator);
@@ -522,6 +541,11 @@ pub const ProtectedClient = struct {
         var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, assembled.bytes);
         errdefer response.deinit(self.quic_client.endpoint.allocator);
         return .{ .stream_bytes = assembled.bytes, .response = response };
+    }
+
+    pub fn sendGoAway(self: *ProtectedClient, stream_id: u64) Error!void {
+        try sendProtectedSettings(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, client_control_stream_id);
+        try sendProtectedControlFrame(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, .goaway, stream_id);
     }
 
     fn receiveStreamBytes(self: *ProtectedClient, expected_stream_id: u62) Error!AssembledStream {
@@ -643,9 +667,60 @@ fn receiveConnectionStreamBytes(
     }
 }
 
+const ControlFrameKind = enum { goaway };
+
+fn controlFramePayload(
+    control: *http3.ControlState,
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    kind: ControlFrameKind,
+    value: u64,
+) Error!void {
+    switch (kind) {
+        .goaway => try control.writeGoAway(list, allocator, value),
+    }
+}
+
+fn sendConnectionControlFrame(
+    connection: *quic.one_rtt.Connection,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    options: HandshakeSessionOptions,
+    kind: ControlFrameKind,
+    value: u64,
+) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(connection.endpoint.allocator);
+    try controlFramePayload(control, &payload, connection.endpoint.allocator, kind, value);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(connection.endpoint.allocator);
+    try control_send.appendFrames(&frames, connection.endpoint.allocator, payload.items, payload.items.len, false);
+    try sendConnectionFrames(connection, frames.items, options.max_frames_per_packet);
+}
+
+fn sendProtectedControlFrame(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
+    next_packet_number: *u64,
+    kind: ControlFrameKind,
+    value: u64,
+) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(endpoint.allocator);
+    try controlFramePayload(control, &payload, endpoint.allocator, kind, value);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(endpoint.allocator);
+    try control_send.appendFrames(&frames, endpoint.allocator, payload.items, payload.items.len, false);
+    try sendProtectedFrames(endpoint, to, config.send_keys, config.peer_connection_id, next_packet_number, frames.items, config.max_frames_per_packet);
+}
+
 fn sendConnectionSettings(
     connection: *quic.one_rtt.Connection,
     control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
     options: HandshakeSessionOptions,
     stream_id: u62,
 ) Error!void {
@@ -659,8 +734,8 @@ fn sendConnectionSettings(
 
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(connection.endpoint.allocator);
-    var send_state = quic.stream_state.SendState.init(stream_id);
-    try send_state.appendFrames(&frames, connection.endpoint.allocator, payload.items, payload.items.len, false);
+    if (control_send.stream_id != stream_id) control_send.* = quic.stream_state.SendState.init(stream_id);
+    try control_send.appendFrames(&frames, connection.endpoint.allocator, payload.items, payload.items.len, false);
 
     var qpack_encoder: std.ArrayList(u8) = .empty;
     defer qpack_encoder.deinit(connection.endpoint.allocator);
@@ -681,6 +756,7 @@ fn sendProtectedSettings(
     to: net.IpAddress,
     config: ProtectedConfig,
     control: *http3.ControlState,
+    control_send: *quic.stream_state.SendState,
     next_packet_number: *u64,
     stream_id: u62,
 ) Error!void {
@@ -694,8 +770,8 @@ fn sendProtectedSettings(
 
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(endpoint.allocator);
-    var send_state = quic.stream_state.SendState.init(stream_id);
-    try send_state.appendFrames(&frames, endpoint.allocator, payload.items, payload.items.len, false);
+    if (control_send.stream_id != stream_id) control_send.* = quic.stream_state.SendState.init(stream_id);
+    try control_send.appendFrames(&frames, endpoint.allocator, payload.items, payload.items.len, false);
 
     var qpack_encoder: std.ArrayList(u8) = .empty;
     defer qpack_encoder.deinit(endpoint.allocator);
@@ -720,11 +796,23 @@ fn sendProtectedSettings(
 }
 
 fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allocator, stream: quic.StreamFrame) Error!bool {
-    // HTTP/3 control and QPACK streams are unidirectional QUIC streams.  The
-    // first bytes carry the stream type varint.  This runtime sends each
-    // critical stream in a single STREAM frame; accepting only offset 0 keeps
-    // parsing deterministic until per-critical-stream reassembly is needed.
-    if ((stream.stream_id & 0x02) == 0 or stream.offset != 0 or stream.data.len == 0) return false;
+    // HTTP/3 control and QPACK streams are unidirectional QUIC streams.  Offset
+    // zero carries the stream type varint; subsequent frames on an already
+    // registered critical stream contain only that stream's payload.
+    if ((stream.stream_id & 0x02) == 0 or stream.data.len == 0) return false;
+    if (stream.offset != 0) {
+        if (control.peer_control_stream_id != null and control.peer_control_stream_id.? == stream.stream_id) {
+            try control.applyControlPayload(allocator, stream.data);
+            return true;
+        }
+        if ((control.peer_qpack_encoder_stream_id != null and control.peer_qpack_encoder_stream_id.? == stream.stream_id) or
+            (control.peer_qpack_decoder_stream_id != null and control.peer_qpack_decoder_stream_id.? == stream.stream_id))
+        {
+            return error.QpackDynamicTableUnsupported;
+        }
+        return false;
+    }
+
     var prefix_cursor = @import("../internal/wire.zig").Cursor.init(stream.data);
     const stream_type: http3.StreamType = @enumFromInt(quic.varint.decode(&prefix_cursor) catch return false);
     switch (stream_type) {
@@ -769,6 +857,61 @@ fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
         if (frame == .stream) return frame.stream;
     }
     return null;
+}
+
+test "HTTP/3 connection control frames advance control stream offset" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
+    const server_cid = [_]u8{ 0xf5, 0xf6, 0xf7, 0xf8 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0xf1} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0xf2} ** quic.protection.secret_len);
+
+    var server = try ProtectedServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+
+    var client = try ProtectedClient.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+
+    try client.sendGoAway(0);
+    var first = try quic.one_rtt.receive(&server.quic_server.endpoint, client_keys, server_cid.len, 0, 8);
+    defer first.deinit(allocator);
+    const first_stream = findStreamFrame(first.frames) orelse return error.MissingStreamFrame;
+    try std.testing.expectEqual(@as(u64, 0), first_stream.offset);
+    try std.testing.expect(try applyControlStreamFrame(&server.control, allocator, first_stream));
+
+    var second = try quic.one_rtt.receive(&server.quic_server.endpoint, client_keys, server_cid.len, 1, 8);
+    defer second.deinit(allocator);
+    const second_stream = findStreamFrame(second.frames) orelse return error.MissingStreamFrame;
+    try std.testing.expect(second_stream.offset > 0);
+    try std.testing.expect(try applyControlStreamFrame(&server.control, allocator, second_stream));
+    try std.testing.expectEqual(@as(?u64, 0), server.control.peer_goaway_id);
+
+    try client.sendGoAway(0);
+    var third = try quic.one_rtt.receive(&server.quic_server.endpoint, client_keys, server_cid.len, 2, 8);
+    defer third.deinit(allocator);
+    const third_stream = findStreamFrame(third.frames) orelse return error.MissingStreamFrame;
+    try std.testing.expect(third_stream.offset > second_stream.offset);
+    try std.testing.expect(try applyControlStreamFrame(&server.control, allocator, third_stream));
+    try std.testing.expectEqual(@as(?u64, 0), server.control.peer_goaway_id);
 }
 
 test "HTTP/3 runtime rejects non-empty QPACK critical streams" {
@@ -939,7 +1082,7 @@ test "HTTP/3 handshake server rejects requests beyond local GOAWAY" {
     });
     defer client.deinit();
 
-    try sendConnectionSettings(&client.established.connection, &client.control, client.options, client_control_stream_id);
+    try sendConnectionSettings(&client.established.connection, &client.control, &client.control_send, client.options, client_control_stream_id);
     try sendConnectionMessage(&client.established.connection, 0, http3.Request{ .method = "GET", .path = "/rejected" }, client.options);
 
     thread.join();
@@ -996,7 +1139,7 @@ test "HTTP/3 protected server rejects requests beyond local GOAWAY" {
     // Send a request without waiting for a response; the server-side receive path
     // should reject it because local GOAWAY(0) says no client request stream is
     // still acceptable.
-    try sendProtectedSettings(&client.quic_client.endpoint, client.quic_client.peer, client.config, &client.control, &client.next_packet_number, client_control_stream_id);
+    try sendProtectedSettings(&client.quic_client.endpoint, client.quic_client.peer, client.config, &client.control, &client.control_send, &client.next_packet_number, client_control_stream_id);
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try (http3.Request{ .method = "GET", .path = "/rejected" }).write(&encoded, allocator);

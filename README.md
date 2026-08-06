@@ -12,7 +12,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder, PING/GOAWAY/WINDOW_UPDATE connection
-  management including interleaved SETTINGS/PING/WINDOW_UPDATE/PRIORITY handling and GOAWAY propagation during stream reads and post-GOAWAY request suppression/rejection, default client server-push opt-out, connection- and stream-level flow-control enforcement including
+  management including interleaved SETTINGS/PING/WINDOW_UPDATE/PRIORITY handling and GOAWAY propagation during stream reads and post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets, default client server-push opt-out, connection- and stream-level flow-control enforcement including
   SETTINGS_INITIAL_WINDOW_SIZE updates, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation,
   outbound frame splitting, frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
   validation, HTTP/2 pseudo-header/lowercase field-name validation,
@@ -20,7 +20,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   and CONNECT body rules, and a blocking prior-knowledge h2c client/server runtime with a
   `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
-  SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection,
+  SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs,
   RFC 9218 Priority field parsing/serialization,
   request/response message decoding with ordered HEADERS/DATA/trailer handling,
