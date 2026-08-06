@@ -785,6 +785,13 @@ pub const Connection = struct {
                         self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
                         _ = self.applyPersistentCongestionIfDetected();
                     }
+                    if (now_ns) |now| {
+                        const timed_lost = self.sent.detectTimeThresholdLoss(now, self.rtt_stats.lossDelay(), frame.ack.largest_acknowledged);
+                        if (timed_lost.bytes > 0) {
+                            self.congestion.onLostAt(timed_lost.bytes, timed_lost.largest_sent_time_ns, now);
+                            _ = self.applyPersistentCongestionIfDetected();
+                        }
+                    }
                     _ = try self.recovery.applyAck(frame.ack);
                     if (self.pending_key_update_ack_threshold) |threshold| {
                         if (self.hasAcknowledgedPacketAtOrAbove(threshold)) {
@@ -3405,6 +3412,68 @@ test "QUIC 1-RTT connection retransmits time-threshold losses" {
     try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
 }
 
+test "QUIC 1-RTT ACK processing detects time-threshold losses" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x7a, 0x7b, 0x7c, 0x7d };
+    const server_cid = [_]u8{ 0x7e, 0x7f, 0x80, 0x81 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x7c} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    // Use already-populated RTT state so ACK-driven time loss uses the real
+    // RFC 9002 9/8 loss delay instead of the larger initial fallback.
+    client.rtt_stats.updateAt(100_000_000, 0, true, 100_000_000);
+    const loss_delay = client.rtt_stats.lossDelay();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 100_000_000); // packet 0, should be lost by time threshold.
+    try client.sendAt(&ping, 300_000_000); // packet 1, newest ACKed packet.
+
+    var dropped = try server_endpoint.receiveBytes();
+    dropped.deinit(allocator);
+    var second = try server.receivePacket();
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), second.packet.packet_number);
+    try server.sendAck(0);
+
+    var ack = try client.receivePacketAt(100_000_000 + loss_delay);
+    defer ack.deinit(allocator);
+    try std.testing.expect(client.sent.packets.items[1].acknowledged);
+    try std.testing.expect(client.sent.packets.items[0].lost);
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+
+    try std.testing.expect(try client.retransmitTimeThresholdLoss(500_000_000, loss_delay));
+    var retransmitted = try server.receivePacket();
+    defer retransmitted.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), retransmitted.packet.packet_number);
+}
+
 test "QUIC 1-RTT connection retransmits packet-threshold losses" {
     const allocator = std.testing.allocator;
 
@@ -3549,8 +3618,6 @@ test "QUIC 1-RTT connection applies persistent congestion response" {
 
     var ack = try client.receivePacketAt(1_400_000_000);
     defer ack.deinit(allocator);
-    client.congestion.congestion_window = 24_000;
-    client.congestion.slow_start_threshold = 24_000;
     try std.testing.expect(try client.retransmitTimeThresholdLoss(1_400_000_000, client.rtt_stats.lossDelay()));
 
     try std.testing.expect(client.sent.packets.items[1].lost);
