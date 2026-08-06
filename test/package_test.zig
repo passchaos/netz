@@ -60,6 +60,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime, "HandshakeClient"));
     try std.testing.expect(@hasDecl(netz.http3, "SettingsState"));
     try std.testing.expect(@hasDecl(netz.http3, "ControlState"));
+    try std.testing.expect(@hasDecl(netz.http3, "Priority"));
+    try std.testing.expect(@hasDecl(netz.http3, "PriorityUpdatePayload"));
+    try std.testing.expect(@hasDecl(netz.http3, "writePriorityUpdateFrame"));
+    try std.testing.expect(@hasDecl(netz.http3, "parsePriorityUpdatePayload"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "static_table"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "staticEntry"));
     try std.testing.expect(@hasDecl(netz.http3, "writeSettingsFrame"));

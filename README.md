@@ -21,7 +21,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with GOAWAY and MAX_PUSH_ID monotonicity checks,
-  CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID payload codecs,
+  CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs,
+  RFC 9218 Priority field parsing/serialization,
   request/response message decoding with ordered HEADERS/DATA/trailer handling,
   HTTP/3 pseudo-header/lowercase field-name and connection-specific header validation,
   DATA-frame aggregation, content-length validation, stateless QPACK helpers with RFC 9204 static-table references plus literal fallback, a cleartext development runtime over the QUIC

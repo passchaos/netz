@@ -21,6 +21,7 @@ pub const Error = wire.Error || error{
     MissingStatus,
     InvalidStatus,
     InvalidHeader,
+    InvalidPriorityUpdate,
     InvalidContentLength,
     IntegerOverflow,
     QpackDynamicTableUnsupported,
@@ -34,6 +35,8 @@ pub const FrameType = struct {
     pub const push_promise: u64 = 0x05;
     pub const goaway: u64 = 0x07;
     pub const max_push_id: u64 = 0x0d;
+    pub const priority_update_request: u64 = 0x0f0700;
+    pub const priority_update_push: u64 = 0x0f0701;
     pub const webtransport_stream: u64 = 0x41;
 };
 
@@ -148,6 +151,7 @@ pub const ControlState = struct {
     local_goaway_id: ?u64 = null,
     peer_max_push_id: ?u64 = null,
     local_max_push_id: ?u64 = null,
+    latest_priority_update: ?PriorityUpdatePayload = null,
 
     pub fn writeSettingsStream(self: *ControlState, list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
         try writeControlStreamPrefix(list, allocator);
@@ -212,6 +216,9 @@ pub const ControlState = struct {
                 self.peer_max_push_id = push_id;
             },
             FrameType.cancel_push => _ = try parseSingleVarintPayload(frame.payload),
+            FrameType.priority_update_request, FrameType.priority_update_push => {
+                self.latest_priority_update = try parsePriorityUpdatePayload(frame.payload);
+            },
             else => {}, // Unknown extension frames on the control stream are ignored.
         }
     }
@@ -226,6 +233,98 @@ pub const PushPromisePayload = struct {
     push_id: u64,
     field_section: []const u8,
 };
+
+pub const Priority = struct {
+    urgency: u3 = 3,
+    incremental: bool = false,
+
+    pub fn parse(value: []const u8) Priority {
+        var result = Priority{};
+        var rest = value;
+        while (rest.len != 0) {
+            rest = trimPriorityLeading(rest);
+            if (rest.len == 0) break;
+            if (rest[0] == ',') {
+                rest = rest[1..];
+                continue;
+            }
+
+            const name_end = priorityNameEnd(rest);
+            const name = rest[0..name_end];
+            rest = trimPriorityLeading(rest[name_end..]);
+            if (rest.len != 0 and rest[0] == '=') {
+                rest = trimPriorityLeading(rest[1..]);
+                const value_end = priorityValueEnd(rest);
+                const parameter_value = rest[0..value_end];
+                rest = rest[value_end..];
+                if (std.mem.eql(u8, name, "u")) {
+                    if (parameter_value.len == 1 and parameter_value[0] >= '0' and parameter_value[0] <= '7') {
+                        result.urgency = @intCast(parameter_value[0] - '0');
+                    }
+                } else if (std.mem.eql(u8, name, "i")) {
+                    if (std.mem.eql(u8, parameter_value, "?1")) result.incremental = true;
+                    if (std.mem.eql(u8, parameter_value, "?0")) result.incremental = false;
+                }
+            } else if (std.mem.eql(u8, name, "i")) {
+                result.incremental = true;
+            }
+        }
+        return result;
+    }
+
+    pub fn serialize(self: Priority, out: []u8) []const u8 {
+        var pos: usize = 0;
+        if (self.urgency != 3) {
+            if (out.len < 3) return out[0..0];
+            out[pos] = 'u';
+            pos += 1;
+            out[pos] = '=';
+            pos += 1;
+            out[pos] = '0' + @as(u8, self.urgency);
+            pos += 1;
+        }
+        if (self.incremental) {
+            if (pos != 0) {
+                if (pos + 2 > out.len) return out[0..pos];
+                out[pos] = ',';
+                pos += 1;
+                out[pos] = ' ';
+                pos += 1;
+            }
+            if (pos + 1 > out.len) return out[0..pos];
+            out[pos] = 'i';
+            pos += 1;
+        }
+        return out[0..pos];
+    }
+};
+
+pub const PriorityUpdatePayload = struct {
+    prioritized_element_id: u64,
+    field_value: []const u8,
+
+    pub fn priority(self: PriorityUpdatePayload) Priority {
+        return Priority.parse(self.field_value);
+    }
+};
+
+fn trimPriorityLeading(value: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < value.len and (value[i] == ' ' or value[i] == 0x09)) : (i += 1) {}
+    return value[i..];
+}
+
+fn priorityNameEnd(value: []const u8) usize {
+    var i: usize = 0;
+    while (i < value.len and value[i] != '=' and value[i] != ',' and value[i] != ' ' and value[i] != 0x09) : (i += 1) {}
+    return i;
+}
+
+fn priorityValueEnd(value: []const u8) usize {
+    var i: usize = 0;
+    while (i < value.len and value[i] != ',' and value[i] != ' ' and value[i] != 0x09) : (i += 1) {}
+    return i;
+}
 
 pub fn writeControlStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
     try quic.varint.encode(list, allocator, @intFromEnum(StreamType.control));
@@ -275,6 +374,38 @@ pub fn parsePushPromisePayload(payload: []const u8) Error!PushPromisePayload {
     var cursor = wire.Cursor.init(payload);
     const push_id = try quic.varint.decode(&cursor);
     return .{ .push_id = push_id, .field_section = payload[cursor.pos..] };
+}
+
+pub fn writePriorityUpdateFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    request_stream_id: u64,
+    priority: Priority,
+) Error!void {
+    var field_value_buf: [16]u8 = undefined;
+    const field_value = priority.serialize(&field_value_buf);
+    try writePriorityUpdateFrameRaw(list, allocator, FrameType.priority_update_request, request_stream_id, field_value);
+}
+
+pub fn writePriorityUpdateFrameRaw(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    frame_type: u64,
+    prioritized_element_id: u64,
+    field_value: []const u8,
+) Error!void {
+    if (frame_type != FrameType.priority_update_request and frame_type != FrameType.priority_update_push) return error.InvalidPriorityUpdate;
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try quic.varint.encode(&payload, allocator, prioritized_element_id);
+    try payload.appendSlice(allocator, field_value);
+    try (Frame{ .frame_type = frame_type, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+}
+
+pub fn parsePriorityUpdatePayload(payload: []const u8) Error!PriorityUpdatePayload {
+    var cursor = wire.Cursor.init(payload);
+    const id = try quic.varint.decode(&cursor);
+    return .{ .prioritized_element_id = id, .field_value = payload[cursor.pos..] };
 }
 
 pub fn validatePushPromise(control: ControlState, push_id: u64) Error!void {
@@ -1036,6 +1167,35 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     try std.testing.expectEqualStrings("value", decoded[1].value);
     try std.testing.expectEqualStrings(":status", Qpack.staticEntry(25).?.name);
     try std.testing.expectEqualStrings("200", Qpack.staticEntry(25).?.value);
+}
+
+test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
+    const allocator = std.testing.allocator;
+    const parsed = Priority.parse("u=1, foo=bar, i=?1");
+    try std.testing.expectEqual(@as(u3, 1), parsed.urgency);
+    try std.testing.expect(parsed.incremental);
+    var field_buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("u=1, i", parsed.serialize(&field_buf));
+    try std.testing.expectEqual(@as(u3, 3), Priority.parse("u=9, i=?0").urgency);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writePriorityUpdateFrame(&encoded, allocator, 8, parsed);
+    const frame = try Frame.parse(encoded.items);
+    try std.testing.expectEqual(FrameType.priority_update_request, frame.frame_type);
+    const payload = try parsePriorityUpdatePayload(frame.payload);
+    try std.testing.expectEqual(@as(u64, 8), payload.prioritized_element_id);
+    try std.testing.expectEqual(@as(u3, 1), payload.priority().urgency);
+    try std.testing.expect(payload.priority().incremental);
+
+    var control = ControlState{};
+    var settings_payload: std.ArrayList(u8) = .empty;
+    defer settings_payload.deinit(allocator);
+    try writeControlStreamPrefix(&settings_payload, allocator);
+    try writeSettingsFrame(&settings_payload, allocator, .{});
+    try control.applyControlStreamBytes(allocator, settings_payload.items);
+    try control.applyFrame(allocator, frame);
+    try std.testing.expectEqual(@as(u64, 8), control.latest_priority_update.?.prioritized_element_id);
 }
 
 test "HTTP/3 typed settings state tracks negotiation" {
