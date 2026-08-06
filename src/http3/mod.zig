@@ -259,6 +259,11 @@ pub const ControlState = struct {
         const goaway_id = self.peer_goaway_id orelse return true;
         return stream_id < goaway_id;
     }
+
+    pub fn acceptsLocalRequestStream(self: ControlState, stream_id: u64) bool {
+        const goaway_id = self.local_goaway_id orelse return true;
+        return stream_id < goaway_id;
+    }
 };
 
 pub const PushPromisePayload = struct {

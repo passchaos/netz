@@ -8,6 +8,7 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
     MissingStreamFrame,
     UnexpectedStream,
     GoAwayReceived,
+    RequestRejected,
 };
 
 const client_control_stream_id: u62 = 2;
@@ -456,6 +457,7 @@ pub const ProtectedServer = struct {
                 if (frame != .stream) continue;
                 if (try applyControlStreamFrame(&self.control, self.quic_server.endpoint.allocator, frame.stream)) continue;
                 const incoming_id: u62 = @intCast(frame.stream.stream_id);
+                if (!self.control.acceptsLocalRequestStream(incoming_id)) return error.RequestRejected;
                 if (stream_id) |id| {
                     if (incoming_id != id) continue;
                 } else {
@@ -622,6 +624,7 @@ fn receiveConnectionStreamBytes(
             if (frame != .stream) continue;
             if (try applyControlStreamFrame(control, connection.endpoint.allocator, frame.stream)) continue;
             const incoming_id: u62 = @intCast(frame.stream.stream_id);
+            if (!control.acceptsLocalRequestStream(incoming_id)) return error.RequestRejected;
             if (stream_id) |id| {
                 if (incoming_id != id) continue;
             } else {
@@ -859,6 +862,133 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
         .method = "GET",
         .path = "/after-goaway",
     }));
+}
+
+test "HTTP/3 handshake server rejects requests beyond local GOAWAY" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7 };
+    const client_cid = [_]u8{ 0xe8, 0xe9, 0xea, 0xeb };
+    const server_cid = [_]u8{ 0xec, 0xed, 0xee, 0xef };
+
+    var server = try HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xe2} ** 32,
+            .x25519_secret_key = [_]u8{0xe4} ** 32,
+        },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            session.control.local_goaway_id = 0;
+            try std.testing.expectError(error.RequestRejected, session.receiveRequest());
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try HandshakeClient.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xe1} ** 32,
+            .x25519_secret_key = [_]u8{0xe3} ** 32,
+        },
+    });
+    defer client.deinit();
+
+    try sendConnectionSettings(&client.established.connection, &client.control, client.options, client_control_stream_id);
+    try sendConnectionMessage(&client.established.connection, 0, http3.Request{ .method = "GET", .path = "/rejected" }, client.options);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 protected server rejects requests beyond local GOAWAY" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xaa, 0x01, 0x02, 0x03 };
+    const server_cid = [_]u8{ 0xbb, 0x01, 0x02, 0x03 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0xd1} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0xd2} ** quic.protection.secret_len);
+
+    var server = try ProtectedServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+    });
+    defer server.deinit();
+    server.control.local_goaway_id = 0;
+
+    const Shared = struct {
+        server: *ProtectedServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            std.testing.expectError(error.RequestRejected, shared.server.receiveRequest()) catch |err| {
+                shared.err = err;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try ProtectedClient.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+
+    // Send a request without waiting for a response; the server-side receive path
+    // should reject it because local GOAWAY(0) says no client request stream is
+    // still acceptable.
+    try sendProtectedSettings(&client.quic_client.endpoint, client.quic_client.peer, client.config, &client.control, &client.next_packet_number, client_control_stream_id);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (http3.Request{ .method = "GET", .path = "/rejected" }).write(&encoded, allocator);
+    var send_state = quic.stream_state.SendState.init(0);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    try send_state.appendFrames(&frames, allocator, encoded.items, encoded.items.len, true);
+    try sendProtectedFrames(&client.quic_client.endpoint, client.quic_client.peer, client.config.send_keys, client.config.peer_connection_id, &client.next_packet_number, frames.items, client.config.max_frames_per_packet);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" {
