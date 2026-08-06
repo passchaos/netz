@@ -34,6 +34,7 @@ pub const Limits = struct {
     max_body_bytes: usize = 16 * 1024 * 1024,
     max_header_fields: usize = 256,
     header_table_size: usize = http2.Hpack.default_dynamic_table_size,
+    initial_window_size: u32 = @intCast(default_flow_window),
     max_concurrent_streams: ?u32 = null,
     max_header_list_size: usize = default_max_header_list_size,
     /// Advertise RFC 8441 SETTINGS_ENABLE_CONNECT_PROTOCOL.  It is disabled by
@@ -1029,7 +1030,10 @@ pub const Connection = struct {
         for (self.recv_stream_windows.items) |*entry| {
             if (entry.stream_id == stream_id) return &entry.window;
         }
-        try self.recv_stream_windows.append(self.allocator, .{ .stream_id = stream_id });
+        try self.recv_stream_windows.append(self.allocator, .{
+            .stream_id = stream_id,
+            .window = .{ .value = @intCast(self.limits.initial_window_size) },
+        });
         return &self.recv_stream_windows.items[self.recv_stream_windows.items.len - 1].window;
     }
 };
@@ -1296,9 +1300,11 @@ fn writeFrame(
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
-    var settings_buf: [5]http2.Setting = undefined;
+    var settings_buf: [6]http2.Setting = undefined;
     var count: usize = 0;
     settings_buf[count] = .{ .id = .header_table_size, .value = @intCast(@min(limits.header_table_size, std.math.maxInt(u32))) };
+    count += 1;
+    settings_buf[count] = .{ .id = .initial_window_size, .value = limits.initial_window_size };
     count += 1;
     if (limits.max_concurrent_streams) |max_streams| {
         settings_buf[count] = .{ .id = .max_concurrent_streams, .value = max_streams };
@@ -3984,6 +3990,24 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     try std.testing.expectEqual(@as(i64, 70_000), (try connection.sendStreamWindow(3)).value);
 }
 
+test "HTTP/2 local initial window config seeds receive stream windows" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .initial_window_size = 1024 },
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(i64, 1024), (try connection.recvStreamWindow(1)).value);
+}
+
 test "HTTP/2 SETTINGS_MAX_FRAME_SIZE controls outbound DATA splitting" {
     const allocator = std.testing.allocator;
 
@@ -4236,6 +4260,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
         io: std.Io,
         listener: *net.Server,
         header_table_size: ?u32 = null,
+        initial_window_size: ?u32 = null,
         max_concurrent_streams: ?u32 = null,
         max_header_list_size: ?u32 = null,
         enable_push: ?u32 = null,
@@ -4259,6 +4284,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
             defer shared.allocator.free(settings);
             for (settings) |setting| switch (setting.id) {
                 .header_table_size => shared.header_table_size = setting.value,
+                .initial_window_size => shared.initial_window_size = setting.value,
                 .max_concurrent_streams => shared.max_concurrent_streams = setting.value,
                 .max_header_list_size => shared.max_header_list_size = setting.value,
                 .enable_push => shared.enable_push = setting.value,
@@ -4275,6 +4301,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
     defer stream.close(io);
     try writeInitialSettings(allocator, io, stream, .{
         .header_table_size = 1024,
+        .initial_window_size = 70_000,
         .max_concurrent_streams = 11,
         .max_header_list_size = 4096,
         .enable_connect_protocol = true,
@@ -4283,6 +4310,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(?u32, 1024), shared.header_table_size);
+    try std.testing.expectEqual(@as(?u32, 70_000), shared.initial_window_size);
     try std.testing.expectEqual(@as(?u32, 11), shared.max_concurrent_streams);
     try std.testing.expectEqual(@as(?u32, 4096), shared.max_header_list_size);
     try std.testing.expectEqual(@as(?u32, 0), shared.enable_push);
