@@ -307,6 +307,7 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn sendGoAway(self: *HandshakeServerSession, stream_id: u64) Error!void {
+        try validateServerGoAwayStreamId(stream_id);
         try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, server_control_stream_id);
         try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
     }
@@ -449,6 +450,7 @@ pub const ProtectedServer = struct {
     }
 
     pub fn sendGoAway(self: *ProtectedServer, to: net.IpAddress, stream_id: u64) Error!void {
+        try validateServerGoAwayStreamId(stream_id);
         try sendProtectedSettings(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, server_control_stream_id);
         try sendProtectedControlFrame(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, .goaway, stream_id);
     }
@@ -669,6 +671,13 @@ fn receiveConnectionStreamBytes(
 
 const ControlFrameKind = enum { goaway };
 
+fn validateServerGoAwayStreamId(stream_id: u64) Error!void {
+    // RFC 9114 requires a server GOAWAY identifier to be a client-initiated
+    // bidirectional request stream ID.  Client-initiated bidirectional stream
+    // IDs are exactly the multiples of four.
+    if ((stream_id & 0x3) != 0) return error.InvalidFrame;
+}
+
 fn controlFramePayload(
     control: *http3.ControlState,
     list: *std.ArrayList(u8),
@@ -857,6 +866,15 @@ fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
         if (frame == .stream) return frame.stream;
     }
     return null;
+}
+
+test "HTTP/3 server GOAWAY validates request stream ids" {
+    try validateServerGoAwayStreamId(0);
+    try validateServerGoAwayStreamId(4);
+    try validateServerGoAwayStreamId(128);
+    try std.testing.expectError(error.InvalidFrame, validateServerGoAwayStreamId(1));
+    try std.testing.expectError(error.InvalidFrame, validateServerGoAwayStreamId(2));
+    try std.testing.expectError(error.InvalidFrame, validateServerGoAwayStreamId(3));
 }
 
 test "HTTP/3 connection control frames advance control stream offset" {
