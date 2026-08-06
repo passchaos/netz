@@ -457,7 +457,7 @@ fn parseNonChunkedTransferResponse(
 
     var sanitized: std.ArrayList(u8) = .empty;
     errdefer sanitized.deinit(allocator);
-    try appendHeadWithoutHeader(&sanitized, allocator, head, "transfer-encoding");
+    try appendHeadWithoutHeaders(&sanitized, allocator, head, &.{ "transfer-encoding", "content-length" });
     try sanitized.appendSlice(allocator, "\r\n\r\n");
     const sanitized_storage = try sanitized.toOwnedSlice(allocator);
     errdefer allocator.free(sanitized_storage);
@@ -520,7 +520,7 @@ fn appendOriginalHeaderLines(
     response.headers = combined;
 }
 
-fn appendHeadWithoutHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocator, head: []const u8, name: []const u8) Error!void {
+fn appendHeadWithoutHeaders(list: *std.ArrayList(u8), allocator: std.mem.Allocator, head: []const u8, names: []const []const u8) Error!void {
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     const status_line = lines.next() orelse return error.InvalidResponse;
     try list.appendSlice(allocator, status_line);
@@ -530,10 +530,17 @@ fn appendHeadWithoutHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocato
             try list.appendSlice(allocator, line);
             continue;
         };
-        if (std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
+        if (headerNameInList(line[0..colon], names)) continue;
         try list.appendSlice(allocator, "\r\n");
         try list.appendSlice(allocator, line);
     }
+}
+
+fn headerNameInList(name: []const u8, names: []const []const u8) bool {
+    for (names) |candidate| {
+        if (std.ascii.eqlIgnoreCase(name, candidate)) return true;
+    }
+    return false;
 }
 
 fn applyCloseDelimitedResponseBody(response: *http1.Response, bytes: []const u8, request_method: ?http1.Method) void {
@@ -2186,7 +2193,7 @@ test "HTTP/1 client treats non-chunked response transfer coding as close-delimit
             // Hyper treats a response with a non-chunked transfer coding as
             // close-delimited.  Requests remain strict because accepting
             // unsupported request transfer codings is a smuggling risk.
-            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 200 OK\r\nTransfer-Encoding: yolo\r\nConnection: close\r\n\r\nclose-delimited-body");
+            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 200 OK\r\nTransfer-Encoding: yolo\r\nContent-Length: 999\r\nConnection: close\r\n\r\nclose-delimited-body");
         }
     };
 
@@ -2208,6 +2215,7 @@ test "HTTP/1 client treats non-chunked response transfer coding as close-delimit
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expectEqual(http1.BodyFraming.close_delimited, response.response.body_framing);
     try std.testing.expectEqualStrings("yolo", response.response.header("transfer-encoding").?);
+    try std.testing.expect(response.response.header("content-length") == null);
     try std.testing.expectEqualStrings("close-delimited-body", response.response.body);
 }
 

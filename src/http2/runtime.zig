@@ -177,10 +177,12 @@ fn ServeTask(comptime HandlerContext: type) type {
             };
             defer request.deinit(connection.allocator);
 
-            const response = task.handler(task.context, request) catch |err| {
+            var response = task.handler(task.context, request) catch |err| {
                 task.result.* = err;
                 return;
             };
+            if (response.request_method == null) response.request_method = request.method;
+            response.extended_connect = request.protocol != null;
             connection.writeResponse(request.stream_id, response) catch |err| {
                 task.result.* = err;
                 return;
@@ -288,6 +290,7 @@ pub const Connection = struct {
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     active_local_streams: std.ArrayList(u31) = .empty,
     active_peer_streams: std.ArrayList(u31) = .empty,
+    response_semantics: std.ArrayList(StreamResponseSemantics) = .empty,
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
     peer_initial_stream_window: i64 = default_flow_window,
@@ -303,6 +306,7 @@ pub const Connection = struct {
         self.recv_stream_windows.deinit(self.allocator);
         self.active_local_streams.deinit(self.allocator);
         self.active_peer_streams.deinit(self.allocator);
+        self.response_semantics.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.stream.close(self.io);
@@ -524,6 +528,7 @@ pub const Connection = struct {
                     }
 
                     try validateContentLength(headers, body.items.len);
+                    try self.rememberResponseSemantics(stream_id, method, protocol);
                     return .{
                         .stream_id = stream_id,
                         .headers = headers,
@@ -547,6 +552,9 @@ pub const Connection = struct {
         var status_buf: [3]u8 = undefined;
         if (options.status < 100 or options.status > 999) return error.InvalidStatus;
         try validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
+        const semantics = self.responseSemanticsFor(stream_id, options);
+        try validateResponseBodyForRequestSemantics(options.status, semantics, options.headers, options.body, options.trailers);
+        const suppress_body = responseWriteSuppressesBodySemantics(options.status, semantics);
         const status = std.fmt.bufPrint(&status_buf, "{}", .{options.status}) catch return error.InvalidStatus;
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
@@ -555,9 +563,11 @@ pub const Connection = struct {
         for (options.headers) |header| try fields.append(self.allocator, header);
         try validateHeaderBlock(fields.items, .response);
         try validateHeaderBlock(options.trailers, .response_trailers);
-        try self.writeHeaders(stream_id, fields.items, options.body.len == 0 and options.trailers.len == 0);
-        if (options.body.len != 0) try self.writeData(stream_id, options.body, options.trailers.len == 0);
-        if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
+        try self.writeHeaders(stream_id, fields.items, suppress_body or (options.body.len == 0 and options.trailers.len == 0));
+        if (!suppress_body) {
+            if (options.body.len != 0) try self.writeData(stream_id, options.body, options.trailers.len == 0);
+            if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
+        }
         self.releasePeerStream(stream_id);
     }
 
@@ -692,9 +702,43 @@ pub const Connection = struct {
         for (self.active_peer_streams.items, 0..) |active, index| {
             if (active == stream_id) {
                 _ = self.active_peer_streams.swapRemove(index);
+                break;
+            }
+        }
+        self.forgetResponseSemantics(stream_id);
+    }
+
+    fn rememberResponseSemantics(self: *Connection, stream_id: u31, method: []const u8, protocol: ?[]const u8) Error!void {
+        self.forgetResponseSemantics(stream_id);
+        try self.response_semantics.append(self.allocator, .{
+            .stream_id = stream_id,
+            .head = std.ascii.eqlIgnoreCase(method, "HEAD"),
+            .traditional_connect = std.ascii.eqlIgnoreCase(method, "CONNECT") and protocol == null,
+            .extended_connect = std.ascii.eqlIgnoreCase(method, "CONNECT") and protocol != null,
+        });
+    }
+
+    fn forgetResponseSemantics(self: *Connection, stream_id: u31) void {
+        for (self.response_semantics.items, 0..) |entry, index| {
+            if (entry.stream_id == stream_id) {
+                _ = self.response_semantics.swapRemove(index);
                 return;
             }
         }
+    }
+
+    fn responseSemanticsFor(self: Connection, stream_id: u31, options: ResponseOptions) ResponseBodySemantics {
+        if (options.request_method) |method| return responseSemanticsFromMethod(method, options.extended_connect);
+        for (self.response_semantics.items) |entry| {
+            if (entry.stream_id == stream_id) {
+                return .{
+                    .head = entry.head,
+                    .traditional_connect = entry.traditional_connect,
+                    .extended_connect = entry.extended_connect,
+                };
+            }
+        }
+        return .{};
     }
 
     fn receiveDataPayload(self: *Connection, stream_id: u31, frame: http2.Frame) Error!http2.DataPayload {
@@ -782,7 +826,11 @@ pub const Connection = struct {
                         }
                         if (responseForbidsBody(status, request_method, extended_connect)) {
                             const response_content_length = (try contentLength(headers.?)) orelse 0;
-                            if (std.ascii.eqlIgnoreCase(request_method, "CONNECT") and !extended_connect and response_content_length != 0) return error.InvalidContentLength;
+                            const traditional_connect = std.ascii.eqlIgnoreCase(request_method, "CONNECT") and !extended_connect;
+                            if (traditional_connect and response_content_length != 0) return error.InvalidContentLength;
+                            if (!traditional_connect and (frame.frame.header.flags & flag_end_stream) == 0) {
+                                try self.consumeForbiddenResponseBody(stream_id);
+                            }
                             break;
                         }
                         if ((frame.frame.header.flags & flag_end_stream) != 0) {
@@ -852,6 +900,31 @@ pub const Connection = struct {
                 .data => return error.UnexpectedFrame,
                 .rst_stream => return error.StreamReset,
                 else => continue,
+            }
+        }
+    }
+
+    fn consumeForbiddenResponseBody(self: *Connection, stream_id: u31) Error!void {
+        while (true) {
+            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            defer frame.deinit(self.allocator);
+            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (frame.frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame.frame);
+                try self.handleGoAwayForStream(stream_id, goaway);
+                continue;
+            }
+            if (frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
+            switch (frame.frame.header.frame_type) {
+                .data => {
+                    const data = try self.receiveDataPayload(stream_id, frame.frame);
+                    try self.maybeReleaseReceivedCapacity(stream_id);
+                    if (data.data.len != 0) return error.InvalidContentLength;
+                    if ((frame.frame.header.flags & flag_end_stream) != 0) return;
+                },
+                .headers => return error.InvalidContentLength,
+                .rst_stream => return error.StreamReset,
+                else => return error.UnexpectedFrame,
             }
         }
     }
@@ -1144,6 +1217,26 @@ pub const ResponseOptions = struct {
     headers: []const http2.Hpack.HeaderField = &.{},
     body: []const u8 = &.{},
     trailers: []const http2.Hpack.HeaderField = &.{},
+    /// Optional request method for method-specific response semantics.  HEAD
+    /// and successful traditional CONNECT responses do not carry HTTP response
+    /// bodies even when representation headers such as Content-Length are
+    /// present; server helpers fill this automatically when they own the
+    /// request/response loop.
+    request_method: ?[]const u8 = null,
+    extended_connect: bool = false,
+};
+
+const StreamResponseSemantics = struct {
+    stream_id: u31,
+    head: bool = false,
+    traditional_connect: bool = false,
+    extended_connect: bool = false,
+};
+
+const ResponseBodySemantics = struct {
+    head: bool = false,
+    traditional_connect: bool = false,
+    extended_connect: bool = false,
 };
 
 pub const OwnedRequest = struct {
@@ -1695,6 +1788,21 @@ fn responseForbidsBody(status: u16, request_method: []const u8, extended_connect
     return false;
 }
 
+fn responseSemanticsFromMethod(method: []const u8, extended_connect: bool) ResponseBodySemantics {
+    return .{
+        .head = std.ascii.eqlIgnoreCase(method, "HEAD"),
+        .traditional_connect = std.ascii.eqlIgnoreCase(method, "CONNECT") and !extended_connect,
+        .extended_connect = std.ascii.eqlIgnoreCase(method, "CONNECT") and extended_connect,
+    };
+}
+
+fn responseWriteSuppressesBodySemantics(status: u16, semantics: ResponseBodySemantics) bool {
+    if ((status >= 100 and status < 200) or status == 204 or status == 304) return true;
+    if (semantics.head) return true;
+    if (semantics.traditional_connect and status >= 200 and status < 300) return true;
+    return false;
+}
+
 fn validateResponseBodyForStatus(
     status: u16,
     headers: []const http2.Hpack.HeaderField,
@@ -1708,6 +1816,30 @@ fn validateResponseBodyForStatus(
     // 1xx and 204 responses terminate at the HEADERS block and must not carry a
     // Content-Length that could be mistaken for DATA on this stream.
     if (status != 304 and declared_content_length != null) return error.InvalidContentLength;
+}
+
+fn validateResponseBodyForRequestSemantics(
+    status: u16,
+    semantics: ResponseBodySemantics,
+    headers: []const http2.Hpack.HeaderField,
+    body: []const u8,
+    trailers: []const http2.Hpack.HeaderField,
+) Error!void {
+    if (semantics.head) {
+        if (trailers.len != 0) return error.InvalidContentLength;
+        if (try contentLength(headers)) |len| {
+            if (body.len != 0 and len != body.len) return error.InvalidContentLength;
+        }
+        return;
+    }
+    if (semantics.traditional_connect and status >= 200 and status < 300) {
+        // Successful traditional CONNECT switches the stream into tunnel mode:
+        // HTTP response DATA/trailers would be interpreted as tunnel bytes by
+        // the peer. Reject them at the server writer boundary rather than
+        // silently framing an ambiguous response.
+        if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
+        if ((try contentLength(headers)) != null) return error.InvalidContentLength;
+    }
 }
 
 fn informationalResponseToSkip(status: u16) bool {

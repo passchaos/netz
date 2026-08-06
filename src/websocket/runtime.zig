@@ -233,7 +233,7 @@ pub const Client = struct {
         if (response.status != 101) return error.InvalidResponse;
         const selected_protocol = try validateServerHandshake(allocator, response, &key, options.protocols);
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
-        const selected_extension = try websocket.ExtensionNegotiation.validateResponse(response.header("sec-websocket-extensions"));
+        const selected_extension = try websocket.ExtensionNegotiation.validateResponse(try optionalSingletonHeader(response.headers, "sec-websocket-extensions"));
         if (selected_extension.permessage_deflate and !options.enable_permessage_deflate) return error.InvalidExtension;
 
         var connection = Connection{
@@ -884,6 +884,7 @@ fn validateServerHandshake(
     const accept = try requiredSingletonHeader(response.headers, "sec-websocket-accept");
     const expected = websocket.acceptKey(client_key);
     if (!std.mem.eql(u8, accept, &expected)) return error.InvalidHandshake;
+    _ = try websocket.ExtensionNegotiation.validateResponse(try optionalSingletonHeader(response.headers, "sec-websocket-extensions"));
     if (try optionalSingletonHeader(response.headers, "sec-websocket-protocol")) |selected| {
         const protocol = wire.trimOws(selected);
         if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
@@ -1030,6 +1031,18 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
     var duplicate_response = try http1.parseResponse(allocator, duplicate_accept, .{});
     defer duplicate_response.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, duplicate_response, client_key, &.{}));
+
+    const duplicate_extensions =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n" ++
+        "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n" ++
+        "\r\n";
+    var duplicate_extensions_response = try http1.parseResponse(allocator, duplicate_extensions, .{});
+    defer duplicate_extensions_response.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, duplicate_extensions_response, client_key, &.{}));
 }
 
 test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
