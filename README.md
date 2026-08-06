@@ -37,7 +37,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   max UDP payload/ACK delay/stream-count bounds), Retry packet codec
   with version-specific integrity-tag verification, plus CRYPTO stream reassembly,
   v1 Initial key/header/payload protection, protected Initial packet seal/open, long-header packet boundary peeking for coalesced datagrams, Version Negotiation packet codec and endpoint-level unsupported-version responses,
-  Initial CRYPTO byte exchange over UDP, coalesced Initial+Handshake CRYPTO datagram helpers, minimal TLS
+  Initial CRYPTO byte exchange over UDP with RFC 9000 1200-byte Initial datagram padding/validation, coalesced Initial+Handshake CRYPTO datagram helpers, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
   packet server/client Finished flights, and handshake/application secret

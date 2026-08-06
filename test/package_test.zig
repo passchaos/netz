@@ -104,6 +104,7 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 65_535), (netz.quic.runtime.Limits{}).max_datagram_size);
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
+    try std.testing.expectEqual(@as(usize, 1200), netz.quic.initial_exchange.min_initial_udp_datagram_size);
     try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "sendInitialCrypto"));
     try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "sendCoalescedInitialHandshakeCrypto"));
     try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "receiveCoalescedInitialHandshakeCrypto"));

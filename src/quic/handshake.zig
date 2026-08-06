@@ -152,6 +152,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
         .packet_number = options.client_initial_packet_number,
         .crypto_data = client_hello.items,
         .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+        .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
     });
 
     var server_datagram = try endpoint.receiveBytes();
@@ -292,6 +293,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             .packet_number = options.server_initial_packet_number,
             .crypto_data = server_hello.items,
             .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+            .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
         },
         handshake.server_quic,
         .{
@@ -342,7 +344,15 @@ const ReceivedClientInitial = struct {
 fn receiveClientInitial(endpoint: *quic.runtime.Endpoint, expected_packet_number: u64, max_crypto_buffer: usize) Error!ReceivedClientInitial {
     var datagram = try endpoint.receiveBytes();
     defer datagram.deinit(endpoint.allocator);
+    if (datagram.bytes.len < quic.initial_exchange.min_initial_udp_datagram_size) return error.InvalidInitialPacket;
+
     const header = try quic.LongHeader.parse(datagram.bytes);
+    if (header.packet_type != .initial) return error.InvalidInitialPacket;
+    // RFC 9000 Section 7.2 requires a first client Initial to use a random
+    // Destination Connection ID of at least 8 bytes.  Server endpoints rely on
+    // that DCID for Initial secret derivation and route bootstrap.
+    if (header.destination_connection_id.len < 8) return error.InvalidInitialPacket;
+
     const initial_secrets = quic.protection.deriveInitialSecrets(header.destination_connection_id);
     var packet = try quic.protection.openInitialPacket(endpoint.allocator, initial_secrets.client, datagram.bytes, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
@@ -627,6 +637,54 @@ test "QUIC integrated handshake establishes 1-RTT stream exchange" {
     if (shared.err) |err| return err;
 
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
+}
+
+test "QUIC integrated server rejects invalid first client Initial datagrams" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var short_server = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer short_server.deinit();
+    var short_client = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer short_client.deinit();
+
+    const valid_dcid = [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
+    const client_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const short_keys = quic.protection.deriveInitialSecrets(&valid_dcid).client;
+    try quic.initial_exchange.sendInitialCrypto(&short_client, short_server.address(), short_keys, .{
+        .destination_connection_id = &valid_dcid,
+        .source_connection_id = &client_cid,
+        .packet_number = 0,
+        .crypto_data = "too small",
+    });
+    try std.testing.expectError(error.InvalidInitialPacket, accept(&short_server, .{
+        .local_connection_id = "srv1",
+        .random = [_]u8{0x52} ** 32,
+        .x25519_secret_key = [_]u8{0x53} ** 32,
+    }));
+
+    var dcid_server = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer dcid_server.deinit();
+    var dcid_client = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer dcid_client.deinit();
+
+    const short_dcid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const short_dcid_keys = quic.protection.deriveInitialSecrets(&short_dcid).client;
+    try quic.initial_exchange.sendInitialCrypto(&dcid_client, dcid_server.address(), short_dcid_keys, .{
+        .destination_connection_id = &short_dcid,
+        .source_connection_id = &client_cid,
+        .packet_number = 0,
+        .crypto_data = "bad dcid",
+        .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+    });
+    try std.testing.expectError(error.InvalidInitialPacket, accept(&dcid_server, .{
+        .local_connection_id = "srv2",
+        .random = [_]u8{0x54} ** 32,
+        .x25519_secret_key = [_]u8{0x55} ** 32,
+    }));
 }
 
 test "QUIC integrated handshake applies negotiated transport parameters" {

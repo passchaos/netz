@@ -7,6 +7,8 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_str
     MissingCryptoFrame,
 };
 
+pub const min_initial_udp_datagram_size: usize = 1200;
+
 pub const SendInitialOptions = struct {
     destination_connection_id: []const u8,
     source_connection_id: []const u8,
@@ -15,6 +17,10 @@ pub const SendInitialOptions = struct {
     packet_number_len: u8 = 4,
     crypto_offset: u64 = 0,
     max_crypto_frame_data_len: usize = 1024,
+    /// Minimum UDP datagram size for an Initial packet. RFC 9000 requires
+    /// clients to send Initial UDP datagrams of at least 1200 bytes; server
+    /// callers can also set this when coalescing an Initial with Handshake data.
+    min_datagram_size: usize = 0,
     crypto_data: []const u8,
 };
 
@@ -60,23 +66,7 @@ pub fn sendInitialCrypto(
     keys: quic.protection.PacketProtectionKeys,
     options: SendInitialOptions,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(endpoint.allocator);
-    try quic.crypto_stream.writeCryptoFrames(
-        &payload,
-        endpoint.allocator,
-        options.crypto_offset,
-        options.crypto_data,
-        options.max_crypto_frame_data_len,
-    );
-    const packet = try quic.protection.sealInitialPacket(endpoint.allocator, keys, .{
-        .destination_connection_id = options.destination_connection_id,
-        .source_connection_id = options.source_connection_id,
-        .token = options.token,
-        .packet_number = options.packet_number,
-        .packet_number_len = options.packet_number_len,
-        .payload = payload.items,
-    });
+    const packet = try sealInitialCryptoPacket(endpoint.allocator, keys, options);
     defer endpoint.allocator.free(packet);
     try endpoint.sendBytes(to, packet);
 }
@@ -89,23 +79,7 @@ pub fn sendCoalescedInitialHandshakeCrypto(
     handshake_keys: quic.protection.PacketProtectionKeys,
     handshake_options: SendInitialOptions,
 ) Error!void {
-    var initial_payload: std.ArrayList(u8) = .empty;
-    defer initial_payload.deinit(endpoint.allocator);
-    try quic.crypto_stream.writeCryptoFrames(
-        &initial_payload,
-        endpoint.allocator,
-        initial_options.crypto_offset,
-        initial_options.crypto_data,
-        initial_options.max_crypto_frame_data_len,
-    );
-    const initial_packet = try quic.protection.sealInitialPacket(endpoint.allocator, initial_keys, .{
-        .destination_connection_id = initial_options.destination_connection_id,
-        .source_connection_id = initial_options.source_connection_id,
-        .token = initial_options.token,
-        .packet_number = initial_options.packet_number,
-        .packet_number_len = initial_options.packet_number_len,
-        .payload = initial_payload.items,
-    });
+    const initial_packet = try sealInitialCryptoPacket(endpoint.allocator, initial_keys, initial_options);
     defer endpoint.allocator.free(initial_packet);
 
     var handshake_payload: std.ArrayList(u8) = .empty;
@@ -131,6 +105,40 @@ pub fn sendCoalescedInitialHandshakeCrypto(
     try coalesced.appendSlice(endpoint.allocator, initial_packet);
     try coalesced.appendSlice(endpoint.allocator, handshake_packet);
     try endpoint.sendBytes(to, coalesced.items);
+}
+
+fn sealInitialCryptoPacket(
+    allocator: std.mem.Allocator,
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendInitialOptions,
+) Error![]u8 {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try quic.crypto_stream.writeCryptoFrames(
+        &payload,
+        allocator,
+        options.crypto_offset,
+        options.crypto_data,
+        options.max_crypto_frame_data_len,
+    );
+
+    while (true) {
+        const packet = try quic.protection.sealInitialPacket(allocator, keys, .{
+            .destination_connection_id = options.destination_connection_id,
+            .source_connection_id = options.source_connection_id,
+            .token = options.token,
+            .packet_number = options.packet_number,
+            .packet_number_len = options.packet_number_len,
+            .payload = payload.items,
+        });
+        if (packet.len >= options.min_datagram_size) return packet;
+        const missing = options.min_datagram_size - packet.len;
+        allocator.free(packet);
+        // PADDING frames are encrypted payload bytes.  Adding at least the
+        // observed shortfall converges quickly even when the long-header Length
+        // varint grows by a byte at a boundary.
+        try payload.appendNTimes(allocator, @intFromEnum(quic.FrameType.padding), missing);
+    }
 }
 
 pub fn receiveInitialCrypto(
@@ -358,6 +366,44 @@ test "QUIC Initial CRYPTO bytes exchange over UDP endpoint" {
     defer client_received.deinit(allocator);
     try std.testing.expect(client_received.from.eql(&server.address()));
     try std.testing.expectEqualStrings("server hello", client_received.crypto_data);
+}
+
+test "QUIC Initial CRYPTO sender pads datagrams to requested minimum" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try quic.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 4096,
+    });
+    defer server.deinit();
+
+    var client = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .max_datagram_size = 4096,
+    });
+    defer client.deinit();
+
+    const dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02 };
+    const scid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const keys = quic.protection.deriveInitialSecrets(&dcid).client;
+
+    try sendInitialCrypto(&client.endpoint, server.address(), keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 0,
+        .crypto_data = "hello",
+        .min_datagram_size = min_initial_udp_datagram_size,
+    });
+
+    var raw = try server.endpoint.receiveBytes();
+    defer raw.deinit(allocator);
+    try std.testing.expect(raw.bytes.len >= min_initial_udp_datagram_size);
+
+    var opened = try openInitialCrypto(&server.endpoint, raw.from, raw.bytes, keys, 0, 1024);
+    defer opened.deinit(allocator);
+    try std.testing.expectEqualStrings("hello", opened.crypto_data);
 }
 
 test "QUIC long-header CRYPTO receive rejects forbidden frame contexts" {
