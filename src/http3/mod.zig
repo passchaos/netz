@@ -152,6 +152,7 @@ pub const ControlState = struct {
     local_goaway_id: ?u64 = null,
     peer_max_push_id: ?u64 = null,
     local_max_push_id: ?u64 = null,
+    peer_control_stream_id: ?u64 = null,
     latest_priority_update: ?PriorityUpdatePayload = null,
     peer_qpack_encoder_stream_id: ?u64 = null,
     peer_qpack_decoder_stream_id: ?u64 = null,
@@ -186,6 +187,7 @@ pub const ControlState = struct {
         var cursor = wire.Cursor.init(bytes);
         const stream_type: StreamType = @enumFromInt(try quic.varint.decode(&cursor));
         if (stream_type != .control) return error.InvalidStreamType;
+        try self.registerControlStream(0);
         try self.applyControlPayload(allocator, bytes[cursor.pos..]);
     }
 
@@ -196,6 +198,14 @@ pub const ControlState = struct {
             cursor.pos += frame.consumed;
             try self.applyFrame(allocator, frame);
         }
+    }
+
+    pub fn registerControlStream(self: *ControlState, stream_id: u64) Error!void {
+        if (self.peer_control_stream_id) |existing| {
+            if (existing != stream_id) return error.StreamCreationError;
+            return;
+        }
+        self.peer_control_stream_id = stream_id;
     }
 
     pub fn registerQpackStream(self: *ControlState, stream_type: StreamType, stream_id: u64) Error!void {
@@ -1272,6 +1282,9 @@ test "HTTP/3 control stream enforces SETTINGS first and GOAWAY monotonicity" {
 
     var peer_control = ControlState{};
     try peer_control.applyControlStreamBytes(allocator, stream_bytes.items);
+    try std.testing.expectEqual(@as(?u64, 0), peer_control.peer_control_stream_id);
+    try peer_control.registerControlStream(0);
+    try std.testing.expectError(error.StreamCreationError, peer_control.registerControlStream(4));
     try std.testing.expect(peer_control.settings.received);
     try std.testing.expect(peer_control.settings.peer.h3_datagram);
     try std.testing.expectEqual(@as(u64, 2), peer_control.settings.peer.webtransport_max_sessions);

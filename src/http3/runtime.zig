@@ -722,7 +722,10 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
     var prefix_cursor = @import("../internal/wire.zig").Cursor.init(stream.data);
     const stream_type: http3.StreamType = @enumFromInt(quic.varint.decode(&prefix_cursor) catch return false);
     switch (stream_type) {
-        .control => try control.applyControlPayload(allocator, stream.data[prefix_cursor.pos..]),
+        .control => {
+            try control.registerControlStream(stream.stream_id);
+            try control.applyControlPayload(allocator, stream.data[prefix_cursor.pos..]);
+        },
         .qpack_encoder, .qpack_decoder => try control.registerQpackStream(stream_type, stream.stream_id),
         else => return false,
     }
@@ -801,6 +804,7 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
             try std.testing.expectEqualStrings("ping split across stream frames", request.request.body);
             try std.testing.expect(server_ptr.control.settings.received);
             try std.testing.expectEqual(@as(u64, 4), server_ptr.control.settings.peer.webtransport_max_sessions);
+            try std.testing.expectEqual(@as(?u64, client_control_stream_id), server_ptr.control.peer_control_stream_id);
             try std.testing.expectEqual(@as(?u64, client_qpack_encoder_stream_id), server_ptr.control.peer_qpack_encoder_stream_id);
             try std.testing.expectEqual(@as(?u64, client_qpack_decoder_stream_id), server_ptr.control.peer_qpack_decoder_stream_id);
             try server_ptr.sendResponse(request.from, request.stream_id, .{
@@ -843,6 +847,7 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
     try std.testing.expect(client.control.settings.sent);
     try std.testing.expect(client.control.settings.received);
     try std.testing.expect(client.control.settings.peer.h3_datagram);
+    try std.testing.expectEqual(@as(?u64, server_control_stream_id), client.control.peer_control_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
@@ -894,6 +899,7 @@ test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" 
             try std.testing.expectEqualStrings("split by handshake runtime", request.request.body);
             try std.testing.expect(session.control.settings.received);
             try std.testing.expectEqual(@as(u64, 6), session.control.settings.peer.webtransport_max_sessions);
+            try std.testing.expectEqual(@as(?u64, client_control_stream_id), session.control.peer_control_stream_id);
             try std.testing.expectEqual(@as(?u64, client_qpack_encoder_stream_id), session.control.peer_qpack_encoder_stream_id);
             try std.testing.expectEqual(@as(?u64, client_qpack_decoder_stream_id), session.control.peer_qpack_decoder_stream_id);
             try session.sendResponse(request.stream_id, .{
@@ -939,6 +945,7 @@ test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" 
     try std.testing.expect(client.control.settings.sent);
     try std.testing.expect(client.control.settings.received);
     try std.testing.expect(client.control.settings.peer.h3_datagram);
+    try std.testing.expectEqual(@as(?u64, server_control_stream_id), client.control.peer_control_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
 }

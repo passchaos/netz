@@ -20,7 +20,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   and CONNECT body rules, and a blocking prior-knowledge h2c client/server runtime with a
   `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
-  SETTINGS-first control-stream negotiation with QPACK encoder/decoder critical stream registration, GOAWAY and MAX_PUSH_ID monotonicity checks,
+  SETTINGS-first control-stream negotiation with unique peer control-stream tracking and QPACK encoder/decoder critical stream registration, GOAWAY and MAX_PUSH_ID monotonicity checks,
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs,
   RFC 9218 Priority field parsing/serialization,
   request/response message decoding with ordered HEADERS/DATA/trailer handling,

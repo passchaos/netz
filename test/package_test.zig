@@ -70,6 +70,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3, "writeControlStreamPrefix"));
     try std.testing.expect(@hasDecl(netz.http3, "writeQpackEncoderStreamPrefix"));
     try std.testing.expect(@hasDecl(netz.http3, "writeQpackDecoderStreamPrefix"));
+    try std.testing.expect(@hasDecl(netz.http3.ControlState, "registerControlStream"));
+    try std.testing.expect(@hasDecl(netz.http3.ControlState, "registerQpackStream"));
     try std.testing.expect(@hasDecl(netz.http3, "writeMaxPushIdFrame"));
     try std.testing.expect(@hasDecl(netz.http3, "writeCancelPushFrame"));
     try std.testing.expect(@hasDecl(netz.http3, "writePushPromiseFrame"));
