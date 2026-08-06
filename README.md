@@ -18,7 +18,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   dynamic-table indexing/size-update state for long-lived runtimes with local decoder table-size enforcement and automatic
   never-index encoding for sensitive fields, PING/GOAWAY/WINDOW_UPDATE connection
   management including interleaved SETTINGS/PING/WINDOW_UPDATE/PRIORITY handling and GOAWAY propagation during stream reads and post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets, default client server-push opt-out, connection- and stream-level flow-control enforcement including
-  SETTINGS_INITIAL_WINDOW_SIZE updates and configurable advertisement, configurable SETTINGS_HEADER_TABLE_SIZE/SETTINGS_MAX_CONCURRENT_STREAMS/SETTINGS_MAX_FRAME_SIZE advertisement, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation with inbound advertised-frame-size enforcement,
+  SETTINGS_INITIAL_WINDOW_SIZE updates and configurable advertisement, configurable SETTINGS_HEADER_TABLE_SIZE/SETTINGS_MAX_CONCURRENT_STREAMS/SETTINGS_MAX_FRAME_SIZE advertisement, bidirectional SETTINGS_MAX_CONCURRENT_STREAMS enforcement, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation with inbound advertised-frame-size enforcement,
   outbound frame splitting with DATA sends that wait for WINDOW_UPDATE capacity
   and inbound DATA consumers that account for full padded frame payloads and restore connection/stream receive capacity,
   frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
