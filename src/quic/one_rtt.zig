@@ -692,6 +692,8 @@ pub const Connection = struct {
         var recv_data_total = self.recv_data_total;
         var recv_streams: std.ArrayList(RecvStreamPreflightEntry) = .empty;
         defer recv_streams.deinit(self.endpoint.allocator);
+        var peer_connection_ids = self.peer_connection_ids;
+        var local_connection_ids = self.local_connection_ids;
 
         for (frames) |frame| {
             switch (frame) {
@@ -707,6 +709,21 @@ pub const Connection = struct {
                 },
                 .stream => |stream| try self.validateStreamFramePrecondition(stream, &recv_streams, &recv_data_total),
                 .reset_stream => |reset| try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_data_total),
+                .new_connection_id => |new_connection_id| {
+                    // CID frames mutate fixed-size pools and can fail because of
+                    // duplicate CIDs/tokens or active_connection_id_limit. Apply
+                    // them to shadow pools first so an invalid CID frame later
+                    // in the packet cannot leave earlier STREAM/ACK effects
+                    // committed.
+                    peer_connection_ids.retirePriorTo(new_connection_id.retire_prior_to);
+                    try peer_connection_ids.addWithLimit(
+                        new_connection_id.sequence_number,
+                        new_connection_id.connection_id,
+                        new_connection_id.stateless_reset_token,
+                        self.config.active_connection_id_limit,
+                    );
+                },
+                .retire_connection_id => |retire| try local_connection_ids.retire(retire.sequence_number),
                 else => {},
             }
         }
@@ -1638,6 +1655,54 @@ test "QUIC 1-RTT connection preflights stream frames before receive-side effects
     try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
+}
+
+test "QUIC 1-RTT connection preflights CID frames before receive-side effects" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x39, 0x3a, 0x3b, 0x3c };
+    const server_cid = [_]u8{ 0x3d, 0x3e, 0x3f, 0x40 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x78} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .local_endpoint = .client,
+    });
+    defer client.deinit();
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{ .stream_id = 1, .data = "before-cid-error", .fin = false } },
+            .{ .new_connection_id = .{
+                .sequence_number = 1,
+                .retire_prior_to = 0,
+                .connection_id = &server_cid,
+                .stateless_reset_token = [_]u8{0x99} ** 16,
+            } },
+        },
+    });
+
+    try std.testing.expectError(error.DuplicateConnectionId, client.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), client.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
+    try std.testing.expectEqual(@as(usize, 1), client.peer_connection_ids.count());
 }
 
 test "QUIC 1-RTT connection models idle timeout deadlines" {
