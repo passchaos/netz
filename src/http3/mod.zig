@@ -22,6 +22,7 @@ pub const Error = wire.Error || error{
     InvalidStatus,
     InvalidHeader,
     InvalidPriorityUpdate,
+    StreamCreationError,
     InvalidContentLength,
     IntegerOverflow,
     QpackDynamicTableUnsupported,
@@ -152,6 +153,8 @@ pub const ControlState = struct {
     peer_max_push_id: ?u64 = null,
     local_max_push_id: ?u64 = null,
     latest_priority_update: ?PriorityUpdatePayload = null,
+    peer_qpack_encoder_stream_id: ?u64 = null,
+    peer_qpack_decoder_stream_id: ?u64 = null,
 
     pub fn writeSettingsStream(self: *ControlState, list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
         try writeControlStreamPrefix(list, allocator);
@@ -183,11 +186,29 @@ pub const ControlState = struct {
         var cursor = wire.Cursor.init(bytes);
         const stream_type: StreamType = @enumFromInt(try quic.varint.decode(&cursor));
         if (stream_type != .control) return error.InvalidStreamType;
+        try self.applyControlPayload(allocator, bytes[cursor.pos..]);
+    }
 
+    pub fn applyControlPayload(self: *ControlState, allocator: std.mem.Allocator, payload: []const u8) Error!void {
+        var cursor = wire.Cursor.init(payload);
         while (!cursor.eof()) {
-            const frame = try Frame.parse(bytes[cursor.pos..]);
+            const frame = try Frame.parse(payload[cursor.pos..]);
             cursor.pos += frame.consumed;
             try self.applyFrame(allocator, frame);
+        }
+    }
+
+    pub fn registerQpackStream(self: *ControlState, stream_type: StreamType, stream_id: u64) Error!void {
+        switch (stream_type) {
+            .qpack_encoder => {
+                if (self.peer_qpack_encoder_stream_id != null) return error.StreamCreationError;
+                self.peer_qpack_encoder_stream_id = stream_id;
+            },
+            .qpack_decoder => {
+                if (self.peer_qpack_decoder_stream_id != null) return error.StreamCreationError;
+                self.peer_qpack_decoder_stream_id = stream_id;
+            },
+            else => return error.InvalidStreamType,
         }
     }
 
@@ -328,6 +349,14 @@ fn priorityValueEnd(value: []const u8) usize {
 
 pub fn writeControlStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
     try quic.varint.encode(list, allocator, @intFromEnum(StreamType.control));
+}
+
+pub fn writeQpackEncoderStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+    try quic.varint.encode(list, allocator, @intFromEnum(StreamType.qpack_encoder));
+}
+
+pub fn writeQpackDecoderStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+    try quic.varint.encode(list, allocator, @intFromEnum(StreamType.qpack_decoder));
 }
 
 pub fn writeSettingsFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {

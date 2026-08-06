@@ -10,7 +10,11 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
 };
 
 const client_control_stream_id: u62 = 2;
+const client_qpack_encoder_stream_id: u62 = 6;
+const client_qpack_decoder_stream_id: u62 = 10;
 const server_control_stream_id: u62 = 3;
+const server_qpack_encoder_stream_id: u62 = 7;
+const server_qpack_decoder_stream_id: u62 = 11;
 
 pub const Limits = struct {
     quic: quic.runtime.Limits = .{},
@@ -647,10 +651,22 @@ fn sendConnectionSettings(
     errdefer control.settings = previous_settings;
     try control.writeSettingsStream(&payload, connection.endpoint.allocator, options.local_settings);
 
-    var send_state = quic.stream_state.SendState.init(stream_id);
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(connection.endpoint.allocator);
+    var send_state = quic.stream_state.SendState.init(stream_id);
     try send_state.appendFrames(&frames, connection.endpoint.allocator, payload.items, payload.items.len, false);
+
+    var qpack_encoder: std.ArrayList(u8) = .empty;
+    defer qpack_encoder.deinit(connection.endpoint.allocator);
+    var qpack_decoder: std.ArrayList(u8) = .empty;
+    defer qpack_decoder.deinit(connection.endpoint.allocator);
+    const is_client = stream_id == client_control_stream_id;
+    try http3.writeQpackEncoderStreamPrefix(&qpack_encoder, connection.endpoint.allocator);
+    try http3.writeQpackDecoderStreamPrefix(&qpack_decoder, connection.endpoint.allocator);
+    var encoder_state = quic.stream_state.SendState.init(if (is_client) client_qpack_encoder_stream_id else server_qpack_encoder_stream_id);
+    var decoder_state = quic.stream_state.SendState.init(if (is_client) client_qpack_decoder_stream_id else server_qpack_decoder_stream_id);
+    try encoder_state.appendFrames(&frames, connection.endpoint.allocator, qpack_encoder.items, qpack_encoder.items.len, false);
+    try decoder_state.appendFrames(&frames, connection.endpoint.allocator, qpack_decoder.items, qpack_decoder.items.len, false);
     try sendConnectionFrames(connection, frames.items, options.max_frames_per_packet);
 }
 
@@ -670,10 +686,22 @@ fn sendProtectedSettings(
     errdefer control.settings = previous_settings;
     try control.writeSettingsStream(&payload, endpoint.allocator, config.local_settings);
 
-    var send_state = quic.stream_state.SendState.init(stream_id);
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(endpoint.allocator);
+    var send_state = quic.stream_state.SendState.init(stream_id);
     try send_state.appendFrames(&frames, endpoint.allocator, payload.items, payload.items.len, false);
+
+    var qpack_encoder: std.ArrayList(u8) = .empty;
+    defer qpack_encoder.deinit(endpoint.allocator);
+    var qpack_decoder: std.ArrayList(u8) = .empty;
+    defer qpack_decoder.deinit(endpoint.allocator);
+    const is_client = stream_id == client_control_stream_id;
+    try http3.writeQpackEncoderStreamPrefix(&qpack_encoder, endpoint.allocator);
+    try http3.writeQpackDecoderStreamPrefix(&qpack_decoder, endpoint.allocator);
+    var encoder_state = quic.stream_state.SendState.init(if (is_client) client_qpack_encoder_stream_id else server_qpack_encoder_stream_id);
+    var decoder_state = quic.stream_state.SendState.init(if (is_client) client_qpack_decoder_stream_id else server_qpack_decoder_stream_id);
+    try encoder_state.appendFrames(&frames, endpoint.allocator, qpack_encoder.items, qpack_encoder.items.len, false);
+    try decoder_state.appendFrames(&frames, endpoint.allocator, qpack_decoder.items, qpack_decoder.items.len, false);
     try sendProtectedFrames(
         endpoint,
         to,
@@ -686,16 +714,18 @@ fn sendProtectedSettings(
 }
 
 fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allocator, stream: quic.StreamFrame) Error!bool {
-    // HTTP/3 control streams are unidirectional QUIC streams.  The first bytes
-    // carry the H3 stream type varint followed by SETTINGS/GOAWAY frames.  This
-    // runtime sends the whole control stream in a single STREAM frame; accepting
-    // only offset 0 keeps parsing deterministic until a full per-control-stream
-    // reassembler is added.
+    // HTTP/3 control and QPACK streams are unidirectional QUIC streams.  The
+    // first bytes carry the stream type varint.  This runtime sends each
+    // critical stream in a single STREAM frame; accepting only offset 0 keeps
+    // parsing deterministic until per-critical-stream reassembly is needed.
     if ((stream.stream_id & 0x02) == 0 or stream.offset != 0 or stream.data.len == 0) return false;
-    control.applyControlStreamBytes(allocator, stream.data) catch |err| switch (err) {
-        error.InvalidStreamType => return false,
-        else => return err,
-    };
+    var prefix_cursor = @import("../internal/wire.zig").Cursor.init(stream.data);
+    const stream_type: http3.StreamType = @enumFromInt(quic.varint.decode(&prefix_cursor) catch return false);
+    switch (stream_type) {
+        .control => try control.applyControlPayload(allocator, stream.data[prefix_cursor.pos..]),
+        .qpack_encoder, .qpack_decoder => try control.registerQpackStream(stream_type, stream.stream_id),
+        else => return false,
+    }
     return true;
 }
 
@@ -771,6 +801,8 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
             try std.testing.expectEqualStrings("ping split across stream frames", request.request.body);
             try std.testing.expect(server_ptr.control.settings.received);
             try std.testing.expectEqual(@as(u64, 4), server_ptr.control.settings.peer.webtransport_max_sessions);
+            try std.testing.expectEqual(@as(?u64, client_qpack_encoder_stream_id), server_ptr.control.peer_qpack_encoder_stream_id);
+            try std.testing.expectEqual(@as(?u64, client_qpack_decoder_stream_id), server_ptr.control.peer_qpack_decoder_stream_id);
             try server_ptr.sendResponse(request.from, request.stream_id, .{
                 .status = 200,
                 .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
@@ -811,6 +843,10 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
     try std.testing.expect(client.control.settings.sent);
     try std.testing.expect(client.control.settings.received);
     try std.testing.expect(client.control.settings.peer.h3_datagram);
+    try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
+    try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
+    try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
+    try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
 }
 
 test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" {
@@ -858,6 +894,8 @@ test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" 
             try std.testing.expectEqualStrings("split by handshake runtime", request.request.body);
             try std.testing.expect(session.control.settings.received);
             try std.testing.expectEqual(@as(u64, 6), session.control.settings.peer.webtransport_max_sessions);
+            try std.testing.expectEqual(@as(?u64, client_qpack_encoder_stream_id), session.control.peer_qpack_encoder_stream_id);
+            try std.testing.expectEqual(@as(?u64, client_qpack_decoder_stream_id), session.control.peer_qpack_decoder_stream_id);
             try session.sendResponse(request.stream_id, .{
                 .status = 200,
                 .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
@@ -901,6 +939,8 @@ test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" 
     try std.testing.expect(client.control.settings.sent);
     try std.testing.expect(client.control.settings.received);
     try std.testing.expect(client.control.settings.peer.h3_datagram);
+    try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
+    try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
 }
 
 test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint" {
