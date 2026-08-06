@@ -1620,6 +1620,75 @@ test "HTTP/1 runtime reuses persistent connection and preserves pipelined bytes"
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 client reuses default HTTP/1.1 persistent connection" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var first = try connection.readRequest(.{});
+            defer first.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/default-one", first.request.target);
+            try std.testing.expect(first.request.keepAlive());
+            try connection.writeResponse(.{ .status = 200, .body = "first" });
+
+            var second = try connection.readRequest(.{});
+            defer second.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/default-two", second.request.target);
+            try std.testing.expect(second.request.keepAlive());
+            try connection.writeResponse(.{ .status = 200, .body = "second" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+
+    var first = try client.request(.{
+        .target = "/default-one",
+        .headers = &.{.{ .name = "Host", .value = "localhost" }},
+    });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("first", first.response.body);
+    try std.testing.expect(first.response.keepAlive());
+
+    var second = try client.request(.{
+        .target = "/default-two",
+        .headers = &.{.{ .name = "Host", .value = "localhost" }},
+    });
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("second", second.response.body);
+    try std.testing.expect(second.response.keepAlive());
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 client keeps pipelined response after HEAD response headers" {
     const allocator = std.testing.allocator;
 
