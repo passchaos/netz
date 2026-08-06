@@ -1163,9 +1163,40 @@ fn informationalResponseToSkip(status: u16) bool {
 
 fn requestShouldSendContinue(head: []const u8) bool {
     if (!requestHeadIsHttp11(head)) return false;
-    const expect = findHeaderValue(head, "expect") orelse return false;
-    if (!std.ascii.eqlIgnoreCase(wire.trimOws(expect), "100-continue")) return false;
+    if (!requestExpectIsOnlyContinue(head)) return false;
+    if (!requestHeadHasValidHost(head)) return false;
     return requestHeadHasBody(head);
+}
+
+fn requestExpectIsOnlyContinue(head: []const u8) bool {
+    var found = false;
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..colon], "expect")) continue;
+        if (found) return false;
+        found = true;
+        // Hyper only recognizes an exact 100-continue expectation.  Be equally
+        // conservative: comma-separated or unknown expectations require the
+        // application to decide, not this auto-continue fast path.
+        if (!std.ascii.eqlIgnoreCase(wire.trimOws(line[colon + 1 ..]), "100-continue")) return false;
+    }
+    return found;
+}
+
+fn requestHeadHasValidHost(head: []const u8) bool {
+    var found = false;
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..colon], "host")) continue;
+        if (found) return false;
+        found = true;
+        http1.validateHostValue(line[colon + 1 ..]) catch return false;
+    }
+    return found;
 }
 
 fn requestHeadIsHttp11(head: []const u8) bool {
@@ -1438,6 +1469,30 @@ test "HTTP/1 server sends 100 Continue before reading expected body" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/1 server suppresses 100 Continue for invalid request head" {
+    const bad_host = "POST /expect HTTP/1.1\r\n" ++
+        "Host: http://example.com\r\n" ++
+        "Expect: 100-continue\r\n" ++
+        "Content-Length: 4\r\n" ++
+        "\r\n";
+    try std.testing.expect(!requestShouldSendContinue(bad_host));
+
+    const duplicate_host = "POST /expect HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Host: other.example\r\n" ++
+        "Expect: 100-continue\r\n" ++
+        "Content-Length: 4\r\n" ++
+        "\r\n";
+    try std.testing.expect(!requestShouldSendContinue(duplicate_host));
+
+    const mixed_expect = "POST /expect HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Expect: 100-continue, custom\r\n" ++
+        "Content-Length: 4\r\n" ++
+        "\r\n";
+    try std.testing.expect(!requestShouldSendContinue(mixed_expect));
 }
 
 test "HTTP/1 server sends 100 Continue even when body was pre-read" {
