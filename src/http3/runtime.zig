@@ -824,6 +824,12 @@ fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.m
     const previous_priority_present = previous.latest_priority_update != null;
     const handled = try applyControlStreamFrame(control, allocator, stream);
     if (handled and role == .client) {
+        if (control.peer_goaway_id != previous.peer_goaway_id) {
+            validateServerGoAwayStreamId(control.peer_goaway_id.?) catch |err| {
+                control.* = previous;
+                return err;
+            };
+        }
         // MAX_PUSH_ID and PRIORITY_UPDATE are client-to-server control frames.
         // A client receiving them from a server must treat the frame as
         // unexpected; restore state so callers can recover or close cleanly.
@@ -915,11 +921,29 @@ test "HTTP/3 client rejects server-only control frames" {
 
     var stream_bytes: std.ArrayList(u8) = .empty;
     defer stream_bytes.deinit(allocator);
+    var goaway_payload: std.ArrayList(u8) = .empty;
+    defer goaway_payload.deinit(allocator);
+
+    try http3.writeControlStreamPrefix(&stream_bytes, allocator);
+    try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
+    try quic.varint.encode(&goaway_payload, allocator, 1);
+    try (http3.Frame{ .frame_type = http3.FrameType.goaway, .payload = goaway_payload.items, .consumed = 0 }).write(&stream_bytes, allocator);
+
+    var client_control = http3.ControlState{};
+    try std.testing.expectError(error.InvalidFrame, applyControlStreamFrameForRole(&client_control, allocator, .{
+        .stream_id = 3,
+        .offset = 0,
+        .fin = false,
+        .data = stream_bytes.items,
+    }, .client));
+    try std.testing.expect(client_control.peer_goaway_id == null);
+
+    stream_bytes.clearRetainingCapacity();
     try http3.writeControlStreamPrefix(&stream_bytes, allocator);
     try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
     try http3.writeMaxPushIdFrame(&stream_bytes, allocator, 4);
 
-    var client_control = http3.ControlState{};
+    client_control = .{};
     try std.testing.expectError(error.UnexpectedFrame, applyControlStreamFrameForRole(&client_control, allocator, .{
         .stream_id = 3,
         .offset = 0,
