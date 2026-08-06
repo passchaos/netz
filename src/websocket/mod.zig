@@ -343,14 +343,38 @@ pub fn acceptKey(client_key: []const u8) [28]u8 {
 pub fn validateClientHandshake(req: http1.Request) Error!void {
     if (req.method != .GET) return error.InvalidHandshake;
     if (req.version != .http_1_1) return error.InvalidHandshake;
-    const upgrade = req.header("upgrade") orelse return error.MissingHeader;
+    const upgrade = try requiredSingletonHeader(req.headers, "upgrade");
     if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
-    const connection = req.header("connection") orelse return error.MissingHeader;
-    if (!wire.containsToken(connection, "upgrade")) return error.InvalidHandshake;
-    const version = req.header("sec-websocket-version") orelse return error.MissingHeader;
+    if (!hasHeader(req.headers, "connection")) return error.MissingHeader;
+    if (!headersContainToken(req.headers, "connection", "upgrade")) return error.InvalidHandshake;
+    const version = try requiredSingletonHeader(req.headers, "sec-websocket-version");
     if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
-    const key = req.header("sec-websocket-key") orelse return error.MissingHeader;
+    const key = try requiredSingletonHeader(req.headers, "sec-websocket-key");
     try validateClientKey(key);
+}
+
+fn requiredSingletonHeader(headers: []const http1.Header, name: []const u8) Error![]const u8 {
+    var found: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!header.eqlName(name)) continue;
+        if (found != null) return error.InvalidHandshake;
+        found = header.value;
+    }
+    return found orelse error.MissingHeader;
+}
+
+fn hasHeader(headers: []const http1.Header, name: []const u8) bool {
+    for (headers) |header| {
+        if (header.eqlName(name)) return true;
+    }
+    return false;
+}
+
+fn headersContainToken(headers: []const http1.Header, name: []const u8, token: []const u8) bool {
+    for (headers) |header| {
+        if (header.eqlName(name) and wire.containsToken(header.value, token)) return true;
+    }
+    return false;
 }
 
 pub fn validateClientKey(key: []const u8) Error!void {
@@ -533,10 +557,20 @@ test "WebSocket handshake validation" {
     defer req.deinit(allocator);
     try validateClientHandshake(req);
 
+    const split_connection = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var split_req = try http1.parseRequest(allocator, split_connection, .{});
+    defer split_req.deinit(allocator);
+    try validateClientHandshake(split_req);
+
     const http10 = "GET /chat HTTP/1.0\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
     var http10_req = try http1.parseRequest(allocator, http10, .{});
     defer http10_req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(http10_req));
+
+    const duplicate_key = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var duplicate_key_req = try http1.parseRequest(allocator, duplicate_key, .{});
+    defer duplicate_key_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(duplicate_key_req));
 }
 
 test "WebSocket strict frame validation" {

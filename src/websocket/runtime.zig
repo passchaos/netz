@@ -870,14 +870,14 @@ fn validateServerHandshake(
     offered_protocols: []const []const u8,
 ) Error!?[]u8 {
     if (response.version != .http_1_1) return error.InvalidHandshake;
-    const upgrade = response.header("upgrade") orelse return error.MissingHeader;
+    const upgrade = try requiredSingletonHeader(response.headers, "upgrade");
     if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
-    const connection = response.header("connection") orelse return error.MissingHeader;
-    if (!wire.containsToken(connection, "upgrade")) return error.InvalidHandshake;
-    const accept = response.header("sec-websocket-accept") orelse return error.MissingHeader;
+    if (!hasHeader(response.headers, "connection")) return error.MissingHeader;
+    if (!headersContainToken(response.headers, "connection", "upgrade")) return error.InvalidHandshake;
+    const accept = try requiredSingletonHeader(response.headers, "sec-websocket-accept");
     const expected = websocket.acceptKey(client_key);
     if (!std.mem.eql(u8, accept, &expected)) return error.InvalidHandshake;
-    if (response.header("sec-websocket-protocol")) |selected| {
+    if (try optionalSingletonHeader(response.headers, "sec-websocket-protocol")) |selected| {
         const protocol = wire.trimOws(selected);
         if (!validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
         for (offered_protocols) |offered| {
@@ -886,6 +886,34 @@ fn validateServerHandshake(
         return error.InvalidSubprotocol;
     }
     return null;
+}
+
+fn requiredSingletonHeader(headers: []const http1.Header, name: []const u8) Error![]const u8 {
+    return (try optionalSingletonHeader(headers, name)) orelse error.MissingHeader;
+}
+
+fn optionalSingletonHeader(headers: []const http1.Header, name: []const u8) Error!?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!header.eqlName(name)) continue;
+        if (found != null) return error.InvalidHandshake;
+        found = header.value;
+    }
+    return found;
+}
+
+fn hasHeader(headers: []const http1.Header, name: []const u8) bool {
+    for (headers) |header| {
+        if (header.eqlName(name)) return true;
+    }
+    return false;
+}
+
+fn headersContainToken(headers: []const http1.Header, name: []const u8, token: []const u8) bool {
+    for (headers) |header| {
+        if (header.eqlName(name) and wire.containsToken(header.value, token)) return true;
+    }
+    return false;
 }
 
 fn validateH2ServerHandshake(
@@ -954,6 +982,33 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
         if (n == 0) return error.SocketUnconnected;
         written += n;
     }
+}
+
+test "WebSocket client handshake accepts split Connection and rejects duplicate critical headers" {
+    const allocator = std.testing.allocator;
+    const client_key = "dGhlIHNhbXBsZSBub25jZQ==";
+
+    const split_connection =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "\r\n";
+    var response = try http1.parseResponse(allocator, split_connection, .{});
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(?[]u8, null), try validateServerHandshake(allocator, response, client_key, &.{}));
+
+    const duplicate_accept =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "\r\n";
+    var duplicate_response = try http1.parseResponse(allocator, duplicate_accept, .{});
+    defer duplicate_response.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, duplicate_response, client_key, &.{}));
 }
 
 test "WebSocket runtime client and server exchange over TCP" {
