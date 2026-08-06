@@ -780,13 +780,13 @@ fn readMessageBytesWithContext(
     errdefer bytes.deinit(allocator);
 
     var scratch: [4096]u8 = undefined;
-    var head_end: ?usize = null;
+    var head_end: ?usize = try findHttpHeadEndWithinLimit(bytes.items, limits.max_head_bytes);
     while (head_end == null) {
-        if (bytes.items.len >= limits.max_head_bytes) return error.HeadersTooLarge;
-        const n = try readSome(io, stream, &scratch);
+        const read_buf = scratch[0..@min(scratch.len, limits.max_head_bytes - bytes.items.len)];
+        const n = try readSome(io, stream, read_buf);
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
-        head_end = std.mem.indexOf(u8, bytes.items, "\r\n\r\n");
+        head_end = try findHttpHeadEndWithinLimit(bytes.items, limits.max_head_bytes);
     }
     try maybeWriteContinue(io, stream, bytes.items[0..head_end.?], bytes.items.len - (head_end.? + 4), auto_continue);
 
@@ -866,13 +866,13 @@ fn readMessageBytesBufferedWithContext(
     close_delimited_when_unknown: bool,
 ) Error![]u8 {
     var scratch: [4096]u8 = undefined;
-    var head_end: ?usize = std.mem.indexOf(u8, inbuf.items, "\r\n\r\n");
+    var head_end: ?usize = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
     while (head_end == null) {
-        if (inbuf.items.len >= limits.max_head_bytes) return error.HeadersTooLarge;
-        const n = try readSome(io, stream, &scratch);
+        const read_buf = scratch[0..@min(scratch.len, limits.max_head_bytes - inbuf.items.len)];
+        const n = try readSome(io, stream, read_buf);
         if (n == 0) return error.ConnectionClosed;
         try inbuf.appendSlice(allocator, scratch[0..n]);
-        head_end = std.mem.indexOf(u8, inbuf.items, "\r\n\r\n");
+        head_end = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
     }
     try maybeWriteContinue(io, stream, inbuf.items[0..head_end.?], inbuf.items.len - (head_end.? + 4), auto_continue);
 
@@ -949,6 +949,15 @@ fn messageTargetLength(bytes: []const u8, head_end: usize, max_body_bytes: usize
         return body_start + len;
     }
     return body_start;
+}
+
+fn findHttpHeadEndWithinLimit(bytes: []const u8, max_head_bytes: usize) Error!?usize {
+    if (std.mem.indexOf(u8, bytes, "\r\n\r\n")) |head_end| {
+        if (head_end + 4 > max_head_bytes) return error.HeadersTooLarge;
+        return head_end;
+    }
+    if (bytes.len >= max_head_bytes) return error.HeadersTooLarge;
+    return null;
 }
 
 const TransferEncodingState = enum { none, chunked, non_chunked };
@@ -2170,4 +2179,14 @@ test "HTTP/1 runtime target length rejects ambiguous head framing" {
     const signed_chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+5\r\nhello\r\n0\r\n\r\n";
     const signed_chunk_head_end = std.mem.indexOf(u8, signed_chunk, "\r\n\r\n").?;
     try std.testing.expectError(error.InvalidChunk, messageTargetLength(signed_chunk, signed_chunk_head_end, 1024, null));
+}
+
+test "HTTP/1 runtime enforces header byte limit at delimiter" {
+    const exact = "GET / HTTP/1.1\r\nHost: example\r\n\r\n";
+    try std.testing.expectEqual(@as(?usize, exact.len - 4), try findHttpHeadEndWithinLimit(exact, exact.len));
+    try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(exact, exact.len - 1));
+
+    const incomplete = "GET / HTTP/1.1\r\nHost: example";
+    try std.testing.expectEqual(@as(?usize, null), try findHttpHeadEndWithinLimit(incomplete, incomplete.len + 1));
+    try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(incomplete, incomplete.len));
 }

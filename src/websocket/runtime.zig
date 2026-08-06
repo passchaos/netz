@@ -838,7 +838,7 @@ fn readHttpHead(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, ma
     defer bytes.deinit(allocator);
     var scratch: [4096]u8 = undefined;
     while (true) {
-        if (std.mem.indexOf(u8, bytes.items, "\r\n\r\n")) |head_end| {
+        if (try findHttpHeadEndWithinLimit(bytes.items, max_head_bytes)) |head_end| {
             const split = head_end + 4;
             const head = try allocator.dupe(u8, bytes.items[0..split]);
             errdefer allocator.free(head);
@@ -847,11 +847,20 @@ fn readHttpHead(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, ma
                 .extra = try allocator.dupe(u8, bytes.items[split..]),
             };
         }
-        if (bytes.items.len >= max_head_bytes) return error.HeadersTooLarge;
-        const n = try readSome(io, stream, &scratch);
+        const read_buf = scratch[0..@min(scratch.len, max_head_bytes - bytes.items.len)];
+        const n = try readSome(io, stream, read_buf);
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
     }
+}
+
+fn findHttpHeadEndWithinLimit(bytes: []const u8, max_head_bytes: usize) Error!?usize {
+    if (std.mem.indexOf(u8, bytes, "\r\n\r\n")) |head_end| {
+        if (head_end + 4 > max_head_bytes) return error.HeadersTooLarge;
+        return head_end;
+    }
+    if (bytes.len >= max_head_bytes) return error.HeadersTooLarge;
+    return null;
 }
 
 fn validateServerHandshake(
@@ -1636,4 +1645,14 @@ test "WebSocket connection serializes concurrent sends" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
+    const exact = "GET /chat HTTP/1.1\r\nHost: example\r\n\r\n";
+    try std.testing.expectEqual(@as(?usize, exact.len - 4), try findHttpHeadEndWithinLimit(exact, exact.len));
+    try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(exact, exact.len - 1));
+
+    const incomplete = "GET /chat HTTP/1.1\r\nHost: example";
+    try std.testing.expectEqual(@as(?usize, null), try findHttpHeadEndWithinLimit(incomplete, incomplete.len + 1));
+    try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(incomplete, incomplete.len));
 }
