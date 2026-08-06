@@ -253,7 +253,8 @@ pub const Connection = struct {
     datagrams_sent_count: u64 = 0,
     datagrams_received_count: u64 = 0,
     datagrams_dropped_incoming_count: u64 = 0,
-    ack_frequency_next_sequence: u64 = 0,
+    ack_frequency_send_next_sequence: u64 = 0,
+    ack_frequency_recv_next_sequence: u64 = 0,
     ack_eliciting_threshold: u64 = 1,
     requested_max_ack_delay: u64 = 0,
     ack_reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
@@ -415,8 +416,8 @@ pub const Connection = struct {
 
     pub fn sendAckFrequency(self: *Connection, ack_eliciting_threshold: u64, request_max_ack_delay: u64, reordering_threshold: u64) Error!u64 {
         if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
-        const sequence_number = self.ack_frequency_next_sequence;
-        self.ack_frequency_next_sequence +|= 1;
+        const sequence_number = self.ack_frequency_send_next_sequence;
+        self.ack_frequency_send_next_sequence +|= 1;
         const frames = [_]quic.Frame{.{ .ack_frequency = .{
             .sequence_number = sequence_number,
             .ack_eliciting_threshold = ack_eliciting_threshold,
@@ -1517,8 +1518,8 @@ pub const Connection = struct {
 
     fn receiveAckFrequency(self: *Connection, ack_frequency: quic.AckFrequencyFrame) Error!void {
         if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
-        if (ack_frequency.sequence_number < self.ack_frequency_next_sequence) return;
-        self.ack_frequency_next_sequence = ack_frequency.sequence_number +| 1;
+        if (ack_frequency.sequence_number < self.ack_frequency_recv_next_sequence) return;
+        self.ack_frequency_recv_next_sequence = ack_frequency.sequence_number +| 1;
         self.ack_eliciting_threshold = @max(@as(u64, 1), ack_frequency.ack_eliciting_threshold);
         self.requested_max_ack_delay = ack_frequency.request_max_ack_delay;
         self.ack_reordering_threshold = @max(@as(u64, 1), ack_frequency.reordering_threshold);
@@ -5232,6 +5233,14 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
     try std.testing.expectEqual(@as(u64, 4), server.ackFrequencyThreshold());
     try std.testing.expectEqual(@as(u64, 12_000), server.requestedMaxAckDelay());
     try std.testing.expectEqual(@as(u64, 5), server.ackReorderingThreshold());
+
+    const reverse_sequence = try server.sendAckFrequency(6, 34_000, 7);
+    try std.testing.expectEqual(@as(u64, 0), reverse_sequence);
+    var reverse_frequency = try client.receivePacket();
+    defer reverse_frequency.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 6), client.ackFrequencyThreshold());
+    try std.testing.expectEqual(@as(u64, 34_000), client.requestedMaxAckDelay());
+    try std.testing.expectEqual(@as(u64, 7), client.ackReorderingThreshold());
 
     try client.sendImmediateAck();
     var immediate = try server.receivePacket();
