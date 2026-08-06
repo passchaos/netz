@@ -1340,6 +1340,9 @@ test {
     _ = congestion;
     _ = path_validation;
     _ = rtt;
+    _ = pmtu;
+    _ = address_validation_token;
+    _ = retry_flow;
 }
 
 test "QUIC long initial header parse" {

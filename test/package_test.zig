@@ -136,8 +136,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "verifyRetryIntegrityTag"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "address_validation_token"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ClientOptions, "retry_source_connection_id"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "local_transport_parameters"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "address_validation_secrets"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "retry_original_destination_connection_id"));
+    try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "retry_source_connection_id"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
@@ -286,10 +289,15 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "validate"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "encodeRetry"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "validateRetry"));
+    try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "validateRetryAnySecret"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "ReplayFilter"));
     try std.testing.expect(@hasDecl(netz.quic, "retry_flow"));
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "issue"));
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "validate"));
+    try std.testing.expect(@hasDecl(netz.quic.retry_flow, "validateAnySecret"));
+    try std.testing.expect(@hasDecl(netz.quic.retry_flow, "processClient"));
+    try std.testing.expect(@hasDecl(netz.quic.retry_flow, "ClientState"));
+    try std.testing.expect(@hasDecl(netz.quic.retry_flow, "ProcessedRetry"));
     try std.testing.expect(@hasDecl(netz.quic.pmtu, "State"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.pmtu.min_udp_payload_size);
     try std.testing.expectEqual(@as(u64, 100_000_000), netz.quic.rtt.default_initial_rtt_ns);

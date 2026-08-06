@@ -40,7 +40,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   Initial CRYPTO byte exchange over UDP with RFC 9000 1200-byte Initial datagram padding/validation, client-carried Initial address tokens, server-side token validation hooks, and server-issued address-validation NEW_TOKEN frames, coalesced Initial+Handshake CRYPTO datagram helpers, HMAC-based
   address-validation token helpers for Retry/NEW_TOKEN with lifetime, version,
   peer-address binding, Retry ODCID/RSCID binding, secret rotation, replay
-  filtering, and Retry datagram issue/validate helpers, minimal TLS
+  filtering, Retry datagram issue/validate helpers, client-side Retry
+  processing that enforces one-Retry/early-Retry rules and prepares retried
+  Initial inputs, plus server-side retried Initial token/transport-parameter
+  validation hooks, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
   packet server/client Finished flights, and handshake/application secret

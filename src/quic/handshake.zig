@@ -10,11 +10,16 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_str
 };
 
 pub const ClientOptions = struct {
-    /// QUIC v1 Initial secrets are derived from the client's first destination
-    /// connection id.  Keeping it explicit lets callers coordinate Retry or
-    /// externally chosen connection-id policy above this minimal runtime.
+    /// Destination Connection ID from the client's first Initial.  It seeds the
+    /// first Initial secrets and remains the value expected in the server's
+    /// original_destination_connection_id transport parameter after Retry.
     original_destination_connection_id: []const u8,
     local_connection_id: []const u8,
+    /// Retry Source Connection ID accepted from a validated Retry packet.  When
+    /// set, the retried Initial uses this value as its Destination Connection
+    /// ID and key-derivation input while preserving the original DCID above for
+    /// transport-parameter validation.
+    retry_source_connection_id: []const u8 = &.{},
     server_name: ?[]const u8 = null,
     alpn_protocols: []const []const u8 = &.{"h3"},
     /// Optional raw override for callers that need full control over the TLS
@@ -43,6 +48,12 @@ pub const ServerOptions = struct {
     address_validation_secrets: []const quic.address_validation_token.Secret = &.{},
     address_validation_peer: []const u8 = &.{},
     address_validation_now_ns: i64 = 0,
+    /// Retry metadata from the first Initial/Retry exchange.  When set, accept()
+    /// validates the Initial token as a Retry token bound to ODCID+RSCID and
+    /// advertises both `original_destination_connection_id` and
+    /// `retry_source_connection_id` transport parameters.
+    retry_original_destination_connection_id: []const u8 = &.{},
+    retry_source_connection_id: []const u8 = &.{},
     max_crypto_buffer: usize = 4096,
     max_crypto_frame_data_len: usize = 1024,
     server_initial_packet_number: u64 = 0,
@@ -135,11 +146,21 @@ pub const EstablishedConnection = struct {
     }
 };
 
+fn clientInitialDestinationConnectionId(options: ClientOptions) []const u8 {
+    if (options.retry_source_connection_id.len != 0) return options.retry_source_connection_id;
+    return options.original_destination_connection_id;
+}
+
 pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: ClientOptions) Error!EstablishedConnection {
+    if (options.retry_source_connection_id.len != 0 and options.address_validation_token.len == 0) {
+        return error.InvalidPacket;
+    }
+
     const client_secret = try secretKey(endpoint.io, options.x25519_secret_key);
     const client_public = try quic.tls_client_hello.x25519PublicKey(client_secret);
     const client_random = try random32(endpoint.io, options.random);
-    const initial_secrets = quic.protection.deriveInitialSecrets(options.original_destination_connection_id);
+    const initial_destination_connection_id = clientInitialDestinationConnectionId(options);
+    const initial_secrets = quic.protection.deriveInitialSecrets(initial_destination_connection_id);
 
     var local_transport_parameters = options.local_transport_parameters;
     var encoded_transport_parameters: std.ArrayList(u8) = .empty;
@@ -162,7 +183,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
     });
 
     try quic.initial_exchange.sendInitialCrypto(endpoint, peer, initial_secrets.client, .{
-        .destination_connection_id = options.original_destination_connection_id,
+        .destination_connection_id = initial_destination_connection_id,
         .source_connection_id = options.local_connection_id,
         .token = options.address_validation_token,
         .packet_number = options.client_initial_packet_number,
@@ -211,6 +232,7 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
         peer_transport_parameters,
         server_initial.packet.source_connection_id,
         options.original_destination_connection_id,
+        options.retry_source_connection_id,
     );
     const server_finished = try quic.tls_client_hello.parseFinished(server_flight.finished);
     const server_finished_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions });
@@ -248,9 +270,17 @@ pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: C
 }
 
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
-    var client_initial = try receiveClientInitial(endpoint, 0, options.max_crypto_buffer);
+    if ((options.retry_original_destination_connection_id.len == 0) != (options.retry_source_connection_id.len == 0)) {
+        return error.InvalidPacket;
+    }
+
+    var client_initial = try receiveClientInitial(endpoint, 0, options.max_crypto_buffer, options.retry_source_connection_id);
     defer client_initial.deinit(endpoint.allocator);
-    try validateAddressTokenForInitial(client_initial.packet.token, options);
+    const original_destination_connection_id = serverOriginalDestinationConnectionId(
+        client_initial.packet.destination_connection_id,
+        options,
+    );
+    try validateAddressTokenForInitial(endpoint.allocator, client_initial.packet.token, original_destination_connection_id, options);
 
     var parsed_client = try quic.tls_client_hello.parseClientHello(endpoint.allocator, client_initial.crypto_data);
     defer parsed_client.deinit(endpoint.allocator);
@@ -282,7 +312,8 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     const transport_parameters = try serverTransportParameters(
         endpoint.allocator,
         options,
-        client_initial.packet.destination_connection_id,
+        original_destination_connection_id,
+        options.retry_source_connection_id,
         &local_transport_parameters,
         &encoded_transport_parameters,
     );
@@ -346,8 +377,37 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     return established;
 }
 
-fn validateAddressTokenForInitial(token: []const u8, options: ServerOptions) Error!void {
-    if (token.len == 0) return;
+fn serverOriginalDestinationConnectionId(received_destination_connection_id: []const u8, options: ServerOptions) []const u8 {
+    if (options.retry_original_destination_connection_id.len != 0) return options.retry_original_destination_connection_id;
+    return received_destination_connection_id;
+}
+
+fn validateAddressTokenForInitial(
+    allocator: std.mem.Allocator,
+    token: []const u8,
+    original_destination_connection_id: []const u8,
+    options: ServerOptions,
+) Error!void {
+    if (token.len == 0) {
+        if (options.retry_source_connection_id.len != 0) return error.InvalidPacket;
+        return;
+    }
+    if (options.retry_source_connection_id.len != 0) {
+        if (options.retry_original_destination_connection_id.len == 0 or
+            options.address_validation_secrets.len == 0 or
+            options.address_validation_peer.len == 0) return error.InvalidPacket;
+        _ = quic.address_validation_token.validateRetryAnySecret(
+            allocator,
+            options.address_validation_secrets,
+            .version_1,
+            options.address_validation_now_ns,
+            options.address_validation_peer,
+            original_destination_connection_id,
+            options.retry_source_connection_id,
+            token,
+        ) catch return error.InvalidPacket;
+        return;
+    }
     if (options.address_validation_secrets.len == 0 or options.address_validation_peer.len == 0) return;
     _ = quic.address_validation_token.validateAnySecret(
         options.address_validation_secrets,
@@ -372,17 +432,27 @@ const ReceivedClientInitial = struct {
     }
 };
 
-fn receiveClientInitial(endpoint: *quic.runtime.Endpoint, expected_packet_number: u64, max_crypto_buffer: usize) Error!ReceivedClientInitial {
+fn receiveClientInitial(
+    endpoint: *quic.runtime.Endpoint,
+    expected_packet_number: u64,
+    max_crypto_buffer: usize,
+    retry_destination_connection_id: []const u8,
+) Error!ReceivedClientInitial {
     var datagram = try endpoint.receiveBytes();
     defer datagram.deinit(endpoint.allocator);
     if (datagram.bytes.len < quic.initial_exchange.min_initial_udp_datagram_size) return error.InvalidInitialPacket;
 
     const header = try quic.LongHeader.parse(datagram.bytes);
     if (header.packet_type != .initial) return error.InvalidInitialPacket;
-    // RFC 9000 Section 7.2 requires a first client Initial to use a random
-    // Destination Connection ID of at least 8 bytes.  Server endpoints rely on
-    // that DCID for Initial secret derivation and route bootstrap.
-    if (header.destination_connection_id.len < 8) return error.InvalidInitialPacket;
+    if (retry_destination_connection_id.len == 0) {
+        // RFC 9000 Section 7.2 requires a first client Initial to use a random
+        // Destination Connection ID of at least 8 bytes.  A Retry follow-up is
+        // different: its DCID is the server-chosen Retry SCID, which can be
+        // shorter, so the accept path below validates exact equality instead.
+        if (header.destination_connection_id.len < 8) return error.InvalidInitialPacket;
+    } else if (!std.mem.eql(u8, header.destination_connection_id, retry_destination_connection_id)) {
+        return error.InvalidInitialPacket;
+    }
 
     const initial_secrets = quic.protection.deriveInitialSecrets(header.destination_connection_id);
     var packet = try quic.protection.openInitialPacket(endpoint.allocator, initial_secrets.client, datagram.bytes, expected_packet_number);
@@ -497,18 +567,22 @@ fn serverTransportParameters(
     allocator: std.mem.Allocator,
     options: ServerOptions,
     original_destination_connection_id: []const u8,
+    retry_source_connection_id: []const u8,
     local_transport_parameters: *quic.TransportParameters,
     encoded: *std.ArrayList(u8),
 ) Error![]const u8 {
     if (options.transport_parameters.len != 0) {
         local_transport_parameters.* = try quic.parseTransportParametersTyped(allocator, options.transport_parameters, .server);
-        try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id);
+        try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id, retry_source_connection_id);
         return options.transport_parameters;
     }
 
     local_transport_parameters.original_destination_connection_id = original_destination_connection_id;
     local_transport_parameters.initial_source_connection_id = options.local_connection_id;
-    try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id);
+    if (retry_source_connection_id.len != 0) {
+        local_transport_parameters.retry_source_connection_id = retry_source_connection_id;
+    }
+    try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id, retry_source_connection_id);
     try quic.encodeTransportParameters(encoded, allocator, local_transport_parameters.*);
     return encoded.items;
 }
@@ -525,6 +599,7 @@ fn validateServerTransportParameters(
     params: quic.TransportParameters,
     initial_source_connection_id: []const u8,
     original_destination_connection_id: []const u8,
+    retry_source_connection_id: []const u8,
 ) Error!void {
     try quic.validateTransportParameters(params, .server);
     if (params.initial_source_connection_id == null or params.original_destination_connection_id == null) {
@@ -535,6 +610,12 @@ fn validateServerTransportParameters(
     }
     if (!std.mem.eql(u8, params.original_destination_connection_id.?, original_destination_connection_id)) {
         return error.InvalidTransportParameter;
+    }
+    if (retry_source_connection_id.len == 0) {
+        if (params.retry_source_connection_id != null) return error.InvalidTransportParameter;
+    } else {
+        const advertised = params.retry_source_connection_id orelse return error.InvalidTransportParameter;
+        if (!std.mem.eql(u8, advertised, retry_source_connection_id)) return error.InvalidTransportParameter;
     }
 }
 
@@ -737,6 +818,149 @@ test "QUIC client Initial carries address validation token" {
         opened.packet.token,
     );
     try std.testing.expectEqual(quic.address_validation_token.Kind.new_token, validated.kind);
+}
+
+test "QUIC integrated handshake succeeds after validated Retry" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const original_dcid = [_]u8{ 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+    const client_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const retry_scid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    const server_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const token_secret: quic.address_validation_token.Secret = [_]u8{0x71} ** quic.address_validation_token.secret_len;
+    const retry_nonce: quic.address_validation_token.Nonce = [_]u8{0x72} ** quic.address_validation_token.nonce_len;
+    const client_random = [_]u8{0x73} ** 32;
+    const client_secret_key = [_]u8{0x74} ** 32;
+    const server_random = [_]u8{0x75} ** 32;
+    const server_secret_key = [_]u8{0x76} ** 32;
+
+    const first_initial_secrets = quic.protection.deriveInitialSecrets(&original_dcid);
+    const client_public = try quic.tls_client_hello.x25519PublicKey(try secretKey(io, client_secret_key));
+    var params = quic.practical_transport_parameters;
+    params.initial_source_connection_id = &client_cid;
+    var encoded_tp: std.ArrayList(u8) = .empty;
+    defer encoded_tp.deinit(allocator);
+    try quic.encodeTransportParameters(&encoded_tp, allocator, params);
+
+    var client_hello: std.ArrayList(u8) = .empty;
+    defer client_hello.deinit(allocator);
+    try quic.tls_client_hello.writeClientHello(&client_hello, allocator, .{
+        .random = client_random,
+        .x25519_public_key = client_public,
+        .server_name = "localhost",
+        .alpn_protocols = &.{"h3"},
+        .transport_parameters = encoded_tp.items,
+    });
+
+    try quic.initial_exchange.sendInitialCrypto(&client_endpoint, server_endpoint.address(), first_initial_secrets.client, .{
+        .destination_connection_id = &original_dcid,
+        .source_connection_id = &client_cid,
+        .packet_number = 0,
+        .crypto_data = client_hello.items,
+        .max_crypto_frame_data_len = 1024,
+        .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+    });
+
+    var first_initial = try receiveClientInitial(&server_endpoint, 0, 4096, &.{});
+    defer first_initial.deinit(allocator);
+    const retry_datagram = try quic.retry_flow.issue(allocator, .{
+        .original_destination_connection_id = first_initial.packet.destination_connection_id,
+        .client_source_connection_id = first_initial.packet.source_connection_id,
+        .retry_source_connection_id = &retry_scid,
+        .peer_address = "client-path",
+        .issued_ns = 1_000,
+        .lifetime_ns = 5_000,
+        .nonce = retry_nonce,
+        .secret = token_secret,
+    });
+    defer allocator.free(retry_datagram);
+    try server_endpoint.sendBytes(first_initial.from, retry_datagram);
+
+    var retry_bytes = try client_endpoint.receiveBytes();
+    defer retry_bytes.deinit(allocator);
+    var retry_state = try quic.retry_flow.ClientState.init(allocator, .version_1, &original_dcid, &client_cid);
+    defer retry_state.deinit();
+    var processed_retry = try retry_state.process(retry_bytes.bytes, .{
+        .original_destination_connection_id = &original_dcid,
+        .local_connection_id = &client_cid,
+        .server_name = "localhost",
+        .random = client_random,
+        .x25519_secret_key = client_secret_key,
+    });
+    defer processed_retry.deinit(allocator);
+
+    const secrets = [_]quic.address_validation_token.Secret{token_secret};
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        cid: []const u8,
+        secrets: []const quic.address_validation_token.Secret,
+        odcid: []const u8,
+        rscid: []const u8,
+        random: [32]u8,
+        secret_key: [32]u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var established = try accept(shared.endpoint, .{
+                .local_connection_id = shared.cid,
+                .address_validation_secrets = shared.secrets,
+                .address_validation_peer = "client-path",
+                .address_validation_now_ns = 1_100,
+                .retry_original_destination_connection_id = shared.odcid,
+                .retry_source_connection_id = shared.rscid,
+                .random = shared.random,
+                .x25519_secret_key = shared.secret_key,
+            });
+            defer established.deinit();
+
+            var request = try established.connection.receivePacket();
+            defer request.deinit(shared.endpoint.allocator);
+            try std.testing.expectEqualStrings("GET /retry", request.frames[0].stream.data);
+
+            const response = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "RETRIED", .fin = true } }};
+            try established.connection.send(&response);
+        }
+    };
+
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .cid = &server_cid,
+        .secrets = &secrets,
+        .odcid = &original_dcid,
+        .rscid = &retry_scid,
+        .random = server_random,
+        .secret_key = server_secret_key,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try connect(&client_endpoint, server_endpoint.address(), processed_retry.retry_client_options);
+    defer established.deinit();
+    try std.testing.expectEqualStrings("h3", established.alpn);
+
+    const request = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "GET /retry", .fin = true } }};
+    try established.connection.send(&request);
+    var response = try established.connection.receivePacket();
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqualStrings("RETRIED", response.frames[0].stream.data);
 }
 
 test "QUIC integrated server rejects invalid first client Initial datagrams" {
