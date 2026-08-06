@@ -366,6 +366,7 @@ pub const HandshakeClient = struct {
     }
 
     pub fn sendGoAway(self: *HandshakeClient, stream_id: u64) Error!void {
+        try validateClientGoAwayPushId(stream_id);
         try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, client_control_stream_id);
         try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
     }
@@ -546,6 +547,7 @@ pub const ProtectedClient = struct {
     }
 
     pub fn sendGoAway(self: *ProtectedClient, stream_id: u64) Error!void {
+        try validateClientGoAwayPushId(stream_id);
         try sendProtectedSettings(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, client_control_stream_id);
         try sendProtectedControlFrame(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, .goaway, stream_id);
     }
@@ -676,6 +678,13 @@ fn validateServerGoAwayStreamId(stream_id: u64) Error!void {
     // bidirectional request stream ID.  Client-initiated bidirectional stream
     // IDs are exactly the multiples of four.
     if ((stream_id & 0x3) != 0) return error.InvalidFrame;
+}
+
+fn validateClientGoAwayPushId(push_id: u64) Error!void {
+    // This runtime does not implement the server-push lifecycle, mirroring the
+    // tquic behavior of sending client GOAWAY with push ID 0.  Accepting larger
+    // IDs would imply outstanding pushes can be retried or drained correctly.
+    if (push_id != 0) return error.InvalidFrame;
 }
 
 fn controlFramePayload(
@@ -875,6 +884,8 @@ test "HTTP/3 server GOAWAY validates request stream ids" {
     try std.testing.expectError(error.InvalidFrame, validateServerGoAwayStreamId(1));
     try std.testing.expectError(error.InvalidFrame, validateServerGoAwayStreamId(2));
     try std.testing.expectError(error.InvalidFrame, validateServerGoAwayStreamId(3));
+    try validateClientGoAwayPushId(0);
+    try std.testing.expectError(error.InvalidFrame, validateClientGoAwayPushId(1));
 }
 
 test "HTTP/3 connection control frames advance control stream offset" {
