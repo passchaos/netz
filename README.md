@@ -39,7 +39,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   v1/v2 Initial key/header/payload protection with version-aware salts, HKDF labels, and long-header type bits, protected Initial packet seal/open, long-header packet boundary peeking for coalesced datagrams, Version Negotiation packet codec and endpoint-level unsupported-version responses,
   Initial CRYPTO byte exchange over UDP with RFC 9000 1200-byte Initial datagram padding/validation, client-carried Initial address tokens, server-side token validation hooks, and server-issued address-validation NEW_TOKEN frames, coalesced Initial+Handshake CRYPTO datagram helpers, HMAC-based
   address-validation token helpers for Retry/NEW_TOKEN with lifetime, version,
-  peer-address binding, secret rotation, and replay filtering, minimal TLS
+  peer-address binding, Retry ODCID/RSCID binding, secret rotation, and replay
+  filtering, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
   packet server/client Finished flights, and handshake/application secret
