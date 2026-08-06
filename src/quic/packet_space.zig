@@ -253,12 +253,22 @@ pub const SentPacketTracker = struct {
         bytes: usize = 0,
         ect0_packets: usize = 0,
         ect1_packets: usize = 0,
+        largest_packet_number: ?u64 = null,
+        largest_sent_time_ns: ?u64 = null,
 
         fn add(self: *AckResult, other: AckResult) void {
             self.packets += other.packets;
             self.bytes += other.bytes;
             self.ect0_packets += other.ect0_packets;
             self.ect1_packets += other.ect1_packets;
+            if (other.largest_packet_number) |packet_number| self.observe(packet_number, other.largest_sent_time_ns);
+        }
+
+        fn observe(self: *AckResult, packet_number: u64, sent_time_ns: ?u64) void {
+            if (self.largest_packet_number == null or packet_number > self.largest_packet_number.?) {
+                self.largest_packet_number = packet_number;
+                self.largest_sent_time_ns = sent_time_ns;
+            }
         }
     };
 
@@ -383,6 +393,7 @@ pub const SentPacketTracker = struct {
             if (packet.acknowledged or packet.lost or packet.packet_number > largest_lost) continue;
             packet.lost = true;
             lost.packets += 1;
+            lost.observe(packet.packet_number, packet.sent_time_ns);
             if (packet.ack_eliciting) lost.bytes += packet.bytes;
         }
         return lost;
@@ -400,6 +411,7 @@ pub const SentPacketTracker = struct {
             if (now_ns < lost_time) continue;
             packet.lost = true;
             lost.packets += 1;
+            lost.observe(packet.packet_number, packet.sent_time_ns);
             if (packet.ack_eliciting) lost.bytes += packet.bytes;
         }
         return lost;
@@ -496,6 +508,7 @@ pub const SentPacketTracker = struct {
             if (!packet.acknowledged and packet.packet_number >= start and packet.packet_number <= end) {
                 packet.acknowledged = true;
                 result.packets += 1;
+                result.observe(packet.packet_number, packet.sent_time_ns);
                 if (packet.ack_eliciting and !packet.lost) result.bytes += packet.bytes;
                 switch (packet.ecn) {
                     .not_ect => {},

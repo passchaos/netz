@@ -385,7 +385,7 @@ pub const Connection = struct {
         const largest = self.sent.largestAcknowledged() orelse return false;
         const lost = self.sent.detectTimeThresholdLoss(now_ns, loss_delay_ns, largest);
         if (lost.bytes > 0) {
-            self.congestion.onLost(lost.bytes);
+            self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
             _ = self.applyPersistentCongestionIfDetected();
         }
         for (self.sent.packets.items) |packet| {
@@ -779,10 +779,10 @@ pub const Connection = struct {
                 .ack => {
                     if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
                     const acked = try self.sent.applyAckDetailed(frame.ack);
-                    self.congestion.onAcked(acked.bytes);
+                    self.congestion.onAckedAt(acked.bytes, acked.largest_sent_time_ns);
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
                     if (lost.bytes > 0) {
-                        self.congestion.onLost(lost.bytes);
+                        self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
                         _ = self.applyPersistentCongestionIfDetected();
                     }
                     _ = try self.recovery.applyAck(frame.ack);
