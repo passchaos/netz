@@ -123,6 +123,7 @@ fn remainingLengthEncodedLen(value: usize) usize {
 
 pub fn writeUtf8(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
     if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
+    try validateMqttUtf8String(value);
     try wire.appendInt(list, allocator, u16, @intCast(value.len), .big);
     try list.appendSlice(allocator, value);
 }
@@ -130,8 +131,13 @@ pub fn writeUtf8(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: 
 pub fn readUtf8(cursor: *wire.Cursor) Error![]const u8 {
     const len = try cursor.readInt(u16, .big);
     const value = try cursor.readSlice(len);
-    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+    try validateMqttUtf8String(value);
     return value;
+}
+
+fn validateMqttUtf8String(value: []const u8) Error!void {
+    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+    if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidUtf8;
 }
 
 pub fn writeBinary(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
@@ -1507,6 +1513,16 @@ test "MQTT remaining length roundtrip" {
     }
     try std.testing.expectError(error.MalformedRemainingLength, decodeRemainingLength(&.{ 0x80, 0x00 }));
     try std.testing.expectError(error.MalformedRemainingLength, decodeRemainingLength(&.{ 0xff, 0x00 }));
+}
+
+test "MQTT UTF-8 strings reject NUL" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expectError(error.InvalidUtf8, writeUtf8(&out, std.testing.allocator, "bad\x00topic"));
+
+    var raw = [_]u8{ 0, 5, 'h', 'e', 0, 'l', 'o' };
+    var cursor = wire.Cursor.init(&raw);
+    try std.testing.expectError(error.InvalidUtf8, readUtf8(&cursor));
 }
 
 test "MQTT connect and publish parse" {
