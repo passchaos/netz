@@ -120,6 +120,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "encodeTransportParameters"));
     try std.testing.expect(@hasDecl(netz.quic, "validateTransportParameters"));
     try std.testing.expect(@hasDecl(netz.quic, "practical_transport_parameters"));
+    try std.testing.expect(@hasDecl(netz.quic, "FramePacketType"));
+    try std.testing.expect(@hasDecl(netz.quic, "frameAllowedInPacketType"));
+    try std.testing.expect(@hasDecl(netz.quic, "validateFrameForPacketType"));
     try std.testing.expect(@hasDecl(netz.quic, "VersionNegotiationPacket"));
     try std.testing.expect(@hasDecl(netz.quic, "writeVersionNegotiationPacket"));
     try std.testing.expect(@hasDecl(netz.quic, "parseVersionNegotiationPacket"));

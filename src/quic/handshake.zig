@@ -352,7 +352,9 @@ fn receiveClientInitial(endpoint: *quic.runtime.Endpoint, expected_packet_number
     var pos: usize = 0;
     var saw_crypto = false;
     while (pos < packet.payload.len) {
-        const parsed = try quic.parseFrame(packet.payload[pos..]);
+        var parsed = try quic.parseFrameOwned(endpoint.allocator, packet.payload[pos..]);
+        defer parsed.deinitOwned(endpoint.allocator);
+        try quic.validateFrameForPacketType(parsed.frame, .initial);
         if (parsed.frame == .crypto) {
             saw_crypto = true;
             try reassembler.insert(parsed.frame.crypto);

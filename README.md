@@ -30,7 +30,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   client/server runtime, plus a `std.Io.async` request receive helper for the
   development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
-  frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames), typed
+  frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with
+  RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed
   RFC-defaulted transport-parameter encoding/validation (duplicate detection,
   endpoint-specific client/server parameter rules, preferred-address parsing,
   max UDP payload/ACK delay/stream-count bounds), Retry packet codec

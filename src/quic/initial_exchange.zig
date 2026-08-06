@@ -263,7 +263,7 @@ pub fn openInitialCrypto(
 ) Error!ReceivedInitialCrypto {
     var packet = try quic.protection.openInitialPacket(endpoint.allocator, keys, bytes, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
-    const crypto_data = try cryptoDataFromPayload(endpoint.allocator, packet.payload, max_crypto_buffer);
+    const crypto_data = try cryptoDataFromPayload(endpoint.allocator, packet.payload, max_crypto_buffer, .initial);
     errdefer endpoint.allocator.free(crypto_data);
     return .{ .from = from, .packet = packet, .crypto_data = crypto_data };
 }
@@ -278,19 +278,26 @@ pub fn openHandshakeCrypto(
 ) Error!ReceivedHandshakeCrypto {
     var packet = try quic.protection.openHandshakePacket(endpoint.allocator, keys, bytes, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
-    const crypto_data = try cryptoDataFromPayload(endpoint.allocator, packet.payload, max_crypto_buffer);
+    const crypto_data = try cryptoDataFromPayload(endpoint.allocator, packet.payload, max_crypto_buffer, .handshake);
     errdefer endpoint.allocator.free(crypto_data);
     return .{ .from = from, .packet = packet, .crypto_data = crypto_data };
 }
 
-fn cryptoDataFromPayload(allocator: std.mem.Allocator, payload: []const u8, max_crypto_buffer: usize) Error![]u8 {
+fn cryptoDataFromPayload(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    max_crypto_buffer: usize,
+    packet_type: quic.FramePacketType,
+) Error![]u8 {
     var reassembler = quic.crypto_stream.Reassembler.init(allocator, max_crypto_buffer);
     defer reassembler.deinit();
 
     var pos: usize = 0;
     var saw_crypto = false;
     while (pos < payload.len) {
-        const parsed = try quic.parseFrame(payload[pos..]);
+        var parsed = try quic.parseFrameOwned(allocator, payload[pos..]);
+        defer parsed.deinitOwned(allocator);
+        try quic.validateFrameForPacketType(parsed.frame, packet_type);
         if (parsed.frame == .crypto) {
             saw_crypto = true;
             try reassembler.insert(parsed.frame.crypto);
@@ -351,6 +358,64 @@ test "QUIC Initial CRYPTO bytes exchange over UDP endpoint" {
     defer client_received.deinit(allocator);
     try std.testing.expect(client_received.from.eql(&server.address()));
     try std.testing.expectEqualStrings("server hello", client_received.crypto_data);
+}
+
+test "QUIC long-header CRYPTO receive rejects forbidden frame contexts" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 4096,
+    });
+    defer endpoint.deinit();
+
+    const dcid = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const scid = [_]u8{ 0x05, 0x06, 0x07, 0x08 };
+    const initial_keys = quic.protection.deriveInitialSecrets(&dcid).client;
+
+    var bad_initial_payload: std.ArrayList(u8) = .empty;
+    defer bad_initial_payload.deinit(allocator);
+    try (quic.Frame{ .stream = .{ .stream_id = 0, .data = "not allowed", .fin = false } }).write(&bad_initial_payload, allocator);
+    const bad_initial = try quic.protection.sealInitialPacket(allocator, initial_keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 0,
+        .packet_number_len = 4,
+        .payload = bad_initial_payload.items,
+    });
+    defer allocator.free(bad_initial);
+    try std.testing.expectError(error.InvalidFrame, openInitialCrypto(
+        &endpoint,
+        endpoint.address(),
+        bad_initial,
+        initial_keys,
+        0,
+        1024,
+    ));
+
+    const handshake_keys = quic.protection.deriveAes128Keys([_]u8{0xd4} ** quic.protection.secret_len);
+    var bad_handshake_payload: std.ArrayList(u8) = .empty;
+    defer bad_handshake_payload.deinit(allocator);
+    try (quic.Frame{ .application_close = .{ .error_code = 1, .reason_phrase = "nope" } }).write(&bad_handshake_payload, allocator);
+    const bad_handshake = try quic.protection.sealHandshakePacket(allocator, handshake_keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 0,
+        .packet_number_len = 4,
+        .payload = bad_handshake_payload.items,
+    });
+    defer allocator.free(bad_handshake);
+    try std.testing.expectError(error.InvalidFrame, openHandshakeCrypto(
+        &endpoint,
+        endpoint.address(),
+        bad_handshake,
+        handshake_keys,
+        0,
+        1024,
+    ));
 }
 
 test "QUIC coalesced Initial and Handshake CRYPTO exchange over UDP endpoint" {

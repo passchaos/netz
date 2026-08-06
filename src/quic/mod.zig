@@ -959,6 +959,50 @@ pub fn deinitOwnedFrameSlice(frames: []Frame, allocator: std.mem.Allocator) void
     for (frames) |*frame| deinitOwnedFrame(frame, allocator);
 }
 
+pub const FramePacketType = enum {
+    initial,
+    handshake,
+    zero_rtt,
+    one_rtt,
+};
+
+pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool {
+    return switch (packet_type) {
+        .initial, .handshake => switch (frame) {
+            .padding, .ping, .ack, .crypto, .connection_close => true,
+            else => false,
+        },
+        .zero_rtt => switch (frame) {
+            .padding,
+            .ping,
+            .reset_stream,
+            .stop_sending,
+            .stream,
+            .max_data,
+            .max_stream_data,
+            .max_streams_bidi,
+            .max_streams_uni,
+            .data_blocked,
+            .stream_data_blocked,
+            .streams_blocked_bidi,
+            .streams_blocked_uni,
+            .new_connection_id,
+            .path_challenge,
+            .application_close,
+            .datagram,
+            => true,
+            // ACK, CRYPTO, CONNECTION_CLOSE, HANDSHAKE_DONE, NEW_TOKEN,
+            // RETIRE_CONNECTION_ID, and PATH_RESPONSE are not 0-RTT frames.
+            else => false,
+        },
+        .one_rtt => true,
+    };
+}
+
+pub fn validateFrameForPacketType(frame: Frame, packet_type: FramePacketType) Error!void {
+    if (!frameAllowedInPacketType(frame, packet_type)) return error.InvalidFrame;
+}
+
 pub const ParsedFrame = struct {
     frame: Frame,
     consumed: usize,
@@ -1534,6 +1578,27 @@ test "QUIC ack close datagram and padding frames" {
     const padding = try parseFrame(&.{ 0, 0, 0, @intFromEnum(FrameType.ping) });
     try std.testing.expectEqual(@as(usize, 3), padding.frame.padding.len);
     try std.testing.expectEqual(@as(usize, 3), padding.consumed);
+}
+
+test "QUIC frame packet context rules follow RFC 9000" {
+    const stream = Frame{ .stream = .{ .stream_id = 0, .data = "data" } };
+    const crypto = Frame{ .crypto = .{ .offset = 0, .data = "tls" } };
+    const ack = Frame{ .ack = .{ .largest_acknowledged = 0, .ack_delay = 0, .first_ack_range = 0 } };
+    const app_close = Frame{ .application_close = .{ .error_code = 0, .reason_phrase = "" } };
+
+    try std.testing.expect(frameAllowedInPacketType(.{ .padding = .{ .len = 1 } }, .initial));
+    try std.testing.expect(frameAllowedInPacketType(.{ .ping = {} }, .handshake));
+    try std.testing.expect(frameAllowedInPacketType(crypto, .initial));
+    try std.testing.expect(frameAllowedInPacketType(ack, .handshake));
+    try std.testing.expect(!frameAllowedInPacketType(stream, .initial));
+    try std.testing.expect(!frameAllowedInPacketType(stream, .handshake));
+    try std.testing.expect(frameAllowedInPacketType(stream, .zero_rtt));
+    try std.testing.expect(!frameAllowedInPacketType(ack, .zero_rtt));
+    try std.testing.expect(!frameAllowedInPacketType(crypto, .zero_rtt));
+    try std.testing.expect(!frameAllowedInPacketType(.{ .path_response = .{ .data = [_]u8{0} ** 8 } }, .zero_rtt));
+    try std.testing.expect(frameAllowedInPacketType(app_close, .zero_rtt));
+    try std.testing.expect(frameAllowedInPacketType(.{ .handshake_done = {} }, .one_rtt));
+    try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(stream, .initial));
 }
 
 test "QUIC ACK frame owned parser preserves sparse ranges" {
