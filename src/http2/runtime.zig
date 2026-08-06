@@ -93,6 +93,7 @@ pub const Server = struct {
             .role = .server,
             .limits = self.limits,
         };
+        connection.applyLocalLimits();
         try connection.applySettings(peer_settings);
         return connection;
     }
@@ -200,6 +201,7 @@ pub const Client = struct {
             .role = .client,
             .limits = limits,
         };
+        connection.applyLocalLimits();
         errdefer connection.close();
         while (!saw_server_settings or !saw_settings_ack) {
             var frame = try readFrame(allocator, io, stream, limits);
@@ -1009,6 +1011,10 @@ pub const Connection = struct {
                 else => {},
             }
         }
+    }
+
+    fn applyLocalLimits(self: *Connection) void {
+        self.hpack_decoder.setMaxDynamicTableSize(self.allocator, self.limits.header_table_size);
     }
 
     fn outboundFramePayloadLimit(self: Connection) usize {
@@ -4160,6 +4166,29 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
         .{ .id = .enable_connect_protocol, .value = 0 },
     }));
     try std.testing.expect(connection.peer_enable_connect_protocol);
+}
+
+test "HTTP/2 runtime applies local HPACK decoder table limit" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+        .limits = .{ .header_table_size = 32 },
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+    connection.applyLocalLimits();
+    try std.testing.expectEqual(@as(usize, 32), connection.hpack_decoder.max_dynamic_table_size);
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(std.testing.allocator);
+    try block.appendSlice(std.testing.allocator, &.{ 0x3f, 0x02 }); // Dynamic table size update value 33 > local limit.
+    try std.testing.expectError(error.InvalidEncoding, connection.hpack_decoder.decodeBlock(std.testing.allocator, block.items));
 }
 
 test "HTTP/2 runtime validates frame envelope rules" {
