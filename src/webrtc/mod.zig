@@ -998,6 +998,100 @@ pub const rtcp = struct {
         pairs: []NackPair,
     };
 
+    pub const NackTracker = struct {
+        initialized: bool = false,
+        highest_seq: u16 = 0,
+        missing: [128]u16 = [_]u16{0} ** 128,
+        missing_len: usize = 0,
+
+        pub fn observe(self: *NackTracker, sequence_number: u16) void {
+            if (!self.initialized) {
+                self.initialized = true;
+                self.highest_seq = sequence_number;
+                return;
+            }
+            if (seqNewer(sequence_number, self.highest_seq)) {
+                var next = self.highest_seq +% 1;
+                while (next != sequence_number) : (next +%= 1) {
+                    self.addMissing(next);
+                }
+                self.highest_seq = sequence_number;
+                self.removeMissing(sequence_number);
+                return;
+            }
+            self.removeMissing(sequence_number);
+        }
+
+        pub fn pendingCount(self: NackTracker) usize {
+            return self.missing_len;
+        }
+
+        pub fn clear(self: *NackTracker) void {
+            self.missing_len = 0;
+        }
+
+        pub fn buildPairs(self: NackTracker, out: []NackPair) []NackPair {
+            if (out.len == 0 or self.missing_len == 0) return out[0..0];
+            var sorted = self.missing;
+            const missing = sorted[0..self.missing_len];
+            std.mem.sort(u16, missing, {}, seqLessThan);
+
+            var count: usize = 0;
+            for (missing) |seq| {
+                var placed = false;
+                for (out[0..count]) |*pair| {
+                    const delta = seq -% pair.packet_id;
+                    if (delta > 0 and delta <= 16) {
+                        pair.lost_packet_bitmask |= @as(u16, 1) << @intCast(delta - 1);
+                        placed = true;
+                        break;
+                    }
+                }
+                if (!placed) {
+                    if (count == out.len) break;
+                    out[count] = .{ .packet_id = seq };
+                    count += 1;
+                }
+            }
+            return out[0..count];
+        }
+
+        fn addMissing(self: *NackTracker, sequence_number: u16) void {
+            for (self.missing[0..self.missing_len]) |existing| {
+                if (existing == sequence_number) return;
+            }
+            if (self.missing_len < self.missing.len) {
+                self.missing[self.missing_len] = sequence_number;
+                self.missing_len += 1;
+                return;
+            }
+            // Keep the newest window by evicting the oldest stored sequence.
+            std.mem.copyForwards(u16, self.missing[0 .. self.missing.len - 1], self.missing[1..]);
+            self.missing[self.missing.len - 1] = sequence_number;
+        }
+
+        fn removeMissing(self: *NackTracker, sequence_number: u16) void {
+            var i: usize = 0;
+            while (i < self.missing_len) {
+                if (self.missing[i] == sequence_number) {
+                    self.missing_len -= 1;
+                    self.missing[i] = self.missing[self.missing_len];
+                    return;
+                }
+                i += 1;
+            }
+        }
+    };
+
+    fn seqNewer(a: u16, b: u16) bool {
+        return a != b and ((a -% b) < 0x8000);
+    }
+
+    fn seqLessThan(_: void, a: u16, b: u16) bool {
+        if (a == b) return false;
+        return ((a -% b) > 0x8000);
+    }
+
     pub const Unknown = struct {
         header: Header,
         payload: []const u8,
@@ -1707,6 +1801,32 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
     try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
+}
+
+test "RTCP NACK tracker detects RTP gaps and wraparound" {
+    var tracker = rtcp.NackTracker{};
+    tracker.observe(1000);
+    tracker.observe(1003);
+    try std.testing.expectEqual(@as(usize, 2), tracker.pendingCount());
+    var pairs_buf: [8]rtcp.NackPair = undefined;
+    const pairs = tracker.buildPairs(&pairs_buf);
+    try std.testing.expectEqual(@as(usize, 1), pairs.len);
+    try std.testing.expect(pairs[0].contains(1001));
+    try std.testing.expect(pairs[0].contains(1002));
+    tracker.observe(1001);
+    try std.testing.expectEqual(@as(usize, 1), tracker.pendingCount());
+    try std.testing.expect(tracker.buildPairs(&pairs_buf)[0].contains(1002));
+
+    var wrap = rtcp.NackTracker{};
+    wrap.observe(0xfffe);
+    wrap.observe(1);
+    const wrap_pairs = wrap.buildPairs(&pairs_buf);
+    try std.testing.expectEqual(@as(usize, 1), wrap_pairs.len);
+    try std.testing.expect(wrap_pairs[0].contains(0xffff));
+    try std.testing.expect(wrap_pairs[0].contains(0));
+    wrap.observe(0xffff);
+    wrap.observe(0);
+    try std.testing.expectEqual(@as(usize, 0), wrap.pendingCount());
 }
 
 test "SCTP DATA packet and DCEP channel messages" {
