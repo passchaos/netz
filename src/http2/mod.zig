@@ -275,6 +275,8 @@ pub const DataPayload = struct {
     padding_len: u8,
 
     pub fn parse(frame: Frame) Error!DataPayload {
+        if (frame.header.frame_type != .data) return error.InvalidFrameSize;
+        if (frame.header.stream_id == 0) return error.InvalidStreamId;
         const flags = Flags.fromByte(frame.header.flags);
         if (!flags.padded) return .{ .data = frame.payload, .padding_len = 0 };
         if (frame.payload.len == 0) return error.InvalidPadding;
@@ -318,6 +320,8 @@ pub const HeadersPayload = struct {
     padding_len: u8,
 
     pub fn parse(frame: Frame) Error!HeadersPayload {
+        if (frame.header.frame_type != .headers) return error.InvalidFrameSize;
+        if (frame.header.stream_id == 0) return error.InvalidStreamId;
         const flags = Flags.fromByte(frame.header.flags);
         var pos: usize = 0;
         var pad_len: u8 = 0;
@@ -330,6 +334,7 @@ pub const HeadersPayload = struct {
         if (flags.priority) {
             if (frame.payload.len < pos + 5) return error.InvalidFrameSize;
             priority = try Priority.parse(frame.payload[pos .. pos + 5]);
+            if (priority.?.stream_dependency == frame.header.stream_id) return error.InvalidStreamId;
             pos += 5;
         }
         if (frame.payload.len < pos + @as(usize, pad_len)) return error.InvalidPadding;
@@ -978,6 +983,27 @@ test "HTTP/2 payload helpers" {
     };
     const data = try DataPayload.parse(frame);
     try std.testing.expectEqualStrings("ok", data.data);
+    try std.testing.expectError(error.InvalidFrameSize, DataPayload.parse(.{
+        .header = .{ .length = 0, .frame_type = .headers, .flags = 0, .stream_id = 1 },
+        .payload = &.{},
+    }));
+    try std.testing.expectError(error.InvalidStreamId, DataPayload.parse(.{
+        .header = .{ .length = 0, .frame_type = .data, .flags = 0, .stream_id = 0 },
+        .payload = &.{},
+    }));
+
+    try std.testing.expectError(error.InvalidStreamId, HeadersPayload.parse(.{
+        .header = .{ .length = 0, .frame_type = .headers, .flags = 0, .stream_id = 0 },
+        .payload = &.{},
+    }));
+    try std.testing.expectError(error.InvalidFrameSize, HeadersPayload.parse(.{
+        .header = .{ .length = 0, .frame_type = .data, .flags = 0, .stream_id = 1 },
+        .payload = &.{},
+    }));
+    try std.testing.expectError(error.InvalidStreamId, HeadersPayload.parse(.{
+        .header = .{ .length = 5, .frame_type = .headers, .flags = (@as(Flags, .{ .priority = true })).byte(), .stream_id = 1 },
+        .payload = &.{ 0, 0, 0, 1, 16 },
+    }));
     try validateClientPreface(connection_preface ++ "rest");
 }
 

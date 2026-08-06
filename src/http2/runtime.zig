@@ -2319,7 +2319,7 @@ test "HTTP/2 runtime rejects HEADERS priority self dependency" {
             defer connection.close();
 
             var request = connection.readRequest() catch |err| {
-                if (err == error.InvalidFrame) {
+                if (err == error.InvalidFrame or err == error.InvalidStreamId) {
                     shared.saw_expected = true;
                     return;
                 }
