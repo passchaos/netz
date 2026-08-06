@@ -1726,6 +1726,14 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
 
 fn validateHeaderName(name: []const u8) Error!void {
     if (name.len == 0) return error.InvalidHeader;
+    if (name[0] == ':') {
+        if (name.len == 1) return error.InvalidHeader;
+        for (name[1..]) |byte| {
+            if (byte >= 'A' and byte <= 'Z') return error.InvalidHeader;
+            if (!validHeaderNameByte(byte)) return error.InvalidHeader;
+        }
+        return;
+    }
     for (name) |byte| {
         if (byte >= 'A' and byte <= 'Z') return error.InvalidHeader;
         if (!validHeaderNameByte(byte)) return error.InvalidHeader;
@@ -1815,7 +1823,7 @@ fn validateAuthorityPort(port: []const u8) Error!void {
 
 fn validHeaderNameByte(byte: u8) bool {
     return std.ascii.isLower(byte) or std.ascii.isDigit(byte) or switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~', ':' => true,
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
         else => false,
     };
 }
@@ -3804,6 +3812,22 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = "connection", .value = "keep-alive" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connection_header, .request));
+
+    const embedded_colon_name = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/embedded-colon" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "bad:name", .value = "value" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&embedded_colon_name, .request));
+
+    const malformed_pseudo_name = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/malformed-pseudo" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":bad:name", .value = "value" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&malformed_pseudo_name, .request));
 
     const host_only = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "GET" },
