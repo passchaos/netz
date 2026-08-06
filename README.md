@@ -22,7 +22,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   outbound frame splitting with DATA sends that wait for WINDOW_UPDATE capacity
   and inbound DATA consumers that account for full padded frame payloads and restore connection/stream receive capacity,
   frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
-  validation with pure-digit Content-Length enforcement, HTTP/2 pseudo-header/lowercase field-name/value and control-character validation,
+  validation with pure-digit Content-Length enforcement, HTTP/2 pseudo-header/lowercase field-name/value and control-character validation, `:method` and `:protocol` token validation,
   URI-like `:scheme`/`:path`/`:authority` validation with Host fallback and Host/`:authority` mismatch rejection,
   connection-specific header rejection including `TE` rules,
   status-forbidden response-body write rejection,

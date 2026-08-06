@@ -1684,7 +1684,7 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
         .request => {
             if (!seen_method) return error.MissingPseudoHeader;
             const method_present = method_value orelse return error.MissingPseudoHeader;
-            if (method_present.len == 0) return error.InvalidHeader;
+            try validateHttpToken(method_present);
             if (scheme_value) |scheme| try validateUriScheme(scheme);
             if (path_value) |path| try validateUriPath(method_present, path);
             if (authority_value) |authority| try validateRequestAuthority(authority);
@@ -1700,7 +1700,7 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
                 }
             }
             if (protocol_value) |protocol| {
-                if (protocol.len == 0) return error.InvalidHeader;
+                try validateHttpToken(protocol);
                 const method = method_value orelse return error.MissingPseudoHeader;
                 if (!std.ascii.eqlIgnoreCase(method, "CONNECT")) return error.InvalidHeader;
                 if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
@@ -1736,6 +1736,20 @@ fn validateHeaderValue(value: []const u8) Error!void {
     for (value) |byte| {
         if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.InvalidHeader;
     }
+}
+
+fn validateHttpToken(value: []const u8) Error!void {
+    if (value.len == 0) return error.InvalidHeader;
+    for (value) |byte| {
+        if (!isHttpTchar(byte)) return error.InvalidHeader;
+    }
+}
+
+fn isHttpTchar(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or switch (byte) {
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
+    };
 }
 
 fn validateUriScheme(scheme: []const u8) Error!void {
@@ -3759,6 +3773,13 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&empty_method, .request));
 
+    const invalid_method_token = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET /" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_method_token, .request));
+
     const empty_path = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "GET" },
         .{ .name = ":path", .value = "" },
@@ -4415,6 +4436,14 @@ test "HTTP/2 extended CONNECT requires peer opt-in" {
         .{ .name = ":protocol", .value = "" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&empty_protocol, .request));
+
+    const invalid_protocol_token = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":path", .value = "/bad-protocol" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":protocol", .value = "web socket" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_protocol_token, .request));
 }
 
 test "HTTP/2 flow window blocks and updates" {
