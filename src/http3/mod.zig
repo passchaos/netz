@@ -870,6 +870,7 @@ pub const Request = struct {
         const fields = try self.headerFields(&fields_buf);
         try validateHeaderBlock(fields, .request);
         try validateHeaderBlock(self.trailers, .trailers);
+        try validateContentLength(fields, self.body.len);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 };
@@ -907,6 +908,7 @@ pub const Response = struct {
         try validateHeaderBlock(fields, .response);
         try validateHeaderBlock(self.trailers, .trailers);
         try validateResponseBodyForStatus(self.status, self.headers, self.body, self.trailers);
+        try validateContentLengthForStatus(self.status, fields, self.body.len);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 };
@@ -2070,6 +2072,14 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
     try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, bad_value.items));
 
     var pseudo_trailer: std.ArrayList(u8) = .empty;
+    try std.testing.expectError(error.InvalidContentLength, (Request{
+        .method = "POST",
+        .path = "/upload",
+        .authority = "example.com",
+        .headers = &.{.{ .name = "content-length", .value = "5" }},
+        .body = "body",
+    }).write(&pseudo_trailer, allocator));
+
     try std.testing.expectError(error.InvalidHeader, (Request{
         .method = "POST",
         .path = "/upload",
@@ -2121,6 +2131,11 @@ test "HTTP/3 response encode decode" {
     try std.testing.expectEqualStrings("created", decoded.body);
     try std.testing.expectEqual(@as(usize, 1), decoded.trailers.len);
     try std.testing.expectEqualStrings("checksum", decoded.trailers[0].name);
+    try std.testing.expectError(error.InvalidContentLength, (Response{
+        .status = 200,
+        .headers = &.{.{ .name = "content-length", .value = "5" }},
+        .body = "ok",
+    }).write(&encoded, allocator));
     try std.testing.expectError(error.InvalidContentLength, (Response{
         .status = 204,
         .body = "body",
