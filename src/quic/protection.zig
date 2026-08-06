@@ -96,6 +96,23 @@ pub const OpenedHandshakePacket = struct {
     }
 };
 
+pub const ProtectedLongPacketType = enum {
+    initial,
+    zero_rtt,
+    handshake,
+    retry,
+};
+
+pub const ProtectedLongPacketInfo = struct {
+    version: u32,
+    packet_type: ProtectedLongPacketType,
+    destination_connection_id: []const u8,
+    source_connection_id: []const u8,
+    /// Number of datagram bytes occupied by the first protected long-header
+    /// packet, excluding any following coalesced packet.
+    len: usize,
+};
+
 pub const ShortPacketOptions = struct {
     destination_connection_id: []const u8,
     packet_number: u64,
@@ -553,6 +570,42 @@ pub fn openHandshakePacket(
     };
 }
 
+pub fn peekProtectedLongPacketInfo(datagram: []const u8) Error!ProtectedLongPacketInfo {
+    var cursor = wire.Cursor.init(datagram);
+    const first = try cursor.readByte();
+    if ((first & 0x80) == 0 or (first & 0x40) == 0) return error.InvalidInitialPacket;
+    const version = try cursor.readInt(u32, .big);
+    if (version == 0) return error.InvalidInitialPacket;
+
+    const dcid_len = try cursor.readByte();
+    if (dcid_len > 20) return error.InvalidInitialPacket;
+    const dcid = try cursor.readSlice(dcid_len);
+    const scid_len = try cursor.readByte();
+    if (scid_len > 20) return error.InvalidInitialPacket;
+    const scid = try cursor.readSlice(scid_len);
+
+    const packet_type = protectedLongPacketType(first, version);
+    if (packet_type == .retry) return error.InvalidInitialPacket;
+    if (packet_type == .initial) {
+        const token_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
+        try cursor.skip(token_len);
+    }
+
+    const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidPayloadLength;
+    if (protected_len < 1 + aead_tag_len) return error.InvalidPayloadLength;
+    const packet_end = std.math.add(usize, cursor.pos, protected_len) catch return error.InvalidPayloadLength;
+    if (packet_end > datagram.len) return error.InvalidPayloadLength;
+    if (cursor.pos + 4 + header_protection_sample_len > packet_end) return error.InvalidHeaderProtectionSample;
+
+    return .{
+        .version = version,
+        .packet_type = packet_type,
+        .destination_connection_id = dcid,
+        .source_connection_id = scid,
+        .len = packet_end,
+    };
+}
+
 pub fn sealShortPacket(
     allocator: std.mem.Allocator,
     keys: PacketProtectionKeys,
@@ -704,6 +757,24 @@ fn peekShortPacketKeyPhase(
     try removeHeaderProtection(hp_key, .short, bytes, pn_offset);
     if ((bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) return error.InvalidInitialPacket;
     return (bytes[0] & 0x04) != 0;
+}
+
+fn protectedLongPacketType(first_byte: u8, version: u32) ProtectedLongPacketType {
+    const bits: u2 = @truncate((first_byte >> 4) & 0x03);
+    if (version == 0x6b3343cf) {
+        return switch (bits) {
+            0 => .retry,
+            1 => .initial,
+            2 => .zero_rtt,
+            3 => .handshake,
+        };
+    }
+    return switch (bits) {
+        0 => .initial,
+        1 => .zero_rtt,
+        2 => .handshake,
+        3 => .retry,
+    };
 }
 
 fn validatePacketNumberLen(packet_number_len: u8) Error!void {
@@ -898,6 +969,49 @@ test "QUIC Handshake packet seal/open roundtrip" {
     try std.testing.expectEqualSlices(u8, &dcid, opened.destination_connection_id);
     try std.testing.expectEqualSlices(u8, &scid, opened.source_connection_id);
     try std.testing.expectEqualStrings(payload, opened.payload);
+}
+
+test "QUIC protected long packet peek splits coalesced Initial and Handshake" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const initial_keys = deriveInitialSecrets(&dcid).client;
+    const handshake_keys = deriveAes128Keys([_]u8{0x43} ** secret_len);
+
+    const initial = try sealInitialPacket(allocator, initial_keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 0,
+        .packet_number_len = 4,
+        .payload = "initial payload",
+    });
+    defer allocator.free(initial);
+    const handshake = try sealHandshakePacket(allocator, handshake_keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 0,
+        .packet_number_len = 4,
+        .payload = "handshake payload",
+    });
+    defer allocator.free(handshake);
+
+    var coalesced: std.ArrayList(u8) = .empty;
+    defer coalesced.deinit(allocator);
+    try coalesced.appendSlice(allocator, initial);
+    try coalesced.appendSlice(allocator, handshake);
+
+    const first = try peekProtectedLongPacketInfo(coalesced.items);
+    try std.testing.expectEqual(@as(u32, 1), first.version);
+    try std.testing.expectEqual(ProtectedLongPacketType.initial, first.packet_type);
+    try std.testing.expectEqualSlices(u8, &dcid, first.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &scid, first.source_connection_id);
+    try std.testing.expectEqual(initial.len, first.len);
+
+    const second = try peekProtectedLongPacketInfo(coalesced.items[first.len..]);
+    try std.testing.expectEqual(@as(u32, 1), second.version);
+    try std.testing.expectEqual(ProtectedLongPacketType.handshake, second.packet_type);
+    try std.testing.expectEqualSlices(u8, &dcid, second.destination_connection_id);
+    try std.testing.expectEqual(handshake.len, second.len);
 }
 
 test "QUIC 1-RTT short packet seal/open roundtrip" {

@@ -105,6 +105,11 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
     try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "sendInitialCrypto"));
+    try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "sendCoalescedInitialHandshakeCrypto"));
+    try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "receiveCoalescedInitialHandshakeCrypto"));
+    try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "openCoalescedInitialHandshakeCrypto"));
+    try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "openInitialCrypto"));
+    try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "openHandshakeCrypto"));
     try std.testing.expect(@hasDecl(netz.quic.tls_client_hello, "writeClientHello"));
     try std.testing.expect(@hasDecl(netz.quic.tls_client_hello, "deriveHandshakeSecrets"));
     try std.testing.expect(@hasDecl(netz.quic.tls_client_hello, "deriveApplicationSecrets"));
@@ -132,6 +137,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLenForPayload"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "peekProtectedLongPacketInfo"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "ProtectedLongPacketInfo"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "nextAes128PacketProtectionKeys"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "Aes128KeyPhaseState"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "openShortPacketWithKeyUpdate"));
