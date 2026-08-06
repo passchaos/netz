@@ -127,8 +127,8 @@ starts with deterministic parsers, serializers, and state helpers for:
 - WebRTC building blocks: STUN, ICE connectivity-check helpers with
   USERNAME/PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE plus
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
-  XOR-MAPPED-ADDRESS helpers, ICE candidates, SDP parsing with DTLS fingerprint
-  and ICE credential extraction, DTLS record headers, RTP packets/extensions/padding, RTCP
+  XOR-MAPPED-ADDRESS helpers, ICE candidates, SDP parsing with DTLS fingerprint,
+  ICE credential, BUNDLE-aware media selection, and RTP `extmap` extraction, DTLS record headers, RTP packets/extensions/padding, RTCP
   RFC 5285 one-byte/two-byte header extension codecs for MID/RID/TWCC/absolute-send-time style metadata, sender/receiver reports plus sender/receiver-report statistics, PLI/NACK/TWCC feedback and RTP sequence-gap NACK tracking, SRTP NULL_HMAC_SHA1_80 RTP authentication with ROC tracking and replay-window checks, SCTP DATA packet parsing/writing, CRC32C validation, and DCEP DataChannel OPEN/ACK codecs, plus
   blocking UDP STUN binding, RTP/SRTP/RTCP packet, and same-socket STUN/DTLS/RTP/RTCP
   peer runtimes with SRTP send/receive helpers and a `std.Io.async` concurrent receive helper

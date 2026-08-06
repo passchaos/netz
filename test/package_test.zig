@@ -428,6 +428,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.sdp, "extractIceCredentials"));
     try std.testing.expect(@hasDecl(netz.webrtc.sdp, "Fingerprint"));
     try std.testing.expect(@hasDecl(netz.webrtc.sdp, "IceCredentials"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "ExtMap"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "parseExtMapAttribute"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sdp, "findExtMapInSession"));
+    try std.testing.expectEqualStrings("urn:ietf:params:rtp-hdrext:sdes:mid", netz.webrtc.sdp.sdes_mid_uri);
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "DataChunk"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeDataPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "parseDcepMessage"));

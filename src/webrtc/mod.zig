@@ -564,6 +564,118 @@ pub const sdp = struct {
         password: []const u8,
     };
 
+    pub const abs_send_time_uri = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+    pub const transport_cc_uri = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+    pub const sdes_mid_uri = "urn:ietf:params:rtp-hdrext:sdes:mid";
+    pub const sdes_rtp_stream_id_uri = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
+    pub const sdes_repaired_rtp_stream_id_uri = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
+    pub const audio_level_uri = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+
+    pub const ExtMapDirection = enum {
+        sendrecv,
+        sendonly,
+        recvonly,
+        inactive,
+    };
+
+    pub const ExtMap = struct {
+        id: u16,
+        direction: ExtMapDirection = .sendrecv,
+        uri: []const u8,
+        extension_attributes: []const u8 = &.{},
+
+        pub fn rtpId(self: ExtMap) Error!u8 {
+            if (self.id == 0 or self.id > std.math.maxInt(u8)) return error.InvalidSdp;
+            return @intCast(self.id);
+        }
+    };
+
+    pub fn parseExtMapAttribute(raw: []const u8) Error!ExtMap {
+        const trimmed = std.mem.trim(u8, raw, " \t");
+        if (trimmed.len == 0) return error.InvalidSdp;
+
+        const first_end = std.mem.indexOfAny(u8, trimmed, " \t") orelse return error.InvalidSdp;
+        const id_and_direction = trimmed[0..first_end];
+        var rest = std.mem.trim(u8, trimmed[first_end..], " \t");
+        if (rest.len == 0) return error.InvalidSdp;
+
+        var direction: ExtMapDirection = .sendrecv;
+        const id_part = if (std.mem.indexOfScalar(u8, id_and_direction, '/')) |slash| blk: {
+            const dir = id_and_direction[slash + 1 ..];
+            if (dir.len == 0) return error.InvalidSdp;
+            direction = parseExtMapDirection(dir) orelse return error.InvalidSdp;
+            break :blk id_and_direction[0..slash];
+        } else id_and_direction;
+        const id = std.fmt.parseInt(u16, id_part, 10) catch return error.InvalidSdp;
+        if (id == 0 or id > std.math.maxInt(u8)) return error.InvalidSdp;
+
+        const uri_end = std.mem.indexOfAny(u8, rest, " \t") orelse rest.len;
+        const uri = rest[0..uri_end];
+        if (uri.len == 0) return error.InvalidSdp;
+        rest = std.mem.trim(u8, rest[uri_end..], " \t");
+
+        return .{ .id = id, .direction = direction, .uri = uri, .extension_attributes = rest };
+    }
+
+    pub fn collectExtMaps(allocator: std.mem.Allocator, attrs: []const Attribute) Error![]ExtMap {
+        var out: std.ArrayList(ExtMap) = .empty;
+        errdefer out.deinit(allocator);
+        for (attrs) |attr| {
+            if (std.ascii.eqlIgnoreCase(attr.name, "extmap")) {
+                try out.append(allocator, try parseExtMapAttribute(attr.value));
+            }
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn findExtMap(attrs: []const Attribute, uri: []const u8) Error!?ExtMap {
+        for (attrs) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, "extmap")) continue;
+            const extmap = try parseExtMapAttribute(attr.value);
+            if (std.mem.eql(u8, extmap.uri, uri)) return extmap;
+        }
+        return null;
+    }
+
+    pub fn findExtMapInSession(session: Session, uri: []const u8) Error!?ExtMap {
+        if (candidateMedia(session)) |media| {
+            if (try findExtMap(media.attributes, uri)) |extmap| return extmap;
+        }
+        return findExtMap(session.attributes, uri);
+    }
+
+    pub fn extMapAllowMixed(session: Session) bool {
+        if (findAttr(session.attributes, "extmap-allow-mixed") != null) return true;
+        if (candidateMedia(session)) |media| return findAttr(media.attributes, "extmap-allow-mixed") != null;
+        return false;
+    }
+
+    pub fn extractExtMaps(allocator: std.mem.Allocator, session: Session) Error![]ExtMap {
+        var out: std.ArrayList(ExtMap) = .empty;
+        errdefer out.deinit(allocator);
+        for (session.attributes) |attr| {
+            if (std.ascii.eqlIgnoreCase(attr.name, "extmap")) try out.append(allocator, try parseExtMapAttribute(attr.value));
+        }
+        if (candidateMedia(session)) |media| {
+            for (media.attributes) |attr| {
+                if (std.ascii.eqlIgnoreCase(attr.name, "extmap")) try out.append(allocator, try parseExtMapAttribute(attr.value));
+            }
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn freeExtMaps(allocator: std.mem.Allocator, extmaps: []ExtMap) void {
+        allocator.free(extmaps);
+    }
+
+    fn parseExtMapDirection(value: []const u8) ?ExtMapDirection {
+        if (std.ascii.eqlIgnoreCase(value, "sendrecv")) return .sendrecv;
+        if (std.ascii.eqlIgnoreCase(value, "sendonly")) return .sendonly;
+        if (std.ascii.eqlIgnoreCase(value, "recvonly")) return .recvonly;
+        if (std.ascii.eqlIgnoreCase(value, "inactive")) return .inactive;
+        return null;
+    }
+
     pub fn parse(allocator: std.mem.Allocator, text: []const u8) Error!Session {
         var session_attrs: std.ArrayList(Attribute) = .empty;
         errdefer session_attrs.deinit(allocator);
@@ -2227,7 +2339,7 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("mid", session.media[0].attributes[0].name);
 }
 
-test "SDP extracts DTLS fingerprint and ICE credentials" {
+test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const allocator = std.testing.allocator;
     const text =
         "v=0\r\n" ++
@@ -2235,17 +2347,22 @@ test "SDP extracts DTLS fingerprint and ICE credentials" {
         "s=-\r\n" ++
         "t=0 0\r\n" ++
         "a=group:BUNDLE 1 0\r\n" ++
+        "a=extmap:9 " ++ sdp.audio_level_uri ++ "\r\n" ++
         "a=fingerprint:sha-256 SESSION-FINGERPRINT\r\n" ++
         "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
         "a=mid:0\r\n" ++
         "a=ice-ufrag:wrong\r\n" ++
         "a=ice-pwd:wrong-pwd\r\n" ++
         "a=fingerprint:sha-256 AUDIO-FINGERPRINT\r\n" ++
+        "a=extmap:2/sendonly " ++ sdp.abs_send_time_uri ++ "\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
         "a=mid:1\r\n" ++
         "a=ice-ufrag:bundle-ufrag\r\n" ++
         "a=ice-pwd:bundle-pwd\r\n" ++
-        "a=fingerprint:sha-256 BUNDLE-FINGERPRINT\r\n";
+        "a=fingerprint:sha-256 BUNDLE-FINGERPRINT\r\n" ++
+        "a=extmap-allow-mixed\r\n" ++
+        "a=extmap:3/recvonly " ++ sdp.transport_cc_uri ++ " appdata\r\n" ++
+        "a=extmap:4 " ++ sdp.sdes_mid_uri ++ "\r\n";
     var session = try sdp.parse(allocator, text);
     defer session.deinit(allocator);
 
@@ -2256,6 +2373,28 @@ test "SDP extracts DTLS fingerprint and ICE credentials" {
     const creds = try sdp.extractIceCredentials(session);
     try std.testing.expectEqualStrings("bundle-ufrag", creds.ufrag);
     try std.testing.expectEqualStrings("bundle-pwd", creds.password);
+
+    try std.testing.expect(sdp.extMapAllowMixed(session));
+    const twcc = (try sdp.findExtMapInSession(session, sdp.transport_cc_uri)).?;
+    try std.testing.expectEqual(@as(u16, 3), twcc.id);
+    try std.testing.expectEqual(sdp.ExtMapDirection.recvonly, twcc.direction);
+    try std.testing.expectEqualStrings("appdata", twcc.extension_attributes);
+    try std.testing.expectEqual(@as(u8, 3), try twcc.rtpId());
+
+    const mid = (try sdp.findExtMapInSession(session, sdp.sdes_mid_uri)).?;
+    try std.testing.expectEqual(@as(u16, 4), mid.id);
+
+    const extmaps = try sdp.extractExtMaps(allocator, session);
+    defer sdp.freeExtMaps(allocator, extmaps);
+    try std.testing.expectEqual(@as(usize, 3), extmaps.len); // session-level audio level is shadowed by BUNDLE media.
+
+    const parsed_extmap = try sdp.parseExtMapAttribute("7/inactive urn:example:ext attrs");
+    try std.testing.expectEqual(@as(u16, 7), parsed_extmap.id);
+    try std.testing.expectEqual(sdp.ExtMapDirection.inactive, parsed_extmap.direction);
+    try std.testing.expectEqualStrings("urn:example:ext", parsed_extmap.uri);
+    try std.testing.expectEqualStrings("attrs", parsed_extmap.extension_attributes);
+
+    try std.testing.expectError(error.InvalidSdp, sdp.parseExtMapAttribute("0 " ++ sdp.sdes_mid_uri));
 
     const media_only =
         "v=0\r\n" ++
