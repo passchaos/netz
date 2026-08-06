@@ -2457,7 +2457,16 @@ pub const sctp = struct {
     };
 
     pub const InitParameterType = enum(u16) {
+        heartbeat_info = 0x0001,
+        unrecognized_parameters = 0x0008,
         state_cookie = 0x0007,
+        outgoing_ssn_reset_request = 0x000d,
+        reconfig_response = 0x0010,
+        ecn_capable = 0x8000,
+        zero_checksum_acceptable = 0x8001,
+        random = 0x8002,
+        chunk_list = 0x8003,
+        requested_hmac_algorithm = 0x8004,
         supported_extensions = 0x8008,
         forward_tsn_supported = 0xc000,
         supported_address_types = 0x000c,
@@ -3550,15 +3559,44 @@ pub const sctp = struct {
         errdefer params.deinit(allocator);
         while (!cursor.eof()) {
             if (cursor.remaining() < 4) return error.InvalidSctpPacket;
-            const param_type: InitParameterType = @enumFromInt(try cursor.readInt(u16, .big));
+            const raw_type = try cursor.readInt(u16, .big);
+            const param_type: InitParameterType = @enumFromInt(raw_type);
             const len = try cursor.readInt(u16, .big);
             if (len < 4 or cursor.remaining() < len - 4) return error.InvalidSctpPacket;
             const value = try cursor.readSlice(len - 4);
-            try params.append(allocator, .{ .param_type = param_type, .value = value });
+            if (knownInitParameter(param_type)) {
+                try params.append(allocator, .{ .param_type = param_type, .value = value });
+            } else {
+                switch (raw_type & 0xc000) {
+                    0x0000, 0x4000 => return error.InvalidSctpPacket,
+                    0x8000, 0xc000 => {},
+                    else => unreachable,
+                }
+            }
             const padding = (4 - (len % 4)) % 4;
             try cursor.skip(padding);
         }
         return params.toOwnedSlice(allocator);
+    }
+
+    fn knownInitParameter(param_type: InitParameterType) bool {
+        return switch (param_type) {
+            .heartbeat_info,
+            .unrecognized_parameters,
+            .state_cookie,
+            .outgoing_ssn_reset_request,
+            .reconfig_response,
+            .ecn_capable,
+            .zero_checksum_acceptable,
+            .random,
+            .chunk_list,
+            .requested_hmac_algorithm,
+            .supported_extensions,
+            .forward_tsn_supported,
+            .supported_address_types,
+            => true,
+            _ => false,
+        };
     }
 
     fn writeInitParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameter: InitParameter) Error!void {
@@ -4724,6 +4762,41 @@ test "SCTP INIT cookie echo and cookie ack packets" {
         .consumed = 20,
     };
     try std.testing.expectError(error.InvalidSctpPacket, sctp.InitChunk.parse(allocator, invalid_init_chunk));
+
+    var skip_unknown_value: std.ArrayList(u8) = .empty;
+    defer skip_unknown_value.deinit(allocator);
+    try wire.appendInt(&skip_unknown_value, allocator, u32, 0x01020304, .big);
+    try wire.appendInt(&skip_unknown_value, allocator, u32, 256 * 1024, .big);
+    try wire.appendInt(&skip_unknown_value, allocator, u16, 16, .big);
+    try wire.appendInt(&skip_unknown_value, allocator, u16, 16, .big);
+    try wire.appendInt(&skip_unknown_value, allocator, u32, 0x10203040, .big);
+    try wire.appendInt(&skip_unknown_value, allocator, u16, 0x800f, .big); // Unknown, skip and continue.
+    try wire.appendInt(&skip_unknown_value, allocator, u16, 4, .big);
+    try wire.appendInt(&skip_unknown_value, allocator, u16, @intFromEnum(sctp.InitParameterType.supported_extensions), .big);
+    try wire.appendInt(&skip_unknown_value, allocator, u16, 5, .big);
+    try skip_unknown_value.append(allocator, @intFromEnum(sctp.ChunkType.i_data));
+    try skip_unknown_value.appendNTimes(allocator, 0, 3);
+    var skip_unknown = try sctp.InitChunk.parse(allocator, .{
+        .chunk_type = .init,
+        .flags = 0,
+        .value = skip_unknown_value.items,
+        .consumed = 0,
+    });
+    defer skip_unknown.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), skip_unknown.parameters.len);
+    try std.testing.expectEqual(sctp.InitParameterType.supported_extensions, skip_unknown.parameters[0].param_type);
+
+    var stop_unknown_value = try std.ArrayList(u8).initCapacity(allocator, skip_unknown_value.items.len);
+    defer stop_unknown_value.deinit(allocator);
+    try stop_unknown_value.appendSlice(allocator, skip_unknown_value.items);
+    stop_unknown_value.items[16] = 0x00;
+    stop_unknown_value.items[17] = 0x20; // Unknown, stop processing.
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.InitChunk.parse(allocator, .{
+        .chunk_type = .init,
+        .flags = 0,
+        .value = stop_unknown_value.items,
+        .consumed = 0,
+    }));
 
     encoded.clearRetainingCapacity();
     try sctp.writeCookieEchoPacket(&encoded, allocator, .{
