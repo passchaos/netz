@@ -250,6 +250,7 @@ pub const ControlState = struct {
             FrameType.priority_update_request, FrameType.priority_update_push => {
                 self.latest_priority_update = try parsePriorityUpdatePayload(frame.payload);
             },
+            FrameType.data, FrameType.headers, FrameType.push_promise => return error.UnexpectedFrame,
             else => {}, // Unknown extension frames on the control stream are ignored.
         }
     }
@@ -1235,6 +1236,29 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
     try control.applyControlStreamBytes(allocator, settings_payload.items);
     try control.applyFrame(allocator, frame);
     try std.testing.expectEqual(@as(u64, 8), control.latest_priority_update.?.prioritized_element_id);
+}
+
+test "HTTP/3 control stream rejects request frames" {
+    const allocator = std.testing.allocator;
+    var control = ControlState{};
+    var stream: std.ArrayList(u8) = .empty;
+    defer stream.deinit(allocator);
+    try writeControlStreamPrefix(&stream, allocator);
+    try writeSettingsFrame(&stream, allocator, .{});
+    try (Frame{ .frame_type = FrameType.data, .payload = "forbidden", .consumed = 0 }).write(&stream, allocator);
+    try std.testing.expectError(error.UnexpectedFrame, control.applyControlStreamBytes(allocator, stream.items));
+
+    var initialized = ControlState{ .settings = .{ .received = true } };
+    try std.testing.expectError(error.UnexpectedFrame, initialized.applyFrame(allocator, .{
+        .frame_type = FrameType.headers,
+        .payload = &.{},
+        .consumed = 0,
+    }));
+    try std.testing.expectError(error.UnexpectedFrame, initialized.applyFrame(allocator, .{
+        .frame_type = FrameType.push_promise,
+        .payload = &.{},
+        .consumed = 0,
+    }));
 }
 
 test "HTTP/3 typed settings state tracks negotiation" {
