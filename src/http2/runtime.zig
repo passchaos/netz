@@ -704,6 +704,13 @@ pub const Connection = struct {
     }
 
     fn handleGoAwayForStream(self: *Connection, stream_id: u31, goaway: http2.GoAwayPayload) Error!void {
+        if (self.peer_goaway_last_stream_id) |last| {
+            // RFC 9113 §6.8: endpoints may send more than one GOAWAY, but the
+            // last-stream-id value must not increase.  h2 rejects an increasing
+            // value as a protocol error because it would resurrect streams that
+            // were already declared unprocessed.
+            if (goaway.last_stream_id > last) return error.InvalidFrame;
+        }
         self.peer_goaway_last_stream_id = goaway.last_stream_id;
         if (stream_id > goaway.last_stream_id) {
             self.releaseLocalStream(stream_id);
@@ -5007,6 +5014,11 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
         .debug_data = &.{},
     }));
     try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
+    try std.testing.expectError(error.InvalidFrame, connection.handleGoAwayForStream(1, .{
+        .last_stream_id = 5,
+        .error_code = .no_error,
+        .debug_data = &.{},
+    }));
 }
 
 test "HTTP/2 local max concurrent streams limits peer opened streams" {
