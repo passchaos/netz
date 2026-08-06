@@ -438,7 +438,6 @@ pub const Connection = struct {
                     const is_connect = std.ascii.eqlIgnoreCase(method, "CONNECT");
                     const is_extended_connect = is_connect and protocol != null;
                     if (is_connect and !is_extended_connect and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
-                    if (is_connect and !is_extended_connect and (frame.frame.header.flags & flag_end_stream) == 0) return error.InvalidContentLength;
 
                     if ((!is_connect or is_extended_connect) and (frame.frame.header.flags & flag_end_stream) == 0) {
                         while (true) {
@@ -3423,7 +3422,6 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
             defer connect.deinit(shared.server.allocator);
             connection.writeResponse(connect.stream_id, .{
                 .status = 200,
-                .headers = &.{.{ .name = "content-length", .value = "9" }},
             }) catch |err| {
                 shared.err = err;
                 return;
@@ -3455,11 +3453,14 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
     try std.testing.expectEqual(@as(u16, 200), head_response.status);
     try std.testing.expectEqualStrings("", head_response.body);
 
-    try std.testing.expectError(error.InvalidContentLength, client.request(.{
+    var connect_response = try client.request(.{
         .method = "CONNECT",
         .path = "example.com:443",
         .authority = "example.com:443",
-    }));
+    });
+    defer connect_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), connect_response.status);
+    try std.testing.expectEqualStrings("", connect_response.body);
 
     thread.join();
     if (shared.err) |err| return err;
