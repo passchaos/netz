@@ -870,6 +870,7 @@ pub const Request = struct {
         const fields = try self.headerFields(&fields_buf);
         try validateHeaderBlock(fields, .request);
         try validateHeaderBlock(self.trailers, .trailers);
+        try validateRequestBodyForMethod(fields, self.body, self.trailers);
         try validateContentLength(fields, self.body.len);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
@@ -964,6 +965,7 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!Deco
 
     try validateHeaderBlock(message.headers, .request);
     try validateHeaderBlock(message.trailers, .trailers);
+    try validateRequestBodyForMethod(message.headers, message.body, message.trailers);
     try validateContentLength(message.headers, message.body.len);
 
     var method: ?[]const u8 = null;
@@ -1162,6 +1164,21 @@ fn contentLength(headers: []const Qpack.HeaderField) Error!?usize {
         }
     }
     return found;
+}
+
+fn validateRequestBodyForMethod(headers: []const Qpack.HeaderField, body: []const u8, trailers: []const Qpack.HeaderField) Error!void {
+    var method: ?[]const u8 = null;
+    var has_protocol = false;
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.name, ":method")) method = header.value;
+        if (std.mem.eql(u8, header.name, ":protocol")) has_protocol = true;
+    }
+    if (method) |value| {
+        if (std.ascii.eqlIgnoreCase(value, "CONNECT") and !has_protocol) {
+            if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
+            if ((try contentLength(headers)) != null) return error.InvalidContentLength;
+        }
+    }
 }
 
 fn validateContentLength(headers: []const Qpack.HeaderField, actual: usize) Error!void {
@@ -1819,6 +1836,17 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try (Frame{ .frame_type = FrameType.data, .payload = "1234", .consumed = 0 }).write(&signed_length_request, allocator);
     try std.testing.expectError(error.InvalidContentLength, decodeRequest(allocator, signed_length_request.items));
 
+    var connect_with_length = std.ArrayList(u8).empty;
+    defer connect_with_length.deinit(allocator);
+    signed_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&signed_block, allocator, &.{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":authority", .value = "proxy.example.com:443" },
+        .{ .name = "content-length", .value = "0" },
+    });
+    try (Frame{ .frame_type = FrameType.headers, .payload = signed_block.items, .consumed = 0 }).write(&connect_with_length, allocator);
+    try std.testing.expectError(error.InvalidContentLength, decodeRequest(allocator, connect_with_length.items));
+
     var invalid_length: std.ArrayList(u8) = .empty;
     defer invalid_length.deinit(allocator);
     var header_block: std.ArrayList(u8) = .empty;
@@ -2081,6 +2109,20 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
     try std.testing.expectEqualStrings("CONNECT", connect_decoded.method);
     try std.testing.expectEqualStrings("", connect_decoded.path);
     try std.testing.expectEqualStrings("", connect_decoded.scheme);
+
+    try std.testing.expectError(error.InvalidContentLength, (Request{
+        .method = "CONNECT",
+        .path = "/must-be-omitted",
+        .authority = "proxy.example.com:443",
+        .headers = &.{.{ .name = "content-length", .value = "0" }},
+    }).write(&plain_connect, allocator));
+
+    try std.testing.expectError(error.InvalidContentLength, (Request{
+        .method = "CONNECT",
+        .path = "/must-be-omitted",
+        .authority = "proxy.example.com:443",
+        .body = "tunnel bytes",
+    }).write(&plain_connect, allocator));
 
     var extended_connect_missing_target = std.ArrayList(u8).empty;
     defer extended_connect_missing_target.deinit(allocator);
