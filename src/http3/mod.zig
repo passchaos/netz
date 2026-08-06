@@ -1077,7 +1077,7 @@ fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!
         const status = try responseStatus(headers);
         if (status < 200) {
             offset += headers_frame.consumed;
-            if (offset >= bytes.len) return error.ExpectedHeadersFrame;
+            if (offset >= bytes.len) return error.MissingStatus;
             continue;
         }
         break;
@@ -1854,6 +1854,13 @@ test "HTTP/3 message rejects bad frame order and content length" {
     defer informational_decoded.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), informational_decoded.status);
     try std.testing.expectEqualStrings("final", informational_decoded.body);
+
+    var informational_only = std.ArrayList(u8).empty;
+    defer informational_only.deinit(allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "103" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&informational_only, allocator);
+    try std.testing.expectError(error.MissingStatus, decodeResponse(allocator, informational_only.items));
 
     var signed_length_response: std.ArrayList(u8) = .empty;
     defer signed_length_response.deinit(allocator);
