@@ -1224,6 +1224,7 @@ pub const rtcp = struct {
     };
 
     pub const transport_feedback_nack: u5 = 1;
+    pub const transport_feedback_twcc: u5 = 15;
     pub const payload_feedback_pli: u5 = 1;
 
     pub const Header = struct {
@@ -1298,6 +1299,43 @@ pub const rtcp = struct {
         sender_ssrc: u32,
         media_ssrc: u32,
         pairs: []NackPair,
+    };
+
+    pub const TwccPacketStatus = enum(u2) {
+        not_received = 0,
+        small_delta = 1,
+        large_delta = 2,
+        reserved = 3,
+    };
+
+    pub const TwccPacketResult = struct {
+        status: TwccPacketStatus,
+        /// Raw delta units from the transport-cc wire format. One tick is
+        /// 250 microseconds; keeping the raw tick preserves exact round-trips
+        /// and lets congestion controllers choose their own time type.
+        delta_ticks: i16 = 0,
+
+        pub fn received(self: TwccPacketResult) bool {
+            return self.status == .small_delta or self.status == .large_delta;
+        }
+
+        pub fn deltaMicros(self: TwccPacketResult) i32 {
+            return @as(i32, self.delta_ticks) * 250;
+        }
+    };
+
+    pub const TransportWideCc = struct {
+        sender_ssrc: u32,
+        media_ssrc: u32,
+        base_sequence_number: u16,
+        reference_time_64ms: u24,
+        feedback_packet_count: u8,
+        packets: []TwccPacketResult,
+
+        pub fn deinit(self: *TransportWideCc, allocator: std.mem.Allocator) void {
+            allocator.free(self.packets);
+            self.* = undefined;
+        }
     };
 
     pub const SenderStats = struct {
@@ -1522,6 +1560,7 @@ pub const rtcp = struct {
         receiver_report: ReceiverReport,
         picture_loss_indication: PictureLossIndication,
         transport_layer_nack: TransportLayerNack,
+        transport_wide_cc: TransportWideCc,
         unknown: Unknown,
 
         pub fn deinit(self: *Packet, allocator: std.mem.Allocator) void {
@@ -1529,6 +1568,7 @@ pub const rtcp = struct {
                 .sender_report => |report| allocator.free(report.report_blocks),
                 .receiver_report => |report| allocator.free(report.report_blocks),
                 .transport_layer_nack => |nack| allocator.free(nack.pairs),
+                .transport_wide_cc => |*twcc| twcc.deinit(allocator),
                 else => {},
             }
             self.* = undefined;
@@ -1561,6 +1601,8 @@ pub const rtcp = struct {
                 .{ .unknown = .{ .header = header, .payload = payload } },
             .transport_feedback => if (header.count_or_format == transport_feedback_nack)
                 .{ .transport_layer_nack = try parseTransportLayerNack(allocator, payload) }
+            else if (header.count_or_format == transport_feedback_twcc)
+                .{ .transport_wide_cc = try parseTransportWideCc(allocator, payload) }
             else
                 .{ .unknown = .{ .header = header, .payload = payload } },
             else => .{ .unknown = .{ .header = header, .payload = payload } },
@@ -1574,6 +1616,7 @@ pub const rtcp = struct {
             .receiver_report => |report| try writeReceiverReport(list, allocator, report),
             .picture_loss_indication => |pli| try writePictureLossIndication(list, allocator, pli),
             .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
+            .transport_wide_cc => |twcc| try writeTransportWideCc(list, allocator, twcc),
             .unknown => |unknown| {
                 try writeHeader(list, allocator, unknown.header.count_or_format, unknown.header.packet_type, unknown.payload.len);
                 try list.appendSlice(allocator, unknown.payload);
@@ -1639,6 +1682,52 @@ pub const rtcp = struct {
         return .{ .sender_ssrc = sender_ssrc, .media_ssrc = media_ssrc, .pairs = pairs };
     }
 
+    fn parseTransportWideCc(allocator: std.mem.Allocator, payload: []const u8) Error!TransportWideCc {
+        if (payload.len < 16) return error.InvalidRtcpPacket;
+        var cursor = wire.Cursor.init(payload);
+        const sender_ssrc = try cursor.readInt(u32, .big);
+        const media_ssrc = try cursor.readInt(u32, .big);
+        const base_sequence_number = try cursor.readInt(u16, .big);
+        const packet_status_count = try cursor.readInt(u16, .big);
+        const reference_time_64ms = try wire.readU24(&cursor);
+        const feedback_packet_count = try cursor.readByte();
+
+        var packets: std.ArrayList(TwccPacketResult) = .empty;
+        errdefer packets.deinit(allocator);
+        try packets.ensureTotalCapacity(allocator, packet_status_count);
+
+        while (packets.items.len < packet_status_count) {
+            if (cursor.remaining() < 2) return error.InvalidRtcpPacket;
+            const chunk = try cursor.readInt(u16, .big);
+            try appendTwccChunkStatuses(&packets, allocator, chunk, packet_status_count);
+        }
+
+        for (packets.items) |*packet| {
+            switch (packet.status) {
+                .not_received => {},
+                .small_delta => {
+                    const byte = try cursor.readByte();
+                    packet.delta_ticks = byte;
+                },
+                .large_delta => packet.delta_ticks = try cursor.readInt(i16, .big),
+                .reserved => return error.InvalidRtcpPacket,
+            }
+        }
+
+        while (!cursor.eof()) {
+            if (try cursor.readByte() != 0) return error.InvalidRtcpPacket;
+        }
+
+        return .{
+            .sender_ssrc = sender_ssrc,
+            .media_ssrc = media_ssrc,
+            .base_sequence_number = base_sequence_number,
+            .reference_time_64ms = reference_time_64ms,
+            .feedback_packet_count = feedback_packet_count,
+            .packets = try packets.toOwnedSlice(allocator),
+        };
+    }
+
     fn parseReportBlocks(allocator: std.mem.Allocator, cursor: *wire.Cursor, count: usize) Error![]ReportBlock {
         const blocks = try allocator.alloc(ReportBlock, count);
         errdefer allocator.free(blocks);
@@ -1691,6 +1780,49 @@ pub const rtcp = struct {
         }
     }
 
+    fn writeTransportWideCc(list: *std.ArrayList(u8), allocator: std.mem.Allocator, twcc: TransportWideCc) Error!void {
+        if (twcc.packets.len > std.math.maxInt(u16)) return error.InvalidRtcpPacket;
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+
+        try wire.appendInt(&payload, allocator, u32, twcc.sender_ssrc, .big);
+        try wire.appendInt(&payload, allocator, u32, twcc.media_ssrc, .big);
+        try wire.appendInt(&payload, allocator, u16, twcc.base_sequence_number, .big);
+        try wire.appendInt(&payload, allocator, u16, @intCast(twcc.packets.len), .big);
+        try wire.appendU24(&payload, allocator, twcc.reference_time_64ms);
+        try payload.append(allocator, twcc.feedback_packet_count);
+
+        var run_status: ?TwccPacketStatus = null;
+        var run_len: usize = 0;
+        for (twcc.packets) |packet| {
+            if (packet.status == .reserved) return error.InvalidRtcpPacket;
+            if (run_status != null and packet.status == run_status.? and run_len < 0x1fff) {
+                run_len += 1;
+                continue;
+            }
+            if (run_status) |status| try writeTwccRunLengthChunk(&payload, allocator, status, run_len);
+            run_status = packet.status;
+            run_len = 1;
+        }
+        if (run_status) |status| try writeTwccRunLengthChunk(&payload, allocator, status, run_len);
+
+        for (twcc.packets) |packet| {
+            switch (packet.status) {
+                .not_received => {},
+                .small_delta => {
+                    if (packet.delta_ticks < 0 or packet.delta_ticks > std.math.maxInt(u8)) return error.InvalidRtcpPacket;
+                    try payload.append(allocator, @intCast(packet.delta_ticks));
+                },
+                .large_delta => try wire.appendInt(&payload, allocator, i16, packet.delta_ticks, .big),
+                .reserved => unreachable,
+            }
+        }
+
+        try payload.appendNTimes(allocator, 0, (4 - (payload.items.len % 4)) % 4);
+        try writeHeader(list, allocator, transport_feedback_twcc, .transport_feedback, payload.items.len);
+        try list.appendSlice(allocator, payload.items);
+    }
+
     fn writeReportBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, block: ReportBlock) Error!void {
         try wire.appendInt(list, allocator, u32, block.ssrc, .big);
         try list.append(allocator, block.fraction_lost);
@@ -1706,6 +1838,49 @@ pub const rtcp = struct {
         try list.append(allocator, 0x80 | @as(u8, count_or_format));
         try list.append(allocator, @intFromEnum(packet_type));
         try wire.appendInt(list, allocator, u16, @intCast(payload_len / 4), .big);
+    }
+
+    fn appendTwccChunkStatuses(
+        packets: *std.ArrayList(TwccPacketResult),
+        allocator: std.mem.Allocator,
+        chunk: u16,
+        packet_status_count: usize,
+    ) Error!void {
+        if ((chunk & 0x8000) == 0) {
+            const status: TwccPacketStatus = @enumFromInt((chunk >> 13) & 0x03);
+            if (status == .reserved) return error.InvalidRtcpPacket;
+            const run_len = chunk & 0x1fff;
+            if (run_len == 0) return error.InvalidRtcpPacket;
+            var i: usize = 0;
+            while (i < run_len and packets.items.len < packet_status_count) : (i += 1) {
+                try packets.append(allocator, .{ .status = status });
+            }
+            return;
+        }
+
+        const two_bit = (chunk & 0x4000) != 0;
+        if (two_bit) {
+            var i: usize = 0;
+            while (i < 7 and packets.items.len < packet_status_count) : (i += 1) {
+                const shift: u4 = @intCast(12 - 2 * i);
+                const status: TwccPacketStatus = @enumFromInt((chunk >> shift) & 0x03);
+                if (status == .reserved) return error.InvalidRtcpPacket;
+                try packets.append(allocator, .{ .status = status });
+            }
+        } else {
+            var i: usize = 0;
+            while (i < 14 and packets.items.len < packet_status_count) : (i += 1) {
+                const shift: u4 = @intCast(13 - i);
+                const status: TwccPacketStatus = if (((chunk >> shift) & 0x01) != 0) .small_delta else .not_received;
+                try packets.append(allocator, .{ .status = status });
+            }
+        }
+    }
+
+    fn writeTwccRunLengthChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, status: TwccPacketStatus, run_len: usize) Error!void {
+        if (run_len == 0 or run_len > 0x1fff or status == .reserved) return error.InvalidRtcpPacket;
+        const value = (@as(u16, @intFromEnum(status)) << 13) | @as(u16, @intCast(run_len));
+        try wire.appendInt(list, allocator, u16, value, .big);
     }
 };
 
@@ -2310,6 +2485,76 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
     try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
+}
+
+test "RTCP transport-wide congestion feedback" {
+    const allocator = std.testing.allocator;
+    var packet_results = [_]rtcp.TwccPacketResult{
+        .{ .status = .small_delta, .delta_ticks = 4 },
+        .{ .status = .not_received },
+        .{ .status = .large_delta, .delta_ticks = -3 },
+        .{ .status = .small_delta, .delta_ticks = 1 },
+    };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try rtcp.writePacket(&encoded, allocator, .{ .transport_wide_cc = .{
+        .sender_ssrc = 0x01020304,
+        .media_ssrc = 0x11121314,
+        .base_sequence_number = 500,
+        .reference_time_64ms = 0x00a0b0,
+        .feedback_packet_count = 7,
+        .packets = &packet_results,
+    } });
+
+    var parsed = try rtcp.parsePacket(allocator, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, encoded.items.len), parsed.consumed);
+    try std.testing.expectEqual(@as(u32, 0x01020304), parsed.packet.transport_wide_cc.sender_ssrc);
+    try std.testing.expectEqual(@as(u16, 500), parsed.packet.transport_wide_cc.base_sequence_number);
+    try std.testing.expectEqual(@as(u24, 0x00a0b0), parsed.packet.transport_wide_cc.reference_time_64ms);
+    try std.testing.expectEqual(@as(u8, 7), parsed.packet.transport_wide_cc.feedback_packet_count);
+    try std.testing.expectEqual(@as(usize, 4), parsed.packet.transport_wide_cc.packets.len);
+    try std.testing.expect(parsed.packet.transport_wide_cc.packets[0].received());
+    try std.testing.expectEqual(@as(i32, 1000), parsed.packet.transport_wide_cc.packets[0].deltaMicros());
+    try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, parsed.packet.transport_wide_cc.packets[1].status);
+    try std.testing.expectEqual(@as(i16, -3), parsed.packet.transport_wide_cc.packets[2].delta_ticks);
+
+    // Also parse a hand-built status-vector chunk.  The writer intentionally
+    // emits simple run-length chunks for predictable output; receivers still
+    // need to accept the more compact one-/two-bit vector chunks that browser
+    // stacks and Pion's TWCC interceptor commonly generate.
+    var vector_encoded: std.ArrayList(u8) = .empty;
+    defer vector_encoded.deinit(allocator);
+    try vector_encoded.append(allocator, @as(u8, 0x80) | @as(u8, rtcp.transport_feedback_twcc));
+    try vector_encoded.append(allocator, @intFromEnum(rtcp.PacketType.transport_feedback));
+    try wire.appendInt(&vector_encoded, allocator, u16, 6, .big); // 24-byte payload.
+    try wire.appendInt(&vector_encoded, allocator, u32, 0x01020304, .big);
+    try wire.appendInt(&vector_encoded, allocator, u32, 0x11121314, .big);
+    try wire.appendInt(&vector_encoded, allocator, u16, 700, .big);
+    try wire.appendInt(&vector_encoded, allocator, u16, 4, .big);
+    try wire.appendU24(&vector_encoded, allocator, 0x000102);
+    try vector_encoded.append(allocator, 9);
+    const two_bit_vector: u16 =
+        0xc000 | // T=1 status-vector, S=1 two-bit symbols.
+        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.small_delta)) << 12) |
+        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.not_received)) << 10) |
+        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.large_delta)) << 8) |
+        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.small_delta)) << 6);
+    try wire.appendInt(&vector_encoded, allocator, u16, two_bit_vector, .big);
+    try vector_encoded.append(allocator, 8);
+    try wire.appendInt(&vector_encoded, allocator, i16, -2, .big);
+    try vector_encoded.append(allocator, 1);
+    try vector_encoded.appendNTimes(allocator, 0, 2);
+
+    var parsed_vector = try rtcp.parsePacket(allocator, vector_encoded.items);
+    defer parsed_vector.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 700), parsed_vector.packet.transport_wide_cc.base_sequence_number);
+    try std.testing.expectEqual(@as(usize, 4), parsed_vector.packet.transport_wide_cc.packets.len);
+    try std.testing.expectEqual(@as(i16, 8), parsed_vector.packet.transport_wide_cc.packets[0].delta_ticks);
+    try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, parsed_vector.packet.transport_wide_cc.packets[1].status);
+    try std.testing.expectEqual(@as(i16, -2), parsed_vector.packet.transport_wide_cc.packets[2].delta_ticks);
+    try std.testing.expectEqual(@as(i16, 1), parsed_vector.packet.transport_wide_cc.packets[3].delta_ticks);
 }
 
 test "RTCP sender stats builds sender report" {
