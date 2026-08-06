@@ -998,6 +998,85 @@ pub const rtcp = struct {
         pairs: []NackPair,
     };
 
+    pub const ReceiverStats = struct {
+        ssrc: u32 = 0,
+        clock_rate: u32 = 90_000,
+        initialized: bool = false,
+        base_seq: u16 = 0,
+        max_seq: u16 = 0,
+        cycles: u32 = 0,
+        received: u32 = 0,
+        expected_prior: u32 = 0,
+        received_prior: u32 = 0,
+        transit_prior: ?i64 = null,
+        jitter_q4: u64 = 0,
+
+        pub fn observe(self: *ReceiverStats, packet: rtp.Packet, arrival_time_ns: u64) void {
+            const seq = packet.header.sequence_number;
+            if (!self.initialized) {
+                self.initialized = true;
+                self.ssrc = packet.header.ssrc;
+                self.base_seq = seq;
+                self.max_seq = seq;
+                self.received = 1;
+                self.transit_prior = self.transit(packet.header.timestamp, arrival_time_ns);
+                return;
+            }
+
+            if (seq < self.max_seq and self.max_seq - seq > 0x8000) self.cycles +%= 1;
+            if (seqNewer(seq, self.max_seq)) self.max_seq = seq;
+            self.received +|= 1;
+
+            const transit_now = self.transit(packet.header.timestamp, arrival_time_ns);
+            if (self.transit_prior) |prior| {
+                const delta = @abs(transit_now - prior);
+                if (delta > self.jitter_q4 >> 4) {
+                    self.jitter_q4 += delta - (self.jitter_q4 >> 4);
+                } else {
+                    self.jitter_q4 -= (self.jitter_q4 >> 4) - delta;
+                }
+            }
+            self.transit_prior = transit_now;
+        }
+
+        pub fn reportBlock(self: *ReceiverStats) ReportBlock {
+            const expected = self.expectedPackets();
+            const interval_expected = expected -% self.expected_prior;
+            const interval_received = self.received -% self.received_prior;
+            const interval_lost: i64 = @as(i64, interval_expected) - @as(i64, interval_received);
+            var fraction_lost: u8 = 0;
+            if (interval_expected != 0 and interval_lost > 0) {
+                fraction_lost = @intCast(@min(@as(u64, 255), (@as(u64, @intCast(interval_lost)) << 8) / interval_expected));
+            }
+            self.expected_prior = expected;
+            self.received_prior = self.received;
+
+            const total_lost: i64 = @as(i64, expected) - @as(i64, self.received);
+            const cumulative_lost: u24 = if (total_lost <= 0) 0 else @intCast(@min(@as(u64, std.math.maxInt(u24)), @as(u64, @intCast(total_lost))));
+            return .{
+                .ssrc = self.ssrc,
+                .fraction_lost = fraction_lost,
+                .cumulative_lost = cumulative_lost,
+                .highest_sequence_number = self.extendedHighestSequenceNumber(),
+                .interarrival_jitter = @intCast(@min(@as(u64, std.math.maxInt(u32)), self.jitter_q4 >> 4)),
+            };
+        }
+
+        pub fn expectedPackets(self: ReceiverStats) u32 {
+            if (!self.initialized) return 0;
+            return self.extendedHighestSequenceNumber() - @as(u32, self.base_seq) + 1;
+        }
+
+        pub fn extendedHighestSequenceNumber(self: ReceiverStats) u32 {
+            return self.cycles + @as(u32, self.max_seq);
+        }
+
+        fn transit(self: ReceiverStats, rtp_timestamp: u32, arrival_time_ns: u64) i64 {
+            const arrival_rtp_units = (arrival_time_ns / std.time.ns_per_s) * self.clock_rate + ((arrival_time_ns % std.time.ns_per_s) * self.clock_rate) / std.time.ns_per_s;
+            return @as(i64, @intCast(arrival_rtp_units)) - @as(i64, rtp_timestamp);
+        }
+    };
+
     pub const NackTracker = struct {
         initialized: bool = false,
         highest_seq: u16 = 0,
@@ -1801,6 +1880,47 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
     try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
+}
+
+test "RTCP receiver stats builds receiver report block" {
+    const allocator = std.testing.allocator;
+    var stats = rtcp.ReceiverStats{ .clock_rate = 90_000 };
+
+    inline for (.{ 1, 2, 4 }) |seq| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        try rtp.writePacket(&bytes, allocator, .{
+            .payload_type = 96,
+            .sequence_number = seq,
+            .timestamp = @as(u32, seq) * 3000,
+            .ssrc = 0x01020304,
+        }, "x");
+        var packet = try rtp.Packet.parse(allocator, bytes.items);
+        defer packet.deinit(allocator);
+        stats.observe(packet, @as(u64, seq) * 33 * std.time.ns_per_ms);
+    }
+
+    const first = stats.reportBlock();
+    try std.testing.expectEqual(@as(u32, 0x01020304), first.ssrc);
+    try std.testing.expectEqual(@as(u24, 1), first.cumulative_lost);
+    try std.testing.expectEqual(@as(u32, 4), first.highest_sequence_number);
+    try std.testing.expect(first.fraction_lost > 0);
+
+    var more_bytes: std.ArrayList(u8) = .empty;
+    defer more_bytes.deinit(allocator);
+    try rtp.writePacket(&more_bytes, allocator, .{
+        .payload_type = 96,
+        .sequence_number = 5,
+        .timestamp = 15_000,
+        .ssrc = 0x01020304,
+    }, "x");
+    var more = try rtp.Packet.parse(allocator, more_bytes.items);
+    defer more.deinit(allocator);
+    stats.observe(more, 200 * std.time.ns_per_ms);
+    const second = stats.reportBlock();
+    try std.testing.expectEqual(@as(u24, 1), second.cumulative_lost);
+    try std.testing.expectEqual(@as(u32, 5), second.highest_sequence_number);
+    try std.testing.expect(second.interarrival_jitter > 0);
 }
 
 test "RTCP NACK tracker detects RTP gaps and wraparound" {
