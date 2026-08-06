@@ -34,7 +34,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs,
   RFC 9218 Priority field parsing/serialization,
-  request/response message decoding with ordered HEADERS/DATA/trailer handling,
+  request/response message decoding with ordered HEADERS/DATA/trailer handling and forbidden trailer-field rejection,
   HTTP/3 pseudo-header/lowercase field-name, `:method`/`:protocol` token, URI path/scheme/authority, Host/`:authority`, and connection-specific header validation,
   DATA-frame aggregation, content-length validation, stateless QPACK helpers with RFC 9204 static-table references plus literal fallback, a cleartext development runtime over the QUIC
   UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with STREAM frame

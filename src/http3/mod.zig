@@ -1179,6 +1179,7 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
         }
         saw_regular = true;
 
+        if (kind == .trailers and forbiddenTrailerFieldName(header.name)) return error.InvalidHeader;
         if (std.mem.eql(u8, header.name, "host")) {
             if (host_value != null) return error.InvalidHeader;
             host_value = header.value;
@@ -1366,6 +1367,21 @@ fn markResponsePseudo(name: []const u8, seen_status: *bool) Error!void {
 fn markOnce(seen: *bool) Error!void {
     if (seen.*) return error.InvalidHeader;
     seen.* = true;
+}
+
+fn forbiddenTrailerFieldName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "authorization") or
+        std.ascii.eqlIgnoreCase(name, "cache-control") or
+        std.ascii.eqlIgnoreCase(name, "content-encoding") or
+        std.ascii.eqlIgnoreCase(name, "content-length") or
+        std.ascii.eqlIgnoreCase(name, "content-range") or
+        std.ascii.eqlIgnoreCase(name, "content-type") or
+        std.ascii.eqlIgnoreCase(name, "host") or
+        std.ascii.eqlIgnoreCase(name, "max-forwards") or
+        std.ascii.eqlIgnoreCase(name, "set-cookie") or
+        std.ascii.eqlIgnoreCase(name, "trailer") or
+        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
+        std.ascii.eqlIgnoreCase(name, "te");
 }
 
 fn connectionSpecificHeaderName(name: []const u8) bool {
@@ -1973,6 +1989,20 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
     try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, bad_value.items));
 
     var pseudo_trailer: std.ArrayList(u8) = .empty;
+    try std.testing.expectError(error.InvalidHeader, (Request{
+        .method = "POST",
+        .path = "/upload",
+        .authority = "example.com",
+        .body = "body",
+        .trailers = &.{.{ .name = "content-length", .value = "4" }},
+    }).write(&pseudo_trailer, allocator));
+
+    try std.testing.expectError(error.InvalidHeader, (Response{
+        .status = 200,
+        .body = "ok",
+        .trailers = &.{.{ .name = "set-cookie", .value = "a=b" }},
+    }).write(&pseudo_trailer, allocator));
+
     defer pseudo_trailer.deinit(allocator);
     try Helper.writeRequestWithTrailers(&pseudo_trailer, allocator, &valid_request, &.{
         .{ .name = ":status", .value = "200" },
