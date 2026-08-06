@@ -231,6 +231,7 @@ fn validatePayload(header: FrameHeader, payload: []const u8, options: ParseFrame
 
 pub fn validateClosePayload(payload: []const u8) Error!void {
     if (payload.len == 0) return;
+    if (payload.len > 125) return error.InvalidControlFrame;
     if (payload.len == 1) return error.InvalidControlFrame;
     const code: CloseCode = @enumFromInt(std.mem.readInt(u16, payload[0..2], .big));
     if (!validCloseCode(code)) return error.InvalidCloseCode;

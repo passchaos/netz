@@ -109,6 +109,7 @@ starts with deterministic parsers, serializers, and state helpers for:
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, fragmented message assembly with aggregate
   message-size limits, automatic PING→PONG and close echo handling,
+  outbound text/close/control-frame validation,
   subprotocol negotiation, optional permessage-deflate negotiation with
   no-context-takeover raw-deflate compression/decompression plus rejection of
   unsupported extension parameters/window sizes, serialized connection writes, a blocking TCP

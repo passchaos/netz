@@ -313,11 +313,13 @@ pub const Connection = struct {
         try payload.append(self.allocator, @truncate(@intFromEnum(code) >> 8));
         try payload.append(self.allocator, @truncate(@intFromEnum(code)));
         try payload.appendSlice(self.allocator, reason);
+        try websocket.validateClosePayload(payload.items);
         try self.sendFrame(.close, payload.items);
     }
 
     pub fn sendFrame(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
         if (self.close_sent and opcode != .close) return error.ConnectionClosed;
+        try validateOutgoingFramePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
         try self.writeFrameLocked(opcode, payload, true);
@@ -327,6 +329,7 @@ pub const Connection = struct {
     pub fn sendMessage(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (self.close_sent) return error.ConnectionClosed;
+        try validateOutgoingMessagePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
 
@@ -343,6 +346,7 @@ pub const Connection = struct {
         if (self.close_sent) return error.ConnectionClosed;
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
+        if (opcode == .text) try validateOutgoingFragmentedText(self.allocator, fragments);
 
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
@@ -523,11 +527,13 @@ pub const H2Connection = struct {
         try payload.append(self.allocator, @truncate(@intFromEnum(code) >> 8));
         try payload.append(self.allocator, @truncate(@intFromEnum(code)));
         try payload.appendSlice(self.allocator, reason);
+        try websocket.validateClosePayload(payload.items);
         try self.sendFrame(.close, payload.items);
     }
 
     pub fn sendFrame(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
         if (self.close_sent and opcode != .close) return error.ConnectionClosed;
+        try validateOutgoingFramePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         try self.writeFrameLocked(opcode, payload, true);
@@ -537,6 +543,7 @@ pub const H2Connection = struct {
     pub fn sendMessage(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (self.close_sent) return error.ConnectionClosed;
+        try validateOutgoingMessagePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
 
@@ -553,6 +560,7 @@ pub const H2Connection = struct {
         if (self.close_sent) return error.ConnectionClosed;
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
+        if (opcode == .text) try validateOutgoingFragmentedText(self.allocator, fragments);
 
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
@@ -790,6 +798,26 @@ pub const H2AcceptOptions = struct {
     enable_permessage_deflate: bool = false,
     limits: Limits = .{},
 };
+
+fn validateOutgoingMessagePayload(opcode: websocket.Opcode, payload: []const u8) Error!void {
+    if (opcode == .text and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
+}
+
+fn validateOutgoingFramePayload(opcode: websocket.Opcode, payload: []const u8) Error!void {
+    switch (opcode) {
+        .text => if (!std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8,
+        .close => try websocket.validateClosePayload(payload),
+        .ping, .pong => if (payload.len > 125) return error.InvalidControlFrame,
+        else => {},
+    }
+}
+
+fn validateOutgoingFragmentedText(allocator: std.mem.Allocator, fragments: []const []const u8) Error!void {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    for (fragments) |fragment| try bytes.appendSlice(allocator, fragment);
+    if (!std.unicode.utf8ValidateSlice(bytes.items)) return error.InvalidUtf8;
+}
 
 const HttpHead = struct {
     head: []u8,
@@ -1374,6 +1402,35 @@ test "WebSocket receiveMessage enforces aggregate fragmented message limit" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebSocket runtimes validate outgoing text and close frames" {
+    const allocator = std.testing.allocator;
+    const bad_utf8 = "\xc0\x80";
+    const too_large_control = "x" ** 126;
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    try std.testing.expectError(error.InvalidUtf8, connection.sendText(bad_utf8));
+    try std.testing.expectError(error.InvalidUtf8, connection.sendFragmented(.text, &.{ "\xe2", "(" }));
+    try std.testing.expectError(error.InvalidUtf8, connection.sendClose(.normal_closure, bad_utf8));
+    try std.testing.expectError(error.InvalidCloseCode, connection.sendClose(.no_status_received, ""));
+    try std.testing.expectError(error.InvalidControlFrame, connection.sendPing(too_large_control));
+
+    var h2 = H2Connection{
+        .allocator = allocator,
+        .tunnel = undefined,
+        .role = .client,
+    };
+    try std.testing.expectError(error.InvalidUtf8, h2.sendText(bad_utf8));
+    try std.testing.expectError(error.InvalidUtf8, h2.sendFragmented(.text, &.{ "\xf0\x9f", "\x28" }));
+    try std.testing.expectError(error.InvalidUtf8, h2.sendClose(.normal_closure, bad_utf8));
+    try std.testing.expectError(error.InvalidCloseCode, h2.sendClose(.abnormal_closure, ""));
+    try std.testing.expectError(error.InvalidControlFrame, h2.sendPong(too_large_control));
 }
 
 test "WebSocket async std.Io server handles concurrent clients" {
