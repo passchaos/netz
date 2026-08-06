@@ -391,6 +391,10 @@ fn payloadFormatIsUtf8(properties: []const Property) bool {
     return false;
 }
 
+fn validatePayloadFormat(properties: []const Property, payload: []const u8) Error!void {
+    if (payloadFormatIsUtf8(properties) and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
+}
+
 pub fn topicAliasMaximum(properties: []const Property) ?u16 {
     for (properties) |property| {
         if (property == .two_byte and property.two_byte.id == .topic_alias_maximum) return property.two_byte.value;
@@ -665,6 +669,7 @@ pub const Connect = struct {
             const topic = try readUtf8(&cursor);
             try validateTopicName(topic);
             const payload = try readBinary(&cursor);
+            try validatePayloadFormat(will_props, payload);
             will = .{
                 .topic = topic,
                 .payload = payload,
@@ -808,7 +813,7 @@ pub const Publish = struct {
             if (protocol != .v5 or topicAlias(props) == null) return error.InvalidTopic;
         } else try validateTopicName(topic);
         const payload = cursor.buf[cursor.pos..];
-        if (payloadFormatIsUtf8(props) and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
+        try validatePayloadFormat(props, payload);
         return .{
             .dup = (fixed.flags & 0x08) != 0,
             .qos = qos,
@@ -1467,6 +1472,7 @@ pub fn writeConnectPacket(
         try validateTopicName(will.topic);
         if (protocol == .v5) {
             try validatePropertiesFor(.will, will.properties);
+            try validatePayloadFormat(will.properties, will.payload);
             try writeProperties(&variable, allocator, will.properties);
         }
         try writeUtf8(&variable, allocator, will.topic);
@@ -1500,7 +1506,7 @@ pub fn writePublish(
     if (topic.len == 0) {
         if (protocol != .v5 or topicAlias(options.properties) == null) return error.InvalidTopic;
     } else try validateTopicName(topic);
-    if (protocol == .v5 and payloadFormatIsUtf8(options.properties) and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
+    if (protocol == .v5) try validatePayloadFormat(options.properties, payload);
     if (options.qos == .at_most_once) {
         if (options.packet_id != null) return error.InvalidPacketIdentifier;
     } else if (options.packet_id == null or options.packet_id.? == 0) {
@@ -1601,6 +1607,12 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqual(@as(u32, 5), connect.will.?.properties[0].four_byte.value);
     try std.testing.expectEqualStrings("rumq", connect.username.?);
     try std.testing.expectEqualStrings("mq", connect.password.?);
+
+    var bad_will_props = [_]Property{.{ .byte = .{ .id = .payload_format_indicator, .value = 1 } }};
+    try std.testing.expectError(error.InvalidUtf8, writeConnectPacket(&connect_bytes, allocator, .v5, .{
+        .client_id = "client-2",
+        .will = .{ .topic = "status/client-2", .payload = "\xff", .properties = &bad_will_props },
+    }));
 
     var publish_bytes: std.ArrayList(u8) = .empty;
     defer publish_bytes.deinit(allocator);
