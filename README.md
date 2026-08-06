@@ -10,7 +10,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   handling for HEAD and successful CONNECT, authority-form CONNECT target validation including bracketed IPv6 and CONNECT tunnel helpers, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling even when body bytes are pre-read with invalid-head suppression, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
-  across repeated/coalesced `Content-Length`, and unsupported transfer-coding rejection,
+  across repeated/coalesced `Content-Length`, and unsupported transfer-coding and HTTP/1.0 transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
   persistence and a `std.Io.async` concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap

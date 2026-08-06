@@ -196,6 +196,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
 
     var parsed_headers = try parseHeaderLines(allocator, &lines, options);
     errdefer parsed_headers.deinit(allocator);
+    try validateTransferEncodingForVersion(version, parsed_headers.headers);
     const consumed_head = head_end + 4;
     const parsed_body = try parseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
@@ -250,6 +251,7 @@ pub fn parseResponseWithContext(
 
     var parsed_headers = try parseHeaderLines(allocator, &lines, options);
     errdefer parsed_headers.deinit(allocator);
+    try validateTransferEncodingForVersion(version, parsed_headers.headers);
     const consumed_head = head_end + 4;
     const parsed_body = if (responseForbidsBody(status, context.request_method))
         ParsedBody{
@@ -492,6 +494,13 @@ fn transferEncodingFraming(headers: []const Header) Error!?BodyFraming {
 
 pub fn statusCodeForbidsBody(status: u16) bool {
     return (status >= 100 and status < 200) or status == 204 or status == 304;
+}
+
+fn validateTransferEncodingForVersion(version: Version, headers: []const Header) Error!void {
+    if (version != .http_1_0) return;
+    for (headers) |header| {
+        if (header.eqlName("transfer-encoding")) return error.InvalidTransferEncoding;
+    }
 }
 
 pub fn validateResponseBodyForStatus(status: u16, headers: []const Header, body: []const u8, trailers: []const Header) Error!void {
@@ -1118,6 +1127,9 @@ test "HTTP/1 parser rejects ambiguous body lengths" {
 
     const unsupported_te = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n";
     try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, unsupported_te, .{}));
+
+    const http10_te = "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+    try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, http10_te, .{}));
 }
 
 test "HTTP/1 response body framing helpers" {
@@ -1137,6 +1149,9 @@ test "HTTP/1 response body framing helpers" {
     try std.testing.expectEqual(BodyFraming.chunked, chunked_resp.body_framing);
     try std.testing.expect(chunked_resp.header("content-length") == null);
     try std.testing.expectEqualStrings("pong", chunked_resp.body);
+
+    const http10_te_response = "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+    try std.testing.expectError(error.InvalidTransferEncoding, parseResponse(allocator, http10_te_response, .{}));
 }
 
 test "HTTP/1 response parsing honors request method body rules" {
