@@ -228,10 +228,12 @@ pub const PushPromisePayload = struct {
         }
         if (frame.payload.len < pos + 4 + @as(usize, pad_len)) return error.InvalidFrameSize;
         const raw_promised = std.mem.readInt(u32, frame.payload[pos..][0..4], .big);
+        const promised_stream_id: u31 = @truncate(raw_promised & 0x7fff_ffff);
+        if (promised_stream_id == 0) return error.InvalidStreamId;
         pos += 4;
         return .{
             .stream_id = frame.header.stream_id,
-            .promised_stream_id = @truncate(raw_promised & 0x7fff_ffff),
+            .promised_stream_id = promised_stream_id,
             .header_block = frame.payload[pos .. frame.payload.len - pad_len],
             .padding_len = pad_len,
         };
@@ -249,6 +251,7 @@ pub const PushPromisePayload = struct {
         },
     ) Error!void {
         if (stream_id == 0) return error.InvalidStreamId;
+        if (promised_stream_id == 0) return error.InvalidStreamId;
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(allocator);
         if (options.padding_len != 0) try payload.append(allocator, options.padding_len);
@@ -1030,6 +1033,11 @@ test "HTTP/2 PUSH_PROMISE payload helper" {
     try std.testing.expectEqualStrings("/pushed.css", fields[1].value);
 
     try std.testing.expectError(error.InvalidStreamId, PushPromisePayload.write(&encoded, allocator, 0, 2, block.items, .{}));
+    try std.testing.expectError(error.InvalidStreamId, PushPromisePayload.write(&encoded, allocator, 1, 0, block.items, .{}));
+    try std.testing.expectError(error.InvalidStreamId, PushPromisePayload.parse(.{
+        .header = .{ .length = 4, .frame_type = .push_promise, .flags = 0, .stream_id = 1 },
+        .payload = &.{ 0, 0, 0, 0 },
+    }));
     try std.testing.expectError(error.InvalidFrameSize, PushPromisePayload.parse(.{
         .header = .{ .length = 2, .frame_type = .push_promise, .flags = 0, .stream_id = 1 },
         .payload = &.{ 0, 0 },
