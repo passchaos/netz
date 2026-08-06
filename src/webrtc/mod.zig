@@ -2128,6 +2128,37 @@ pub const sctp = struct {
         _,
     };
 
+    pub const SkippedStream = struct {
+        stream_id: u16,
+        stream_sequence_number: u16,
+    };
+
+    pub const ForwardTsnChunk = struct {
+        new_cumulative_tsn: u32,
+        skipped_streams: []SkippedStream = &.{},
+
+        pub fn deinit(self: *ForwardTsnChunk, allocator: std.mem.Allocator) void {
+            allocator.free(self.skipped_streams);
+            self.* = undefined;
+        }
+
+        pub fn parse(allocator: std.mem.Allocator, chunk: Chunk) Error!ForwardTsnChunk {
+            if (chunk.chunk_type != .forward_tsn or chunk.flags != 0 or chunk.value.len < 4 or ((chunk.value.len - 4) % 4) != 0) return error.InvalidSctpPacket;
+            var cursor = wire.Cursor.init(chunk.value);
+            const new_cumulative_tsn = try cursor.readInt(u32, .big);
+            const count = cursor.remaining() / 4;
+            const skipped = try allocator.alloc(SkippedStream, count);
+            errdefer allocator.free(skipped);
+            for (skipped) |*stream| {
+                stream.* = .{
+                    .stream_id = try cursor.readInt(u16, .big),
+                    .stream_sequence_number = try cursor.readInt(u16, .big),
+                };
+            }
+            return .{ .new_cumulative_tsn = new_cumulative_tsn, .skipped_streams = skipped };
+        }
+    };
+
     pub const InitParameter = struct {
         param_type: InitParameterType,
         value: []const u8,
@@ -2544,6 +2575,28 @@ pub const sctp = struct {
 
     pub fn validateCookieAck(chunk: Chunk) Error!void {
         if (chunk.chunk_type != .cookie_ack or chunk.flags != 0 or chunk.value.len != 0) return error.InvalidSctpPacket;
+    }
+
+    pub fn writeForwardTsnPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, forward_tsn: ForwardTsnChunk) Error!void {
+        const start = list.items.len;
+        try writePacketHeader(list, allocator, options);
+        try writeForwardTsnChunk(list, allocator, forward_tsn);
+        const value = try checksum(list.items[start..]);
+        std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
+    }
+
+    pub fn writeForwardTsnChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, forward_tsn: ForwardTsnChunk) Error!void {
+        if (forward_tsn.skipped_streams.len > (std.math.maxInt(u16) - 8) / 4) return error.InvalidSctpPacket;
+        const chunk_len = 8 + forward_tsn.skipped_streams.len * 4;
+        try list.append(allocator, @intFromEnum(ChunkType.forward_tsn));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        try wire.appendInt(list, allocator, u32, forward_tsn.new_cumulative_tsn, .big);
+        for (forward_tsn.skipped_streams) |stream| {
+            try wire.appendInt(list, allocator, u16, stream.stream_id, .big);
+            try wire.appendInt(list, allocator, u16, stream.stream_sequence_number, .big);
+        }
+        try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
     }
 
     pub fn writeReconfigPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, parameters: []const ReconfigParameter) Error!void {
@@ -3336,6 +3389,47 @@ test "RTCP NACK tracker detects RTP gaps and wraparound" {
     wrap.observe(0xffff);
     wrap.observe(0);
     try std.testing.expectEqual(@as(usize, 0), wrap.pendingCount());
+}
+
+test "SCTP FORWARD-TSN packet roundtrip" {
+    const allocator = std.testing.allocator;
+    var skipped = [_]sctp.SkippedStream{
+        .{ .stream_id = 1, .stream_sequence_number = 7 },
+        .{ .stream_id = 2, .stream_sequence_number = 9 },
+    };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try sctp.writeForwardTsnPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, .{
+        .new_cumulative_tsn = 9000,
+        .skipped_streams = &skipped,
+    });
+
+    try std.testing.expect(try sctp.validChecksum(encoded.items));
+    var parsed = try sctp.parsePacket(allocator, encoded.items, true);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(sctp.ChunkType.forward_tsn, parsed.chunks[0].chunk_type);
+    var forward = try sctp.ForwardTsnChunk.parse(allocator, parsed.chunks[0]);
+    defer forward.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 9000), forward.new_cumulative_tsn);
+    try std.testing.expectEqual(@as(usize, 2), forward.skipped_streams.len);
+    try std.testing.expectEqual(@as(u16, 1), forward.skipped_streams[0].stream_id);
+    try std.testing.expectEqual(@as(u16, 7), forward.skipped_streams[0].stream_sequence_number);
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeForwardTsnChunk(&encoded, allocator, .{ .new_cumulative_tsn = 42 });
+    var empty_forward = try sctp.ForwardTsnChunk.parse(allocator, .{
+        .chunk_type = .forward_tsn,
+        .flags = encoded.items[1],
+        .value = encoded.items[4..],
+        .consumed = encoded.items.len,
+    });
+    defer empty_forward.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), empty_forward.skipped_streams.len);
 }
 
 test "SCTP RE-CONFIG stream reset request and response" {

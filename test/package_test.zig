@@ -443,6 +443,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeCookieAckPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ReconfigChunk"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeReconfigPacket"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "ForwardTsnChunk"));
+    try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeForwardTsnPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "writeDataPacket"));
     try std.testing.expect(@hasDecl(netz.webrtc.sctp, "parseDcepMessage"));
     try std.testing.expectEqual(@as(usize, 2048), (netz.webrtc.runtime.Limits{}).max_datagram_size);
