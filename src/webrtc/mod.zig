@@ -156,6 +156,7 @@ pub const stun = struct {
         var seen_integrity = false;
         var seen_fingerprint = false;
         for (attrs) |attr| {
+            if (seen_fingerprint) return error.InvalidStunAttribute;
             if (seen_integrity and attr.attr_type != .fingerprint) return error.InvalidStunAttribute;
             if (seen_fingerprint and attr.attr_type == .message_integrity) return error.InvalidStunAttribute;
             try wire.appendInt(&payload, allocator, u16, @intFromEnum(attr.attr_type), .big);
@@ -230,6 +231,7 @@ pub const stun = struct {
     pub fn validateFingerprint(bytes: []const u8) Error!void {
         const located = (try findAttributeBytes(bytes, .fingerprint)) orelse return error.MissingStunAttribute;
         if (located.value.len != fingerprint_len) return error.InvalidStunAttribute;
+        if (located.value_start + fingerprint_len != try stunMessageEnd(bytes)) return error.InvalidStunAttribute;
         const expected = fingerprint(bytes[0..located.attribute_start]);
         const actual = std.mem.readInt(u32, located.value[0..4], .big);
         if (actual != expected) return error.BadFingerprint;
@@ -435,6 +437,14 @@ pub const stun = struct {
             };
         }
         return null;
+    }
+
+    fn stunMessageEnd(bytes: []const u8) Error!usize {
+        if (bytes.len < 20) return error.BufferTooShort;
+        const payload_len = std.mem.readInt(u16, bytes[2..4], .big);
+        const end = 20 + @as(usize, payload_len);
+        if (bytes.len < end) return error.BufferTooShort;
+        return end;
     }
 };
 
@@ -3729,6 +3739,17 @@ test "STUN ICE binding request authenticates integrity and fingerprint" {
     try std.testing.expectEqual(@as(u64, 0x0102030405060708), try stun.attrU64(parsed, .ice_controlling));
     try std.testing.expect(stun.attrValue(parsed, .use_candidate) != null);
 
+    var malformed_fingerprint_order = try std.ArrayList(u8).initCapacity(allocator, encoded.items.len + 8);
+    defer malformed_fingerprint_order.deinit(allocator);
+    try malformed_fingerprint_order.appendSlice(allocator, encoded.items);
+    const new_len = std.mem.readInt(u16, malformed_fingerprint_order.items[2..4], .big) + 8;
+    std.mem.writeInt(u16, malformed_fingerprint_order.items[2..4], new_len, .big);
+    try wire.appendInt(&malformed_fingerprint_order, allocator, u16, @intFromEnum(stun.AttributeType.software), .big);
+    try wire.appendInt(&malformed_fingerprint_order, allocator, u16, 4, .big);
+    try malformed_fingerprint_order.appendSlice(allocator, "late");
+    try std.testing.expectError(error.InvalidStunAttribute, stun.validateFingerprint(malformed_fingerprint_order.items));
+    try std.testing.expectError(error.InvalidStunAttribute, stun.parse(allocator, malformed_fingerprint_order.items));
+
     encoded.items[encoded.items.len - 1] ^= 0xff;
     try std.testing.expectError(error.BadFingerprint, stun.validateFingerprint(encoded.items));
 
@@ -3741,6 +3762,10 @@ test "STUN ICE binding request authenticates integrity and fingerprint" {
     try std.testing.expectError(error.InvalidStunAttribute, stun.write(&invalid_order, allocator, .request, .binding, tid, &.{
         .{ .attr_type = .fingerprint, .value = &([_]u8{0} ** stun.fingerprint_len) },
         .{ .attr_type = .message_integrity, .value = &([_]u8{0} ** stun.message_integrity_len) },
+    }));
+    try std.testing.expectError(error.InvalidStunAttribute, stun.write(&invalid_order, allocator, .request, .binding, tid, &.{
+        .{ .attr_type = .fingerprint, .value = &([_]u8{0} ** stun.fingerprint_len) },
+        .{ .attr_type = .software, .value = "after-fingerprint" },
     }));
 
     invalid_order.clearRetainingCapacity();
