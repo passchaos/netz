@@ -110,10 +110,14 @@ pub const Request = struct {
     body_framing: BodyFraming = .none,
     trailers: []Header = &.{},
     body_storage: ?[]u8 = null,
+    header_value_storage: [][]u8 = &.{},
+    trailer_value_storage: [][]u8 = &.{},
     consumed: usize,
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
         if (self.body_storage) |body| allocator.free(body);
+        freeHeaderValueStorage(allocator, self.header_value_storage);
+        freeHeaderValueStorage(allocator, self.trailer_value_storage);
         allocator.free(self.headers);
         allocator.free(self.trailers);
         self.* = undefined;
@@ -148,10 +152,14 @@ pub const Response = struct {
     body_framing: BodyFraming = .none,
     trailers: []Header = &.{},
     body_storage: ?[]u8 = null,
+    header_value_storage: [][]u8 = &.{},
+    trailer_value_storage: [][]u8 = &.{},
     consumed: usize,
 
     pub fn deinit(self: *Response, allocator: std.mem.Allocator) void {
         if (self.body_storage) |body| allocator.free(body);
+        freeHeaderValueStorage(allocator, self.header_value_storage);
+        freeHeaderValueStorage(allocator, self.trailer_value_storage);
         allocator.free(self.headers);
         allocator.free(self.trailers);
         self.* = undefined;
@@ -185,21 +193,23 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     try validateRequestTarget(target);
     const version = try Version.parse(version_s);
 
-    const headers = try parseHeaderLines(allocator, &lines, options);
-    errdefer allocator.free(headers);
+    var parsed_headers = try parseHeaderLines(allocator, &lines, options);
+    errdefer parsed_headers.deinit(allocator);
     const consumed_head = head_end + 4;
-    const parsed_body = try parseBody(allocator, bytes, consumed_head, headers, options);
+    const parsed_body = try parseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
 
     return .{
         .method = method,
         .target = target,
         .version = version,
-        .headers = headers,
+        .headers = parsed_headers.headers,
         .body = parsed_body.body,
         .body_framing = parsed_body.framing,
         .trailers = parsed_body.trailers,
         .body_storage = parsed_body.body_storage,
+        .header_value_storage = parsed_headers.value_storage,
+        .trailer_value_storage = parsed_body.trailer_value_storage,
         .consumed = parsed_body.consumed,
     };
 }
@@ -236,8 +246,8 @@ pub fn parseResponseWithContext(
     const version = try Version.parse(version_s);
     try validateReasonPhrase(reason);
 
-    const headers = try parseHeaderLines(allocator, &lines, options);
-    errdefer allocator.free(headers);
+    var parsed_headers = try parseHeaderLines(allocator, &lines, options);
+    errdefer parsed_headers.deinit(allocator);
     const consumed_head = head_end + 4;
     const parsed_body = if (responseForbidsBody(status, context.request_method))
         ParsedBody{
@@ -246,33 +256,57 @@ pub fn parseResponseWithContext(
             .consumed = consumed_head,
         }
     else
-        try parseBody(allocator, bytes, consumed_head, headers, options);
+        try parseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
 
     return .{
         .version = version,
         .status = status,
         .reason = reason,
-        .headers = headers,
+        .headers = parsed_headers.headers,
         .body = parsed_body.body,
         .body_framing = parsed_body.framing,
         .trailers = parsed_body.trailers,
         .body_storage = parsed_body.body_storage,
+        .header_value_storage = parsed_headers.value_storage,
+        .trailer_value_storage = parsed_body.trailer_value_storage,
         .consumed = parsed_body.consumed,
     };
 }
+
+const ParsedHeaders = struct {
+    headers: []Header,
+    value_storage: [][]u8 = &.{},
+
+    fn deinit(self: *ParsedHeaders, allocator: std.mem.Allocator) void {
+        freeHeaderValueStorage(allocator, self.value_storage);
+        allocator.free(self.headers);
+        self.* = undefined;
+    }
+};
 
 fn parseHeaderLines(
     allocator: std.mem.Allocator,
     lines: *std.mem.SplitIterator(u8, .sequence),
     options: ParseOptions,
-) Error![]Header {
+) Error!ParsedHeaders {
     var headers: std.ArrayList(Header) = .empty;
-    errdefer headers.deinit(allocator);
+    var value_storage: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (value_storage.items) |value| allocator.free(value);
+        value_storage.deinit(allocator);
+        headers.deinit(allocator);
+    }
 
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        if ((line[0] == ' ' or line[0] == '\t') and !options.allow_obs_fold) return error.MalformedHeader;
+        if (line[0] == ' ' or line[0] == '\t') {
+            if (!options.allow_obs_fold or headers.items.len == 0) return error.MalformedHeader;
+            const continuation = wire.trimOws(line);
+            try validateHeaderValue(continuation);
+            try appendFoldedHeaderValue(allocator, &headers, &value_storage, continuation);
+            continue;
+        }
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MalformedHeader;
         if (colon == 0) return error.MalformedHeader;
         if (headers.items.len >= options.max_headers) return error.TooManyHeaders;
@@ -285,7 +319,34 @@ fn parseHeaderLines(
         });
     }
 
-    return headers.toOwnedSlice(allocator);
+    const owned_headers = try headers.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_headers);
+    const owned_value_storage = try value_storage.toOwnedSlice(allocator);
+    return .{ .headers = owned_headers, .value_storage = owned_value_storage };
+}
+
+fn appendFoldedHeaderValue(
+    allocator: std.mem.Allocator,
+    headers: *std.ArrayList(Header),
+    value_storage: *std.ArrayList([]u8),
+    continuation: []const u8,
+) Error!void {
+    const last = &headers.items[headers.items.len - 1];
+    var unfolded: std.ArrayList(u8) = .empty;
+    errdefer unfolded.deinit(allocator);
+    try unfolded.appendSlice(allocator, last.value);
+    if (continuation.len != 0) {
+        // RFC 9112 deprecates obs-fold but permits recipients to replace each
+        // fold with whitespace.  Hyper trims the folded line before joining;
+        // doing the same turns "Fold: just\r\n some\r\n\t folding" into the
+        // application-facing value "just some folding".
+        try unfolded.append(allocator, ' ');
+        try unfolded.appendSlice(allocator, continuation);
+    }
+    const owned = try unfolded.toOwnedSlice(allocator);
+    errdefer allocator.free(owned);
+    try value_storage.append(allocator, owned);
+    last.value = owned;
 }
 
 const ParsedBody = struct {
@@ -293,10 +354,12 @@ const ParsedBody = struct {
     body: []const u8,
     body_storage: ?[]u8 = null,
     trailers: []Header = &.{},
+    trailer_value_storage: [][]u8 = &.{},
     consumed: usize,
 
     fn deinit(self: ParsedBody, allocator: std.mem.Allocator) void {
         if (self.body_storage) |body| allocator.free(body);
+        freeHeaderValueStorage(allocator, self.trailer_value_storage);
         allocator.free(self.trailers);
     }
 };
@@ -332,6 +395,7 @@ fn parseBody(
                 .body = decoded.body,
                 .body_storage = decoded.body,
                 .trailers = decoded.trailers,
+                .trailer_value_storage = decoded.trailer_value_storage,
                 .consumed = body_start + decoded.consumed,
             };
         },
@@ -615,10 +679,12 @@ pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chu
 pub const DecodedChunked = struct {
     body: []u8,
     trailers: []Header,
+    trailer_value_storage: [][]u8 = &.{},
     consumed: usize,
 
     pub fn deinit(self: *DecodedChunked, allocator: std.mem.Allocator) void {
         allocator.free(self.body);
+        freeHeaderValueStorage(allocator, self.trailer_value_storage);
         allocator.free(self.trailers);
         self.* = undefined;
     }
@@ -662,16 +728,22 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
         trailer_block_end = pos + full_end_rel;
     }
     var lines = std.mem.splitSequence(u8, bytes[pos..trailer_block_end], "\r\n");
-    const trailers = try parseHeaderLines(allocator, &lines, options);
-    errdefer allocator.free(trailers);
-    try validateTrailers(trailers);
+    var parsed_trailers = try parseHeaderLines(allocator, &lines, options);
+    errdefer parsed_trailers.deinit(allocator);
+    try validateTrailers(parsed_trailers.headers);
     const consumed = if (trailer_end_rel == 0) pos + 2 else trailer_block_end + 4;
 
     return .{
         .body = try out.toOwnedSlice(allocator),
-        .trailers = trailers,
+        .trailers = parsed_trailers.headers,
+        .trailer_value_storage = parsed_trailers.value_storage,
         .consumed = consumed,
     };
+}
+
+fn freeHeaderValueStorage(allocator: std.mem.Allocator, storage: [][]u8) void {
+    for (storage) |value| allocator.free(value);
+    allocator.free(storage);
 }
 
 pub fn validateTrailers(trailers: []const Header) Error!void {
@@ -726,6 +798,37 @@ test "HTTP/1 validates header field syntax" {
     try validateHeader(.{ .name = "X-Custom_123", .value = "text\tvalue" });
     try std.testing.expectError(error.MalformedHeader, validateHeader(.{ .name = "bad:name", .value = "value" }));
     try std.testing.expectError(error.MalformedHeader, validateHeader(.{ .name = "x-test", .value = "bad\x7fvalue" }));
+}
+
+test "HTTP/1 optionally unfolds obsolete folded fields" {
+    const allocator = std.testing.allocator;
+    const raw =
+        "GET / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Fold: just\r\n" ++
+        " some\r\n" ++
+        "\t folding\r\n" ++
+        "\r\n";
+    try std.testing.expectError(error.MalformedHeader, parseRequest(allocator, raw, .{}));
+
+    var req = try parseRequest(allocator, raw, .{ .allow_obs_fold = true });
+    defer req.deinit(allocator);
+    try std.testing.expectEqualStrings("just some folding", req.header("fold").?);
+    try std.testing.expectEqual(@as(usize, 2), req.headers.len);
+
+    const chunked =
+        "POST /trailers HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "\r\n" ++
+        "5\r\nhello\r\n" ++
+        "0\r\n" ++
+        "Digest: sha-256=abc\r\n" ++
+        "\tdef\r\n" ++
+        "\r\n";
+    var with_trailer = try parseRequest(allocator, chunked, .{ .allow_obs_fold = true });
+    defer with_trailer.deinit(allocator);
+    try std.testing.expectEqualStrings("sha-256=abc def", with_trailer.trailers[0].value);
 }
 
 test "HTTP/1 validates start-line components" {
