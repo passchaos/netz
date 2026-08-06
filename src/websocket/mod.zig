@@ -13,13 +13,14 @@ pub const Error = error{
     InvalidUtf8,
     MissingHeader,
     InvalidHandshake,
+    InvalidExtension,
     PayloadTooLarge,
     UnmaskedClientFrame,
     MaskedServerFrame,
     UnexpectedRsv,
     NonMinimalLength,
     InvalidCloseCode,
-} || std.mem.Allocator.Error;
+} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
 pub const Opcode = enum(u4) {
     continuation = 0x0,
@@ -106,6 +107,49 @@ pub const FrameHeader = struct {
     }
 };
 
+pub const ExtensionNegotiation = struct {
+    permessage_deflate: bool = false,
+    client_no_context_takeover: bool = true,
+    server_no_context_takeover: bool = true,
+    client_max_window_bits: ?u8 = null,
+    server_max_window_bits: ?u8 = null,
+
+    pub fn parseOffer(header_value: []const u8) Error!ExtensionNegotiation {
+        var offers = std.mem.splitScalar(u8, header_value, ',');
+        while (offers.next()) |raw_offer| {
+            if (try parseExtensionOffer(wire.trimOws(raw_offer))) |offer| return offer;
+        }
+        return .{};
+    }
+
+    pub fn accept(allocator: std.mem.Allocator, offer_header: ?[]const u8, enable_permessage_deflate: bool) Error!?[]u8 {
+        if (!enable_permessage_deflate) return null;
+        const raw = offer_header orelse return null;
+        const offer = try parseOffer(raw);
+        if (!offer.permessage_deflate) return null;
+
+        var value: std.ArrayList(u8) = .empty;
+        errdefer value.deinit(allocator);
+        try value.appendSlice(allocator, "permessage-deflate");
+        // `std.compress.flate` exposes a normal 32 KiB history window.  Until
+        // smaller sliding windows are implemented, negotiate no-context-takeover
+        // on both directions and ignore smaller *_max_window_bits offers.
+        try value.appendSlice(allocator, "; server_no_context_takeover; client_no_context_takeover");
+        return try value.toOwnedSlice(allocator);
+    }
+
+    pub fn validateResponse(header_value: ?[]const u8) Error!ExtensionNegotiation {
+        const raw = header_value orelse return .{};
+        var responses = std.mem.splitScalar(u8, raw, ',');
+        while (responses.next()) |response| {
+            const parsed = (try parseExtensionOffer(wire.trimOws(response))) orelse return error.InvalidExtension;
+            if (!parsed.permessage_deflate) return error.InvalidExtension;
+            return parsed;
+        }
+        return .{};
+    }
+};
+
 pub const ParseFrameOptions = struct {
     /// RFC 6455 requires client-to-server frames to be masked and server-to-client
     /// frames to be unmasked.  The default keeps parseFrame's original tolerant
@@ -168,7 +212,7 @@ fn validateFrameHeader(header: FrameHeader, options: ParseFrameOptions) Error!vo
 
 fn validatePayload(header: FrameHeader, payload: []const u8, options: ParseFrameOptions) Error!void {
     switch (header.opcode) {
-        .text => if (options.validate_utf8 and header.fin and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8,
+        .text => if (options.validate_utf8 and header.fin and !header.rsv1 and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8,
         .close => try validateClosePayload(payload),
         .continuation, .binary, .ping, .pong => {},
         _ => {},
@@ -216,8 +260,31 @@ pub fn writeFrame(
     payload: []const u8,
     options: struct { fin: bool = true, mask_key: ?[4]u8 = null },
 ) !void {
+    try writeFrameExtended(list, allocator, opcode, payload, .{
+        .fin = options.fin,
+        .mask_key = options.mask_key,
+    });
+}
+
+pub fn writeFrameExtended(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    opcode: Opcode,
+    payload: []const u8,
+    options: struct {
+        fin: bool = true,
+        mask_key: ?[4]u8 = null,
+        rsv1: bool = false,
+        rsv2: bool = false,
+        rsv3: bool = false,
+    },
+) !void {
     if (opcode.isControl() and (!options.fin or payload.len > 125)) return error.InvalidControlFrame;
-    const b0: u8 = (if (options.fin) @as(u8, 0x80) else 0) | @intFromEnum(opcode);
+    const b0: u8 = (if (options.fin) @as(u8, 0x80) else 0) |
+        (if (options.rsv1) @as(u8, 0x40) else 0) |
+        (if (options.rsv2) @as(u8, 0x20) else 0) |
+        (if (options.rsv3) @as(u8, 0x10) else 0) |
+        @intFromEnum(opcode);
     try list.append(allocator, b0);
     const masked_bit: u8 = if (options.mask_key != null) 0x80 else 0;
     if (payload.len <= 125) {
@@ -298,11 +365,13 @@ pub const MessageAssembler = struct {
     allocator: std.mem.Allocator,
     max_message_bytes: usize = std.math.maxInt(usize),
     opcode: ?Opcode = null,
+    compressed: bool = false,
     buffer: std.ArrayList(u8) = .empty,
 
     pub const Message = struct {
         opcode: Opcode,
         payload: []u8,
+        compressed: bool = false,
     };
 
     pub fn init(allocator: std.mem.Allocator) MessageAssembler {
@@ -323,9 +392,12 @@ pub const MessageAssembler = struct {
         if (frame.header.opcode != .continuation) {
             if (self.opcode != null) return error.InvalidFrame;
             self.opcode = frame.header.opcode;
+            self.compressed = frame.header.rsv1;
             self.buffer.clearRetainingCapacity();
         } else if (self.opcode == null) {
             return error.InvalidFrame;
+        } else if (frame.header.rsv1) {
+            return error.UnexpectedRsv;
         }
         // A fragmented message can be split into many individually-valid
         // frames.  Bound the aggregate payload, not only the current frame, so
@@ -336,11 +408,87 @@ pub const MessageAssembler = struct {
         if (!frame.header.fin) return null;
         const payload = try self.buffer.toOwnedSlice(self.allocator);
         const opcode = self.opcode.?;
+        const compressed = self.compressed;
         self.opcode = null;
+        self.compressed = false;
         self.buffer = .empty;
-        return .{ .opcode = opcode, .payload = payload };
+        return .{ .opcode = opcode, .payload = payload, .compressed = compressed };
     }
 };
+
+pub fn compressMessage(allocator: std.mem.Allocator, payload: []const u8) Error![]u8 {
+    var output_writer = try std.Io.Writer.Allocating.initCapacity(allocator, payload.len + 32);
+    errdefer output_writer.deinit();
+    const history = try allocator.alloc(u8, std.compress.flate.max_window_len * 2);
+    defer allocator.free(history);
+    var compressor = try std.compress.flate.Compress.init(&output_writer.writer, history, .raw, std.compress.flate.Compress.Options.default);
+    try compressor.writer.writeAll(payload);
+    // Zig 0.16 does not expose a dedicated zlib Z_SYNC_FLUSH mode.  Finish a
+    // self-contained raw DEFLATE message, then clear the BFINAL bit on the
+    // first block so the receiver-side RFC 7692 tail restoration
+    // (00 00 ff ff) cleanly terminates the message without carrying context.
+    try std.compress.flate.Compress.finish(&compressor);
+    const compressed = try output_writer.toOwnedSlice();
+    if (compressed.len != 0) compressed[0] &= 0xfe;
+    return compressed;
+}
+
+pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []const u8, max_message_bytes: usize) Error![]u8 {
+    var with_tail = try std.ArrayList(u8).initCapacity(allocator, compressed_payload.len + 4);
+    defer with_tail.deinit(allocator);
+    try with_tail.appendSlice(allocator, compressed_payload);
+    try with_tail.appendSlice(allocator, &.{
+        0x00, 0x00, 0xff, 0xff, // RFC 7692 tail restored for the message.
+        0x01, 0x00, 0x00, 0xff, 0xff, // Final empty block for std's raw inflater.
+    });
+
+    var input_reader = std.Io.Reader.fixed(with_tail.items);
+    const buffer = try allocator.alloc(u8, std.compress.flate.max_window_len);
+    defer allocator.free(buffer);
+    var decompressor = std.compress.flate.Decompress.init(&input_reader, .raw, buffer);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    while (decompressor.reader.peekGreedy(1)) |bytes| {
+        if (output.writer.end + bytes.len > max_message_bytes) return error.PayloadTooLarge;
+        try output.writer.writeAll(bytes);
+        decompressor.reader.toss(bytes.len);
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        error.ReadFailed => return error.InvalidFrame,
+    }
+    return output.toOwnedSlice();
+}
+
+fn parseExtensionOffer(value: []const u8) Error!?ExtensionNegotiation {
+    if (value.len == 0) return null;
+    var parts = std.mem.splitScalar(u8, value, ';');
+    const name = wire.trimOws(parts.next() orelse return null);
+    if (!std.ascii.eqlIgnoreCase(name, "permessage-deflate")) return null;
+    var out = ExtensionNegotiation{ .permessage_deflate = true };
+    while (parts.next()) |raw_param| {
+        const param = wire.trimOws(raw_param);
+        if (param.len == 0) return error.InvalidExtension;
+        if (std.ascii.eqlIgnoreCase(param, "client_no_context_takeover")) {
+            out.client_no_context_takeover = true;
+        } else if (std.ascii.eqlIgnoreCase(param, "server_no_context_takeover")) {
+            out.server_no_context_takeover = true;
+        } else if (parseWindowBitsParam(param, "client_max_window_bits")) |bits| {
+            out.client_max_window_bits = bits;
+        } else if (parseWindowBitsParam(param, "server_max_window_bits")) |bits| {
+            out.server_max_window_bits = bits;
+        }
+    }
+    if (out.client_max_window_bits) |bits| if (bits < 8 or bits > 15) return error.InvalidExtension;
+    if (out.server_max_window_bits) |bits| if (bits < 8 or bits > 15) return error.InvalidExtension;
+    return out;
+}
+
+fn parseWindowBitsParam(param: []const u8, name: []const u8) ?u8 {
+    if (std.ascii.eqlIgnoreCase(param, name)) return 15;
+    if (param.len <= name.len or param[name.len] != '=') return null;
+    if (!std.ascii.eqlIgnoreCase(param[0..name.len], name)) return null;
+    return std.fmt.parseInt(u8, param[name.len + 1 ..], 10) catch 0;
+}
 
 test "WebSocket accept key matches RFC example" {
     const key = acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
@@ -393,6 +541,37 @@ test "WebSocket close payload validation" {
 
     var bad_utf8 = [_]u8{ 0x03, 0xe8, 0xc0, 0x80 };
     try std.testing.expectError(error.InvalidUtf8, validateClosePayload(&bad_utf8));
+}
+
+test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
+    const allocator = std.testing.allocator;
+
+    const accepted = try ExtensionNegotiation.accept(
+        allocator,
+        "permessage-deflate; client_no_context_takeover; server_max_window_bits=15",
+        true,
+    );
+    defer if (accepted) |value| allocator.free(value);
+    try std.testing.expect(accepted != null);
+    try std.testing.expect(std.mem.indexOf(u8, accepted.?, "permessage-deflate") != null);
+    const response = try ExtensionNegotiation.validateResponse(accepted.?);
+    try std.testing.expect(response.permessage_deflate);
+
+    const payload = "compress me compress me compress me compress me";
+    const compressed = try compressMessage(allocator, payload);
+    defer allocator.free(compressed);
+    try std.testing.expect(compressed.len < payload.len);
+    const decoded = try decompressMessage(allocator, compressed, 1024);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings(payload, decoded);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeFrameExtended(&encoded, allocator, .text, compressed, .{ .rsv1 = true });
+    var frame = try parseFrameOptions(allocator, encoded.items, .{ .allow_rsv1 = true, .validate_utf8 = false });
+    defer frame.deinit(allocator);
+    try std.testing.expect(frame.header.rsv1);
+    try std.testing.expectError(error.PayloadTooLarge, decompressMessage(allocator, frame.payload, 4));
 }
 
 test "WebSocket message assembler enforces aggregate payload limit" {

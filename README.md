@@ -7,11 +7,13 @@ starts with deterministic parsers, serializers, and state helpers for:
   transfer writing with validated trailer fields, keep-alive/upgrade handling, pipelined
   byte buffering for persistent connections, method-aware response body
   handling for HEAD and successful CONNECT, interim 1xx response skipping plus
-  server-side `Expect: 100-continue` handling, ambiguous body-length rejection,
+  server-side `Expect: 100-continue` handling, ambiguous body-length rejection
+  across repeated/coalesced `Content-Length` and unsupported transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with a `std.Io.async`
   concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
-  HPACK static/literal encoder-decoder, PING/GOAWAY/WINDOW_UPDATE connection
+  HPACK static/literal encoder-decoder with RFC 7541 Huffman strings plus
+  dynamic-table indexing/size-update state for long-lived runtimes, PING/GOAWAY/WINDOW_UPDATE connection
   management including interleaved SETTINGS/PING/WINDOW_UPDATE/PRIORITY handling and GOAWAY propagation during stream reads and post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets, default client server-push opt-out, connection- and stream-level flow-control enforcement including
   SETTINGS_INITIAL_WINDOW_SIZE updates, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation,
   outbound frame splitting, frame-envelope and stream-id direction/monotonicity validation, request/response trailers, pre-HEADERS frame ordering checks, interim 1xx response skipping, content-length
@@ -94,7 +96,8 @@ starts with deterministic parsers, serializers, and state helpers for:
 - WebSocket handshakes, nonce validation, frame masking, strict frame/control
   validation, close payload checks, fragmented message assembly with aggregate
   message-size limits, automatic PING→PONG and close echo handling,
-  subprotocol negotiation, serialized connection writes, and a blocking TCP
+  subprotocol negotiation, optional permessage-deflate negotiation with
+  no-context-takeover raw-deflate compression/decompression, serialized connection writes, and a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
   server helper
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and

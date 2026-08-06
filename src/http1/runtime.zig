@@ -715,17 +715,62 @@ fn messageTargetLength(bytes: []const u8, head_end: usize, max_body_bytes: usize
     const body_start = head_end + 4;
     const head = bytes[0..head_end];
     if (responseHeadForbidsBody(head, request_method)) return body_start;
-    if (findHeaderValue(head, "transfer-encoding")) |transfer_encoding| {
-        if (wire.containsToken(transfer_encoding, "chunked")) {
-            return body_start + try chunkedWireLength(bytes[body_start..], max_body_bytes);
-        }
+    if (try transferEncodingIsChunked(head)) {
+        return body_start + try chunkedWireLength(bytes[body_start..], max_body_bytes);
     }
-    if (findHeaderValue(head, "content-length")) |content_length| {
-        const len = std.fmt.parseInt(usize, wire.trimOws(content_length), 10) catch return error.InvalidContentLength;
+    if (try contentLengthFromHead(head)) |len| {
         if (len > max_body_bytes) return error.BodyTooLarge;
         return body_start + len;
     }
     return body_start;
+}
+
+fn transferEncodingIsChunked(head: []const u8) Error!bool {
+    var saw_transfer_encoding = false;
+    var saw_chunked = false;
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..colon], "transfer-encoding")) continue;
+        saw_transfer_encoding = true;
+        var tokens = std.mem.splitScalar(u8, line[colon + 1 ..], ',');
+        while (tokens.next()) |raw| {
+            const token = wire.trimOws(raw);
+            if (token.len == 0) return error.InvalidTransferEncoding;
+            if (!std.ascii.eqlIgnoreCase(token, "chunked")) return error.InvalidTransferEncoding;
+            if (saw_chunked) return error.InvalidTransferEncoding;
+            saw_chunked = true;
+        }
+    }
+    if (!saw_transfer_encoding) return false;
+    if (!saw_chunked) return error.InvalidTransferEncoding;
+    return true;
+}
+
+fn contentLengthFromHead(head: []const u8) Error!?usize {
+    var found: ?usize = null;
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..colon], "content-length")) continue;
+        var parts = std.mem.splitScalar(u8, line[colon + 1 ..], ',');
+        while (parts.next()) |raw_part| {
+            const part = wire.trimOws(raw_part);
+            if (part.len == 0) return error.InvalidContentLength;
+            const parsed = std.fmt.parseInt(usize, part, 10) catch |err| switch (err) {
+                error.InvalidCharacter => return error.InvalidContentLength,
+                error.Overflow => return error.ContentLengthOverflow,
+            };
+            if (found) |existing| {
+                if (existing != parsed) return error.ConflictingContentLength;
+            } else {
+                found = parsed;
+            }
+        }
+    }
+    return found;
 }
 
 fn responseHeadUsesCloseDelimitedBody(head: []const u8, request_method: ?http1.Method) bool {
@@ -772,13 +817,8 @@ fn requestHeadIsHttp11(head: []const u8) bool {
 }
 
 fn requestHeadHasBody(head: []const u8) bool {
-    if (findHeaderValue(head, "transfer-encoding")) |transfer_encoding| {
-        if (wire.containsToken(transfer_encoding, "chunked")) return true;
-    }
-    if (findHeaderValue(head, "content-length")) |content_length| {
-        const len = std.fmt.parseInt(usize, wire.trimOws(content_length), 10) catch return false;
-        return len > 0;
-    }
+    if (transferEncodingIsChunked(head) catch false) return true;
+    if (contentLengthFromHead(head) catch null) |len| return len > 0;
     return false;
 }
 
@@ -1623,4 +1663,18 @@ test "HTTP/1 status-forbidden body preserves pipelined response without request 
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/1 runtime target length rejects ambiguous head framing" {
+    const conflicting = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!";
+    const conflicting_head_end = std.mem.indexOf(u8, conflicting, "\r\n\r\n").?;
+    try std.testing.expectError(error.ConflictingContentLength, messageTargetLength(conflicting, conflicting_head_end, 1024, null));
+
+    const coalesced = "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nhello";
+    const coalesced_head_end = std.mem.indexOf(u8, coalesced, "\r\n\r\n").?;
+    try std.testing.expectEqual(coalesced.len, try messageTargetLength(coalesced, coalesced_head_end, 1024, null));
+
+    const unsupported_te = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    const unsupported_te_head_end = std.mem.indexOf(u8, unsupported_te, "\r\n\r\n").?;
+    try std.testing.expectError(error.InvalidTransferEncoding, messageTargetLength(unsupported_te, unsupported_te_head_end, 1024, null));
 }

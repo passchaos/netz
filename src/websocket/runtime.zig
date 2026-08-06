@@ -62,11 +62,18 @@ pub const Server = struct {
         const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
         const selected_protocol = try selectSubprotocol(self.http.allocator, request.header("sec-websocket-protocol"), options.protocols);
         errdefer if (selected_protocol) |protocol| self.http.allocator.free(protocol);
+        const selected_extension = try websocket.ExtensionNegotiation.accept(
+            self.http.allocator,
+            request.header("sec-websocket-extensions"),
+            options.enable_permessage_deflate,
+        );
+        defer if (selected_extension) |extension| self.http.allocator.free(extension);
         var response: std.ArrayList(u8) = .empty;
         defer response.deinit(self.http.allocator);
         var headers: std.ArrayList(http1.Header) = .empty;
         defer headers.deinit(self.http.allocator);
         if (selected_protocol) |protocol| try headers.append(self.http.allocator, .{ .name = "Sec-WebSocket-Protocol", .value = protocol });
+        if (selected_extension) |extension| try headers.append(self.http.allocator, .{ .name = "Sec-WebSocket-Extensions", .value = extension });
         try headers.appendSlice(self.http.allocator, options.extra_headers);
         try websocket.writeServerHandshake(&response, self.http.allocator, key, headers.items);
         try writeAll(http_conn.io, http_conn.stream, response.items);
@@ -78,6 +85,7 @@ pub const Server = struct {
             .role = .server,
             .limits = self.limits,
             .selected_protocol = selected_protocol,
+            .permessage_deflate = selected_extension != null,
             .inbuf = try std.ArrayList(u8).initCapacity(self.http.allocator, head.extra.len),
         };
         errdefer connection.inbuf.deinit(connection.allocator);
@@ -164,6 +172,7 @@ fn ServeTask(comptime HandlerContext: type) type {
 pub const AcceptOptions = struct {
     protocols: []const []const u8 = &.{},
     extra_headers: []const http1.Header = &.{},
+    enable_permessage_deflate: bool = false,
 };
 
 pub const Client = struct {
@@ -200,6 +209,12 @@ pub const Client = struct {
             }
             try headers.append(allocator, .{ .name = "Sec-WebSocket-Protocol", .value = protocol_value.items });
         }
+        if (options.enable_permessage_deflate) {
+            try headers.append(allocator, .{
+                .name = "Sec-WebSocket-Extensions",
+                .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+            });
+        }
         try http1_runtime.writeRequestToStream(allocator, io, stream, .{
             .method = .GET,
             .target = options.target,
@@ -213,6 +228,8 @@ pub const Client = struct {
         if (response.status != 101) return error.InvalidResponse;
         const selected_protocol = try validateServerHandshake(allocator, response, &key, options.protocols);
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
+        const selected_extension = try websocket.ExtensionNegotiation.validateResponse(response.header("sec-websocket-extensions"));
+        if (selected_extension.permessage_deflate and !options.enable_permessage_deflate) return error.InvalidExtension;
 
         var connection = Connection{
             .io = io,
@@ -221,6 +238,7 @@ pub const Client = struct {
             .role = .client,
             .limits = options.limits,
             .selected_protocol = selected_protocol,
+            .permessage_deflate = selected_extension.permessage_deflate,
             .inbuf = try std.ArrayList(u8).initCapacity(allocator, head.extra.len),
         };
         errdefer connection.inbuf.deinit(connection.allocator);
@@ -233,6 +251,7 @@ pub const ConnectOptions = struct {
     host: []const u8,
     target: []const u8 = "/",
     protocols: []const []const u8 = &.{},
+    enable_permessage_deflate: bool = false,
     limits: Limits = .{},
 };
 
@@ -257,6 +276,7 @@ pub const Connection = struct {
     close_sent: bool = false,
     close_received: bool = false,
     selected_protocol: ?[]u8 = null,
+    permessage_deflate: bool = false,
 
     fn bufferInitial(self: *Connection, bytes: []const u8) Error!void {
         try self.inbuf.appendSlice(self.allocator, bytes);
@@ -270,11 +290,11 @@ pub const Connection = struct {
     }
 
     pub fn sendText(self: *Connection, text: []const u8) Error!void {
-        try self.sendFrame(.text, text);
+        try self.sendMessage(.text, text);
     }
 
     pub fn sendBinary(self: *Connection, payload: []const u8) Error!void {
-        try self.sendFrame(.binary, payload);
+        try self.sendMessage(.binary, payload);
     }
 
     pub fn sendPing(self: *Connection, payload: []const u8) Error!void {
@@ -300,6 +320,21 @@ pub const Connection = struct {
         defer self.send_mutex.unlock(self.io);
         try self.writeFrameLocked(opcode, payload, true);
         if (opcode == .close) self.close_sent = true;
+    }
+
+    pub fn sendMessage(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
+        if (opcode != .text and opcode != .binary) return error.InvalidFrame;
+        if (self.close_sent) return error.ConnectionClosed;
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+
+        if (self.permessage_deflate and payload.len != 0) {
+            const compressed = try websocket.compressMessage(self.allocator, payload);
+            defer self.allocator.free(compressed);
+            try self.writeFrameLockedExtended(opcode, compressed, true, .{ .rsv1 = true });
+        } else {
+            try self.writeFrameLocked(opcode, payload, true);
+        }
     }
 
     pub fn sendFragmented(self: *Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
@@ -333,10 +368,12 @@ pub const Connection = struct {
         try self.ensureBuffered(total_len);
 
         const parse_options: websocket.ParseFrameOptions = switch (self.role) {
-            .client => .{ .expect_mask = .unmasked },
-            .server => .{ .expect_mask = .masked },
+            .client => .{ .expect_mask = .unmasked, .allow_rsv1 = self.permessage_deflate },
+            .server => .{ .expect_mask = .masked, .allow_rsv1 = self.permessage_deflate },
         };
-        const frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
+        var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
+        errdefer frame.deinit(self.allocator);
+        if (frame.header.rsv1 and (frame.header.opcode.isControl() or frame.header.opcode == .continuation)) return error.UnexpectedRsv;
         self.discardBuffered(frame.consumed);
         return frame;
     }
@@ -364,11 +401,16 @@ pub const Connection = struct {
                 else => {
                     const maybe_message = try assembler.feed(frame);
                     if (maybe_message) |message| {
-                        if (message.opcode == .text and !std.unicode.utf8ValidateSlice(message.payload)) {
+                        var payload = message.payload;
+                        if (message.compressed) {
+                            payload = try websocket.decompressMessage(self.allocator, message.payload, self.limits.max_message_bytes);
                             self.allocator.free(message.payload);
+                        }
+                        if (message.opcode == .text and !std.unicode.utf8ValidateSlice(payload)) {
+                            self.allocator.free(payload);
                             return error.InvalidUtf8;
                         }
-                        return .{ .opcode = message.opcode, .payload = message.payload };
+                        return .{ .opcode = message.opcode, .payload = payload };
                     }
                 },
             }
@@ -376,6 +418,16 @@ pub const Connection = struct {
     }
 
     fn writeFrameLocked(self: *Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
+        try self.writeFrameLockedExtended(opcode, payload, fin, .{});
+    }
+
+    fn writeFrameLockedExtended(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        fin: bool,
+        options: struct { rsv1: bool = false },
+    ) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         const mask_key = if (self.role == .client) blk: {
@@ -383,7 +435,11 @@ pub const Connection = struct {
             try std.Io.randomSecure(self.io, &key);
             break :blk key;
         } else null;
-        try websocket.writeFrame(&encoded, self.allocator, opcode, payload, .{ .fin = fin, .mask_key = mask_key });
+        try websocket.writeFrameExtended(&encoded, self.allocator, opcode, payload, .{
+            .fin = fin,
+            .mask_key = mask_key,
+            .rsv1 = options.rsv1,
+        });
         try writeAll(self.io, self.stream, encoded.items);
     }
 
@@ -631,6 +687,73 @@ test "WebSocket runtime negotiates subprotocol" {
     var response = try client.receiveFrame();
     defer response.deinit(allocator);
     try std.testing.expectEqualStrings("world", response.payload);
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket runtime negotiates permessage-deflate" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{ .enable_permessage_deflate = true });
+            defer connection.close();
+            try std.testing.expect(connection.permessage_deflate);
+
+            var request = try connection.receiveMessage();
+            defer request.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.text, request.opcode);
+            try std.testing.expectEqualStrings("compressible compressible compressible", request.payload);
+
+            try connection.sendText("deflated response deflated response");
+
+            var close = try connection.receiveFrame();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/deflate",
+        .enable_permessage_deflate = true,
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
+    });
+    defer client.close();
+    try std.testing.expect(client.permessage_deflate);
+
+    try client.sendText("compressible compressible compressible");
+    var response = try client.receiveMessage();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, response.opcode);
+    try std.testing.expectEqualStrings("deflated response deflated response", response.payload);
+
     try client.sendClose(.normal_closure, "bye");
 
     thread.join();

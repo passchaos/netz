@@ -1,5 +1,6 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
+const hpack_huffman = @import("hpack_huffman.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const connection_preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -438,6 +439,8 @@ pub fn validateClientPreface(bytes: []const u8) Error!void {
 }
 
 pub const Hpack = struct {
+    pub const default_dynamic_table_size: usize = 4096;
+
     pub const StaticEntry = struct {
         name: []const u8,
         value: []const u8,
@@ -514,6 +517,157 @@ pub const Hpack = struct {
         name: []const u8,
         value: []const u8,
         never_index: bool = false,
+        /// Set by decoders when a Huffman string had to be materialized into
+        /// owned memory.  Call `freeDecodedFields` on decoder output instead of
+        /// only freeing the slice so these allocations are released.
+        name_storage: ?[]u8 = null,
+        value_storage: ?[]u8 = null,
+    };
+
+    pub const DynamicTable = struct {
+        entries: std.ArrayList(HeaderField) = .empty,
+        size_limit: usize = default_dynamic_table_size,
+        used: usize = 0,
+
+        pub fn deinit(self: *DynamicTable, allocator: std.mem.Allocator) void {
+            self.clear(allocator);
+            self.entries.deinit(allocator);
+            self.* = undefined;
+        }
+
+        pub fn clear(self: *DynamicTable, allocator: std.mem.Allocator) void {
+            for (self.entries.items) |item| {
+                allocator.free(item.name);
+                allocator.free(item.value);
+            }
+            self.entries.clearRetainingCapacity();
+            self.used = 0;
+        }
+
+        pub fn setLimit(self: *DynamicTable, allocator: std.mem.Allocator, new_limit: usize) void {
+            self.size_limit = new_limit;
+            self.evictToLimit(allocator);
+        }
+
+        pub fn add(self: *DynamicTable, allocator: std.mem.Allocator, name: []const u8, value: []const u8) !void {
+            const size = entrySize(name, value);
+            if (size > self.size_limit) {
+                // RFC 7541 §4.4: an entry larger than the table size empties the
+                // table and is not inserted.  Keeping this branch explicit avoids
+                // retaining stale state after an oversized indexed literal.
+                self.clear(allocator);
+                return;
+            }
+
+            const name_copy = try allocator.dupe(u8, name);
+            errdefer allocator.free(name_copy);
+            const value_copy = try allocator.dupe(u8, value);
+            errdefer allocator.free(value_copy);
+
+            try self.entries.append(allocator, undefined);
+            var index = self.entries.items.len - 1;
+            while (index > 0) : (index -= 1) {
+                self.entries.items[index] = self.entries.items[index - 1];
+            }
+            self.entries.items[0] = .{ .name = name_copy, .value = value_copy };
+            self.used += size;
+            self.evictToLimit(allocator);
+        }
+
+        fn get(self: DynamicTable, dynamic_index: usize) ?HeaderField {
+            if (dynamic_index >= self.entries.items.len) return null;
+            return self.entries.items[dynamic_index];
+        }
+
+        fn findIndex(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
+            for (self.entries.items, 0..) |item, i| {
+                if (std.mem.eql(u8, item.name, name) and std.mem.eql(u8, item.value, value)) {
+                    return @intCast(static_table.len + i + 1);
+                }
+            }
+            return null;
+        }
+
+        fn findNameIndex(self: DynamicTable, name: []const u8) ?u64 {
+            for (self.entries.items, 0..) |item, i| {
+                if (std.mem.eql(u8, item.name, name)) return @intCast(static_table.len + i + 1);
+            }
+            return null;
+        }
+
+        fn evictToLimit(self: *DynamicTable, allocator: std.mem.Allocator) void {
+            while (self.used > self.size_limit and self.entries.items.len != 0) {
+                const removed = self.entries.orderedRemove(self.entries.items.len - 1);
+                self.used -= entrySize(removed.name, removed.value);
+                allocator.free(removed.name);
+                allocator.free(removed.value);
+            }
+        }
+    };
+
+    pub const Decoder = struct {
+        dynamic_table: DynamicTable = .{},
+        max_dynamic_table_size: usize = default_dynamic_table_size,
+
+        pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
+            self.dynamic_table.deinit(allocator);
+            self.* = undefined;
+        }
+
+        pub fn setMaxDynamicTableSize(self: *Decoder, allocator: std.mem.Allocator, max_size: usize) void {
+            self.max_dynamic_table_size = max_size;
+            if (self.dynamic_table.size_limit > max_size) self.dynamic_table.setLimit(allocator, max_size);
+        }
+
+        pub fn decodeBlock(self: *Decoder, allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
+            return decodeBlockWithDynamicTable(allocator, block, &self.dynamic_table, self.max_dynamic_table_size);
+        }
+    };
+
+    pub const Encoder = struct {
+        dynamic_table: DynamicTable = .{},
+
+        pub fn deinit(self: *Encoder, allocator: std.mem.Allocator) void {
+            self.dynamic_table.deinit(allocator);
+            self.* = undefined;
+        }
+
+        pub fn setMaxDynamicTableSize(self: *Encoder, allocator: std.mem.Allocator, max_size: usize) void {
+            self.dynamic_table.setLimit(allocator, max_size);
+        }
+
+        pub fn encodeBlock(self: *Encoder, list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
+            for (fields) |field| {
+                if (!field.never_index) {
+                    if (findStaticIndex(field.name, field.value)) |index| {
+                        try encodeInteger(list, allocator, 7, 0x80, index);
+                        continue;
+                    }
+                    if (self.dynamic_table.findIndex(field.name, field.value)) |index| {
+                        try encodeInteger(list, allocator, 7, 0x80, index);
+                        continue;
+                    }
+                }
+
+                const representation: u8 = if (field.never_index) 0x10 else 0x40;
+                if (findStaticNameIndex(field.name) orelse self.dynamic_table.findNameIndex(field.name)) |name_index| {
+                    if (field.never_index) {
+                        try encodeInteger(list, allocator, 4, representation, name_index);
+                    } else {
+                        try encodeInteger(list, allocator, 6, representation, name_index);
+                    }
+                } else {
+                    if (field.never_index) {
+                        try encodeInteger(list, allocator, 4, representation, 0);
+                    } else {
+                        try encodeInteger(list, allocator, 6, representation, 0);
+                    }
+                    try encodeString(list, allocator, field.name);
+                }
+                try encodeString(list, allocator, field.value);
+                if (!field.never_index) try self.dynamic_table.add(allocator, field.name, field.value);
+            }
+        }
     };
 
     pub fn findStaticIndex(name: []const u8, value: []const u8) ?u64 {
@@ -533,50 +687,149 @@ pub const Hpack = struct {
     }
 
     pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
-        for (fields) |field| {
-            if (!field.never_index) {
-                if (findStaticIndex(field.name, field.value)) |index| {
-                    try encodeInteger(list, allocator, 7, 0x80, index);
-                    continue;
-                }
-            }
+        var encoder = Encoder{};
+        defer encoder.deinit(allocator);
+        try encoder.encodeBlock(list, allocator, fields);
+    }
 
-            const representation: u8 = if (field.never_index) 0x10 else 0x00;
-            if (findStaticNameIndex(field.name)) |name_index| {
-                try encodeInteger(list, allocator, 4, representation, name_index);
-            } else {
-                try encodeInteger(list, allocator, 4, representation, 0);
-                try encodeString(list, allocator, field.name);
-            }
-            try encodeString(list, allocator, field.value);
+    /// Decode a self-contained HPACK field block.  For long-lived HTTP/2
+    /// connections use `Hpack.Decoder` so incremental-indexing state survives
+    /// across HEADERS/CONTINUATION blocks.  Decoder-owned string storage (for
+    /// Huffman literals) is released with `freeDecodedFields`.
+    pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
+        if (block.len != 0 and (block[0] & 0xe0) == 0x20) return error.HpackDynamicTableUnsupported;
+        var dynamic_table = DynamicTable{};
+        defer dynamic_table.deinit(allocator);
+        return decodeBlockWithDynamicTable(allocator, block, &dynamic_table, default_dynamic_table_size);
+    }
+
+    pub fn freeDecodedFields(allocator: std.mem.Allocator, fields: []HeaderField) void {
+        freeFieldStorages(allocator, fields);
+        allocator.free(fields);
+    }
+
+    fn freeFieldStorages(allocator: std.mem.Allocator, fields: []HeaderField) void {
+        for (fields) |field| {
+            if (field.name_storage) |name| allocator.free(name);
+            if (field.value_storage) |value| allocator.free(value);
         }
     }
 
-    /// A pragmatic HPACK codec. It resolves RFC 7541 static-table references and
-    /// literal fields, but intentionally refuses dynamic-table references and
-    /// Huffman strings so callers never observe partially-decoded state.
-    pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
+    pub fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+
+        var bits: u64 = 0;
+        var bits_left: u6 = 40;
+        for (value) |byte| {
+            const entry = hpack_huffman.encode_table[byte];
+            bits |= @as(u64, entry.code) << @intCast(bits_left - entry.bits);
+            bits_left -= entry.bits;
+
+            while (bits_left <= 32) {
+                try out.append(allocator, @truncate(bits >> 32));
+                bits <<= 8;
+                bits_left += 8;
+            }
+        }
+
+        if (bits_left != 40) {
+            // RFC 7541 §5.2 pads the final octet with a prefix of the EOS code,
+            // which is all ones.  The EOS symbol itself is never emitted.
+            bits |= (@as(u64, 1) << bits_left) - 1;
+            try out.append(allocator, @truncate(bits >> 32));
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+
+        var code: u32 = 0;
+        var code_len: u6 = 0;
+        for (encoded) |byte| {
+            var bit_index: u4 = 0;
+            while (bit_index < 8) : (bit_index += 1) {
+                const shift: u3 = @intCast(7 - bit_index);
+                code = (code << 1) | @as(u32, (byte >> shift) & 1);
+                code_len += 1;
+                if (code_len > 30) return error.InvalidEncoding;
+                if (huffmanSymbol(code, code_len)) |symbol| {
+                    if (symbol == hpack_huffman.eos_symbol) return error.InvalidEncoding;
+                    try out.append(allocator, @intCast(symbol));
+                    code = 0;
+                    code_len = 0;
+                }
+            }
+        }
+
+        if (code_len != 0) {
+            // The only legal incomplete suffix is EOS-prefix padding of at most
+            // seven one bits (RFC 7541 §5.2).
+            if (code_len > 7) return error.InvalidEncoding;
+            const padding = (@as(u32, 1) << @as(u5, @intCast(code_len))) - 1;
+            if (code != padding) return error.InvalidEncoding;
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    fn decodeBlockWithDynamicTable(
+        allocator: std.mem.Allocator,
+        block: []const u8,
+        dynamic_table: *DynamicTable,
+        max_dynamic_table_size: usize,
+    ) ![]HeaderField {
         var cursor = wire.Cursor.init(block);
         var fields: std.ArrayList(HeaderField) = .empty;
-        errdefer fields.deinit(allocator);
+        errdefer {
+            freeFieldStorages(allocator, fields.items);
+            fields.deinit(allocator);
+        }
+        var saw_header = false;
         while (!cursor.eof()) {
             const first = try cursor.readByte();
             if ((first & 0x80) != 0) {
-                const entry = try staticEntry(try decodeInteger(first, &cursor, 7));
-                try fields.append(allocator, .{ .name = entry.name, .value = entry.value });
+                saw_header = true;
+                try fields.append(allocator, try indexedHeaderOwned(allocator, dynamic_table, try decodeInteger(first, &cursor, 7)));
                 continue;
             }
 
-            const name_index = if ((first & 0x40) != 0)
+            if ((first & 0xe0) == 0x20) {
+                if (saw_header) return error.InvalidEncoding;
+                const new_size = std.math.cast(usize, try decodeInteger(first, &cursor, 5)) orelse return error.IntegerOverflow;
+                if (new_size > max_dynamic_table_size) return error.InvalidEncoding;
+                dynamic_table.setLimit(allocator, new_size);
+                continue;
+            }
+
+            saw_header = true;
+            const indexed_literal = (first & 0x40) != 0;
+            const name_index = if (indexed_literal)
                 try decodeInteger(first, &cursor, 6)
-            else if ((first & 0x20) != 0)
-                return error.HpackDynamicTableUnsupported
             else
                 try decodeInteger(first, &cursor, 4);
             const never_index = (first & 0x10) != 0;
-            const name = if (name_index == 0) try decodeString(&cursor) else (try staticEntry(name_index)).name;
-            const value = try decodeString(&cursor);
-            try fields.append(allocator, .{ .name = name, .value = value, .never_index = never_index });
+
+            var field = HeaderField{
+                .name = undefined,
+                .value = undefined,
+                .never_index = never_index,
+            };
+            if (name_index == 0) {
+                const name = try decodeString(allocator, &cursor);
+                field.name = name.value;
+                field.name_storage = name.storage;
+            } else {
+                const name = try indexedNameOwned(allocator, dynamic_table, name_index);
+                field.name = name.value;
+                field.name_storage = name.storage;
+            }
+            const value = try decodeString(allocator, &cursor);
+            field.value = value.value;
+            field.value_storage = value.storage;
+            if (indexed_literal) try dynamic_table.add(allocator, field.name, field.value);
+            try fields.append(allocator, field);
         }
         return fields.toOwnedSlice(allocator);
     }
@@ -619,22 +872,70 @@ pub const Hpack = struct {
     }
 
     fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
-        try encodeInteger(list, allocator, 7, 0x00, value.len);
-        try list.appendSlice(allocator, value);
+        const huffman = try encodeHuffman(allocator, value);
+        defer allocator.free(huffman);
+        if (huffman.len < value.len) {
+            try encodeInteger(list, allocator, 7, 0x80, huffman.len);
+            try list.appendSlice(allocator, huffman);
+        } else {
+            try encodeInteger(list, allocator, 7, 0x00, value.len);
+            try list.appendSlice(allocator, value);
+        }
     }
 
-    fn decodeString(cursor: *wire.Cursor) ![]const u8 {
+    const DecodedString = struct {
+        value: []const u8,
+        storage: ?[]u8 = null,
+    };
+
+    fn decodeString(allocator: std.mem.Allocator, cursor: *wire.Cursor) !DecodedString {
         const first = try cursor.readByte();
         const huffman = (first & 0x80) != 0;
-        if (huffman) return error.InvalidEncoding;
         const len = std.math.cast(usize, try decodeInteger(first, cursor, 7)) orelse return error.IntegerOverflow;
-        return cursor.readSlice(len);
+        const raw = try cursor.readSlice(len);
+        if (!huffman) return .{ .value = raw };
+        const decoded = try decodeHuffman(allocator, raw);
+        return .{ .value = decoded, .storage = decoded };
     }
 
     fn staticEntry(index: u64) Error!StaticEntry {
         if (index == 0) return error.InvalidEncoding;
         if (index > static_table.len) return error.HpackDynamicTableUnsupported;
         return static_table[@intCast(index - 1)];
+    }
+
+    fn indexedHeaderOwned(allocator: std.mem.Allocator, dynamic_table: *DynamicTable, index: u64) Error!HeaderField {
+        if (index == 0) return error.InvalidEncoding;
+        if (index <= static_table.len) {
+            const entry = static_table[@intCast(index - 1)];
+            return .{ .name = entry.name, .value = entry.value };
+        }
+        const dynamic_index = std.math.cast(usize, index - static_table.len - 1) orelse return error.IntegerOverflow;
+        const entry = dynamic_table.get(dynamic_index) orelse return error.HpackDynamicTableUnsupported;
+        const name = try allocator.dupe(u8, entry.name);
+        errdefer allocator.free(name);
+        const value = try allocator.dupe(u8, entry.value);
+        return .{ .name = name, .value = value, .name_storage = name, .value_storage = value };
+    }
+
+    fn indexedNameOwned(allocator: std.mem.Allocator, dynamic_table: *DynamicTable, index: u64) Error!DecodedString {
+        if (index == 0) return error.InvalidEncoding;
+        if (index <= static_table.len) return .{ .value = static_table[@intCast(index - 1)].name };
+        const dynamic_index = std.math.cast(usize, index - static_table.len - 1) orelse return error.IntegerOverflow;
+        const entry = dynamic_table.get(dynamic_index) orelse return error.HpackDynamicTableUnsupported;
+        const name = try allocator.dupe(u8, entry.name);
+        return .{ .value = name, .storage = name };
+    }
+
+    fn huffmanSymbol(code: u32, bits: u6) ?usize {
+        for (hpack_huffman.encode_table, 0..) |entry, symbol| {
+            if (entry.bits == bits and entry.code == code) return symbol;
+        }
+        return null;
+    }
+
+    fn entrySize(name: []const u8, value: []const u8) usize {
+        return name.len + value.len + 32;
     }
 };
 
@@ -716,7 +1017,7 @@ test "HTTP/2 PUSH_PROMISE payload helper" {
     try std.testing.expectEqual(@as(u8, 3), promise.padding_len);
 
     const fields = try Hpack.decodeLiteralBlock(allocator, promise.header_block);
-    defer allocator.free(fields);
+    defer Hpack.freeDecodedFields(allocator, fields);
     try std.testing.expectEqualStrings("/pushed.css", fields[1].value);
 
     try std.testing.expectError(error.InvalidStreamId, PushPromisePayload.write(&encoded, allocator, 0, 2, block.items, .{}));
@@ -819,7 +1120,7 @@ test "HTTP/2 HPACK static table decode" {
     // not inserted because this bootstrap decoder has no dynamic table.
     const block = "\x82\x86\x84\x41\x0fwww.example.com";
     const fields = try Hpack.decodeLiteralBlock(allocator, block);
-    defer allocator.free(fields);
+    defer Hpack.freeDecodedFields(allocator, fields);
 
     try std.testing.expectEqual(@as(usize, 4), fields.len);
     try std.testing.expectEqualStrings(":method", fields[0].name);
@@ -843,7 +1144,7 @@ test "HTTP/2 HPACK static-only encode roundtrip" {
 
     try Hpack.encodeLiteralBlock(&encoded, allocator, &fields_in);
     const decoded = try Hpack.decodeLiteralBlock(allocator, encoded.items);
-    defer allocator.free(decoded);
+    defer Hpack.freeDecodedFields(allocator, decoded);
 
     try std.testing.expectEqual(fields_in.len, decoded.len);
     for (fields_in, decoded) |expected, actual| {
@@ -853,10 +1154,50 @@ test "HTTP/2 HPACK static-only encode roundtrip" {
     }
 }
 
-test "HTTP/2 HPACK rejects dynamic table references" {
+test "HTTP/2 HPACK Huffman and dynamic table state" {
+    const allocator = std.testing.allocator;
+
+    const huffman = try Hpack.encodeHuffman(allocator, "www.example.com");
+    defer allocator.free(huffman);
+    try std.testing.expectEqualSlices(u8, &.{ 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff }, huffman);
+    const decoded_huffman = try Hpack.decodeHuffman(allocator, huffman);
+    defer allocator.free(decoded_huffman);
+    try std.testing.expectEqualStrings("www.example.com", decoded_huffman);
+
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    var first_block: std.ArrayList(u8) = .empty;
+    defer first_block.deinit(allocator);
+    try encoder.encodeBlock(&first_block, allocator, &.{.{ .name = "x-dynamic", .value = "one" }});
+    try std.testing.expect((first_block.items[0] & 0x40) != 0);
+
+    var second_block: std.ArrayList(u8) = .empty;
+    defer second_block.deinit(allocator);
+    try encoder.encodeBlock(&second_block, allocator, &.{.{ .name = "x-dynamic", .value = "one" }});
+    try std.testing.expect((second_block.items[0] & 0x80) != 0);
+
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    const first_fields = try decoder.decodeBlock(allocator, first_block.items);
+    defer Hpack.freeDecodedFields(allocator, first_fields);
+    try std.testing.expectEqualStrings("x-dynamic", first_fields[0].name);
+    try std.testing.expectEqualStrings("one", first_fields[0].value);
+
+    const second_fields = try decoder.decodeBlock(allocator, second_block.items);
+    defer Hpack.freeDecodedFields(allocator, second_fields);
+    try std.testing.expectEqualStrings("x-dynamic", second_fields[0].name);
+    try std.testing.expectEqualStrings("one", second_fields[0].value);
+}
+
+test "HTTP/2 HPACK rejects unsupported or invalid dynamic table use" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.HpackDynamicTableUnsupported, Hpack.decodeLiteralBlock(allocator, &.{0xfe}));
     try std.testing.expectError(error.HpackDynamicTableUnsupported, Hpack.decodeLiteralBlock(allocator, &.{ 0x20, 0x00 }));
+
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    decoder.setMaxDynamicTableSize(allocator, 32);
+    try std.testing.expectError(error.InvalidEncoding, decoder.decodeBlock(allocator, &.{ 0x3f, 0x02 }));
 }
 
 test {

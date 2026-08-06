@@ -256,6 +256,8 @@ pub const Connection = struct {
     recv_connection_window: FlowWindow = .{},
     send_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
+    hpack_decoder: http2.Hpack.Decoder = .{},
+    hpack_encoder: http2.Hpack.Encoder = .{},
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
@@ -265,6 +267,8 @@ pub const Connection = struct {
     pub fn close(self: *Connection) void {
         self.send_stream_windows.deinit(self.allocator);
         self.recv_stream_windows.deinit(self.allocator);
+        self.hpack_decoder.deinit(self.allocator);
+        self.hpack_encoder.deinit(self.allocator);
         self.stream.close(self.io);
         self.* = undefined;
     }
@@ -557,7 +561,7 @@ pub const Connection = struct {
         try validateHeaderListSize(headers, self.peer_max_header_list_size);
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
-        try http2.Hpack.encodeLiteralBlock(&block, self.allocator, headers);
+        try self.hpack_encoder.encodeBlock(&block, self.allocator, headers);
         try self.writeHeaderBlock(stream_id, block.items, end_stream);
     }
 
@@ -650,7 +654,7 @@ pub const Connection = struct {
             if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
             flags = frame.frame.header.flags;
         }
-        return cloneDecodedHeaders(self.allocator, block.items, self.limits);
+        return cloneDecodedHeaders(self.allocator, block.items, self.limits, &self.hpack_decoder);
     }
 
     fn writeData(self: *Connection, stream_id: u31, data: []const u8, end_stream: bool) Error!void {
@@ -705,6 +709,7 @@ pub const Connection = struct {
                     self.peer_max_frame_size = setting.value;
                 },
                 .max_header_list_size => self.peer_max_header_list_size = setting.value,
+                .header_table_size => self.hpack_encoder.setMaxDynamicTableSize(self.allocator, setting.value),
                 else => {},
             }
         }
@@ -912,9 +917,14 @@ fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.St
     try writeFrame(allocator, io, stream, .settings, 0, 0, payload.items);
 }
 
-fn cloneDecodedHeaders(allocator: std.mem.Allocator, block: []const u8, limits: Limits) Error![]http2.Hpack.HeaderField {
-    const decoded = try http2.Hpack.decodeLiteralBlock(allocator, block);
-    defer allocator.free(decoded);
+fn cloneDecodedHeaders(
+    allocator: std.mem.Allocator,
+    block: []const u8,
+    limits: Limits,
+    decoder: *http2.Hpack.Decoder,
+) Error![]http2.Hpack.HeaderField {
+    const decoded = try decoder.decodeBlock(allocator, block);
+    defer http2.Hpack.freeDecodedFields(allocator, decoded);
     if (decoded.len > limits.max_header_fields) return error.MessageTooLarge;
     try validateHeaderListSize(decoded, limits.max_header_list_size);
     const cloned = try allocator.alloc(http2.Hpack.HeaderField, decoded.len);
@@ -3086,6 +3096,8 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
     }
 
     const first = try connection.sendStreamWindow(1);
@@ -3216,6 +3228,8 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
     }
 
     try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
@@ -3293,10 +3307,12 @@ test "HTTP/2 runtime enforces header list size limits" {
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(allocator);
     try http2.Hpack.encodeLiteralBlock(&block, allocator, &oversized);
+    var decoder = http2.Hpack.Decoder{};
+    defer decoder.deinit(allocator);
     try std.testing.expectError(error.MessageTooLarge, cloneDecodedHeaders(allocator, block.items, .{
         .max_header_fields = 16,
         .max_header_list_size = 120,
-    }));
+    }, &decoder));
 
     var connection = Connection{
         .io = undefined,
@@ -3307,6 +3323,8 @@ test "HTTP/2 runtime enforces header list size limits" {
     defer {
         connection.send_stream_windows.deinit(allocator);
         connection.recv_stream_windows.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
     }
     try connection.applySettings(&.{.{ .id = .max_header_list_size, .value = 120 }});
     try std.testing.expectEqual(@as(usize, 120), connection.peer_max_header_list_size);
