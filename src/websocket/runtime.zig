@@ -389,6 +389,7 @@ pub const Connection = struct {
         var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
+        if (frame.header.opcode == .close) self.close_received = true;
         return frame;
     }
 
@@ -595,6 +596,7 @@ pub const H2Connection = struct {
         var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
+        if (frame.header.opcode == .close) self.close_received = true;
         return frame;
     }
 
@@ -1145,6 +1147,7 @@ test "WebSocket runtime client and server exchange over TCP" {
             var close = try connection.receiveFrame();
             defer close.deinit(server_ptr.http.allocator);
             try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+            try std.testing.expect(connection.close_received);
         }
     };
 
