@@ -67,8 +67,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.runtime, "ExtendedConnectRequest"));
     try std.testing.expect(@hasDecl(netz.http2.runtime, "ExtendedConnectResponse"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "openExtendedConnect"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "openConnectTunnel"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "readExtendedConnectRequest"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "acceptExtendedConnect"));
+    try std.testing.expect(@hasDecl(netz.http2.runtime.Connection, "acceptConnectTunnel"));
     try std.testing.expect(@hasDecl(netz.http2, "PingPayload"));
     try std.testing.expect(@hasDecl(netz.http2, "GoAwayPayload"));
     try std.testing.expect(@hasDecl(netz.http2, "ResetStreamPayload"));

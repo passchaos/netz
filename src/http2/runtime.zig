@@ -349,6 +349,32 @@ pub const Connection = struct {
         return self.readExtendedConnectResponse(stream_id);
     }
 
+    pub fn openConnectTunnel(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
+        if (self.role != .client) return error.UnexpectedFrame;
+        if (!std.ascii.eqlIgnoreCase(options.method, "CONNECT") or options.protocol != null) return error.InvalidHeader;
+        if (options.authority == null) return error.MissingPseudoHeader;
+        if (options.body.len != 0 or options.trailers.len != 0) return error.InvalidContentLength;
+
+        const stream_id = self.next_client_stream_id;
+        if (self.peer_goaway_last_stream_id) |last| {
+            if (stream_id > last) return error.ConnectionGoAway;
+        }
+        self.next_client_stream_id += 2;
+
+        var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+        defer fields.deinit(self.allocator);
+        try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
+        try fields.append(self.allocator, .{ .name = ":authority", .value = options.authority.? });
+        for (options.headers) |header| try fields.append(self.allocator, header);
+        try validateHeaderBlock(fields.items, .request);
+
+        // Traditional HTTP/2 CONNECT also establishes a tunnel on the stream.
+        // Keep the request side open so DATA frames can flow immediately after
+        // the peer accepts with a 2xx response.
+        try self.writeHeaders(stream_id, fields.items, false);
+        return self.readExtendedConnectResponse(stream_id);
+    }
+
     pub fn readExtendedConnectRequest(self: *Connection, expected_protocol: []const u8) Error!ExtendedConnectRequest {
         if (self.role != .server) return error.UnexpectedFrame;
         if (!self.limits.enable_connect_protocol) return error.ExtendedConnectDisabled;
@@ -394,6 +420,18 @@ pub const Connection = struct {
         response_headers: []const http2.Hpack.HeaderField,
     ) Error!Tunnel {
         if (self.role != .server) return error.UnexpectedFrame;
+        try self.writeExtendedConnectResponse(connect_request.stream_id, 200, response_headers, false);
+        return .{ .connection = self, .stream_id = connect_request.stream_id };
+    }
+
+    pub fn acceptConnectTunnel(
+        self: *Connection,
+        connect_request: OwnedRequest,
+        response_headers: []const http2.Hpack.HeaderField,
+    ) Error!Tunnel {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (!std.ascii.eqlIgnoreCase(connect_request.method, "CONNECT") or connect_request.protocol != null) return error.InvalidHeader;
+        if (connect_request.body.len != 0 or connect_request.trailers.len != 0) return error.InvalidContentLength;
         try self.writeExtendedConnectResponse(connect_request.stream_id, 200, response_headers, false);
         return .{ .connection = self, .stream_id = connect_request.stream_id };
     }
@@ -3461,6 +3499,82 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
     defer connect_response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), connect_response.status);
     try std.testing.expectEqualStrings("", connect_response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 runtime accepts traditional CONNECT DATA tunnel" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("CONNECT", request.method);
+            try std.testing.expectEqualStrings("example.com:443", request.authority orelse "");
+
+            var tunnel = try connection.acceptConnectTunnel(request, &.{});
+            var inbound = try tunnel.read();
+            defer inbound.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("client tunnel bytes", inbound.data);
+            try std.testing.expect(!inbound.end_stream);
+
+            try tunnel.write("server tunnel bytes", false);
+            try tunnel.closeWrite();
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.openConnectTunnel(.{
+        .method = "CONNECT",
+        .authority = "example.com:443",
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+
+    var tunnel = response.tunnel;
+    try tunnel.write("client tunnel bytes", false);
+    var inbound = try tunnel.read();
+    defer inbound.deinit(allocator);
+    try std.testing.expectEqualStrings("server tunnel bytes", inbound.data);
+
+    var fin = try tunnel.read();
+    defer fin.deinit(allocator);
+    try std.testing.expectEqualStrings("", fin.data);
+    try std.testing.expect(fin.end_stream);
 
     thread.join();
     if (shared.err) |err| return err;
