@@ -65,6 +65,7 @@ pub const Server = struct {
             .reason_code = options.reason_code,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .topic_alias_maximum = options.topic_alias_maximum,
+            .server_keep_alive_seconds = options.server_keep_alive_seconds,
         });
 
         return .{ .connection = connection, .connect = connect };
@@ -153,6 +154,7 @@ pub const AcceptOptions = struct {
     reason_code: u8 = 0,
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
+    server_keep_alive_seconds: ?u16 = null,
 };
 
 pub const AcceptedClient = struct {
@@ -213,6 +215,7 @@ pub const Client = struct {
         if (mqtt.receiveMaximum(connack.connack.properties)) |receive_maximum| connection.max_outgoing_inflight = receive_maximum;
         if (mqtt.maximumPacketSize(connack.connack.properties)) |maximum_packet_size| connection.peer_max_packet_size = maximum_packet_size;
         if (mqtt.topicAliasMaximum(connack.connack.properties)) |topic_alias_maximum| connection.peer_topic_alias_maximum = topic_alias_maximum;
+        if (mqtt.serverKeepAlive(connack.connack.properties)) |server_keep_alive| connection.keep_alive_seconds = server_keep_alive;
 
         return connection;
     }
@@ -238,6 +241,7 @@ pub const ConnAckOptions = struct {
     properties: []const mqtt.Property = &.{},
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
+    server_keep_alive_seconds: ?u16 = null,
 };
 
 pub const Connection = struct {
@@ -252,6 +256,7 @@ pub const Connection = struct {
     peer_max_packet_size: usize = std.math.maxInt(usize),
     incoming_topic_alias_maximum: u16 = 16,
     peer_topic_alias_maximum: u16 = 0,
+    keep_alive_seconds: u16 = 30,
     incoming_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
 
     pub fn close(self: *Connection) void {
@@ -269,6 +274,7 @@ pub const Connection = struct {
         var connect = try mqtt.Connect.parse(self.allocator, packet.bytes);
         errdefer connect.deinit(self.allocator);
         self.protocol = connect.protocol;
+        self.keep_alive_seconds = connect.keep_alive_seconds;
         return .{ .packet = packet, .connect = connect };
     }
 
@@ -286,6 +292,11 @@ pub const Connection = struct {
         }
         if (self.protocol == .v5 and mqtt.topicAliasMaximum(options.properties) == null) {
             try properties.append(self.allocator, .{ .two_byte = .{ .id = .topic_alias_maximum, .value = options.topic_alias_maximum } });
+        }
+        if (self.protocol == .v5 and mqtt.serverKeepAlive(options.properties) == null) {
+            if (options.server_keep_alive_seconds) |keep_alive| {
+                try properties.append(self.allocator, .{ .two_byte = .{ .id = .server_keep_alive, .value = keep_alive } });
+            }
         }
         try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
         try self.writePacket(encoded.items);
@@ -772,7 +783,7 @@ test "MQTT runtime client and server exchange over TCP" {
         }
 
         fn runFallible(server_ptr: *Server) !void {
-            var accepted = try server_ptr.accept(.{ .protocol = .v5, .max_outgoing_inflight = 2, .topic_alias_maximum = 4 });
+            var accepted = try server_ptr.accept(.{ .protocol = .v5, .max_outgoing_inflight = 2, .topic_alias_maximum = 4, .server_keep_alive_seconds = 7 });
             defer accepted.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("client-1", accepted.connect.connect.client_id);
             try std.testing.expectEqualStrings("status/client-1", accepted.connect.connect.will.?.topic);
@@ -785,6 +796,7 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqual(@as(?u16, 4), mqtt.topicAliasMaximum(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(u16, 3), accepted.connection.max_outgoing_inflight);
             try std.testing.expectEqual(@as(usize, 4096), accepted.connection.peer_max_packet_size);
+            try std.testing.expectEqual(@as(u16, 30), accepted.connection.keep_alive_seconds);
 
             var client_auth = try accepted.connection.readAuth();
             defer client_auth.deinit(server_ptr.allocator);
@@ -875,6 +887,7 @@ test "MQTT runtime client and server exchange over TCP" {
     try std.testing.expectEqual(@as(u16, 2), client.max_outgoing_inflight);
     try std.testing.expectEqual(@as(usize, 4096), client.peer_max_packet_size);
     try std.testing.expectEqual(@as(u16, 4), client.peer_topic_alias_maximum);
+    try std.testing.expectEqual(@as(u16, 7), client.keep_alive_seconds);
 
     try client.writeAuth(0x19, &.{
         .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },

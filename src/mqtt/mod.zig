@@ -323,6 +323,13 @@ pub fn maximumPacketSize(properties: []const Property) ?u32 {
     return null;
 }
 
+pub fn serverKeepAlive(properties: []const Property) ?u16 {
+    for (properties) |property| {
+        if (property == .two_byte and property.two_byte.id == .server_keep_alive) return property.two_byte.value;
+    }
+    return null;
+}
+
 pub fn topicAlias(properties: []const Property) ?u16 {
     for (properties) |property| {
         if (property == .two_byte and property.two_byte.id == .topic_alias) return property.two_byte.value;
