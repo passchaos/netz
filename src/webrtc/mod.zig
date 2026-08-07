@@ -4748,6 +4748,21 @@ pub const sctp = struct {
         parameter: u32,
     };
 
+    pub const DataChannelPayloadKind = enum {
+        dcep,
+        string,
+        binary,
+    };
+
+    pub const DataChannelPayloadInfo = struct {
+        kind: DataChannelPayloadKind,
+        is_string: bool = false,
+        empty: bool = false,
+        /// Per RFC 8831/Pion, empty string/binary PPIDs carry one dummy SCTP
+        /// byte that receivers ignore and surface as a zero-length message.
+        effective_len: usize,
+    };
+
     pub const DataChannelOpen = struct {
         channel_type: DataChannelType = .reliable,
         priority: u16 = 0,
@@ -5763,6 +5778,17 @@ pub const sctp = struct {
     pub fn dataChannelPayloadProtocol(is_string: bool, len: usize) PayloadProtocolIdentifier {
         if (is_string) return if (len == 0) .webrtc_string_empty else .webrtc_string;
         return if (len == 0) .webrtc_binary_empty else .webrtc_binary;
+    }
+
+    pub fn dataChannelPayloadInfo(ppid: PayloadProtocolIdentifier, user_data_len: usize) Error!DataChannelPayloadInfo {
+        return switch (ppid) {
+            .webrtc_dcep => .{ .kind = .dcep, .effective_len = user_data_len },
+            .webrtc_string => .{ .kind = .string, .is_string = true, .effective_len = user_data_len },
+            .webrtc_binary => .{ .kind = .binary, .effective_len = user_data_len },
+            .webrtc_string_empty => .{ .kind = .string, .is_string = true, .empty = true, .effective_len = 0 },
+            .webrtc_binary_empty => .{ .kind = .binary, .empty = true, .effective_len = 0 },
+            _ => error.InvalidSctpPacket,
+        };
     }
 
     pub fn dataChannelReliability(channel_type: DataChannelType, reliability_parameter: u32) Error!DataChannelReliability {
@@ -8283,6 +8309,21 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expectError(error.InvalidSctpPacket, sctp.parseDcepMessage(&.{ 0x02, 0, 0, 1 }));
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string_empty, sctp.dataChannelPayloadProtocol(true, 0));
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_binary, sctp.dataChannelPayloadProtocol(false, 4));
+    try std.testing.expectEqual(sctp.DataChannelPayloadInfo{
+        .kind = .string,
+        .is_string = true,
+        .empty = true,
+        .effective_len = 0,
+    }, try sctp.dataChannelPayloadInfo(.webrtc_string_empty, 1));
+    try std.testing.expectEqual(sctp.DataChannelPayloadInfo{
+        .kind = .binary,
+        .effective_len = 9,
+    }, try sctp.dataChannelPayloadInfo(.webrtc_binary, 9));
+    try std.testing.expectEqual(sctp.DataChannelPayloadInfo{
+        .kind = .dcep,
+        .effective_len = 4,
+    }, try sctp.dataChannelPayloadInfo(.webrtc_dcep, 4));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.dataChannelPayloadInfo(@enumFromInt(@as(u32, 0)), 0));
 
     var invalid_dcep: std.ArrayList(u8) = .empty;
     defer invalid_dcep.deinit(allocator);
