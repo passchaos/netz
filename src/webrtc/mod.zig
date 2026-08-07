@@ -778,6 +778,14 @@ pub const sdp = struct {
         auto,
         client,
         server,
+
+        pub fn setupAttribute(self: DtlsRole) []const u8 {
+            return switch (self) {
+                .auto => "actpass",
+                .client => "active",
+                .server => "passive",
+            };
+        }
     };
 
     pub const RtcpFeedback = struct {
@@ -7359,6 +7367,9 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
     defer no_setup.deinit(allocator);
     try std.testing.expectEqual(sdp.DtlsRole.auto, try sdp.extractDtlsRole(no_setup));
     try std.testing.expectEqual(sdp.DtlsRole.auto, (try sdp.parseDtlsSetupAttribute("holdconn")).dtlsRole());
+    try std.testing.expectEqualStrings("actpass", sdp.DtlsRole.auto.setupAttribute());
+    try std.testing.expectEqualStrings("active", sdp.DtlsRole.client.setupAttribute());
+    try std.testing.expectEqualStrings("passive", sdp.DtlsRole.server.setupAttribute());
 }
 
 test "RTP and DTLS record parsers" {
