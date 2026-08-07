@@ -2945,7 +2945,7 @@ pub const rtp = struct {
         }
 
         const tl_start = list.items.len;
-        try list.appendNTimes(allocator, 0, (vla.active_spatial_layers.len - 1) / 4 + 1);
+        try list.appendNTimes(allocator, 0, vlaTemporalLayerControlLen(vla.active_spatial_layers.len));
         var temporal_layer_index: usize = 0;
         for (0..vla.rtp_stream_count) |stream_id| {
             for (0..4) |spatial_id| {
@@ -2970,6 +2970,35 @@ pub const rtp = struct {
                 try list.append(allocator, layer.framerate);
             }
         }
+    }
+
+    pub fn videoLayerAllocationPayloadLen(vla: VideoLayerAllocation) Error!usize {
+        if (vla.rtp_stream_count == 0 or vla.rtp_stream_count > 4 or vla.rtp_stream_id >= vla.rtp_stream_count) return error.InvalidRtpPacket;
+        var sl_bms = [_]u4{ 0, 0, 0, 0 };
+        var seen: [4][4]bool = .{
+            .{ false, false, false, false },
+            .{ false, false, false, false },
+            .{ false, false, false, false },
+            .{ false, false, false, false },
+        };
+        var bitrate_len: usize = 0;
+        for (vla.active_spatial_layers) |layer| {
+            if (layer.rtp_stream_id >= vla.rtp_stream_count or layer.target_bitrates_kbps.len == 0 or layer.target_bitrates_kbps.len > 4) return error.InvalidRtpPacket;
+            if (seen[layer.rtp_stream_id][layer.spatial_id]) return error.InvalidRtpPacket;
+            seen[layer.rtp_stream_id][layer.spatial_id] = true;
+            sl_bms[layer.rtp_stream_id] |= @as(u4, 1) << layer.spatial_id;
+            if (vla.has_resolution_and_framerate and (layer.width == 0 or layer.height == 0)) return error.InvalidRtpPacket;
+            for (layer.target_bitrates_kbps) |kbps| bitrate_len += leb128Size(kbps);
+        }
+
+        var total: usize = 1; // RID/NS/sl_bm byte.
+        if (commonSpatialLayerBitmask(sl_bms[0..vla.rtp_stream_count]) == 0) {
+            total += (vla.rtp_stream_count - 1) / 2 + 1;
+        }
+        total += vlaTemporalLayerControlLen(vla.active_spatial_layers.len);
+        total += bitrate_len;
+        if (vla.has_resolution_and_framerate) total += vla.active_spatial_layers.len * 5;
+        return total;
     }
 
     pub fn parseVideoLayerAllocationPayload(allocator: std.mem.Allocator, payload: []const u8) Error!VideoLayerAllocation {
@@ -3089,6 +3118,17 @@ pub const rtp = struct {
             byte |= 0x80;
             try list.append(allocator, byte);
         }
+    }
+
+    fn leb128Size(value: u32) usize {
+        var remaining = value >> 7;
+        var size: usize = 1;
+        while (remaining != 0) : (remaining >>= 7) size += 1;
+        return size;
+    }
+
+    fn vlaTemporalLayerControlLen(layer_count: usize) usize {
+        return if (layer_count == 0) 1 else (layer_count - 1) / 4 + 1;
     }
 
     fn readLeb128(bytes: []const u8) Error!struct { value: u32, consumed: usize } {
@@ -8664,6 +8704,11 @@ test "RTP packet extension padding and writer" {
         .rtp_stream_count = 3,
         .active_spatial_layers = &vla_layers,
     });
+    try std.testing.expectEqual(vla_payload.items.len, try rtp.videoLayerAllocationPayloadLen(.{
+        .rtp_stream_id = 0,
+        .rtp_stream_count = 3,
+        .active_spatial_layers = &vla_layers,
+    }));
     try std.testing.expectEqualSlices(u8, &.{
         0x21, 0x14, 0x96, 0x01, 0xf0, 0x01, 0x90, 0x03, 0xd0, 0x05, 0xb0, 0x09,
     }, vla_payload.items);
@@ -8692,6 +8737,12 @@ test "RTP packet extension padding and writer" {
         .active_spatial_layers = &vla_layers_with_resolution,
         .has_resolution_and_framerate = true,
     });
+    try std.testing.expectEqual(vla_payload.items.len, try rtp.videoLayerAllocationPayloadLen(.{
+        .rtp_stream_id = 2,
+        .rtp_stream_count = 3,
+        .active_spatial_layers = &vla_layers_with_resolution,
+        .has_resolution_and_framerate = true,
+    }));
     try std.testing.expectEqualSlices(u8, &.{
         0xa1, 0x14, 0x96, 0x01, 0xf0, 0x01, 0x90, 0x03, 0xd0, 0x05, 0xb0, 0x09,
         0x01, 0x3f, 0x00, 0xb3, 0x1e, 0x02, 0x7f, 0x01, 0x67, 0x1e, 0x04, 0xff,
@@ -8711,6 +8762,19 @@ test "RTP packet extension padding and writer" {
     try std.testing.expect(parsed_vla_with_trailing.has_resolution_and_framerate);
     try std.testing.expectEqual(@as(usize, 3), parsed_vla_with_trailing.active_spatial_layers.len);
     try std.testing.expectEqual(@as(u16, 1280), parsed_vla_with_trailing.active_spatial_layers[2].width);
+
+    vla_payload.clearRetainingCapacity();
+    try rtp.writeVideoLayerAllocationPayload(&vla_payload, allocator, .{
+        .rtp_stream_id = 0,
+        .rtp_stream_count = 1,
+        .active_spatial_layers = &.{},
+    });
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x00 }, vla_payload.items);
+    try std.testing.expectEqual(@as(usize, 3), try rtp.videoLayerAllocationPayloadLen(.{
+        .rtp_stream_id = 0,
+        .rtp_stream_count = 1,
+        .active_spatial_layers = &.{},
+    }));
 
     try std.testing.expectError(error.InvalidRtpPacket, rtp.writeVideoLayerAllocationPayload(&vla_payload, allocator, .{
         .rtp_stream_id = 0,
