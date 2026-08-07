@@ -2490,6 +2490,7 @@ pub const rtcp = struct {
     pub const transport_feedback_nack: u5 = 1;
     pub const transport_feedback_sli: u5 = 2;
     pub const transport_feedback_rrr: u5 = 5;
+    pub const transport_feedback_ccfb: u5 = 11;
     pub const transport_feedback_twcc: u5 = 15;
     pub const payload_feedback_pli: u5 = 1;
     pub const payload_feedback_sli: u5 = 2;
@@ -2665,6 +2666,43 @@ pub const rtcp = struct {
     pub const RapidResynchronizationRequest = struct {
         sender_ssrc: u32,
         media_ssrc: u32,
+    };
+
+    pub const Ecn = enum(u2) {
+        non_ect = 0,
+        ect1 = 1,
+        ect0 = 2,
+        ce = 3,
+    };
+
+    pub const CcFeedbackMetricBlock = struct {
+        received: bool = false,
+        ecn: Ecn = .non_ect,
+        /// Offset in 1/1024-second units before the report timestamp.
+        arrival_time_offset: u16 = 0,
+    };
+
+    pub const CcFeedbackReportBlock = struct {
+        media_ssrc: u32,
+        begin_sequence: u16 = 0,
+        metric_blocks: []CcFeedbackMetricBlock = &.{},
+
+        pub fn deinit(self: *CcFeedbackReportBlock, allocator: std.mem.Allocator) void {
+            allocator.free(self.metric_blocks);
+            self.* = undefined;
+        }
+    };
+
+    pub const CongestionControlFeedback = struct {
+        sender_ssrc: u32,
+        report_blocks: []CcFeedbackReportBlock = &.{},
+        report_timestamp: u32,
+
+        pub fn deinit(self: *CongestionControlFeedback, allocator: std.mem.Allocator) void {
+            for (self.report_blocks) |*block| block.deinit(allocator);
+            allocator.free(self.report_blocks);
+            self.* = undefined;
+        }
     };
 
     pub const NackPair = struct {
@@ -2950,6 +2988,7 @@ pub const rtcp = struct {
         receiver_estimated_maximum_bitrate: ReceiverEstimatedMaximumBitrate,
         application_defined: ApplicationDefined,
         rapid_resynchronization_request: RapidResynchronizationRequest,
+        congestion_control_feedback: CongestionControlFeedback,
         transport_layer_nack: TransportLayerNack,
         transport_wide_cc: TransportWideCc,
         unknown: Unknown,
@@ -2964,6 +3003,7 @@ pub const rtcp = struct {
                 .full_intra_request => |*fir| fir.deinit(allocator),
                 .receiver_estimated_maximum_bitrate => |*remb| remb.deinit(allocator),
                 .application_defined => |*app| app.deinit(allocator),
+                .congestion_control_feedback => |*ccfb| ccfb.deinit(allocator),
                 .transport_layer_nack => |nack| allocator.free(nack.pairs),
                 .transport_wide_cc => |*twcc| twcc.deinit(allocator),
                 else => {},
@@ -3011,6 +3051,8 @@ pub const rtcp = struct {
                 .{ .slice_loss_indication = try parseSliceLossIndication(allocator, payload) }
             else if (header.count_or_format == transport_feedback_rrr)
                 .{ .rapid_resynchronization_request = try parseRapidResynchronizationRequest(payload) }
+            else if (header.count_or_format == transport_feedback_ccfb)
+                .{ .congestion_control_feedback = try parseCongestionControlFeedback(allocator, payload) }
             else if (header.count_or_format == transport_feedback_twcc)
                 .{ .transport_wide_cc = try parseTransportWideCc(allocator, payload) }
             else
@@ -3048,6 +3090,7 @@ pub const rtcp = struct {
             .receiver_estimated_maximum_bitrate => |remb| try writeReceiverEstimatedMaximumBitrate(list, allocator, remb),
             .application_defined => |app| try writeApplicationDefined(list, allocator, app),
             .rapid_resynchronization_request => |rrr| try writeRapidResynchronizationRequest(list, allocator, rrr),
+            .congestion_control_feedback => |ccfb| try writeCongestionControlFeedback(list, allocator, ccfb),
             .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
             .transport_wide_cc => |twcc| try writeTransportWideCc(list, allocator, twcc),
             .unknown => |unknown| {
@@ -3251,6 +3294,72 @@ pub const rtcp = struct {
             .sender_ssrc = sender_ssrc,
             .bitrate = bitrate,
             .ssrcs = ssrcs,
+        };
+    }
+
+    fn parseCongestionControlFeedback(allocator: std.mem.Allocator, payload: []const u8) Error!CongestionControlFeedback {
+        if (payload.len < 8 or (payload.len % 4) != 0) return error.InvalidRtcpPacket;
+        const sender_ssrc = std.mem.readInt(u32, payload[0..4], .big);
+        const report_timestamp_offset = payload.len - 4;
+        var pos: usize = 4;
+
+        var blocks: std.ArrayList(CcFeedbackReportBlock) = .empty;
+        errdefer {
+            for (blocks.items) |*block| block.deinit(allocator);
+            blocks.deinit(allocator);
+        }
+
+        while (pos < report_timestamp_offset) {
+            const parsed = try parseCcFeedbackReportBlock(allocator, payload[pos..report_timestamp_offset]);
+            var block = parsed.block;
+            errdefer block.deinit(allocator);
+            try blocks.append(allocator, block);
+            block.metric_blocks = &.{};
+            pos += parsed.consumed;
+        }
+        if (pos != report_timestamp_offset) return error.InvalidRtcpPacket;
+
+        return .{
+            .sender_ssrc = sender_ssrc,
+            .report_blocks = try blocks.toOwnedSlice(allocator),
+            .report_timestamp = std.mem.readInt(u32, payload[report_timestamp_offset..][0..4], .big),
+        };
+    }
+
+    fn parseCcFeedbackReportBlock(allocator: std.mem.Allocator, bytes: []const u8) Error!struct { block: CcFeedbackReportBlock, consumed: usize } {
+        if (bytes.len < 8) return error.InvalidRtcpPacket;
+        const num_reports = std.mem.readInt(u16, bytes[6..8], .big);
+        const metric_count = @as(usize, num_reports);
+        const padded_metric_count = metric_count + (metric_count % 2);
+        const metric_bytes = std.math.mul(usize, padded_metric_count, 2) catch return error.InvalidRtcpPacket;
+        const consumed = std.math.add(usize, 8, metric_bytes) catch return error.InvalidRtcpPacket;
+        if (bytes.len < consumed) return error.InvalidRtcpPacket;
+
+        const metric_blocks = try allocator.alloc(CcFeedbackMetricBlock, metric_count);
+        errdefer allocator.free(metric_blocks);
+        var metric_pos: usize = 8;
+        for (metric_blocks) |*metric| {
+            metric.* = try parseCcFeedbackMetricBlock(bytes[metric_pos..][0..2]);
+            metric_pos += 2;
+        }
+        return .{
+            .block = .{
+                .media_ssrc = std.mem.readInt(u32, bytes[0..4], .big),
+                .begin_sequence = std.mem.readInt(u16, bytes[4..6], .big),
+                .metric_blocks = metric_blocks,
+            },
+            .consumed = consumed,
+        };
+    }
+
+    fn parseCcFeedbackMetricBlock(bytes: []const u8) Error!CcFeedbackMetricBlock {
+        if (bytes.len != 2) return error.InvalidRtcpPacket;
+        const received = (bytes[0] & 0x80) != 0;
+        if (!received) return .{};
+        return .{
+            .received = true,
+            .ecn = @enumFromInt((bytes[0] >> 5) & 0x03),
+            .arrival_time_offset = std.mem.readInt(u16, bytes[0..2], .big) & 0x1fff,
         };
     }
 
@@ -3480,6 +3589,37 @@ pub const rtcp = struct {
         try writeHeader(list, allocator, transport_feedback_rrr, .transport_feedback, 8);
         try wire.appendInt(list, allocator, u32, rrr.sender_ssrc, .big);
         try wire.appendInt(list, allocator, u32, rrr.media_ssrc, .big);
+    }
+
+    fn writeCongestionControlFeedback(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ccfb: CongestionControlFeedback) Error!void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+
+        try wire.appendInt(&payload, allocator, u32, ccfb.sender_ssrc, .big);
+        for (ccfb.report_blocks) |block| try writeCcFeedbackReportBlock(&payload, allocator, block);
+        try wire.appendInt(&payload, allocator, u32, ccfb.report_timestamp, .big);
+
+        try writeHeader(list, allocator, transport_feedback_ccfb, .transport_feedback, payload.items.len);
+        try list.appendSlice(allocator, payload.items);
+    }
+
+    fn writeCcFeedbackReportBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, block: CcFeedbackReportBlock) Error!void {
+        if (block.metric_blocks.len > 16_384) return error.InvalidRtcpPacket;
+        try wire.appendInt(list, allocator, u32, block.media_ssrc, .big);
+        try wire.appendInt(list, allocator, u16, block.begin_sequence, .big);
+        try wire.appendInt(list, allocator, u16, @intCast(block.metric_blocks.len), .big);
+        for (block.metric_blocks) |metric| try writeCcFeedbackMetricBlock(list, allocator, metric);
+        if ((block.metric_blocks.len % 2) != 0) try list.appendNTimes(allocator, 0, 2);
+    }
+
+    fn writeCcFeedbackMetricBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, metric: CcFeedbackMetricBlock) Error!void {
+        var raw: u16 = 0;
+        if (metric.received) {
+            raw |= 0x8000;
+            raw |= (@as(u16, @intFromEnum(metric.ecn)) & 0x03) << 13;
+            raw |= metric.arrival_time_offset & 0x1fff;
+        }
+        try wire.appendInt(list, allocator, u16, raw, .big);
     }
 
     fn writeReceiverEstimatedMaximumBitrate(list: *std.ArrayList(u8), allocator: std.mem.Allocator, remb: ReceiverEstimatedMaximumBitrate) Error!void {
@@ -6409,6 +6549,50 @@ test "RTCP receiver report and feedback packets" {
     defer rrr.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x902f9e2e), rrr.packet.rapid_resynchronization_request.sender_ssrc);
     try std.testing.expectEqual(@as(u32, 0xbc5e9a40), rrr.packet.rapid_resynchronization_request.media_ssrc);
+
+    const ccfb_wire = [_]u8{
+        0x8b, 0xcd, 0x00, 0x0a,
+        0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x01,
+        0x00, 0x02, 0x00, 0x04,
+        0x9f, 0xfd, 0x9f, 0xfc,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x02,
+        0x00, 0x02, 0x00, 0x03,
+        0x9f, 0xfd, 0x9f, 0xfc,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+    };
+    var ccfb = try rtcp.parsePacket(allocator, &ccfb_wire);
+    defer ccfb.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), ccfb.packet.congestion_control_feedback.sender_ssrc);
+    try std.testing.expectEqual(@as(u32, 1), ccfb.packet.congestion_control_feedback.report_timestamp);
+    try std.testing.expectEqual(@as(usize, 2), ccfb.packet.congestion_control_feedback.report_blocks.len);
+    try std.testing.expectEqual(@as(u32, 1), ccfb.packet.congestion_control_feedback.report_blocks[0].media_ssrc);
+    try std.testing.expectEqual(@as(u16, 2), ccfb.packet.congestion_control_feedback.report_blocks[0].begin_sequence);
+    try std.testing.expectEqual(@as(usize, 4), ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks.len);
+    try std.testing.expect(ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].received);
+    try std.testing.expectEqual(rtcp.Ecn.non_ect, ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].ecn);
+    try std.testing.expectEqual(@as(u16, 8189), ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].arrival_time_offset);
+    try std.testing.expect(!ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[2].received);
+    try std.testing.expectEqual(@as(u32, 2), ccfb.packet.congestion_control_feedback.report_blocks[1].media_ssrc);
+    try std.testing.expectEqual(@as(usize, 3), ccfb.packet.congestion_control_feedback.report_blocks[1].metric_blocks.len);
+
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, ccfb.packet);
+    try std.testing.expectEqualSlices(u8, &ccfb_wire, encoded.items);
+
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, .{ .congestion_control_feedback = .{
+        .sender_ssrc = 1,
+        .report_blocks = &.{},
+        .report_timestamp = 2,
+    } });
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0x8b, 0xcd, 0x00, 0x02,
+        0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x02,
+    }, encoded.items);
 
     encoded.clearRetainingCapacity();
     var nack_pairs = [_]rtcp.NackPair{.{
