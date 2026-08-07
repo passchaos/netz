@@ -422,6 +422,27 @@ pub fn retainAvailable(properties: []const Property) ?bool {
     return null;
 }
 
+pub fn wildcardSubscriptionAvailable(properties: []const Property) ?bool {
+    for (properties) |property| {
+        if (property == .byte and property.byte.id == .wildcard_subscription_available) return property.byte.value != 0;
+    }
+    return null;
+}
+
+pub fn subscriptionIdentifierAvailable(properties: []const Property) ?bool {
+    for (properties) |property| {
+        if (property == .byte and property.byte.id == .subscription_identifier_available) return property.byte.value != 0;
+    }
+    return null;
+}
+
+pub fn sharedSubscriptionAvailable(properties: []const Property) ?bool {
+    for (properties) |property| {
+        if (property == .byte and property.byte.id == .shared_subscription_available) return property.byte.value != 0;
+    }
+    return null;
+}
+
 pub fn serverKeepAlive(properties: []const Property) ?u16 {
     for (properties) |property| {
         if (property == .two_byte and property.two_byte.id == .server_keep_alive) return property.two_byte.value;
@@ -432,6 +453,13 @@ pub fn serverKeepAlive(properties: []const Property) ?u16 {
 pub fn topicAlias(properties: []const Property) ?u16 {
     for (properties) |property| {
         if (property == .two_byte and property.two_byte.id == .topic_alias) return property.two_byte.value;
+    }
+    return null;
+}
+
+pub fn subscriptionIdentifier(properties: []const Property) ?usize {
+    for (properties) |property| {
+        if (property == .varint and property.varint.id == .subscription_identifier) return property.varint.value;
     }
     return null;
 }

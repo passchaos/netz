@@ -12,6 +12,7 @@ pub const Error = mqtt.Error || error{
     ReceiveMaximumExceeded,
     OutgoingPacketTooLarge,
     PublishRefused,
+    SubscriptionRefused,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -72,6 +73,9 @@ pub const Server = struct {
             .server_keep_alive_seconds = options.server_keep_alive_seconds,
             .maximum_qos = options.maximum_qos,
             .retain_available = options.retain_available,
+            .wildcard_subscription_available = options.wildcard_subscription_available,
+            .subscription_identifier_available = options.subscription_identifier_available,
+            .shared_subscription_available = options.shared_subscription_available,
         });
 
         return .{ .connection = connection, .connect = connect };
@@ -163,6 +167,9 @@ pub const AcceptOptions = struct {
     server_keep_alive_seconds: ?u16 = null,
     maximum_qos: ?mqtt.QoS = null,
     retain_available: bool = true,
+    wildcard_subscription_available: bool = true,
+    subscription_identifier_available: bool = true,
+    shared_subscription_available: bool = true,
 };
 
 pub const AcceptedClient = struct {
@@ -230,6 +237,9 @@ pub const Client = struct {
         if (mqtt.serverKeepAlive(connack.connack.properties)) |server_keep_alive| connection.keep_alive_seconds = server_keep_alive;
         if (mqtt.maximumQoS(connack.connack.properties)) |maximum_qos| connection.peer_maximum_qos = maximum_qos;
         if (mqtt.retainAvailable(connack.connack.properties)) |retain_available| connection.peer_retain_available = retain_available;
+        if (mqtt.wildcardSubscriptionAvailable(connack.connack.properties)) |available| connection.peer_wildcard_subscription_available = available;
+        if (mqtt.subscriptionIdentifierAvailable(connack.connack.properties)) |available| connection.peer_subscription_identifier_available = available;
+        if (mqtt.sharedSubscriptionAvailable(connack.connack.properties)) |available| connection.peer_shared_subscription_available = available;
 
         return connection;
     }
@@ -260,6 +270,9 @@ pub const ConnAckOptions = struct {
     server_keep_alive_seconds: ?u16 = null,
     maximum_qos: ?mqtt.QoS = null,
     retain_available: bool = true,
+    wildcard_subscription_available: bool = true,
+    subscription_identifier_available: bool = true,
+    shared_subscription_available: bool = true,
 };
 
 pub const Connection = struct {
@@ -279,6 +292,12 @@ pub const Connection = struct {
     keep_alive_seconds: u16 = 30,
     peer_maximum_qos: mqtt.QoS = .exactly_once,
     peer_retain_available: bool = true,
+    peer_wildcard_subscription_available: bool = true,
+    peer_subscription_identifier_available: bool = true,
+    peer_shared_subscription_available: bool = true,
+    local_wildcard_subscription_available: bool = true,
+    local_subscription_identifier_available: bool = true,
+    local_shared_subscription_available: bool = true,
     incoming_qos1: std.StaticBitSet(packet_identifier_slots) = .empty,
     incoming_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
     incoming_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
@@ -339,10 +358,22 @@ pub const Connection = struct {
         if (self.protocol == .v5 and mqtt.retainAvailable(options.properties) == null and !options.retain_available) {
             try properties.append(self.allocator, .{ .byte = .{ .id = .retain_available, .value = 0 } });
         }
+        if (self.protocol == .v5 and mqtt.wildcardSubscriptionAvailable(options.properties) == null and !options.wildcard_subscription_available) {
+            try properties.append(self.allocator, .{ .byte = .{ .id = .wildcard_subscription_available, .value = 0 } });
+        }
+        if (self.protocol == .v5 and mqtt.subscriptionIdentifierAvailable(options.properties) == null and !options.subscription_identifier_available) {
+            try properties.append(self.allocator, .{ .byte = .{ .id = .subscription_identifier_available, .value = 0 } });
+        }
+        if (self.protocol == .v5 and mqtt.sharedSubscriptionAvailable(options.properties) == null and !options.shared_subscription_available) {
+            try properties.append(self.allocator, .{ .byte = .{ .id = .shared_subscription_available, .value = 0 } });
+        }
         try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
         try self.writePacket(encoded.items);
         if (self.protocol == .v5) {
             self.max_incoming_inflight = mqtt.receiveMaximum(properties.items) orelse self.max_incoming_inflight;
+            self.local_wildcard_subscription_available = mqtt.wildcardSubscriptionAvailable(properties.items) orelse options.wildcard_subscription_available;
+            self.local_subscription_identifier_available = mqtt.subscriptionIdentifierAvailable(properties.items) orelse options.subscription_identifier_available;
+            self.local_shared_subscription_available = mqtt.sharedSubscriptionAvailable(properties.items) orelse options.shared_subscription_available;
         }
     }
 
@@ -473,6 +504,7 @@ pub const Connection = struct {
     }
 
     pub fn subscribe(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions) Error!OwnedSubAck {
+        try self.validateOutgoingSubscribe(subscriptions, options.properties);
         const packet_id = self.nextPacketId();
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
@@ -493,6 +525,7 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != .subscribe) return error.UnexpectedPacket;
         var subscribe_packet = try mqtt.Subscribe.parse(self.allocator, self.protocol, packet.bytes);
         errdefer subscribe_packet.deinit(self.allocator);
+        try self.validateIncomingSubscribe(subscribe_packet.subscriptions, subscribe_packet.properties);
         return .{ .packet = packet, .subscribe = subscribe_packet };
     }
 
@@ -675,6 +708,40 @@ pub const Connection = struct {
         if (!set.isSet(index)) return;
         set.setValue(index, false);
         self.incoming_inflight -= 1;
+    }
+
+    fn validateOutgoingSubscribe(self: Connection, subscriptions: []const mqtt.Subscription, properties: []const mqtt.Property) Error!void {
+        try validateSubscribeCapabilities(
+            subscriptions,
+            properties,
+            self.peer_wildcard_subscription_available,
+            self.peer_subscription_identifier_available,
+            self.peer_shared_subscription_available,
+        );
+    }
+
+    fn validateIncomingSubscribe(self: Connection, subscriptions: []const mqtt.Subscription, properties: []const mqtt.Property) Error!void {
+        try validateSubscribeCapabilities(
+            subscriptions,
+            properties,
+            self.local_wildcard_subscription_available,
+            self.local_subscription_identifier_available,
+            self.local_shared_subscription_available,
+        );
+    }
+
+    fn validateSubscribeCapabilities(
+        subscriptions: []const mqtt.Subscription,
+        properties: []const mqtt.Property,
+        wildcard_available: bool,
+        subscription_identifier_available: bool,
+        shared_available: bool,
+    ) Error!void {
+        if (!subscription_identifier_available and mqtt.subscriptionIdentifier(properties) != null) return error.SubscriptionRefused;
+        for (subscriptions) |subscription| {
+            if (!wildcard_available and mqtt.hasWildcards(subscription.topic_filter)) return error.SubscriptionRefused;
+            if (!shared_available and std.mem.startsWith(u8, subscription.topic_filter, "$share/")) return error.SubscriptionRefused;
+        }
     }
 
     fn writePacket(self: *Connection, bytes: []const u8) Error!void {
@@ -1208,6 +1275,36 @@ test "MQTT connection keeps QoS2 receive slot until PUBCOMP" {
         .payload = "ok",
     });
     try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
+}
+
+test "MQTT connection enforces negotiated subscribe capabilities" {
+    const exact = [_]mqtt.Subscription{.{ .topic_filter = "sensors/temp" }};
+    const wildcard = [_]mqtt.Subscription{.{ .topic_filter = "sensors/+" }};
+    const shared = [_]mqtt.Subscription{.{ .topic_filter = "$share/workers/sensors/temp" }};
+    const sub_id = [_]mqtt.Property{.{ .varint = .{ .id = .subscription_identifier, .value = 1 } }};
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .protocol = .v5,
+        .peer_wildcard_subscription_available = false,
+        .peer_subscription_identifier_available = false,
+        .peer_shared_subscription_available = false,
+    };
+
+    try connection.validateOutgoingSubscribe(&exact, &.{});
+    try std.testing.expectError(error.SubscriptionRefused, connection.validateOutgoingSubscribe(&wildcard, &.{}));
+    try std.testing.expectError(error.SubscriptionRefused, connection.validateOutgoingSubscribe(&shared, &.{}));
+    try std.testing.expectError(error.SubscriptionRefused, connection.validateOutgoingSubscribe(&exact, &sub_id));
+
+    connection.local_wildcard_subscription_available = false;
+    connection.local_subscription_identifier_available = false;
+    connection.local_shared_subscription_available = false;
+    try connection.validateIncomingSubscribe(&exact, &.{});
+    try std.testing.expectError(error.SubscriptionRefused, connection.validateIncomingSubscribe(&wildcard, &.{}));
+    try std.testing.expectError(error.SubscriptionRefused, connection.validateIncomingSubscribe(&shared, &.{}));
+    try std.testing.expectError(error.SubscriptionRefused, connection.validateIncomingSubscribe(&exact, &sub_id));
 }
 
 test "MQTT connection rejects topic aliases beyond negotiated maximum" {
