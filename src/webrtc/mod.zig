@@ -788,6 +788,7 @@ pub const sdp = struct {
     pub const RtpCodec = struct {
         payload_type: u8,
         mime_type: []const u8,
+        codec_name: []const u8,
         clock_rate: u32,
         channels: u16 = 0,
         fmtp: []const u8 = "",
@@ -1387,10 +1388,28 @@ pub const sdp = struct {
 
         return .{
             .payload_type = payload_type,
-            .mime_type = codec_name,
+            .mime_type = fullMimeType(media_kind, codec_name),
+            .codec_name = codec_name,
             .clock_rate = std.fmt.parseInt(u32, clock_s, 10) catch return error.InvalidSdp,
             .channels = if (channels_s) |channels| std.fmt.parseInt(u16, channels, 10) catch return error.InvalidSdp else defaultCodecChannels(media_kind),
         };
+    }
+
+    fn fullMimeType(media_kind: []const u8, codec_name: []const u8) []const u8 {
+        if (std.ascii.eqlIgnoreCase(media_kind, "audio")) {
+            if (std.ascii.eqlIgnoreCase(codec_name, "opus")) return "audio/opus";
+            if (std.ascii.eqlIgnoreCase(codec_name, "PCMU")) return "audio/PCMU";
+            if (std.ascii.eqlIgnoreCase(codec_name, "PCMA")) return "audio/PCMA";
+            if (std.ascii.eqlIgnoreCase(codec_name, "G722")) return "audio/G722";
+        } else if (std.ascii.eqlIgnoreCase(media_kind, "video")) {
+            if (std.ascii.eqlIgnoreCase(codec_name, "VP8")) return "video/VP8";
+            if (std.ascii.eqlIgnoreCase(codec_name, "VP9")) return "video/VP9";
+            if (std.ascii.eqlIgnoreCase(codec_name, "AV1")) return "video/AV1";
+            if (std.ascii.eqlIgnoreCase(codec_name, "H264")) return "video/H264";
+            if (std.ascii.eqlIgnoreCase(codec_name, "H265")) return "video/H265";
+            if (std.ascii.eqlIgnoreCase(codec_name, "rtx")) return "video/rtx";
+        }
+        return codec_name;
     }
 
     fn parsePayloadType(value: []const u8) Error!u8 {
@@ -1403,9 +1422,9 @@ pub const sdp = struct {
         // Pion/sdp handles the RTP/AVP static payload types without an rtpmap
         // attribute.  These appear in legacy offers and browser interop tests.
         return switch (payload_type) {
-            0 => .{ .payload_type = 0, .mime_type = "PCMU", .clock_rate = 8000, .channels = 1 },
-            8 => .{ .payload_type = 8, .mime_type = "PCMA", .clock_rate = 8000, .channels = 1 },
-            9 => .{ .payload_type = 9, .mime_type = "G722", .clock_rate = 8000, .channels = 1 },
+            0 => .{ .payload_type = 0, .mime_type = "audio/PCMU", .codec_name = "PCMU", .clock_rate = 8000, .channels = 1 },
+            8 => .{ .payload_type = 8, .mime_type = "audio/PCMA", .codec_name = "PCMA", .clock_rate = 8000, .channels = 1 },
+            9 => .{ .payload_type = 9, .mime_type = "audio/G722", .codec_name = "G722", .clock_rate = 8000, .channels = 1 },
             else => null,
         };
     }
@@ -5184,7 +5203,8 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     defer sdp.freeRtpCodecs(allocator, codecs);
     try std.testing.expectEqual(@as(usize, 1), codecs.len);
     try std.testing.expectEqual(@as(u8, 111), codecs[0].payload_type);
-    try std.testing.expectEqualStrings("opus", codecs[0].mime_type);
+    try std.testing.expectEqualStrings("audio/opus", codecs[0].mime_type);
+    try std.testing.expectEqualStrings("opus", codecs[0].codec_name);
     try std.testing.expectEqual(@as(u32, 48000), codecs[0].clock_rate);
     try std.testing.expectEqual(@as(u16, 2), codecs[0].channels);
     try std.testing.expectEqualStrings("minptime=10;useinbandfec=1", codecs[0].fmtp);
@@ -5209,9 +5229,11 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const rtx_codecs = try sdp.extractRtpCodecs(allocator, rtx_codec_session.media[0]);
     defer sdp.freeRtpCodecs(allocator, rtx_codecs);
     try std.testing.expectEqual(@as(usize, 2), rtx_codecs.len);
-    try std.testing.expectEqualStrings("VP8", rtx_codecs[0].mime_type);
+    try std.testing.expectEqualStrings("video/VP8", rtx_codecs[0].mime_type);
+    try std.testing.expectEqualStrings("VP8", rtx_codecs[0].codec_name);
     try std.testing.expectEqual(@as(?u8, null), rtx_codecs[0].apt);
-    try std.testing.expectEqualStrings("rtx", rtx_codecs[1].mime_type);
+    try std.testing.expectEqualStrings("video/rtx", rtx_codecs[1].mime_type);
+    try std.testing.expectEqualStrings("rtx", rtx_codecs[1].codec_name);
     try std.testing.expectEqual(@as(?u8, 96), rtx_codecs[1].apt);
     try std.testing.expectEqualStrings("apt=96;rtx-time=3000", rtx_codecs[1].fmtp);
 
@@ -5248,11 +5270,12 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const static_codecs = try sdp.extractRtpCodecs(allocator, static_codec_session.media[0]);
     defer sdp.freeRtpCodecs(allocator, static_codecs);
     try std.testing.expectEqual(@as(usize, 3), static_codecs.len);
-    try std.testing.expectEqualStrings("PCMU", static_codecs[0].mime_type);
+    try std.testing.expectEqualStrings("audio/PCMU", static_codecs[0].mime_type);
+    try std.testing.expectEqualStrings("PCMU", static_codecs[0].codec_name);
     try std.testing.expectEqual(@as(u32, 8000), static_codecs[0].clock_rate);
     try std.testing.expectEqual(@as(u16, 1), static_codecs[0].channels);
-    try std.testing.expectEqualStrings("PCMA", static_codecs[1].mime_type);
-    try std.testing.expectEqualStrings("G722", static_codecs[2].mime_type);
+    try std.testing.expectEqualStrings("audio/PCMA", static_codecs[1].mime_type);
+    try std.testing.expectEqualStrings("audio/G722", static_codecs[2].mime_type);
 
     const rid_text =
         "v=0\r\n" ++
