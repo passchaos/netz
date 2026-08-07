@@ -678,7 +678,7 @@ pub const ice = struct {
             const prefix = "candidate:";
             const body = if (std.mem.startsWith(u8, line, "a=")) line[2..] else line;
             const candidate_body = if (std.mem.startsWith(u8, body, prefix)) body[prefix.len..] else body;
-            var it = std.mem.tokenizeScalar(u8, candidate_body, ' ');
+            var it = std.mem.splitScalar(u8, candidate_body, ' ');
             const foundation = it.next() orelse return error.InvalidIceCandidate;
             try validateIceFoundation(foundation);
             const component_s = it.next() orelse return error.InvalidIceCandidate;
@@ -693,6 +693,7 @@ pub const ice = struct {
             const typ_label = it.next() orelse return error.InvalidIceCandidate;
             if (!std.mem.eql(u8, typ_label, "typ")) return error.InvalidIceCandidate;
             const typ_s = it.next() orelse return error.InvalidIceCandidate;
+            const extension_raw = it.rest();
 
             var extensions: std.ArrayList(CandidateExtension) = .empty;
             errdefer if (allocator) |a| extensions.deinit(a);
@@ -706,17 +707,16 @@ pub const ice = struct {
                 .candidate_type = parseCandidateType(typ_s) orelse return error.UnknownIceCandidateType,
             };
 
-            while (it.next()) |key| {
-                try validateCandidateByteString(key);
-                const value = it.next() orelse return error.InvalidIceCandidate;
-                try validateCandidateByteString(value);
+            var ext_pos: usize = 0;
+            while (try nextCandidateExtensionToken(extension_raw, &ext_pos)) |key| {
+                const value = try nextCandidateExtensionValue(extension_raw, &ext_pos);
                 if (std.mem.eql(u8, key, "raddr")) {
                     if (candidate.related_address != null or candidate.related_port != null) return error.InvalidIceCandidate;
                     try validateCandidateAddress(value);
                     candidate.related_address = value;
-                    const rport_key = it.next() orelse return error.InvalidIceCandidate;
+                    const rport_key = (try nextCandidateExtensionToken(extension_raw, &ext_pos)) orelse return error.InvalidIceCandidate;
                     if (!std.mem.eql(u8, rport_key, "rport")) return error.InvalidIceCandidate;
-                    const rport_value = it.next() orelse return error.InvalidIceCandidate;
+                    const rport_value = try nextCandidateExtensionValue(extension_raw, &ext_pos);
                     try validateDecimalToken(rport_value, 5);
                     candidate.related_port = std.fmt.parseInt(u16, rport_value, 10) catch return error.InvalidIceCandidate;
                 } else if (std.mem.eql(u8, key, "rport")) {
@@ -906,6 +906,35 @@ pub const ice = struct {
             // hostnames and IPv6 literals that are common in WebRTC candidates.
             if (byte == 0 or byte == '\r' or byte == '\n') return error.InvalidIceCandidate;
         }
+    }
+
+    fn validateCandidateExtensionByteString(value: []const u8) Error!void {
+        for (value) |byte| {
+            if (byte == 0 or byte == '\r' or byte == '\n') return error.InvalidIceCandidate;
+        }
+    }
+
+    fn nextCandidateExtensionToken(raw: []const u8, pos: *usize) Error!?[]const u8 {
+        if (pos.* >= raw.len) return null;
+        const start = pos.*;
+        var end = start;
+        while (end < raw.len and raw[end] != ' ') : (end += 1) {}
+        const token = raw[start..end];
+        if (token.len == 0) return error.InvalidIceCandidate;
+        try validateCandidateByteString(token);
+        pos.* = if (end < raw.len) end + 1 else end;
+        return token;
+    }
+
+    fn nextCandidateExtensionValue(raw: []const u8, pos: *usize) Error![]const u8 {
+        if (pos.* >= raw.len) return "";
+        const start = pos.*;
+        var end = start;
+        while (end < raw.len and raw[end] != ' ') : (end += 1) {}
+        const value = raw[start..end];
+        try validateCandidateExtensionByteString(value);
+        pos.* = if (end < raw.len) end + 1 else end;
+        return value;
     }
 
     fn validateCandidateAddress(value: []const u8) Error!void {
@@ -7404,6 +7433,19 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings(
         "candidate:4207374052 1 tcp 1685790463 192.0.2.15 50000 typ prflx raddr 10.0.0.1 rport 12345 generation 0 network-id 2 network-cost 10",
         extended_line.items,
+    );
+
+    var empty_ext = try ice.Candidate.parseOwned(allocator, "candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype active empty-value-1  empty-value-2 ");
+    defer empty_ext.deinit(allocator);
+    try std.testing.expectEqualStrings("active", empty_ext.extensionValue("tcptype").?);
+    try std.testing.expectEqual(@as(usize, 0), empty_ext.extensionValue("empty-value-1").?.len);
+    try std.testing.expectEqual(@as(usize, 0), empty_ext.extensionValue("empty-value-2").?.len);
+    var empty_ext_line: std.ArrayList(u8) = .empty;
+    defer empty_ext_line.deinit(allocator);
+    try empty_ext.write(&empty_ext_line, allocator);
+    try std.testing.expectEqualStrings(
+        "candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype active empty-value-1  empty-value-2 ",
+        empty_ext_line.items,
     );
 
     const mdns = try ice.Candidate.parse("candidate:1380287402 1 udp 2130706431 e2494022-4d9a-4c1e-a750-cc48d4f8d6ee.local 60542 typ host");
