@@ -988,9 +988,15 @@ pub const AckPacket = struct {
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
         try wire.appendInt(&variable, allocator, u16, packet_id, .big);
-        if (protocol == .v5 and (reason_code != 0 or properties.len != 0)) {
+        if (protocol == .v5 and properties.len != 0) {
             try variable.append(allocator, reason_code);
             try writeProperties(&variable, allocator, properties);
+        } else if (protocol == .v5 and reason_code != 0) {
+            // MQTT 5 lets PUBACK/PUBREC/PUBREL/PUBCOMP omit Property Length
+            // when no properties are present.  Emit the shorter reason-only
+            // form used by rumqtt instead of appending a redundant zero-length
+            // property section.
+            try variable.append(allocator, reason_code);
         }
         try (FixedHeader{ .packet_type = packet_type, .flags = packet_type.defaultFlags(), .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
         try list.appendSlice(allocator, variable.items);
@@ -2185,6 +2191,7 @@ test "MQTT connack ack and ping controls" {
     var puback_bytes: std.ArrayList(u8) = .empty;
     defer puback_bytes.deinit(allocator);
     try AckPacket.write(&puback_bytes, allocator, .v5, .puback, 42, 0x10, &.{});
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x40, 0x03, 0x00, 0x2a, 0x10 }, puback_bytes.items);
     var puback = try AckPacket.parse(allocator, .v5, puback_bytes.items);
     defer puback.deinit(allocator);
     try std.testing.expectEqual(PacketType.puback, puback.packet_type);
