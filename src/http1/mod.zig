@@ -674,8 +674,23 @@ pub fn validateRequestTarget(target: []const u8) Error!void {
 pub fn validateRequestTargetForMethod(method: Method, target: []const u8) Error!void {
     switch (method) {
         .CONNECT => try validateConnectTarget(target),
-        else => try validateRequestTarget(target),
+        .OPTIONS => {
+            try validateRequestTarget(target);
+            if (std.mem.eql(u8, target, "*")) return;
+            if (looksLikeAuthorityForm(target)) return error.MalformedStartLine;
+        },
+        else => {
+            try validateRequestTarget(target);
+            if (std.mem.eql(u8, target, "*")) return error.MalformedStartLine;
+            if (looksLikeAuthorityForm(target)) return error.MalformedStartLine;
+        },
     }
+}
+
+fn looksLikeAuthorityForm(target: []const u8) bool {
+    if (target.len == 0 or target[0] == '/' or target[0] == '*') return false;
+    if (std.mem.indexOf(u8, target, "://") != null) return false;
+    return std.mem.indexOfScalar(u8, target, ':') != null;
 }
 
 pub fn validateConnectTarget(target: []const u8) Error!void {
@@ -1005,7 +1020,12 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, validateRequestTarget(""));
     try validateConnectTarget("example.com:443");
     try validateConnectTarget("[2001:db8::1]:443");
+    try validateRequestTargetForMethod(.OPTIONS, "*");
+    try validateRequestTargetForMethod(.GET, "https://example.com/path");
     try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "CONNECT /path HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "GET * HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "GET example.com:80 HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "OPTIONS example.com:80 HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("/path"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("2001:db8::1:443"));
