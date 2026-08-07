@@ -2150,6 +2150,59 @@ fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Strea
     }
 }
 
+test "HTTP/1 runtime accepts matching absolute-form target" {
+    const allocator = std.testing.allocator;
+
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    defer backend.deinit();
+    const io = backend.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("http://example.com:8080/absolute?x=1", request.request.target);
+            try connection.writeResponse(.{ .body = "absolute-ok", .request_method = request.request.method });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    try writeAllToStream(io, stream, "GET http://example.com:8080/absolute?x=1 HTTP/1.1\r\n" ++
+        "Host: example.com:8080\r\n" ++
+        "Connection: close\r\n" ++
+        "\r\n");
+    var response = try readResponseFromStreamForRequest(allocator, io, stream, .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    }, .{}, .GET);
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("absolute-ok", response.response.body);
+}
+
 test "HTTP/1 runtime client and server exchange over TCP" {
     const allocator = std.testing.allocator;
 
