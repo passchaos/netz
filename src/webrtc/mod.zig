@@ -2691,7 +2691,8 @@ pub const sdp = struct {
             }
             const typ = parts.next() orelse return error.InvalidSdp;
             const parameter = parts.rest();
-            try feedback.append(allocator, .{ .typ = typ, .parameter = std.mem.trim(u8, parameter, " \t") });
+            const entry = RtcpFeedback{ .typ = typ, .parameter = std.mem.trim(u8, parameter, " \t") };
+            if (!rtcpFeedbackContainsIgnoreCase(feedback.items, entry)) try feedback.append(allocator, entry);
         }
         return feedback.toOwnedSlice(allocator);
     }
@@ -9389,7 +9390,9 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=fmtp:111 minptime=10;useinbandfec=1\r\n" ++
         "a=rtcp-fb:111 goog-remb\r\n" ++
         "a=rtcp-fb:111 ccm fir\r\n" ++
-        "a=rtcp-fb:* nack\r\n";
+        "a=rtcp-fb:* ccm fir\r\n" ++
+        "a=rtcp-fb:* nack\r\n" ++
+        "a=rtcp-fb:* NACK\r\n";
     var codec_session = try sdp.parse(allocator, codec_text);
     defer codec_session.deinit(allocator);
     const codecs = try sdp.extractRtpCodecs(allocator, codec_session.media[0]);
