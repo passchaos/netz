@@ -1261,6 +1261,7 @@ fn validateServerHandshake(
         }
         return error.InvalidSubprotocol;
     }
+    if (offered_protocols.len != 0) return error.InvalidSubprotocol;
     return null;
 }
 
@@ -1305,6 +1306,7 @@ fn validateH2ServerHandshake(
         }
         return error.InvalidSubprotocol;
     }
+    if (offered_protocols.len != 0) return error.InvalidSubprotocol;
     return null;
 }
 
@@ -1426,6 +1428,7 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
     var response = try http1.parseResponse(allocator, split_connection, .{});
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(?[]u8, null), try validateServerHandshake(allocator, response, client_key, &.{}));
+    try std.testing.expectError(error.InvalidSubprotocol, validateServerHandshake(allocator, response, client_key, &.{"chat.v1"}));
 
     const duplicate_accept =
         "HTTP/1.1 101 Switching Protocols\r\n" ++
@@ -1541,6 +1544,7 @@ test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
         .{ .name = "sec-websocket-protocol", .value = "bad protocol" },
     };
     try std.testing.expectError(error.InvalidSubprotocol, selectH2Subprotocol(allocator, &invalid_split_protocol, &.{"chat.v1"}));
+    try std.testing.expectError(error.InvalidSubprotocol, validateH2ServerHandshake(allocator, &.{}, &.{"chat.v1"}));
 }
 
 test "WebSocket runtime client and server exchange over TCP" {
