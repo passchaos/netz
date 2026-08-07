@@ -201,12 +201,14 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var saw_supported_versions = false;
     var alpn_list: std.ArrayList([]const u8) = .empty;
     errdefer alpn_list.deinit(allocator);
+    var seen_extensions = SeenExtensions{};
 
     var ext_cursor = wire.Cursor.init(extensions);
     while (!ext_cursor.eof()) {
         const typ = try ext_cursor.readInt(u16, .big);
         const len = try ext_cursor.readInt(u16, .big);
         const payload = try ext_cursor.readSlice(len);
+        try seen_extensions.note(typ, error.InvalidClientHello);
         switch (typ) {
             ext_server_name => server_name = try parseServerName(payload),
             ext_alpn => try parseAlpn(allocator, &alpn_list, payload),
@@ -256,11 +258,13 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
 
     var saw_supported_versions = false;
     var x25519: ?[]const u8 = null;
+    var seen_extensions = SeenExtensions{};
     var ext_cursor = wire.Cursor.init(extensions);
     while (!ext_cursor.eof()) {
         const typ = try ext_cursor.readInt(u16, .big);
         const len = try ext_cursor.readInt(u16, .big);
         const payload = try ext_cursor.readSlice(len);
+        try seen_extensions.note(typ, error.InvalidServerHello);
         switch (typ) {
             ext_supported_versions => {
                 if (payload.len != 2 or std.mem.readInt(u16, payload[0..2], .big) != tls_1_3) return error.InvalidServerHello;
@@ -289,11 +293,13 @@ pub fn parseEncryptedExtensions(bytes: []const u8) Error!ParsedEncryptedExtensio
 
     var alpn: ?[]const u8 = null;
     var transport_parameters: ?[]const u8 = null;
+    var seen_extensions = SeenExtensions{};
     var ext_cursor = wire.Cursor.init(extensions);
     while (!ext_cursor.eof()) {
         const typ = try ext_cursor.readInt(u16, .big);
         const len = try ext_cursor.readInt(u16, .big);
         const payload = try ext_cursor.readSlice(len);
+        try seen_extensions.note(typ, error.InvalidEncryptedExtensions);
         switch (typ) {
             ext_alpn => {
                 alpn = try parseSingleAlpn(payload);
@@ -391,6 +397,20 @@ pub fn verifyFinished(base_key: [32]u8, transcript_hash: [32]u8, verify_data: [3
     const expected = computeFinishedVerifyData(base_key, transcript_hash);
     if (!std.crypto.timing_safe.eql([32]u8, expected, verify_data)) return error.BadFinished;
 }
+
+const SeenExtensions = struct {
+    values: [64]u16 = [_]u16{0} ** 64,
+    len: usize = 0,
+
+    fn note(self: *SeenExtensions, typ: u16, err: Error) Error!void {
+        for (self.values[0..self.len]) |existing| {
+            if (existing == typ) return err;
+        }
+        if (self.len == self.values.len) return err;
+        self.values[self.len] = typ;
+        self.len += 1;
+    }
+};
 
 fn writeServerNameExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) Error!void {
     const server_name_len = std.math.add(usize, 1 + 2, name.len) catch return error.InvalidClientHello;
@@ -582,6 +602,11 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     defer allocator.free(params);
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.TransportParameterId.initial_max_data)), params[0].id);
 
+    var duplicate_transport_parameters = try hello.clone(allocator);
+    defer duplicate_transport_parameters.deinit(allocator);
+    try appendClientHelloExtensionForTest(&duplicate_transport_parameters, allocator, ext_quic_transport_parameters, &.{});
+    try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, duplicate_transport_parameters.items));
+
     const huge_transport_parameters = try allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) + 1);
     defer allocator.free(huge_transport_parameters);
     try std.testing.expectError(error.InvalidClientHello, writeClientHello(&hello, allocator, .{
@@ -610,6 +635,46 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
         .x25519_public_key = key,
         .alpn_protocols = too_many_protocols,
     }));
+}
+
+fn appendClientHelloExtensionForTest(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    typ: u16,
+    payload: []const u8,
+) Error!void {
+    if (list.items.len < 4 or list.items[0] != handshake_type_client_hello) return error.InvalidClientHello;
+    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
+    if (body_len + 4 != list.items.len) return error.InvalidClientHello;
+
+    var pos: usize = 4;
+    pos += 2 + 32; // legacy_version + random
+    if (pos >= list.items.len) return error.InvalidClientHello;
+    const session_id_len = list.items[pos];
+    pos += 1 + @as(usize, session_id_len);
+    if (pos + 2 > list.items.len) return error.InvalidClientHello;
+    const cipher_suites_len = std.mem.readInt(u16, list.items[pos..][0..2], .big);
+    pos += 2 + @as(usize, cipher_suites_len);
+    if (pos >= list.items.len) return error.InvalidClientHello;
+    const compression_len = list.items[pos];
+    pos += 1 + @as(usize, compression_len);
+    if (pos + 2 > list.items.len) return error.InvalidClientHello;
+
+    const extensions_len_pos = pos;
+    const extensions_len = std.mem.readInt(u16, list.items[extensions_len_pos..][0..2], .big);
+    if (extensions_len_pos + 2 + @as(usize, extensions_len) != list.items.len) return error.InvalidClientHello;
+    const added_len = std.math.add(usize, 4, payload.len) catch return error.InvalidClientHello;
+    const next_extensions_len = std.math.add(usize, extensions_len, added_len) catch return error.InvalidClientHello;
+    const next_body_len = std.math.add(usize, body_len, added_len) catch return error.InvalidClientHello;
+    if (next_extensions_len > std.math.maxInt(u16) or next_body_len > std.math.maxInt(u24)) return error.InvalidClientHello;
+
+    try appendInt(list, allocator, u16, typ);
+    try appendU16Len(list, allocator, payload.len, error.InvalidClientHello);
+    try list.appendSlice(allocator, payload);
+    std.mem.writeInt(u16, list.items[extensions_len_pos..][0..2], @intCast(next_extensions_len), .big);
+    list.items[1] = @truncate(next_body_len >> 16);
+    list.items[2] = @truncate(next_body_len >> 8);
+    list.items[3] = @truncate(next_body_len);
 }
 
 test "QUIC TLS ClientHello travels over Initial CRYPTO exchange" {
