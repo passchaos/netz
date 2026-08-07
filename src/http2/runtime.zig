@@ -858,13 +858,15 @@ pub const Connection = struct {
         comptime HandlerContext: type,
         context: *HandlerContext,
         comptime handler: *const fn (*HandlerContext, OwnedRequest) Error!ResponseOptions,
-    ) Error!void {
+    ) Error!u31 {
         var owned_request = try self.readRequest();
+        const stream_id = owned_request.stream_id;
         defer owned_request.deinit(self.allocator);
         var response = try handler(context, owned_request);
         if (response.request_method == null) response.request_method = owned_request.method;
         response.extended_connect = owned_request.protocol != null;
-        try self.writeResponse(owned_request.stream_id, response);
+        try self.writeResponse(stream_id, response);
+        return stream_id;
     }
 
     pub fn serve(
@@ -875,9 +877,11 @@ pub const Connection = struct {
         max_requests: usize,
     ) Error!usize {
         var served: usize = 0;
+        var last_stream_id: u31 = 0;
         while (served < max_requests) : (served += 1) {
-            try self.serveOne(HandlerContext, context, handler);
+            last_stream_id = try self.serveOne(HandlerContext, context, handler);
         }
+        try self.sendGoAway(last_stream_id, .no_error, "serve-complete");
         return served;
     }
 
@@ -2653,6 +2657,11 @@ test "HTTP/2 serveConnection handles sequential requests" {
     var second = try client.request(.{ .path = "/two" });
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("second", second.body);
+    var goaway = try client.readGoAway();
+    defer goaway.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 3), goaway.goaway.last_stream_id);
+    try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
+    try std.testing.expectEqualStrings("serve-complete", goaway.goaway.debug_data);
 
     thread.join();
     if (shared.err) |err| return err;
