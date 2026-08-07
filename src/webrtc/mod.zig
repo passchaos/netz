@@ -1380,6 +1380,37 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub const msid_semantic_wms = "WMS";
+
+    pub fn formatMsidSemanticAttribute(allocator: std.mem.Allocator, semantic: []const u8, stream_ids: []const []const u8) Error![]u8 {
+        try validateSdpToken(semantic);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.appendSlice(allocator, semantic);
+        for (stream_ids) |stream_id| {
+            try validateSdpToken(stream_id);
+            try out.append(allocator, ' ');
+            try out.appendSlice(allocator, stream_id);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn formatMsidSemanticTokensLine(allocator: std.mem.Allocator, semantic: []const u8, stream_ids: []const []const u8) Error![]u8 {
+        const attr = try formatMsidSemanticAttribute(allocator, semantic, stream_ids);
+        defer allocator.free(attr);
+        return std.fmt.allocPrint(allocator, "a=msid-semantic:{s}\r\n", .{attr});
+    }
+
+    pub fn appendMsidSemanticTokensLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, semantic: []const u8, stream_ids: []const []const u8) Error!void {
+        const line = try formatMsidSemanticTokensLine(allocator, semantic, stream_ids);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatWildcardMsidSemanticLine(allocator: std.mem.Allocator) Error![]u8 {
+        return formatMsidSemanticTokensLine(allocator, msid_semantic_wms, &.{"*"});
+    }
+
     pub fn formatMsidSemanticLine(allocator: std.mem.Allocator, value: []const u8) Error![]u8 {
         try validateSdpAttributeValue(value);
         return std.fmt.allocPrint(allocator, "a=msid-semantic:{s}\r\n", .{value});
@@ -9714,14 +9745,31 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const msid_semantic_line = try sdp.formatMsidSemanticLine(allocator, "WMS*");
     defer allocator.free(msid_semantic_line);
     try std.testing.expectEqualStrings("a=msid-semantic:WMS*\r\n", msid_semantic_line);
+    const msid_semantic_attr = try sdp.formatMsidSemanticAttribute(allocator, sdp.msid_semantic_wms, &.{ "stream-a", "stream-b" });
+    defer allocator.free(msid_semantic_attr);
+    try std.testing.expectEqualStrings("WMS stream-a stream-b", msid_semantic_attr);
+    const wildcard_msid_semantic_line = try sdp.formatWildcardMsidSemanticLine(allocator);
+    defer allocator.free(wildcard_msid_semantic_line);
+    try std.testing.expectEqualStrings("a=msid-semantic:WMS *\r\n", wildcard_msid_semantic_line);
+    const token_msid_semantic_line = try sdp.formatMsidSemanticTokensLine(allocator, sdp.msid_semantic_wms, &.{"video_stream"});
+    defer allocator.free(token_msid_semantic_line);
+    try std.testing.expectEqualStrings("a=msid-semantic:WMS video_stream\r\n", token_msid_semantic_line);
     var msid_lines: std.ArrayList(u8) = .empty;
     defer msid_lines.deinit(allocator);
     try sdp.appendMsidSemanticLine(&msid_lines, allocator, "WMS*");
+    try sdp.appendMsidSemanticTokensLine(&msid_lines, allocator, sdp.msid_semantic_wms, &.{"*"});
     try sdp.appendMsidLine(&msid_lines, allocator, "video_stream", "video_track");
-    try std.testing.expectEqualStrings("a=msid-semantic:WMS*\r\na=msid:video_stream video_track\r\n", msid_lines.items);
+    try std.testing.expectEqualStrings(
+        "a=msid-semantic:WMS*\r\n" ++
+            "a=msid-semantic:WMS *\r\n" ++
+            "a=msid:video_stream video_track\r\n",
+        msid_lines.items,
+    );
     try std.testing.expectError(error.InvalidSdp, sdp.formatMsidLine(allocator, "", "track"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatMsidLine(allocator, "stream", "bad track"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatMsidSemanticLine(allocator, "bad\nvalue"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatMsidSemanticTokensLine(allocator, "", &.{"*"}));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatMsidSemanticTokensLine(allocator, sdp.msid_semantic_wms, &.{"bad stream"}));
     try std.testing.expectError(error.InvalidSdp, sdp.formatSsrcLine(allocator, 3000, "", "value"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatSsrcLine(allocator, 3000, "msid", "bad\nvalue"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatSsrcGroupLine(allocator, "FID", &.{3000}));
