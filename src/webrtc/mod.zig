@@ -2353,6 +2353,7 @@ pub const dtls = struct {
             var cursor = wire.Cursor.init(bytes);
             const content_type: ContentType = @enumFromInt(try cursor.readByte());
             const version = try cursor.readInt(u16, .big);
+            try validateRecordHeader(content_type, version);
             const epoch = try cursor.readInt(u16, .big);
             const seq_hi = try cursor.readInt(u16, .big);
             const seq_lo = try cursor.readInt(u32, .big);
@@ -2388,6 +2389,7 @@ pub const dtls = struct {
         while (!cursor.eof()) {
             const content_type: ContentType = @enumFromInt(try cursor.readByte());
             const version = try cursor.readInt(u16, .big);
+            try validateRecordHeader(content_type, version);
             const epoch = try cursor.readInt(u16, .big);
             const seq_hi = try cursor.readInt(u16, .big);
             const seq_lo = try cursor.readInt(u32, .big);
@@ -2407,6 +2409,15 @@ pub const dtls = struct {
 
     pub fn freeRecords(allocator: std.mem.Allocator, records: []Record) void {
         allocator.free(records);
+    }
+
+    fn validateRecordHeader(content_type: ContentType, version: u16) Error!void {
+        switch (content_type) {
+            .change_cipher_spec, .alert, .handshake, .application_data => {},
+            _ => return error.InvalidDtlsRecord,
+        }
+        // Pion's record layer accepts DTLS 1.0 (FEFF) and DTLS 1.2 (FEFD).
+        if (version != 0xfeff and version != 0xfefd) return error.InvalidDtlsRecord;
     }
 };
 
@@ -8323,6 +8334,14 @@ test "RTP and DTLS record parsers" {
     try std.testing.expectEqual(@as(u48, 4), records[1].sequence_number);
     try std.testing.expectEqualStrings("alert", records[1].fragment);
     try std.testing.expectError(error.BufferTooShort, dtls.parseRecords(allocator, written.items[0 .. written.items.len - 1]));
+
+    var invalid_dtls = try written.clone(allocator);
+    defer invalid_dtls.deinit(allocator);
+    invalid_dtls.items[1] = 0x03; // TLS record versions are not valid DTLS wire versions.
+    try std.testing.expectError(error.InvalidDtlsRecord, dtls.Record.parse(invalid_dtls.items));
+    invalid_dtls.items[1] = 0xfe;
+    invalid_dtls.items[0] = 0xff; // Unknown content type.
+    try std.testing.expectError(error.InvalidDtlsRecord, dtls.Record.parse(invalid_dtls.items));
 }
 
 test "RTP packet extension padding and writer" {
