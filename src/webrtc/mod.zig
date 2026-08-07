@@ -2488,8 +2488,11 @@ pub const rtcp = struct {
     };
 
     pub const transport_feedback_nack: u5 = 1;
+    pub const transport_feedback_sli: u5 = 2;
+    pub const transport_feedback_rrr: u5 = 5;
     pub const transport_feedback_twcc: u5 = 15;
     pub const payload_feedback_pli: u5 = 1;
+    pub const payload_feedback_sli: u5 = 2;
     pub const payload_feedback_fir: u5 = 4;
     pub const payload_feedback_remb: u5 = 15;
     const max_rtcp_payload_len: usize = @as(usize, std.math.maxInt(u16)) * 4;
@@ -2626,6 +2629,23 @@ pub const rtcp = struct {
         media_ssrc: u32,
     };
 
+    pub const SliEntry = struct {
+        first: u16,
+        number: u16,
+        picture: u8,
+    };
+
+    pub const SliceLossIndication = struct {
+        sender_ssrc: u32,
+        media_ssrc: u32,
+        entries: []SliEntry,
+
+        pub fn deinit(self: *SliceLossIndication, allocator: std.mem.Allocator) void {
+            allocator.free(self.entries);
+            self.* = undefined;
+        }
+    };
+
     pub const FirEntry = struct {
         ssrc: u32,
         sequence_number: u8,
@@ -2640,6 +2660,11 @@ pub const rtcp = struct {
             allocator.free(self.entries);
             self.* = undefined;
         }
+    };
+
+    pub const RapidResynchronizationRequest = struct {
+        sender_ssrc: u32,
+        media_ssrc: u32,
     };
 
     pub const NackPair = struct {
@@ -2920,9 +2945,11 @@ pub const rtcp = struct {
         goodbye: Goodbye,
         source_description: SourceDescription,
         picture_loss_indication: PictureLossIndication,
+        slice_loss_indication: SliceLossIndication,
         full_intra_request: FullIntraRequest,
         receiver_estimated_maximum_bitrate: ReceiverEstimatedMaximumBitrate,
         application_defined: ApplicationDefined,
+        rapid_resynchronization_request: RapidResynchronizationRequest,
         transport_layer_nack: TransportLayerNack,
         transport_wide_cc: TransportWideCc,
         unknown: Unknown,
@@ -2933,6 +2960,7 @@ pub const rtcp = struct {
                 .receiver_report => |report| allocator.free(report.report_blocks),
                 .goodbye => |*goodbye| goodbye.deinit(allocator),
                 .source_description => |*sdes| sdes.deinit(allocator),
+                .slice_loss_indication => |*sli| sli.deinit(allocator),
                 .full_intra_request => |*fir| fir.deinit(allocator),
                 .receiver_estimated_maximum_bitrate => |*remb| remb.deinit(allocator),
                 .application_defined => |*app| app.deinit(allocator),
@@ -2969,6 +2997,8 @@ pub const rtcp = struct {
             .application_defined => .{ .application_defined = try parseApplicationDefined(allocator, header, payload) },
             .payload_feedback => if (header.count_or_format == payload_feedback_pli)
                 .{ .picture_loss_indication = try parsePictureLossIndication(payload) }
+            else if (header.count_or_format == payload_feedback_sli)
+                .{ .slice_loss_indication = try parseSliceLossIndication(allocator, payload) }
             else if (header.count_or_format == payload_feedback_fir)
                 .{ .full_intra_request = try parseFullIntraRequest(allocator, payload) }
             else if (header.count_or_format == payload_feedback_remb)
@@ -2977,6 +3007,10 @@ pub const rtcp = struct {
                 .{ .unknown = .{ .header = header, .payload = payload } },
             .transport_feedback => if (header.count_or_format == transport_feedback_nack)
                 .{ .transport_layer_nack = try parseTransportLayerNack(allocator, payload) }
+            else if (header.count_or_format == transport_feedback_sli)
+                .{ .slice_loss_indication = try parseSliceLossIndication(allocator, payload) }
+            else if (header.count_or_format == transport_feedback_rrr)
+                .{ .rapid_resynchronization_request = try parseRapidResynchronizationRequest(payload) }
             else if (header.count_or_format == transport_feedback_twcc)
                 .{ .transport_wide_cc = try parseTransportWideCc(allocator, payload) }
             else
@@ -3009,9 +3043,11 @@ pub const rtcp = struct {
             .goodbye => |goodbye| try writeGoodbye(list, allocator, goodbye),
             .source_description => |sdes| try writeSourceDescription(list, allocator, sdes),
             .picture_loss_indication => |pli| try writePictureLossIndication(list, allocator, pli),
+            .slice_loss_indication => |sli| try writeSliceLossIndication(list, allocator, sli),
             .full_intra_request => |fir| try writeFullIntraRequest(list, allocator, fir),
             .receiver_estimated_maximum_bitrate => |remb| try writeReceiverEstimatedMaximumBitrate(list, allocator, remb),
             .application_defined => |app| try writeApplicationDefined(list, allocator, app),
+            .rapid_resynchronization_request => |rrr| try writeRapidResynchronizationRequest(list, allocator, rrr),
             .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
             .transport_wide_cc => |twcc| try writeTransportWideCc(list, allocator, twcc),
             .unknown => |unknown| {
@@ -3140,6 +3176,32 @@ pub const rtcp = struct {
     }
 
     fn parsePictureLossIndication(payload: []const u8) Error!PictureLossIndication {
+        if (payload.len != 8) return error.InvalidRtcpPacket;
+        return .{
+            .sender_ssrc = std.mem.readInt(u32, payload[0..4], .big),
+            .media_ssrc = std.mem.readInt(u32, payload[4..8], .big),
+        };
+    }
+
+    fn parseSliceLossIndication(allocator: std.mem.Allocator, payload: []const u8) Error!SliceLossIndication {
+        if (payload.len < 8 or ((payload.len - 8) % 4) != 0) return error.InvalidRtcpPacket;
+        var cursor = wire.Cursor.init(payload);
+        const sender_ssrc = try cursor.readInt(u32, .big);
+        const media_ssrc = try cursor.readInt(u32, .big);
+        const entries = try allocator.alloc(SliEntry, cursor.remaining() / 4);
+        errdefer allocator.free(entries);
+        for (entries) |*entry| {
+            const raw = try cursor.readInt(u32, .big);
+            entry.* = .{
+                .first = @intCast((raw >> 19) & 0x1fff),
+                .number = @intCast((raw >> 6) & 0x1fff),
+                .picture = @intCast(raw & 0x3f),
+            };
+        }
+        return .{ .sender_ssrc = sender_ssrc, .media_ssrc = media_ssrc, .entries = entries };
+    }
+
+    fn parseRapidResynchronizationRequest(payload: []const u8) Error!RapidResynchronizationRequest {
         if (payload.len != 8) return error.InvalidRtcpPacket;
         return .{
             .sender_ssrc = std.mem.readInt(u32, payload[0..4], .big),
@@ -3385,6 +3447,22 @@ pub const rtcp = struct {
         try wire.appendInt(list, allocator, u32, pli.media_ssrc, .big);
     }
 
+    fn writeSliceLossIndication(list: *std.ArrayList(u8), allocator: std.mem.Allocator, sli: SliceLossIndication) Error!void {
+        if (sli.entries.len > (max_rtcp_payload_len - 8) / 4) return error.InvalidRtcpPacket;
+        // Match Pion/rtcp's wire image for SLI (PT=TSFB/FMT=2).  The parser
+        // accepts the RFC 4585 PSFB variant as well because that is the IANA
+        // assignment other stacks may emit.
+        try writeHeader(list, allocator, transport_feedback_sli, .transport_feedback, 8 + sli.entries.len * 4);
+        try wire.appendInt(list, allocator, u32, sli.sender_ssrc, .big);
+        try wire.appendInt(list, allocator, u32, sli.media_ssrc, .big);
+        for (sli.entries) |entry| {
+            const raw = ((@as(u32, entry.first) & 0x1fff) << 19) |
+                ((@as(u32, entry.number) & 0x1fff) << 6) |
+                (@as(u32, entry.picture) & 0x3f);
+            try wire.appendInt(list, allocator, u32, raw, .big);
+        }
+    }
+
     fn writeFullIntraRequest(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fir: FullIntraRequest) Error!void {
         if (fir.entries.len == 0) return error.InvalidRtcpPacket;
         if (fir.entries.len > (max_rtcp_payload_len - 8) / 8) return error.InvalidRtcpPacket;
@@ -3396,6 +3474,12 @@ pub const rtcp = struct {
             try list.append(allocator, entry.sequence_number);
             try list.appendNTimes(allocator, 0, 3);
         }
+    }
+
+    fn writeRapidResynchronizationRequest(list: *std.ArrayList(u8), allocator: std.mem.Allocator, rrr: RapidResynchronizationRequest) Error!void {
+        try writeHeader(list, allocator, transport_feedback_rrr, .transport_feedback, 8);
+        try wire.appendInt(list, allocator, u32, rrr.sender_ssrc, .big);
+        try wire.appendInt(list, allocator, u32, rrr.media_ssrc, .big);
     }
 
     fn writeReceiverEstimatedMaximumBitrate(list: *std.ArrayList(u8), allocator: std.mem.Allocator, remb: ReceiverEstimatedMaximumBitrate) Error!void {
@@ -6278,6 +6362,53 @@ test "RTCP receiver report and feedback packets" {
     defer pli.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x11111111), pli.packet.picture_loss_indication.sender_ssrc);
     try std.testing.expectEqual(@as(u32, 0x22222222), pli.packet.picture_loss_indication.media_ssrc);
+
+    encoded.clearRetainingCapacity();
+    var sli_entries = [_]rtcp.SliEntry{.{
+        .first = 0x0aaa,
+        .number = 0,
+        .picture = 0x2c,
+    }};
+    try rtcp.writePacket(&encoded, allocator, .{ .slice_loss_indication = .{
+        .sender_ssrc = 0x902f9e2e,
+        .media_ssrc = 0x902f9e2e,
+        .entries = &sli_entries,
+    } });
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0x82, 0xcd, 0x00, 0x03,
+        0x90, 0x2f, 0x9e, 0x2e,
+        0x90, 0x2f, 0x9e, 0x2e,
+        0x55, 0x50, 0x00, 0x2c,
+    }, encoded.items);
+    var sli = try rtcp.parsePacket(allocator, encoded.items);
+    defer sli.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x902f9e2e), sli.packet.slice_loss_indication.sender_ssrc);
+    try std.testing.expectEqual(@as(usize, 1), sli.packet.slice_loss_indication.entries.len);
+    try std.testing.expectEqual(@as(u16, 0x0aaa), sli.packet.slice_loss_indication.entries[0].first);
+    try std.testing.expectEqual(@as(u16, 0), sli.packet.slice_loss_indication.entries[0].number);
+    try std.testing.expectEqual(@as(u8, 0x2c), sli.packet.slice_loss_indication.entries[0].picture);
+
+    var psfb_sli_bytes = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(psfb_sli_bytes);
+    psfb_sli_bytes[1] = @intFromEnum(rtcp.PacketType.payload_feedback);
+    var psfb_sli = try rtcp.parsePacket(allocator, psfb_sli_bytes);
+    defer psfb_sli.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 0x0aaa), psfb_sli.packet.slice_loss_indication.entries[0].first);
+
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, .{ .rapid_resynchronization_request = .{
+        .sender_ssrc = 0x902f9e2e,
+        .media_ssrc = 0xbc5e9a40,
+    } });
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0x85, 0xcd, 0x00, 0x02,
+        0x90, 0x2f, 0x9e, 0x2e,
+        0xbc, 0x5e, 0x9a, 0x40,
+    }, encoded.items);
+    var rrr = try rtcp.parsePacket(allocator, encoded.items);
+    defer rrr.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x902f9e2e), rrr.packet.rapid_resynchronization_request.sender_ssrc);
+    try std.testing.expectEqual(@as(u32, 0xbc5e9a40), rrr.packet.rapid_resynchronization_request.media_ssrc);
 
     encoded.clearRetainingCapacity();
     var nack_pairs = [_]rtcp.NackPair{.{
