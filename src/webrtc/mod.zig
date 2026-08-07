@@ -2740,7 +2740,7 @@ pub const rtp = struct {
 
     pub fn playoutDelay(elements: []const HeaderExtensionElement, id: u8) Error!?PlayoutDelayExtension {
         const value = findHeaderExtension(elements, id) orelse return null;
-        if (value.len != 3) return error.InvalidRtpPacket;
+        if (value.len < 3) return error.InvalidRtpPacket;
         return .{
             .min_delay = @truncate(std.mem.readInt(u16, value[0..2], .big) >> 4),
             .max_delay = @truncate(std.mem.readInt(u16, value[1..3], .big) & 0x0fff),
@@ -8423,6 +8423,10 @@ test "RTP packet extension padding and writer" {
     const parsed_playout_delay = (try rtp.playoutDelay(parsed_extensions, 6)).?;
     try std.testing.expectEqual(@as(u12, 1 << 4), parsed_playout_delay.min_delay);
     try std.testing.expectEqual(@as(u12, 1 << 8), parsed_playout_delay.max_delay);
+    const extra_playout_delay = (try rtp.playoutDelay(&.{.{ .id = 6, .data = &.{ 0x01, 0x01, 0x00, 0xff, 0xff } }}, 6)).?;
+    try std.testing.expectEqual(@as(u12, 1 << 4), extra_playout_delay.min_delay);
+    try std.testing.expectEqual(@as(u12, 1 << 8), extra_playout_delay.max_delay);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.playoutDelay(&.{.{ .id = 6, .data = &.{ 0x01, 0x01 } }}, 6));
     try std.testing.expectError(error.InvalidRtpPacket, rtp.playoutDelayPayload(1 << 12, 1 << 12));
     const parsed_video_orientation = (try rtp.videoOrientation(parsed_extensions, 8)).?;
     try std.testing.expectEqual(rtp.VideoRotation.rotate_90, parsed_video_orientation.rotation);
