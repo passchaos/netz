@@ -765,10 +765,10 @@ pub fn validateHostValue(raw_host: []const u8) Error!void {
     if (std.mem.indexOf(u8, host, "://") != null) return error.InvalidHost;
     for (host) |byte| {
         // Host is an authority component, not a free-form field value.  Reject
-        // whitespace, path/query/fragment separators, and userinfo so
+        // whitespace, list/path/query/fragment separators, and userinfo so
         // proxies/origin servers do not disagree about which authority was
         // requested.
-        if (byte <= 0x20 or byte == 0x7f or byte == '/' or byte == '\\' or byte == '?' or byte == '#' or byte == '@') return error.InvalidHost;
+        if (byte <= 0x20 or byte == 0x7f or byte == ',' or byte == '/' or byte == '\\' or byte == '?' or byte == '#' or byte == '@') return error.InvalidHost;
     }
 
     const port: ?[]const u8 = if (host[0] == '[') blk: {
@@ -1077,6 +1077,7 @@ test "HTTP/1 validates Host authority rules" {
     try std.testing.expectError(error.InvalidHost, validateHostValue("example.com:65536"));
     try std.testing.expectError(error.InvalidHost, validateHostValue("http://example.com"));
     try std.testing.expectError(error.InvalidHost, validateHostValue("user@example.com"));
+    try std.testing.expectError(error.InvalidHost, validateHostValue("example.com, other.example"));
     try std.testing.expectError(error.InvalidHost, validateHostValue("example.com?query"));
     try std.testing.expectError(error.InvalidHost, validateHostValue("example.com#fragment"));
     try std.testing.expectError(error.InvalidHost, validateHostValue("2001:db8::1"));
