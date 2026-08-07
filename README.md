@@ -141,7 +141,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   protected runtime that uses QUIC 1-RTT DATAGRAM send/receive queues with
   WebTransport payload-size accounting and batch receive helpers
 - WebRTC building blocks: STUN, ICE connectivity-check helpers with priority encode/decode,
-  USERNAME/PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE plus
+  USERNAME/PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE role-conflict tiebreaker decisions plus
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
   XOR-MAPPED-ADDRESS helpers, ICE candidates with RFC/Pion-compatible candidate type/local/TCP/relay priority and pair-priority helpers, SDP parsing with DTLS fingerprint, DTLS setup role parse/generation helpers,
   ICE credential, BUNDLE-aware media selection, ICE trickle option detection, RTP `extmap` extraction, SDP track extraction with SSRC/RID lookup helpers, and modern/legacy SCTP DataChannel port plus DataChannel protocol-token validation, Pion-compatible max-message-size metadata defaults and `sctp-init` decoding, empty DataChannel PPID placeholder validation, DTLS record headers, RTP packets/extensions/padding, RTCP

@@ -192,6 +192,12 @@ pub const stun = struct {
         use_candidate: bool,
     };
 
+    pub const IceRoleConflictDecision = enum {
+        no_conflict,
+        switch_role,
+        reject_role_conflict,
+    };
+
     pub const BindingRequestOptions = struct {
         transaction_id: [12]u8,
         username: []const u8,
@@ -276,6 +282,23 @@ pub const stun = struct {
             .role = role,
             .tie_breaker = tie_breaker,
             .use_candidate = attrValue(message, .use_candidate) != null,
+        };
+    }
+
+    pub fn resolveRoleConflict(local_role: IceRole, local_tie_breaker: u64, remote: ValidatedIceBindingRequest) IceRoleConflictDecision {
+        if (local_role != remote.role) return .no_conflict;
+        const local_is_greater_or_equal = local_tie_breaker >= remote.tie_breaker;
+
+        // RFC 8445 section 7.3.1.1 / Pion ICE:
+        // * controlling + local >= remote ICE-CONTROLLING => reject with 487
+        // * controlled   + local <  remote ICE-CONTROLLED   => reject with 487
+        // Otherwise the local agent switches role and continues processing the
+        // connectivity check.  Exposing the pure decision here lets lightweight
+        // runtimes share the same tiebreaker behavior without embedding a full
+        // ICE agent state machine in the STUN codec.
+        return switch (local_role) {
+            .controlling => if (local_is_greater_or_equal) .reject_role_conflict else .switch_role,
+            .controlled => if (!local_is_greater_or_equal) .reject_role_conflict else .switch_role,
         };
     }
 
@@ -7137,6 +7160,23 @@ test "STUN ICE binding request authenticates integrity and fingerprint" {
     try std.testing.expectError(error.InvalidStunAttribute, stun.decodePriority(0));
     try std.testing.expectEqual(@as(u64, 0x0102030405060708), try stun.attrU64(parsed, .ice_controlling));
     try std.testing.expect(stun.attrValue(parsed, .use_candidate) != null);
+    const validated = try stun.validateIceBindingRequest(encoded.items, parsed, "remote:local", "ice-password");
+    try std.testing.expectEqual(stun.IceRole.controlling, validated.role);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), validated.tie_breaker);
+    try std.testing.expect(validated.use_candidate);
+    try std.testing.expectEqual(stun.IceRoleConflictDecision.reject_role_conflict, stun.resolveRoleConflict(.controlling, 0x0102030405060708, validated));
+    try std.testing.expectEqual(stun.IceRoleConflictDecision.switch_role, stun.resolveRoleConflict(.controlling, 1, validated));
+    try std.testing.expectEqual(stun.IceRoleConflictDecision.no_conflict, stun.resolveRoleConflict(.controlled, 1, validated));
+
+    const controlled_request = stun.ValidatedIceBindingRequest{
+        .username = "remote:local",
+        .priority = validated.priority,
+        .role = .controlled,
+        .tie_breaker = 10,
+        .use_candidate = false,
+    };
+    try std.testing.expectEqual(stun.IceRoleConflictDecision.reject_role_conflict, stun.resolveRoleConflict(.controlled, 9, controlled_request));
+    try std.testing.expectEqual(stun.IceRoleConflictDecision.switch_role, stun.resolveRoleConflict(.controlled, 10, controlled_request));
 
     var malformed_fingerprint_order = try std.ArrayList(u8).initCapacity(allocator, encoded.items.len + 8);
     defer malformed_fingerprint_order.deinit(allocator);
