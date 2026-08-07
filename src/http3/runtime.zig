@@ -75,9 +75,19 @@ pub const Server = struct {
     }
 
     pub fn sendResponse(self: *Server, to: net.IpAddress, stream_id: u62, response: http3.Response) Error!void {
+        try self.sendResponseWithInformational(to, stream_id, &.{}, response);
+    }
+
+    pub fn sendResponseWithInformational(
+        self: *Server,
+        to: net.IpAddress,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+    ) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
-        try response.write(&encoded, self.quic_server.endpoint.allocator);
+        try http3.writeResponseSequence(&encoded, self.quic_server.endpoint.allocator, informational, response);
         const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = stream_id, .data = encoded.items, .fin = true } }};
         try self.quic_server.sendFrames(to, &frames);
     }
@@ -302,8 +312,17 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
+        try self.sendResponseWithInformational(stream_id, &.{}, response);
+    }
+
+    pub fn sendResponseWithInformational(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+    ) Error!void {
         try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, server_control_stream_id);
-        try sendConnectionMessage(&self.established.connection, stream_id, response, self.options);
+        try sendConnectionResponseSequence(&self.established.connection, stream_id, informational, response, self.options);
     }
 
     pub fn sendGoAway(self: *HandshakeServerSession, stream_id: u64) Error!void {
@@ -431,10 +450,20 @@ pub const ProtectedServer = struct {
     }
 
     pub fn sendResponse(self: *ProtectedServer, to: net.IpAddress, stream_id: u62, response: http3.Response) Error!void {
+        try self.sendResponseWithInformational(to, stream_id, &.{}, response);
+    }
+
+    pub fn sendResponseWithInformational(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+    ) Error!void {
         try sendProtectedSettings(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, server_control_stream_id);
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
-        try response.write(&encoded, self.quic_server.endpoint.allocator);
+        try http3.writeResponseSequence(&encoded, self.quic_server.endpoint.allocator, informational, response);
         var send_state = quic.stream_state.SendState.init(stream_id);
         var frames: std.ArrayList(quic.Frame) = .empty;
         defer frames.deinit(self.quic_server.endpoint.allocator);
@@ -616,6 +645,24 @@ fn sendConnectionMessage(connection: *quic.one_rtt.Connection, stream_id: u62, m
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(connection.endpoint.allocator);
     try message.write(&encoded, connection.endpoint.allocator);
+
+    var send_state = quic.stream_state.SendState.init(stream_id);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(connection.endpoint.allocator);
+    try send_state.appendFrames(&frames, connection.endpoint.allocator, encoded.items, options.max_stream_frame_data, true);
+    try sendConnectionFrames(connection, frames.items, options.max_frames_per_packet);
+}
+
+fn sendConnectionResponseSequence(
+    connection: *quic.one_rtt.Connection,
+    stream_id: u62,
+    informational: []const http3.InformationalResponse,
+    response: http3.Response,
+    options: HandshakeSessionOptions,
+) Error!void {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(connection.endpoint.allocator);
+    try http3.writeResponseSequence(&encoded, connection.endpoint.allocator, informational, response);
 
     var send_state = quic.stream_state.SendState.init(stream_id);
     var frames: std.ArrayList(quic.Frame) = .empty;

@@ -921,6 +921,39 @@ pub const Response = struct {
     }
 };
 
+pub const InformationalResponse = struct {
+    status: u16,
+    headers: []const Qpack.HeaderField = &.{},
+
+    pub fn headerFields(self: InformationalResponse, out: []Qpack.HeaderField, status_buf: *[3]u8) Error![]Qpack.HeaderField {
+        if (self.status < 100 or self.status >= 200) return error.InvalidStatus;
+        var count: usize = 0;
+        const status = std.fmt.bufPrint(status_buf, "{d}", .{self.status}) catch return error.InvalidStatus;
+        try appendHeaderField(out, &count, .{ .name = ":status", .value = status });
+        for (self.headers) |header| try appendHeaderField(out, &count, header);
+        return out[0..count];
+    }
+
+    pub fn write(self: InformationalResponse, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var status_buf: [3]u8 = undefined;
+        const fields = try self.headerFields(&fields_buf, &status_buf);
+        try validateHeaderBlock(fields, .response);
+        try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
+        try writeHeadersFrame(list, allocator, fields);
+    }
+};
+
+pub fn writeResponseSequence(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    informational: []const InformationalResponse,
+    response: Response,
+) Error!void {
+    for (informational) |info| try info.write(list, allocator);
+    try response.write(list, allocator);
+}
+
 pub const DecodedRequest = struct {
     method: []const u8,
     path: []const u8,
@@ -1044,6 +1077,13 @@ const DecodedMessage = struct {
     }
 };
 
+fn writeHeadersFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const Qpack.HeaderField) Error!void {
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&block, allocator, fields);
+    try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, allocator);
+}
+
 fn writeHeadersAndData(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -1051,17 +1091,12 @@ fn writeHeadersAndData(
     body: []const u8,
     trailers: []const Qpack.HeaderField,
 ) Error!void {
-    var block: std.ArrayList(u8) = .empty;
-    defer block.deinit(allocator);
-    try Qpack.encodeLiteralBlock(&block, allocator, fields);
-    try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, allocator);
+    try writeHeadersFrame(list, allocator, fields);
     if (body.len > 0) {
         try (Frame{ .frame_type = FrameType.data, .payload = body, .consumed = 0 }).write(list, allocator);
     }
     if (trailers.len > 0) {
-        block.clearRetainingCapacity();
-        try Qpack.encodeLiteralBlock(&block, allocator, trailers);
-        try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, allocator);
+        try writeHeadersFrame(list, allocator, trailers);
     }
 }
 
@@ -1918,6 +1953,22 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "103" }});
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&informational_only, allocator);
     try std.testing.expectError(error.MissingStatus, decodeResponse(allocator, informational_only.items));
+
+    var written_sequence: std.ArrayList(u8) = .empty;
+    defer written_sequence.deinit(allocator);
+    try writeResponseSequence(&written_sequence, allocator, &.{.{
+        .status = 103,
+        .headers = &.{.{ .name = "link", .value = "</style.css>; rel=preload" }},
+    }}, .{ .status = 200, .body = "sequence-final" });
+    var sequence_decoded = try decodeResponse(allocator, written_sequence.items);
+    defer sequence_decoded.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), sequence_decoded.status);
+    try std.testing.expectEqualStrings("sequence-final", sequence_decoded.body);
+    try std.testing.expectError(error.InvalidStatus, (InformationalResponse{ .status = 200 }).write(&written_sequence, allocator));
+    try std.testing.expectError(error.InvalidContentLength, (InformationalResponse{
+        .status = 103,
+        .headers = &.{.{ .name = "content-length", .value = "1" }},
+    }).write(&written_sequence, allocator));
 
     var signed_length_response: std.ArrayList(u8) = .empty;
     defer signed_length_response.deinit(allocator);
