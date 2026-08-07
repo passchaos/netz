@@ -31,7 +31,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   status-forbidden response-body write rejection,
   traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body/Content-Length rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
-  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade request helpers that carry `HTTP2-Settings` and receive the stream-1 response, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis,
+  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis,
   `http://` URI and host-name DNS connect helpers, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
@@ -151,7 +151,7 @@ starts with deterministic parsers, serializers, and state helpers for:
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
 but practical runtime APIs are being added in priority order. HTTP/1 now has
 blocking HTTP and HTTPS client/server-side transport helpers, HTTP/2 covers both
-prior-knowledge h2c and RFC h2c Upgrade client flows, WebSocket includes a
+prior-knowledge h2c and RFC h2c Upgrade client/server flows, WebSocket includes a
 blocking TCP runtime, and WebSocket clients also support WSS over the shared TLS
 client transport; QUIC has Initial
 protection primitives plus a blocking UDP endpoint runtime for datagram/frame
