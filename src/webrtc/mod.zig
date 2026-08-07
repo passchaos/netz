@@ -2673,7 +2673,7 @@ pub const rtp = struct {
 
     pub fn transportWideSequenceNumber(elements: []const HeaderExtensionElement, id: u8) Error!?u16 {
         const value = findHeaderExtension(elements, id) orelse return null;
-        if (value.len != 2) return error.InvalidRtpPacket;
+        if (value.len < 2) return error.InvalidRtpPacket;
         return std.mem.readInt(u16, value[0..2], .big);
     }
 
@@ -8406,6 +8406,8 @@ test "RTP packet extension padding and writer" {
     defer rtp.freeHeaderExtensionElements(allocator, parsed_extensions);
     try std.testing.expectEqualStrings("m", rtp.findHeaderExtension(parsed_extensions, 1).?);
     try std.testing.expectEqual(@as(?u16, 0x1234), try rtp.transportWideSequenceNumber(parsed_extensions, 3));
+    try std.testing.expectEqual(@as(?u16, 2), try rtp.transportWideSequenceNumber(&.{.{ .id = 3, .data = &.{ 0x00, 0x02, 0xff } }}, 3));
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.transportWideSequenceNumber(&.{.{ .id = 3, .data = &.{0x00} }}, 3));
     try std.testing.expectEqual(@as(?u24, 0x010203), try rtp.absoluteSendTime24(parsed_extensions, 4));
     const send_ntp: u64 = 0xa0c65b1000100000;
     const receive_ntp: u64 = 0xa0c65b1001000000;
