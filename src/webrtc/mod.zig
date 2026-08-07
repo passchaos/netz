@@ -2543,6 +2543,44 @@ pub const rtp = struct {
         return null;
     }
 
+    pub fn headerExtensionIds(allocator: std.mem.Allocator, elements: []const HeaderExtensionElement) Error![]u8 {
+        const ids = try allocator.alloc(u8, elements.len);
+        for (elements, ids) |element, *id| id.* = element.id;
+        return ids;
+    }
+
+    pub fn setHeaderExtension(
+        allocator: std.mem.Allocator,
+        elements: *[]HeaderExtensionElement,
+        id: u8,
+        data: []const u8,
+    ) Error!void {
+        if (id == 0) return error.InvalidRtpPacket;
+        for (elements.*) |*element| {
+            if (element.id == id) {
+                element.data = data;
+                return;
+            }
+        }
+        if (elements.*.len == 0) {
+            elements.* = try allocator.alloc(HeaderExtensionElement, 1);
+            elements.*[0] = .{ .id = id, .data = data };
+            return;
+        }
+        elements.* = try allocator.realloc(elements.*, elements.*.len + 1);
+        elements.*[elements.*.len - 1] = .{ .id = id, .data = data };
+    }
+
+    pub fn deleteHeaderExtension(allocator: std.mem.Allocator, elements: *[]HeaderExtensionElement, id: u8) Error!bool {
+        for (elements.*, 0..) |element, index| {
+            if (element.id != id) continue;
+            std.mem.copyForwards(HeaderExtensionElement, elements.*[index .. elements.*.len - 1], elements.*[index + 1 ..]);
+            elements.* = try allocator.realloc(elements.*, elements.*.len - 1);
+            return true;
+        }
+        return false;
+    }
+
     pub fn mid(elements: []const HeaderExtensionElement, id: u8) ?[]const u8 {
         return findHeaderExtension(elements, id);
     }
@@ -8411,6 +8449,20 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(?u24, 0x010203), try rtp.absoluteSendTime24(parsed_extensions, 4));
     try std.testing.expectEqual(@as(?u24, 0x010203), try rtp.absoluteSendTime24(&.{.{ .id = 4, .data = &.{ 0x01, 0x02, 0x03, 0xff } }}, 4));
     try std.testing.expectError(error.InvalidRtpPacket, rtp.absoluteSendTime24(&.{.{ .id = 4, .data = &.{ 0x01, 0x02 } }}, 4));
+    var mutable_extensions = try allocator.dupe(rtp.HeaderExtensionElement, parsed_extensions);
+    defer allocator.free(mutable_extensions);
+    try rtp.setHeaderExtension(allocator, &mutable_extensions, 3, &.{ 0xab, 0xcd });
+    try rtp.setHeaderExtension(allocator, &mutable_extensions, 12, "new");
+    try std.testing.expectEqual(@as(?u16, 0xabcd), try rtp.transportWideSequenceNumber(mutable_extensions, 3));
+    try std.testing.expectEqualStrings("new", rtp.findHeaderExtension(mutable_extensions, 12).?);
+    const mutable_ids = try rtp.headerExtensionIds(allocator, mutable_extensions);
+    defer allocator.free(mutable_ids);
+    try std.testing.expectEqual(@as(u8, 1), mutable_ids[0]);
+    try std.testing.expectEqual(@as(u8, 12), mutable_ids[mutable_ids.len - 1]);
+    try std.testing.expect(try rtp.deleteHeaderExtension(allocator, &mutable_extensions, 1));
+    try std.testing.expect(rtp.findHeaderExtension(mutable_extensions, 1) == null);
+    try std.testing.expect(!(try rtp.deleteHeaderExtension(allocator, &mutable_extensions, 42)));
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.setHeaderExtension(allocator, &mutable_extensions, 0, "bad"));
     const send_ntp: u64 = 0xa0c65b1000100000;
     const receive_ntp: u64 = 0xa0c65b1001000000;
     const send_unix_ns = rtp.unixNanosFromNtpTime(send_ntp);
