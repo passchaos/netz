@@ -24,6 +24,7 @@ pub const Error = wire.Error || error{
     SrtpReplay,
     InvalidSctpPacket,
     BadSctpChecksum,
+    UnknownIceCandidateType,
     UnsupportedAddressFamily,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
@@ -568,7 +569,7 @@ pub const ice = struct {
                 .priority = std.fmt.parseInt(u32, priority_s, 10) catch return error.InvalidIceCandidate,
                 .address = address,
                 .port = std.fmt.parseInt(u16, port_s, 10) catch return error.InvalidIceCandidate,
-                .candidate_type = parseCandidateType(typ_s) orelse return error.InvalidIceCandidate,
+                .candidate_type = parseCandidateType(typ_s) orelse return error.UnknownIceCandidateType,
             };
 
             while (it.next()) |key| {
@@ -1050,6 +1051,7 @@ pub const sdp = struct {
         for (media.media.attributes) |attr| {
             if (!std.ascii.eqlIgnoreCase(attr.name, "candidate")) continue;
             var candidate = ice.Candidate.parseOwned(allocator, attr.value) catch |err| switch (err) {
+                error.UnknownIceCandidateType => continue,
                 error.InvalidIceCandidate => {
                     last_error = err;
                     continue;
@@ -4659,6 +4661,7 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectError(error.InvalidIceCandidate, ice.Candidate.parse("candidate:848194626 1 udp 16777215 50.0.0.1 5000 typ relay raddr 192.168.0.1"));
     try std.testing.expectError(error.InvalidIceCandidate, ice.Candidate.parse("candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype INVALID"));
     try std.testing.expectError(error.InvalidIceCandidate, ice.Candidate.parse("candidate:750 1 udp 500 fcd9:e3b8:12ce:9fc5:74a5:c6bb:d8b:e08a 53987 typ host ext valu\nu"));
+    try std.testing.expectError(error.UnknownIceCandidateType, ice.Candidate.parse("candidate:1 1 udp 2122162783 192.168.84.254 46492 typ zzz generation 0"));
 
     const text = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:0\r\n";
     var session = try sdp.parse(allocator, text);
@@ -4775,6 +4778,32 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("192.168.84.254", ice_details.candidates[0].candidate.address);
     try std.testing.expectEqual(@as(u16, 46492), ice_details.candidates[0].candidate.port);
     try std.testing.expectEqual(@as(usize, 2), ice_details.candidates[0].candidate.extensions.len);
+
+    const unknown_candidate_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=ice-ufrag:ufrag\r\n" ++
+        "a=ice-pwd:pwd\r\n" ++
+        "a=candidate:1 1 udp 2122162783 192.168.84.254 46492 typ zzz generation 0\r\n";
+    var unknown_candidate_session = try sdp.parse(allocator, unknown_candidate_text);
+    defer unknown_candidate_session.deinit(allocator);
+    var unknown_candidate_details = try sdp.extractIceDetails(allocator, unknown_candidate_session);
+    defer unknown_candidate_details.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), unknown_candidate_details.candidates.len);
+
+    const malformed_candidate_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=ice-ufrag:ufrag\r\n" ++
+        "a=ice-pwd:pwd\r\n" ++
+        "a=candidate:1 1 udp not-a-priority 192.168.84.254 50000 typ host generation 0\r\n";
+    var malformed_candidate_session = try sdp.parse(allocator, malformed_candidate_text);
+    defer malformed_candidate_session.deinit(allocator);
+    try std.testing.expectError(error.InvalidIceCandidate, sdp.extractIceDetails(allocator, malformed_candidate_session));
 
     try std.testing.expectEqual(sdp.DtlsRole.client, try sdp.extractDtlsRole(session));
 
