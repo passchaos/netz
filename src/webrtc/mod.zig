@@ -3651,6 +3651,14 @@ pub const rtcp = struct {
             const delay = self.roundTripDelay65536(now_compact_ntp) orelse return null;
             return compactNtpDelayToNanos(delay);
         }
+
+        pub fn cumulativeLostSigned(self: ReportBlock) i32 {
+            return decodeCumulativeLost(self.cumulative_lost);
+        }
+
+        pub fn setCumulativeLostSigned(self: *ReportBlock, lost: i32) Error!void {
+            self.cumulative_lost = try encodeCumulativeLost(lost);
+        }
     };
 
     pub const SenderReport = struct {
@@ -4334,6 +4342,16 @@ pub const rtcp = struct {
     fn roundTripDelayFromCompact(last_report: u32, delay_since_report: u32, now_compact_ntp: u32) ?u32 {
         if (last_report == 0 or delay_since_report == 0) return null;
         return now_compact_ntp -% last_report -% delay_since_report;
+    }
+
+    pub fn decodeCumulativeLost(raw: u24) i32 {
+        const value: i32 = @intCast(raw);
+        return if ((raw & 0x80_0000) != 0) value - 0x100_0000 else value;
+    }
+
+    pub fn encodeCumulativeLost(lost: i32) Error!u24 {
+        if (lost < -0x80_0000 or lost > 0x7f_ffff) return error.InvalidRtcpPacket;
+        return @truncate(@as(u32, @bitCast(lost)));
     }
 
     pub const ReceiverStats = struct {
@@ -9450,6 +9468,7 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(usize, encoded.items.len), rr.consumed);
     try std.testing.expectEqual(@as(u32, 0x0a0b0c0d), rr.packet.receiver_report.sender_ssrc);
     try std.testing.expectEqual(@as(u24, 3), rr.packet.receiver_report.report_blocks[0].cumulative_lost);
+    try std.testing.expectEqual(@as(i32, 3), rr.packet.receiver_report.report_blocks[0].cumulativeLostSigned());
     try std.testing.expectEqual(@as(u32, 44), rr.packet.receiver_report.report_blocks[0].interarrival_jitter);
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0, 0 }, rr.packet.receiver_report.profile_extensions);
     const report_block = rr.packet.receiver_report.report_blocks[0];
@@ -9458,6 +9477,15 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u64, std.time.ns_per_s / 2), report_block.roundTripDelayNanos(rr_now_compact_ntp).?);
     try std.testing.expect((rtcp.ReportBlock{ .ssrc = 1, .last_sender_report = 0, .delay_since_last_sender_report = 1 }).roundTripDelay65536(rr_now_compact_ntp) == null);
     try std.testing.expect((rtcp.ReportBlock{ .ssrc = 1, .last_sender_report = 1, .delay_since_last_sender_report = 0 }).roundTripDelayNanos(rr_now_compact_ntp) == null);
+
+    var duplicate_loss_block = rtcp.ReportBlock{ .ssrc = 1 };
+    try duplicate_loss_block.setCumulativeLostSigned(-2);
+    try std.testing.expectEqual(@as(u24, 0xff_fffe), duplicate_loss_block.cumulative_lost);
+    try std.testing.expectEqual(@as(i32, -2), duplicate_loss_block.cumulativeLostSigned());
+    try std.testing.expectEqual(@as(i32, -0x80_0000), rtcp.decodeCumulativeLost(0x80_0000));
+    try std.testing.expectEqual(@as(u24, 0x7f_ffff), try rtcp.encodeCumulativeLost(0x7f_ffff));
+    try std.testing.expectError(error.InvalidRtcpPacket, duplicate_loss_block.setCumulativeLostSigned(0x80_0000));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.encodeCumulativeLost(-0x80_0001));
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, .{ .sender_report = .{
