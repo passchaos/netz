@@ -34,6 +34,7 @@ pub const Error = varint.Error || error{
     InvalidPacketNumberLength,
     InvalidPayloadLength,
     KeyUpdateError,
+    UnsupportedVersion,
 } || std.crypto.errors.AuthenticationError || std.mem.Allocator.Error;
 
 pub const HeaderForm = enum {
@@ -481,6 +482,7 @@ pub fn sealInitialPacket(
     keys: PacketProtectionKeys,
     options: InitialPacketOptions,
 ) Error![]u8 {
+    try validateProtectedVersion(options.version);
     try validatePacketNumberLen(options.packet_number_len);
     if (options.destination_connection_id.len > 20 or options.source_connection_id.len > 20) return error.InvalidInitialPacket;
 
@@ -529,6 +531,7 @@ pub fn openInitialPacket(
     const protected_first_byte = try cursor.readByte();
     try validateLongHeaderFixedBit(protected_first_byte);
     const version = try cursor.readInt(u32, .big);
+    try validateProtectedVersion(version);
     if (protectedLongPacketType(protected_first_byte, version) != .initial) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
     try validateLongHeaderConnectionIdLen(dcid_len);
@@ -580,6 +583,7 @@ pub fn sealHandshakePacket(
     keys: PacketProtectionKeys,
     options: HandshakePacketOptions,
 ) Error![]u8 {
+    try validateProtectedVersion(options.version);
     try validatePacketNumberLen(options.packet_number_len);
     if (options.destination_connection_id.len > 20 or options.source_connection_id.len > 20) return error.InvalidInitialPacket;
 
@@ -626,6 +630,7 @@ pub fn openHandshakePacket(
     const protected_first_byte = try cursor.readByte();
     try validateLongHeaderFixedBit(protected_first_byte);
     const version = try cursor.readInt(u32, .big);
+    try validateProtectedVersion(version);
     if (protectedLongPacketType(protected_first_byte, version) != .handshake) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
     try validateLongHeaderConnectionIdLen(dcid_len);
@@ -672,6 +677,7 @@ pub fn sealZeroRttPacket(
     keys: PacketProtectionKeys,
     options: ZeroRttPacketOptions,
 ) Error![]u8 {
+    try validateProtectedVersion(options.version);
     try validatePacketNumberLen(options.packet_number_len);
     if (options.destination_connection_id.len > 20 or options.source_connection_id.len > 20) return error.InvalidInitialPacket;
 
@@ -718,6 +724,7 @@ pub fn openZeroRttPacket(
     const protected_first_byte = try cursor.readByte();
     try validateLongHeaderFixedBit(protected_first_byte);
     const version = try cursor.readInt(u32, .big);
+    try validateProtectedVersion(version);
     if (protectedLongPacketType(protected_first_byte, version) != .zero_rtt) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
     try validateLongHeaderConnectionIdLen(dcid_len);
@@ -765,6 +772,7 @@ pub fn peekProtectedLongPacketInfo(datagram: []const u8) Error!ProtectedLongPack
     if ((first & 0x80) == 0 or (first & 0x40) == 0) return error.InvalidInitialPacket;
     const version = try cursor.readInt(u32, .big);
     if (version == 0) return error.InvalidInitialPacket;
+    try validateProtectedVersion(version);
 
     const dcid_len = try cursor.readByte();
     if (dcid_len > 20) return error.InvalidInitialPacket;
@@ -999,6 +1007,14 @@ fn validatePacketNumberLen(packet_number_len: u8) Error!void {
 
 fn validatePacketNumber(packet_number: u64) Error!void {
     if (packet_number > max_packet_number) return error.InvalidPacketNumber;
+}
+
+fn validateProtectedVersion(version: u32) Error!void {
+    // Packet-protection salts, long-header type bits, and retry integrity keys
+    // are version-specific.  Do not silently treat unknown versions as v1; the
+    // endpoint Version Negotiation path handles unsupported long-header packets
+    // before callers attempt to derive/open protected packets.
+    if (version != version_1_wire and version != version_2_wire) return error.UnsupportedVersion;
 }
 
 fn validateLongHeaderFixedBit(first_byte: u8) Error!void {
@@ -1561,6 +1577,48 @@ test "QUIC protected long packets reject oversized connection IDs before AEAD" {
     try std.testing.expectError(error.InvalidInitialPacket, openInitialPacket(allocator, keys, &oversized_scid_initial, 0));
     try std.testing.expectError(error.InvalidInitialPacket, openHandshakePacket(allocator, keys, &oversized_scid_handshake, 0));
     try std.testing.expectError(error.InvalidInitialPacket, openZeroRttPacket(allocator, keys, &oversized_scid_zero_rtt, 0));
+}
+
+test "QUIC protected long packets reject unsupported versions" {
+    const allocator = std.testing.allocator;
+    const unsupported_version: u32 = 0xface_b00c;
+    const dcid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const scid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
+    const keys = deriveInitialSecrets(&dcid).client;
+
+    try std.testing.expectError(error.UnsupportedVersion, sealInitialPacket(allocator, keys, .{
+        .version = unsupported_version,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 1,
+        .payload = "unsupported initial",
+    }));
+    try std.testing.expectError(error.UnsupportedVersion, sealHandshakePacket(allocator, keys, .{
+        .version = unsupported_version,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 1,
+        .payload = "unsupported handshake",
+    }));
+    try std.testing.expectError(error.UnsupportedVersion, sealZeroRttPacket(allocator, keys, .{
+        .version = unsupported_version,
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 1,
+        .payload = "unsupported zero rtt",
+    }));
+
+    const initial_first = longHeaderFirstByte(version_1_wire, .initial, 1);
+    const handshake_first = longHeaderFirstByte(version_1_wire, .handshake, 1);
+    const zero_rtt_first = longHeaderFirstByte(version_1_wire, .zero_rtt, 1);
+    const unsupported_initial = [_]u8{ initial_first, 0xfa, 0xce, 0xb0, 0x0c, 0, 0 };
+    const unsupported_handshake = [_]u8{ handshake_first, 0xfa, 0xce, 0xb0, 0x0c, 0, 0 };
+    const unsupported_zero_rtt = [_]u8{ zero_rtt_first, 0xfa, 0xce, 0xb0, 0x0c, 0, 0 };
+
+    try std.testing.expectError(error.UnsupportedVersion, openInitialPacket(allocator, keys, &unsupported_initial, 0));
+    try std.testing.expectError(error.UnsupportedVersion, openHandshakePacket(allocator, keys, &unsupported_handshake, 0));
+    try std.testing.expectError(error.UnsupportedVersion, openZeroRttPacket(allocator, keys, &unsupported_zero_rtt, 0));
+    try std.testing.expectError(error.UnsupportedVersion, peekProtectedLongPacketInfo(&unsupported_initial));
 }
 
 test "QUIC short packet key update opens next and retained previous generations" {
