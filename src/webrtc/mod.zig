@@ -5680,6 +5680,24 @@ pub const sctp = struct {
         std.mem.writeInt(u32, list.items[start + 8 ..][0..4], value, .little);
     }
 
+    pub fn writeDataChannelResetPacket(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        options: PacketOptions,
+        stream_id: u16,
+        request_sequence_number: u32,
+        response_sequence_number: u32,
+        sender_last_assigned_tsn: u32,
+    ) Error!void {
+        const streams = [_]u16{stream_id};
+        try writeReconfigPacket(list, allocator, options, &.{.{ .outgoing_ssn_reset_request = .{
+            .request_sequence_number = request_sequence_number,
+            .response_sequence_number = response_sequence_number,
+            .sender_last_assigned_tsn = sender_last_assigned_tsn,
+            .stream_numbers = &streams,
+        } }});
+    }
+
     pub fn writeReconfigChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameters: []const ReconfigParameter) Error!void {
         if (parameters.len == 0) return error.InvalidSctpPacket;
         var value: std.ArrayList(u8) = .empty;
@@ -8047,6 +8065,24 @@ test "SCTP RE-CONFIG stream reset request and response" {
     const response = reconfig.parameters[1].outgoing_ssn_reset_response;
     try std.testing.expectEqual(@as(u32, 10), response.response_sequence_number);
     try std.testing.expectEqual(sctp.ReconfigResult.success_performed, response.result);
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeDataChannelResetPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, 7, 11, 10, 1235);
+    try std.testing.expect(try sctp.validChecksum(encoded.items));
+    var reset_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer reset_packet.deinit(allocator);
+    var reset_reconfig = try sctp.ReconfigChunk.parse(allocator, reset_packet.chunks[0]);
+    defer reset_reconfig.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), reset_reconfig.parameters.len);
+    const reset = reset_reconfig.parameters[0].outgoing_ssn_reset_request;
+    try std.testing.expectEqual(@as(u32, 11), reset.request_sequence_number);
+    try std.testing.expectEqual(@as(u32, 10), reset.response_sequence_number);
+    try std.testing.expectEqual(@as(u32, 1235), reset.sender_last_assigned_tsn);
+    try std.testing.expectEqualSlices(u16, &.{7}, reset.stream_numbers);
 
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);
