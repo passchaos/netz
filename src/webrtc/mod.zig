@@ -1924,6 +1924,11 @@ pub const rtp = struct {
         data: []const u8,
     };
 
+    pub const AudioLevelExtension = struct {
+        level: u7,
+        voice: bool = false,
+    };
+
     pub const HeaderExtensionFormat = enum {
         one_byte,
         two_byte,
@@ -2058,6 +2063,20 @@ pub const rtp = struct {
         const value = findHeaderExtension(elements, id) orelse return null;
         if (value.len != 3) return error.InvalidRtpPacket;
         return (@as(u24, value[0]) << 16) | (@as(u24, value[1]) << 8) | value[2];
+    }
+
+    pub fn audioLevel(elements: []const HeaderExtensionElement, id: u8) Error!?AudioLevelExtension {
+        const value = findHeaderExtension(elements, id) orelse return null;
+        if (value.len != 1) return error.InvalidRtpPacket;
+        return .{
+            .level = @truncate(value[0] & 0x7f),
+            .voice = (value[0] & 0x80) != 0,
+        };
+    }
+
+    pub fn audioLevelPayload(level: u8, voice: bool) Error![1]u8 {
+        if (level > 127) return error.InvalidRtpPacket;
+        return .{(if (voice) @as(u8, 0x80) else 0) | level};
     }
 
     pub const Header = struct {
@@ -6997,10 +7016,12 @@ test "RTP packet extension padding and writer" {
     const allocator = std.testing.allocator;
     var one_byte_extensions: std.ArrayList(u8) = .empty;
     defer one_byte_extensions.deinit(allocator);
+    const audio_level = try rtp.audioLevelPayload(8, true);
     try rtp.writeOneByteHeaderExtensions(&one_byte_extensions, allocator, &.{
         .{ .id = 1, .data = "m" },
         .{ .id = 3, .data = &.{ 0x12, 0x34 } },
         .{ .id = 4, .data = &.{ 0x01, 0x02, 0x03 } },
+        .{ .id = 5, .data = &audio_level },
     });
     try std.testing.expectEqual(@as(usize, 0), one_byte_extensions.items.len % 4);
 
@@ -7026,6 +7047,10 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqualStrings("m", rtp.findHeaderExtension(parsed_extensions, 1).?);
     try std.testing.expectEqual(@as(?u16, 0x1234), try rtp.transportWideSequenceNumber(parsed_extensions, 3));
     try std.testing.expectEqual(@as(?u24, 0x010203), try rtp.absoluteSendTime24(parsed_extensions, 4));
+    const parsed_audio_level = (try rtp.audioLevel(parsed_extensions, 5)).?;
+    try std.testing.expect(parsed_audio_level.voice);
+    try std.testing.expectEqual(@as(u7, 8), parsed_audio_level.level);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.audioLevelPayload(128, false));
     try std.testing.expectEqualStrings("opus", packet.payload);
     try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
 
