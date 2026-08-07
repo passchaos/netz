@@ -4830,6 +4830,10 @@ pub const sctp = struct {
             return id;
         }
 
+        pub fn allocateForDtlsRole(self: *DataChannelIdRegistry, role: sdp.DtlsRole) Error!u16 {
+            return self.allocate(try dataChannelIdRoleFromDtlsRole(role));
+        }
+
         pub fn contains(self: DataChannelIdRegistry, id: u16) bool {
             return dataChannelIdUsed(self.used_ids.items, id);
         }
@@ -6121,6 +6125,18 @@ pub const sctp = struct {
             if (candidate > std.math.maxInt(u16) - 2) break;
         }
         return error.InvalidSctpPacket;
+    }
+
+    pub fn dataChannelIdRoleFromDtlsRole(role: sdp.DtlsRole) Error!DataChannelIdRole {
+        return switch (role) {
+            .client => .dtls_client,
+            .server => .dtls_server,
+            .auto => error.InvalidSctpPacket,
+        };
+    }
+
+    pub fn nextDataChannelIdForDtlsRole(role: sdp.DtlsRole, used_ids: []const u16, max_channels: u16) Error!u16 {
+        return nextDataChannelId(try dataChannelIdRoleFromDtlsRole(role), used_ids, max_channels);
     }
 
     pub fn writeDcepOpen(list: *std.ArrayList(u8), allocator: std.mem.Allocator, open: DataChannelOpen) Error!void {
@@ -8672,6 +8688,11 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expectEqual(@as(u16, 5), try sctp.nextDataChannelId(.dtls_server, &.{ 1, 3 }, 16));
     try std.testing.expectEqual(@as(u16, 3), try sctp.nextDataChannelId(.dtls_server, &.{ 1, 5 }, 16));
     try std.testing.expectError(error.InvalidSctpPacket, sctp.nextDataChannelId(.dtls_client, &.{ 0, 2 }, 3));
+    try std.testing.expectEqual(sctp.DataChannelIdRole.dtls_client, try sctp.dataChannelIdRoleFromDtlsRole(.client));
+    try std.testing.expectEqual(sctp.DataChannelIdRole.dtls_server, try sctp.dataChannelIdRoleFromDtlsRole(.server));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.dataChannelIdRoleFromDtlsRole(.auto));
+    try std.testing.expectEqual(@as(u16, 2), try sctp.nextDataChannelIdForDtlsRole(.client, &.{0}, 16));
+    try std.testing.expectEqual(@as(u16, 3), try sctp.nextDataChannelIdForDtlsRole(.server, &.{1}, 16));
     var id_registry = try sctp.DataChannelIdRegistry.init(allocator, 8);
     defer id_registry.deinit();
     try std.testing.expectEqual(@as(u16, 0), try id_registry.allocate(.dtls_client));
@@ -8686,6 +8707,9 @@ test "SCTP DATA packet and DCEP channel messages" {
     try id_registry.reserve(5);
     try id_registry.reserve(7);
     try std.testing.expectError(error.InvalidSctpPacket, id_registry.allocate(.dtls_server));
+    id_registry.release(4);
+    try std.testing.expectEqual(@as(u16, 4), try id_registry.allocateForDtlsRole(.client));
+    try std.testing.expectError(error.InvalidSctpPacket, id_registry.allocateForDtlsRole(.auto));
 
     packet_bytes.clearRetainingCapacity();
     try sctp.writeDataPacket(&packet_bytes, allocator, .{
