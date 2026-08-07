@@ -3839,6 +3839,7 @@ pub const sctp = struct {
 
     pub fn writeDcepOpen(list: *std.ArrayList(u8), allocator: std.mem.Allocator, open: DataChannelOpen) Error!void {
         if (open.label.len > std.math.maxInt(u16) or open.protocol.len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try validateDataChannelType(open.channel_type);
         try validateDcepString(open.label);
         try validateDcepString(open.protocol);
         try list.append(allocator, 0x03); // DATA_CHANNEL_OPEN
@@ -3865,6 +3866,7 @@ pub const sctp = struct {
             0x03 => blk: {
                 if (bytes.len < 12) return error.InvalidSctpPacket;
                 const channel_type: DataChannelType = @enumFromInt(bytes[1]);
+                try validateDataChannelType(channel_type);
                 const priority = std.mem.readInt(u16, bytes[2..4], .big);
                 const reliability_parameter = std.mem.readInt(u32, bytes[4..8], .big);
                 const label_len = std.mem.readInt(u16, bytes[8..10], .big);
@@ -3891,6 +3893,19 @@ pub const sctp = struct {
 
     fn validateDcepString(value: []const u8) Error!void {
         if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidSctpPacket;
+    }
+
+    fn validateDataChannelType(channel_type: DataChannelType) Error!void {
+        switch (channel_type) {
+            .reliable,
+            .partial_reliable_retransmit,
+            .partial_reliable_timed,
+            .reliable_unordered,
+            .partial_reliable_retransmit_unordered,
+            .partial_reliable_timed_unordered,
+            => {},
+            _ => return error.InvalidSctpPacket,
+        }
     }
 
     fn isConstEmptyU32(value: []const u32) bool {
@@ -5364,6 +5379,10 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expectError(error.InvalidSctpPacket, sctp.writeDcepOpen(&invalid_dcep, allocator, .{
         .label = "\xc0\x80",
     }));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeDcepOpen(&invalid_dcep, allocator, .{
+        .channel_type = @enumFromInt(0x7f),
+        .label = "bad-type",
+    }));
 
     invalid_dcep.clearRetainingCapacity();
     try invalid_dcep.appendSlice(allocator, &.{
@@ -5375,6 +5394,11 @@ test "SCTP DATA packet and DCEP channel messages" {
         0x00, 0x00, // protocol length
         0xc0, 0x80, // invalid UTF-8 label
     });
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parseDcepMessage(invalid_dcep.items));
+
+    invalid_dcep.items[1] = 0x7f;
+    invalid_dcep.items[12] = 'o';
+    invalid_dcep.items[13] = 'k';
     try std.testing.expectError(error.InvalidSctpPacket, sctp.parseDcepMessage(invalid_dcep.items));
 }
 
