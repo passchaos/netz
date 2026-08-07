@@ -883,6 +883,20 @@ pub const Connection = struct {
         });
     }
 
+    pub fn resendClose(self: *Connection) Error!void {
+        const close_info = self.close_info orelse return error.ConnectionClosed;
+        if (close_info.state != .closing) return error.ConnectionClosed;
+        const frame: quic.Frame = if (close_info.application) .{ .application_close = .{
+            .error_code = close_info.error_code,
+            .reason_phrase = close_info.reason_phrase,
+        } } else .{ .connection_close = .{
+            .error_code = close_info.error_code,
+            .frame_type = close_info.frame_type,
+            .reason_phrase = close_info.reason_phrase,
+        } };
+        try self.sendTrackedFramesAllowClosing(&.{frame});
+    }
+
     pub fn closeApplication(self: *Connection, error_code: u64, reason_phrase: []const u8) Error!void {
         try self.closeApplicationAt(error_code, reason_phrase, null, null);
     }
@@ -1625,6 +1639,11 @@ pub const Connection = struct {
         entry.reset_sent = info;
     }
 
+    fn sendTrackedFramesAllowClosing(self: *Connection, frames: []const quic.Frame) Error!void {
+        if (self.idle_timed_out or self.closed() or self.draining()) return error.ConnectionClosed;
+        try self.sendTrackedFramesEcnAt(frames, .not_ect, null);
+    }
+
     fn noteSentStreams(self: *Connection, frames: []const quic.Frame) void {
         for (frames) |frame| {
             if (frame != .stream) continue;
@@ -1644,7 +1663,18 @@ pub const Connection = struct {
         now_ms: ?u64 = null,
         pto_ms: ?u64 = null,
     }) Error!void {
-        if (self.close_info != null) return;
+        if (self.close_info) |*existing| {
+            // RFC 9000: receipt of CONNECTION_CLOSE moves the endpoint into
+            // draining, where no further packets are sent.  A locally initiated
+            // close starts in `closing`; if the peer answers with its own close,
+            // do not ignore that transition merely because close_info exists.
+            if (close.state == .draining and existing.state == .closing) {
+                existing.state = .draining;
+                existing.started_ms = close.now_ms;
+                existing.expires_ms = closeExpiryMillis(close.now_ms, close.pto_ms);
+            }
+            return;
+        }
         const expires_ms = closeExpiryMillis(close.now_ms, close.pto_ms);
         self.close_info = .{
             .application = close.application,
@@ -2832,6 +2862,41 @@ test "QUIC 1-RTT connection decodes peer ACK delay" {
 
     connection.config.peer_ack_delay_exponent = quic.rtt.max_ack_delay_exponent + 1;
     try std.testing.expectError(error.InvalidFrame, connection.decodedPeerAckDelayNanos(ack));
+}
+
+test "QUIC 1-RTT closing state can retransmit close" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xbb} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+    });
+    defer connection.deinit();
+
+    try connection.closeTransport(42, @intFromEnum(quic.FrameType.stream), "closing");
+    try std.testing.expect(connection.closing());
+    const before = connection.next_packet_number;
+    try connection.resendClose();
+    try std.testing.expectEqual(before + 1, connection.next_packet_number);
+
+    try connection.applyReceivedFrames(0, &.{.{ .connection_close = .{
+        .error_code = 0,
+        .frame_type = 0,
+        .reason_phrase = "peer-close",
+    } }}, null, .not_ect);
+    try std.testing.expect(connection.draining());
+    try std.testing.expectError(error.ConnectionClosed, connection.resendClose());
 }
 
 test "QUIC 1-RTT draining state drops subsequent packets" {
