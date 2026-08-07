@@ -131,7 +131,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   UNSUBSCRIBE/UNSUBACK, PING,
   DISCONNECT with MQTT v5 minimal reason-only encoding, AUTH enhanced-authentication exchanges, properties, exact packet bounds, minimal remaining length, MQTT UTF-8 string validation, response-topic/topic-name/filter validation, clean-session empty-client-id checks, version-specific MQTT 3.1.1/v5 property and SUBSCRIBE option validation, payload-format UTF-8 validation, and
   wildcard and shared-subscription matching with MQTT 5 No Local/shared-subscription combination rejection, plus a blocking TCP client/server runtime with a
-  `std.Io.async` concurrent server helper, MQTT v5 Server Keep Alive, Receive Maximum, Maximum Packet Size, Maximum QoS, Retain Available, and Topic Alias negotiation/resolution with outgoing alias registration checks, QoS publish inflight limiting, and
+  `std.Io.async` concurrent server helper, MQTT v5 Server Keep Alive, Receive Maximum, Maximum Packet Size, Maximum QoS, Retain Available, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation and negative publish acknowledgement propagation
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation, and
   datagram mapping, session lifecycle/counter state, plus a cleartext

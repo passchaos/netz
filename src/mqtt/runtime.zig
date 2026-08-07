@@ -20,6 +20,7 @@ pub const Limits = struct {
 };
 
 const packet_identifier_slots = @as(usize, std.math.maxInt(u16)) + 1;
+const topic_alias_slots: usize = 16;
 
 pub const Server = struct {
     io: std.Io,
@@ -56,7 +57,7 @@ pub const Server = struct {
             .protocol = options.protocol,
             .limits = self.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
-            .incoming_topic_alias_maximum = options.topic_alias_maximum,
+            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(options.topic_alias_maximum),
         };
         errdefer connection.close();
 
@@ -196,7 +197,7 @@ pub const Client = struct {
             .limits = options.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse options.max_outgoing_inflight,
-            .incoming_topic_alias_maximum = options.topic_alias_maximum,
+            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(options.topic_alias_maximum),
         };
         errdefer connection.close();
 
@@ -211,11 +212,12 @@ pub const Client = struct {
         if (options.protocol == .v5 and mqtt.maximumPacketSize(options.properties) == null and options.limits.max_packet_size <= std.math.maxInt(u32)) {
             try connect_properties.append(allocator, .{ .four_byte = .{ .id = .maximum_packet_size, .value = @intCast(options.limits.max_packet_size) } });
         }
-        if (options.protocol == .v5 and mqtt.topicAliasMaximum(options.properties) == null) {
-            try connect_properties.append(allocator, .{ .two_byte = .{ .id = .topic_alias_maximum, .value = options.topic_alias_maximum } });
+        if (options.protocol == .v5) {
+            try appendTopicAliasMaximumSetting(&connect_properties, allocator, options.properties, options.topic_alias_maximum);
         }
         if (options.protocol == .v5) {
             connection.max_incoming_inflight = mqtt.receiveMaximum(connect_properties.items) orelse connection.max_incoming_inflight;
+            connection.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(connect_properties.items) orelse connection.incoming_topic_alias_maximum;
         }
         try mqtt.writeConnectPacket(&encoded, allocator, options.protocol, .{
             .client_id = options.client_id,
@@ -275,6 +277,33 @@ pub const ConnAckOptions = struct {
     shared_subscription_available: bool = true,
 };
 
+fn effectiveTopicAliasMaximum(configured: u16) u16 {
+    return @min(configured, @as(u16, @intCast(topic_alias_slots)));
+}
+
+fn validateTopicAliasMaximumFitsRuntime(properties: []const mqtt.Property) Error!void {
+    if (mqtt.topicAliasMaximum(properties)) |maximum| {
+        if (maximum > @as(u16, @intCast(topic_alias_slots))) return error.InvalidProperty;
+    }
+}
+
+fn appendTopicAliasMaximumSetting(
+    properties: *std.ArrayList(mqtt.Property),
+    allocator: std.mem.Allocator,
+    explicit_properties: []const mqtt.Property,
+    configured_maximum: u16,
+) Error!void {
+    try validateTopicAliasMaximumFitsRuntime(explicit_properties);
+    if (mqtt.topicAliasMaximum(explicit_properties) == null) {
+        try properties.append(allocator, .{
+            .two_byte = .{
+                .id = .topic_alias_maximum,
+                .value = effectiveTopicAliasMaximum(configured_maximum),
+            },
+        });
+    }
+}
+
 pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -300,8 +329,8 @@ pub const Connection = struct {
     local_shared_subscription_available: bool = true,
     incoming_qos1: std.StaticBitSet(packet_identifier_slots) = .empty,
     incoming_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
-    incoming_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
-    outgoing_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
+    incoming_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
+    outgoing_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
 
     pub fn close(self: *Connection) void {
         for (self.incoming_topic_aliases) |maybe_topic| {
@@ -337,8 +366,8 @@ pub const Connection = struct {
         if (self.protocol == .v5 and mqtt.maximumPacketSize(options.properties) == null and self.limits.max_packet_size <= std.math.maxInt(u32)) {
             try properties.append(self.allocator, .{ .four_byte = .{ .id = .maximum_packet_size, .value = @intCast(self.limits.max_packet_size) } });
         }
-        if (self.protocol == .v5 and mqtt.topicAliasMaximum(options.properties) == null) {
-            try properties.append(self.allocator, .{ .two_byte = .{ .id = .topic_alias_maximum, .value = options.topic_alias_maximum } });
+        if (self.protocol == .v5) {
+            try appendTopicAliasMaximumSetting(&properties, self.allocator, options.properties, options.topic_alias_maximum);
         }
         if (self.protocol == .v5 and mqtt.serverKeepAlive(options.properties) == null) {
             if (options.server_keep_alive_seconds) |keep_alive| {
@@ -371,6 +400,7 @@ pub const Connection = struct {
         try self.writePacket(encoded.items);
         if (self.protocol == .v5) {
             self.max_incoming_inflight = mqtt.receiveMaximum(properties.items) orelse self.max_incoming_inflight;
+            self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(properties.items) orelse self.incoming_topic_alias_maximum;
             self.local_wildcard_subscription_available = mqtt.wildcardSubscriptionAvailable(properties.items) orelse options.wildcard_subscription_available;
             self.local_subscription_identifier_available = mqtt.subscriptionIdentifierAvailable(properties.items) orelse options.subscription_identifier_available;
             self.local_shared_subscription_available = mqtt.sharedSubscriptionAvailable(properties.items) orelse options.shared_subscription_available;
@@ -1340,6 +1370,31 @@ test "MQTT connection rejects topic aliases beyond negotiated maximum" {
         .payload = "payload",
     };
     try std.testing.expectError(error.InvalidProperty, connection.applyIncomingTopicAlias(&incoming));
+}
+
+test "MQTT runtime caps advertised topic alias maximum to local storage" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectEqual(@as(u16, 0), effectiveTopicAliasMaximum(0));
+    try std.testing.expectEqual(@as(u16, 4), effectiveTopicAliasMaximum(4));
+    try std.testing.expectEqual(@as(u16, @intCast(topic_alias_slots)), effectiveTopicAliasMaximum(99));
+
+    var properties: std.ArrayList(mqtt.Property) = .empty;
+    defer properties.deinit(allocator);
+    try appendTopicAliasMaximumSetting(&properties, allocator, &.{}, 99);
+    try std.testing.expectEqual(@as(?u16, @intCast(topic_alias_slots)), mqtt.topicAliasMaximum(properties.items));
+
+    properties.clearRetainingCapacity();
+    try appendTopicAliasMaximumSetting(&properties, allocator, &.{.{ .two_byte = .{
+        .id = .topic_alias_maximum,
+        .value = 8,
+    } }}, 99);
+    try std.testing.expectEqual(@as(usize, 0), properties.items.len);
+
+    try std.testing.expectError(error.InvalidProperty, appendTopicAliasMaximumSetting(&properties, allocator, &.{.{ .two_byte = .{
+        .id = .topic_alias_maximum,
+        .value = @as(u16, @intCast(topic_alias_slots + 1)),
+    } }}, 99));
 }
 
 test "MQTT connection enforces peer publish capabilities" {
