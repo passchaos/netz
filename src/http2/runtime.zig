@@ -1196,7 +1196,10 @@ pub const Connection = struct {
             }
             if (frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
             switch (frame.frame.header.frame_type) {
-                .push_promise => return error.InvalidFrame,
+                .push_promise => {
+                    _ = try self.validatePushPromiseForClientStream(frame.frame);
+                    return error.InvalidFrame;
+                },
                 .headers => {
                     if (headers) |h| {
                         if ((frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
@@ -1295,6 +1298,25 @@ pub const Connection = struct {
                 else => continue,
             }
         }
+    }
+
+    fn validatePushPromiseForClientStream(self: Connection, frame: http2.Frame) Error!http2.PushPromisePayload {
+        if (self.role != .client) return error.InvalidFrame;
+        const promise = try http2.PushPromisePayload.parse(frame);
+        // RFC 9113 keeps server push tied to a client-initiated stream that is
+        // still open or half-closed(remote).  Rust h2 treats a promise on an
+        // unknown/inactive parent as a connection protocol error instead of
+        // silently discarding it; do the same before considering local push
+        // policy.
+        if (!clientInitiatedStreamId(promise.stream_id) or !self.outboundStreamIsActive(promise.stream_id)) {
+            return error.InvalidFrame;
+        }
+        // Server-pushed streams are server initiated and must be strictly
+        // increasing.  The lightweight runtime does not implement a push queue,
+        // but validating the promised id catches malformed peers before the
+        // normal "push disabled" rejection path.
+        if (clientInitiatedStreamId(promise.promised_stream_id)) return error.InvalidStreamId;
+        return promise;
     }
 
     fn consumeForbiddenResponseBody(self: *Connection, stream_id: u31) Error!void {
@@ -4361,6 +4383,40 @@ test "HTTP/2 client rejects PUSH_PROMISE after disabling push" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 validates PUSH_PROMISE parent and promised stream ids" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    const valid_parent_even_promise = http2.Frame{
+        .header = .{ .length = 4, .frame_type = .push_promise, .flags = flag_end_headers, .stream_id = 1 },
+        .payload = &.{ 0, 0, 0, 2 },
+    };
+    try std.testing.expectError(error.InvalidFrame, connection.validatePushPromiseForClientStream(valid_parent_even_promise));
+
+    try connection.active_local_streams.append(std.testing.allocator, 1);
+    const promise = try connection.validatePushPromiseForClientStream(valid_parent_even_promise);
+    try std.testing.expectEqual(@as(u31, 1), promise.stream_id);
+    try std.testing.expectEqual(@as(u31, 2), promise.promised_stream_id);
+
+    const odd_promised_stream = http2.Frame{
+        .header = .{ .length = 4, .frame_type = .push_promise, .flags = flag_end_headers, .stream_id = 1 },
+        .payload = &.{ 0, 0, 0, 3 },
+    };
+    try std.testing.expectError(error.InvalidStreamId, connection.validatePushPromiseForClientStream(odd_promised_stream));
 }
 
 test "HTTP/2 client fails active request rejected by GOAWAY" {
