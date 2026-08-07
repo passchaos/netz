@@ -12,6 +12,7 @@ pub const Error = error{
     PoolFull,
     UnknownConnectionId,
     RetireQueueFull,
+    RetirePriorToTooLarge,
 } || std.mem.Allocator.Error;
 
 pub const Entry = struct {
@@ -47,6 +48,7 @@ pub const PeerPool = struct {
         token: [16]u8,
         active_limit: usize,
     ) Error!void {
+        if (retire_prior_to > sequence_number) return error.RetirePriorToTooLarge;
         try self.retirePriorTo(retire_prior_to);
         // RFC 9000 §19.15: if a NEW_CONNECTION_ID arrives below a previously
         // advertised Retire Prior To, the endpoint sends RETIRE_CONNECTION_ID
@@ -279,6 +281,19 @@ test "QUIC peer CID pool validates duplicate IDs tokens and active limit" {
     try std.testing.expectError(error.DuplicateResetToken, pool.addWithLimit(1, "cid-b", token_a, 2));
     try pool.addWithLimit(1, "cid-b", token_b, 2);
     try std.testing.expectError(error.ActiveConnectionIdLimit, pool.addWithLimit(2, "cid-c", [_]u8{0xcc} ** 16, 2));
+}
+
+test "QUIC peer CID pool rejects retire_prior_to above sequence" {
+    var pool = PeerPool{};
+    try std.testing.expectError(error.RetirePriorToTooLarge, pool.addWithRetirePriorTo(
+        3,
+        4,
+        "cid-three",
+        [_]u8{3} ** 16,
+        4,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), pool.count());
+    try std.testing.expectEqual(@as(usize, 0), pool.pendingRetireCount());
 }
 
 test "QUIC peer CID pool queues retire frames for retire_prior_to" {
