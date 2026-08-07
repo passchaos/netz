@@ -3367,6 +3367,11 @@ pub const rtcp = struct {
         allocator.free(packets);
     }
 
+    pub fn compoundDestinationSsrcs(allocator: std.mem.Allocator, packets: []const Packet) Error![]u32 {
+        if (packets.len == 0) return allocator.alloc(u32, 0);
+        return packets[0].destinationSsrcs(allocator);
+    }
+
     pub fn writeCompound(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packets: []const Packet) Error!void {
         try validateCompound(packets);
         for (packets) |packet| try writePacket(list, allocator, packet);
@@ -7202,6 +7207,9 @@ test "RTCP SDES and compound packets" {
     try std.testing.expectEqual(@as(u32, 0x11121314), parsed[2].picture_loss_indication.media_ssrc);
     try std.testing.expectEqual(@as(u32, 0x01020304), parsed[3].goodbye.sources[0]);
     try std.testing.expectEqualStrings("done", parsed[3].goodbye.reason);
+    const empty_compound_destinations = try rtcp.compoundDestinationSsrcs(allocator, parsed);
+    defer allocator.free(empty_compound_destinations);
+    try std.testing.expectEqual(@as(usize, 0), empty_compound_destinations.len);
 
     var single = try rtcp.parsePacket(allocator, encoded.items[parsed[0].receiver_report.report_blocks.len..]);
     defer single.deinit(allocator);
@@ -7226,6 +7234,24 @@ test "RTCP SDES and compound packets" {
         .{ .receiver_report = .{ .sender_ssrc = 0x01020304 } },
         .{ .source_description = .{ .chunks = &no_cname_chunks } },
     }));
+
+    encoded.clearRetainingCapacity();
+    var sr_blocks = [_]rtcp.ReportBlock{.{ .ssrc = 0x20212223 }};
+    var sr_packets = [_]rtcp.Packet{
+        .{ .sender_report = .{
+            .sender_ssrc = 0x01020304,
+            .ntp_timestamp_msw = 1,
+            .ntp_timestamp_lsw = 2,
+            .rtp_timestamp = 3,
+            .sender_packet_count = 4,
+            .sender_octet_count = 5,
+            .report_blocks = &sr_blocks,
+        } },
+        .{ .picture_loss_indication = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x33333333 } },
+    };
+    const compound_destinations = try rtcp.compoundDestinationSsrcs(allocator, &sr_packets);
+    defer allocator.free(compound_destinations);
+    try std.testing.expectEqualSlices(u32, &.{ 0x20212223, 0x01020304 }, compound_destinations);
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, .{ .receiver_report = .{ .sender_ssrc = 0x01020304 } });
