@@ -703,18 +703,42 @@ pub fn validateConnectTarget(target: []const u8) Error!void {
 }
 
 pub fn validateRequestHost(request: Request) Error!void {
-    return validateHostHeaderBlock(request.version, request.headers);
+    const host = try validateHostHeaderBlockValue(request.version, request.headers);
+    if (absoluteFormAuthority(request.target)) |authority| {
+        try validateHostValue(authority);
+        if (host) |host_value| {
+            if (!std.ascii.eqlIgnoreCase(wire.trimOws(host_value), authority)) return error.InvalidHost;
+        }
+    }
 }
 
 pub fn validateHostHeaderBlock(version: Version, headers: []const Header) Error!void {
-    var found_host = false;
+    _ = try validateHostHeaderBlockValue(version, headers);
+}
+
+fn validateHostHeaderBlockValue(version: Version, headers: []const Header) Error!?[]const u8 {
+    var found_host: ?[]const u8 = null;
     for (headers) |header| {
         if (!header.eqlName("host")) continue;
-        if (found_host) return error.InvalidHost;
-        found_host = true;
+        if (found_host != null) return error.InvalidHost;
+        found_host = header.value;
         try validateHostValue(header.value);
     }
-    if (version == .http_1_1 and !found_host) return error.InvalidHost;
+    if (version == .http_1_1 and found_host == null) return error.InvalidHost;
+    return found_host;
+}
+
+pub fn absoluteFormAuthority(target: []const u8) ?[]const u8 {
+    const scheme_end = std.mem.indexOf(u8, target, "://") orelse return null;
+    if (scheme_end == 0) return null;
+    const authority_start = scheme_end + 3;
+    if (authority_start >= target.len) return null;
+    const rest = target[authority_start..];
+    const authority_end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    if (authority_end == 0) return null;
+    const authority = rest[0..authority_end];
+    if (std.mem.indexOfScalar(u8, authority, '@') != null) return null;
+    return authority;
 }
 
 pub fn validateHostValue(raw_host: []const u8) Error!void {
@@ -1027,6 +1051,26 @@ test "HTTP/1 validates Host authority rules" {
     try std.testing.expectError(error.InvalidHost, validateHostValue("user@example.com"));
     try std.testing.expectError(error.InvalidHost, validateHostValue("2001:db8::1"));
     try validateHostValue("[2001:db8::1]:443");
+}
+
+test "HTTP/1 validates absolute-form authority against Host" {
+    const allocator = std.testing.allocator;
+
+    const matching = "GET http://example.com:8080/proxy?q=1 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n";
+    var req = try parseRequest(allocator, matching, .{});
+    defer req.deinit(allocator);
+    try validateRequestHost(req);
+    try std.testing.expectEqualStrings("example.com:8080", absoluteFormAuthority(req.target).?);
+
+    const mismatch = "GET http://example.com/proxy HTTP/1.1\r\nHost: other.example\r\n\r\n";
+    var bad = try parseRequest(allocator, mismatch, .{});
+    defer bad.deinit(allocator);
+    try std.testing.expectError(error.InvalidHost, validateRequestHost(bad));
+
+    const invalid_authority = "GET http://user@example.com/proxy HTTP/1.1\r\nHost: user@example.com\r\n\r\n";
+    var invalid = try parseRequest(allocator, invalid_authority, .{});
+    defer invalid.deinit(allocator);
+    try std.testing.expectError(error.InvalidHost, validateRequestHost(invalid));
 }
 
 test "HTTP/1 writers reject forbidden response bodies" {
