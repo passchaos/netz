@@ -187,6 +187,23 @@ pub fn validateTopicName(topic: []const u8) Error!void {
 }
 
 pub fn validTopicFilter(filter: []const u8) bool {
+    if (std.mem.startsWith(u8, filter, "$share/")) return validSharedTopicFilter(filter);
+    return validTopicFilterLevels(filter);
+}
+
+fn validSharedTopicFilter(filter: []const u8) bool {
+    const rest = filter["$share/".len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return false;
+    const group = rest[0..slash];
+    const shared_filter = rest[slash + 1 ..];
+    // MQTT 5 shared subscriptions use "$share/{ShareName}/{TopicFilter}".
+    // The share name is a literal name, not a topic level, so reject empty
+    // groups and wildcard characters before validating the nested TopicFilter.
+    if (group.len == 0 or hasWildcards(group)) return false;
+    return validTopicFilterLevels(shared_filter);
+}
+
+fn validTopicFilterLevels(filter: []const u8) bool {
     if (filter.len == 0) return false;
 
     var start: usize = 0;
@@ -1898,6 +1915,12 @@ test "MQTT topic validation and filter matching" {
     try std.testing.expect(!validTopicFilter("wrong/#/filter"));
     try std.testing.expect(!validTopicFilter("wrong/wr#ng/filter"));
     try std.testing.expect(!validTopicFilter("wr/+o+/ng"));
+    try std.testing.expect(validTopicFilter("$share/group/sensors/+/temp"));
+    try std.testing.expect(validTopicFilter("$share/group/#"));
+    try std.testing.expect(!validTopicFilter("$share/group"));
+    try std.testing.expect(!validTopicFilter("$share//sensors/temp"));
+    try std.testing.expect(!validTopicFilter("$share/gr+oup/sensors/temp"));
+    try std.testing.expect(!validTopicFilter("$share/group/bad/#/filter"));
 
     try std.testing.expect(topicMatchesFilter("a/b/c", "a/b/c"));
     try std.testing.expect(topicMatchesFilter("a/b/c/d/e", "a/+/c/+/e"));
@@ -1910,6 +1933,7 @@ test "MQTT topic validation and filter matching" {
     defer encoded.deinit(std.testing.allocator);
     try std.testing.expectError(error.InvalidTopic, writePublish(&encoded, std.testing.allocator, .v5, "bad/#", "payload", .{}));
     try std.testing.expectError(error.InvalidSubscription, Subscribe.write(&encoded, std.testing.allocator, .v5, 1, &.{}, &[_]Subscription{.{ .topic_filter = "bad/#/filter" }}));
+    try std.testing.expectError(error.InvalidSubscription, Subscribe.write(&encoded, std.testing.allocator, .v5, 1, &.{}, &[_]Subscription{.{ .topic_filter = "$share/group" }}));
 }
 
 test "MQTT connack ack and ping controls" {
