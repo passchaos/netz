@@ -875,6 +875,11 @@ pub const sdp = struct {
         }
     };
 
+    pub const RtpExtensionMap = struct {
+        uri: []const u8,
+        id: u8,
+    };
+
     pub fn parseExtMapAttribute(raw: []const u8) Error!ExtMap {
         const trimmed = std.mem.trim(u8, raw, " \t");
         if (trimmed.len == 0) return error.InvalidSdp;
@@ -951,6 +956,21 @@ pub const sdp = struct {
 
     pub fn freeExtMaps(allocator: std.mem.Allocator, extmaps: []ExtMap) void {
         allocator.free(extmaps);
+    }
+
+    pub fn rtpExtensionsFromMedia(allocator: std.mem.Allocator, media: Media) Error![]RtpExtensionMap {
+        var out: std.ArrayList(RtpExtensionMap) = .empty;
+        errdefer out.deinit(allocator);
+        for (media.attributes) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, "extmap")) continue;
+            const extmap = try parseExtMapAttribute(attr.value);
+            try out.append(allocator, .{ .uri = extmap.uri, .id = try extmap.rtpId() });
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn freeRtpExtensionMap(allocator: std.mem.Allocator, extensions: []RtpExtensionMap) void {
+        allocator.free(extensions);
     }
 
     fn parseExtMapDirection(value: []const u8) ?ExtMapDirection {
@@ -5178,6 +5198,14 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const extmaps = try sdp.extractExtMaps(allocator, session);
     defer sdp.freeExtMaps(allocator, extmaps);
     try std.testing.expectEqual(@as(usize, 3), extmaps.len); // session-level audio level is shadowed by BUNDLE media.
+
+    const media_extension_map = try sdp.rtpExtensionsFromMedia(allocator, session.media[1]);
+    defer sdp.freeRtpExtensionMap(allocator, media_extension_map);
+    try std.testing.expectEqual(@as(usize, 2), media_extension_map.len);
+    try std.testing.expectEqualStrings(sdp.transport_cc_uri, media_extension_map[0].uri);
+    try std.testing.expectEqual(@as(u8, 3), media_extension_map[0].id);
+    try std.testing.expectEqualStrings(sdp.sdes_mid_uri, media_extension_map[1].uri);
+    try std.testing.expectEqual(@as(u8, 4), media_extension_map[1].id);
 
     const parsed_extmap = try sdp.parseExtMapAttribute("7/inactive urn:example:ext attrs");
     try std.testing.expectEqual(@as(u16, 7), parsed_extmap.id);
