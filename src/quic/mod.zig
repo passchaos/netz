@@ -246,6 +246,7 @@ pub fn parseRetryPacket(bytes: []const u8) Error!RetryPacket {
 }
 
 pub fn writeRetryPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: RetryPacketOptions) Error!void {
+    _ = try retryIntegrityProfile(options.version);
     try validatePacketConnectionIdLen(options.destination_connection_id.len);
     try validatePacketConnectionIdLen(options.source_connection_id.len);
     try validatePacketConnectionIdLen(options.original_destination_connection_id.len);
@@ -274,7 +275,7 @@ pub fn retryIntegrityTag(
     if (retry_without_integrity_tag.len < 1 + 4 + 2) return error.BufferTooShort;
 
     const version = std.mem.readInt(u32, retry_without_integrity_tag[1..5], .big);
-    const profile = retryIntegrityProfile(version);
+    const profile = try retryIntegrityProfile(version);
     const pseudo_len = std.math.add(usize, 1 + original_destination_connection_id.len, retry_without_integrity_tag.len) catch return error.IntegerOverflow;
     const pseudo_packet = try allocator.alloc(u8, pseudo_len);
     defer allocator.free(pseudo_packet);
@@ -326,11 +327,14 @@ fn longHeaderPacketTypeBits(version: u32, packet_type: PacketType) u8 {
     return @intFromEnum(packet_type);
 }
 
-fn retryIntegrityProfile(version: u32) struct { key: [Aes128Gcm.key_length]u8, nonce: [Aes128Gcm.nonce_length]u8 } {
+fn retryIntegrityProfile(version: u32) Error!struct { key: [Aes128Gcm.key_length]u8, nonce: [Aes128Gcm.nonce_length]u8 } {
     if (version == Version.version_2.wireValue()) {
         return .{ .key = retry_integrity_key_v2, .nonce = retry_integrity_nonce_v2 };
     }
-    return .{ .key = retry_integrity_key_v1, .nonce = retry_integrity_nonce_v1 };
+    if (version == Version.version_1.wireValue()) {
+        return .{ .key = retry_integrity_key_v1, .nonce = retry_integrity_nonce_v1 };
+    }
+    return error.InvalidVersionNegotiation;
 }
 
 pub const TransportParameterId = enum(u64) {
@@ -1720,6 +1724,31 @@ test "QUIC Retry packet supports version 2 type mapping" {
     try std.testing.expectEqualSlices(u8, &retry_scid, header.source_connection_id);
     try std.testing.expectEqualSlices(u8, &token, header.token);
     try std.testing.expect(try verifyRetryIntegrityTag(allocator, &original_dcid, encoded.items));
+}
+
+test "QUIC Retry rejects unsupported versions" {
+    const allocator = std.testing.allocator;
+    const cid = [_]u8{ 1, 2, 3, 4 };
+    const token = [_]u8{ 9 };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try std.testing.expectError(error.InvalidVersionNegotiation, writeRetryPacket(&encoded, allocator, .{
+        .version = 0x0a0a0a0a,
+        .destination_connection_id = &cid,
+        .source_connection_id = &cid,
+        .token = &token,
+        .original_destination_connection_id = &cid,
+    }));
+
+    const retry_without_tag = [_]u8{
+        0xf0,
+        0x0a, 0x0a, 0x0a, 0x0a,
+        0x00, // dcid len
+        0x00, // scid len
+        0x01, // token byte
+    };
+    try std.testing.expectError(error.InvalidVersionNegotiation, retryIntegrityTag(allocator, &cid, &retry_without_tag));
 }
 
 test "QUIC transport parameter parser" {
