@@ -214,9 +214,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
             ext_server_name => server_name = try parseServerName(payload),
             ext_alpn => try parseAlpn(allocator, &alpn_list, payload),
             ext_supported_versions => {
-                if (payload.len != 3 or payload[0] != 2 or std.mem.readInt(u16, payload[1..3], .big) != tls_1_3) {
-                    return error.InvalidClientHello;
-                }
+                try validateClientSupportedVersions(payload);
                 saw_supported_versions = true;
             },
             ext_key_share => x25519 = try parseX25519KeyShare(payload),
@@ -500,6 +498,17 @@ fn parseServerName(payload: []const u8) Error![]const u8 {
     return name;
 }
 
+fn validateClientSupportedVersions(payload: []const u8) Error!void {
+    if (payload.len < 3) return error.InvalidClientHello;
+    const list_len = payload[0];
+    if (list_len == 0 or (list_len % 2) != 0 or payload.len != 1 + @as(usize, list_len)) return error.InvalidClientHello;
+    var pos: usize = 1;
+    while (pos < payload.len) : (pos += 2) {
+        if (std.mem.readInt(u16, payload[pos..][0..2], .big) == tls_1_3) return;
+    }
+    return error.InvalidClientHello;
+}
+
 fn parseAlpn(allocator: std.mem.Allocator, out: *std.ArrayList([]const u8), payload: []const u8) Error!void {
     var cursor = wire.Cursor.init(payload);
     const list_len = try cursor.readInt(u16, .big);
@@ -627,6 +636,33 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     non_null_compression.items[offsets.compression_start] = 1;
     try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, non_null_compression.items));
 
+    // Real TLS 1.3 clients commonly send a version preference vector instead of
+    // the one-element vector produced by this minimal writer. QUIC still requires
+    // TLS 1.3 to be offered, but the parser must not reject otherwise valid
+    // multi-version ClientHellos before negotiation can happen.
+    const multi_version_payload = [_]u8{ 4, 0x03, 0x03, 0x03, 0x04 };
+    var multi_version_hello = try hello.clone(allocator);
+    defer multi_version_hello.deinit(allocator);
+    try replaceClientHelloExtensionForTest(&multi_version_hello, allocator, ext_supported_versions, &multi_version_payload);
+    var multi_version_parsed = try parseClientHello(allocator, multi_version_hello.items);
+    defer multi_version_parsed.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &key, multi_version_parsed.x25519_public_key);
+
+    const malformed_supported_versions = [_][]const u8{
+        &.{},
+        &.{0},
+        &.{ 1, 0x03 },
+        &.{ 3, 0x03, 0x03, 0x04 },
+        &.{ 2, 0x03, 0x03 },
+        &.{ 4, 0x03, 0x04 },
+    };
+    for (malformed_supported_versions) |payload| {
+        var malformed_version_hello = try hello.clone(allocator);
+        defer malformed_version_hello.deinit(allocator);
+        try replaceClientHelloExtensionForTest(&malformed_version_hello, allocator, ext_supported_versions, payload);
+        try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, malformed_version_hello.items));
+    }
+
     const huge_transport_parameters = try allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) + 1);
     defer allocator.free(huge_transport_parameters);
     try std.testing.expectError(error.InvalidClientHello, writeClientHello(&hello, allocator, .{
@@ -695,6 +731,75 @@ fn appendClientHelloExtensionForTest(
     list.items[1] = @truncate(next_body_len >> 16);
     list.items[2] = @truncate(next_body_len >> 8);
     list.items[3] = @truncate(next_body_len);
+}
+
+fn replaceClientHelloExtensionForTest(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    typ: u16,
+    replacement_payload: []const u8,
+) Error!void {
+    if (list.items.len < 4 or list.items[0] != handshake_type_client_hello) return error.InvalidClientHello;
+    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
+    if (body_len + 4 != list.items.len) return error.InvalidClientHello;
+
+    var pos: usize = 4 + 2 + 32;
+    if (pos >= list.items.len) return error.InvalidClientHello;
+    const session_id_len = list.items[pos];
+    pos += 1 + @as(usize, session_id_len);
+    if (pos + 2 > list.items.len) return error.InvalidClientHello;
+    const cipher_suites_len = std.mem.readInt(u16, list.items[pos..][0..2], .big);
+    pos += 2 + @as(usize, cipher_suites_len);
+    if (pos >= list.items.len) return error.InvalidClientHello;
+    const compression_len = list.items[pos];
+    pos += 1 + @as(usize, compression_len);
+    if (pos + 2 > list.items.len) return error.InvalidClientHello;
+
+    const extensions_len_pos = pos;
+    const extensions_len = std.mem.readInt(u16, list.items[extensions_len_pos..][0..2], .big);
+    var ext_pos = extensions_len_pos + 2;
+    const ext_end = ext_pos + @as(usize, extensions_len);
+    if (ext_end != list.items.len) return error.InvalidClientHello;
+    while (ext_pos < ext_end) {
+        if (ext_pos + 4 > ext_end) return error.InvalidClientHello;
+        const ext_type = std.mem.readInt(u16, list.items[ext_pos..][0..2], .big);
+        const old_len = std.mem.readInt(u16, list.items[ext_pos + 2 ..][0..2], .big);
+        const old_payload_start = ext_pos + 4;
+        const old_payload_end = old_payload_start + @as(usize, old_len);
+        if (old_payload_end > ext_end) return error.InvalidClientHello;
+        if (ext_type == typ) {
+            const old_total = 4 + @as(usize, old_len);
+            const new_total = std.math.add(usize, 4, replacement_payload.len) catch return error.InvalidClientHello;
+            const next_extensions_len = if (new_total >= old_total)
+                std.math.add(usize, extensions_len, new_total - old_total) catch return error.InvalidClientHello
+            else
+                extensions_len - (old_total - new_total);
+            const next_body_len = if (new_total >= old_total)
+                std.math.add(usize, body_len, new_total - old_total) catch return error.InvalidClientHello
+            else
+                body_len - (old_total - new_total);
+            if (next_extensions_len > std.math.maxInt(u16) or next_body_len > std.math.maxInt(u24)) return error.InvalidClientHello;
+
+            const tail = try allocator.dupe(u8, list.items[old_payload_end..]);
+            defer allocator.free(tail);
+            try list.resize(allocator, old_payload_start + replacement_payload.len + tail.len);
+            try appendU16LenToSlice(list.items[ext_pos + 2 ..][0..2], replacement_payload.len);
+            @memcpy(list.items[old_payload_start..][0..replacement_payload.len], replacement_payload);
+            @memcpy(list.items[old_payload_start + replacement_payload.len ..], tail);
+            std.mem.writeInt(u16, list.items[extensions_len_pos..][0..2], @intCast(next_extensions_len), .big);
+            list.items[1] = @truncate(next_body_len >> 16);
+            list.items[2] = @truncate(next_body_len >> 8);
+            list.items[3] = @truncate(next_body_len);
+            return;
+        }
+        ext_pos = old_payload_end;
+    }
+    return error.InvalidClientHello;
+}
+
+fn appendU16LenToSlice(out: *[2]u8, len: usize) Error!void {
+    if (len > std.math.maxInt(u16)) return error.InvalidClientHello;
+    std.mem.writeInt(u16, out, @intCast(len), .big);
 }
 
 const ClientHelloOffsetsForTest = struct {
