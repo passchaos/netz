@@ -1210,6 +1210,23 @@ pub const sdp = struct {
         }
     }
 
+    pub fn formatFmtpAttribute(allocator: std.mem.Allocator, payload_type: u8, fmtp: []const u8) Error![]u8 {
+        if (fmtp.len == 0) return error.InvalidSdp;
+        return std.fmt.allocPrint(allocator, "{d} {s}", .{ payload_type, fmtp });
+    }
+
+    pub fn formatFmtpLine(allocator: std.mem.Allocator, payload_type: u8, fmtp: []const u8) Error![]u8 {
+        if (fmtp.len == 0) return error.InvalidSdp;
+        return std.fmt.allocPrint(allocator, "a=fmtp:{d} {s}\r\n", .{ payload_type, fmtp });
+    }
+
+    pub fn appendFmtpLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, payload_type: u8, fmtp: []const u8) Error!void {
+        if (fmtp.len == 0) return;
+        const line = try formatFmtpLine(allocator, payload_type, fmtp);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub fn rtcpFeedbackIntersection(allocator: std.mem.Allocator, local: []const RtcpFeedback, remote: []const RtcpFeedback) Error![]RtcpFeedback {
         var out: std.ArrayList(RtcpFeedback) = .empty;
         errdefer out.deinit(allocator);
@@ -8652,6 +8669,18 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
             "a=rtcp-fb:111 nack\r\n",
         feedback_lines.items,
     );
+    const formatted_fmtp = try sdp.formatFmtpAttribute(allocator, 111, codecs[0].fmtp);
+    defer allocator.free(formatted_fmtp);
+    try std.testing.expectEqualStrings("111 minptime=10;useinbandfec=1", formatted_fmtp);
+    const formatted_fmtp_line = try sdp.formatFmtpLine(allocator, 111, codecs[0].fmtp);
+    defer allocator.free(formatted_fmtp_line);
+    try std.testing.expectEqualStrings("a=fmtp:111 minptime=10;useinbandfec=1\r\n", formatted_fmtp_line);
+    var fmtp_lines: std.ArrayList(u8) = .empty;
+    defer fmtp_lines.deinit(allocator);
+    try sdp.appendFmtpLine(&fmtp_lines, allocator, 111, codecs[0].fmtp);
+    try sdp.appendFmtpLine(&fmtp_lines, allocator, 111, "");
+    try std.testing.expectEqualStrings("a=fmtp:111 minptime=10;useinbandfec=1\r\n", fmtp_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatFmtpLine(allocator, 111, ""));
 
     const fmtp_params = try sdp.parseFmtpParameters(allocator, " Key = Value ; flag ; apt=96 ");
     defer sdp.freeFmtpParameters(allocator, fmtp_params);
