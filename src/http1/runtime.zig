@@ -1328,10 +1328,16 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
 
 fn writeRequestToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: RequestOptions) Error!void {
     try http1.validateRequestTargetForMethod(options.method, options.target);
+    const target_authority = http1.absoluteFormAuthority(options.target);
+    const synthesized_host = options.host orelse target_authority;
     var request_headers: std.ArrayList(http1.Header) = .empty;
     defer request_headers.deinit(allocator);
-    try appendRequestHeadersWithHost(&request_headers, allocator, options.headers, options.host);
+    try appendRequestHeadersWithHost(&request_headers, allocator, options.headers, synthesized_host);
     try http1.validateHostHeaderBlock(options.version, request_headers.items);
+    if (target_authority) |authority| {
+        const host = wire.findHeader(request_headers.items, "host") orelse return error.InvalidHost;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, host, " \t"), authority)) return error.InvalidHost;
+    }
     if (options.method == .CONNECT and (options.body.len != 0 or options.trailers.len != 0)) return error.InvalidContentLength;
     const use_chunked = try chunkedWriteFraming(options.version, request_headers.items, options.trailers);
     try validateDeclaredRequestBodyLength(request_headers.items, options.body.len, use_chunked);
@@ -2179,6 +2185,7 @@ test "HTTP/1 runtime accepts matching absolute-form target" {
             var request = try connection.readRequest(.{});
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("http://example.com:8080/absolute?x=1", request.request.target);
+            try std.testing.expectEqualStrings("example.com:8080", request.request.header("host").?);
             try connection.writeResponse(.{ .body = "absolute-ok", .request_method = request.request.method });
         }
     };
@@ -2188,10 +2195,10 @@ test "HTTP/1 runtime accepts matching absolute-form target" {
 
     const stream = try server.address().connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    try writeAllToStream(io, stream, "GET http://example.com:8080/absolute?x=1 HTTP/1.1\r\n" ++
-        "Host: example.com:8080\r\n" ++
-        "Connection: close\r\n" ++
-        "\r\n");
+    try writeRequestToStream(allocator, io, stream, .{
+        .target = "http://example.com:8080/absolute?x=1",
+        .headers = &.{.{ .name = "Connection", .value = "close" }},
+    });
     var response = try readResponseFromStreamForRequest(allocator, io, stream, .{
         .max_head_bytes = 4096,
         .max_body_bytes = 4096,
@@ -3915,6 +3922,11 @@ test "HTTP/1 runtime validates outbound request and response framing before writ
     try std.testing.expectError(error.InvalidHost, writeRequestToStream(allocator, io, stream, .{
         .method = .GET,
         .target = "/missing-host",
+    }));
+    try std.testing.expectError(error.InvalidHost, writeRequestToStream(allocator, io, stream, .{
+        .method = .GET,
+        .target = "http://example.com/absolute",
+        .headers = &.{.{ .name = "Host", .value = "other.example" }},
     }));
     try std.testing.expectError(error.InvalidContentLength, writeRequestToStream(allocator, io, stream, .{
         .method = .POST,

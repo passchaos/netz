@@ -12,7 +12,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, and unsupported transfer-coding and HTTP/1.0 transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
-  persistence, optional Host/port synthesis, `http://`/`https://` URI helpers
+  persistence, optional Host/port and absolute-form authority synthesis, `http://`/`https://` URI helpers
   with host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
   with host verification plus OS/custom CA bundles, and a `std.Io.async`
   concurrent server helper
