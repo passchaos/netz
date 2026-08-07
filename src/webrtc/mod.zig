@@ -2510,18 +2510,20 @@ pub const rtp = struct {
     pub const HeaderExtensionFormat = enum {
         one_byte,
         two_byte,
+        raw,
     };
 
     pub fn headerExtensionFormat(profile: u16) ?HeaderExtensionFormat {
         if (profile == one_byte_header_extension_profile or profile == cryptex_one_byte_header_extension_profile) return .one_byte;
         if ((profile & 0xfff0) == two_byte_header_extension_profile or profile == cryptex_two_byte_header_extension_profile) return .two_byte;
-        return null;
+        return .raw;
     }
 
     pub fn parseHeaderExtensionElements(allocator: std.mem.Allocator, extension: Extension) Error![]HeaderExtensionElement {
         return switch (headerExtensionFormat(extension.profile) orelse return error.InvalidRtpPacket) {
             .one_byte => parseOneByteHeaderExtensions(allocator, extension.data),
             .two_byte => parseTwoByteHeaderExtensions(allocator, extension.data),
+            .raw => parseRawHeaderExtensions(allocator, extension.data),
         };
     }
 
@@ -2529,6 +2531,7 @@ pub const rtp = struct {
         return switch (headerExtensionFormat(extension.profile) orelse return error.InvalidRtpPacket) {
             .one_byte => parseOneByteHeaderExtensionsLenient(allocator, extension.data),
             .two_byte => parseTwoByteHeaderExtensions(allocator, extension.data),
+            .raw => parseRawHeaderExtensions(allocator, extension.data),
         };
     }
 
@@ -2676,6 +2679,12 @@ pub const rtp = struct {
             pos += len;
         }
         return elements.toOwnedSlice(allocator);
+    }
+
+    pub fn parseRawHeaderExtensions(allocator: std.mem.Allocator, data: []const u8) Error![]HeaderExtensionElement {
+        const elements = try allocator.alloc(HeaderExtensionElement, 1);
+        elements[0] = .{ .id = 0, .data = data };
+        return elements;
     }
 
     pub fn writeOneByteHeaderExtensions(
@@ -8541,6 +8550,15 @@ test "RTP packet extension padding and writer" {
     const lenient_reserved = try rtp.parseHeaderExtensionElementsLenient(allocator, reserved_extension);
     defer rtp.freeHeaderExtensionElements(allocator, lenient_reserved);
     try std.testing.expectEqual(@as(usize, 0), lenient_reserved.len);
+
+    const raw_extension = try rtp.parseHeaderExtensionElements(allocator, .{
+        .profile = 0xbeef,
+        .data = &.{ 0xde, 0xad, 0xbe, 0xef },
+    });
+    defer rtp.freeHeaderExtensionElements(allocator, raw_extension);
+    try std.testing.expectEqual(@as(usize, 1), raw_extension.len);
+    try std.testing.expectEqual(@as(u8, 0), raw_extension[0].id);
+    try std.testing.expectEqualSlices(u8, &.{ 0xde, 0xad, 0xbe, 0xef }, raw_extension[0].data);
 
     const cryptex_one = try rtp.parseHeaderExtensionElements(allocator, .{
         .profile = rtp.cryptex_one_byte_header_extension_profile,
