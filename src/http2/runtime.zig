@@ -326,20 +326,18 @@ pub const Client = struct {
     ) Error!OwnedResponse {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
-        var host_buffer: [net.HostName.max_len]u8 = undefined;
-        const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
+        var endpoint = try http1_runtime.uriEndpoint(allocator, uri, 80);
+        defer endpoint.deinit();
 
         try validateLocalLimits(limits);
-        const host_name = try net.HostName.init(host.bytes);
-        const stream = try host_name.connect(io, uri.port orelse 80, .{ .mode = .stream });
+        const stream = try endpoint.connect(io);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         var options = request_options;
         options.path = target;
-        if (options.authority == null) options.authority = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host.bytes, uri.port orelse 80 });
-        defer if (request_options.authority == null) allocator.free(options.authority.?);
+        if (options.authority == null) options.authority = endpoint.authority;
         if (options.scheme == null) options.scheme = uri.scheme;
         var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, options);
         stream_owned = false;
@@ -463,13 +461,20 @@ pub const Client = struct {
     ) Error!OwnedResponse {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
-        var host_buffer: [net.HostName.max_len]u8 = undefined;
-        const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
+        var endpoint = try http1_runtime.uriEndpoint(allocator, uri, 80);
+        defer endpoint.deinit();
 
-        var connection = try Client.connectHost(allocator, io, host.bytes, uri.port orelse 80, limits);
+        try validateLocalLimits(limits);
+        const stream = try endpoint.connect(io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        var connection = try connectStream(allocator, io, stream, limits);
+        stream_owned = false;
         defer connection.close();
+        connection.default_authority = try allocator.dupe(u8, endpoint.authority);
+        connection.default_scheme = uri.scheme;
         var options = request_options;
         options.path = target;
         if (options.scheme == null) options.scheme = uri.scheme;
@@ -2671,6 +2676,65 @@ test "HTTP/2 client sends request to URI" {
 
     try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "https://localhost/", .{}, .{}));
     try std.testing.expectError(error.InvalidUri, Client.requestUri(allocator, io, "http:///missing-host", .{}, .{}));
+}
+
+test "HTTP/2 client sends request to bracketed IPv6 URI" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = Server.listen(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    ) catch |err| switch (err) {
+        error.AddressFamilyUnsupported, error.AddressUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/h2-ipv6?x=1", request.path);
+            try std.testing.expectEqualStrings("http", request.scheme);
+            var expected_authority: [64]u8 = undefined;
+            const rendered_authority = try std.fmt.bufPrint(&expected_authority, "[::1]:{d}", .{server_ptr.address().ip6.port});
+            try std.testing.expectEqualStrings(rendered_authority, request.authority.?);
+            try connection.writeResponse(request.stream_id, .{ .body = "h2-ipv6-uri-ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "http://[::1]:{d}/h2-ipv6?x=1", .{server.address().ip6.port});
+    defer allocator.free(uri);
+    var response = try Client.requestUri(allocator, io, uri, .{}, .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("h2-ipv6-uri-ok", response.body);
 }
 
 test "HTTP/2 h2c upgrade request receives stream one response" {

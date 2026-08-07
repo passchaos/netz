@@ -38,6 +38,100 @@ pub const TlsClientOptions = struct {
     allow_truncation_attacks: bool = false,
 };
 
+pub const UriEndpoint = struct {
+    allocator: std.mem.Allocator,
+    /// Owned host text exactly as it belongs in HTTP authority syntax.  IPv6
+    /// literals intentionally keep their RFC 3986 brackets so synthesized Host
+    /// / `:authority` fields are valid.
+    host_storage: []u8,
+    authority: []u8,
+    port: u16,
+    target: Target,
+    /// Borrowed from `host_storage`; bracketed IPv6 literals drop the brackets
+    /// here because TCP/TLS APIs expect the address text, not URI authority
+    /// syntax.
+    tls_host: []const u8,
+
+    pub const Target = union(enum) {
+        host: net.HostName,
+        ip: net.IpAddress,
+    };
+
+    pub fn deinit(self: *UriEndpoint) void {
+        self.allocator.free(self.authority);
+        self.allocator.free(self.host_storage);
+        self.* = undefined;
+    }
+
+    pub fn connect(self: UriEndpoint, io: std.Io) Error!net.Stream {
+        return switch (self.target) {
+            .host => |host| host.connect(io, self.port, .{ .mode = .stream }),
+            .ip => |address| address.connect(io, .{ .mode = .stream }),
+        };
+    }
+};
+
+pub fn uriEndpoint(allocator: std.mem.Allocator, uri: std.Uri, default_port: u16) Error!UriEndpoint {
+    const host_component = uri.host orelse return error.InvalidUri;
+    const host_storage = try uriHostToOwned(allocator, host_component);
+    errdefer allocator.free(host_storage);
+
+    const port = uri.port orelse default_port;
+    const authority = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host_storage, port });
+    errdefer allocator.free(authority);
+
+    const target, const tls_host = try uriTargetForHost(host_storage, port);
+    return .{
+        .allocator = allocator,
+        .host_storage = host_storage,
+        .authority = authority,
+        .port = port,
+        .target = target,
+        .tls_host = tls_host,
+    };
+}
+
+fn uriHostToOwned(allocator: std.mem.Allocator, host: std.Uri.Component) Error![]u8 {
+    var buffer: [net.HostName.max_len + 2]u8 = undefined;
+    const raw = host.toRaw(&buffer) catch return error.InvalidUri;
+    if (raw.len == 0) return error.InvalidUri;
+    return allocator.dupe(u8, raw);
+}
+
+fn uriTargetForHost(host: []const u8, port: u16) Error!struct { UriEndpoint.Target, []const u8 } {
+    if (host[0] == '[') {
+        if (host[host.len - 1] != ']') return error.InvalidUri;
+        const inner = host[1 .. host.len - 1];
+        if (inner.len == 0) return error.InvalidUri;
+        const ip6 = net.IpAddress.parseIp6(inner, port) catch return error.InvalidUri;
+        return .{ .{ .ip = ip6 }, inner };
+    }
+    if (std.mem.indexOfScalar(u8, host, '[') != null or std.mem.indexOfScalar(u8, host, ']') != null) {
+        return error.InvalidUri;
+    }
+    if (net.IpAddress.parse(host, port)) |address| {
+        return .{ .{ .ip = address }, host };
+    } else |_| {}
+    return .{ .{ .host = try net.HostName.init(host) }, host };
+}
+
+test "URI endpoint handles bracketed IPv6 literals" {
+    const allocator = std.testing.allocator;
+    const uri = try std.Uri.parse("http://[::1]:8080/ipv6?x=1");
+    var endpoint = try uriEndpoint(allocator, uri, 80);
+    defer endpoint.deinit();
+
+    try std.testing.expectEqualStrings("[::1]:8080", endpoint.authority);
+    try std.testing.expectEqualStrings("::1", endpoint.tls_host);
+    switch (endpoint.target) {
+        .ip => |address| switch (address) {
+            .ip6 => |ip6| try std.testing.expectEqual(@as(u16, 8080), ip6.port),
+            .ip4 => return error.InvalidUri,
+        },
+        .host => return error.InvalidUri,
+    }
+}
+
 pub const TlsClientConnection = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -405,15 +499,38 @@ pub const Client = struct {
         const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
         const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
         if (!is_http and !is_https) return error.UnsupportedScheme;
-        var host_buffer: [net.HostName.max_len]u8 = undefined;
-        const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
+        var endpoint = try uriEndpoint(allocator, uri, if (is_https) 443 else 80);
+        defer endpoint.deinit();
 
-        var client = if (is_https)
-            try Client.connectTlsHost(allocator, io, host.bytes, uri.port orelse 443, limits, tls_options)
-        else
-            try Client.connectHost(allocator, io, host.bytes, uri.port orelse 80, limits);
+        const stream = try endpoint.connect(io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        var client = if (is_https) blk: {
+            const tls_conn = try TlsClientConnection.init(allocator, io, stream, endpoint.tls_host, tls_options);
+            stream_owned = false;
+            errdefer tls_conn.deinit();
+            const default_host = try allocator.dupe(u8, endpoint.authority);
+            break :blk Client{
+                .io = io,
+                .allocator = allocator,
+                .stream = stream,
+                .limits = limits,
+                .default_host = default_host,
+                .tls_conn = tls_conn,
+            };
+        } else blk: {
+            const default_host = try allocator.dupe(u8, endpoint.authority);
+            stream_owned = false;
+            break :blk Client{
+                .io = io,
+                .allocator = allocator,
+                .stream = stream,
+                .limits = limits,
+                .default_host = default_host,
+            };
+        };
         defer client.close();
         var options = request_options;
         options.target = target;
@@ -1831,6 +1948,64 @@ test "HTTP/1 client sends request to URI" {
 
     try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "ftp://localhost/", .{}, .{}));
     try std.testing.expectError(error.InvalidUri, Client.requestUri(allocator, io, "http:///missing-host", .{}, .{}));
+}
+
+test "HTTP/1 client sends request to bracketed IPv6 URI" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = Server.listen(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    ) catch |err| switch (err) {
+        error.AddressFamilyUnsupported, error.AddressUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/ipv6?x=1", request.request.target);
+            var expected_host: [64]u8 = undefined;
+            const rendered_host = try std.fmt.bufPrint(&expected_host, "[::1]:{d}", .{server_ptr.address().ip6.port});
+            try std.testing.expectEqualStrings(rendered_host, request.request.header("host").?);
+            try connection.writeResponse(.{ .body = "ipv6-uri-ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "http://[::1]:{d}/ipv6?x=1", .{server.address().ip6.port});
+    defer allocator.free(uri);
+    var response = try Client.requestUri(allocator, io, uri, .{}, .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("ipv6-uri-ok", response.response.body);
 }
 
 test "HTTP/1 server sends 100 Continue before reading expected body" {

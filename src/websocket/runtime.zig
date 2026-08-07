@@ -272,17 +272,27 @@ pub const Client = struct {
         const is_ws = std.ascii.eqlIgnoreCase(uri.scheme, "ws");
         const is_wss = std.ascii.eqlIgnoreCase(uri.scheme, "wss");
         if (!is_ws and !is_wss) return error.UnsupportedScheme;
-        var host_buffer: [net.HostName.max_len]u8 = undefined;
-        const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
+        var endpoint = try http1_runtime.uriEndpoint(allocator, uri, if (is_wss) 443 else 80);
+        defer endpoint.deinit();
 
         var connect_options = options;
         connect_options.target = target;
-        return if (is_wss)
-            connectTlsHost(allocator, io, host.bytes, uri.port orelse 443, connect_options, tls_options)
-        else
-            connectHost(allocator, io, host.bytes, uri.port orelse 80, connect_options);
+        if (connect_options.host.len == 0) connect_options.host = endpoint.authority;
+
+        const stream = try endpoint.connect(io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (is_wss) {
+            const tls_conn = try http1_runtime.TlsClientConnection.init(allocator, io, stream, endpoint.tls_host, tls_options);
+            stream_owned = false;
+            errdefer tls_conn.deinit();
+            return connectStream(allocator, io, stream, tls_conn, connect_options);
+        }
+        const connection = try connectStream(allocator, io, stream, null, connect_options);
+        stream_owned = false;
+        return connection;
     }
 
     fn connectStream(
@@ -1673,6 +1683,69 @@ test "WebSocket client connects by ws URI" {
 
     try std.testing.expectError(error.UnsupportedScheme, Client.connectUri(allocator, io, "ftp://localhost/chat", .{}));
     try std.testing.expectError(error.InvalidUri, Client.connectUri(allocator, io, "ws:///missing-host", .{}));
+}
+
+test "WebSocket client connects by bracketed IPv6 URI" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = Server.listen(
+        allocator,
+        io,
+        .{ .ip6 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    ) catch |err| switch (err) {
+        error.AddressFamilyUnsupported, error.AddressUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+
+            var request = try connection.receiveMessage();
+            defer request.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqualStrings("ipv6-uri-hello", request.payload);
+            try connection.sendText("ipv6-uri-world");
+
+            var close = try connection.receiveFrame();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "ws://[::1]:{d}/ipv6?x=1", .{server.address().ip6.port});
+    defer allocator.free(uri);
+    var client = try Client.connectUri(allocator, io, uri, .{
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+
+    try client.sendText("ipv6-uri-hello");
+    var response = try client.receiveMessage();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("ipv6-uri-world", response.payload);
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "WebSocket runtime negotiates permessage-deflate" {

@@ -12,8 +12,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, and unsupported transfer-coding and HTTP/1.0 transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
-  persistence, optional Host/port synthesis, `http://`/`https://` URI and
-  host-name DNS connect helpers, TLS client transport via Zig `std.crypto.tls`
+  persistence, optional Host/port synthesis, `http://`/`https://` URI helpers
+  with host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
   with host verification plus OS/custom CA bundles, and a `std.Io.async`
   concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
@@ -32,7 +32,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body/Content-Length rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
   open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`,
-  `http://` URI and host-name DNS connect helpers, and a `std.Io.async` concurrent server helper
+  `http://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs,
@@ -120,7 +120,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
-  server helper, `ws://`/`wss://` URI and host-name DNS connect helpers with
+  server helper, `ws://`/`wss://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
   Host/port synthesis, TLS client transport shared with HTTP/1, and RFC 8441
   WebSocket-over-HTTP/2 adapters that negotiate `:protocol = websocket`,
   subprotocols, permessage-deflate, and transport-derived `:scheme` over an h2 DATA tunnel
@@ -178,6 +178,17 @@ receive calls if the peer did not negotiate the matching capabilities.
 zig build test
 ```
 
+Runnable examples are under `examples/` and are wired into the build:
+
+```sh
+zig build examples
+zig build run-http1-hello
+zig build run-http2-h2c
+zig build run-websocket-echo
+# Linux only: raw std.os.linux.IoUring connect/send/recv example
+zig build run-linux-io-uring-http1
+```
+
 The build script pins the package to Zig `0.16.0`.
 
 ## Implementation order
@@ -226,6 +237,16 @@ try ws.sendText("hello");
 var frame = try ws.receiveFrame();
 defer frame.deinit(allocator);
 ```
+
+The HTTP and WebSocket URI helpers synthesize Host / `:authority` / `:scheme`
+from the URI and can connect to host names, IPv4 literals, and bracketed IPv6
+literals such as `http://[::1]:8080/` and `ws://[::1]:8080/chat`.
+
+On Zig 0.16, `std.Io.Uring` exists but its `std.Io.net` networking hooks are
+still unavailable. The portable runtimes therefore use the `std.Io` abstraction
+with `std.Io.Threaded` in examples, while `examples/linux_io_uring_http1.zig`
+shows direct `std.os.linux.IoUring` `connect`/`send`/`recv` usage around netz's
+HTTP/1 parser.
 
 Handshake-backed WebTransport sessions expose the negotiated DATAGRAM budget so
 callers can avoid sending a payload the underlying QUIC peer will reject:
