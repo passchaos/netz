@@ -1268,6 +1268,19 @@ pub const sdp = struct {
         return genericFmtpCompatible(local.fmtp, remote.fmtp);
     }
 
+    pub fn findCodecByPayloadType(codecs: []const RtpCodec, payload_type: u8) ?RtpCodec {
+        for (codecs) |codec| {
+            if (codec.payload_type == payload_type) return codec;
+        }
+        return null;
+    }
+
+    pub fn rtxAssociatedCodec(codecs: []const RtpCodec, rtx: RtpCodec) ?RtpCodec {
+        if (!std.ascii.eqlIgnoreCase(rtx.mime_type, "video/rtx")) return null;
+        const apt = rtx.apt orelse return null;
+        return findCodecByPayloadType(codecs, apt);
+    }
+
     pub fn extractRids(allocator: std.mem.Allocator, media: Media) Error![]Rid {
         var rids: std.ArrayList(Rid) = .empty;
         errdefer rids.deinit(allocator);
@@ -5443,6 +5456,10 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("rtx", rtx_codecs[1].codec_name);
     try std.testing.expectEqual(@as(?u8, 96), rtx_codecs[1].apt);
     try std.testing.expectEqualStrings("apt=96;rtx-time=3000", rtx_codecs[1].fmtp);
+    const associated_vp8 = sdp.rtxAssociatedCodec(rtx_codecs, rtx_codecs[1]).?;
+    try std.testing.expectEqual(@as(u8, 96), associated_vp8.payload_type);
+    try std.testing.expectEqualStrings("video/VP8", associated_vp8.mime_type);
+    try std.testing.expect(sdp.findCodecByPayloadType(rtx_codecs, 42) == null);
 
     const invalid_payload_text =
         "v=0\r\n" ++
