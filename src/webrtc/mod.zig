@@ -1086,6 +1086,11 @@ pub const sdp = struct {
         .address = "0.0.0.0",
     };
 
+    pub const RtcpAddress = struct {
+        port: u16,
+        connection: ?Connection = null,
+    };
+
     pub const Session = struct {
         version: []const u8 = "0",
         origin: []const u8 = "- 0 0 IN IP4 127.0.0.1",
@@ -1372,6 +1377,55 @@ pub const sdp = struct {
         const line = try formatConnectionLine(allocator, network_type, address_type, address);
         defer allocator.free(line);
         try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatRtcpAttribute(allocator: std.mem.Allocator, rtcp_address: RtcpAddress) Error![]u8 {
+        if (rtcp_address.connection) |connection| {
+            try validateSdpToken(connection.network_type);
+            try validateSdpToken(connection.address_type);
+            try validateSdpToken(connection.address);
+            return std.fmt.allocPrint(allocator, "{d} {s} {s} {s}", .{ rtcp_address.port, connection.network_type, connection.address_type, connection.address });
+        }
+        return std.fmt.allocPrint(allocator, "{d}", .{rtcp_address.port});
+    }
+
+    pub fn formatRtcpLine(allocator: std.mem.Allocator, rtcp_address: RtcpAddress) Error![]u8 {
+        const attr = try formatRtcpAttribute(allocator, rtcp_address);
+        defer allocator.free(attr);
+        return std.fmt.allocPrint(allocator, "a=rtcp:{s}\r\n", .{attr});
+    }
+
+    pub fn appendRtcpLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, rtcp_address: RtcpAddress) Error!void {
+        const line = try formatRtcpLine(allocator, rtcp_address);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn parseRtcpAttribute(raw: []const u8) Error!RtcpAddress {
+        var it = std.mem.splitScalar(u8, raw, ' ');
+        const port_s = it.next() orelse return error.InvalidSdp;
+        try validateSdpToken(port_s);
+        const port = std.fmt.parseInt(u16, port_s, 10) catch return error.InvalidSdp;
+        const network_type = it.next() orelse return .{ .port = port };
+        const address_type = it.next() orelse return error.InvalidSdp;
+        const address = it.next() orelse return error.InvalidSdp;
+        if (it.next() != null) return error.InvalidSdp;
+        try validateSdpToken(network_type);
+        try validateSdpToken(address_type);
+        try validateSdpToken(address);
+        return .{
+            .port = port,
+            .connection = .{
+                .network_type = network_type,
+                .address_type = address_type,
+                .address = address,
+            },
+        };
+    }
+
+    pub fn extractRtcpAddress(media: Media) Error!?RtcpAddress {
+        const raw = findAttr(media.attributes, "rtcp") orelse return null;
+        return try parseRtcpAttribute(raw);
     }
 
     pub fn appendSessionHeaderLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, session: Session) Error!void {
@@ -8966,6 +9020,7 @@ test "ICE candidate parser and SDP parser" {
         "a=group:BUNDLE 0\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
         "c=IN IP4 0.0.0.0\r\n" ++
+        "a=rtcp:9 IN IP4 0.0.0.0\r\n" ++
         "a=mid:0\r\n";
     var session = try sdp.parse(allocator, text);
     defer session.deinit(allocator);
@@ -8975,7 +9030,13 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
     try std.testing.expectEqualStrings("0.0.0.0", session.media[0].connection.?.address);
-    try std.testing.expectEqualStrings("mid", session.media[0].attributes[0].name);
+    const parsed_rtcp = (try sdp.extractRtcpAddress(session.media[0])).?;
+    try std.testing.expectEqual(@as(u16, 9), parsed_rtcp.port);
+    try std.testing.expectEqualStrings("IN", parsed_rtcp.connection.?.network_type);
+    try std.testing.expectEqualStrings("IP4", parsed_rtcp.connection.?.address_type);
+    try std.testing.expectEqualStrings("0.0.0.0", parsed_rtcp.connection.?.address);
+    try std.testing.expectEqualStrings("rtcp", session.media[0].attributes[0].name);
+    try std.testing.expectEqualStrings("mid", session.media[0].attributes[1].name);
     const formatted_session = try sdp.formatSessionLines(allocator, session);
     defer allocator.free(formatted_session);
     try std.testing.expectEqualStrings(text, formatted_session);
@@ -8991,7 +9052,7 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("a=rtcp-mux\r\n", property_attr_line);
     var generic_attr_lines: std.ArrayList(u8) = .empty;
     defer generic_attr_lines.deinit(allocator);
-    try sdp.appendAttributeLine(&generic_attr_lines, allocator, session.media[0].attributes[0]);
+    try sdp.appendAttributeLine(&generic_attr_lines, allocator, session.media[0].attributes[1]);
     try sdp.appendAttributeLine(&generic_attr_lines, allocator, .{ .name = "rtcp-mux", .value = "" });
     try std.testing.expectEqualStrings("a=mid:0\r\na=rtcp-mux\r\n", generic_attr_lines.items);
     try std.testing.expectError(error.InvalidSdp, sdp.formatAttributeLine(allocator, .{ .name = "bad name", .value = "" }));
@@ -9032,6 +9093,25 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("c=IN IP6 ::\r\n", connection_lines.items);
     try std.testing.expectError(error.InvalidSdp, sdp.formatConnectionLine(allocator, "IN", "IP4", "bad address"));
     try std.testing.expectError(error.InvalidSdp, sdp.parse(allocator, "v=0\r\nc=IN IP4\r\n"));
+    const rtcp_attr = try sdp.formatRtcpAttribute(allocator, .{ .port = 9, .connection = sdp.unspecified_ipv4_connection });
+    defer allocator.free(rtcp_attr);
+    try std.testing.expectEqualStrings("9 IN IP4 0.0.0.0", rtcp_attr);
+    const rtcp_line = try sdp.formatRtcpLine(allocator, .{ .port = 9, .connection = sdp.unspecified_ipv4_connection });
+    defer allocator.free(rtcp_line);
+    try std.testing.expectEqualStrings("a=rtcp:9 IN IP4 0.0.0.0\r\n", rtcp_line);
+    const rtcp_muxed_attr = try sdp.formatRtcpAttribute(allocator, .{ .port = 9 });
+    defer allocator.free(rtcp_muxed_attr);
+    try std.testing.expectEqualStrings("9", rtcp_muxed_attr);
+    var rtcp_lines: std.ArrayList(u8) = .empty;
+    defer rtcp_lines.deinit(allocator);
+    try sdp.appendRtcpLine(&rtcp_lines, allocator, .{ .port = 9, .connection = sdp.unspecified_ipv4_connection });
+    try std.testing.expectEqualStrings("a=rtcp:9 IN IP4 0.0.0.0\r\n", rtcp_lines.items);
+    const parsed_rtcp_without_connection = try sdp.parseRtcpAttribute("9");
+    try std.testing.expectEqual(@as(u16, 9), parsed_rtcp_without_connection.port);
+    try std.testing.expect(parsed_rtcp_without_connection.connection == null);
+    try std.testing.expectError(error.InvalidSdp, sdp.parseRtcpAttribute(""));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseRtcpAttribute("9 IN IP4"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseRtcpAttribute("9 IN IP4 0.0.0.0 extra"));
     const mid_line = try sdp.formatMidLine(allocator, "0");
     defer allocator.free(mid_line);
     try std.testing.expectEqualStrings("a=mid:0\r\n", mid_line);
