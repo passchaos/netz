@@ -162,6 +162,7 @@ pub const stun = struct {
             if (seen_fingerprint) return error.InvalidStunAttribute;
             if (seen_integrity and attr.attr_type != .fingerprint) return error.InvalidStunAttribute;
             if (seen_fingerprint and attr.attr_type == .message_integrity) return error.InvalidStunAttribute;
+            if (attr.value.len > std.math.maxInt(u16)) return error.InvalidStunAttribute;
             try wire.appendInt(&payload, allocator, u16, @intFromEnum(attr.attr_type), .big);
             try wire.appendInt(&payload, allocator, u16, @intCast(attr.value.len), .big);
             try payload.appendSlice(allocator, attr.value);
@@ -3930,6 +3931,14 @@ test "STUN binding message roundtrip" {
     defer bad_length.deinit(allocator);
     bad_length.items[3] = 1; // STUN message length must be 32-bit aligned.
     try std.testing.expectError(error.InvalidStunMessage, stun.parse(allocator, bad_length.items));
+
+    const too_large_attr = try allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) + 1);
+    defer allocator.free(too_large_attr);
+    var invalid_write: std.ArrayList(u8) = .empty;
+    defer invalid_write.deinit(allocator);
+    try std.testing.expectError(error.InvalidStunAttribute, stun.write(&invalid_write, allocator, .request, .binding, tid, &.{
+        .{ .attr_type = .software, .value = too_large_attr },
+    }));
 }
 
 test "STUN XOR-MAPPED-ADDRESS helper" {
