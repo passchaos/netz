@@ -6568,10 +6568,25 @@ pub const sctp = struct {
             .webrtc_dcep => .{ .kind = .dcep, .effective_len = user_data_len },
             .webrtc_string => .{ .kind = .string, .is_string = true, .effective_len = user_data_len },
             .webrtc_binary => .{ .kind = .binary, .effective_len = user_data_len },
-            .webrtc_string_empty => .{ .kind = .string, .is_string = true, .empty = true, .effective_len = 0 },
-            .webrtc_binary_empty => .{ .kind = .binary, .empty = true, .effective_len = 0 },
+            .webrtc_string_empty => blk: {
+                try validateEmptyDataChannelPayloadLength(user_data_len);
+                break :blk .{ .kind = .string, .is_string = true, .empty = true, .effective_len = 0 };
+            },
+            .webrtc_binary_empty => blk: {
+                try validateEmptyDataChannelPayloadLength(user_data_len);
+                break :blk .{ .kind = .binary, .empty = true, .effective_len = 0 };
+            },
             _ => error.InvalidSctpPacket,
         };
+    }
+
+    fn validateEmptyDataChannelPayloadLength(user_data_len: usize) Error!void {
+        // RFC 8831 / Pion datachannel encodes empty string/binary messages with
+        // special PPIDs and a single dummy payload byte.  A packet carrying the
+        // empty PPID without exactly that placeholder is malformed; otherwise a
+        // truncated SCTP DATA chunk would be indistinguishable from a legitimate
+        // empty message.
+        if (user_data_len != 1) return error.InvalidSctpPacket;
     }
 
     pub fn dataChannelPayload(ppid: PayloadProtocolIdentifier, user_data: []const u8) Error!DataChannelPayload {
@@ -9526,6 +9541,13 @@ test "SCTP DATA packet and DCEP channel messages" {
         .empty = true,
         .effective_len = 0,
     }, try sctp.dataChannelPayloadInfo(.webrtc_string_empty, 1));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.dataChannelPayloadInfo(.webrtc_string_empty, 0));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.dataChannelPayloadInfo(.webrtc_binary_empty, 2));
+    try std.testing.expectEqual(sctp.DataChannelPayloadInfo{
+        .kind = .binary,
+        .empty = true,
+        .effective_len = 0,
+    }, try sctp.dataChannelPayloadInfo(.webrtc_binary_empty, 1));
     try std.testing.expectEqual(sctp.DataChannelPayloadInfo{
         .kind = .binary,
         .effective_len = 9,
