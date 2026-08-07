@@ -1097,6 +1097,18 @@ pub const sdp = struct {
         return false;
     }
 
+    pub fn supportsIceTrickle(session: Session) bool {
+        if (findAttr(session.attributes, "ice-options")) |value| {
+            if (iceOptionsHasToken(value, "trickle")) return true;
+        }
+        for (session.media) |media| {
+            if (findAttr(media.attributes, "ice-options")) |value| {
+                if (iceOptionsHasToken(value, "trickle")) return true;
+            }
+        }
+        return false;
+    }
+
     pub fn extractExtMaps(allocator: std.mem.Allocator, session: Session) Error![]ExtMap {
         var out: std.ArrayList(ExtMap) = .empty;
         errdefer out.deinit(allocator);
@@ -1546,6 +1558,14 @@ pub const sdp = struct {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
         }
         return null;
+    }
+
+    fn iceOptionsHasToken(value: []const u8, token: []const u8) bool {
+        var parts = std.mem.tokenizeAny(u8, value, " \t");
+        while (parts.next()) |part| {
+            if (std.ascii.eqlIgnoreCase(part, token)) return true;
+        }
+        return false;
     }
 
     pub fn parseDtlsSetupAttribute(raw: []const u8) Error!DtlsSetupRole {
@@ -7089,6 +7109,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=setup:active\r\n" ++
         "a=ice-ufrag:bundle-ufrag\r\n" ++
         "a=ice-pwd:bundle-pwd\r\n" ++
+        "a=ice-options:google-ice trickle\r\n" ++
         "a=fingerprint:sha-256 01:23:45:67:89:AB:CD:EF:FE:DC:BA:98:76:54:32:10:11:33:55:77:99:BB:DD:FF:00:22:44:66:88:AA:CC:EE\r\n" ++
         "a=rtcp-mux\r\n" ++
         "a=rtcp-rsize\r\n" ++
@@ -7114,6 +7135,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expect(transport.rtcp_rsize);
 
     try std.testing.expect(sdp.extMapAllowMixed(session));
+    try std.testing.expect(sdp.supportsIceTrickle(session));
     const twcc = (try sdp.findExtMapInSession(session, sdp.transport_cc_uri)).?;
     try std.testing.expectEqual(@as(u16, 3), twcc.id);
     try std.testing.expectEqual(sdp.ExtMapDirection.recvonly, twcc.direction);
@@ -7142,6 +7164,23 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("attrs", parsed_extmap.extension_attributes);
 
     try std.testing.expectError(error.InvalidSdp, sdp.parseExtMapAttribute("0 " ++ sdp.sdes_mid_uri));
+
+    var media_trickle = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=ice-options:google-ice\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=ice-options:renomination\tTrIcKlE\r\n");
+    defer media_trickle.deinit(allocator);
+    try std.testing.expect(sdp.supportsIceTrickle(media_trickle));
+
+    var no_trickle = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=ice-options:nottrickle\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n");
+    defer no_trickle.deinit(allocator);
+    try std.testing.expect(!sdp.supportsIceTrickle(no_trickle));
 
     const codec_text =
         "v=0\r\n" ++
