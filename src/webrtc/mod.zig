@@ -1179,6 +1179,49 @@ pub const sdp = struct {
         if (options.extmap_allow_mixed) try list.appendSlice(allocator, "a=extmap-allow-mixed\r\n");
     }
 
+    pub fn formatMidLine(allocator: std.mem.Allocator, mid: []const u8) Error![]u8 {
+        try validateSdpToken(mid);
+        return std.fmt.allocPrint(allocator, "a=mid:{s}\r\n", .{mid});
+    }
+
+    pub fn appendMidLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, mid: []const u8) Error!void {
+        const line = try formatMidLine(allocator, mid);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatBundleGroupAttribute(allocator: std.mem.Allocator, mids: []const []const u8) Error![]u8 {
+        if (mids.len == 0) return error.InvalidSdp;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.appendSlice(allocator, "BUNDLE");
+        for (mids) |mid| {
+            try validateSdpToken(mid);
+            try out.append(allocator, ' ');
+            try out.appendSlice(allocator, mid);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn formatBundleGroupLine(allocator: std.mem.Allocator, mids: []const []const u8) Error![]u8 {
+        const attr = try formatBundleGroupAttribute(allocator, mids);
+        defer allocator.free(attr);
+        return std.fmt.allocPrint(allocator, "a=group:{s}\r\n", .{attr});
+    }
+
+    pub fn appendBundleGroupLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, mids: []const []const u8) Error!void {
+        const line = try formatBundleGroupLine(allocator, mids);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    fn validateSdpToken(value: []const u8) Error!void {
+        if (value.len == 0) return error.InvalidSdp;
+        for (value) |byte| {
+            if (byte == 0 or byte == '\r' or byte == '\n' or byte == ' ' or byte == '\t') return error.InvalidSdp;
+        }
+    }
+
     pub fn formatCandidateAttribute(allocator: std.mem.Allocator, candidate: ice.Candidate) Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -8613,6 +8656,23 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
     try std.testing.expectEqualStrings("mid", session.media[0].attributes[0].name);
+    const mid_line = try sdp.formatMidLine(allocator, "0");
+    defer allocator.free(mid_line);
+    try std.testing.expectEqualStrings("a=mid:0\r\n", mid_line);
+    const bundle_attr = try sdp.formatBundleGroupAttribute(allocator, &.{ "0", "1" });
+    defer allocator.free(bundle_attr);
+    try std.testing.expectEqualStrings("BUNDLE 0 1", bundle_attr);
+    const bundle_line = try sdp.formatBundleGroupLine(allocator, &.{ "0", "1" });
+    defer allocator.free(bundle_line);
+    try std.testing.expectEqualStrings("a=group:BUNDLE 0 1\r\n", bundle_line);
+    var mid_bundle_lines: std.ArrayList(u8) = .empty;
+    defer mid_bundle_lines.deinit(allocator);
+    try sdp.appendBundleGroupLine(&mid_bundle_lines, allocator, &.{ "0", "1" });
+    try sdp.appendMidLine(&mid_bundle_lines, allocator, "0");
+    try std.testing.expectEqualStrings("a=group:BUNDLE 0 1\r\na=mid:0\r\n", mid_bundle_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatMidLine(allocator, ""));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatBundleGroupLine(allocator, &.{}));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatBundleGroupLine(allocator, &.{"bad mid"}));
 }
 
 test "ICE candidate priority helpers mirror RFC and Pion defaults" {
