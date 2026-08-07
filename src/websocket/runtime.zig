@@ -202,8 +202,10 @@ pub const Client = struct {
         const host_name = try net.HostName.init(host);
         const stream = try host_name.connect(io, port, .{ .mode = .stream });
         errdefer stream.close(io);
+        const default_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+        defer allocator.free(default_host);
         var connect_options = options;
-        if (connect_options.host.len == 0) connect_options.host = host;
+        if (connect_options.host.len == 0) connect_options.host = default_host;
         return connectStream(allocator, io, stream, connect_options);
     }
 

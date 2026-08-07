@@ -12,7 +12,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, and unsupported transfer-coding and HTTP/1.0 transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
-  persistence, optional Host synthesis, host-name DNS connect helpers, and a
+  persistence, optional Host/port synthesis, host-name DNS connect helpers, and a
   `std.Io.async` concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder with RFC 7541 Huffman strings plus
@@ -29,7 +29,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   status-forbidden response-body write rejection,
   traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body/Content-Length rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
-  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, and a blocking prior-knowledge h2c client/server runtime with
+  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis,
   host-name DNS connect helpers and a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
@@ -118,7 +118,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
-  server helper and host-name DNS connect helpers, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
+  server helper and host-name DNS connect helpers with Host/port synthesis, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
   `:protocol = websocket`, subprotocols, and permessage-deflate over an h2 DATA tunnel
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
   username/password payload support, PUBLISH,

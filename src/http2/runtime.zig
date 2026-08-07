@@ -210,7 +210,7 @@ pub const Client = struct {
     ) Error!Connection {
         try validateLocalLimits(limits);
         const host_name = try net.HostName.init(host);
-        const owned_host = try allocator.dupe(u8, host);
+        const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
         errdefer allocator.free(owned_host);
         const stream = try host_name.connect(io, port, .{ .mode = .stream });
         errdefer stream.close(io);
@@ -2265,7 +2265,9 @@ test "HTTP/2 client connects by host name" {
 
             var request = try connection.readRequest();
             defer request.deinit(server_ptr.allocator);
-            try std.testing.expectEqualStrings("localhost", request.authority.?);
+            var expected_authority: [32]u8 = undefined;
+            const rendered_authority = try std.fmt.bufPrint(&expected_authority, "localhost:{d}", .{server_ptr.address().ip4.port});
+            try std.testing.expectEqualStrings(rendered_authority, request.authority.?);
             try connection.writeResponse(request.stream_id, .{ .body = "h2-dns-ok" });
         }
     };

@@ -176,7 +176,7 @@ pub const Client = struct {
         limits: Limits,
     ) Error!Client {
         const host_name = try net.HostName.init(host);
-        const owned_host = try allocator.dupe(u8, host);
+        const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
         errdefer allocator.free(owned_host);
         return .{
             .io = io,
@@ -1481,7 +1481,9 @@ test "HTTP/1 client connects by host name" {
 
             var request = try connection.readRequest(.{});
             defer request.deinit(server_ptr.allocator);
-            try std.testing.expectEqualStrings("localhost", request.request.header("host").?);
+            var expected_host: [32]u8 = undefined;
+            const rendered_host = try std.fmt.bufPrint(&expected_host, "localhost:{d}", .{server_ptr.address().ip4.port});
+            try std.testing.expectEqualStrings(rendered_host, request.request.header("host").?);
             try connection.writeResponse(.{ .body = "dns-ok" });
         }
     };
