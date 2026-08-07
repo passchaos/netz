@@ -106,11 +106,11 @@ pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try writeKeyShareExtension(&extensions, allocator, options.x25519_public_key);
     try writeExtension(&extensions, allocator, ext_quic_transport_parameters, options.transport_parameters);
 
-    try appendInt(&body, allocator, u16, @intCast(extensions.items.len));
+    try appendU16Len(&body, allocator, extensions.items.len, error.InvalidClientHello);
     try body.appendSlice(allocator, extensions.items);
 
     try list.append(allocator, handshake_type_client_hello);
-    try appendU24(list, allocator, @intCast(body.items.len));
+    try appendU24Len(list, allocator, body.items.len, error.InvalidClientHello);
     try list.appendSlice(allocator, body.items);
 }
 
@@ -136,11 +136,11 @@ pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try key_share.appendSlice(allocator, &options.x25519_public_key);
     try writeExtension(&extensions, allocator, ext_key_share, key_share.items);
 
-    try appendInt(&body, allocator, u16, @intCast(extensions.items.len));
+    try appendU16Len(&body, allocator, extensions.items.len, error.InvalidServerHello);
     try body.appendSlice(allocator, extensions.items);
 
     try list.append(allocator, handshake_type_server_hello);
-    try appendU24(list, allocator, @intCast(body.items.len));
+    try appendU24Len(list, allocator, body.items.len, error.InvalidServerHello);
     try list.appendSlice(allocator, body.items);
 }
 
@@ -157,11 +157,11 @@ pub fn writeEncryptedExtensions(
 
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
-    try appendInt(&body, allocator, u16, @intCast(extensions.items.len));
+    try appendU16Len(&body, allocator, extensions.items.len, error.InvalidEncryptedExtensions);
     try body.appendSlice(allocator, extensions.items);
 
     try list.append(allocator, handshake_type_encrypted_extensions);
-    try appendU24(list, allocator, @intCast(body.items.len));
+    try appendU24Len(list, allocator, body.items.len, error.InvalidEncryptedExtensions);
     try list.appendSlice(allocator, body.items);
 }
 
@@ -393,9 +393,11 @@ pub fn verifyFinished(base_key: [32]u8, transcript_hash: [32]u8, verify_data: [3
 }
 
 fn writeServerNameExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) Error!void {
+    const server_name_len = std.math.add(usize, 1 + 2, name.len) catch return error.InvalidClientHello;
+    if (name.len > std.math.maxInt(u16) or server_name_len > std.math.maxInt(u16)) return error.InvalidClientHello;
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
-    try appendInt(&payload, allocator, u16, @intCast(1 + 2 + name.len));
+    try appendInt(&payload, allocator, u16, @intCast(server_name_len));
     try payload.append(allocator, 0);
     try appendInt(&payload, allocator, u16, @intCast(name.len));
     try payload.appendSlice(allocator, name);
@@ -426,6 +428,7 @@ fn writeAlpnExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, pr
         try names.append(allocator, @intCast(protocol.len));
         try names.appendSlice(allocator, protocol);
     }
+    if (names.items.len > std.math.maxInt(u16)) return error.InvalidClientHello;
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
     try appendInt(&payload, allocator, u16, @intCast(names.items.len));
@@ -449,6 +452,7 @@ fn writeKeyShareExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator
 }
 
 fn writeExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, typ: u16, payload: []const u8) Error!void {
+    if (payload.len > std.math.maxInt(u16)) return error.InvalidClientHello;
     try appendInt(list, allocator, u16, typ);
     try appendInt(list, allocator, u16, @intCast(payload.len));
     try list.appendSlice(allocator, payload);
@@ -533,6 +537,16 @@ fn appendU24(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u24)
     try list.append(allocator, @truncate(value));
 }
 
+fn appendU16Len(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len: usize, err: Error) Error!void {
+    if (len > std.math.maxInt(u16)) return err;
+    try appendInt(list, allocator, u16, @intCast(len));
+}
+
+fn appendU24Len(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len: usize, err: Error) Error!void {
+    if (len > std.math.maxInt(u24)) return err;
+    try appendU24(list, allocator, @intCast(len));
+}
+
 fn readU24(cursor: *wire.Cursor) !usize {
     const bytes = try cursor.readSlice(3);
     return (@as(usize, bytes[0]) << 16) | (@as(usize, bytes[1]) << 8) | bytes[2];
@@ -567,6 +581,35 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     const params = try quic.parseTransportParameters(allocator, parsed.transport_parameters);
     defer allocator.free(params);
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.TransportParameterId.initial_max_data)), params[0].id);
+
+    const huge_transport_parameters = try allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) + 1);
+    defer allocator.free(huge_transport_parameters);
+    try std.testing.expectError(error.InvalidClientHello, writeClientHello(&hello, allocator, .{
+        .random = random,
+        .x25519_public_key = key,
+        .transport_parameters = huge_transport_parameters,
+    }));
+
+    const huge_sni = try allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) - 1);
+    defer allocator.free(huge_sni);
+    @memset(huge_sni, 'a');
+    try std.testing.expectError(error.InvalidClientHello, writeClientHello(&hello, allocator, .{
+        .random = random,
+        .x25519_public_key = key,
+        .server_name = huge_sni,
+    }));
+
+    const long_proto = try allocator.alloc(u8, 255);
+    defer allocator.free(long_proto);
+    @memset(long_proto, 'h');
+    const too_many_protocols = try allocator.alloc([]const u8, 257);
+    defer allocator.free(too_many_protocols);
+    for (too_many_protocols) |*protocol| protocol.* = long_proto;
+    try std.testing.expectError(error.InvalidClientHello, writeClientHello(&hello, allocator, .{
+        .random = random,
+        .x25519_public_key = key,
+        .alpn_protocols = too_many_protocols,
+    }));
 }
 
 test "QUIC TLS ClientHello travels over Initial CRYPTO exchange" {
