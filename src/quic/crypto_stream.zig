@@ -27,6 +27,7 @@ pub const Reassembler = struct {
     }
 
     pub fn insert(self: *Reassembler, frame: quic.CryptoFrame) Error!void {
+        if (frame.data.len == 0) return;
         const offset = std.math.cast(usize, frame.offset) orelse return error.InvalidCryptoRange;
         const end = std.math.add(usize, offset, frame.data.len) catch return error.InvalidCryptoRange;
         if (end > self.max_buffered) return error.CryptoBufferTooLarge;
@@ -133,6 +134,19 @@ test "QUIC CRYPTO reassembler exposes only contiguous bytes" {
     try std.testing.expectEqualStrings("helloworld", reassembler.available());
     try reassembler.consume(5);
     try std.testing.expectEqualStrings("world", reassembler.available());
+}
+
+test "QUIC CRYPTO reassembler ignores empty no-op frames" {
+    const allocator = std.testing.allocator;
+    var reassembler = Reassembler.init(allocator, 8);
+    defer reassembler.deinit();
+
+    try reassembler.insert(.{ .offset = 8, .data = &.{} });
+    try std.testing.expectEqual(@as(usize, 0), reassembler.available().len);
+    try std.testing.expectEqual(@as(usize, 0), reassembler.buffer.items.len);
+
+    try reassembler.insert(.{ .offset = 0, .data = "hello" });
+    try std.testing.expectEqualStrings("hello", reassembler.available());
 }
 
 test "QUIC CRYPTO reassembler rejects conflicting duplicate bytes" {
