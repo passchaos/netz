@@ -1542,6 +1542,18 @@ pub const sdp = struct {
         return a0 == b0 and a1 == b1;
     }
 
+    pub fn vp9FmtpCompatible(local_fmtp: []const u8, remote_fmtp: []const u8) bool {
+        const local_profile = fmtpParameter(local_fmtp, "profile-id") orelse "0";
+        const remote_profile = fmtpParameter(remote_fmtp, "profile-id") orelse "0";
+        return std.mem.eql(u8, local_profile, remote_profile);
+    }
+
+    pub fn av1FmtpCompatible(local_fmtp: []const u8, remote_fmtp: []const u8) bool {
+        const local_profile = fmtpParameter(local_fmtp, "profile") orelse "0";
+        const remote_profile = fmtpParameter(remote_fmtp, "profile") orelse "0";
+        return std.mem.eql(u8, local_profile, remote_profile);
+    }
+
     fn parseRidAttribute(raw: []const u8) Error!Rid {
         var parts = std.mem.tokenizeAny(u8, raw, " \t");
         const id = parts.next() orelse return error.InvalidSdp;
@@ -5313,6 +5325,12 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "packetization-mode=1",
     ));
     try std.testing.expect(!sdp.h264ProfileLevelIdMatches("zzzzzz", "42e01f"));
+    try std.testing.expect(sdp.vp9FmtpCompatible("profile-id=0", ""));
+    try std.testing.expect(sdp.vp9FmtpCompatible("profile-id=1", "profile-id=1"));
+    try std.testing.expect(!sdp.vp9FmtpCompatible("", "profile-id=1"));
+    try std.testing.expect(sdp.av1FmtpCompatible("profile=0", ""));
+    try std.testing.expect(sdp.av1FmtpCompatible("profile=1", "profile=1"));
+    try std.testing.expect(!sdp.av1FmtpCompatible("", "profile=1"));
 
     const no_channels_codec_text =
         "v=0\r\n" ++
