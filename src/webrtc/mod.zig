@@ -467,6 +467,11 @@ pub const ice = struct {
         tcp,
     };
 
+    pub const CandidateExtension = struct {
+        key: []const u8,
+        value: []const u8,
+    };
+
     pub const Candidate = struct {
         foundation: []const u8,
         component: u16,
@@ -478,8 +483,17 @@ pub const ice = struct {
         related_address: ?[]const u8 = null,
         related_port: ?u16 = null,
         tcp_type: ?[]const u8 = null,
+        extensions: []const CandidateExtension = &.{},
 
         pub fn parse(line: []const u8) Error!Candidate {
+            return parseInternal(null, line);
+        }
+
+        pub fn parseOwned(allocator: std.mem.Allocator, line: []const u8) Error!Candidate {
+            return parseInternal(allocator, line);
+        }
+
+        fn parseInternal(allocator: ?std.mem.Allocator, line: []const u8) Error!Candidate {
             const prefix = "candidate:";
             const body = if (std.mem.startsWith(u8, line, "a=")) line[2..] else line;
             if (!std.mem.startsWith(u8, body, prefix)) return error.InvalidIceCandidate;
@@ -499,6 +513,8 @@ pub const ice = struct {
             if (!std.mem.eql(u8, typ_label, "typ")) return error.InvalidIceCandidate;
             const typ_s = it.next() orelse return error.InvalidIceCandidate;
 
+            var extensions: std.ArrayList(CandidateExtension) = .empty;
+            errdefer if (allocator) |a| extensions.deinit(a);
             var candidate: Candidate = .{
                 .foundation = foundation,
                 .component = std.fmt.parseInt(u16, component_s, 10) catch return error.InvalidIceCandidate,
@@ -527,15 +543,28 @@ pub const ice = struct {
                 } else if (std.mem.eql(u8, key, "tcptype")) {
                     if (!validTcpType(value)) return error.InvalidIceCandidate;
                     candidate.tcp_type = value;
+                } else if (allocator) |a| {
+                    // Pion preserves candidate extension attributes such as
+                    // generation/network-id/network-cost and writes them back in
+                    // insertion order.  The zero-allocation parse path keeps its
+                    // previous lightweight behavior, while parseOwned exposes the
+                    // full extension list for SDP round-tripping.
+                    try extensions.append(a, .{ .key = key, .value = value });
                 }
             }
+            if (allocator) |a| candidate.extensions = try extensions.toOwnedSlice(a);
             return candidate;
+        }
+
+        pub fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
+            allocator.free(self.extensions);
+            self.* = undefined;
         }
 
         pub fn write(self: Candidate, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
             try list.appendSlice(allocator, "candidate:");
             try list.appendSlice(allocator, self.foundation);
-            try appendFmt(list, allocator, " {} {} {} {} {} typ {s}", .{
+            try appendFmt(list, allocator, " {} {s} {} {s} {} typ {s}", .{
                 self.component,
                 @tagName(self.transport),
                 self.priority,
@@ -551,6 +580,9 @@ pub const ice = struct {
             }
             if (self.tcp_type) |tcp| {
                 try appendFmt(list, allocator, " tcptype {s}", .{tcp});
+            }
+            for (self.extensions) |extension| {
+                try appendFmt(list, allocator, " {s} {s}", .{ extension.key, extension.value });
             }
         }
     };
@@ -4352,6 +4384,21 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqual(ice.CandidateType.relay, relay.candidate_type);
     try std.testing.expectEqualStrings("192.168.0.1", relay.related_address.?);
     try std.testing.expectEqual(@as(u16, 5001), relay.related_port.?);
+
+    var extended = try ice.Candidate.parseOwned(allocator, "candidate:4207374052 1 tcp 1685790463 192.0.2.15 50000 typ prflx raddr 10.0.0.1 rport 12345 generation 0 network-id 2 network-cost 10");
+    defer extended.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), extended.extensions.len);
+    try std.testing.expectEqualStrings("generation", extended.extensions[0].key);
+    try std.testing.expectEqualStrings("0", extended.extensions[0].value);
+    try std.testing.expectEqualStrings("network-cost", extended.extensions[2].key);
+    try std.testing.expectEqualStrings("10", extended.extensions[2].value);
+    var extended_line: std.ArrayList(u8) = .empty;
+    defer extended_line.deinit(allocator);
+    try extended.write(&extended_line, allocator);
+    try std.testing.expectEqualStrings(
+        "candidate:4207374052 1 tcp 1685790463 192.0.2.15 50000 typ prflx raddr 10.0.0.1 rport 12345 generation 0 network-id 2 network-cost 10",
+        extended_line.items,
+    );
 
     const mdns = try ice.Candidate.parse("candidate:1380287402 1 udp 2130706431 e2494022-4d9a-4c1e-a750-cc48d4f8d6ee.local 60542 typ host");
     try std.testing.expectEqualStrings("e2494022-4d9a-4c1e-a750-cc48d4f8d6ee.local", mdns.address);
