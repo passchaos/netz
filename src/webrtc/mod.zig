@@ -4422,12 +4422,12 @@ pub const rtcp = struct {
             self.expected_prior = expected;
             self.received_prior = self.received;
 
-            const total_lost: i64 = @as(i64, expected) - @as(i64, self.received);
-            const cumulative_lost: u24 = if (total_lost <= 0) 0 else @intCast(@min(@as(u64, std.math.maxInt(u24)), @as(u64, @intCast(total_lost))));
+            const total_lost = @as(i64, expected) - @as(i64, self.received);
+            const signed_lost: i32 = @intCast(std.math.clamp(total_lost, -0x80_0000, 0x7f_ffff));
             return .{
                 .ssrc = self.ssrc,
                 .fraction_lost = fraction_lost,
-                .cumulative_lost = cumulative_lost,
+                .cumulative_lost = encodeCumulativeLost(signed_lost) catch unreachable,
                 .highest_sequence_number = self.extendedHighestSequenceNumber(),
                 .interarrival_jitter = @intCast(@min(@as(u64, std.math.maxInt(u32)), self.jitter_q4 >> 4)),
             };
@@ -10095,6 +10095,25 @@ test "RTCP receiver stats builds receiver report block" {
     try std.testing.expectEqual(@as(u32, 0x0001_0000), wrap_report.highest_sequence_number);
     try std.testing.expectEqual(@as(u32, 3), wrap_stats.expectedPackets());
     try std.testing.expectEqual(@as(u24, 0), wrap_report.cumulative_lost);
+
+    var duplicate_stats = rtcp.ReceiverStats{ .clock_rate = 90_000 };
+    inline for (.{ 10, 10 }) |seq| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        try rtp.writePacket(&bytes, allocator, .{
+            .payload_type = 96,
+            .sequence_number = seq,
+            .timestamp = @as(u32, seq) * 3000,
+            .ssrc = 0x99aabbcc,
+        }, "x");
+        var packet = try rtp.Packet.parse(allocator, bytes.items);
+        defer packet.deinit(allocator);
+        duplicate_stats.observe(packet, @as(u64, seq) * std.time.ns_per_ms);
+    }
+    const duplicate_report = duplicate_stats.reportBlock();
+    try std.testing.expectEqual(@as(u32, 1), duplicate_stats.expectedPackets());
+    try std.testing.expectEqual(@as(i32, -1), duplicate_report.cumulativeLostSigned());
+    try std.testing.expectEqual(@as(u24, 0xff_ffff), duplicate_report.cumulative_lost);
 
     const TimestampWrapPacket = struct {
         seq: u16,
