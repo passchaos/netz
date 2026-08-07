@@ -3257,14 +3257,29 @@ pub const sctp = struct {
         var pos: usize = 12;
         while (pos < bytes.len) {
             if (bytes.len - pos < 4) return error.InvalidSctpPacket;
-            const chunk_type: ChunkType = @enumFromInt(bytes[pos]);
-            if (!supportedChunkType(chunk_type)) return error.InvalidSctpPacket;
+            const raw_chunk_type = bytes[pos];
+            const chunk_type: ChunkType = @enumFromInt(raw_chunk_type);
             const flags = bytes[pos + 1];
             const len = std.mem.readInt(u16, bytes[pos + 2 ..][0..2], .big);
             if (len < 4 or bytes.len - pos < len) return error.InvalidSctpPacket;
             const padded_len = align4(len);
             if (bytes.len - pos < padded_len) return error.InvalidSctpPacket;
             try validateZeroPadding(bytes[pos + len .. pos + padded_len]);
+            if (!supportedChunkType(chunk_type)) {
+                // RFC 4960 encodes unknown-chunk handling in the high two bits:
+                // 00/01 stop processing this packet, 10/11 skip and continue
+                // (optionally reporting an ERROR chunk).  This parser has no
+                // association command queue for reports, but it can still keep
+                // known chunks before/after skip-able unknown chunks usable.
+                switch (raw_chunk_type & 0xc0) {
+                    0x00, 0x40 => break,
+                    0x80, 0xc0 => {
+                        pos += padded_len;
+                        continue;
+                    },
+                    else => unreachable,
+                }
+            }
             try chunks.append(allocator, .{
                 .chunk_type = chunk_type,
                 .flags = flags,
@@ -5283,7 +5298,24 @@ test "SCTP SACK packet roundtrip" {
     const unknown_checksum = try sctp.checksum(unknown.items);
     std.mem.writeInt(u32, unknown.items[8..12], unknown_checksum, .little);
     try std.testing.expect(try sctp.validChecksum(unknown.items));
-    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, unknown.items, true));
+    var stopped_unknown = try sctp.parsePacket(allocator, unknown.items, true);
+    defer stopped_unknown.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), stopped_unknown.chunks.len);
+
+    var skip_unknown: std.ArrayList(u8) = .empty;
+    defer skip_unknown.deinit(allocator);
+    try wire.appendInt(&skip_unknown, allocator, u16, 5000, .big);
+    try wire.appendInt(&skip_unknown, allocator, u16, 5000, .big);
+    try wire.appendInt(&skip_unknown, allocator, u32, 0x11223344, .big);
+    try wire.appendInt(&skip_unknown, allocator, u32, 0, .little);
+    try skip_unknown.appendSlice(allocator, &.{ 0x80, 0x00, 0x00, 0x04 }); // unknown: skip and continue
+    try skip_unknown.appendSlice(allocator, &.{ @intFromEnum(sctp.ChunkType.heartbeat), 0x00, 0x00, 0x04 });
+    const skip_checksum = try sctp.checksum(skip_unknown.items);
+    std.mem.writeInt(u32, skip_unknown.items[8..12], skip_checksum, .little);
+    var skipped_unknown = try sctp.parsePacket(allocator, skip_unknown.items, true);
+    defer skipped_unknown.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), skipped_unknown.chunks.len);
+    try std.testing.expectEqual(sctp.ChunkType.heartbeat, skipped_unknown.chunks[0].chunk_type);
 
     var bad_gaps = [_]sctp.GapAckBlock{.{ .start = 3, .end = 2 }};
     var invalid: std.ArrayList(u8) = .empty;
