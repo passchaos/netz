@@ -1579,21 +1579,20 @@ pub const sdp = struct {
     }
 
     fn genericFmtpCompatible(local_fmtp: []const u8, remote_fmtp: []const u8) bool {
-        return fmtpParamsContain(local_fmtp, remote_fmtp) and fmtpParamsContain(remote_fmtp, local_fmtp);
+        return fmtpSharedParamsEqual(local_fmtp, remote_fmtp) and fmtpSharedParamsEqual(remote_fmtp, local_fmtp);
     }
 
-    fn fmtpParamsContain(a: []const u8, b: []const u8) bool {
+    fn fmtpSharedParamsEqual(a: []const u8, b: []const u8) bool {
         var params = std.mem.splitScalar(u8, a, ';');
         while (params.next()) |raw_param| {
             const param = std.mem.trim(u8, raw_param, " \t");
             if (param.len == 0) continue;
             const eq = std.mem.indexOfScalar(u8, param, '=') orelse {
-                if (fmtpParameter(b, param) == null) return false;
                 continue;
             };
             const key = std.mem.trim(u8, param[0..eq], " \t");
             const value = std.mem.trim(u8, param[eq + 1 ..], " \t");
-            const other = fmtpParameter(b, key) orelse return false;
+            const other = fmtpParameter(b, key) orelse continue;
             if (!std.ascii.eqlIgnoreCase(value, other)) return false;
         }
         return true;
@@ -5417,6 +5416,14 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expect(sdp.rtpCodecCompatible(
         .{ .payload_type = 96, .mime_type = "video/H264", .codec_name = "H264", .clock_rate = 90000, .fmtp = "packetization-mode=1;profile-level-id=42e01f" },
         .{ .payload_type = 126, .mime_type = "video/h264", .codec_name = "H264", .clock_rate = 90000, .fmtp = "packetization-mode=1;profile-level-id=42e029" },
+    ));
+    try std.testing.expect(sdp.rtpCodecCompatible(
+        .{ .payload_type = 120, .mime_type = "application/custom", .codec_name = "custom", .clock_rate = 90000, .fmtp = "key1=value1;key2=value2" },
+        .{ .payload_type = 121, .mime_type = "application/custom", .codec_name = "custom", .clock_rate = 90000, .fmtp = "key1=value1;key2=value2;key3=value3" },
+    ));
+    try std.testing.expect(!sdp.rtpCodecCompatible(
+        .{ .payload_type = 120, .mime_type = "application/custom", .codec_name = "custom", .clock_rate = 90000, .fmtp = "key1=value1" },
+        .{ .payload_type = 121, .mime_type = "application/custom", .codec_name = "custom", .clock_rate = 90000, .fmtp = "key1=different" },
     ));
     try std.testing.expect(!sdp.rtpCodecCompatible(
         .{ .payload_type = 96, .mime_type = "video/VP9", .codec_name = "VP9", .clock_rate = 90000, .fmtp = "" },
