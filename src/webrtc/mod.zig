@@ -770,6 +770,16 @@ pub const ice = struct {
             return null;
         }
 
+        pub fn exportedExtensions(self: Candidate, allocator: std.mem.Allocator) Error![]CandidateExtension {
+            const tcp_count: usize = if (self.tcp_type != null) 1 else 0;
+            const out = try allocator.alloc(CandidateExtension, tcp_count + self.extensions.len);
+            if (self.tcp_type) |tcp| {
+                out[0] = .{ .key = "tcptype", .value = tcp };
+            }
+            @memcpy(out[tcp_count..], self.extensions);
+            return out;
+        }
+
         pub fn addExtension(self: *Candidate, allocator: std.mem.Allocator, extension: CandidateExtension) Error!void {
             try validateCandidateByteString(extension.key);
             try validateCandidateExtensionByteString(extension.value);
@@ -7518,6 +7528,11 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqual(@as(usize, 0), empty_ext.extensionValue("new-empty").?.len);
     try empty_ext.addExtension(allocator, .{ .key = "tcptype", .value = "passive" });
     try std.testing.expectEqualStrings("passive", empty_ext.extensionValue("tcptype").?);
+    const exported_exts = try empty_ext.exportedExtensions(allocator);
+    defer allocator.free(exported_exts);
+    try std.testing.expectEqualStrings("tcptype", exported_exts[0].key);
+    try std.testing.expectEqualStrings("passive", exported_exts[0].value);
+    try std.testing.expectEqualStrings("empty-value-1", exported_exts[1].key);
     try std.testing.expectError(error.InvalidIceCandidate, empty_ext.addExtension(allocator, .{ .key = "tcptype", .value = "INVALID" }));
     try std.testing.expectError(error.InvalidIceCandidate, empty_ext.addExtension(allocator, .{ .key = "", .value = "" }));
     try std.testing.expect(try empty_ext.removeExtension(allocator, "empty-value-2"));
