@@ -2231,6 +2231,75 @@ test "WebSocket server rejects data sent with HTTP upgrade request" {
     try std.testing.expect(shared.saw_expected);
 }
 
+test "WebSocket over HTTP/2 receiveFrameAuto replies to ping" {
+    const allocator = std.testing.allocator;
+
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    defer backend.deinit();
+    const io = backend.io();
+
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096, .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+        fn runFallible(server_ptr: *http2_runtime.Server) !void {
+            var h2 = try server_ptr.accept();
+            defer h2.close();
+            var ws = try H2Server.accept(server_ptr.allocator, &h2, .{
+                .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+            });
+            defer ws.close();
+            var ping = try ws.receiveFrameAuto();
+            defer ping.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(websocket.Opcode.ping, ping.header.opcode);
+            try std.testing.expectEqualStrings("h2-auto?", ping.payload);
+            var close = try ws.receiveFrameAuto();
+            defer close.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var h2_client = try http2_runtime.Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer h2_client.close();
+    var ws_client = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/h2-auto-pong",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer ws_client.close();
+
+    try ws_client.sendPing("h2-auto?");
+    var pong = try ws_client.receiveFrame();
+    defer pong.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.pong, pong.header.opcode);
+    try std.testing.expectEqualStrings("h2-auto?", pong.payload);
+    try ws_client.sendClose(.normal_closure, "bye");
+    var close = try ws_client.receiveFrame();
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket receiveFrameAuto replies to ping" {
     const allocator = std.testing.allocator;
 
