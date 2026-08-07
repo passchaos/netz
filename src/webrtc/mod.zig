@@ -5702,6 +5702,19 @@ pub const sctp = struct {
         } }});
     }
 
+    pub fn writeDataChannelResetResponsePacket(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        options: PacketOptions,
+        response_sequence_number: u32,
+        result: ReconfigResult,
+    ) Error!void {
+        try writeReconfigPacket(list, allocator, options, &.{.{ .outgoing_ssn_reset_response = .{
+            .response_sequence_number = response_sequence_number,
+            .result = result,
+        } }});
+    }
+
     pub fn writeReconfigChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameters: []const ReconfigParameter) Error!void {
         if (parameters.len == 0) return error.InvalidSctpPacket;
         var value: std.ArrayList(u8) = .empty;
@@ -8099,6 +8112,22 @@ test "SCTP RE-CONFIG stream reset request and response" {
     try std.testing.expectEqual(@as(u32, 10), reset.response_sequence_number);
     try std.testing.expectEqual(@as(u32, 1235), reset.sender_last_assigned_tsn);
     try std.testing.expectEqualSlices(u16, &.{7}, reset.stream_numbers);
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeDataChannelResetResponsePacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, 11, .success_performed);
+    try std.testing.expect(try sctp.validChecksum(encoded.items));
+    var reset_response_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer reset_response_packet.deinit(allocator);
+    var reset_response_reconfig = try sctp.ReconfigChunk.parse(allocator, reset_response_packet.chunks[0]);
+    defer reset_response_reconfig.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), reset_response_reconfig.parameters.len);
+    const reset_response = reset_response_reconfig.parameters[0].outgoing_ssn_reset_response;
+    try std.testing.expectEqual(@as(u32, 11), reset_response.response_sequence_number);
+    try std.testing.expectEqual(sctp.ReconfigResult.success_performed, reset_response.result);
 
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);
