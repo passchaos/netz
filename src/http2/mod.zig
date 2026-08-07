@@ -634,7 +634,17 @@ pub const Hpack = struct {
     };
 
     pub const Encoder = struct {
+        const SizeUpdate = union(enum) {
+            one: usize,
+            two: struct {
+                min: usize,
+                max: usize,
+            },
+        };
+
         dynamic_table: DynamicTable = .{},
+        pending_size_update: ?SizeUpdate = null,
+        last_emitted_dynamic_table_size: usize = default_dynamic_table_size,
 
         pub fn deinit(self: *Encoder, allocator: std.mem.Allocator) void {
             self.dynamic_table.deinit(allocator);
@@ -642,12 +652,36 @@ pub const Hpack = struct {
         }
 
         pub fn setMaxDynamicTableSize(self: *Encoder, allocator: std.mem.Allocator, max_size: usize) void {
+            self.queueSizeUpdate(max_size);
             self.dynamic_table.setLimit(allocator, max_size);
         }
 
         pub fn encodeBlock(self: *Encoder, list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
+            if (self.pending_size_update) |size_update| {
+                // Rust h2/hyper queues SETTINGS_HEADER_TABLE_SIZE changes and
+                // emits HPACK dynamic-table-size updates at the beginning of
+                // the next header block.  If the peer temporarily lowered its
+                // advertised maximum and raised it again before we sent
+                // headers, RFC 7541 still requires the smaller value to be
+                // signaled first, so keep a min/max pair instead of coalescing
+                // blindly to the final size.
+                switch (size_update) {
+                    .one => |max_size| {
+                        try encodeInteger(list, allocator, 5, 0x20, max_size);
+                        self.last_emitted_dynamic_table_size = max_size;
+                    },
+                    .two => |limits| {
+                        try encodeInteger(list, allocator, 5, 0x20, limits.min);
+                        try encodeInteger(list, allocator, 5, 0x20, limits.max);
+                        self.last_emitted_dynamic_table_size = limits.max;
+                    },
+                }
+                self.pending_size_update = null;
+            }
+
             for (fields) |field| {
                 const never_index = field.never_index or sensitiveHeaderName(field.name);
+                const skip_value_index = skipValueIndex(field.name);
                 if (!never_index) {
                     if (findStaticIndex(field.name, field.value)) |index| {
                         try encodeInteger(list, allocator, 7, 0x80, index);
@@ -659,24 +693,46 @@ pub const Hpack = struct {
                     }
                 }
 
-                const representation: u8 = if (never_index) 0x10 else 0x40;
+                const can_incrementally_index = !never_index and !skip_value_index and shouldIndexField(field, self.dynamic_table.size_limit);
+                const literal_without_indexing_prefix: u8 = if (never_index) 0x10 else 0x00;
                 if (findStaticNameIndex(field.name) orelse self.dynamic_table.findNameIndex(field.name)) |name_index| {
-                    if (never_index) {
-                        try encodeInteger(list, allocator, 4, representation, name_index);
+                    if (can_incrementally_index) {
+                        try encodeInteger(list, allocator, 6, 0x40, name_index);
                     } else {
-                        try encodeInteger(list, allocator, 6, representation, name_index);
+                        try encodeInteger(list, allocator, 4, literal_without_indexing_prefix, name_index);
                     }
                 } else {
-                    if (never_index) {
-                        try encodeInteger(list, allocator, 4, representation, 0);
+                    if (can_incrementally_index) {
+                        try encodeInteger(list, allocator, 6, 0x40, 0);
                     } else {
-                        try encodeInteger(list, allocator, 6, representation, 0);
+                        try encodeInteger(list, allocator, 4, literal_without_indexing_prefix, 0);
                     }
                     try encodeString(list, allocator, field.name);
                 }
                 try encodeString(list, allocator, field.value);
-                if (!never_index) try self.dynamic_table.add(allocator, field.name, field.value);
+                if (can_incrementally_index) try self.dynamic_table.add(allocator, field.name, field.value);
             }
+        }
+
+        fn queueSizeUpdate(self: *Encoder, max_size: usize) void {
+            const pending = self.pending_size_update orelse {
+                if (max_size != self.last_emitted_dynamic_table_size) self.pending_size_update = .{ .one = max_size };
+                return;
+            };
+
+            self.pending_size_update = switch (pending) {
+                .one => |old| if (max_size > old)
+                    if (old > self.last_emitted_dynamic_table_size)
+                        .{ .one = max_size }
+                    else
+                        .{ .two = .{ .min = old, .max = max_size } }
+                else
+                    .{ .one = max_size },
+                .two => |limits| if (max_size < limits.min)
+                    .{ .one = max_size }
+                else
+                    .{ .two = .{ .min = limits.min, .max = max_size } },
+            };
         }
     };
 
@@ -701,6 +757,20 @@ pub const Hpack = struct {
             std.ascii.eqlIgnoreCase(name, "proxy-authorization") or
             std.ascii.eqlIgnoreCase(name, "cookie") or
             std.ascii.eqlIgnoreCase(name, "set-cookie");
+    }
+
+    fn skipValueIndex(name: []const u8) bool {
+        // Mirroring h2/hyper's HPACK table policy, avoid indexing header values
+        // that are usually request-specific or validators.  This is distinct
+        // from `never_index`: peers may index these values if they choose, but
+        // this encoder does not burn dynamic-table capacity on them.
+        return std.mem.eql(u8, name, ":path") or
+            std.ascii.eqlIgnoreCase(name, "age") or
+            std.ascii.eqlIgnoreCase(name, "content-length") or
+            std.ascii.eqlIgnoreCase(name, "etag") or
+            std.ascii.eqlIgnoreCase(name, "if-modified-since") or
+            std.ascii.eqlIgnoreCase(name, "if-none-match") or
+            std.ascii.eqlIgnoreCase(name, "location");
     }
 
     pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
@@ -953,6 +1023,16 @@ pub const Hpack = struct {
 
     fn entrySize(name: []const u8, value: []const u8) usize {
         return name.len + value.len + 32;
+    }
+
+    fn shouldIndexField(field: HeaderField, table_limit: usize) bool {
+        const size = entrySize(field.name, field.value);
+        if (size > table_limit) return false;
+        // Rust h2/hyper avoids indexing entries that would consume more than
+        // 75% of the table.  The threshold keeps a single large value from
+        // evicting most useful history while still allowing legal HPACK output.
+        const threshold = (table_limit / 4) * 3 + ((table_limit % 4) * 3) / 4;
+        return size <= threshold;
     }
 };
 
@@ -1263,6 +1343,53 @@ test "HTTP/2 HPACK Huffman and dynamic table state" {
     defer Hpack.freeDecodedFields(allocator, second_fields);
     try std.testing.expectEqualStrings("x-dynamic", second_fields[0].name);
     try std.testing.expectEqualStrings("one", second_fields[0].value);
+}
+
+test "HTTP/2 HPACK encoder emits table size updates and avoids low-value indexing" {
+    const allocator = std.testing.allocator;
+
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    encoder.setMaxDynamicTableSize(allocator, 128);
+    encoder.setMaxDynamicTableSize(allocator, 512);
+
+    var sized_block: std.ArrayList(u8) = .empty;
+    defer sized_block.deinit(allocator);
+    try encoder.encodeBlock(&sized_block, allocator, &.{.{ .name = "x-small", .value = "one" }});
+
+    // RFC 7541 requires dynamic table-size updates before any header field when
+    // the peer's SETTINGS_HEADER_TABLE_SIZE changes.  h2/hyper emits both the
+    // temporary minimum and final value if the limit was lowered then raised
+    // before the next HEADERS frame.
+    try std.testing.expectEqualSlices(u8, &.{ 0x3f, 0x61, 0x3f, 0xe1, 0x03 }, sized_block.items[0..5]);
+    try std.testing.expectEqual(@as(usize, 512), encoder.last_emitted_dynamic_table_size);
+
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    const sized_fields = try decoder.decodeBlock(allocator, sized_block.items);
+    defer Hpack.freeDecodedFields(allocator, sized_fields);
+    try std.testing.expectEqual(@as(usize, 512), decoder.dynamic_table.size_limit);
+    try std.testing.expectEqualStrings("x-small", sized_fields[0].name);
+
+    var indexed_again: std.ArrayList(u8) = .empty;
+    defer indexed_again.deinit(allocator);
+    try encoder.encodeBlock(&indexed_again, allocator, &.{.{ .name = "x-small", .value = "one" }});
+    try std.testing.expect((indexed_again.items[0] & 0x80) != 0);
+
+    var small_table_encoder = Hpack.Encoder{};
+    defer small_table_encoder.deinit(allocator);
+    small_table_encoder.setMaxDynamicTableSize(allocator, 128);
+    var large_block: std.ArrayList(u8) = .empty;
+    defer large_block.deinit(allocator);
+    try small_table_encoder.encodeBlock(&large_block, allocator, &.{.{ .name = "x-large", .value = "01234567890123456789012345678901234567890123456789012345678901234567890123456789" }});
+    try std.testing.expectEqual(@as(usize, 0), small_table_encoder.dynamic_table.entries.items.len);
+    try std.testing.expect((large_block.items[2] & 0xc0) == 0x00);
+
+    var content_length_block: std.ArrayList(u8) = .empty;
+    defer content_length_block.deinit(allocator);
+    try encoder.encodeBlock(&content_length_block, allocator, &.{.{ .name = "content-length", .value = "1234" }});
+    try std.testing.expectEqualSlices(u8, &.{ 0x0f, 0x0d }, content_length_block.items[0..2]);
+    try std.testing.expect(encoder.dynamic_table.findNameIndex("content-length") == null);
 }
 
 test "HTTP/2 HPACK rejects unsupported or invalid dynamic table use" {
