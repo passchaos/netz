@@ -3659,6 +3659,10 @@ pub const rtcp = struct {
         pub fn setCumulativeLostSigned(self: *ReportBlock, lost: i32) Error!void {
             self.cumulative_lost = try encodeCumulativeLost(lost);
         }
+
+        pub fn wireLen(_: ReportBlock) usize {
+            return 24;
+        }
     };
 
     pub const SenderReport = struct {
@@ -3670,12 +3674,20 @@ pub const rtcp = struct {
         sender_octet_count: u32,
         report_blocks: []ReportBlock = &.{},
         profile_extensions: []const u8 = &.{},
+
+        pub fn wireLen(self: SenderReport) usize {
+            return 4 + 24 + self.report_blocks.len * 24 + std.mem.alignForward(usize, self.profile_extensions.len, 4);
+        }
     };
 
     pub const ReceiverReport = struct {
         sender_ssrc: u32,
         report_blocks: []ReportBlock = &.{},
         profile_extensions: []const u8 = &.{},
+
+        pub fn wireLen(self: ReceiverReport) usize {
+            return 4 + 4 + self.report_blocks.len * 24 + std.mem.alignForward(usize, self.profile_extensions.len, 4);
+        }
     };
 
     pub const ReceiverEstimatedMaximumBitrate = struct {
@@ -9603,7 +9615,9 @@ test "RTCP receiver report and feedback packets" {
     defer rr.deinit(allocator);
     try std.testing.expectEqual(@as(usize, encoded.items.len), rr.consumed);
     try std.testing.expectEqual(@as(u32, 0x0a0b0c0d), rr.packet.receiver_report.sender_ssrc);
+    try std.testing.expectEqual(@as(usize, encoded.items.len), rr.packet.receiver_report.wireLen());
     try std.testing.expectEqual(@as(u24, 3), rr.packet.receiver_report.report_blocks[0].cumulative_lost);
+    try std.testing.expectEqual(@as(usize, 24), rr.packet.receiver_report.report_blocks[0].wireLen());
     try std.testing.expectEqual(@as(i32, 3), rr.packet.receiver_report.report_blocks[0].cumulativeLostSigned());
     try std.testing.expectEqual(@as(u32, 44), rr.packet.receiver_report.report_blocks[0].interarrival_jitter);
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0, 0 }, rr.packet.receiver_report.profile_extensions);
@@ -9636,6 +9650,7 @@ test "RTCP receiver report and feedback packets" {
     var sr = try rtcp.parsePacket(allocator, encoded.items);
     defer sr.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x01020304), sr.packet.sender_report.sender_ssrc);
+    try std.testing.expectEqual(@as(usize, encoded.items.len), sr.packet.sender_report.wireLen());
     try std.testing.expectEqualSlices(u8, &.{ 0xcc, 0xdd, 0xee, 0 }, sr.packet.sender_report.profile_extensions);
 
     var padded_rr: std.ArrayList(u8) = .empty;
