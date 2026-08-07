@@ -76,8 +76,16 @@ pub const Peer = struct {
         try self.endpoint.sendRtcpPacket(to, packet);
     }
 
+    pub fn sendRtcpCompound(self: *Peer, to: net.IpAddress, packets: []const webrtc.rtcp.Packet) Error!void {
+        try self.endpoint.sendRtcpCompound(to, packets);
+    }
+
     pub fn receiveRtcpPacket(self: *Peer) Error!RtcpDatagram {
         return self.endpoint.receiveRtcpPacket();
+    }
+
+    pub fn receiveRtcpCompound(self: *Peer) Error!RtcpCompoundDatagram {
+        return self.endpoint.receiveRtcpCompound();
     }
 
     pub fn sendSrtcpPacket(self: *Peer, to: net.IpAddress, context: *webrtc.srtp.Context, packet: webrtc.rtcp.Packet) Error!void {
@@ -263,6 +271,13 @@ pub const PeerEndpoint = struct {
         try self.sendBytes(to, encoded.items);
     }
 
+    pub fn sendRtcpCompound(self: *PeerEndpoint, to: net.IpAddress, packets: []const webrtc.rtcp.Packet) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try webrtc.rtcp.writeCompound(&encoded, self.allocator, packets);
+        try self.sendBytes(to, encoded.items);
+    }
+
     pub fn sendSrtcpPacket(self: *PeerEndpoint, to: net.IpAddress, context: *webrtc.srtp.Context, packet: webrtc.rtcp.Packet) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
@@ -316,6 +331,20 @@ pub const PeerEndpoint = struct {
             var parsed = try webrtc.rtcp.parsePacket(self.allocator, raw.bytes);
             errdefer parsed.deinit(self.allocator);
             return .{ .from = raw.from, .bytes = raw.bytes, .packet = parsed.packet };
+        }
+    }
+
+    pub fn receiveRtcpCompound(self: *PeerEndpoint) Error!RtcpCompoundDatagram {
+        while (true) {
+            var raw = try self.receiveRaw();
+            errdefer raw.deinit(self.allocator);
+            if (!looksLikeRtcp(raw.bytes)) {
+                raw.deinit(self.allocator);
+                continue;
+            }
+            const packets = try webrtc.rtcp.parseCompound(self.allocator, raw.bytes);
+            errdefer webrtc.rtcp.freeCompound(self.allocator, packets);
+            return .{ .from = raw.from, .bytes = raw.bytes, .packets = packets };
         }
     }
 
@@ -620,6 +649,18 @@ pub const RtcpDatagram = struct {
 
     pub fn deinit(self: *RtcpDatagram, allocator: std.mem.Allocator) void {
         self.packet.deinit(allocator);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+pub const RtcpCompoundDatagram = struct {
+    from: net.IpAddress,
+    bytes: []u8,
+    packets: []webrtc.rtcp.Packet,
+
+    pub fn deinit(self: *RtcpCompoundDatagram, allocator: std.mem.Allocator) void {
+        webrtc.rtcp.freeCompound(allocator, self.packets);
         allocator.free(self.bytes);
         self.* = undefined;
     }
@@ -1432,6 +1473,22 @@ test "WebRTC peer runtime sends and receives RTCP feedback" {
         },
         else => return error.UnexpectedStunMessage,
     }
+
+    var sdes_items = [_]webrtc.rtcp.SdesItem{.{ .item_type = .cname, .value = "plain@example.test" }};
+    var sdes_chunks = [_]webrtc.rtcp.SdesChunk{.{ .ssrc = 0x01020304, .items = &sdes_items }};
+    const compound = [_]webrtc.rtcp.Packet{
+        .{ .receiver_report = .{ .sender_ssrc = 0x01020304 } },
+        .{ .source_description = .{ .chunks = &sdes_chunks } },
+        .{ .picture_loss_indication = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x44556677 } },
+    };
+    try receiver.sendRtcpCompound(sender.address(), &compound);
+
+    var inbound_compound = try sender.receiveRtcpCompound();
+    defer inbound_compound.deinit(allocator);
+    try std.testing.expect(inbound_compound.from.eql(&receiver.address()));
+    try std.testing.expectEqual(@as(usize, 3), inbound_compound.packets.len);
+    try std.testing.expectEqualStrings("plain@example.test", inbound_compound.packets[1].source_description.cname(0x01020304).?);
+    try std.testing.expectEqual(@as(u32, 0x44556677), inbound_compound.packets[2].picture_loss_indication.media_ssrc);
 }
 
 test "WebRTC peer receives mixed datagrams with std.Io async demux" {
