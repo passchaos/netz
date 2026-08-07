@@ -4170,6 +4170,88 @@ pub const rtcp = struct {
         }
     };
 
+    pub const TwccPacketStatusChunk = u16;
+
+    pub const TwccChunkType = enum {
+        run_length,
+        status_vector,
+    };
+
+    pub const TwccSymbolSize = enum(u1) {
+        one_bit = 0,
+        two_bit = 1,
+    };
+
+    pub fn twccChunkType(chunk: TwccPacketStatusChunk) TwccChunkType {
+        return if ((chunk & 0x8000) == 0) .run_length else .status_vector;
+    }
+
+    pub fn twccRunStatus(chunk: TwccPacketStatusChunk) Error!TwccPacketStatus {
+        if (twccChunkType(chunk) != .run_length) return error.InvalidRtcpPacket;
+        return @enumFromInt((chunk >> 13) & 0x03);
+    }
+
+    pub fn twccRunLength(chunk: TwccPacketStatusChunk) Error!u13 {
+        if (twccChunkType(chunk) != .run_length) return error.InvalidRtcpPacket;
+        const run_len: u13 = @truncate(chunk & 0x1fff);
+        if (run_len == 0) return error.InvalidRtcpPacket;
+        return run_len;
+    }
+
+    pub fn twccRunLengthChunk(status: TwccPacketStatus, run_len: u13) Error!TwccPacketStatusChunk {
+        if (run_len == 0) return error.InvalidRtcpPacket;
+        return (@as(u16, @intFromEnum(status)) << 13) | @as(u16, run_len);
+    }
+
+    pub fn twccStatusVectorCapacity(symbol_size: TwccSymbolSize) usize {
+        return switch (symbol_size) {
+            .one_bit => 14,
+            .two_bit => 7,
+        };
+    }
+
+    pub fn twccStatusVectorSymbolSize(chunk: TwccPacketStatusChunk) Error!TwccSymbolSize {
+        if (twccChunkType(chunk) != .status_vector) return error.InvalidRtcpPacket;
+        return @enumFromInt(@as(u1, @truncate((chunk >> 14) & 0x01)));
+    }
+
+    pub fn twccStatusVectorSymbol(chunk: TwccPacketStatusChunk, index: usize) Error!TwccPacketStatus {
+        const symbol_size = try twccStatusVectorSymbolSize(chunk);
+        if (index >= twccStatusVectorCapacity(symbol_size)) return error.InvalidRtcpPacket;
+        return switch (symbol_size) {
+            .one_bit => blk: {
+                const shift: u4 = @intCast(13 - index);
+                const raw: u2 = @intCast((chunk >> shift) & 0x01);
+                break :blk @enumFromInt(raw);
+            },
+            .two_bit => blk: {
+                const shift: u4 = @intCast(12 - 2 * index);
+                const raw: u2 = @intCast((chunk >> shift) & 0x03);
+                break :blk @enumFromInt(raw);
+            },
+        };
+    }
+
+    pub fn twccStatusVectorChunk(symbol_size: TwccSymbolSize, statuses: []const TwccPacketStatus) Error!TwccPacketStatusChunk {
+        if (statuses.len > twccStatusVectorCapacity(symbol_size)) return error.InvalidRtcpPacket;
+        var chunk: u16 = 0x8000 | (@as(u16, @intFromEnum(symbol_size)) << 14);
+        for (statuses, 0..) |status, i| {
+            switch (symbol_size) {
+                .one_bit => {
+                    if (status != .not_received and status != .small_delta) return error.InvalidRtcpPacket;
+                    const bit: u16 = if (status == .small_delta) 1 else 0;
+                    const shift: u4 = @intCast(13 - i);
+                    chunk |= bit << shift;
+                },
+                .two_bit => {
+                    const shift: u4 = @intCast(12 - 2 * i);
+                    chunk |= @as(u16, @intFromEnum(status)) << shift;
+                },
+            }
+        }
+        return chunk;
+    }
+
     pub const SenderStats = struct {
         ssrc: u32 = 0,
         packet_count: u32 = 0,
@@ -5530,38 +5612,26 @@ pub const rtcp = struct {
         chunk: u16,
         packet_status_count: usize,
     ) Error!void {
-        if ((chunk & 0x8000) == 0) {
-            const status: TwccPacketStatus = @enumFromInt((chunk >> 13) & 0x03);
-            const run_len = chunk & 0x1fff;
-            if (run_len == 0) return error.InvalidRtcpPacket;
+        if (twccChunkType(chunk) == .run_length) {
+            const status = try twccRunStatus(chunk);
+            const run_len = try twccRunLength(chunk);
             var i: usize = 0;
-            while (i < run_len and packets.items.len < packet_status_count) : (i += 1) {
+            while (i < @as(usize, run_len) and packets.items.len < packet_status_count) : (i += 1) {
                 try packets.append(allocator, .{ .status = status });
             }
             return;
         }
 
-        const two_bit = (chunk & 0x4000) != 0;
-        if (two_bit) {
-            var i: usize = 0;
-            while (i < 7 and packets.items.len < packet_status_count) : (i += 1) {
-                const shift: u4 = @intCast(12 - 2 * i);
-                const status: TwccPacketStatus = @enumFromInt((chunk >> shift) & 0x03);
-                try packets.append(allocator, .{ .status = status });
-            }
-        } else {
-            var i: usize = 0;
-            while (i < 14 and packets.items.len < packet_status_count) : (i += 1) {
-                const shift: u4 = @intCast(13 - i);
-                const status: TwccPacketStatus = if (((chunk >> shift) & 0x01) != 0) .small_delta else .not_received;
-                try packets.append(allocator, .{ .status = status });
-            }
+        const symbol_size = try twccStatusVectorSymbolSize(chunk);
+        var i: usize = 0;
+        while (i < twccStatusVectorCapacity(symbol_size) and packets.items.len < packet_status_count) : (i += 1) {
+            try packets.append(allocator, .{ .status = try twccStatusVectorSymbol(chunk, i) });
         }
     }
 
     fn writeTwccRunLengthChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, status: TwccPacketStatus, run_len: usize) Error!void {
         if (run_len == 0 or run_len > 0x1fff) return error.InvalidRtcpPacket;
-        const value = (@as(u16, @intFromEnum(status)) << 13) | @as(u16, @intCast(run_len));
+        const value = try twccRunLengthChunk(status, @intCast(run_len));
         try wire.appendInt(list, allocator, u16, value, .big);
     }
 };
@@ -9688,6 +9758,28 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(@as(i16, -3), wrap_twcc.packetForSequence(0).?.delta_ticks);
     try std.testing.expect(wrap_twcc.packetForSequence(3) == null);
 
+    const run_chunk = try rtcp.twccRunLengthChunk(.large_delta, 3);
+    try std.testing.expectEqual(rtcp.TwccChunkType.run_length, rtcp.twccChunkType(run_chunk));
+    try std.testing.expectEqual(rtcp.TwccPacketStatus.large_delta, try rtcp.twccRunStatus(run_chunk));
+    try std.testing.expectEqual(@as(u13, 3), try rtcp.twccRunLength(run_chunk));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccRunLengthChunk(.small_delta, 0));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccRunLength(0));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccRunStatus(0x8000));
+
+    const one_bit_vector = try rtcp.twccStatusVectorChunk(.one_bit, &.{
+        .not_received,
+        .small_delta,
+        .not_received,
+    });
+    try std.testing.expectEqual(@as(rtcp.TwccPacketStatusChunk, 0x9000), one_bit_vector);
+    try std.testing.expectEqual(rtcp.TwccChunkType.status_vector, rtcp.twccChunkType(one_bit_vector));
+    try std.testing.expectEqual(rtcp.TwccSymbolSize.one_bit, try rtcp.twccStatusVectorSymbolSize(one_bit_vector));
+    try std.testing.expectEqual(@as(usize, 14), rtcp.twccStatusVectorCapacity(.one_bit));
+    try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, try rtcp.twccStatusVectorSymbol(one_bit_vector, 0));
+    try std.testing.expectEqual(rtcp.TwccPacketStatus.small_delta, try rtcp.twccStatusVectorSymbol(one_bit_vector, 1));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccStatusVectorSymbol(one_bit_vector, 14));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccStatusVectorChunk(.one_bit, &.{.large_delta}));
+
     // Also parse a hand-built status-vector chunk.  The writer intentionally
     // emits simple run-length chunks for predictable output; receivers still
     // need to accept the more compact one-/two-bit vector chunks that browser
@@ -9703,12 +9795,16 @@ test "RTCP transport-wide congestion feedback" {
     try wire.appendInt(&vector_encoded, allocator, u16, 4, .big);
     try wire.appendU24(&vector_encoded, allocator, 0x000102);
     try vector_encoded.append(allocator, 9);
-    const two_bit_vector: u16 =
-        0xc000 | // T=1 status-vector, S=1 two-bit symbols.
-        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.small_delta)) << 12) |
-        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.not_received)) << 10) |
-        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.large_delta)) << 8) |
-        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.received_without_delta)) << 6);
+    const two_bit_vector = try rtcp.twccStatusVectorChunk(.two_bit, &.{
+        .small_delta,
+        .not_received,
+        .large_delta,
+        .received_without_delta,
+    });
+    try std.testing.expectEqual(@as(rtcp.TwccPacketStatusChunk, 0xd2c0), two_bit_vector);
+    try std.testing.expectEqual(@as(usize, 7), rtcp.twccStatusVectorCapacity(.two_bit));
+    try std.testing.expectEqual(rtcp.TwccSymbolSize.two_bit, try rtcp.twccStatusVectorSymbolSize(two_bit_vector));
+    try std.testing.expectEqual(rtcp.TwccPacketStatus.received_without_delta, try rtcp.twccStatusVectorSymbol(two_bit_vector, 3));
     try wire.appendInt(&vector_encoded, allocator, u16, two_bit_vector, .big);
     try vector_encoded.append(allocator, 8);
     try wire.appendInt(&vector_encoded, allocator, i16, -2, .big);
