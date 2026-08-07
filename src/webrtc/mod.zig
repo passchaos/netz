@@ -4349,6 +4349,8 @@ pub const rtcp = struct {
         expected_prior: u32 = 0,
         received_prior: u32 = 0,
         transit_prior: ?i64 = null,
+        transit_arrival_units: u64 = 0,
+        transit_rtp_timestamp: u32 = 0,
         jitter_q4: u64 = 0,
         last_sender_report: u32 = 0,
         last_sender_report_arrival: u32 = 0,
@@ -4356,13 +4358,14 @@ pub const rtcp = struct {
 
         pub fn observe(self: *ReceiverStats, packet: rtp.Packet, arrival_time_ns: u64) void {
             const seq = packet.header.sequence_number;
+            const arrival_rtp_units = self.arrivalRtpUnits(arrival_time_ns);
             if (!self.initialized) {
                 self.initialized = true;
                 self.ssrc = packet.header.ssrc;
                 self.base_seq = seq;
                 self.max_seq = seq;
                 self.received = 1;
-                self.transit_prior = self.transit(packet.header.timestamp, arrival_time_ns);
+                self.setTransitPrior(packet.header.timestamp, arrival_rtp_units);
                 return;
             }
 
@@ -4370,16 +4373,17 @@ pub const rtcp = struct {
             if (seqNewer(seq, self.max_seq)) self.max_seq = seq;
             self.received +|= 1;
 
-            const transit_now = self.transit(packet.header.timestamp, arrival_time_ns);
-            if (self.transit_prior) |prior| {
-                const delta = @abs(transit_now - prior);
+            if (self.transit_prior != null) {
+                const arrival_delta = @as(i64, @intCast(arrival_rtp_units)) - @as(i64, @intCast(self.transit_arrival_units));
+                const timestamp_delta = rtpTimestampDelta(packet.header.timestamp, self.transit_rtp_timestamp);
+                const delta = @abs(arrival_delta - timestamp_delta);
                 if (delta > self.jitter_q4 >> 4) {
                     self.jitter_q4 += delta - (self.jitter_q4 >> 4);
                 } else {
                     self.jitter_q4 -= (self.jitter_q4 >> 4) - delta;
                 }
             }
-            self.transit_prior = transit_now;
+            self.setTransitPrior(packet.header.timestamp, arrival_rtp_units);
         }
 
         pub fn observeSenderReport(self: *ReceiverStats, report: SenderReport, arrival_time_ns: u64) void {
@@ -4429,9 +4433,33 @@ pub const rtcp = struct {
             return self.cycles + @as(u32, self.max_seq);
         }
 
+        fn setTransitPrior(self: *ReceiverStats, rtp_timestamp: u32, arrival_rtp_units: u64) void {
+            self.transit_arrival_units = arrival_rtp_units;
+            self.transit_rtp_timestamp = rtp_timestamp;
+            self.transit_prior = self.transitFromArrival(rtp_timestamp, arrival_rtp_units);
+        }
+
+        fn arrivalRtpUnits(self: ReceiverStats, arrival_time_ns: u64) u64 {
+            // Convert arrival time to RTP timestamp units before subtracting
+            // sender timestamps.  The jitter update below uses modulo-aware
+            // RTP timestamp deltas so a normal 32-bit RTP timestamp rollover
+            // does not look like multi-hour network jitter.
+            return (arrival_time_ns / std.time.ns_per_s) * self.clock_rate + ((arrival_time_ns % std.time.ns_per_s) * self.clock_rate) / std.time.ns_per_s;
+        }
+
+        fn transitFromArrival(_: ReceiverStats, rtp_timestamp: u32, arrival_rtp_units: u64) i64 {
+            return @as(i64, @intCast(arrival_rtp_units)) - @as(i64, rtp_timestamp);
+        }
+
+        fn rtpTimestampDelta(new_timestamp: u32, old_timestamp: u32) i64 {
+            const forward = new_timestamp -% old_timestamp;
+            if (forward <= std.math.maxInt(i31)) return @intCast(forward);
+            return -@as(i64, @intCast(old_timestamp -% new_timestamp));
+        }
+
         fn transit(self: ReceiverStats, rtp_timestamp: u32, arrival_time_ns: u64) i64 {
             const arrival_rtp_units = (arrival_time_ns / std.time.ns_per_s) * self.clock_rate + ((arrival_time_ns % std.time.ns_per_s) * self.clock_rate) / std.time.ns_per_s;
-            return @as(i64, @intCast(arrival_rtp_units)) - @as(i64, rtp_timestamp);
+            return self.transitFromArrival(rtp_timestamp, arrival_rtp_units);
         }
     };
 
@@ -10039,6 +10067,32 @@ test "RTCP receiver stats builds receiver report block" {
     try std.testing.expectEqual(@as(u32, 0x0001_0000), wrap_report.highest_sequence_number);
     try std.testing.expectEqual(@as(u32, 3), wrap_stats.expectedPackets());
     try std.testing.expectEqual(@as(u24, 0), wrap_report.cumulative_lost);
+
+    const TimestampWrapPacket = struct {
+        seq: u16,
+        timestamp: u32,
+        arrival_ns: u64,
+    };
+    const timestamp_wrap_packets = [_]TimestampWrapPacket{
+        .{ .seq = 1, .timestamp = 0xffff_0000, .arrival_ns = 0 },
+        .{ .seq = 2, .timestamp = 0x0000_5f90, .arrival_ns = std.time.ns_per_s },
+    };
+    var timestamp_wrap_stats = rtcp.ReceiverStats{ .clock_rate = 90_000 };
+    for (timestamp_wrap_packets) |fixture| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        try rtp.writePacket(&bytes, allocator, .{
+            .payload_type = 96,
+            .sequence_number = fixture.seq,
+            .timestamp = fixture.timestamp,
+            .ssrc = 0x55667788,
+        }, "x");
+        var packet = try rtp.Packet.parse(allocator, bytes.items);
+        defer packet.deinit(allocator);
+        timestamp_wrap_stats.observe(packet, fixture.arrival_ns);
+    }
+    const timestamp_wrap_report = timestamp_wrap_stats.reportBlock();
+    try std.testing.expectEqual(@as(u32, 0), timestamp_wrap_report.interarrival_jitter);
 }
 
 test "RTCP NACK tracker detects RTP gaps and wraparound" {
