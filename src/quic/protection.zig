@@ -531,8 +531,10 @@ pub fn openInitialPacket(
     const version = try cursor.readInt(u32, .big);
     if (protectedLongPacketType(protected_first_byte, version) != .initial) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
+    try validateLongHeaderConnectionIdLen(dcid_len);
     const dcid = try cursor.readSlice(dcid_len);
     const scid_len = try cursor.readByte();
+    try validateLongHeaderConnectionIdLen(scid_len);
     const scid = try cursor.readSlice(scid_len);
     const token_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
     const token = try cursor.readSlice(token_len);
@@ -626,8 +628,10 @@ pub fn openHandshakePacket(
     const version = try cursor.readInt(u32, .big);
     if (protectedLongPacketType(protected_first_byte, version) != .handshake) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
+    try validateLongHeaderConnectionIdLen(dcid_len);
     const dcid = try cursor.readSlice(dcid_len);
     const scid_len = try cursor.readByte();
+    try validateLongHeaderConnectionIdLen(scid_len);
     const scid = try cursor.readSlice(scid_len);
     const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
     const pn_offset = cursor.pos;
@@ -716,8 +720,10 @@ pub fn openZeroRttPacket(
     const version = try cursor.readInt(u32, .big);
     if (protectedLongPacketType(protected_first_byte, version) != .zero_rtt) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
+    try validateLongHeaderConnectionIdLen(dcid_len);
     const dcid = try cursor.readSlice(dcid_len);
     const scid_len = try cursor.readByte();
+    try validateLongHeaderConnectionIdLen(scid_len);
     const scid = try cursor.readSlice(scid_len);
     const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
     const pn_offset = cursor.pos;
@@ -1001,6 +1007,15 @@ fn validateLongHeaderFixedBit(first_byte: u8) Error!void {
     // like the generic long-header parser and mature stacks do, instead of
     // spending AEAD work on datagrams that cannot be valid QUIC v1/v2 packets.
     if ((first_byte & 0x40) == 0) return error.InvalidInitialPacket;
+}
+
+fn validateLongHeaderConnectionIdLen(len: usize) Error!void {
+    // QUIC v1/v2 long-header packets cap both connection IDs at 20 bytes.
+    // The generic parser, packet peeker, and the reference implementations
+    // reject this before packet-number/header protection work; keep the
+    // encrypted open paths equally strict so oversized IDs cannot bypass the
+    // shared parsing invariant.
+    if (len > 20) return error.InvalidInitialPacket;
 }
 
 fn validateLongHeaderReservedBits(first_byte: u8) Error!void {
@@ -1521,6 +1536,31 @@ test "QUIC protected long packets reject a missing fixed bit before AEAD" {
     defer allocator.free(malformed_zero_rtt);
     malformed_zero_rtt[0] &= ~@as(u8, 0x40);
     try std.testing.expectError(error.InvalidInitialPacket, openZeroRttPacket(allocator, zero_rtt_keys, malformed_zero_rtt, 0));
+}
+
+test "QUIC protected long packets reject oversized connection IDs before AEAD" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const keys = deriveInitialSecrets(&dcid).client;
+
+    const initial_first = longHeaderFirstByte(version_1_wire, .initial, 1);
+    const handshake_first = longHeaderFirstByte(version_1_wire, .handshake, 1);
+    const zero_rtt_first = longHeaderFirstByte(version_1_wire, .zero_rtt, 1);
+    const oversized_dcid_initial = [_]u8{ initial_first, 0, 0, 0, 1, 21 };
+    const oversized_dcid_handshake = [_]u8{ handshake_first, 0, 0, 0, 1, 21 };
+    const oversized_dcid_zero_rtt = [_]u8{ zero_rtt_first, 0, 0, 0, 1, 21 };
+
+    try std.testing.expectError(error.InvalidInitialPacket, openInitialPacket(allocator, keys, &oversized_dcid_initial, 0));
+    try std.testing.expectError(error.InvalidInitialPacket, openHandshakePacket(allocator, keys, &oversized_dcid_handshake, 0));
+    try std.testing.expectError(error.InvalidInitialPacket, openZeroRttPacket(allocator, keys, &oversized_dcid_zero_rtt, 0));
+
+    const oversized_scid_initial = [_]u8{ initial_first, 0, 0, 0, 1, 4, 1, 2, 3, 4, 21 };
+    const oversized_scid_handshake = [_]u8{ handshake_first, 0, 0, 0, 1, 4, 1, 2, 3, 4, 21 };
+    const oversized_scid_zero_rtt = [_]u8{ zero_rtt_first, 0, 0, 0, 1, 4, 1, 2, 3, 4, 21 };
+
+    try std.testing.expectError(error.InvalidInitialPacket, openInitialPacket(allocator, keys, &oversized_scid_initial, 0));
+    try std.testing.expectError(error.InvalidInitialPacket, openHandshakePacket(allocator, keys, &oversized_scid_handshake, 0));
+    try std.testing.expectError(error.InvalidInitialPacket, openZeroRttPacket(allocator, keys, &oversized_scid_zero_rtt, 0));
 }
 
 test "QUIC short packet key update opens next and retained previous generations" {
