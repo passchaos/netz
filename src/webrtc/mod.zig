@@ -337,6 +337,22 @@ pub const stun = struct {
             (@as(u32, 256) - component_id);
     }
 
+    pub const DecodedPriority = struct {
+        type_preference: u8,
+        local_preference: u16,
+        component_id: u8,
+    };
+
+    pub fn decodePriority(value: u32) Error!DecodedPriority {
+        const component_delta = value & 0xff;
+        if (component_delta == 0) return error.InvalidStunAttribute;
+        return .{
+            .type_preference = @truncate(value >> 24),
+            .local_preference = @truncate((value >> 8) & 0xffff),
+            .component_id = @intCast(256 - component_delta),
+        };
+    }
+
     pub fn parseXorMappedAddress(value: []const u8, transaction_id: [12]u8) Error!XorMappedAddress {
         if (value.len < 4 or value[0] != 0) return error.InvalidStunAttribute;
         const family = value[1];
@@ -6737,6 +6753,11 @@ test "STUN ICE binding request authenticates integrity and fingerprint" {
     try std.testing.expectEqual(stun.Class.request, parsed.class);
     try std.testing.expectEqualStrings("remote:local", stun.attrValue(parsed, .username).?);
     try std.testing.expectEqual(@as(u32, stun.priority(126, 65_535, 1)), try stun.attrU32(parsed, .priority));
+    const decoded_priority = try stun.decodePriority(try stun.attrU32(parsed, .priority));
+    try std.testing.expectEqual(@as(u8, 126), decoded_priority.type_preference);
+    try std.testing.expectEqual(@as(u16, 65_535), decoded_priority.local_preference);
+    try std.testing.expectEqual(@as(u8, 1), decoded_priority.component_id);
+    try std.testing.expectError(error.InvalidStunAttribute, stun.decodePriority(0));
     try std.testing.expectEqual(@as(u64, 0x0102030405060708), try stun.attrU64(parsed, .ice_controlling));
     try std.testing.expect(stun.attrValue(parsed, .use_candidate) != null);
 

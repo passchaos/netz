@@ -139,7 +139,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   SETTINGS advertisement and negotiation checks, and a handshake-backed
   protected runtime that uses QUIC 1-RTT DATAGRAM send/receive queues with
   WebTransport payload-size accounting and batch receive helpers
-- WebRTC building blocks: STUN, ICE connectivity-check helpers with
+- WebRTC building blocks: STUN, ICE connectivity-check helpers with priority encode/decode,
   USERNAME/PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE plus
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,
   XOR-MAPPED-ADDRESS helpers, ICE candidates, SDP parsing with DTLS fingerprint, DTLS setup role parse/generation helpers,
