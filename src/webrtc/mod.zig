@@ -1392,6 +1392,34 @@ pub const sdp = struct {
         return findAttr(media.attributes, "end-of-candidates") != null or findAttr(session.attributes, "end-of-candidates") != null;
     }
 
+    pub fn descriptionContainsUfrag(session: Session, match_ufrag: []const u8) bool {
+        if (findAttr(session.attributes, "ice-ufrag")) |ufrag| {
+            if (std.mem.eql(u8, ufrag, match_ufrag)) return true;
+        }
+        for (session.media) |media| {
+            if (findAttr(media.attributes, "ice-ufrag")) |ufrag| {
+                if (std.mem.eql(u8, ufrag, match_ufrag)) return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn candidateUfrag(candidate: ice.Candidate) ?[]const u8 {
+        for (candidate.extensions) |extension| {
+            if (std.ascii.eqlIgnoreCase(extension.key, "ufrag")) return extension.value;
+        }
+        return null;
+    }
+
+    pub fn candidateMatchesDescriptionUfrag(session: Session, candidate: ice.Candidate) bool {
+        const ufrag = candidateUfrag(candidate) orelse return true;
+        // Pion drops trickle candidates from old ICE generations when the
+        // candidate-level ufrag is not present in the currently applied remote
+        // description.  Keep the predicate separate from extraction so callers
+        // can decide whether to log, ignore, or surface the mismatch.
+        return descriptionContainsUfrag(session, ufrag);
+    }
+
     pub fn extractIceDetails(allocator: std.mem.Allocator, session: Session) Error!IceDetails {
         const credentials = try extractIceCredentials(session);
         const candidates = try extractIceCandidates(allocator, session);
@@ -7774,7 +7802,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=mid:video\r\n" ++
         "a=ice-ufrag:video-ufrag\r\n" ++
         "a=ice-pwd:video-pwd\r\n" ++
-        "a=candidate:1 1 udp 2122162783 192.168.84.254 46492 typ host generation 0 network-id 2\r\n" ++
+        "a=candidate:1 1 udp 2122162783 192.168.84.254 46492 typ host generation 0 network-id 2 ufrag video-ufrag\r\n" ++
         "a=candidate:2 1 udp not-a-priority 192.168.84.254 50000 typ host generation 0\r\n" ++
         "a=end-of-candidates\r\n";
     var candidate_session = try sdp.parse(allocator, candidate_details_text);
@@ -7788,7 +7816,16 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(u16, 1), ice_details.candidates[0].sdp_mline_index);
     try std.testing.expectEqualStrings("192.168.84.254", ice_details.candidates[0].candidate.address);
     try std.testing.expectEqual(@as(u16, 46492), ice_details.candidates[0].candidate.port);
-    try std.testing.expectEqual(@as(usize, 2), ice_details.candidates[0].candidate.extensions.len);
+    try std.testing.expectEqual(@as(usize, 3), ice_details.candidates[0].candidate.extensions.len);
+    try std.testing.expect(sdp.descriptionContainsUfrag(candidate_session, "video-ufrag"));
+    try std.testing.expectEqualStrings("video-ufrag", sdp.candidateUfrag(ice_details.candidates[0].candidate).?);
+    try std.testing.expect(sdp.candidateMatchesDescriptionUfrag(candidate_session, ice_details.candidates[0].candidate));
+    var stale_candidate = try ice.Candidate.parseOwned(allocator, "candidate:9 1 udp 2122162783 192.0.2.9 5000 typ host ufrag stale-ufrag");
+    defer stale_candidate.deinit(allocator);
+    try std.testing.expect(!sdp.candidateMatchesDescriptionUfrag(candidate_session, stale_candidate));
+    var no_ufrag_candidate = try ice.Candidate.parseOwned(allocator, "candidate:10 1 udp 2122162783 192.0.2.10 5000 typ host");
+    defer no_ufrag_candidate.deinit(allocator);
+    try std.testing.expect(sdp.candidateMatchesDescriptionUfrag(candidate_session, no_ufrag_candidate));
     try std.testing.expect(ice_details.end_of_candidates);
 
     const unknown_candidate_text =
