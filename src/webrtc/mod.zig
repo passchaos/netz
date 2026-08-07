@@ -3842,6 +3842,10 @@ pub const rtcp = struct {
             return metric.arrivalTimeMicros(report_timestamp);
         }
 
+        pub fn wireLen(self: CcFeedbackReportBlock) usize {
+            return 8 + std.mem.alignForward(usize, self.metric_blocks.len * 2, 4);
+        }
+
         pub fn deinit(self: *CcFeedbackReportBlock, allocator: std.mem.Allocator) void {
             allocator.free(self.metric_blocks);
             self.* = undefined;
@@ -3878,6 +3882,12 @@ pub const rtcp = struct {
         pub fn arrivalTimeMicrosForMediaSequence(self: CongestionControlFeedback, media_ssrc: u32, sequence_number: u16) ?u64 {
             const metric = self.metricForMediaSequence(media_ssrc, sequence_number) orelse return null;
             return metric.arrivalTimeMicros(self.report_timestamp);
+        }
+
+        pub fn wirePayloadLen(self: CongestionControlFeedback) usize {
+            var len: usize = 8 + 4; // Sender SSRC + trailing Report Timestamp.
+            for (self.report_blocks) |block| len += block.wireLen();
+            return len;
         }
     };
 
@@ -9686,6 +9696,7 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 1), ccfb.packet.congestion_control_feedback.report_blocks[0].media_ssrc);
     try std.testing.expectEqual(@as(u16, 2), ccfb.packet.congestion_control_feedback.report_blocks[0].begin_sequence);
     try std.testing.expectEqual(@as(usize, 4), ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks.len);
+    try std.testing.expectEqual(@as(usize, 16), ccfb.packet.congestion_control_feedback.report_blocks[0].wireLen());
     try std.testing.expect(ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].received);
     try std.testing.expectEqual(rtcp.Ecn.non_ect, ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].ecn);
     try std.testing.expectEqual(@as(u16, 8189), ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].arrival_time_offset);
@@ -9695,6 +9706,8 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[2].arrivalOffsetMicros() == null);
     try std.testing.expectEqual(@as(u32, 2), ccfb.packet.congestion_control_feedback.report_blocks[1].media_ssrc);
     try std.testing.expectEqual(@as(usize, 3), ccfb.packet.congestion_control_feedback.report_blocks[1].metric_blocks.len);
+    try std.testing.expectEqual(@as(usize, 16), ccfb.packet.congestion_control_feedback.report_blocks[1].wireLen());
+    try std.testing.expectEqual(@as(usize, 44), ccfb.packet.congestion_control_feedback.wirePayloadLen());
     try std.testing.expectEqual(@as(u16, 8189), ccfb.packet.congestion_control_feedback.report_blocks[0].metricForSequence(2).?.arrival_time_offset);
     try std.testing.expectEqual(@as(u64, (8189 * std.time.us_per_s) / 1024), ccfb.packet.congestion_control_feedback.report_blocks[0].arrivalOffsetMicrosForSequence(2).?);
     try std.testing.expectEqual(@as(u64, 0), ccfb.packet.congestion_control_feedback.report_blocks[0].arrivalTimeMicrosForSequence(ccfb.packet.congestion_control_feedback.report_timestamp, 2).?);
