@@ -5750,14 +5750,19 @@ pub const sctp = struct {
     }
 
     pub fn writeDcepAck(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-        try list.append(allocator, 0x02); // DATA_CHANNEL_ACK
+        // Pion/datachannel serializes ACK as the message type followed by the
+        // three reserved bytes from the DCEP common header.  Accepting the
+        // historical one-byte form on parse keeps old fixtures working, but
+        // emit the interoperable 4-byte wire image.
+        try list.appendSlice(allocator, &.{ 0x02, 0, 0, 0 }); // DATA_CHANNEL_ACK
     }
 
     pub fn parseDcepMessage(bytes: []const u8) Error!DataChannelMessage {
         if (bytes.len == 0) return error.InvalidSctpPacket;
         return switch (bytes[0]) {
             0x02 => blk: {
-                if (bytes.len != 1) return error.InvalidSctpPacket;
+                if (bytes.len != 1 and bytes.len != 4) return error.InvalidSctpPacket;
+                if (bytes.len == 4 and !std.mem.eql(u8, bytes[1..4], &.{ 0, 0, 0 })) return error.InvalidSctpPacket;
                 break :blk .{ .ack = {} };
             },
             0x03 => blk: {
@@ -8207,7 +8212,10 @@ test "SCTP DATA packet and DCEP channel messages" {
     var ack: std.ArrayList(u8) = .empty;
     defer ack.deinit(allocator);
     try sctp.writeDcepAck(&ack, allocator);
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, 0, 0, 0 }, ack.items);
     try std.testing.expect(try sctp.parseDcepMessage(ack.items) == .ack);
+    try std.testing.expect(try sctp.parseDcepMessage(&.{0x02}) == .ack);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parseDcepMessage(&.{ 0x02, 0, 0, 1 }));
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string_empty, sctp.dataChannelPayloadProtocol(true, 0));
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_binary, sctp.dataChannelPayloadProtocol(false, 4));
 
