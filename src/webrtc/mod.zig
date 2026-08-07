@@ -4008,7 +4008,7 @@ pub const rtcp = struct {
         }
 
         pub fn wirePayloadLen(self: CongestionControlFeedback) usize {
-            var len: usize = 8 + 4; // Sender SSRC + trailing Report Timestamp.
+            var len: usize = 4 + 4; // Sender SSRC + trailing Report Timestamp.
             for (self.report_blocks) |block| len += block.wireLen();
             return len;
         }
@@ -4930,6 +4930,30 @@ pub const rtcp = struct {
                 .unknown => {},
             }
             return out.toOwnedSlice(allocator);
+        }
+
+        pub fn wireLen(self: Packet) Error!usize {
+            return switch (self) {
+                .sender_report => |report| report.wireLen(),
+                .receiver_report => |report| report.wireLen(),
+                .goodbye => |goodbye| goodbye.wireLen(),
+                .source_description => |sdes| sdes.wireLen(),
+                .picture_loss_indication => |pli| pli.wireLen(),
+                .slice_loss_indication => |sli| sli.wireLen(),
+                .full_intra_request => |fir| fir.wireLen(),
+                .receiver_estimated_maximum_bitrate => |remb| remb.wireLen(),
+                .application_defined => |app| app.wireLen(),
+                .extended_report => |xr| xr.wireLen(),
+                .rapid_resynchronization_request => |rrr| rrr.wireLen(),
+                .congestion_control_feedback => |ccfb| 4 + ccfb.wirePayloadLen(),
+                .transport_layer_nack => |nack| nack.wireLen(),
+                .transport_wide_cc => |twcc| try twcc.wireLen(),
+                .unknown => |unknown| blk: {
+                    if (unknown.raw.len != 0) break :blk unknown.raw.len;
+                    if ((unknown.payload.len % 4) != 0) return error.InvalidRtcpPacket;
+                    break :blk 4 + unknown.payload.len;
+                },
+            };
         }
     };
 
@@ -9787,6 +9811,7 @@ test "RTCP unknown packets preserve raw wire image" {
     try std.testing.expectEqual(@as(usize, 4), parsed.packet.unknown.payload.len);
     try std.testing.expectEqualSlices(u8, raw[4..8], parsed.packet.unknown.payload);
     try std.testing.expectEqualSlices(u8, &raw, parsed.packet.unknown.raw);
+    try std.testing.expectEqual(@as(usize, raw.len), try parsed.packet.wireLen());
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -9832,6 +9857,7 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(usize, encoded.items.len), rr.consumed);
     try std.testing.expectEqual(@as(u32, 0x0a0b0c0d), rr.packet.receiver_report.sender_ssrc);
     try std.testing.expectEqual(@as(usize, encoded.items.len), rr.packet.receiver_report.wireLen());
+    try std.testing.expectEqual(@as(usize, encoded.items.len), try rr.packet.wireLen());
     try std.testing.expectEqual(@as(u24, 3), rr.packet.receiver_report.report_blocks[0].cumulative_lost);
     try std.testing.expectEqual(@as(usize, 24), rr.packet.receiver_report.report_blocks[0].wireLen());
     try std.testing.expectEqual(@as(i32, 3), rr.packet.receiver_report.report_blocks[0].cumulativeLostSigned());
@@ -9982,7 +10008,8 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 2), ccfb.packet.congestion_control_feedback.report_blocks[1].media_ssrc);
     try std.testing.expectEqual(@as(usize, 3), ccfb.packet.congestion_control_feedback.report_blocks[1].metric_blocks.len);
     try std.testing.expectEqual(@as(usize, 16), ccfb.packet.congestion_control_feedback.report_blocks[1].wireLen());
-    try std.testing.expectEqual(@as(usize, 44), ccfb.packet.congestion_control_feedback.wirePayloadLen());
+    try std.testing.expectEqual(@as(usize, 40), ccfb.packet.congestion_control_feedback.wirePayloadLen());
+    try std.testing.expectEqual(@as(usize, ccfb_wire.len), try ccfb.packet.wireLen());
     try std.testing.expectEqual(@as(u16, 8189), ccfb.packet.congestion_control_feedback.report_blocks[0].metricForSequence(2).?.arrival_time_offset);
     try std.testing.expectEqual(@as(u64, (8189 * std.time.us_per_s) / 1024), ccfb.packet.congestion_control_feedback.report_blocks[0].arrivalOffsetMicrosForSequence(2).?);
     try std.testing.expectEqual(@as(u64, 0), ccfb.packet.congestion_control_feedback.report_blocks[0].arrivalTimeMicrosForSequence(ccfb.packet.congestion_control_feedback.report_timestamp, 2).?);
@@ -10287,6 +10314,7 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(@as(u24, 0x00a0b0), rtcp.twccReferenceTimeFromUnixMicros(parsed.packet.transport_wide_cc.referenceTimeMicros() + 63_999));
     try std.testing.expectEqual(@as(u64, 0x00a0b0 * 64_000), rtcp.twccReferenceTimeToMicros(0x00a0b0));
     try std.testing.expectEqual(@as(usize, encoded.items.len), try parsed.packet.transport_wide_cc.wireLen());
+    try std.testing.expectEqual(@as(usize, encoded.items.len), try parsed.packet.wireLen());
     try std.testing.expectEqual(@as(u8, 7), parsed.packet.transport_wide_cc.feedback_packet_count);
     try std.testing.expectEqual(@as(usize, 5), parsed.packet.transport_wide_cc.packets.len);
     try std.testing.expect(parsed.packet.transport_wide_cc.packets[0].received());
