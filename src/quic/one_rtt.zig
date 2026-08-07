@@ -1257,7 +1257,7 @@ pub const Connection = struct {
         packet_destination_connection_id: ?[]const u8,
     ) Error!void {
         if (!try self.received.wouldRecordFresh(packet_number)) return error.DuplicatePacket;
-        try self.validateReceivedFramePreconditions(frames);
+        try self.validateReceivedFramePreconditions(frames, packet_destination_connection_id);
         if (!try self.received.recordWithEcn(packet_number, ecn)) return error.DuplicatePacket;
         if (packet_number >= self.expected_packet_number) {
             self.expected_packet_number = packet_number + 1;
@@ -1371,7 +1371,7 @@ pub const Connection = struct {
         }
     }
 
-    fn validateReceivedFramePreconditions(self: *Connection, frames: []const quic.Frame) Error!void {
+    fn validateReceivedFramePreconditions(self: *Connection, frames: []const quic.Frame, packet_destination_connection_id: ?[]const u8) Error!void {
         var recv_data_total = self.recv_data_total;
         var recv_streams: std.ArrayList(RecvStreamPreflightEntry) = .empty;
         defer {
@@ -1413,7 +1413,7 @@ pub const Connection = struct {
                         self.config.active_connection_id_limit,
                     );
                 },
-                .retire_connection_id => |retire| try local_connection_ids.retire(retire.sequence_number),
+                .retire_connection_id => |retire| try local_connection_ids.retireExceptPacketDestination(retire.sequence_number, packet_destination_connection_id),
                 .path_challenge => |path_challenge| try path_validation.receiveChallenge(path_challenge.data),
                 .path_response => |path_response| try path_validation.receiveResponse(path_response.data),
                 .new_token => |new_token| {
@@ -4046,6 +4046,56 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     var retire_packet = try server.receiveRoutedDatagram(routed);
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
+}
+
+test "QUIC 1-RTT preflights RETIRE_CONNECTION_ID for packet destination CID" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x73, 0x74, 0x75, 0x76 };
+    const server_cid = [_]u8{ 0x77, 0x78, 0x79, 0x7a };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe2} ** quic.protection.secret_len);
+
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    _ = try server.local_connection_ids.issue("server-new-cid", [_]u8{0x44} ** 16);
+    try std.testing.expectEqual(@as(usize, 2), server.local_connection_ids.count());
+
+    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = "server-new-cid",
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{
+            .{ .stream = .{ .stream_id = 0, .data = "must-not-commit", .fin = false } },
+            .{ .retire_connection_id = .{ .sequence_number = 1 } },
+        },
+    });
+
+    var router = quic.connection_router.Router.init(allocator);
+    defer router.deinit();
+    try router.register("server-new-cid", .{ .connection_index = 0, .sequence_number = 1 });
+    var routed = try server_endpoint.receiveRoutedBytes(router);
+    defer routed.deinit(allocator);
+
+    try std.testing.expectError(error.InvalidConnectionId, server.receiveRoutedDatagram(routed));
+    try std.testing.expectEqual(@as(usize, 2), server.local_connection_ids.count());
+    try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
+    try std.testing.expect(server.findRecvStreamEntry(0) == null);
 }
 
 test "QUIC 1-RTT queues RETIRE_CONNECTION_ID for retired peer IDs" {
