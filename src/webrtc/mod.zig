@@ -699,7 +699,8 @@ pub const ice = struct {
             const transport_s = it.next() orelse return error.InvalidIceCandidate;
             const priority_s = it.next() orelse return error.InvalidIceCandidate;
             try validateDecimalToken(priority_s, 10);
-            const address = it.next() orelse return error.InvalidIceCandidate;
+            const address_token = it.next() orelse return error.InvalidIceCandidate;
+            const address = stripIpv6ZoneId(address_token);
             try validateCandidateAddress(address);
             const port_s = it.next() orelse return error.InvalidIceCandidate;
             try validateDecimalToken(port_s, 5);
@@ -725,8 +726,9 @@ pub const ice = struct {
                 const value = try nextCandidateExtensionValue(extension_raw, &ext_pos);
                 if (std.mem.eql(u8, key, "raddr")) {
                     if (candidate.related_address != null or candidate.related_port != null) return error.InvalidIceCandidate;
-                    try validateCandidateAddress(value);
-                    candidate.related_address = value;
+                    const related_address = stripIpv6ZoneId(value);
+                    try validateCandidateAddress(related_address);
+                    candidate.related_address = related_address;
                     const rport_key = (try nextCandidateExtensionToken(extension_raw, &ext_pos)) orelse return error.InvalidIceCandidate;
                     if (!std.mem.eql(u8, rport_key, "rport")) return error.InvalidIceCandidate;
                     const rport_value = try nextCandidateExtensionValue(extension_raw, &ext_pos);
@@ -1004,6 +1006,16 @@ pub const ice = struct {
             return;
         } else |_| {}
         try validateHostname(value);
+    }
+
+    fn stripIpv6ZoneId(value: []const u8) []const u8 {
+        // Pion/ICE normalizes candidates such as "fe80::1%eth0" by dropping
+        // the local-interface zone before comparing or serializing.  SDP
+        // candidates are exchanged between peers, so local zone identifiers are
+        // not meaningful on the remote endpoint.
+        if (std.mem.indexOfScalar(u8, value, ':') == null) return value;
+        if (std.mem.indexOfScalar(u8, value, '%')) |zone| return value[0..zone];
+        return value;
     }
 
     fn validateHostname(value: []const u8) Error!void {
@@ -7543,6 +7555,16 @@ test "ICE candidate parser and SDP parser" {
 
     const mdns = try ice.Candidate.parse("candidate:1380287402 1 udp 2130706431 e2494022-4d9a-4c1e-a750-cc48d4f8d6ee.local 60542 typ host");
     try std.testing.expectEqualStrings("e2494022-4d9a-4c1e-a750-cc48d4f8d6ee.local", mdns.address);
+
+    const zone = try ice.Candidate.parse("candidate:750 0 udp 500 fcd9:e3b8:12ce:9fc5:74a5:c6bb:d8b:e08a%eth0%eth1 53987 typ host");
+    try std.testing.expectEqualStrings("fcd9:e3b8:12ce:9fc5:74a5:c6bb:d8b:e08a", zone.address);
+    var zone_line: std.ArrayList(u8) = .empty;
+    defer zone_line.deinit(allocator);
+    try zone.write(&zone_line, allocator);
+    try std.testing.expectEqualStrings(
+        "candidate:750 0 udp 500 fcd9:e3b8:12ce:9fc5:74a5:c6bb:d8b:e08a 53987 typ host",
+        zone_line.items,
+    );
 
     // Match the mature Pion ICE parser's defensive checks for SDP candidate
     // lines: malformed addresses, incomplete related-address pairs, invalid
