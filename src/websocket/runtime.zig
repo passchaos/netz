@@ -480,11 +480,21 @@ pub const Connection = struct {
         if (self.close_sent) return error.ConnectionClosed;
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
-        // RFC 7692 compresses the whole message and sets RSV1 only on the first
-        // fragment. Our Zig 0.16 raw-deflate shim is intentionally limited to
-        // complete no-context messages, so reject this combination instead of
-        // silently sending uncompressed fragments after negotiating compression.
-        if (self.permessage_deflate) return error.InvalidFrame;
+
+        if (self.permessage_deflate) {
+            const plain = try joinFragments(self.allocator, fragments);
+            defer self.allocator.free(plain);
+            if (opcode == .text and !std.unicode.utf8ValidateSlice(plain)) return error.InvalidUtf8;
+
+            const compressed = try websocket.compressMessage(self.allocator, plain);
+            defer self.allocator.free(compressed);
+
+            self.send_mutex.lockUncancelable(self.io);
+            defer self.send_mutex.unlock(self.io);
+            try self.writeCompressedFragmentsLocked(opcode, compressed, fragments.len);
+            return;
+        }
+
         if (opcode == .text) try validateOutgoingFragmentedText(self.allocator, fragments);
 
         self.send_mutex.lockUncancelable(self.io);
@@ -578,6 +588,23 @@ pub const Connection = struct {
             .rsv1 = options.rsv1,
         });
         try self.transport().writeAll(encoded.items);
+    }
+
+    fn writeCompressedFragmentsLocked(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        compressed_payload: []const u8,
+        frame_count: usize,
+    ) Error!void {
+        for (0..frame_count) |index| {
+            const range = compressedFragmentRange(compressed_payload.len, frame_count, index);
+            try self.writeFrameLockedExtended(
+                if (index == 0) opcode else .continuation,
+                compressed_payload[range.start..range.end],
+                index + 1 == frame_count,
+                .{ .rsv1 = index == 0 },
+            );
+        }
     }
 
     fn ensureBuffered(self: *Connection, len: usize) Error!void {
@@ -691,7 +718,21 @@ pub const H2Connection = struct {
         if (self.close_sent) return error.ConnectionClosed;
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
-        if (self.permessage_deflate) return error.InvalidFrame;
+
+        if (self.permessage_deflate) {
+            const plain = try joinFragments(self.allocator, fragments);
+            defer self.allocator.free(plain);
+            if (opcode == .text and !std.unicode.utf8ValidateSlice(plain)) return error.InvalidUtf8;
+
+            const compressed = try websocket.compressMessage(self.allocator, plain);
+            defer self.allocator.free(compressed);
+
+            self.send_mutex.lockUncancelable(self.tunnel.connection.io);
+            defer self.send_mutex.unlock(self.tunnel.connection.io);
+            try self.writeCompressedFragmentsLocked(opcode, compressed, fragments.len);
+            return;
+        }
+
         if (opcode == .text) try validateOutgoingFragmentedText(self.allocator, fragments);
 
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
@@ -786,6 +827,23 @@ pub const H2Connection = struct {
         // a Close frame is sent, this endpoint has no more WebSocket bytes to
         // write, so carry END_STREAM with the DATA frame that contains Close.
         try self.tunnel.write(encoded.items, opcode == .close);
+    }
+
+    fn writeCompressedFragmentsLocked(
+        self: *H2Connection,
+        opcode: websocket.Opcode,
+        compressed_payload: []const u8,
+        frame_count: usize,
+    ) Error!void {
+        for (0..frame_count) |index| {
+            const range = compressedFragmentRange(compressed_payload.len, frame_count, index);
+            try self.writeFrameLockedExtended(
+                if (index == 0) opcode else .continuation,
+                compressed_payload[range.start..range.end],
+                index + 1 == frame_count,
+                .{ .rsv1 = index == 0 },
+            );
+        }
     }
 
     fn ensureBuffered(self: *H2Connection, len: usize) Error!void {
@@ -953,10 +1011,38 @@ fn finishIncomingMessage(
 }
 
 fn validateOutgoingFragmentedText(allocator: std.mem.Allocator, fragments: []const []const u8) Error!void {
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(allocator);
-    for (fragments) |fragment| try bytes.appendSlice(allocator, fragment);
-    if (!std.unicode.utf8ValidateSlice(bytes.items)) return error.InvalidUtf8;
+    const bytes = try joinFragments(allocator, fragments);
+    defer allocator.free(bytes);
+    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
+}
+
+fn joinFragments(allocator: std.mem.Allocator, fragments: []const []const u8) Error![]u8 {
+    var total: usize = 0;
+    for (fragments) |fragment| total = std.math.add(usize, total, fragment.len) catch return error.PayloadTooLarge;
+    const bytes = try allocator.alloc(u8, total);
+    errdefer allocator.free(bytes);
+    var offset: usize = 0;
+    for (fragments) |fragment| {
+        @memcpy(bytes[offset..][0..fragment.len], fragment);
+        offset += fragment.len;
+    }
+    return bytes;
+}
+
+const FragmentRange = struct { start: usize, end: usize };
+
+fn compressedFragmentRange(total_len: usize, frame_count: usize, index: usize) FragmentRange {
+    std.debug.assert(frame_count != 0);
+    std.debug.assert(index < frame_count);
+    // permessage-deflate compresses the message as one DEFLATE stream.  RFC 6455
+    // fragmentation is then applied to the compressed byte stream, with RSV1 set
+    // only on the first frame; boundaries do not have to match caller-provided
+    // plaintext fragment boundaries.
+    const base = total_len / frame_count;
+    const extra = total_len % frame_count;
+    const start = index * base + @min(index, extra);
+    const len = base + @as(usize, if (index < extra) 1 else 0);
+    return .{ .start = start, .end = start + len };
 }
 
 const HttpHead = struct {
@@ -1620,7 +1706,7 @@ test "WebSocket runtime negotiates permessage-deflate" {
             try std.testing.expectEqual(websocket.Opcode.text, request.opcode);
             try std.testing.expectEqualStrings("compressible compressible compressible", request.payload);
 
-            try connection.sendText("deflated response deflated response");
+            try connection.sendFragmented(.text, &.{ "deflated response ", "deflated response" });
 
             var close = try connection.receiveFrame();
             defer close.deinit(server_ptr.http.allocator);
@@ -1640,7 +1726,7 @@ test "WebSocket runtime negotiates permessage-deflate" {
     defer client.close();
     try std.testing.expect(client.permessage_deflate);
 
-    try client.sendText("compressible compressible compressible");
+    try client.sendFragmented(.text, &.{ "compressible ", "compressible ", "compressible" });
     var response = try client.receiveMessage();
     defer response.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.text, response.opcode);
@@ -1695,7 +1781,7 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
             try std.testing.expectEqual(websocket.Opcode.text, request.opcode);
             try std.testing.expectEqualStrings("hello over h2 websocket", request.payload);
 
-            try ws.sendText("world over h2 websocket");
+            try ws.sendFragmented(.text, &.{ "world over ", "h2 websocket" });
 
             // The h2 WebSocket adapter still runs the normal RFC 6455 close
             // handshake inside DATA frames and maps the final Close write to
@@ -1726,7 +1812,7 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
     try std.testing.expectEqualStrings("chat.v1", ws_client.selected_protocol.?);
     try std.testing.expect(ws_client.permessage_deflate);
 
-    try ws_client.sendText("hello over h2 websocket");
+    try ws_client.sendFragmented(.text, &.{ "hello over ", "h2 websocket" });
     var response = try ws_client.receiveMessage();
     defer response.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.text, response.opcode);
@@ -2117,8 +2203,6 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidControlFrame, connection.sendPing(too_large_control));
     try std.testing.expectError(error.InvalidFrame, connection.sendFrame(.text, "bypass"));
     try std.testing.expectError(error.InvalidFrame, connection.sendFrame(.continuation, "bypass"));
-    connection.permessage_deflate = true;
-    try std.testing.expectError(error.InvalidFrame, connection.sendFragmented(.text, &.{ "compressed ", "fragments" }));
 
     var h2 = H2Connection{
         .allocator = allocator,
@@ -2132,8 +2216,6 @@ test "WebSocket runtimes validate outgoing text and close frames" {
     try std.testing.expectError(error.InvalidControlFrame, h2.sendPong(too_large_control));
     try std.testing.expectError(error.InvalidFrame, h2.sendFrame(.binary, "bypass"));
     try std.testing.expectError(error.InvalidFrame, h2.sendFrame(.continuation, "bypass"));
-    h2.permessage_deflate = true;
-    try std.testing.expectError(error.InvalidFrame, h2.sendFragmented(.text, &.{ "compressed ", "fragments" }));
 }
 
 test "WebSocket incoming message finalization frees failed payloads" {
