@@ -542,8 +542,8 @@ pub const ice = struct {
         fn parseInternal(allocator: ?std.mem.Allocator, line: []const u8) Error!Candidate {
             const prefix = "candidate:";
             const body = if (std.mem.startsWith(u8, line, "a=")) line[2..] else line;
-            if (!std.mem.startsWith(u8, body, prefix)) return error.InvalidIceCandidate;
-            var it = std.mem.tokenizeScalar(u8, body[prefix.len..], ' ');
+            const candidate_body = if (std.mem.startsWith(u8, body, prefix)) body[prefix.len..] else body;
+            var it = std.mem.tokenizeScalar(u8, candidate_body, ' ');
             const foundation = it.next() orelse return error.InvalidIceCandidate;
             try validateIceFoundation(foundation);
             const component_s = it.next() orelse return error.InvalidIceCandidate;
@@ -741,6 +741,29 @@ pub const sdp = struct {
     pub const IceCredentials = struct {
         ufrag: []const u8,
         password: []const u8,
+    };
+
+    pub const IceCandidate = struct {
+        candidate: ice.Candidate,
+        sdp_mid: ?[]const u8 = null,
+        sdp_mline_index: u16 = 0,
+
+        pub fn deinit(self: *IceCandidate, allocator: std.mem.Allocator) void {
+            var candidate = self.candidate;
+            candidate.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
+    pub const IceDetails = struct {
+        credentials: IceCredentials,
+        candidates: []IceCandidate,
+
+        pub fn deinit(self: *IceDetails, allocator: std.mem.Allocator) void {
+            for (self.candidates) |*candidate| candidate.deinit(allocator);
+            allocator.free(self.candidates);
+            self.* = undefined;
+        }
     };
 
     pub const DtlsRole = enum {
@@ -1016,6 +1039,47 @@ pub const sdp = struct {
         return error.MissingIceUfrag;
     }
 
+    pub fn extractIceCandidates(allocator: std.mem.Allocator, session: Session) Error![]IceCandidate {
+        const media = candidateMediaWithIndex(session) orelse return allocator.alloc(IceCandidate, 0);
+        var candidates: std.ArrayList(IceCandidate) = .empty;
+        errdefer {
+            for (candidates.items) |*candidate| candidate.deinit(allocator);
+            candidates.deinit(allocator);
+        }
+        var last_error: ?Error = null;
+        for (media.media.attributes) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, "candidate")) continue;
+            var candidate = ice.Candidate.parseOwned(allocator, attr.value) catch |err| switch (err) {
+                error.InvalidIceCandidate => {
+                    last_error = err;
+                    continue;
+                },
+                else => |e| return e,
+            };
+            errdefer candidate.deinit(allocator);
+            try candidates.append(allocator, .{
+                .candidate = candidate,
+                .sdp_mid = findAttr(media.media.attributes, "mid"),
+                .sdp_mline_index = media.index,
+            });
+            candidate.extensions = &.{};
+        }
+        if (candidates.items.len == 0) {
+            if (last_error) |err| return err;
+        }
+        return candidates.toOwnedSlice(allocator);
+    }
+
+    pub fn extractIceDetails(allocator: std.mem.Allocator, session: Session) Error!IceDetails {
+        const credentials = try extractIceCredentials(session);
+        const candidates = try extractIceCandidates(allocator, session);
+        errdefer {
+            for (candidates) |*candidate| candidate.deinit(allocator);
+            allocator.free(candidates);
+        }
+        return .{ .credentials = credentials, .candidates = candidates };
+    }
+
     pub fn extractDtlsRole(session: Session) Error!DtlsRole {
         if (candidateMedia(session)) |media| {
             if (findAttr(media.attributes, "setup")) |setup| return (try parseDtlsSetupAttribute(setup)).dtlsRole();
@@ -1200,15 +1264,25 @@ pub const sdp = struct {
     }
 
     fn candidateMedia(session: Session) ?Media {
+        if (candidateMediaWithIndex(session)) |indexed| return indexed.media;
+        return null;
+    }
+
+    const IndexedMedia = struct {
+        media: Media,
+        index: u16,
+    };
+
+    fn candidateMediaWithIndex(session: Session) ?IndexedMedia {
         if (bundleId(session)) |bundle_id| {
-            for (session.media) |media| {
+            for (session.media, 0..) |media, index| {
                 if (findAttr(media.attributes, "mid")) |mid| {
-                    if (std.mem.eql(u8, mid, bundle_id)) return media;
+                    if (std.mem.eql(u8, mid, bundle_id)) return .{ .media = media, .index = @intCast(index) };
                 }
             }
             return null;
         }
-        return if (session.media.len > 0) session.media[0] else null;
+        return if (session.media.len > 0) .{ .media = session.media[0], .index = 0 } else null;
     }
 };
 
@@ -4671,6 +4745,36 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("75:74:5A:A6:A4:E5:52:F4:A7:67:4C:01:C7:EE:91:3F:21:3D:A2:E3:53:7B:6F:30:86:F2:30:AA:65:FB:04:24", media_fingerprint.value);
     const media_creds = try sdp.extractIceCredentials(media_session);
     try std.testing.expectEqualStrings("media-ufrag", media_creds.ufrag);
+
+    const candidate_details_text =
+        "v=0\r\n" ++
+        "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=group:BUNDLE video audio\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:audio\r\n" ++
+        "a=ice-ufrag:audio-ufrag\r\n" ++
+        "a=ice-pwd:audio-pwd\r\n" ++
+        "a=candidate:1 1 udp 2122162783 10.0.0.1 5000 typ host generation 0\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
+        "a=mid:video\r\n" ++
+        "a=ice-ufrag:video-ufrag\r\n" ++
+        "a=ice-pwd:video-pwd\r\n" ++
+        "a=candidate:1 1 udp 2122162783 192.168.84.254 46492 typ host generation 0 network-id 2\r\n" ++
+        "a=candidate:2 1 udp not-a-priority 192.168.84.254 50000 typ host generation 0\r\n";
+    var candidate_session = try sdp.parse(allocator, candidate_details_text);
+    defer candidate_session.deinit(allocator);
+    var ice_details = try sdp.extractIceDetails(allocator, candidate_session);
+    defer ice_details.deinit(allocator);
+    try std.testing.expectEqualStrings("video-ufrag", ice_details.credentials.ufrag);
+    try std.testing.expectEqualStrings("video-pwd", ice_details.credentials.password);
+    try std.testing.expectEqual(@as(usize, 1), ice_details.candidates.len);
+    try std.testing.expectEqualStrings("video", ice_details.candidates[0].sdp_mid.?);
+    try std.testing.expectEqual(@as(u16, 1), ice_details.candidates[0].sdp_mline_index);
+    try std.testing.expectEqualStrings("192.168.84.254", ice_details.candidates[0].candidate.address);
+    try std.testing.expectEqual(@as(u16, 46492), ice_details.candidates[0].candidate.port);
+    try std.testing.expectEqual(@as(usize, 2), ice_details.candidates[0].candidate.extensions.len);
 
     try std.testing.expectEqual(sdp.DtlsRole.client, try sdp.extractDtlsRole(session));
 
