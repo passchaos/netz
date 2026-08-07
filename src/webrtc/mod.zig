@@ -793,6 +793,13 @@ pub const sdp = struct {
         }
     };
 
+    pub const Rid = struct {
+        id: []const u8,
+        direction: []const u8,
+        parameters: []const u8 = "",
+        paused: bool = false,
+    };
+
     pub const DtlsSetupRole = enum {
         actpass,
         active,
@@ -1187,6 +1194,21 @@ pub const sdp = struct {
         allocator.free(codecs);
     }
 
+    pub fn extractRids(allocator: std.mem.Allocator, media: Media) Error![]Rid {
+        var rids: std.ArrayList(Rid) = .empty;
+        errdefer rids.deinit(allocator);
+        var simulcast: ?[]const u8 = null;
+        for (media.attributes) |attr| {
+            if (std.ascii.eqlIgnoreCase(attr.name, "rid")) {
+                try rids.append(allocator, try parseRidAttribute(attr.value));
+            } else if (std.ascii.eqlIgnoreCase(attr.name, "simulcast")) {
+                simulcast = attr.value;
+            }
+        }
+        if (simulcast) |value| markPausedRids(rids.items, value);
+        return rids.toOwnedSlice(allocator);
+    }
+
     pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
         for (attrs) |attr| {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
@@ -1284,6 +1306,42 @@ pub const sdp = struct {
             try feedback.append(allocator, .{ .typ = typ, .parameter = std.mem.trim(u8, parameter, " \t") });
         }
         return feedback.toOwnedSlice(allocator);
+    }
+
+    fn parseRidAttribute(raw: []const u8) Error!Rid {
+        var parts = std.mem.tokenizeAny(u8, raw, " \t");
+        const id = parts.next() orelse return error.InvalidSdp;
+        const direction = parts.next() orelse return error.InvalidSdp;
+        const rest = parts.rest();
+        if (id.len == 0 or direction.len == 0) return error.InvalidSdp;
+        return .{ .id = id, .direction = direction, .parameters = std.mem.trim(u8, rest, " \t") };
+    }
+
+    fn markPausedRids(rids: []Rid, raw_simulcast: []const u8) void {
+        var value = raw_simulcast;
+        if (std.mem.indexOfAny(u8, value, " \t")) |space| {
+            value = std.mem.trim(u8, value[space + 1 ..], " \t");
+        } else {
+            return;
+        }
+        var alternatives = std.mem.splitScalar(u8, value, ';');
+        while (alternatives.next()) |alternative_raw| {
+            var alternative = std.mem.trim(u8, alternative_raw, " \t");
+            if (alternative.len == 0) continue;
+            var paused = false;
+            if (alternative[0] == '~') {
+                paused = true;
+                alternative = alternative[1..];
+            }
+            if (!paused or alternative.len == 0) continue;
+            var ids = std.mem.splitScalar(u8, alternative, ',');
+            while (ids.next()) |id_raw| {
+                const id = std.mem.trim(u8, id_raw, " \t");
+                for (rids) |*rid| {
+                    if (std.mem.eql(u8, rid.id, id)) rid.paused = true;
+                }
+            }
+        }
     }
 
     fn parseMaxMessageSize(value: ?[]const u8) Error!u32 {
@@ -4867,6 +4925,29 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("ccm", codecs[0].rtcp_feedback[1].typ);
     try std.testing.expectEqualStrings("fir", codecs[0].rtcp_feedback[1].parameter);
     try std.testing.expectEqualStrings("nack", codecs[0].rtcp_feedback[2].typ);
+
+    const rid_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
+        "a=rid:f send pt=96;max-width=1280\r\n" ++
+        "a=rid:h send pt=96;max-width=640\r\n" ++
+        "a=rid:q send pt=96;max-width=320\r\n" ++
+        "a=simulcast:send f;~h;;q;\r\n";
+    var rid_session = try sdp.parse(allocator, rid_text);
+    defer rid_session.deinit(allocator);
+    const rids = try sdp.extractRids(allocator, rid_session.media[0]);
+    defer allocator.free(rids);
+    try std.testing.expectEqual(@as(usize, 3), rids.len);
+    try std.testing.expectEqualStrings("f", rids[0].id);
+    try std.testing.expectEqualStrings("send", rids[0].direction);
+    try std.testing.expectEqualStrings("pt=96;max-width=1280", rids[0].parameters);
+    try std.testing.expect(!rids[0].paused);
+    try std.testing.expectEqualStrings("h", rids[1].id);
+    try std.testing.expect(rids[1].paused);
+    try std.testing.expectEqualStrings("q", rids[2].id);
+    try std.testing.expect(!rids[2].paused);
 
     const media_only =
         "v=0\r\n" ++
