@@ -1150,14 +1150,15 @@ pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool
             .stream_data_blocked,
             .streams_blocked_bidi,
             .streams_blocked_uni,
-            .new_connection_id,
             .path_challenge,
             .datagram,
-            .immediate_ack,
-            .ack_frequency,
             => true,
             // ACK, CRYPTO, CONNECTION_CLOSE, HANDSHAKE_DONE, NEW_TOKEN,
-            // RETIRE_CONNECTION_ID, and PATH_RESPONSE are not 0-RTT frames.
+            // NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, PATH_RESPONSE, and the
+            // ACK_FREQUENCY draft control frames are not 0-RTT frames.  tquic
+            // and quic-zig both keep these 1-RTT-only because peers cannot
+            // safely process connection-ID lifecycle or ACK policy changes from
+            // replayable early data.
             else => false,
         },
         .one_rtt => true,
@@ -1899,13 +1900,16 @@ test "QUIC ACK_FREQUENCY and IMMEDIATE_ACK frames" {
     const immediate = try parseFrame(encoded.items);
     try std.testing.expect(immediate.frame == .immediate_ack);
 
-    try std.testing.expect(frameAllowedInPacketType(.{ .ack_frequency = .{
+    const ack_frequency = Frame{ .ack_frequency = .{
         .sequence_number = 0,
         .ack_eliciting_threshold = 1,
         .request_max_ack_delay = 0,
         .reordering_threshold = 1,
-    } }, .zero_rtt));
+    } };
+    try std.testing.expect(!frameAllowedInPacketType(ack_frequency, .zero_rtt));
+    try std.testing.expect(frameAllowedInPacketType(ack_frequency, .one_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .immediate_ack = {} }, .one_rtt));
+    try std.testing.expect(!frameAllowedInPacketType(.{ .immediate_ack = {} }, .zero_rtt));
 }
 
 test "QUIC frame packet context rules follow RFC 9000" {
@@ -1924,6 +1928,12 @@ test "QUIC frame packet context rules follow RFC 9000" {
     try std.testing.expect(!frameAllowedInPacketType(ack, .zero_rtt));
     try std.testing.expect(!frameAllowedInPacketType(crypto, .zero_rtt));
     try std.testing.expect(!frameAllowedInPacketType(.{ .path_response = .{ .data = [_]u8{0} ** 8 } }, .zero_rtt));
+    try std.testing.expect(!frameAllowedInPacketType(.{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = "new-cid",
+        .stateless_reset_token = [_]u8{0} ** 16,
+    } }, .zero_rtt));
     try std.testing.expect(!frameAllowedInPacketType(app_close, .zero_rtt));
     try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(app_close, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .handshake_done = {} }, .one_rtt));
