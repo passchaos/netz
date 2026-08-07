@@ -4984,6 +4984,7 @@ pub const sctp = struct {
                     if (chunk.value.len < 16) return error.InvalidSctpPacket;
                     const mid = std.mem.readInt(u32, chunk.value[8..12], .big);
                     const ppid_or_fsn = std.mem.readInt(u32, chunk.value[12..16], .big);
+                    if (!base.beginning and ppid_or_fsn == 0) return error.InvalidSctpPacket;
                     break :blk .{
                         .immediate_sack = base.immediate_sack,
                         .unordered = base.unordered,
@@ -6367,6 +6368,7 @@ pub const sctp = struct {
         const value_len = (if (chunk.interleaved) @as(usize, 16) else @as(usize, 12)) + chunk.user_data.len;
         const chunk_len = 4 + value_len;
         if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        if (chunk.interleaved and !chunk.beginning and chunk.fragment_sequence_number == 0) return error.InvalidSctpPacket;
         try list.append(allocator, @intFromEnum(if (chunk.interleaved) ChunkType.i_data else ChunkType.data));
         try list.append(allocator, chunk.flags());
         try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
@@ -9280,6 +9282,18 @@ test "SCTP DATA reassembler handles fragmented messages" {
     try std.testing.expectEqual(@as(u32, 9), i_begin.message_identifier);
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string, i_begin.payload_protocol_identifier);
     try std.testing.expectEqual(@as(u32, 2), i_end.fragment_sequence_number);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.DataChunk.parse(.{
+        .chunk_type = .i_data,
+        .flags = 0x01, // End fragment without Begin; the fourth word is FSN and must not be zero.
+        .value = &.{
+            0, 0, 0, 1, // TSN
+            0, 4, // Stream ID
+            0, 0, // Reserved
+            0, 0, 0, 9, // MID
+            0, 0, 0, 0, // Invalid FSN for a non-beginning fragment
+        },
+        .consumed = 20,
+    }));
 
     var i_reassembler = sctp.Reassembler.init(allocator, 64);
     defer i_reassembler.deinit();
@@ -9734,6 +9748,19 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expectEqual(@as(u32, 1), i_fragments[1].fragment_sequence_number);
     try std.testing.expectEqual(@as(u32, 2), i_fragments[2].fragment_sequence_number);
     try std.testing.expectEqual(@as(u32, 42), i_fragments[2].tsn);
+    var invalid_i_data: std.ArrayList(u8) = .empty;
+    defer invalid_i_data.deinit(allocator);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeDataChunk(&invalid_i_data, allocator, .{
+        .interleaved = true,
+        .tsn = 43,
+        .stream_id = 7,
+        .message_identifier = 0x0102_0304,
+        .fragment_sequence_number = 0,
+        .beginning = false,
+        .ending = true,
+        .payload_protocol_identifier = @enumFromInt(@as(u32, 0)),
+        .user_data = "bad",
+    }));
 
     const dcep_fragments = try sctp.fragmentDcepMessage(allocator, .{
         .first_tsn = 50,
