@@ -44,6 +44,10 @@ pub const Peer = struct {
         return self.endpoint.receiveBindingRequest();
     }
 
+    pub fn receiveIceBindingRequest(self: *Peer, expected_username: []const u8, password: []const u8) Error!IceBindingRequest {
+        return self.endpoint.receiveIceBindingRequest(expected_username, password);
+    }
+
     pub fn respondBindingSuccess(self: *Peer, request: StunDatagram) Error!void {
         try self.endpoint.respondBindingSuccess(request);
     }
@@ -188,6 +192,26 @@ pub const PeerEndpoint = struct {
             errdefer datagram.deinit(self.allocator);
             if (datagram.message.method == .binding and datagram.message.class == .request) return datagram;
             datagram.deinit(self.allocator);
+        }
+    }
+
+    pub fn receiveIceBindingRequest(self: *PeerEndpoint, expected_username: []const u8, password: []const u8) Error!IceBindingRequest {
+        while (true) {
+            var datagram = try self.receiveBindingRequest();
+            errdefer datagram.deinit(self.allocator);
+            const validated = stun.validateIceBindingRequest(datagram.bytes, datagram.message, expected_username, password) catch |err| switch (err) {
+                error.InvalidStunMessage,
+                error.InvalidStunAttribute,
+                error.MissingStunAttribute,
+                error.BadMessageIntegrity,
+                error.BadFingerprint,
+                => {
+                    datagram.deinit(self.allocator);
+                    continue;
+                },
+                else => |e| return e,
+            };
+            return .{ .datagram = datagram, .validated = validated };
         }
     }
 
@@ -632,6 +656,26 @@ pub const StunServer = struct {
         }
     }
 
+    pub fn receiveIceBindingRequest(self: *StunServer, expected_username: []const u8, password: []const u8) Error!IceBindingRequest {
+        while (true) {
+            var datagram = try self.receiveBindingRequest();
+            errdefer datagram.deinit(self.endpoint.allocator);
+            const validated = stun.validateIceBindingRequest(datagram.bytes, datagram.message, expected_username, password) catch |err| switch (err) {
+                error.InvalidStunMessage,
+                error.InvalidStunAttribute,
+                error.MissingStunAttribute,
+                error.BadMessageIntegrity,
+                error.BadFingerprint,
+                => {
+                    datagram.deinit(self.endpoint.allocator);
+                    continue;
+                },
+                else => |e| return e,
+            };
+            return .{ .datagram = datagram, .validated = validated };
+        }
+    }
+
     pub fn respondBindingSuccess(self: *StunServer, request: StunDatagram) Error!void {
         try writeBindingSuccess(&self.endpoint, request);
     }
@@ -768,6 +812,16 @@ pub const StunDatagram = struct {
     pub fn deinit(self: *StunDatagram, allocator: std.mem.Allocator) void {
         self.message.deinit(allocator);
         allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+pub const IceBindingRequest = struct {
+    datagram: StunDatagram,
+    validated: stun.ValidatedIceBindingRequest,
+
+    pub fn deinit(self: *IceBindingRequest, allocator: std.mem.Allocator) void {
+        self.datagram.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -927,15 +981,14 @@ test "WebRTC STUN runtime authenticated ICE binding request" {
         }
 
         fn runFallible(server_ptr: *StunServer, password_bytes: []const u8, expected: u32) !void {
-            var request = try server_ptr.receiveBindingRequest();
+            var request = try server_ptr.receiveIceBindingRequest("remote:local", password_bytes);
             defer request.deinit(server_ptr.endpoint.allocator);
-            try stun.validateFingerprint(request.bytes);
-            try stun.validateMessageIntegrity(request.bytes, password_bytes);
-            try std.testing.expectEqualStrings("remote:local", stun.attrValue(request.message, .username).?);
-            try std.testing.expectEqual(expected, try stun.attrU32(request.message, .priority));
-            try std.testing.expectEqual(@as(u64, 0x0102030405060708), try stun.attrU64(request.message, .ice_controlling));
-            try std.testing.expect(stun.attrValue(request.message, .use_candidate) != null);
-            try server_ptr.respondIceBindingSuccess(request, password_bytes);
+            try std.testing.expectEqualStrings("remote:local", request.validated.username);
+            try std.testing.expectEqual(expected, request.validated.priority);
+            try std.testing.expectEqual(stun.IceRole.controlling, request.validated.role);
+            try std.testing.expectEqual(@as(u64, 0x0102030405060708), request.validated.tie_breaker);
+            try std.testing.expect(request.validated.use_candidate);
+            try server_ptr.respondIceBindingSuccess(request.datagram, password_bytes);
         }
     };
 
@@ -963,6 +1016,75 @@ test "WebRTC STUN runtime authenticated ICE binding request" {
     try std.testing.expectEqual(client_ip4.port, response.mapped_address.port);
     try stun.validateFingerprint(response.datagram.bytes);
     try stun.validateMessageIntegrity(response.datagram.bytes, password);
+}
+
+test "WebRTC ICE binding receive helper drops unauthenticated requests" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try StunServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+
+    const password = "shared-ice-password";
+    const expected_priority = stun.priority(126, 65_535, 1);
+
+    const Shared = struct {
+        server: *StunServer,
+        password: []const u8,
+        expected_priority: u32,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server, shared.password, shared.expected_priority) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *StunServer, password_bytes: []const u8, expected: u32) !void {
+            var request = try server_ptr.receiveIceBindingRequest("remote:local", password_bytes);
+            defer request.deinit(server_ptr.endpoint.allocator);
+            try std.testing.expectEqual(expected, request.validated.priority);
+            try std.testing.expectEqual(stun.IceRole.controlled, request.validated.role);
+            try std.testing.expectEqual(@as(u64, 0x1112131415161718), request.validated.tie_breaker);
+            try std.testing.expect(!request.validated.use_candidate);
+            try server_ptr.respondIceBindingSuccess(request.datagram, password_bytes);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .password = password, .expected_priority = expected_priority };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var bad_client = try StunClient.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{});
+    defer bad_client.deinit();
+    var bad_encoded: std.ArrayList(u8) = .empty;
+    defer bad_encoded.deinit(allocator);
+    try stun.writeIceBindingRequest(&bad_encoded, allocator, .{
+        .transaction_id = .{ 0xaa, 0xaa, 0xaa, 0xaa, 1, 2, 3, 4, 5, 6, 7, 8 },
+        .username = "remote:local",
+        .password = "wrong-password",
+        .priority = expected_priority,
+        .role = .controlled,
+        .tie_breaker = 0x0102030405060708,
+    });
+    try bad_client.endpoint.sendBytes(server.address(), bad_encoded.items);
+
+    var good_client = try StunClient.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{});
+    defer good_client.deinit();
+    var response = try good_client.iceBindingRequest(.{
+        .transaction_id = .{ 0xbb, 0xbb, 0xbb, 0xbb, 1, 2, 3, 4, 5, 6, 7, 8 },
+        .username = "remote:local",
+        .password = password,
+        .priority = expected_priority,
+        .role = .controlled,
+        .tie_breaker = 0x1112131415161718,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "WebRTC RTP runtime sends and receives packets over UDP" {

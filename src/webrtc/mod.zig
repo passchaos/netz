@@ -183,6 +183,14 @@ pub const stun = struct {
         controlled,
     };
 
+    pub const ValidatedIceBindingRequest = struct {
+        username: []const u8,
+        priority: u32,
+        role: IceRole,
+        tie_breaker: u64,
+        use_candidate: bool,
+    };
+
     pub const BindingRequestOptions = struct {
         transaction_id: [12]u8,
         username: []const u8,
@@ -230,6 +238,44 @@ pub const stun = struct {
     ) Error!void {
         const attrs = [_]Attribute{.{ .attr_type = .xor_mapped_address, .value = xor_mapped_value }};
         try writeAuthenticated(list, allocator, .success_response, .binding, transaction_id, &attrs, password);
+    }
+
+    pub fn validateIceBindingRequest(
+        bytes: []const u8,
+        message: Message,
+        expected_username: []const u8,
+        password: []const u8,
+    ) Error!ValidatedIceBindingRequest {
+        if (message.class != .request or message.method != .binding) return error.InvalidStunMessage;
+        const username = attrValue(message, .username) orelse return error.MissingStunAttribute;
+        if (!std.mem.eql(u8, username, expected_username)) return error.InvalidStunAttribute;
+
+        // Pion's ICE agent rejects inbound Binding Requests before pair
+        // handling when USERNAME or MESSAGE-INTEGRITY do not match local ICE
+        // credentials. Validate the same invariant at the codec boundary so
+        // callers that use netz's lightweight runtime cannot accidentally reply
+        // to unauthenticated connectivity checks.
+        try validateMessageIntegrity(bytes, password);
+        if (attrValue(message, .fingerprint) != null) try validateFingerprint(bytes);
+
+        const priority_value = try attrU32(message, .priority);
+        const controlling = attrValue(message, .ice_controlling);
+        const controlled = attrValue(message, .ice_controlled);
+        if (controlling != null and controlled != null) return error.InvalidStunAttribute;
+        if (controlling == null and controlled == null) return error.MissingStunAttribute;
+        const role: IceRole = if (controlling != null) .controlling else .controlled;
+        const tie_breaker = try attrU64(message, if (role == .controlling) .ice_controlling else .ice_controlled);
+
+        if (attrValue(message, .use_candidate)) |value| {
+            if (value.len != 0) return error.InvalidStunAttribute;
+        }
+        return .{
+            .username = username,
+            .priority = priority_value,
+            .role = role,
+            .tie_breaker = tie_breaker,
+            .use_candidate = attrValue(message, .use_candidate) != null,
+        };
     }
 
     pub fn validateFingerprint(bytes: []const u8) Error!void {
