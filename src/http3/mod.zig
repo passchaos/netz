@@ -1124,6 +1124,10 @@ fn requestStreamForbiddenFrame(frame_type: u64) bool {
 fn responseStatus(headers: []const Qpack.HeaderField) Error!u16 {
     for (headers) |header| {
         if (!std.mem.eql(u8, header.name, ":status")) continue;
+        if (header.value.len != 3) return error.InvalidStatus;
+        for (header.value) |byte| {
+            if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
+        }
         const status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
         if (status < 100 or status > 999) return error.InvalidStatus;
         return status;
@@ -1973,6 +1977,19 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "099" }});
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&low_status, allocator);
     try std.testing.expectError(error.InvalidStatus, decodeResponse(allocator, low_status.items));
+
+    var malformed_status: std.ArrayList(u8) = .empty;
+    defer malformed_status.deinit(allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "0200" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&malformed_status, allocator);
+    try std.testing.expectError(error.InvalidStatus, decodeResponse(allocator, malformed_status.items));
+
+    malformed_status.clearRetainingCapacity();
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "20x" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&malformed_status, allocator);
+    try std.testing.expectError(error.InvalidStatus, decodeResponse(allocator, malformed_status.items));
 
     var informational_response: std.ArrayList(u8) = .empty;
     defer informational_response.deinit(allocator);
