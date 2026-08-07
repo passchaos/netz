@@ -1103,6 +1103,19 @@ fn writeHeadersAndData(
     }
 }
 
+fn requestStreamForbiddenFrame(frame_type: u64) bool {
+    return switch (frame_type) {
+        FrameType.cancel_push,
+        FrameType.settings,
+        FrameType.goaway,
+        FrameType.max_push_id,
+        FrameType.priority_update_request,
+        FrameType.priority_update_push,
+        => true,
+        else => false,
+    };
+}
+
 fn responseStatus(headers: []const Qpack.HeaderField) Error!u16 {
     for (headers) |header| {
         if (!std.mem.eql(u8, header.name, ":status")) continue;
@@ -1133,12 +1146,21 @@ fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!
 }
 
 fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedMessage {
-    const headers_frame = try Frame.parse(bytes);
-    if (headers_frame.frame_type != FrameType.headers) return error.ExpectedHeadersFrame;
+    var offset: usize = 0;
+    const headers_frame = while (true) {
+        const frame = try Frame.parse(bytes[offset..]);
+        if (frame.frame_type == FrameType.headers) break frame;
+        if (frame.frame_type == FrameType.data or requestStreamForbiddenFrame(frame.frame_type)) return error.ExpectedHeadersFrame;
+        // RFC 9114 allows unknown extension frames on request streams.  Like
+        // tquic's request-stream state machine, ignore them before the first
+        // HEADERS rather than treating every non-HEADERS frame as fatal.
+        offset += frame.consumed;
+        if (offset >= bytes.len) return error.ExpectedHeadersFrame;
+    };
     const headers = try Qpack.decodeLiteralBlock(allocator, headers_frame.payload);
     errdefer allocator.free(headers);
 
-    var consumed = headers_frame.consumed;
+    var consumed = offset + headers_frame.consumed;
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(allocator);
     var trailers: []Qpack.HeaderField = &.{};
@@ -1157,15 +1179,8 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedM
                 trailers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
                 saw_trailers = true;
             },
-            FrameType.cancel_push,
-            FrameType.settings,
-            FrameType.push_promise,
-            FrameType.goaway,
-            FrameType.max_push_id,
-            FrameType.priority_update_request,
-            FrameType.priority_update_push,
-            => return error.UnexpectedFrame,
-            else => {},
+            FrameType.push_promise => return error.UnexpectedFrame,
+            else => if (requestStreamForbiddenFrame(frame.frame_type)) return error.UnexpectedFrame,
         }
     }
 
