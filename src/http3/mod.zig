@@ -1129,14 +1129,19 @@ fn responseStatus(headers: []const Qpack.HeaderField) Error!u16 {
 fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedMessage {
     var offset: usize = 0;
     while (true) {
-        const headers_frame = try Frame.parse(bytes[offset..]);
-        if (headers_frame.frame_type != FrameType.headers) return error.ExpectedHeadersFrame;
-        const headers = try Qpack.decodeLiteralBlock(allocator, headers_frame.payload);
+        const frame = try Frame.parse(bytes[offset..]);
+        if (frame.frame_type != FrameType.headers) {
+            if (frame.frame_type == FrameType.data or requestStreamForbiddenFrame(frame.frame_type)) return error.ExpectedHeadersFrame;
+            offset += frame.consumed;
+            if (offset >= bytes.len) return error.MissingStatus;
+            continue;
+        }
+        const headers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
         defer allocator.free(headers);
         try validateHeaderBlock(headers, .response);
         const status = try responseStatus(headers);
         if (status < 200) {
-            offset += headers_frame.consumed;
+            offset += frame.consumed;
             if (offset >= bytes.len) return error.MissingStatus;
             continue;
         }
@@ -1969,6 +1974,17 @@ test "HTTP/3 message rejects bad frame order and content length" {
     defer informational_decoded.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), informational_decoded.status);
     try std.testing.expectEqualStrings("final", informational_decoded.body);
+
+    var extension_prefaced_response: std.ArrayList(u8) = .empty;
+    defer extension_prefaced_response.deinit(allocator);
+    try (Frame{ .frame_type = 0x21, .payload = "extension", .consumed = 0 }).write(&extension_prefaced_response, allocator);
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "200" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&extension_prefaced_response, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "response-ext", .consumed = 0 }).write(&extension_prefaced_response, allocator);
+    var extension_decoded = try decodeResponse(allocator, extension_prefaced_response.items);
+    defer extension_decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("response-ext", extension_decoded.body);
 
     var informational_only = std.ArrayList(u8).empty;
     defer informational_only.deinit(allocator);
