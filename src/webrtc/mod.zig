@@ -1202,6 +1202,14 @@ pub const sdp = struct {
         return std.fmt.allocPrint(allocator, "a=rtcp-fb:* {s} {s}\r\n", .{ feedback.typ, feedback.parameter });
     }
 
+    pub fn appendRtcpFeedbackLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, payload_type: ?u8, feedback: []const RtcpFeedback) Error!void {
+        for (feedback) |entry| {
+            const line = try formatRtcpFeedbackLine(allocator, payload_type, entry);
+            defer allocator.free(line);
+            try list.appendSlice(allocator, line);
+        }
+    }
+
     pub fn rtcpFeedbackIntersection(allocator: std.mem.Allocator, local: []const RtcpFeedback, remote: []const RtcpFeedback) Error![]RtcpFeedback {
         var out: std.ArrayList(RtcpFeedback) = .empty;
         errdefer out.deinit(allocator);
@@ -8635,6 +8643,15 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const formatted_wildcard_line = try sdp.formatRtcpFeedbackLine(allocator, null, codecs[0].rtcp_feedback[2]);
     defer allocator.free(formatted_wildcard_line);
     try std.testing.expectEqualStrings("a=rtcp-fb:* nack\r\n", formatted_wildcard_line);
+    var feedback_lines: std.ArrayList(u8) = .empty;
+    defer feedback_lines.deinit(allocator);
+    try sdp.appendRtcpFeedbackLines(&feedback_lines, allocator, 111, codecs[0].rtcp_feedback);
+    try std.testing.expectEqualStrings(
+        "a=rtcp-fb:111 goog-remb\r\n" ++
+            "a=rtcp-fb:111 ccm fir\r\n" ++
+            "a=rtcp-fb:111 nack\r\n",
+        feedback_lines.items,
+    );
 
     const fmtp_params = try sdp.parseFmtpParameters(allocator, " Key = Value ; flag ; apt=96 ");
     defer sdp.freeFmtpParameters(allocator, fmtp_params);
