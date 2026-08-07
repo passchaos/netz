@@ -1067,7 +1067,7 @@ pub const Subscribe = struct {
             const topic_filter = try readUtf8(&cursor);
             try validateTopicFilter(topic_filter);
             const options = try cursor.readByte();
-            try validateSubscriptionOptions(options);
+            try validateSubscriptionOptions(protocol, options);
             try subs.append(allocator, .{
                 .topic_filter = topic_filter,
                 .qos = std.enums.fromInt(QoS, @as(u2, @truncate(options & 0x03))) orelse return error.InvalidQoS,
@@ -1099,12 +1099,12 @@ pub const Subscribe = struct {
         }
         for (subscriptions) |subscription| {
             try validateTopicFilter(subscription.topic_filter);
-            if (subscription.retain_handling == 3) return error.InvalidSubscription;
             try writeUtf8(&variable, allocator, subscription.topic_filter);
             const options: u8 = @intFromEnum(subscription.qos) |
                 (if (subscription.no_local) @as(u8, 0x04) else 0) |
                 (if (subscription.retain_as_published) @as(u8, 0x08) else 0) |
                 (@as(u8, subscription.retain_handling) << 4);
+            try validateSubscriptionOptions(protocol, options);
             try variable.append(allocator, options);
         }
         try (FixedHeader{ .packet_type = .subscribe, .flags = PacketType.subscribe.defaultFlags(), .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
@@ -1400,11 +1400,22 @@ fn validateConnAckSessionPresent(session_present: bool, reason_code: u8) Error!v
     if (session_present and reason_code != 0) return error.InvalidFlags;
 }
 
-fn validateSubscriptionOptions(options: u8) Error!void {
+fn validateSubscriptionOptions(protocol: ProtocolVersion, options: u8) Error!void {
     if ((options & 0xc0) != 0) return error.InvalidSubscription;
     const qos_bits: u2 = @truncate(options & 0x03);
     if (qos_bits == 3) return error.InvalidQoS;
-    if (((options >> 4) & 0x03) == 3) return error.InvalidSubscription;
+    switch (protocol) {
+        .v3_1_1 => {
+            // MQTT 3.1.1 SUBSCRIBE options only carry the requested QoS in
+            // bits 0..1.  MQTT 5 added No Local, Retain As Published and
+            // Retain Handling in bits 2..5; reject those for v3 rather than
+            // silently emitting or accepting a wire-incompatible packet.
+            if ((options & 0xfc) != 0) return error.InvalidSubscription;
+        },
+        .v5 => {
+            if (((options >> 4) & 0x03) == 3) return error.InvalidSubscription;
+        },
+    }
 }
 
 fn validateSubAckReason(protocol: ProtocolVersion, code: u8) Error!void {
@@ -2122,6 +2133,42 @@ test "MQTT subscribe and suback controls" {
     try std.testing.expectEqual(@as(usize, 2), subscribe.subscriptions.len);
     try std.testing.expectEqualStrings("sensors/+", subscribe.subscriptions[0].topic_filter);
     try std.testing.expectEqual(QoS.at_least_once, subscribe.subscriptions[0].qos);
+
+    subscribe_bytes.clearRetainingCapacity();
+    try Subscribe.write(&subscribe_bytes, allocator, .v3_1_1, 10, &.{}, &.{.{ .topic_filter = "v3/ok", .qos = .at_least_once }});
+    subscribe.deinit(allocator);
+    subscribe = try Subscribe.parse(allocator, .v3_1_1, subscribe_bytes.items);
+    try std.testing.expectEqual(@as(u16, 10), subscribe.packet_id);
+    try std.testing.expectEqual(QoS.at_least_once, subscribe.subscriptions[0].qos);
+    try std.testing.expect(!subscribe.subscriptions[0].no_local);
+    try std.testing.expect(!subscribe.subscriptions[0].retain_as_published);
+    try std.testing.expectEqual(@as(u2, 0), subscribe.subscriptions[0].retain_handling);
+
+    try std.testing.expectError(error.InvalidSubscription, Subscribe.write(&subscribe_bytes, allocator, .v3_1_1, 11, &.{}, &.{.{
+        .topic_filter = "v3/no-local",
+        .qos = .at_most_once,
+        .no_local = true,
+    }}));
+    try std.testing.expectError(error.InvalidSubscription, Subscribe.write(&subscribe_bytes, allocator, .v3_1_1, 12, &.{}, &.{.{
+        .topic_filter = "v3/retain-handling",
+        .retain_handling = 1,
+    }}));
+
+    var invalid_v3_options: std.ArrayList(u8) = .empty;
+    defer invalid_v3_options.deinit(allocator);
+    var invalid_v3_variable: std.ArrayList(u8) = .empty;
+    defer invalid_v3_variable.deinit(allocator);
+    try wire.appendInt(&invalid_v3_variable, allocator, u16, 13, .big);
+    try writeUtf8(&invalid_v3_variable, allocator, "v3/bad-options");
+    try invalid_v3_variable.append(allocator, 0x04); // MQTT 5 No Local bit is reserved in 3.1.1.
+    try (FixedHeader{
+        .packet_type = .subscribe,
+        .flags = PacketType.subscribe.defaultFlags(),
+        .remaining_len = invalid_v3_variable.items.len,
+        .header_len = 0,
+    }).write(&invalid_v3_options, allocator);
+    try invalid_v3_options.appendSlice(allocator, invalid_v3_variable.items);
+    try std.testing.expectError(error.InvalidSubscription, Subscribe.parse(allocator, .v3_1_1, invalid_v3_options.items));
 
     var suback_bytes: std.ArrayList(u8) = .empty;
     defer suback_bytes.deinit(allocator);

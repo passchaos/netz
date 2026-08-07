@@ -129,7 +129,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   username/password payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
   UNSUBSCRIBE/UNSUBACK, PING,
-  DISCONNECT, AUTH enhanced-authentication exchanges, properties, exact packet bounds, minimal remaining length, MQTT UTF-8 string validation, response-topic/topic-name/filter validation, payload-format UTF-8 validation, and
+  DISCONNECT, AUTH enhanced-authentication exchanges, properties, exact packet bounds, minimal remaining length, MQTT UTF-8 string validation, response-topic/topic-name/filter validation, version-specific SUBSCRIBE option validation, payload-format UTF-8 validation, and
   wildcard and shared-subscription matching, plus a blocking TCP client/server runtime with a
   `std.Io.async` concurrent server helper, MQTT v5 Server Keep Alive, Receive Maximum, Maximum Packet Size, Maximum QoS, Retain Available, and Topic Alias negotiation/resolution with outgoing alias registration checks, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation and negative publish acknowledgement propagation
