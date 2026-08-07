@@ -1133,6 +1133,26 @@ pub const sdp = struct {
         parameter: []const u8 = "",
     };
 
+    pub fn rtcpFeedbackEquivalent(a: RtcpFeedback, b: RtcpFeedback) bool {
+        return std.mem.eql(u8, a.typ, b.typ) and std.mem.eql(u8, a.parameter, b.parameter);
+    }
+
+    pub fn rtcpFeedbackContains(feedback: []const RtcpFeedback, needle: RtcpFeedback) bool {
+        for (feedback) |candidate| {
+            if (rtcpFeedbackEquivalent(candidate, needle)) return true;
+        }
+        return false;
+    }
+
+    pub fn rtcpFeedbackIntersection(allocator: std.mem.Allocator, local: []const RtcpFeedback, remote: []const RtcpFeedback) Error![]RtcpFeedback {
+        var out: std.ArrayList(RtcpFeedback) = .empty;
+        errdefer out.deinit(allocator);
+        for (local) |local_feedback| {
+            if (rtcpFeedbackContains(remote, local_feedback)) try out.append(allocator, local_feedback);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
     pub const RtpCodec = struct {
         payload_type: u8,
         mime_type: []const u8,
@@ -8478,6 +8498,18 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("ccm", codecs[0].rtcp_feedback[1].typ);
     try std.testing.expectEqualStrings("fir", codecs[0].rtcp_feedback[1].parameter);
     try std.testing.expectEqualStrings("nack", codecs[0].rtcp_feedback[2].typ);
+    try std.testing.expect(sdp.rtcpFeedbackContains(codecs[0].rtcp_feedback, .{ .typ = "nack" }));
+    try std.testing.expect(!sdp.rtcpFeedbackContains(codecs[0].rtcp_feedback, .{ .typ = "NACK" }));
+    const negotiated_feedback = try sdp.rtcpFeedbackIntersection(allocator, &.{
+        .{ .typ = "nack" },
+        .{ .typ = "transport-cc" },
+        .{ .typ = "ccm", .parameter = "fir" },
+    }, codecs[0].rtcp_feedback);
+    defer allocator.free(negotiated_feedback);
+    try std.testing.expectEqual(@as(usize, 2), negotiated_feedback.len);
+    try std.testing.expectEqualStrings("nack", negotiated_feedback[0].typ);
+    try std.testing.expectEqualStrings("ccm", negotiated_feedback[1].typ);
+    try std.testing.expectEqualStrings("fir", negotiated_feedback[1].parameter);
 
     const fmtp_params = try sdp.parseFmtpParameters(allocator, " Key = Value ; flag ; apt=96 ");
     defer sdp.freeFmtpParameters(allocator, fmtp_params);
