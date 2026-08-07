@@ -1340,6 +1340,22 @@ pub const sdp = struct {
         return out.toOwnedSlice(allocator);
     }
 
+    pub fn appendSessionLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, session: Session) Error!void {
+        try appendSessionHeaderLines(list, allocator, session);
+        for (session.attributes) |attr| try appendAttributeLine(list, allocator, attr);
+        for (session.media) |media| {
+            try appendMediaLine(list, allocator, media.kind, media.port, media.protocol, media.formats);
+            for (media.attributes) |attr| try appendAttributeLine(list, allocator, attr);
+        }
+    }
+
+    pub fn formatSessionLines(allocator: std.mem.Allocator, session: Session) Error![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try appendSessionLines(&out, allocator, session);
+        return out.toOwnedSlice(allocator);
+    }
+
     pub fn formatCandidateAttribute(allocator: std.mem.Allocator, candidate: ice.Candidate) Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -8849,6 +8865,13 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
     try std.testing.expectEqualStrings("mid", session.media[0].attributes[0].name);
+    const formatted_session = try sdp.formatSessionLines(allocator, session);
+    defer allocator.free(formatted_session);
+    try std.testing.expectEqualStrings(text, formatted_session);
+    var appended_session: std.ArrayList(u8) = .empty;
+    defer appended_session.deinit(allocator);
+    try sdp.appendSessionLines(&appended_session, allocator, session);
+    try std.testing.expectEqualStrings(text, appended_session.items);
     const group_attr_line = try sdp.formatAttributeLine(allocator, session.attributes[0]);
     defer allocator.free(group_attr_line);
     try std.testing.expectEqualStrings("a=group:BUNDLE 0\r\n", group_attr_line);
