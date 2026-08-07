@@ -1741,6 +1741,13 @@ pub const rtp = struct {
         };
     }
 
+    pub fn parseHeaderExtensionElementsLenient(allocator: std.mem.Allocator, extension: Extension) Error![]HeaderExtensionElement {
+        return switch (headerExtensionFormat(extension.profile) orelse return error.InvalidRtpPacket) {
+            .one_byte => parseOneByteHeaderExtensionsLenient(allocator, extension.data),
+            .two_byte => parseTwoByteHeaderExtensions(allocator, extension.data),
+        };
+    }
+
     pub fn freeHeaderExtensionElements(allocator: std.mem.Allocator, elements: []HeaderExtensionElement) void {
         allocator.free(elements);
     }
@@ -1765,6 +1772,25 @@ pub const rtp = struct {
             if (id == 15) return error.InvalidRtpPacket; // Reserved by RFC 5285.
             const len = @as(usize, header & 0x0f) + 1;
             if (pos + len > data.len) return error.InvalidRtpPacket;
+            try elements.append(allocator, .{ .id = id, .data = data[pos .. pos + len] });
+            pos += len;
+        }
+        return elements.toOwnedSlice(allocator);
+    }
+
+    pub fn parseOneByteHeaderExtensionsLenient(allocator: std.mem.Allocator, data: []const u8) Error![]HeaderExtensionElement {
+        var elements: std.ArrayList(HeaderExtensionElement) = .empty;
+        errdefer elements.deinit(allocator);
+
+        var pos: usize = 0;
+        while (pos < data.len) {
+            const header = data[pos];
+            pos += 1;
+            if (header == 0) continue;
+            const id = header >> 4;
+            if (id == 15) break;
+            const len = @as(usize, header & 0x0f) + 1;
+            if (pos + len > data.len) break;
             try elements.append(allocator, .{ .id = id, .data = data[pos .. pos + len] });
             pos += len;
         }
@@ -5513,6 +5539,15 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(?u24, 0x010203), try rtp.absoluteSendTime24(parsed_extensions, 4));
     try std.testing.expectEqualStrings("opus", packet.payload);
     try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
+
+    const reserved_extension = rtp.Extension{
+        .profile = rtp.one_byte_header_extension_profile,
+        .data = &.{ 0xf0, 0xaa, 0xbb, 0xcc },
+    };
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.parseHeaderExtensionElements(allocator, reserved_extension));
+    const lenient_reserved = try rtp.parseHeaderExtensionElementsLenient(allocator, reserved_extension);
+    defer rtp.freeHeaderExtensionElements(allocator, lenient_reserved);
+    try std.testing.expectEqual(@as(usize, 0), lenient_reserved.len);
 
     var two_byte_extensions: std.ArrayList(u8) = .empty;
     defer two_byte_extensions.deinit(allocator);
