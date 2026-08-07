@@ -7,7 +7,7 @@ pub const min_datagram_len: usize = token_len + 5;
 pub const Error = error{
     InvalidLength,
     InvalidHeaderForm,
-} || std.mem.Allocator.Error;
+} || std.Io.RandomSecureError || std.mem.Allocator.Error;
 
 pub fn tokenForConnectionId(static_key: [static_key_len]u8, connection_id: []const u8) [token_len]u8 {
     var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
@@ -38,6 +38,27 @@ pub fn encode(list: *std.ArrayList(u8), allocator: std.mem.Allocator, unpredicta
     try list.appendSlice(allocator, &token);
 }
 
+pub fn encodeForConnectionId(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    packet_len: usize,
+    static_key: [static_key_len]u8,
+    connection_id: []const u8,
+) Error!void {
+    if (packet_len < min_datagram_len) return error.InvalidLength;
+    const prefix_len = packet_len - token_len;
+    const start = list.items.len;
+    try list.resize(allocator, start + packet_len);
+    errdefer list.shrinkRetainingCapacity(start);
+
+    const prefix = list.items[start..][0..prefix_len];
+    try std.Io.randomSecure(io, prefix);
+    prefix[0] = (prefix[0] & 0x3f) | 0x40;
+    const token = tokenForConnectionId(static_key, connection_id);
+    @memcpy(list.items[start + prefix_len ..][0..token_len], &token);
+}
+
 test "QUIC stateless reset token derives from static key and connection ID" {
     const key = [_]u8{0x42} ** static_key_len;
     const cid = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -59,6 +80,25 @@ test "QUIC stateless reset encodes and matches trailing token" {
     try std.testing.expect(matches(datagram.items, token));
     try std.testing.expect(!matches(datagram.items, [_]u8{0x5a} ** token_len));
     try std.testing.expectEqual(token, tokenCandidate(datagram.items).?);
+}
+
+test "QUIC stateless reset encodes random packet from static key and CID" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const key = [_]u8{0x31} ** static_key_len;
+    const cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const token = tokenForConnectionId(key, &cid);
+    var datagram: std.ArrayList(u8) = .empty;
+    defer datagram.deinit(allocator);
+
+    try encodeForConnectionId(&datagram, allocator, io, 64, key, &cid);
+    try std.testing.expectEqual(@as(usize, 64), datagram.items.len);
+    try std.testing.expect(validPrefix(datagram.items));
+    try std.testing.expect(matches(datagram.items, token));
+    try std.testing.expectError(error.InvalidLength, encodeForConnectionId(&datagram, allocator, io, min_datagram_len - 1, key, &cid));
 }
 
 test "QUIC stateless reset validates minimum size and short header prefix" {
