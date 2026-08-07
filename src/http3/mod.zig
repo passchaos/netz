@@ -903,10 +903,16 @@ pub const Request = struct {
     }
 
     pub fn write(self: Request, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        try self.writeWithSettings(list, allocator, .{});
+    }
+
+    pub fn writeWithSettings(self: Request, list: *std.ArrayList(u8), allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         const fields = try self.headerFields(&fields_buf);
         try validateHeaderBlock(fields, .request);
         try validateHeaderBlock(self.trailers, .trailers);
+        try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
+        try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
         try validateRequestBodyForMethod(fields, self.body, self.trailers);
         try validateContentLength(fields, self.body.len);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
@@ -941,11 +947,17 @@ pub const Response = struct {
     }
 
     pub fn write(self: Response, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        try self.writeWithSettings(list, allocator, .{});
+    }
+
+    pub fn writeWithSettings(self: Response, list: *std.ArrayList(u8), allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         var status_buf: [3]u8 = undefined;
         const fields = try self.headerFields(&fields_buf, &status_buf);
         try validateHeaderBlock(fields, .response);
         try validateHeaderBlock(self.trailers, .trailers);
+        try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
+        try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
         try validateResponseBodyForStatus(self.status, self.headers, self.body, self.trailers);
         try validateContentLengthForStatus(self.status, fields, self.body.len);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
@@ -966,10 +978,15 @@ pub const InformationalResponse = struct {
     }
 
     pub fn write(self: InformationalResponse, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        try self.writeWithSettings(list, allocator, .{});
+    }
+
+    pub fn writeWithSettings(self: InformationalResponse, list: *std.ArrayList(u8), allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         var status_buf: [3]u8 = undefined;
         const fields = try self.headerFields(&fields_buf, &status_buf);
         try validateHeaderBlock(fields, .response);
+        try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
         try writeHeadersFrame(list, allocator, fields);
     }
@@ -981,8 +998,18 @@ pub fn writeResponseSequence(
     informational: []const InformationalResponse,
     response: Response,
 ) Error!void {
-    for (informational) |info| try info.write(list, allocator);
-    try response.write(list, allocator);
+    try writeResponseSequenceWithSettings(list, allocator, informational, response, .{});
+}
+
+pub fn writeResponseSequenceWithSettings(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    informational: []const InformationalResponse,
+    response: Response,
+    peer_settings: Settings,
+) Error!void {
+    for (informational) |info| try info.writeWithSettings(list, allocator, peer_settings);
+    try response.writeWithSettings(list, allocator, peer_settings);
 }
 
 pub const DecodedRequest = struct {
@@ -1942,6 +1969,15 @@ test "HTTP/3 enforces SETTINGS_MAX_FIELD_SECTION_SIZE" {
     try std.testing.expectError(error.ExcessiveLoad, decodeRequestWithSettings(allocator, request_bytes.items, .{
         .max_field_section_size = 1,
     }));
+    var rejected_request_write: std.ArrayList(u8) = .empty;
+    defer rejected_request_write.deinit(allocator);
+    try std.testing.expectError(error.ExcessiveLoad, (Request{
+        .method = "GET",
+        .path = "/limited",
+        .authority = "example.com",
+    }).writeWithSettings(&rejected_request_write, allocator, .{
+        .max_field_section_size = 1,
+    }));
 
     var response_bytes: std.ArrayList(u8) = .empty;
     defer response_bytes.deinit(allocator);
@@ -1955,6 +1991,16 @@ test "HTTP/3 enforces SETTINGS_MAX_FIELD_SECTION_SIZE" {
     decoded_response.deinit(allocator);
     try std.testing.expectError(error.ExcessiveLoad, decodeResponseWithSettings(allocator, response_bytes.items, .{
         .max_field_section_size = 43,
+    }));
+
+    var rejected_response_write: std.ArrayList(u8) = .empty;
+    defer rejected_response_write.deinit(allocator);
+    try std.testing.expectError(error.ExcessiveLoad, writeResponseSequenceWithSettings(&rejected_response_write, allocator, &.{.{
+        .status = 103,
+    }}, .{
+        .status = 200,
+    }, .{
+        .max_field_section_size = 41,
     }));
 }
 

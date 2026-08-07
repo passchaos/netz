@@ -324,7 +324,7 @@ pub const HandshakeServerSession = struct {
         response: http3.Response,
     ) Error!void {
         try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, server_control_stream_id);
-        try sendConnectionResponseSequence(&self.established.connection, stream_id, informational, response, self.options);
+        try sendConnectionResponseSequence(&self.established.connection, stream_id, informational, response, self.options, self.control.settings.peer);
     }
 
     pub fn sendGoAway(self: *HandshakeServerSession, stream_id: u64) Error!void {
@@ -378,7 +378,7 @@ pub const HandshakeClient = struct {
         self.next_stream_id += 4;
 
         try sendConnectionSettings(&self.established.connection, &self.control, &self.control_send, self.options, client_control_stream_id);
-        try sendConnectionMessage(&self.established.connection, stream_id, request_options, self.options);
+        try sendConnectionMessage(&self.established.connection, stream_id, request_options, self.options, self.control.settings.peer);
         const assembled = try receiveConnectionStreamBytes(&self.established.connection, stream_id, self.options, &self.control, .client);
         errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
         try http3.validateResponsePushPromises(self.control, assembled.bytes);
@@ -466,7 +466,7 @@ pub const ProtectedServer = struct {
         try sendProtectedSettings(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, server_control_stream_id);
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
-        try http3.writeResponseSequence(&encoded, self.quic_server.endpoint.allocator, informational, response);
+        try http3.writeResponseSequenceWithSettings(&encoded, self.quic_server.endpoint.allocator, informational, response, self.control.settings.peer);
         var send_state = quic.stream_state.SendState.init(stream_id);
         var frames: std.ArrayList(quic.Frame) = .empty;
         defer frames.deinit(self.quic_server.endpoint.allocator);
@@ -558,7 +558,7 @@ pub const ProtectedClient = struct {
         try sendProtectedSettings(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, client_control_stream_id);
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_client.endpoint.allocator);
-        try request_options.write(&encoded, self.quic_client.endpoint.allocator);
+        try request_options.writeWithSettings(&encoded, self.quic_client.endpoint.allocator, self.control.settings.peer);
         var send_state = quic.stream_state.SendState.init(stream_id);
         var frames: std.ArrayList(quic.Frame) = .empty;
         defer frames.deinit(self.quic_client.endpoint.allocator);
@@ -647,10 +647,10 @@ const AssembledStream = struct {
     bytes: []u8,
 };
 
-fn sendConnectionMessage(connection: *quic.one_rtt.Connection, stream_id: u62, message: anytype, options: HandshakeSessionOptions) Error!void {
+fn sendConnectionMessage(connection: *quic.one_rtt.Connection, stream_id: u62, request: http3.Request, options: HandshakeSessionOptions, peer_settings: http3.Settings) Error!void {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(connection.endpoint.allocator);
-    try message.write(&encoded, connection.endpoint.allocator);
+    try request.writeWithSettings(&encoded, connection.endpoint.allocator, peer_settings);
 
     var send_state = quic.stream_state.SendState.init(stream_id);
     var frames: std.ArrayList(quic.Frame) = .empty;
@@ -665,10 +665,11 @@ fn sendConnectionResponseSequence(
     informational: []const http3.InformationalResponse,
     response: http3.Response,
     options: HandshakeSessionOptions,
+    peer_settings: http3.Settings,
 ) Error!void {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(connection.endpoint.allocator);
-    try http3.writeResponseSequence(&encoded, connection.endpoint.allocator, informational, response);
+    try http3.writeResponseSequenceWithSettings(&encoded, connection.endpoint.allocator, informational, response, peer_settings);
 
     var send_state = quic.stream_state.SendState.init(stream_id);
     var frames: std.ArrayList(quic.Frame) = .empty;
@@ -1491,7 +1492,7 @@ test "HTTP/3 handshake server rejects requests beyond local GOAWAY" {
     defer client.deinit();
 
     try sendConnectionSettings(&client.established.connection, &client.control, &client.control_send, client.options, client_control_stream_id);
-    try sendConnectionMessage(&client.established.connection, 0, http3.Request{ .method = "GET", .path = "/rejected", .authority = "localhost" }, client.options);
+    try sendConnectionMessage(&client.established.connection, 0, http3.Request{ .method = "GET", .path = "/rejected", .authority = "localhost" }, client.options, client.control.settings.peer);
 
     thread.join();
     if (shared.err) |err| return err;
