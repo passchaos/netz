@@ -104,7 +104,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   endpoint-level connection-ID routing and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route
-  rejection, NEW_CONNECTION_ID active-limit/duplicate-CID/reset-token validation and RETIRE_CONNECTION_ID lifecycle/preflight state wired into
+  rejection, NEW_CONNECTION_ID receive/send active-limit, duplicate-CID/reset-token validation and RETIRE_CONNECTION_ID lifecycle/preflight state wired into
   1-RTT, transport/application CONNECTION_CLOSE state, PATH_CHALLENGE/PATH_RESPONSE validation state with duplicate challenge suppression wired into 1-RTT,
   peer-migration helpers that honor disable_active_migration, apply a server
   preferred_address by selecting its CID/reset token and peer IP/port, reset

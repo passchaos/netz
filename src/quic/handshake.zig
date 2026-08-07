@@ -129,6 +129,7 @@ pub const OneRttConfig = struct {
                 std.math.cast(usize, peer_transport_parameters.max_udp_payload_size) orelse std.math.maxInt(usize),
             ),
             .active_connection_id_limit = std.math.cast(usize, local_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
+            .peer_active_connection_id_limit = std.math.cast(usize, peer_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .local_max_idle_timeout_ms = local_transport_parameters.max_idle_timeout,
             .peer_max_idle_timeout_ms = peer_transport_parameters.max_idle_timeout,
             .local_ack_delay_exponent = local_transport_parameters.ack_delay_exponent,

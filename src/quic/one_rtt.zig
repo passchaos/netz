@@ -128,6 +128,7 @@ pub const ConnectionConfig = struct {
     local_min_ack_delay: ?u64 = null,
     peer_min_ack_delay: ?u64 = null,
     local_stateless_reset_key: ?[quic.stateless_reset.static_key_len]u8 = null,
+    peer_active_connection_id_limit: usize = quic.default_active_connection_id_limit,
 };
 
 const StreamFlowEntry = struct {
@@ -1019,6 +1020,7 @@ pub const Connection = struct {
     }
 
     pub fn sendNewConnectionId(self: *Connection, connection_id: []const u8, stateless_reset_token: [16]u8) Error!void {
+        try self.validateLocalConnectionIdIssueLimit();
         const frame = try self.local_connection_ids.issue(connection_id, stateless_reset_token);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
@@ -1026,9 +1028,14 @@ pub const Connection = struct {
 
     pub fn sendNewConnectionIdWithDerivedToken(self: *Connection, connection_id: []const u8) Error!void {
         const key = self.config.local_stateless_reset_key orelse return error.InvalidConnectionId;
+        try self.validateLocalConnectionIdIssueLimit();
         const frame = try self.local_connection_ids.issueWithStaticKey(connection_id, key);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
+    }
+
+    fn validateLocalConnectionIdIssueLimit(self: Connection) Error!void {
+        if (self.local_connection_ids.count() >= self.config.peer_active_connection_id_limit) return error.ActiveConnectionIdLimit;
     }
 
     pub fn sendHandshakeDone(self: *Connection) Error!void {
@@ -4041,6 +4048,7 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     var new_cid_packet = try client.receivePacket();
     defer new_cid_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
+    try std.testing.expectError(error.ActiveConnectionIdLimit, server.sendNewConnectionId("server-extra-cid", [_]u8{0xab} ** 16));
     try std.testing.expect(client.switchToNextPeerConnectionId());
     try std.testing.expectEqualStrings("server-new-cid", client.config.peer_connection_id);
     var reset_datagram: std.ArrayList(u8) = .empty;
