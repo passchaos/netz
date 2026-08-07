@@ -1,8 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const http1 = @import("mod.zig");
 const wire = @import("../internal/wire.zig");
 
 const net = std.Io.net;
+const linux = std.os.linux;
+const posix = std.posix;
 const tls = std.crypto.tls;
 const CertificateBundle = std.crypto.Certificate.Bundle;
 
@@ -13,6 +16,10 @@ pub const Error = http1.Error || error{
     InvalidUri,
     InvalidResponse,
     UnsupportedScheme,
+    UnsupportedEndpoint,
+    UnsupportedIoBackend,
+    IoUringOperationFailed,
+    UnexpectedCompletion,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || tls.Client.InitError || CertificateBundle.RescanError || std.Io.RandomSecureError || std.Io.Reader.ShortError || std.Io.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -37,6 +44,8 @@ pub const TlsClientOptions = struct {
     /// layer independently verifies body length (for example Content-Length).
     allow_truncation_attacks: bool = false,
 };
+
+pub const LinuxIoUringHandle = if (builtin.os.tag == .linux) linux.IoUring else opaque {};
 
 pub const UriEndpoint = struct {
     allocator: std.mem.Allocator,
@@ -239,11 +248,13 @@ pub const TlsClientConnection = struct {
 const RuntimeTransport = union(enum) {
     tcp: struct { io: std.Io, stream: net.Stream },
     tls: *TlsClientConnection,
+    linux_io_uring: LinuxIoUringTransport,
 
     fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
         return switch (self) {
             .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
             .tls => |conn| conn.read(buffer),
+            .linux_io_uring => |transport| transport.read(buffer),
         };
     }
 
@@ -251,9 +262,118 @@ const RuntimeTransport = union(enum) {
         return switch (self) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
             .tls => |conn| conn.writeAll(bytes),
+            .linux_io_uring => |transport| transport.writeAll(bytes),
         };
     }
 };
+
+const LinuxIoUringTransport = if (builtin.os.tag == .linux) struct {
+    ring: *linux.IoUring,
+    fd: linux.fd_t,
+
+    const Completion = enum(u64) {
+        connect = 1,
+        send = 2,
+        recv = 3,
+        close = 4,
+    };
+
+    pub fn connect(self: LinuxIoUringTransport, address: net.IpAddress) Error!void {
+        var storage: PosixAddress = undefined;
+        const address_len = ipAddressToPosix(&address, &storage);
+        _ = self.ring.connect(@intFromEnum(Completion.connect), self.fd, &storage.any, address_len) catch return error.IoUringOperationFailed;
+        _ = try self.submitOne(.connect);
+    }
+
+    pub fn read(self: LinuxIoUringTransport, buffer: []u8) Error!usize {
+        if (buffer.len == 0) return 0;
+        _ = self.ring.recv(@intFromEnum(Completion.recv), self.fd, .{ .buffer = buffer }, 0) catch return error.IoUringOperationFailed;
+        const cqe = try self.submitOne(.recv);
+        if (cqe.res < 0) return error.IoUringOperationFailed;
+        return @intCast(cqe.res);
+    }
+
+    pub fn writeAll(self: LinuxIoUringTransport, bytes: []const u8) Error!void {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            _ = self.ring.send(@intFromEnum(Completion.send), self.fd, bytes[offset..], 0) catch return error.IoUringOperationFailed;
+            const cqe = try self.submitOne(.send);
+            if (cqe.res <= 0) return error.ConnectionClosed;
+            offset += @intCast(cqe.res);
+        }
+    }
+
+    pub fn close(self: LinuxIoUringTransport) void {
+        _ = self.ring.close(@intFromEnum(Completion.close), self.fd) catch {
+            _ = linux.close(self.fd);
+            return;
+        };
+        _ = self.submitOne(.close) catch {
+            _ = linux.close(self.fd);
+        };
+    }
+
+    fn submitOne(self: LinuxIoUringTransport, expected: Completion) Error!linux.io_uring_cqe {
+        _ = self.ring.submit_and_wait(1) catch return error.IoUringOperationFailed;
+        const cqe = self.ring.copy_cqe() catch return error.IoUringOperationFailed;
+        if (cqe.user_data != @intFromEnum(expected)) return error.UnexpectedCompletion;
+        if (cqe.err() != .SUCCESS) return error.IoUringOperationFailed;
+        return cqe;
+    }
+} else struct {
+    pub fn read(_: @This(), _: []u8) Error!usize {
+        return error.UnsupportedIoBackend;
+    }
+
+    pub fn writeAll(_: @This(), _: []const u8) Error!void {
+        return error.UnsupportedIoBackend;
+    }
+};
+
+const PosixAddress = if (builtin.os.tag == .linux) extern union {
+    any: posix.sockaddr,
+    in: posix.sockaddr.in,
+    in6: posix.sockaddr.in6,
+} else void;
+
+fn ipAddressToPosix(address: *const net.IpAddress, storage: *PosixAddress) posix.socklen_t {
+    return switch (address.*) {
+        .ip4 => |ip4| {
+            storage.in = .{
+                .port = std.mem.nativeToBig(u16, ip4.port),
+                .addr = @bitCast(ip4.bytes),
+            };
+            return @sizeOf(posix.sockaddr.in);
+        },
+        .ip6 => |ip6| {
+            storage.in6 = .{
+                .port = std.mem.nativeToBig(u16, ip6.port),
+                .flowinfo = ip6.flow,
+                .addr = ip6.bytes,
+                .scope_id = ip6.interface.index,
+            };
+            return @sizeOf(posix.sockaddr.in6);
+        },
+    };
+}
+
+fn createLinuxTcpSocket(address: net.IpAddress) Error!linux.fd_t {
+    const family: u32 = switch (address) {
+        .ip4 => linux.AF.INET,
+        .ip6 => linux.AF.INET6,
+    };
+    const rc = linux.socket(family, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, linux.IPPROTO.TCP);
+    return switch (linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .ACCES, .PERM => error.AccessDenied,
+        .AFNOSUPPORT => error.AddressFamilyUnsupported,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NOMEM => error.SystemResources,
+        .PROTONOSUPPORT => error.ProtocolUnsupportedBySystem,
+        else => error.IoUringOperationFailed,
+    };
+}
 
 pub const Server = struct {
     io: std.Io,
@@ -535,6 +655,62 @@ pub const Client = struct {
         var options = request_options;
         options.target = target;
         return client.request(options);
+    }
+
+    /// Linux-only HTTP/1 client path backed directly by `std.os.linux.IoUring`.
+    ///
+    /// Zig 0.16 exposes a `std.Io.Uring` backend, but its `std.Io.net` vtable
+    /// does not yet implement TCP listen/connect/read/write.  This helper uses
+    /// the lower-level `std.os.linux.IoUring` operations directly and then
+    /// feeds the same runtime parser/serializer used by the normal TCP client.
+    /// It intentionally supports only literal IP URI authorities (`127.0.0.1`
+    /// and bracketed IPv6 such as `[::1]`) because DNS lookup still belongs to
+    /// the higher-level `std.Io.net` abstraction.
+    pub fn requestUriLinuxIoUring(
+        allocator: std.mem.Allocator,
+        ring: *LinuxIoUringHandle,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+    ) Error!OwnedResponse {
+        if (comptime builtin.os.tag != .linux) return error.UnsupportedIoBackend;
+
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+        var endpoint = try uriEndpoint(allocator, uri, 80);
+        defer endpoint.deinit();
+        const address = switch (endpoint.target) {
+            .ip => |address| address,
+            .host => return error.UnsupportedEndpoint,
+        };
+
+        const fd = try createLinuxTcpSocket(address);
+        var uring_transport = LinuxIoUringTransport{ .ring = ring, .fd = fd };
+        var fd_open = true;
+        errdefer if (fd_open) uring_transport.close();
+
+        try uring_transport.connect(address);
+        var options = request_options;
+        options.target = target;
+        if (options.host == null) options.host = endpoint.authority;
+        try writeRequestToTransport(allocator, .{ .linux_io_uring = uring_transport }, options);
+
+        var inbuf: std.ArrayList(u8) = .empty;
+        defer inbuf.deinit(allocator);
+        var response = try readResponseFromTransportBufferedForRequest(
+            allocator,
+            .{ .linux_io_uring = uring_transport },
+            limits,
+            .{},
+            &inbuf,
+            request_options.method,
+        );
+        errdefer response.deinit(allocator);
+        uring_transport.close();
+        fd_open = false;
+        return response;
     }
 
     pub fn openConnectTunnel(self: *Client, target: []const u8, headers: []const http1.Header) Error!Tunnel {
@@ -2006,6 +2182,73 @@ test "HTTP/1 client sends request to bracketed IPv6 URI" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("ipv6-uri-ok", response.response.body);
+}
+
+test "HTTP/1 Linux io_uring client sends request to IP URI" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var ring = linux.IoUring.init(16, 0) catch |err| switch (err) {
+        error.PermissionDenied, error.SystemOutdated => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer ring.deinit();
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/uring-runtime", request.request.target);
+            var expected_host: [64]u8 = undefined;
+            const rendered_host = try std.fmt.bufPrint(&expected_host, "127.0.0.1:{d}", .{server_ptr.address().ip4.port});
+            try std.testing.expectEqualStrings(rendered_host, request.request.header("host").?);
+            try connection.writeResponse(.{
+                .body = "uring-runtime-ok",
+                .request_method = request.request.method,
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/uring-runtime", .{server.address().ip4.port});
+    defer allocator.free(uri);
+    var response = try Client.requestUriLinuxIoUring(allocator, &ring, uri, .{}, .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("uring-runtime-ok", response.response.body);
 }
 
 test "HTTP/1 server sends 100 Continue before reading expected body" {

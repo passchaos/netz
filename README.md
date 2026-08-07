@@ -244,9 +244,9 @@ literals such as `http://[::1]:8080/` and `ws://[::1]:8080/chat`.
 
 On Zig 0.16, `std.Io.Uring` exists but its `std.Io.net` networking hooks are
 still unavailable. The portable runtimes therefore use the `std.Io` abstraction
-with `std.Io.Threaded` in examples, while `examples/linux_io_uring_http1.zig`
-shows direct `std.os.linux.IoUring` `connect`/`send`/`recv` usage around netz's
-HTTP/1 parser.
+with `std.Io.Threaded` in portable examples, while `examples/linux_io_uring_http1.zig`
+uses the reusable Linux-only HTTP/1 client path backed by raw
+`std.os.linux.IoUring` `connect`/`send`/`recv` operations.
 
 Handshake-backed WebTransport sessions expose the negotiated DATAGRAM budget so
 callers can avoid sending a payload the underlying QUIC peer will reject:

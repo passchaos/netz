@@ -33,9 +33,10 @@ Zig 0.16 includes two related APIs:
   networking vtable still marks `listen`, `accept`, `connect`, `read`, and
   `write` as unavailable, so the high-level `std.Io.net` runtimes use
   `std.Io.Threaded` for real TCP today.
-- `std.os.linux.IoUring`, the low-level Linux ring wrapper. The
-  `linux_io_uring_http1.zig` example uses it directly for `connect`, `send`,
-  `recv`, and `close`, then feeds the received bytes into netz HTTP/1 parsing.
+- `std.os.linux.IoUring`, the low-level Linux ring wrapper. The HTTP/1 runtime
+  exposes a Linux-only `Client.requestUriLinuxIoUring` helper that uses it for
+  `connect`, `send`, `recv`, and `close`; `linux_io_uring_http1.zig` demonstrates
+  that reusable path.
 
 Because netz runtimes take a `std.Io` value, they can switch to the standard
 Uring backend as soon as Zig wires networking into it. The raw Linux example is
