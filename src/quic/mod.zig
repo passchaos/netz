@@ -1031,6 +1031,7 @@ pub const Frame = union(enum) {
                 try list.appendSlice(allocator, crypto.data);
             },
             .stream => |stream| {
+                try validateStreamFramePayload(stream);
                 try validateEndOffset(stream.offset, stream.data.len);
                 var frame_type: u64 = @intFromEnum(FrameType.stream) | 0x02; // always include Length for unambiguous composition.
                 if (stream.offset != 0) frame_type |= 0x04;
@@ -1308,12 +1309,14 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
         const offset = if (has_offset) try varint.decode(cursor) else 0;
         const len = if (has_length) try usizeFromVarint(try varint.decode(cursor)) else cursor.remaining();
         try validateEndOffset(offset, len);
-        return .{ .stream = .{
+        const stream = StreamFrame{
             .stream_id = stream_id,
             .offset = offset,
             .fin = (frame_type & 0x01) != 0,
             .data = try cursor.readSlice(len),
-        } };
+        };
+        try validateStreamFramePayload(stream);
+        return .{ .stream = stream };
     }
 
     if (frame_type == @intFromEnum(FrameType.connection_close)) {
@@ -1469,6 +1472,14 @@ fn validateEndOffset(offset: u64, data_len: usize) Error!void {
     const data_len_u64 = std.math.cast(u64, data_len) orelse return error.InvalidFrameLength;
     const end = std.math.add(u64, offset, data_len_u64) catch return error.InvalidFrameLength;
     if (end > varint.max_value) return error.InvalidFrameLength;
+}
+
+fn validateStreamFramePayload(stream: StreamFrame) Error!void {
+    // A zero-length STREAM without FIN has no stream-data or final-size effect.
+    // Production send paths (tquic/quic-zig) avoid emitting it; rejecting it at
+    // the codec boundary keeps packet composition from carrying ambiguous
+    // no-op STREAM frames that are better represented as PADDING/PING.
+    if (stream.data.len == 0 and !stream.fin) return error.InvalidFrame;
 }
 
 fn validateQuicVarint(value: u64) Error!void {
@@ -2034,6 +2045,29 @@ test "QUIC frame packet context rules follow RFC 9000" {
     try std.testing.expect(!frameAllowedInPacketType(.{ .connection_close = .{ .error_code = 0, .frame_type = 0, .reason_phrase = "" } }, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .handshake_done = {} }, .one_rtt));
     try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(stream, .initial));
+}
+
+test "QUIC STREAM frame rejects empty non-FIN no-ops" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try std.testing.expectError(error.InvalidFrame, (Frame{ .stream = .{
+        .stream_id = 0,
+        .data = &.{},
+        .fin = false,
+    } }).write(&encoded, allocator));
+
+    try varint.encode(&encoded, allocator, @intFromEnum(FrameType.stream) | 0x02);
+    try varint.encode(&encoded, allocator, 0);
+    try varint.encode(&encoded, allocator, 0);
+    try std.testing.expectError(error.InvalidFrame, parseFrame(encoded.items));
+
+    encoded.clearRetainingCapacity();
+    try (Frame{ .stream = .{ .stream_id = 0, .data = &.{}, .fin = true } }).write(&encoded, allocator);
+    const parsed = try parseFrame(encoded.items);
+    try std.testing.expect(parsed.frame.stream.fin);
+    try std.testing.expectEqual(@as(usize, 0), parsed.frame.stream.data.len);
 }
 
 test "QUIC stream-count control frames reject values above RFC limit" {
