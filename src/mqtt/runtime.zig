@@ -513,7 +513,10 @@ pub const Connection = struct {
     }
 
     pub fn readPubRel(self: *Connection) Error!OwnedAck {
-        return self.readAck(.pubrel);
+        var pubrel = try self.readAck(.pubrel);
+        errdefer pubrel.deinit(self.allocator);
+        try self.validateIncomingPubRel(pubrel.ack.packet_id);
+        return pubrel;
     }
 
     pub fn writePubComp(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
@@ -723,6 +726,14 @@ pub const Connection = struct {
     fn validateIncomingPublishCapabilities(self: Connection, publish_packet: mqtt.Publish) Error!void {
         if (@intFromEnum(publish_packet.qos) > @intFromEnum(self.local_maximum_qos)) return error.InvalidQoS;
         if (publish_packet.retain and !self.local_retain_available) return error.InvalidProperty;
+    }
+
+    fn validateIncomingPubRel(self: Connection, packet_id: u16) Error!void {
+        // A PUBREL is valid only after this endpoint has received a QoS 2
+        // PUBLISH with the same Packet Identifier and answered PUBREC.  Rumqtt
+        // treats an unsolicited PUBREL as a state error; preserve that guard so
+        // peer bugs cannot complete or disturb unrelated QoS state.
+        if (!self.incoming_qos2.isSet(@as(usize, packet_id))) return error.InvalidPacketIdentifier;
     }
 
     fn recordIncomingPublish(self: *Connection, publish_packet: mqtt.Publish) Error!void {
@@ -1302,6 +1313,8 @@ test "MQTT connection keeps QoS2 receive slot until PUBCOMP" {
         .payload = "first",
     });
     try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
+    try connection.validateIncomingPubRel(20);
+    try std.testing.expectError(error.InvalidPacketIdentifier, connection.validateIncomingPubRel(21));
     try std.testing.expectError(error.InvalidPacketIdentifier, connection.recordIncomingPublish(.{
         .dup = false,
         .qos = .at_least_once,
@@ -1324,6 +1337,7 @@ test "MQTT connection keeps QoS2 receive slot until PUBCOMP" {
 
     connection.completeIncomingPublish(.pubcomp, 20);
     try std.testing.expectEqual(@as(u16, 0), connection.incoming_inflight);
+    try std.testing.expectError(error.InvalidPacketIdentifier, connection.validateIncomingPubRel(20));
     try connection.recordIncomingPublish(.{
         .dup = false,
         .qos = .exactly_once,
