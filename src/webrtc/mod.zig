@@ -1131,7 +1131,19 @@ pub const sdp = struct {
     pub const RtcpFeedback = struct {
         typ: []const u8,
         parameter: []const u8 = "",
+
+        pub fn isType(self: RtcpFeedback, typ: []const u8) bool {
+            return std.mem.eql(u8, self.typ, typ);
+        }
     };
+
+    pub const rtcp_feedback_transport_cc = "transport-cc";
+    pub const rtcp_feedback_goog_remb = "goog-remb";
+    pub const rtcp_feedback_ack = "ack";
+    pub const rtcp_feedback_ccm = "ccm";
+    pub const rtcp_feedback_nack = "nack";
+    pub const rtcp_feedback_parameter_fir = "fir";
+    pub const rtcp_feedback_parameter_pli = "pli";
 
     pub fn rtcpFeedbackEquivalent(a: RtcpFeedback, b: RtcpFeedback) bool {
         return std.mem.eql(u8, a.typ, b.typ) and std.mem.eql(u8, a.parameter, b.parameter);
@@ -8531,6 +8543,10 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("ccm", codecs[0].rtcp_feedback[1].typ);
     try std.testing.expectEqualStrings("fir", codecs[0].rtcp_feedback[1].parameter);
     try std.testing.expectEqualStrings("nack", codecs[0].rtcp_feedback[2].typ);
+    try std.testing.expect(codecs[0].rtcp_feedback[0].isType(sdp.rtcp_feedback_goog_remb));
+    try std.testing.expect(codecs[0].rtcp_feedback[1].isType(sdp.rtcp_feedback_ccm));
+    try std.testing.expectEqualStrings(sdp.rtcp_feedback_parameter_fir, codecs[0].rtcp_feedback[1].parameter);
+    try std.testing.expect(codecs[0].rtcp_feedback[2].isType(sdp.rtcp_feedback_nack));
     try std.testing.expect(sdp.rtcpFeedbackContains(codecs[0].rtcp_feedback, .{ .typ = "nack" }));
     try std.testing.expect(!sdp.rtcpFeedbackContains(codecs[0].rtcp_feedback, .{ .typ = "NACK" }));
     try std.testing.expect(sdp.rtcpFeedbackContainsIgnoreCase(codecs[0].rtcp_feedback, .{ .typ = "NACK" }));
