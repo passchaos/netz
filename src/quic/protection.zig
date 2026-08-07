@@ -27,14 +27,17 @@ pub const header_protection_sample_len = 16;
 pub const header_protection_mask_len = 5;
 pub const max_packet_number: u64 = varint.max_value;
 
-pub const Error = varint.Error || error{
+pub const VersionError = error{
+    UnsupportedVersion,
+};
+
+pub const Error = varint.Error || VersionError || error{
     InvalidInitialPacket,
     InvalidHeaderProtectionSample,
     InvalidPacketNumber,
     InvalidPacketNumberLength,
     InvalidPayloadLength,
     KeyUpdateError,
-    UnsupportedVersion,
 } || std.crypto.errors.AuthenticationError || std.mem.Allocator.Error;
 
 pub const HeaderForm = enum {
@@ -321,11 +324,11 @@ pub const Aes128KeyPhaseState = struct {
 };
 
 pub fn deriveInitialSecrets(client_initial_dcid: []const u8) InitialSecrets {
-    return deriveInitialSecretsForVersion(version_1_wire, client_initial_dcid);
+    return deriveInitialSecretsForVersion(version_1_wire, client_initial_dcid) catch unreachable;
 }
 
-pub fn deriveInitialSecretsForVersion(version: u32, client_initial_dcid: []const u8) InitialSecrets {
-    const profile = protectionProfile(version);
+pub fn deriveInitialSecretsForVersion(version: u32, client_initial_dcid: []const u8) VersionError!InitialSecrets {
+    const profile = try protectionProfile(version);
     const initial_secret = HkdfSha256.extract(profile.salt, client_initial_dcid);
     const client_secret = hkdfExpandLabel(initial_secret, "client in", secret_len);
     const server_secret = hkdfExpandLabel(initial_secret, "server in", secret_len);
@@ -340,8 +343,8 @@ pub fn deriveAes128Keys(secret: [secret_len]u8) PacketProtectionKeys {
     return deriveAes128KeysWithLabels(secret, hkdf_labels_v1);
 }
 
-pub fn deriveAes128KeysForVersion(version: u32, secret: [secret_len]u8) PacketProtectionKeys {
-    return deriveAes128KeysWithLabels(secret, protectionProfile(version).labels);
+pub fn deriveAes128KeysForVersion(version: u32, secret: [secret_len]u8) VersionError!PacketProtectionKeys {
+    return deriveAes128KeysWithLabels(secret, (try protectionProfile(version)).labels);
 }
 
 fn deriveAes128KeysWithLabels(secret: [secret_len]u8, labels: HkdfLabels) PacketProtectionKeys {
@@ -354,11 +357,11 @@ fn deriveAes128KeysWithLabels(secret: [secret_len]u8, labels: HkdfLabels) Packet
 }
 
 pub fn nextAes128TrafficSecret(secret: [secret_len]u8) [secret_len]u8 {
-    return nextAes128TrafficSecretForVersion(version_1_wire, secret);
+    return nextAes128TrafficSecretForVersion(version_1_wire, secret) catch unreachable;
 }
 
-pub fn nextAes128TrafficSecretForVersion(version: u32, secret: [secret_len]u8) [secret_len]u8 {
-    return hkdfExpandLabel(secret, protectionProfile(version).labels.ku, secret_len);
+pub fn nextAes128TrafficSecretForVersion(version: u32, secret: [secret_len]u8) VersionError![secret_len]u8 {
+    return hkdfExpandLabel(secret, (try protectionProfile(version)).labels.ku, secret_len);
 }
 
 /// Derive the next QUIC 1-RTT packet-protection generation.
@@ -368,12 +371,12 @@ pub fn nextAes128TrafficSecretForVersion(version: u32, secret: [secret_len]u8) [
 /// retained for the life of the connection so the key phase bit itself remains
 /// protected consistently across generations.
 pub fn nextAes128PacketProtectionKeys(current: PacketProtectionKeys) PacketProtectionKeys {
-    return nextAes128PacketProtectionKeysForVersion(version_1_wire, current);
+    return nextAes128PacketProtectionKeysForVersion(version_1_wire, current) catch unreachable;
 }
 
-pub fn nextAes128PacketProtectionKeysForVersion(version: u32, current: PacketProtectionKeys) PacketProtectionKeys {
-    const next_secret = nextAes128TrafficSecretForVersion(version, current.secret);
-    var next = deriveAes128KeysForVersion(version, next_secret);
+pub fn nextAes128PacketProtectionKeysForVersion(version: u32, current: PacketProtectionKeys) VersionError!PacketProtectionKeys {
+    const next_secret = try nextAes128TrafficSecretForVersion(version, current.secret);
+    var next = try deriveAes128KeysForVersion(version, next_secret);
     next.hp = current.hp;
     return next;
 }
@@ -961,11 +964,14 @@ fn peekShortPacketKeyPhase(
     return (bytes[0] & 0x04) != 0;
 }
 
-fn protectionProfile(version: u32) ProtectionProfile {
+fn protectionProfile(version: u32) VersionError!ProtectionProfile {
     if (version == version_2_wire) {
         return .{ .salt = &initial_salt_v2, .labels = hkdf_labels_v2 };
     }
-    return .{ .salt = &initial_salt_v1, .labels = hkdf_labels_v1 };
+    if (version == version_1_wire) {
+        return .{ .salt = &initial_salt_v1, .labels = hkdf_labels_v1 };
+    }
+    return error.UnsupportedVersion;
 }
 
 fn longHeaderFirstByte(version: u32, packet_type: ProtectedLongPacketType, packet_number_len: u8) u8 {
@@ -1151,7 +1157,7 @@ test "QUIC AES key update derives next traffic keys and retains header protectio
 test "QUIC v2 Initial secrets use v2 salt and labels" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const v1 = deriveInitialSecrets(&dcid);
-    const v2 = deriveInitialSecretsForVersion(version_2_wire, &dcid);
+    const v2 = try deriveInitialSecretsForVersion(version_2_wire, &dcid);
 
     try std.testing.expect(!std.mem.eql(u8, &v1.initial_secret, &v2.initial_secret));
     try std.testing.expect(!std.mem.eql(u8, &v1.client.key, &v2.client.key));
@@ -1160,8 +1166,20 @@ test "QUIC v2 Initial secrets use v2 salt and labels" {
 
     const base = [_]u8{0x46} ** secret_len;
     const v1_next = nextAes128TrafficSecret(base);
-    const v2_next = nextAes128TrafficSecretForVersion(version_2_wire, base);
+    const v2_next = try nextAes128TrafficSecretForVersion(version_2_wire, base);
     try std.testing.expect(!std.mem.eql(u8, &v1_next, &v2_next));
+}
+
+test "QUIC versioned key derivation rejects unsupported versions" {
+    const unsupported_version: u32 = 0xface_b00c;
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secret = [_]u8{0x5a} ** secret_len;
+    const keys = deriveAes128Keys(secret);
+
+    try std.testing.expectError(error.UnsupportedVersion, deriveInitialSecretsForVersion(unsupported_version, &dcid));
+    try std.testing.expectError(error.UnsupportedVersion, deriveAes128KeysForVersion(unsupported_version, secret));
+    try std.testing.expectError(error.UnsupportedVersion, nextAes128TrafficSecretForVersion(unsupported_version, secret));
+    try std.testing.expectError(error.UnsupportedVersion, nextAes128PacketProtectionKeysForVersion(unsupported_version, keys));
 }
 
 test "QUIC key phase state advances and expires retained previous keys" {
@@ -1262,7 +1280,7 @@ test "QUIC v2 Initial and Handshake packet seal/open roundtrip" {
     const version = version_2_wire;
     const dcid = [_]u8{ 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28 };
     const scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
-    const initial_keys = deriveInitialSecretsForVersion(version, &dcid).client;
+    const initial_keys = (try deriveInitialSecretsForVersion(version, &dcid)).client;
     const initial = try sealInitialPacket(allocator, initial_keys, .{
         .version = version,
         .destination_connection_id = &dcid,
@@ -1282,7 +1300,7 @@ test "QUIC v2 Initial and Handshake packet seal/open roundtrip" {
     try std.testing.expectEqual(@as(u64, 1), opened_initial.packet_number);
     try std.testing.expectEqualStrings("v2 initial", opened_initial.payload);
 
-    const handshake_keys = deriveAes128KeysForVersion(version, [_]u8{0x57} ** secret_len);
+    const handshake_keys = try deriveAes128KeysForVersion(version, [_]u8{0x57} ** secret_len);
     const handshake = try sealHandshakePacket(allocator, handshake_keys, .{
         .version = version,
         .destination_connection_id = &dcid,

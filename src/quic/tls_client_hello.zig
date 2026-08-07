@@ -13,7 +13,7 @@ pub const Error = error{
     MissingAlpn,
     KeyExchangeFailed,
     BadFinished,
-} || wire.Error || std.mem.Allocator.Error;
+} || wire.Error || quic.protection.VersionError || std.mem.Allocator.Error;
 
 const handshake_type_client_hello: u8 = 0x01;
 const handshake_type_server_hello: u8 = 0x02;
@@ -342,10 +342,10 @@ pub fn transcriptHash(client_hello: []const u8, server_hello: []const u8) [32]u8
 }
 
 pub fn deriveHandshakeSecrets(shared_secret: [32]u8, transcript_hash: [32]u8) HandshakeSecrets {
-    return deriveHandshakeSecretsForVersion(quic.Version.version_1.wireValue(), shared_secret, transcript_hash);
+    return deriveHandshakeSecretsForVersion(quic.Version.version_1.wireValue(), shared_secret, transcript_hash) catch unreachable;
 }
 
-pub fn deriveHandshakeSecretsForVersion(version: u32, shared_secret: [32]u8, transcript_hash: [32]u8) HandshakeSecrets {
+pub fn deriveHandshakeSecretsForVersion(version: u32, shared_secret: [32]u8, transcript_hash: [32]u8) quic.protection.VersionError!HandshakeSecrets {
     const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
     const zero_secret = [_]u8{0} ** quic.protection.secret_len;
     const early_secret = HkdfSha256.extract(&zero_secret, &.{});
@@ -358,16 +358,16 @@ pub fn deriveHandshakeSecretsForVersion(version: u32, shared_secret: [32]u8, tra
         .handshake_secret = handshake_secret,
         .client_handshake_traffic_secret = client_hs,
         .server_handshake_traffic_secret = server_hs,
-        .client_quic = quic.protection.deriveAes128KeysForVersion(version, client_hs),
-        .server_quic = quic.protection.deriveAes128KeysForVersion(version, server_hs),
+        .client_quic = try quic.protection.deriveAes128KeysForVersion(version, client_hs),
+        .server_quic = try quic.protection.deriveAes128KeysForVersion(version, server_hs),
     };
 }
 
 pub fn deriveApplicationSecrets(handshake_secret: [32]u8, transcript_hash: [32]u8) ApplicationSecrets {
-    return deriveApplicationSecretsForVersion(quic.Version.version_1.wireValue(), handshake_secret, transcript_hash);
+    return deriveApplicationSecretsForVersion(quic.Version.version_1.wireValue(), handshake_secret, transcript_hash) catch unreachable;
 }
 
-pub fn deriveApplicationSecretsForVersion(version: u32, handshake_secret: [32]u8, transcript_hash: [32]u8) ApplicationSecrets {
+pub fn deriveApplicationSecretsForVersion(version: u32, handshake_secret: [32]u8, transcript_hash: [32]u8) quic.protection.VersionError!ApplicationSecrets {
     const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
     const zero_secret = [_]u8{0} ** quic.protection.secret_len;
     const empty_hash = std.crypto.tls.emptyHash(std.crypto.hash.sha2.Sha256);
@@ -379,8 +379,8 @@ pub fn deriveApplicationSecretsForVersion(version: u32, handshake_secret: [32]u8
         .master_secret = master_secret,
         .client_application_traffic_secret = client_ap,
         .server_application_traffic_secret = server_ap,
-        .client_quic = quic.protection.deriveAes128KeysForVersion(version, client_ap),
-        .server_quic = quic.protection.deriveAes128KeysForVersion(version, server_ap),
+        .client_quic = try quic.protection.deriveAes128KeysForVersion(version, client_ap),
+        .server_quic = try quic.protection.deriveAes128KeysForVersion(version, server_ap),
     };
 }
 
@@ -970,17 +970,27 @@ test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
 test "QUIC TLS QUIC keys use version-specific packet-protection labels" {
     const shared = [_]u8{0x33} ** 32;
     const transcript = [_]u8{0x44} ** 32;
-    const v1 = deriveHandshakeSecretsForVersion(quic.Version.version_1.wireValue(), shared, transcript);
-    const v2 = deriveHandshakeSecretsForVersion(quic.Version.version_2.wireValue(), shared, transcript);
+    const v1 = try deriveHandshakeSecretsForVersion(quic.Version.version_1.wireValue(), shared, transcript);
+    const v2 = try deriveHandshakeSecretsForVersion(quic.Version.version_2.wireValue(), shared, transcript);
 
     try std.testing.expectEqualSlices(u8, &v1.handshake_secret, &v2.handshake_secret);
     try std.testing.expectEqualSlices(u8, &v1.client_handshake_traffic_secret, &v2.client_handshake_traffic_secret);
     try std.testing.expect(!std.mem.eql(u8, &v1.client_quic.key, &v2.client_quic.key));
 
-    const app_v1 = deriveApplicationSecretsForVersion(quic.Version.version_1.wireValue(), v1.handshake_secret, transcript);
-    const app_v2 = deriveApplicationSecretsForVersion(quic.Version.version_2.wireValue(), v1.handshake_secret, transcript);
+    const app_v1 = try deriveApplicationSecretsForVersion(quic.Version.version_1.wireValue(), v1.handshake_secret, transcript);
+    const app_v2 = try deriveApplicationSecretsForVersion(quic.Version.version_2.wireValue(), v1.handshake_secret, transcript);
     try std.testing.expectEqualSlices(u8, &app_v1.master_secret, &app_v2.master_secret);
     try std.testing.expect(!std.mem.eql(u8, &app_v1.client_quic.key, &app_v2.client_quic.key));
+}
+
+test "QUIC TLS versioned packet-protection derivation rejects unsupported versions" {
+    const unsupported_version: u32 = 0xface_b00c;
+    const shared = [_]u8{0x35} ** 32;
+    const transcript = [_]u8{0x36} ** 32;
+    const handshake_secret = [_]u8{0x37} ** quic.protection.secret_len;
+
+    try std.testing.expectError(error.UnsupportedVersion, deriveHandshakeSecretsForVersion(unsupported_version, shared, transcript));
+    try std.testing.expectError(error.UnsupportedVersion, deriveApplicationSecretsForVersion(unsupported_version, handshake_secret, transcript));
 }
 
 test "QUIC TLS ClientHello and ServerHello exchange over protected Initial packets" {

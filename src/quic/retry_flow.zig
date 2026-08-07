@@ -1,7 +1,7 @@
 const std = @import("std");
 const quic = @import("mod.zig");
 
-pub const Error = quic.Error || quic.address_validation_token.Error || std.mem.Allocator.Error || error{
+pub const Error = quic.Error || quic.protection.VersionError || quic.address_validation_token.Error || std.mem.Allocator.Error || error{
     RetryAlreadyProcessed,
     InitialAlreadyProcessed,
 };
@@ -255,7 +255,7 @@ pub fn processClient(
     // Retry changes the destination CID used for Initial key derivation.  The
     // first Initial's ODCID remains available separately for later server
     // transport-parameter validation.
-    const retry_initial_secrets = quic.protection.deriveInitialSecretsForVersion(packet.version, owned_rscid);
+    const retry_initial_secrets = try quic.protection.deriveInitialSecretsForVersion(packet.version, owned_rscid);
     var retry_options = base_options;
     retry_options.version = options.version;
     retry_options.retry_source_connection_id = owned_rscid;
@@ -388,7 +388,7 @@ test "QUIC client Retry processing builds retried Initial inputs" {
     try std.testing.expectEqualSlices(u8, &retry_scid, state.retry_source_connection_id);
     try std.testing.expectEqualSlices(
         u8,
-        &quic.protection.deriveInitialSecretsForVersion(quic.Version.version_2.wireValue(), &retry_scid).client.key,
+        &(try quic.protection.deriveInitialSecretsForVersion(quic.Version.version_2.wireValue(), &retry_scid)).client.key,
         &processed.retry_initial_secrets.client.key,
     );
 

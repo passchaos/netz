@@ -201,7 +201,7 @@ fn connectAttempt(
     const client_public = try quic.tls_client_hello.x25519PublicKey(client_secret);
     const client_random = try random32(endpoint.io, options.random);
     const initial_destination_connection_id = clientInitialDestinationConnectionId(options);
-    const initial_secrets = quic.protection.deriveInitialSecretsForVersion(options.version.wireValue(), initial_destination_connection_id);
+    const initial_secrets = try quic.protection.deriveInitialSecretsForVersion(options.version.wireValue(), initial_destination_connection_id);
 
     var local_transport_parameters = options.local_transport_parameters;
     var encoded_transport_parameters: std.ArrayList(u8) = .empty;
@@ -265,7 +265,7 @@ fn connectAttempt(
     const parsed_server = try quic.tls_client_hello.parseServerHello(server_initial.crypto_data);
     const shared = try quic.tls_client_hello.x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
     const hs_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data });
-    const handshake = quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
+    const handshake = try quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
 
     var server_handshake = try receiveServerHandshakeCrypto(
         endpoint,
@@ -313,7 +313,7 @@ fn connectAttempt(
     });
 
     const app_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions, server_flight.finished, client_finished.items });
-    const application = quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
+    const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
     return try establishedConnection(
         endpoint,
         server_initial.from,
@@ -370,7 +370,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         .x25519_public_key = server_public,
     });
     const hs_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items });
-    const handshake = quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
+    const handshake = try quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
 
     var local_transport_parameters = options.local_transport_parameters;
     var encoded_transport_parameters: std.ArrayList(u8) = .empty;
@@ -428,7 +428,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     try quic.tls_client_hello.verifyFinished(handshake.client_handshake_traffic_secret, client_finished_hash, client_verify);
 
     const app_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items, server_finished.items, client_finished.crypto_data });
-    const application = quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
+    const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
     const established = try establishedConnection(
         endpoint,
         client_initial.from,
@@ -524,7 +524,7 @@ fn receiveClientInitial(
     }
 
     if (header.version != version.wireValue()) return error.InvalidInitialPacket;
-    const initial_secrets = quic.protection.deriveInitialSecretsForVersion(version.wireValue(), header.destination_connection_id);
+    const initial_secrets = try quic.protection.deriveInitialSecretsForVersion(version.wireValue(), header.destination_connection_id);
     var packet = try quic.protection.openInitialPacket(endpoint.allocator, initial_secrets.client, datagram.bytes, expected_packet_number);
     errdefer packet.deinit(endpoint.allocator);
 
@@ -1016,7 +1016,7 @@ test "QUIC integrated client rejects mismatched Version Information after VN" {
                 .x25519_public_key = server_public,
             });
             const hs_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items });
-            const handshake = quic.tls_client_hello.deriveHandshakeSecretsForVersion(quic.Version.version_2.wireValue(), shared_secret, hs_hash);
+            const handshake = try quic.tls_client_hello.deriveHandshakeSecretsForVersion(quic.Version.version_2.wireValue(), shared_secret, hs_hash);
 
             var wrong_tp = quic.practical_transport_parameters;
             wrong_tp.original_destination_connection_id = client_initial.packet.destination_connection_id;

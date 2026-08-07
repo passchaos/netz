@@ -430,7 +430,7 @@ test "QUIC Initial CRYPTO exchange supports QUIC v2 packet protection" {
     const version = quic.Version.version_2.wireValue();
     const dcid = [_]u8{ 0xba, 0xdc, 0x0f, 0xfe, 0xe0, 0xdd, 0xf0, 0x0d };
     const scid = [_]u8{ 0x01, 0x03, 0x03, 0x07 };
-    const keys = quic.protection.deriveInitialSecretsForVersion(version, &dcid).client;
+    const keys = (try quic.protection.deriveInitialSecretsForVersion(version, &dcid)).client;
 
     try sendInitialCrypto(&client.endpoint, server.address(), keys, .{
         .version = version,

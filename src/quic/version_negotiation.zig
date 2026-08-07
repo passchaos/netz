@@ -1,7 +1,7 @@
 const std = @import("std");
 const quic = @import("mod.zig");
 
-pub const Error = quic.Error || std.mem.Allocator.Error;
+pub const Error = quic.Error || quic.protection.VersionError || std.mem.Allocator.Error;
 
 pub const ProcessOptions = struct {
     chosen_version: quic.Version = .version_1,
@@ -163,7 +163,7 @@ pub fn processClient(allocator: std.mem.Allocator, options: ProcessOptions, data
     return .{
         .packet = packet,
         .selected_version = selected,
-        .selected_initial_secrets = quic.protection.deriveInitialSecretsForVersion(
+        .selected_initial_secrets = try quic.protection.deriveInitialSecretsForVersion(
             selected.wireValue(),
             options.original_destination_connection_id,
         ),
@@ -238,7 +238,7 @@ test "QUIC client Version Negotiation selects mutual version once" {
 
     try std.testing.expectEqualSlices(
         u8,
-        &quic.protection.deriveInitialSecretsForVersion(quic.Version.version_2.wireValue(), &odcid).client.key,
+        &(try quic.protection.deriveInitialSecretsForVersion(quic.Version.version_2.wireValue(), &odcid)).client.key,
         &processed.selected_initial_secrets.client.key,
     );
 
