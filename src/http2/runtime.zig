@@ -11,12 +11,14 @@ pub const Error = http2.Error || error{
     InvalidStatus,
     InvalidContentLength,
     InvalidHeader,
+    InvalidUri,
     MessageTooLarge,
     FlowControlBlocked,
     FlowControlViolation,
     ExtendedConnectDisabled,
     StreamReset,
     ConnectionGoAway,
+    UnsupportedScheme,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
@@ -254,6 +256,27 @@ pub const Client = struct {
             }
         }
         return connection;
+    }
+
+    pub fn requestUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+    ) Error!OwnedResponse {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
+        var host_buffer: [net.HostName.max_len]u8 = undefined;
+        const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+
+        var connection = try Client.connectHost(allocator, io, host.bytes, uri.port orelse 80, limits);
+        defer connection.close();
+        var options = request_options;
+        options.path = target;
+        return connection.request(options);
     }
 };
 
@@ -1363,6 +1386,21 @@ const ResponseBodySemantics = struct {
     extended_connect: bool = false,
 };
 
+fn uriTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
+    const path_value = uriComponentBytes(uri.path);
+    const path = if (path_value.len == 0) "/" else path_value;
+    if (uri.query) |query| {
+        return try std.fmt.allocPrint(allocator, "{s}?{s}", .{ path, uriComponentBytes(query) });
+    }
+    return try allocator.dupe(u8, path);
+}
+
+fn uriComponentBytes(component: std.Uri.Component) []const u8 {
+    return switch (component) {
+        .raw, .percent_encoded => |value| value,
+    };
+}
+
 pub const OwnedRequest = struct {
     stream_id: u31,
     headers: []http2.Hpack.HeaderField,
@@ -2290,6 +2328,64 @@ test "HTTP/2 client connects by host name" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("h2-dns-ok", response.body);
+}
+
+test "HTTP/2 client sends request to URI" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/h2-uri?x=1", request.path);
+            var expected_authority: [32]u8 = undefined;
+            const rendered_authority = try std.fmt.bufPrint(&expected_authority, "localhost:{d}", .{server_ptr.address().ip4.port});
+            try std.testing.expectEqualStrings(rendered_authority, request.authority.?);
+            try connection.writeResponse(request.stream_id, .{ .body = "h2-uri-ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "http://localhost:{d}/h2-uri?x=1", .{server.address().ip4.port});
+    defer allocator.free(uri);
+    var response = try Client.requestUri(allocator, io, uri, .{}, .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("h2-uri-ok", response.body);
+
+    try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "https://localhost/", .{}, .{}));
+    try std.testing.expectError(error.InvalidUri, Client.requestUri(allocator, io, "http:///missing-host", .{}, .{}));
 }
 
 test "HTTP/2 readPing ignores ACK frames" {

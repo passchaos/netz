@@ -30,7 +30,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body/Content-Length rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
   open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis,
-  host-name DNS connect helpers and a `std.Io.async` concurrent server helper
+  `http://` URI and host-name DNS connect helpers, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs,
