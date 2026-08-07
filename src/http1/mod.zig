@@ -721,7 +721,8 @@ pub fn validateConnectTarget(target: []const u8) Error!void {
 
 pub fn validateRequestHost(request: Request) Error!void {
     const host = try validateHostHeaderBlockValue(request.version, request.headers);
-    if (absoluteFormAuthority(request.target)) |authority| {
+    if (std.mem.indexOf(u8, request.target, "://") != null) {
+        const authority = absoluteFormAuthority(request.target) orelse return error.InvalidHost;
         try validateHostValue(authority);
         if (host) |host_value| {
             if (!std.ascii.eqlIgnoreCase(wire.trimOws(host_value), authority)) return error.InvalidHost;
@@ -1097,6 +1098,16 @@ test "HTTP/1 validates absolute-form authority against Host" {
     var invalid = try parseRequest(allocator, invalid_authority, .{});
     defer invalid.deinit(allocator);
     try std.testing.expectError(error.InvalidHost, validateRequestHost(invalid));
+
+    const missing_authority = "GET http:///proxy HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    var missing_authority_req = try parseRequest(allocator, missing_authority, .{});
+    defer missing_authority_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHost, validateRequestHost(missing_authority_req));
+
+    const empty_authority = "GET http://?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    var empty_authority_req = try parseRequest(allocator, empty_authority, .{});
+    defer empty_authority_req.deinit(allocator);
+    try std.testing.expectError(error.InvalidHost, validateRequestHost(empty_authority_req));
 }
 
 test "HTTP/1 writers reject forbidden response bodies" {
