@@ -3711,6 +3711,10 @@ pub const rtcp = struct {
         name: [4]u8,
         data: []const u8 = &.{},
 
+        pub fn wireLen(self: ApplicationDefined) usize {
+            return 12 + std.mem.alignForward(usize, self.data.len, 4);
+        }
+
         pub fn deinit(self: *ApplicationDefined, allocator: std.mem.Allocator) void {
             allocator.free(@constCast(self.data));
             self.* = undefined;
@@ -3720,6 +3724,11 @@ pub const rtcp = struct {
     pub const Goodbye = struct {
         sources: []u32 = &.{},
         reason: []const u8 = &.{},
+
+        pub fn wireLen(self: Goodbye) usize {
+            const reason_len = if (self.reason.len == 0) 0 else 1 + self.reason.len;
+            return std.mem.alignForward(usize, 4 + self.sources.len * 4 + reason_len, 4);
+        }
 
         pub fn deinit(self: *Goodbye, allocator: std.mem.Allocator) void {
             allocator.free(self.sources);
@@ -3743,15 +3752,32 @@ pub const rtcp = struct {
     pub const SdesItem = struct {
         item_type: SdesItemType,
         value: []const u8,
+
+        pub fn wireLen(self: SdesItem) usize {
+            return if (self.item_type == .end) 1 else 2 + self.value.len;
+        }
     };
 
     pub const SdesChunk = struct {
         ssrc: u32,
         items: []SdesItem,
+
+        pub fn wireLen(self: SdesChunk) usize {
+            var len: usize = 4;
+            for (self.items) |item| len += item.wireLen();
+            len += 1; // END item.
+            return std.mem.alignForward(usize, len, 4);
+        }
     };
 
     pub const SourceDescription = struct {
         chunks: []SdesChunk,
+
+        pub fn wireLen(self: SourceDescription) usize {
+            var len: usize = 4;
+            for (self.chunks) |chunk| len += chunk.wireLen();
+            return len;
+        }
 
         pub fn deinit(self: *SourceDescription, allocator: std.mem.Allocator) void {
             for (self.chunks) |chunk| allocator.free(chunk.items);
@@ -9365,9 +9391,13 @@ test "RTCP SDES and compound packets" {
     try std.testing.expectEqual(@as(u32, 0x01020304), parsed[0].receiver_report.sender_ssrc);
     try std.testing.expectEqualStrings("alice@example.test", parsed[1].source_description.cname(0x01020304).?);
     try std.testing.expectEqualStrings("alice@example.test", try rtcp.compoundCname(parsed));
+    try std.testing.expectEqual(@as(usize, 20), parsed[1].source_description.chunks[0].items[0].wireLen());
+    try std.testing.expectEqual(@as(usize, 28), parsed[1].source_description.chunks[0].wireLen());
+    try std.testing.expectEqual(@as(usize, 32), parsed[1].source_description.wireLen());
     try std.testing.expectEqual(@as(u32, 0x11121314), parsed[2].picture_loss_indication.media_ssrc);
     try std.testing.expectEqual(@as(u32, 0x01020304), parsed[3].goodbye.sources[0]);
     try std.testing.expectEqualStrings("done", parsed[3].goodbye.reason);
+    try std.testing.expectEqual(@as(usize, 16), parsed[3].goodbye.wireLen());
     const empty_compound_destinations = try rtcp.compoundDestinationSsrcs(allocator, parsed);
     defer allocator.free(empty_compound_destinations);
     try std.testing.expectEqual(@as(usize, 0), empty_compound_destinations.len);
@@ -9480,6 +9510,7 @@ test "RTCP application-defined APP packets" {
     try std.testing.expectEqual(@as(u32, 0x4baae1ab), parsed.packet.application_defined.ssrc);
     try std.testing.expectEqualStrings("NAME", &parsed.packet.application_defined.name);
     try std.testing.expectEqualStrings("ABCD", parsed.packet.application_defined.data);
+    try std.testing.expectEqual(@as(usize, 16), parsed.packet.application_defined.wireLen());
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, .{ .application_defined = .{
@@ -9498,6 +9529,7 @@ test "RTCP application-defined APP packets" {
     defer padded.deinit(allocator);
     try std.testing.expectEqual(@as(u5, 0), padded.packet.application_defined.subtype);
     try std.testing.expectEqualStrings("ABCDE", padded.packet.application_defined.data);
+    try std.testing.expectEqual(@as(usize, 20), padded.packet.application_defined.wireLen());
 
     try std.testing.expectError(error.BufferTooShort, rtcp.parsePacket(allocator, &.{
         0x80, 0xcc, 0x00, 0x02,
