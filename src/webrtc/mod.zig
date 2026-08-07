@@ -2723,6 +2723,34 @@ pub const rtcp = struct {
         block_length_words: u16 = 0,
     };
 
+    pub const XrChunk = u16;
+
+    pub const RleReportBlock = struct {
+        thinning: u4 = 0,
+        ssrc: u32,
+        begin_sequence: u16,
+        end_sequence: u16,
+        chunks: []XrChunk = &.{},
+
+        pub fn deinit(self: *RleReportBlock, allocator: std.mem.Allocator) void {
+            allocator.free(self.chunks);
+            self.* = undefined;
+        }
+    };
+
+    pub const PacketReceiptTimesReportBlock = struct {
+        thinning: u4 = 0,
+        ssrc: u32,
+        begin_sequence: u16,
+        end_sequence: u16,
+        receipt_times: []u32 = &.{},
+
+        pub fn deinit(self: *PacketReceiptTimesReportBlock, allocator: std.mem.Allocator) void {
+            allocator.free(self.receipt_times);
+            self.* = undefined;
+        }
+    };
+
     pub const DlrrReport = struct {
         ssrc: u32,
         last_rr: u32,
@@ -2749,12 +2777,18 @@ pub const rtcp = struct {
     };
 
     pub const XrBlock = union(enum) {
+        loss_rle: RleReportBlock,
+        duplicate_rle: RleReportBlock,
+        packet_receipt_times: PacketReceiptTimesReportBlock,
         receiver_reference_time: u64,
         dlrr: DlrrReportBlock,
         unknown: UnknownXrBlock,
 
         pub fn deinit(self: *XrBlock, allocator: std.mem.Allocator) void {
             switch (self.*) {
+                .loss_rle => |*rle| rle.deinit(allocator),
+                .duplicate_rle => |*rle| rle.deinit(allocator),
+                .packet_receipt_times => |*receipt| receipt.deinit(allocator),
                 .dlrr => |*dlrr| dlrr.deinit(allocator),
                 .unknown => |*unknown| unknown.deinit(allocator),
                 else => {},
@@ -3469,6 +3503,9 @@ pub const rtcp = struct {
 
     fn parseXrBlock(allocator: std.mem.Allocator, header: XrHeader, payload: []const u8) Error!XrBlock {
         switch (header.block_type) {
+            .loss_rle => return .{ .loss_rle = try parseRleReportBlock(allocator, header, payload) },
+            .duplicate_rle => return .{ .duplicate_rle = try parseRleReportBlock(allocator, header, payload) },
+            .packet_receipt_times => return .{ .packet_receipt_times = try parsePacketReceiptTimesReportBlock(allocator, header, payload) },
             .receiver_reference_time => {
                 if (header.type_specific != 0 or header.block_length_words != 2 or payload.len != 8) return error.InvalidRtcpPacket;
                 return .{ .receiver_reference_time = std.mem.readInt(u64, payload[0..8], .big) };
@@ -3493,6 +3530,44 @@ pub const rtcp = struct {
                 return .{ .unknown = .{ .header = header, .payload = copy } };
             },
         }
+    }
+
+    fn parseRleReportBlock(allocator: std.mem.Allocator, header: XrHeader, payload: []const u8) Error!RleReportBlock {
+        if (payload.len < 8 or (payload.len % 2) != 0) return error.InvalidRtcpPacket;
+        const chunk_count = (payload.len - 8) / 2;
+        const chunks = try allocator.alloc(XrChunk, chunk_count);
+        errdefer allocator.free(chunks);
+        var cursor = wire.Cursor.init(payload);
+        const ssrc = try cursor.readInt(u32, .big);
+        const begin_sequence = try cursor.readInt(u16, .big);
+        const end_sequence = try cursor.readInt(u16, .big);
+        for (chunks) |*chunk| chunk.* = try cursor.readInt(u16, .big);
+        return .{
+            .thinning = @intCast(header.type_specific & 0x0f),
+            .ssrc = ssrc,
+            .begin_sequence = begin_sequence,
+            .end_sequence = end_sequence,
+            .chunks = chunks,
+        };
+    }
+
+    fn parsePacketReceiptTimesReportBlock(allocator: std.mem.Allocator, header: XrHeader, payload: []const u8) Error!PacketReceiptTimesReportBlock {
+        if (payload.len < 8 or ((payload.len - 8) % 4) != 0) return error.InvalidRtcpPacket;
+        const receipt_count = (payload.len - 8) / 4;
+        const receipt_times = try allocator.alloc(u32, receipt_count);
+        errdefer allocator.free(receipt_times);
+        var cursor = wire.Cursor.init(payload);
+        const ssrc = try cursor.readInt(u32, .big);
+        const begin_sequence = try cursor.readInt(u16, .big);
+        const end_sequence = try cursor.readInt(u16, .big);
+        for (receipt_times) |*receipt_time| receipt_time.* = try cursor.readInt(u32, .big);
+        return .{
+            .thinning = @intCast(header.type_specific & 0x0f),
+            .ssrc = ssrc,
+            .begin_sequence = begin_sequence,
+            .end_sequence = end_sequence,
+            .receipt_times = receipt_times,
+        };
     }
 
     fn parseSourceDescription(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!SourceDescription {
@@ -3767,6 +3842,9 @@ pub const rtcp = struct {
 
     fn writeXrBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, block: XrBlock) Error!void {
         switch (block) {
+            .loss_rle => |rle| try writeRleReportBlock(list, allocator, .loss_rle, rle),
+            .duplicate_rle => |rle| try writeRleReportBlock(list, allocator, .duplicate_rle, rle),
+            .packet_receipt_times => |receipt| try writePacketReceiptTimesReportBlock(list, allocator, receipt),
             .receiver_reference_time => |ntp| {
                 try writeXrBlockHeader(list, allocator, .receiver_reference_time, 0, 2);
                 try wire.appendInt(list, allocator, u64, ntp, .big);
@@ -3789,6 +3867,27 @@ pub const rtcp = struct {
                 try list.appendSlice(allocator, unknown.payload);
             },
         }
+    }
+
+    fn writeRleReportBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, block_type: XrBlockType, rle: RleReportBlock) Error!void {
+        if (rle.chunks.len > (max_rtcp_payload_len - 8) / 2) return error.InvalidRtcpPacket;
+        const payload_len = 8 + rle.chunks.len * 2;
+        if ((payload_len % 4) != 0) return error.InvalidRtcpPacket;
+        try writeXrBlockHeader(list, allocator, block_type, rle.thinning & 0x0f, @intCast(payload_len / 4));
+        try wire.appendInt(list, allocator, u32, rle.ssrc, .big);
+        try wire.appendInt(list, allocator, u16, rle.begin_sequence, .big);
+        try wire.appendInt(list, allocator, u16, rle.end_sequence, .big);
+        for (rle.chunks) |chunk| try wire.appendInt(list, allocator, u16, chunk, .big);
+    }
+
+    fn writePacketReceiptTimesReportBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, receipt: PacketReceiptTimesReportBlock) Error!void {
+        if (receipt.receipt_times.len > (max_rtcp_payload_len - 8) / 4) return error.InvalidRtcpPacket;
+        const payload_len = 8 + receipt.receipt_times.len * 4;
+        try writeXrBlockHeader(list, allocator, .packet_receipt_times, receipt.thinning & 0x0f, @intCast(payload_len / 4));
+        try wire.appendInt(list, allocator, u32, receipt.ssrc, .big);
+        try wire.appendInt(list, allocator, u16, receipt.begin_sequence, .big);
+        try wire.appendInt(list, allocator, u16, receipt.end_sequence, .big);
+        for (receipt.receipt_times) |receipt_time| try wire.appendInt(list, allocator, u32, receipt_time, .big);
     }
 
     fn writeXrBlockHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocator, block_type: XrBlockType, type_specific: u8, block_length_words: u16) Error!void {
@@ -6770,8 +6869,26 @@ test "RTCP receiver report and feedback packets" {
     }, encoded.items);
 
     const xr_wire = [_]u8{
-        0x80, 0xcf, 0x00, 0x0d,
+        0x80, 0xcf, 0x00, 0x1f,
         0x01, 0x02, 0x03, 0x04,
+        0x01, 0x0c, 0x00, 0x04,
+        0x12, 0x34, 0x56, 0x89,
+        0x00, 0x05, 0x00, 0x0c,
+        0x40, 0x06, 0x00, 0x06,
+        0x87, 0x65, 0x00, 0x00,
+        0x02, 0x06, 0x00, 0x04,
+        0x12, 0x34, 0x56, 0x89,
+        0x00, 0x05, 0x00, 0x0c,
+        0x41, 0x23, 0x3f, 0xff,
+        0xff, 0xff, 0x00, 0x00,
+        0x03, 0x03, 0x00, 0x07,
+        0x98, 0x76, 0x54, 0x32,
+        0x3c, 0x48, 0x3c, 0xd9,
+        0x11, 0x11, 0x11, 0x11,
+        0x22, 0x22, 0x22, 0x22,
+        0x33, 0x33, 0x33, 0x33,
+        0x44, 0x44, 0x44, 0x44,
+        0x55, 0x55, 0x55, 0x55,
         0x04, 0x00, 0x00, 0x02,
         0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08,
@@ -6788,16 +6905,28 @@ test "RTCP receiver report and feedback packets" {
     var xr = try rtcp.parsePacket(allocator, &xr_wire);
     defer xr.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x01020304), xr.packet.extended_report.sender_ssrc);
-    try std.testing.expectEqual(@as(usize, 3), xr.packet.extended_report.blocks.len);
-    try std.testing.expectEqual(@as(u64, 0x0102030405060708), xr.packet.extended_report.blocks[0].receiver_reference_time);
-    try std.testing.expectEqual(@as(usize, 2), xr.packet.extended_report.blocks[1].dlrr.reports.len);
-    try std.testing.expectEqual(@as(u32, 0x88888888), xr.packet.extended_report.blocks[1].dlrr.reports[0].ssrc);
-    try std.testing.expectEqual(@as(u32, 0x12345678), xr.packet.extended_report.blocks[1].dlrr.reports[0].last_rr);
-    try std.testing.expectEqual(@as(u32, 0x99999999), xr.packet.extended_report.blocks[1].dlrr.reports[0].dlrr);
-    try std.testing.expectEqual(@as(u32, 0x09090909), xr.packet.extended_report.blocks[1].dlrr.reports[1].ssrc);
-    try std.testing.expectEqual(@as(u8, 0xab), xr.packet.extended_report.blocks[2].unknown.header.type_specific);
-    try std.testing.expectEqual(@as(rtcp.XrBlockType, @enumFromInt(0x63)), xr.packet.extended_report.blocks[2].unknown.header.block_type);
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad, 0xbe, 0xef }, xr.packet.extended_report.blocks[2].unknown.payload);
+    try std.testing.expectEqual(@as(usize, 6), xr.packet.extended_report.blocks.len);
+    try std.testing.expectEqual(@as(u4, 12), xr.packet.extended_report.blocks[0].loss_rle.thinning);
+    try std.testing.expectEqual(@as(u32, 0x12345689), xr.packet.extended_report.blocks[0].loss_rle.ssrc);
+    try std.testing.expectEqual(@as(u16, 5), xr.packet.extended_report.blocks[0].loss_rle.begin_sequence);
+    try std.testing.expectEqual(@as(u16, 0x4006), xr.packet.extended_report.blocks[0].loss_rle.chunks[0]);
+    try std.testing.expectEqual(@as(u4, 6), xr.packet.extended_report.blocks[1].duplicate_rle.thinning);
+    try std.testing.expectEqual(@as(u16, 0x4123), xr.packet.extended_report.blocks[1].duplicate_rle.chunks[0]);
+    try std.testing.expectEqual(@as(u4, 3), xr.packet.extended_report.blocks[2].packet_receipt_times.thinning);
+    try std.testing.expectEqual(@as(u32, 0x98765432), xr.packet.extended_report.blocks[2].packet_receipt_times.ssrc);
+    try std.testing.expectEqual(@as(u16, 15432), xr.packet.extended_report.blocks[2].packet_receipt_times.begin_sequence);
+    try std.testing.expectEqual(@as(u16, 15577), xr.packet.extended_report.blocks[2].packet_receipt_times.end_sequence);
+    try std.testing.expectEqual(@as(usize, 5), xr.packet.extended_report.blocks[2].packet_receipt_times.receipt_times.len);
+    try std.testing.expectEqual(@as(u32, 0x33333333), xr.packet.extended_report.blocks[2].packet_receipt_times.receipt_times[2]);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), xr.packet.extended_report.blocks[3].receiver_reference_time);
+    try std.testing.expectEqual(@as(usize, 2), xr.packet.extended_report.blocks[4].dlrr.reports.len);
+    try std.testing.expectEqual(@as(u32, 0x88888888), xr.packet.extended_report.blocks[4].dlrr.reports[0].ssrc);
+    try std.testing.expectEqual(@as(u32, 0x12345678), xr.packet.extended_report.blocks[4].dlrr.reports[0].last_rr);
+    try std.testing.expectEqual(@as(u32, 0x99999999), xr.packet.extended_report.blocks[4].dlrr.reports[0].dlrr);
+    try std.testing.expectEqual(@as(u32, 0x09090909), xr.packet.extended_report.blocks[4].dlrr.reports[1].ssrc);
+    try std.testing.expectEqual(@as(u8, 0xab), xr.packet.extended_report.blocks[5].unknown.header.type_specific);
+    try std.testing.expectEqual(@as(rtcp.XrBlockType, @enumFromInt(0x63)), xr.packet.extended_report.blocks[5].unknown.header.block_type);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad, 0xbe, 0xef }, xr.packet.extended_report.blocks[5].unknown.payload);
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, xr.packet);
