@@ -40,6 +40,7 @@ Zig 0.16 includes two related APIs:
   the analogous `Client.connectUriLinuxIoUring` for cleartext `ws://`
   IP-literal clients. The Linux examples demonstrate those reusable paths.
 
-Because netz runtimes take a `std.Io` value, they can switch to the standard
-Uring backend as soon as Zig wires networking into it. The raw Linux example is
-kept separate so portable examples still run on non-Linux targets.
+Because netz runtimes take a `std.Io` value, protocol code stays backend-neutral.
+`netz.runtime.Backend` centralizes Evented-vs-Threaded selection so applications
+can opt into Evented mode without scattering platform checks through protocol
+implementations.

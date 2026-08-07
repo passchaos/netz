@@ -246,12 +246,12 @@ literals such as `http://[::1]:8080/` and `ws://[::1]:8080/chat`.
 
 On Zig 0.16, `std.Io.Uring` exists but its `std.Io.net` networking hooks are
 still unavailable. The portable runtimes therefore use the `std.Io` abstraction
-with `std.Io.Threaded` in portable examples. Linux-only HTTP/1 and cleartext
-WebSocket client helpers (`requestUriLinuxIoUring` / `connectUriLinuxIoUring`)
-use raw `std.os.linux.IoUring` `connect`/`send`/`recv` operations for IP-literal
-URIs. `examples/linux_io_uring_http1.zig`,
-`examples/linux_io_uring_http1_server.zig`, and
-`examples/linux_io_uring_websocket.zig` demonstrate the client and server paths.
+through `netz.runtime.Backend.initAuto(.evented_then_threaded)`, which keeps
+protocol modules on the `std.Io` abstraction and falls back to `std.Io.Threaded`
+when the pinned Zig stdlib cannot compile/use Evented networking. Linux-only
+HTTP/1 and cleartext WebSocket helpers (`requestUriLinuxIoUring` /
+`connectUriLinuxIoUring`) remain available for raw `std.os.linux.IoUring`
+experiments on IP-literal URIs; the Linux examples demonstrate those paths.
 
 Handshake-backed WebTransport sessions expose the negotiated DATAGRAM budget so
 callers can avoid sending a payload the underlying QUIC peer will reject:

@@ -30,9 +30,10 @@ pub fn main() !void {
     );
     defer server.deinit();
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.initAuto(allocator, .evented_then_threaded);
+    defer backend.deinit();
+    const io = backend.io();
+    std.debug.print("std.Io backend: {t}\n", .{backend.kind});
 
     const Shared = struct {
         server: *netz.http1.runtime.LinuxIoUringServer,

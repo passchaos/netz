@@ -6,14 +6,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Zig 0.16 exposes std.Io.Uring on Linux, but its std.Io networking
-    // vtable currently marks listen/connect/read/write as unavailable.  These
-    // protocol runtimes accept any std.Io backend, so this can switch to Uring
-    // once Zig wires networking into that backend; today Threaded is the
-    // portable backend that can actually drive TCP.
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try netz.runtime.Backend.initAuto(allocator, .evented_then_threaded);
+    defer backend.deinit();
+    const io = backend.io();
+    std.debug.print("std.Io backend: {t}\n", .{backend.kind});
 
     var server = try netz.http1.runtime.Server.listen(
         allocator,
