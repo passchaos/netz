@@ -774,6 +774,25 @@ pub const sdp = struct {
         server,
     };
 
+    pub const RtcpFeedback = struct {
+        typ: []const u8,
+        parameter: []const u8 = "",
+    };
+
+    pub const RtpCodec = struct {
+        payload_type: u8,
+        mime_type: []const u8,
+        clock_rate: u32,
+        channels: u16 = 0,
+        fmtp: []const u8 = "",
+        rtcp_feedback: []RtcpFeedback = &.{},
+
+        pub fn deinit(self: *RtpCodec, allocator: std.mem.Allocator) void {
+            allocator.free(self.rtcp_feedback);
+            self.* = undefined;
+        }
+    };
+
     pub const DtlsSetupRole = enum {
         actpass,
         active,
@@ -1142,6 +1161,32 @@ pub const sdp = struct {
         };
     }
 
+    pub fn extractRtpCodecs(allocator: std.mem.Allocator, media: Media) Error![]RtpCodec {
+        var codecs: std.ArrayList(RtpCodec) = .empty;
+        errdefer {
+            for (codecs.items) |*codec| codec.deinit(allocator);
+            codecs.deinit(allocator);
+        }
+
+        var payloads = std.mem.tokenizeAny(u8, media.formats, " \t");
+        while (payloads.next()) |payload_token| {
+            const payload_type = std.fmt.parseInt(u8, payload_token, 10) catch return error.InvalidSdp;
+            const rtpmap = findPayloadAttribute(media.attributes, "rtpmap", payload_type) orelse return error.InvalidSdp;
+            var codec = try parseRtpMap(payload_type, media.kind, rtpmap);
+            errdefer codec.deinit(allocator);
+            if (findPayloadAttribute(media.attributes, "fmtp", payload_type)) |fmtp| codec.fmtp = fmtp;
+            codec.rtcp_feedback = try collectRtcpFeedback(allocator, media.attributes, payload_type);
+            try codecs.append(allocator, codec);
+            codec.rtcp_feedback = &.{};
+        }
+        return codecs.toOwnedSlice(allocator);
+    }
+
+    pub fn freeRtpCodecs(allocator: std.mem.Allocator, codecs: []RtpCodec) void {
+        for (codecs) |*codec| codec.deinit(allocator);
+        allocator.free(codecs);
+    }
+
     pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
         for (attrs) |attr| {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
@@ -1185,6 +1230,60 @@ pub const sdp = struct {
         const port = std.fmt.parseInt(u16, value, 10) catch return null;
         if (port == 0) return null;
         return port;
+    }
+
+    fn parseRtpMap(payload_type: u8, media_kind: []const u8, raw: []const u8) Error!RtpCodec {
+        var parts = std.mem.tokenizeAny(u8, raw, " \t");
+        const encoding = parts.next() orelse return error.InvalidSdp;
+        if (parts.next() != null) return error.InvalidSdp;
+
+        var encoding_parts = std.mem.splitScalar(u8, encoding, '/');
+        const codec_name = encoding_parts.next() orelse return error.InvalidSdp;
+        const clock_s = encoding_parts.next() orelse return error.InvalidSdp;
+        const channels_s = encoding_parts.next();
+        if (encoding_parts.next() != null or codec_name.len == 0 or clock_s.len == 0) return error.InvalidSdp;
+
+        return .{
+            .payload_type = payload_type,
+            .mime_type = codec_name,
+            .clock_rate = std.fmt.parseInt(u32, clock_s, 10) catch return error.InvalidSdp,
+            .channels = if (channels_s) |channels| std.fmt.parseInt(u16, channels, 10) catch return error.InvalidSdp else defaultCodecChannels(media_kind),
+        };
+    }
+
+    fn defaultCodecChannels(media_kind: []const u8) u16 {
+        return if (std.ascii.eqlIgnoreCase(media_kind, "audio")) 1 else 0;
+    }
+
+    fn findPayloadAttribute(attrs: []const Attribute, name: []const u8, payload_type: u8) ?[]const u8 {
+        for (attrs) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, name)) continue;
+            var parts = std.mem.tokenizeAny(u8, attr.value, " \t");
+            const payload_s = parts.next() orelse continue;
+            const payload = std.fmt.parseInt(u8, payload_s, 10) catch continue;
+            if (payload != payload_type) continue;
+            const value_start = payload_s.len;
+            return std.mem.trim(u8, attr.value[value_start..], " \t");
+        }
+        return null;
+    }
+
+    fn collectRtcpFeedback(allocator: std.mem.Allocator, attrs: []const Attribute, payload_type: u8) Error![]RtcpFeedback {
+        var feedback: std.ArrayList(RtcpFeedback) = .empty;
+        errdefer feedback.deinit(allocator);
+        for (attrs) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, "rtcp-fb")) continue;
+            var parts = std.mem.tokenizeAny(u8, attr.value, " \t");
+            const payload_s = parts.next() orelse return error.InvalidSdp;
+            if (!std.mem.eql(u8, payload_s, "*")) {
+                const payload = std.fmt.parseInt(u8, payload_s, 10) catch return error.InvalidSdp;
+                if (payload != payload_type) continue;
+            }
+            const typ = parts.next() orelse return error.InvalidSdp;
+            const parameter = parts.rest();
+            try feedback.append(allocator, .{ .typ = typ, .parameter = std.mem.trim(u8, parameter, " \t") });
+        }
+        return feedback.toOwnedSlice(allocator);
     }
 
     fn parseMaxMessageSize(value: ?[]const u8) Error!u32 {
@@ -4741,6 +4840,33 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("attrs", parsed_extmap.extension_attributes);
 
     try std.testing.expectError(error.InvalidSdp, sdp.parseExtMapAttribute("0 " ++ sdp.sdes_mid_uri));
+
+    const codec_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=rtpmap:111 opus/48000/2\r\n" ++
+        "a=fmtp:111 minptime=10;useinbandfec=1\r\n" ++
+        "a=rtcp-fb:111 goog-remb\r\n" ++
+        "a=rtcp-fb:111 ccm fir\r\n" ++
+        "a=rtcp-fb:* nack\r\n";
+    var codec_session = try sdp.parse(allocator, codec_text);
+    defer codec_session.deinit(allocator);
+    const codecs = try sdp.extractRtpCodecs(allocator, codec_session.media[0]);
+    defer sdp.freeRtpCodecs(allocator, codecs);
+    try std.testing.expectEqual(@as(usize, 1), codecs.len);
+    try std.testing.expectEqual(@as(u8, 111), codecs[0].payload_type);
+    try std.testing.expectEqualStrings("opus", codecs[0].mime_type);
+    try std.testing.expectEqual(@as(u32, 48000), codecs[0].clock_rate);
+    try std.testing.expectEqual(@as(u16, 2), codecs[0].channels);
+    try std.testing.expectEqualStrings("minptime=10;useinbandfec=1", codecs[0].fmtp);
+    try std.testing.expectEqual(@as(usize, 3), codecs[0].rtcp_feedback.len);
+    try std.testing.expectEqualStrings("goog-remb", codecs[0].rtcp_feedback[0].typ);
+    try std.testing.expectEqualStrings("", codecs[0].rtcp_feedback[0].parameter);
+    try std.testing.expectEqualStrings("ccm", codecs[0].rtcp_feedback[1].typ);
+    try std.testing.expectEqualStrings("fir", codecs[0].rtcp_feedback[1].parameter);
+    try std.testing.expectEqualStrings("nack", codecs[0].rtcp_feedback[2].typ);
 
     const media_only =
         "v=0\r\n" ++
