@@ -3640,6 +3640,12 @@ pub const rtcp = struct {
         feedback_packet_count: u8,
         packets: []TwccPacketResult,
 
+        pub fn packetForSequence(self: TransportWideCc, sequence_number: u16) ?TwccPacketResult {
+            const delta = sequence_number -% self.base_sequence_number;
+            if (delta >= self.packets.len) return null;
+            return self.packets[delta];
+        }
+
         pub fn deinit(self: *TransportWideCc, allocator: std.mem.Allocator) void {
             allocator.free(self.packets);
             self.* = undefined;
@@ -8817,6 +8823,23 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(@as(i16, -3), parsed.packet.transport_wide_cc.packets[2].delta_ticks);
     try std.testing.expect(parsed.packet.transport_wide_cc.packets[3].received());
     try std.testing.expectEqual(@as(i16, 0), parsed.packet.transport_wide_cc.packets[3].delta_ticks);
+    try std.testing.expectEqual(@as(i16, 4), parsed.packet.transport_wide_cc.packetForSequence(500).?.delta_ticks);
+    try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, parsed.packet.transport_wide_cc.packetForSequence(501).?.status);
+    try std.testing.expectEqual(@as(i16, -3), parsed.packet.transport_wide_cc.packetForSequence(502).?.delta_ticks);
+    try std.testing.expect(parsed.packet.transport_wide_cc.packetForSequence(505) == null);
+
+    const wrap_twcc = rtcp.TransportWideCc{
+        .sender_ssrc = 1,
+        .media_ssrc = 2,
+        .base_sequence_number = 0xfffe,
+        .reference_time_64ms = 0,
+        .feedback_packet_count = 0,
+        .packets = &packet_results,
+    };
+    try std.testing.expectEqual(@as(i16, 4), wrap_twcc.packetForSequence(0xfffe).?.delta_ticks);
+    try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, wrap_twcc.packetForSequence(0xffff).?.status);
+    try std.testing.expectEqual(@as(i16, -3), wrap_twcc.packetForSequence(0).?.delta_ticks);
+    try std.testing.expect(wrap_twcc.packetForSequence(3) == null);
 
     // Also parse a hand-built status-vector chunk.  The writer intentionally
     // emits simple run-length chunks for predictable output; receivers still
