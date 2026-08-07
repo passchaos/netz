@@ -128,6 +128,10 @@ pub const Peer = struct {
         return self.endpoint.receiveDtlsRecord();
     }
 
+    pub fn receiveDtlsRecords(self: *Peer) Error!DtlsRecordsDatagram {
+        return self.endpoint.receiveDtlsRecords();
+    }
+
     pub fn receiveManyConcurrent(self: *Peer, count: usize) Error!PeerDatagramBatch {
         return self.endpoint.receiveManyConcurrent(count);
     }
@@ -447,6 +451,20 @@ pub const PeerEndpoint = struct {
         }
     }
 
+    pub fn receiveDtlsRecords(self: *PeerEndpoint) Error!DtlsRecordsDatagram {
+        while (true) {
+            var raw = try self.receiveRaw();
+            errdefer raw.deinit(self.allocator);
+            if (!looksLikeDtls(raw.bytes)) {
+                raw.deinit(self.allocator);
+                continue;
+            }
+            const records = try webrtc.dtls.parseRecords(self.allocator, raw.bytes);
+            errdefer webrtc.dtls.freeRecords(self.allocator, records);
+            return .{ .from = raw.from, .bytes = raw.bytes, .records = records };
+        }
+    }
+
     pub fn receiveAny(self: *PeerEndpoint) Error!PeerDatagram {
         while (true) {
             var raw = try self.receiveRaw();
@@ -707,6 +725,18 @@ pub const DtlsDatagram = struct {
     record: webrtc.dtls.Record,
 
     pub fn deinit(self: *DtlsDatagram, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+pub const DtlsRecordsDatagram = struct {
+    from: net.IpAddress,
+    bytes: []u8,
+    records: []webrtc.dtls.Record,
+
+    pub fn deinit(self: *DtlsRecordsDatagram, allocator: std.mem.Allocator) void {
+        webrtc.dtls.freeRecords(allocator, self.records);
         allocator.free(self.bytes);
         self.* = undefined;
     }
@@ -1430,6 +1460,43 @@ test "WebRTC peer runtime sends authenticated reduced-size SRTCP packets" {
     try std.testing.expectEqual(@as(usize, 2), protected.authenticated.rtcp.len);
     try std.testing.expectEqual(@as(u32, 0x31323334), protected.authenticated.rtcp[0].picture_loss_indication.media_ssrc);
     try std.testing.expectEqual(@as(u32, 0x41424344), protected.authenticated.rtcp[1].rapid_resynchronization_request.media_ssrc);
+}
+
+test "WebRTC peer runtime receives multi-record DTLS datagrams" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer receiver.deinit();
+    var sender = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer sender.deinit();
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try webrtc.dtls.writeRecord(&encoded, allocator, .{
+        .content_type = .handshake,
+        .epoch = 0,
+        .sequence_number = 1,
+    }, "hello");
+    try webrtc.dtls.writeRecord(&encoded, allocator, .{
+        .content_type = .alert,
+        .epoch = 0,
+        .sequence_number = 2,
+    }, "warn");
+    try sender.endpoint.sendBytes(receiver.address(), encoded.items);
+
+    var datagram = try receiver.receiveDtlsRecords();
+    defer datagram.deinit(allocator);
+    try std.testing.expect(datagram.from.eql(&sender.address()));
+    try std.testing.expectEqual(@as(usize, 2), datagram.records.len);
+    try std.testing.expectEqual(webrtc.dtls.ContentType.handshake, datagram.records[0].content_type);
+    try std.testing.expectEqualStrings("hello", datagram.records[0].fragment);
+    try std.testing.expectEqual(webrtc.dtls.ContentType.alert, datagram.records[1].content_type);
+    try std.testing.expectEqual(@as(u48, 2), datagram.records[1].sequence_number);
+    try std.testing.expectEqualStrings("warn", datagram.records[1].fragment);
 }
 
 test "WebRTC peer runtime sends authenticated SRTP and rejects replay" {
