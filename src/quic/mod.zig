@@ -1108,6 +1108,7 @@ pub const Frame = union(enum) {
                 try list.appendSlice(allocator, datagram.data);
             },
             .ack_frequency => |ack_frequency| {
+                try validateAckFrequencyFrame(ack_frequency);
                 try varint.encode(list, allocator, @intFromEnum(FrameType.ack_frequency));
                 try varint.encode(list, allocator, ack_frequency.sequence_number);
                 try varint.encode(list, allocator, ack_frequency.ack_eliciting_threshold);
@@ -1345,12 +1346,14 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
     }
 
     if (frame_type == @intFromEnum(FrameType.ack_frequency)) {
-        return .{ .ack_frequency = .{
+        const ack_frequency = AckFrequencyFrame{
             .sequence_number = try varint.decode(cursor),
             .ack_eliciting_threshold = try varint.decode(cursor),
             .request_max_ack_delay = try varint.decode(cursor),
             .reordering_threshold = try varint.decode(cursor),
-        } };
+        };
+        try validateAckFrequencyFrame(ack_frequency);
+        return .{ .ack_frequency = ack_frequency };
     }
 
     return error.UnsupportedFrameType;
@@ -1421,6 +1424,14 @@ fn validateAckFrame(ack: AckFrame) Error!void {
         try validateQuicVarint(ecn.ect1_count);
         try validateQuicVarint(ecn.ecn_ce_count);
     }
+}
+
+fn validateAckFrequencyFrame(ack_frequency: AckFrequencyFrame) Error!void {
+    try validateQuicVarint(ack_frequency.sequence_number);
+    try validateQuicVarint(ack_frequency.ack_eliciting_threshold);
+    try validateQuicVarint(ack_frequency.request_max_ack_delay);
+    try validateQuicVarint(ack_frequency.reordering_threshold);
+    if (ack_frequency.ack_eliciting_threshold == 0) return error.InvalidFrame;
 }
 
 fn writeAckFields(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: AckFrame) Error!void {
@@ -1946,6 +1957,21 @@ test "QUIC ACK_FREQUENCY and IMMEDIATE_ACK frames" {
     try std.testing.expect(frameAllowedInPacketType(ack_frequency, .one_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .immediate_ack = {} }, .one_rtt));
     try std.testing.expect(!frameAllowedInPacketType(.{ .immediate_ack = {} }, .zero_rtt));
+
+    try std.testing.expectError(error.InvalidFrame, (Frame{ .ack_frequency = .{
+        .sequence_number = 10,
+        .ack_eliciting_threshold = 0,
+        .request_max_ack_delay = 0,
+        .reordering_threshold = 0,
+    } }).write(&encoded, allocator));
+
+    encoded.clearRetainingCapacity();
+    try varint.encode(&encoded, allocator, @intFromEnum(FrameType.ack_frequency));
+    try varint.encode(&encoded, allocator, 10);
+    try varint.encode(&encoded, allocator, 0);
+    try varint.encode(&encoded, allocator, 0);
+    try varint.encode(&encoded, allocator, 0);
+    try std.testing.expectError(error.InvalidFrame, parseFrame(encoded.items));
 }
 
 test "QUIC frame packet context rules follow RFC 9000" {
