@@ -4778,6 +4778,22 @@ pub const sctp = struct {
         immediate_sack: bool = false,
     };
 
+    pub const DataChannelFragmentOptions = struct {
+        first_tsn: u32,
+        stream_id: u16,
+        stream_sequence_number: u16 = 0,
+        message_identifier: u32 = 0,
+        reliability: DataChannelReliability = .{
+            .unordered = false,
+            .mode = .reliable,
+            .parameter = 0,
+        },
+        interleaved: bool = false,
+        is_string: bool = false,
+        immediate_sack: bool = false,
+        max_payload_size: usize,
+    };
+
     pub const DataChannelOpen = struct {
         channel_type: DataChannelType = .reliable,
         priority: u16 = 0,
@@ -5839,6 +5855,55 @@ pub const sctp = struct {
             .payload_protocol_identifier = .webrtc_dcep,
             .user_data = user_data,
         };
+    }
+
+    pub fn fragmentDataChannelMessage(allocator: std.mem.Allocator, options: DataChannelFragmentOptions, user_data: []const u8) Error![]DataChunk {
+        if (options.max_payload_size == 0) return error.InvalidSctpPacket;
+        const ppid = dataChannelPayloadProtocol(options.is_string, user_data.len);
+        const payload = if (user_data.len == 0) &[_]u8{0} else user_data;
+        const chunk_count = (payload.len + options.max_payload_size - 1) / options.max_payload_size;
+        const chunks = try allocator.alloc(DataChunk, chunk_count);
+        errdefer allocator.free(chunks);
+
+        var offset: usize = 0;
+        for (chunks, 0..) |*chunk, index| {
+            const remaining = payload.len - offset;
+            const fragment_len = @min(options.max_payload_size, remaining);
+            const beginning = index == 0;
+            const ending = offset + fragment_len == payload.len;
+            chunk.* = .{
+                .unordered = options.reliability.unordered,
+                .beginning = beginning,
+                .ending = ending,
+                .immediate_sack = options.immediate_sack,
+                .interleaved = options.interleaved,
+                .tsn = options.first_tsn +% @as(u32, @intCast(index)),
+                .stream_id = options.stream_id,
+                .stream_sequence_number = if (options.interleaved) @truncate(options.message_identifier) else options.stream_sequence_number,
+                .message_identifier = options.message_identifier,
+                .fragment_sequence_number = @intCast(index),
+                .payload_protocol_identifier = if (!options.interleaved or beginning) ppid else @enumFromInt(@as(u32, 0)),
+                .user_data = payload[offset .. offset + fragment_len],
+            };
+            offset += fragment_len;
+        }
+        return chunks;
+    }
+
+    pub fn fragmentDcepMessage(allocator: std.mem.Allocator, options: DataChannelFragmentOptions, user_data: []const u8) Error![]DataChunk {
+        if (options.max_payload_size == 0 or user_data.len == 0) return error.InvalidSctpPacket;
+        var ordered_options = options;
+        ordered_options.reliability.unordered = false;
+        const chunks = try fragmentDataChannelMessage(allocator, ordered_options, user_data);
+        for (chunks, 0..) |*chunk, index| {
+            chunk.unordered = false;
+            chunk.payload_protocol_identifier = if (!ordered_options.interleaved or index == 0) .webrtc_dcep else @enumFromInt(@as(u32, 0));
+        }
+        return chunks;
+    }
+
+    pub fn freeDataChannelFragments(allocator: std.mem.Allocator, chunks: []DataChunk) void {
+        allocator.free(chunks);
     }
 
     pub fn dataChannelReliability(channel_type: DataChannelType, reliability_parameter: u32) Error!DataChannelReliability {
@@ -8404,6 +8469,78 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expect(!dcep_chunk.unordered);
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_dcep, dcep_chunk.payload_protocol_identifier);
     try std.testing.expectEqualSlices(u8, ack.items, dcep_chunk.user_data);
+
+    const fragments = try sctp.fragmentDataChannelMessage(allocator, .{
+        .first_tsn = 20,
+        .stream_id = 3,
+        .stream_sequence_number = 9,
+        .reliability = unordered_reliability,
+        .max_payload_size = 4,
+    }, "hello world");
+    defer sctp.freeDataChannelFragments(allocator, fragments);
+    try std.testing.expectEqual(@as(usize, 3), fragments.len);
+    try std.testing.expect(fragments[0].unordered);
+    try std.testing.expect(fragments[0].beginning);
+    try std.testing.expect(!fragments[0].ending);
+    try std.testing.expectEqual(@as(u32, 20), fragments[0].tsn);
+    try std.testing.expectEqual(@as(u16, 9), fragments[0].stream_sequence_number);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_binary, fragments[0].payload_protocol_identifier);
+    try std.testing.expectEqualStrings("hell", fragments[0].user_data);
+    try std.testing.expect(!fragments[1].beginning);
+    try std.testing.expect(!fragments[1].ending);
+    try std.testing.expectEqual(@as(u32, 21), fragments[1].tsn);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_binary, fragments[1].payload_protocol_identifier);
+    try std.testing.expectEqualStrings("o wo", fragments[1].user_data);
+    try std.testing.expect(!fragments[2].beginning);
+    try std.testing.expect(fragments[2].ending);
+    try std.testing.expectEqualStrings("rld", fragments[2].user_data);
+
+    const empty_fragments = try sctp.fragmentDataChannelMessage(allocator, .{
+        .first_tsn = 30,
+        .stream_id = 3,
+        .stream_sequence_number = 10,
+        .is_string = true,
+        .max_payload_size = 8,
+    }, "");
+    defer sctp.freeDataChannelFragments(allocator, empty_fragments);
+    try std.testing.expectEqual(@as(usize, 1), empty_fragments.len);
+    try std.testing.expect(empty_fragments[0].beginning);
+    try std.testing.expect(empty_fragments[0].ending);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string_empty, empty_fragments[0].payload_protocol_identifier);
+    try std.testing.expectEqualSlices(u8, &.{0}, empty_fragments[0].user_data);
+
+    const i_fragments = try sctp.fragmentDataChannelMessage(allocator, .{
+        .first_tsn = 40,
+        .stream_id = 4,
+        .message_identifier = 0x0102_0304,
+        .reliability = unordered_reliability,
+        .interleaved = true,
+        .is_string = true,
+        .max_payload_size = 3,
+    }, "abcdefg");
+    defer sctp.freeDataChannelFragments(allocator, i_fragments);
+    try std.testing.expectEqual(@as(usize, 3), i_fragments.len);
+    try std.testing.expect(i_fragments[0].interleaved);
+    try std.testing.expectEqual(@as(u16, 0x0304), i_fragments[0].stream_sequence_number);
+    try std.testing.expectEqual(@as(u32, 0x0102_0304), i_fragments[0].message_identifier);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string, i_fragments[0].payload_protocol_identifier);
+    try std.testing.expectEqual(@as(u32, 1), i_fragments[1].fragment_sequence_number);
+    try std.testing.expectEqual(@as(u32, 2), i_fragments[2].fragment_sequence_number);
+    try std.testing.expectEqual(@as(u32, 42), i_fragments[2].tsn);
+
+    const dcep_fragments = try sctp.fragmentDcepMessage(allocator, .{
+        .first_tsn = 50,
+        .stream_id = 2,
+        .stream_sequence_number = 5,
+        .reliability = unordered_reliability,
+        .max_payload_size = 2,
+    }, ack.items);
+    defer sctp.freeDataChannelFragments(allocator, dcep_fragments);
+    try std.testing.expectEqual(@as(usize, 2), dcep_fragments.len);
+    try std.testing.expect(!dcep_fragments[0].unordered);
+    try std.testing.expect(!dcep_fragments[1].unordered);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_dcep, dcep_fragments[0].payload_protocol_identifier);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_dcep, dcep_fragments[1].payload_protocol_identifier);
 
     var invalid_dcep: std.ArrayList(u8) = .empty;
     defer invalid_dcep.deinit(allocator);
