@@ -1671,6 +1671,13 @@ pub const srtp = struct {
             try self.protectRtcp(list, allocator, raw.items);
         }
 
+        pub fn protectRtcpCompound(self: *Context, list: *std.ArrayList(u8), allocator: std.mem.Allocator, packets: []const rtcp.Packet) Error!void {
+            var raw: std.ArrayList(u8) = .empty;
+            defer raw.deinit(allocator);
+            try rtcp.writeCompound(&raw, allocator, packets);
+            try self.protectRtcp(list, allocator, raw.items);
+        }
+
         pub fn verifyRtcp(self: *Context, protected_packet: []const u8) Error!VerifiedRtcp {
             if (protected_packet.len <= 4 + auth_tag_len_80) return error.InvalidSrtpPacket;
             const auth_start = protected_packet.len - auth_tag_len_80;
@@ -1692,6 +1699,13 @@ pub const srtp = struct {
             var parsed = try rtcp.parsePacket(allocator, verified.packet);
             errdefer parsed.deinit(allocator);
             return .{ .verified = verified, .rtcp = parsed.packet };
+        }
+
+        pub fn unprotectRtcpCompound(self: *Context, allocator: std.mem.Allocator, protected_packet: []const u8) Error!AuthenticatedRtcpCompound {
+            const verified = try self.verifyRtcp(protected_packet);
+            const packets = try rtcp.parseCompound(allocator, verified.packet);
+            errdefer rtcp.freeCompound(allocator, packets);
+            return .{ .verified = verified, .rtcp = packets };
         }
     };
 
@@ -1723,6 +1737,16 @@ pub const srtp = struct {
 
         pub fn deinit(self: *AuthenticatedRtcp, allocator: std.mem.Allocator) void {
             self.rtcp.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
+    pub const AuthenticatedRtcpCompound = struct {
+        verified: VerifiedRtcp,
+        rtcp: []rtcp.Packet,
+
+        pub fn deinit(self: *AuthenticatedRtcpCompound, allocator: std.mem.Allocator) void {
+            rtcp.freeCompound(allocator, self.rtcp);
             self.* = undefined;
         }
     };
@@ -4786,6 +4810,24 @@ test "SRTCP NULL_HMAC_SHA1_80 authenticates index and rejects replay" {
     tampered[tampered.len - 1] ^= 0x55;
     var fresh = srtp.Context{ .keys = .{ .auth_key = &auth_key } };
     try std.testing.expectError(error.BadSrtpAuthTag, fresh.verifyRtcp(tampered));
+
+    encoded.clearRetainingCapacity();
+    var sdes_items = [_]rtcp.SdesItem{.{ .item_type = .cname, .value = "compound@example.test" }};
+    var sdes_chunks = [_]rtcp.SdesChunk{.{ .ssrc = 0x01020304, .items = &sdes_items }};
+    const compound_packets = [_]rtcp.Packet{
+        .{ .receiver_report = .{ .sender_ssrc = 0x01020304 } },
+        .{ .source_description = .{ .chunks = &sdes_chunks } },
+        .{ .picture_loss_indication = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x11121314 } },
+    };
+    try sender.protectRtcpCompound(&encoded, allocator, &compound_packets);
+
+    var compound = try receiver.unprotectRtcpCompound(allocator, encoded.items);
+    defer compound.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), compound.verified.index);
+    try std.testing.expectEqual(@as(usize, 3), compound.rtcp.len);
+    try std.testing.expectEqual(@as(u32, 0x01020304), compound.rtcp[0].receiver_report.sender_ssrc);
+    try std.testing.expectEqualStrings("compound@example.test", compound.rtcp[1].source_description.cname(0x01020304).?);
+    try std.testing.expectEqual(@as(u32, 0x11121314), compound.rtcp[2].picture_loss_indication.media_ssrc);
 }
 
 test "SRTP NULL_HMAC_SHA1_80 authenticates ROC and rejects replay" {
