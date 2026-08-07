@@ -1242,6 +1242,14 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub fn formatIceLiteLine(allocator: std.mem.Allocator) Error![]u8 {
+        return allocator.dupe(u8, "a=ice-lite\r\n");
+    }
+
+    pub fn appendIceLiteLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        try list.appendSlice(allocator, "a=ice-lite\r\n");
+    }
+
     pub fn formatFingerprintLine(allocator: std.mem.Allocator, fingerprint: Fingerprint) Error![]u8 {
         if (fingerprint.algorithm.len == 0 or fingerprint.value.len == 0) return error.InvalidSdp;
         return std.fmt.allocPrint(allocator, "a=fingerprint:{s} {s}\r\n", .{ fingerprint.algorithm, fingerprint.value });
@@ -1252,6 +1260,7 @@ pub const sdp = struct {
     }
 
     pub fn appendTransportAttributeLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: TransportLineOptions) Error!void {
+        if (options.transport_attributes.ice_lite) try appendIceLiteLine(list, allocator);
         if (options.dtls_role) |role| {
             const line = try formatDtlsSetupLine(allocator, role);
             defer allocator.free(line);
@@ -10028,17 +10037,21 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
     const pwd_line = try sdp.formatIcePwdLine(allocator, creds_line);
     defer allocator.free(pwd_line);
     try std.testing.expectEqualStrings("a=ice-pwd:pwd\r\n", pwd_line);
+    const ice_lite_line = try sdp.formatIceLiteLine(allocator);
+    defer allocator.free(ice_lite_line);
+    try std.testing.expectEqualStrings("a=ice-lite\r\n", ice_lite_line);
     var transport_lines: std.ArrayList(u8) = .empty;
     defer transport_lines.deinit(allocator);
     try sdp.appendTransportAttributeLines(&transport_lines, allocator, .{
         .ice_credentials = creds_line,
         .fingerprint = .{ .algorithm = "sha-256", .value = "AA:BB" },
         .dtls_role = .client,
-        .transport_attributes = .{ .rtcp_mux = true, .rtcp_rsize = true },
+        .transport_attributes = .{ .ice_lite = true, .rtcp_mux = true, .rtcp_rsize = true },
         .extmap_allow_mixed = true,
     });
     try std.testing.expectEqualStrings(
-        "a=setup:active\r\n" ++
+        "a=ice-lite\r\n" ++
+            "a=setup:active\r\n" ++
             "a=fingerprint:sha-256 AA:BB\r\n" ++
             "a=ice-ufrag:ufrag\r\n" ++
             "a=ice-pwd:pwd\r\n" ++
