@@ -17,6 +17,7 @@ pub const Error = wire.Error || error{
     InvalidReasonCode,
     InvalidTopic,
     InvalidSubscription,
+    InvalidClientId,
     InvalidPacketIdentifier,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
@@ -776,9 +777,11 @@ pub const Connect = struct {
         const username = if ((connect_flags & 0x80) != 0) try readUtf8(&cursor) else null;
         const password = if ((connect_flags & 0x40) != 0) try readBinary(&cursor) else null;
         if (!cursor.eof()) return error.InvalidPacketType;
+        const clean_start = (connect_flags & 0x02) != 0;
+        try validateConnectClientId(client_id, clean_start);
         return .{
             .protocol = protocol,
-            .clean_start = (connect_flags & 0x02) != 0,
+            .clean_start = clean_start,
             .keep_alive_seconds = keep_alive,
             .client_id = client_id,
             .properties = props,
@@ -1583,6 +1586,7 @@ pub fn writeConnectPacket(
     protocol: ProtocolVersion,
     options: ConnectPacketOptions,
 ) Error!void {
+    try validateConnectClientId(options.client_id, options.clean_start);
     var variable: std.ArrayList(u8) = .empty;
     defer variable.deinit(allocator);
     try writeUtf8(&variable, allocator, "MQTT");
@@ -1623,6 +1627,14 @@ fn connectFlags(options: ConnectPacketOptions) u8 {
     if (options.password != null) flags |= 0x40;
     if (options.username != null) flags |= 0x80;
     return flags;
+}
+
+fn validateConnectClientId(client_id: []const u8, clean_start: bool) Error!void {
+    // MQTT 3.1.1 and MQTT 5 allow a Server to assign a Client Identifier when
+    // the CONNECT packet carries an empty Client ID, but only for a clean
+    // session/start.  Persistent sessions need a stable identifier to resume;
+    // rumqtt rejects this combination before constructing connection state.
+    if (client_id.len == 0 and !clean_start) return error.InvalidClientId;
 }
 
 pub fn writePublish(
@@ -1741,6 +1753,39 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqual(@as(u32, 5), connect.will.?.properties[0].four_byte.value);
     try std.testing.expectEqualStrings("rumq", connect.username.?);
     try std.testing.expectEqualStrings("mq", connect.password.?);
+
+    connect_bytes.clearRetainingCapacity();
+    try writeConnectPacket(&connect_bytes, allocator, .v5, .{
+        .client_id = "",
+        .clean_start = true,
+    });
+    connect.deinit(allocator);
+    connect = try Connect.parse(allocator, connect_bytes.items);
+    try std.testing.expectEqualStrings("", connect.client_id);
+    try std.testing.expect(connect.clean_start);
+    try std.testing.expectError(error.InvalidClientId, writeConnectPacket(&connect_bytes, allocator, .v5, .{
+        .client_id = "",
+        .clean_start = false,
+    }));
+
+    var persistent_empty_id: std.ArrayList(u8) = .empty;
+    defer persistent_empty_id.deinit(allocator);
+    var persistent_variable: std.ArrayList(u8) = .empty;
+    defer persistent_variable.deinit(allocator);
+    try writeUtf8(&persistent_variable, allocator, "MQTT");
+    try persistent_variable.append(allocator, ProtocolVersion.v5.byte());
+    try persistent_variable.append(allocator, 0x00); // Clean Start false with an empty Client ID.
+    try wire.appendInt(&persistent_variable, allocator, u16, 30, .big);
+    try writeProperties(&persistent_variable, allocator, &.{});
+    try writeUtf8(&persistent_variable, allocator, "");
+    try (FixedHeader{
+        .packet_type = .connect,
+        .flags = 0,
+        .remaining_len = persistent_variable.items.len,
+        .header_len = 0,
+    }).write(&persistent_empty_id, allocator);
+    try persistent_empty_id.appendSlice(allocator, persistent_variable.items);
+    try std.testing.expectError(error.InvalidClientId, Connect.parse(allocator, persistent_empty_id.items));
 
     var bad_will_props = [_]Property{.{ .byte = .{ .id = .payload_format_indicator, .value = 1 } }};
     try std.testing.expectError(error.InvalidUtf8, writeConnectPacket(&connect_bytes, allocator, .v5, .{
