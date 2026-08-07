@@ -1003,7 +1003,7 @@ pub const DecodedResponse = struct {
 };
 
 pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedRequest {
-    var message = try decodeMessage(allocator, bytes);
+    var message = try decodeMessage(allocator, bytes, .request);
     errdefer message.deinit(allocator);
 
     try validateHeaderBlock(message.headers, .request);
@@ -1080,6 +1080,11 @@ const DecodedMessage = struct {
     }
 };
 
+const MessageStreamKind = enum {
+    request,
+    response,
+};
+
 fn writeHeadersFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const Qpack.HeaderField) Error!void {
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(allocator);
@@ -1147,14 +1152,20 @@ fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!
         }
         break;
     }
-    return decodeMessage(allocator, bytes[offset..]);
+    return decodeMessage(allocator, bytes[offset..], .response);
 }
 
-fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedMessage {
+fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageStreamKind) Error!DecodedMessage {
     var offset: usize = 0;
     const headers_frame = while (true) {
         const frame = try Frame.parse(bytes[offset..]);
         if (frame.frame_type == FrameType.headers) break frame;
+        if (frame.frame_type == FrameType.push_promise) {
+            if (kind == .request) return error.ExpectedHeadersFrame;
+            offset += frame.consumed;
+            if (offset >= bytes.len) return error.ExpectedHeadersFrame;
+            continue;
+        }
         if (frame.frame_type == FrameType.data or requestStreamForbiddenFrame(frame.frame_type)) return error.ExpectedHeadersFrame;
         // RFC 9114 allows unknown extension frames on request streams.  Like
         // tquic's request-stream state machine, ignore them before the first
@@ -1184,7 +1195,9 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedM
                 trailers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
                 saw_trailers = true;
             },
-            FrameType.push_promise => return error.UnexpectedFrame,
+            FrameType.push_promise => {
+                if (kind == .request or saw_trailers) return error.UnexpectedFrame;
+            },
             else => if (requestStreamForbiddenFrame(frame.frame_type)) return error.UnexpectedFrame,
         }
     }
@@ -1985,6 +1998,22 @@ test "HTTP/3 message rejects bad frame order and content length" {
     var extension_decoded = try decodeResponse(allocator, extension_prefaced_response.items);
     defer extension_decoded.deinit(allocator);
     try std.testing.expectEqualStrings("response-ext", extension_decoded.body);
+
+    var pushed_response: std.ArrayList(u8) = .empty;
+    defer pushed_response.deinit(allocator);
+    try writePushPromiseFrame(&pushed_response, allocator, 0, "promised-headers");
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "200" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&pushed_response, allocator);
+    try (Frame{ .frame_type = FrameType.data, .payload = "pushed-ok", .consumed = 0 }).write(&pushed_response, allocator);
+    var pushed_decoded = try decodeResponse(allocator, pushed_response.items);
+    defer pushed_decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("pushed-ok", pushed_decoded.body);
+
+    var client_push_promise: std.ArrayList(u8) = .empty;
+    defer client_push_promise.deinit(allocator);
+    try writePushPromiseFrame(&client_push_promise, allocator, 0, "illegal-client-push");
+    try std.testing.expectError(error.ExpectedHeadersFrame, decodeRequest(allocator, client_push_promise.items));
 
     var informational_only = std.ArrayList(u8).empty;
     defer informational_only.deinit(allocator);
