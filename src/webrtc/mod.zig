@@ -2894,11 +2894,13 @@ pub const rtcp = struct {
         sender_packet_count: u32,
         sender_octet_count: u32,
         report_blocks: []ReportBlock = &.{},
+        profile_extensions: []const u8 = &.{},
     };
 
     pub const ReceiverReport = struct {
         sender_ssrc: u32,
         report_blocks: []ReportBlock = &.{},
+        profile_extensions: []const u8 = &.{},
     };
 
     pub const ReceiverEstimatedMaximumBitrate = struct {
@@ -3754,7 +3756,8 @@ pub const rtcp = struct {
 
     fn parseSenderReport(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!SenderReport {
         const report_count = @as(usize, header.count_or_format);
-        if (payload.len != 24 + report_count * 24) return error.InvalidRtcpPacket;
+        const fixed_len = 24 + report_count * 24;
+        if (payload.len < fixed_len or ((payload.len - fixed_len) % 4) != 0) return error.InvalidRtcpPacket;
         var cursor = wire.Cursor.init(payload);
         const sender_ssrc = try cursor.readInt(u32, .big);
         const ntp_timestamp_msw = try cursor.readInt(u32, .big);
@@ -3771,17 +3774,20 @@ pub const rtcp = struct {
             .sender_packet_count = sender_packet_count,
             .sender_octet_count = sender_octet_count,
             .report_blocks = report_blocks,
+            .profile_extensions = payload[fixed_len..],
         };
     }
 
     fn parseReceiverReport(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!ReceiverReport {
         const report_count = @as(usize, header.count_or_format);
-        if (payload.len != 4 + report_count * 24) return error.InvalidRtcpPacket;
+        const fixed_len = 4 + report_count * 24;
+        if (payload.len < fixed_len or ((payload.len - fixed_len) % 4) != 0) return error.InvalidRtcpPacket;
         var cursor = wire.Cursor.init(payload);
         const sender_ssrc = try cursor.readInt(u32, .big);
         return .{
             .sender_ssrc = sender_ssrc,
             .report_blocks = try parseReportBlocks(allocator, &cursor, report_count),
+            .profile_extensions = payload[fixed_len..],
         };
     }
 
@@ -4232,7 +4238,8 @@ pub const rtcp = struct {
 
     fn writeSenderReport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, report: SenderReport) Error!void {
         if (report.report_blocks.len > 31) return error.InvalidRtcpPacket;
-        try writeHeader(list, allocator, @intCast(report.report_blocks.len), .sender_report, 24 + report.report_blocks.len * 24);
+        const profile_padding = (4 - (report.profile_extensions.len % 4)) % 4;
+        try writeHeader(list, allocator, @intCast(report.report_blocks.len), .sender_report, 24 + report.report_blocks.len * 24 + report.profile_extensions.len + profile_padding);
         try wire.appendInt(list, allocator, u32, report.sender_ssrc, .big);
         try wire.appendInt(list, allocator, u32, report.ntp_timestamp_msw, .big);
         try wire.appendInt(list, allocator, u32, report.ntp_timestamp_lsw, .big);
@@ -4240,13 +4247,18 @@ pub const rtcp = struct {
         try wire.appendInt(list, allocator, u32, report.sender_packet_count, .big);
         try wire.appendInt(list, allocator, u32, report.sender_octet_count, .big);
         for (report.report_blocks) |block| try writeReportBlock(list, allocator, block);
+        try list.appendSlice(allocator, report.profile_extensions);
+        try list.appendNTimes(allocator, 0, profile_padding);
     }
 
     fn writeReceiverReport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, report: ReceiverReport) Error!void {
         if (report.report_blocks.len > 31) return error.InvalidRtcpPacket;
-        try writeHeader(list, allocator, @intCast(report.report_blocks.len), .receiver_report, 4 + report.report_blocks.len * 24);
+        const profile_padding = (4 - (report.profile_extensions.len % 4)) % 4;
+        try writeHeader(list, allocator, @intCast(report.report_blocks.len), .receiver_report, 4 + report.report_blocks.len * 24 + report.profile_extensions.len + profile_padding);
         try wire.appendInt(list, allocator, u32, report.sender_ssrc, .big);
         for (report.report_blocks) |block| try writeReportBlock(list, allocator, block);
+        try list.appendSlice(allocator, report.profile_extensions);
+        try list.appendNTimes(allocator, 0, profile_padding);
     }
 
     fn writeGoodbye(list: *std.ArrayList(u8), allocator: std.mem.Allocator, goodbye: Goodbye) Error!void {
@@ -7838,6 +7850,7 @@ test "RTCP receiver report and feedback packets" {
     try rtcp.writePacket(&encoded, allocator, .{ .receiver_report = .{
         .sender_ssrc = 0x0a0b0c0d,
         .report_blocks = &report_blocks,
+        .profile_extensions = &.{ 0xaa, 0xbb },
     } });
     var rr = try rtcp.parsePacket(allocator, encoded.items);
     defer rr.deinit(allocator);
@@ -7845,6 +7858,22 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 0x0a0b0c0d), rr.packet.receiver_report.sender_ssrc);
     try std.testing.expectEqual(@as(u24, 3), rr.packet.receiver_report.report_blocks[0].cumulative_lost);
     try std.testing.expectEqual(@as(u32, 44), rr.packet.receiver_report.report_blocks[0].interarrival_jitter);
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0, 0 }, rr.packet.receiver_report.profile_extensions);
+
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, .{ .sender_report = .{
+        .sender_ssrc = 0x01020304,
+        .ntp_timestamp_msw = 1,
+        .ntp_timestamp_lsw = 2,
+        .rtp_timestamp = 3,
+        .sender_packet_count = 4,
+        .sender_octet_count = 5,
+        .profile_extensions = &.{ 0xcc, 0xdd, 0xee },
+    } });
+    var sr = try rtcp.parsePacket(allocator, encoded.items);
+    defer sr.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x01020304), sr.packet.sender_report.sender_ssrc);
+    try std.testing.expectEqualSlices(u8, &.{ 0xcc, 0xdd, 0xee, 0 }, sr.packet.sender_report.profile_extensions);
 
     var padded_rr: std.ArrayList(u8) = .empty;
     defer padded_rr.deinit(allocator);
