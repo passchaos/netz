@@ -1517,6 +1517,7 @@ pub const Connection = struct {
     }
 
     fn writeData(self: *Connection, stream_id: u31, data: []const u8, end_stream: bool) Error!void {
+        if (!self.outboundStreamIsActive(stream_id)) return error.InvalidStreamId;
         const chunk_size = self.outboundFramePayloadLimit();
         if (data.len == 0) {
             try writeFrame(
@@ -1827,6 +1828,10 @@ pub const Tunnel = struct {
 
     pub fn write(self: *Tunnel, data: []const u8, end_stream: bool) Error!void {
         try self.connection.writeData(self.stream_id, data, end_stream);
+        if (end_stream) {
+            self.connection.releaseLocalStream(self.stream_id);
+            self.connection.releasePeerStream(self.stream_id);
+        }
     }
 
     pub fn closeWrite(self: *Tunnel) Error!void {
@@ -1860,10 +1865,6 @@ pub const Tunnel = struct {
                     const payload = try self.connection.receiveDataPayload(self.stream_id, frame.frame);
                     try self.connection.maybeReleaseReceivedCapacity(self.stream_id);
                     const end_stream = (frame.frame.header.flags & flag_end_stream) != 0;
-                    if (end_stream) {
-                        self.connection.releaseLocalStream(self.stream_id);
-                        self.connection.releasePeerStream(self.stream_id);
-                    }
                     return .{
                         .frame = frame,
                         .data = payload.data,
@@ -3497,6 +3498,29 @@ test "HTTP/2 sendResetStream rejects idle streams" {
     try std.testing.expectError(error.InvalidStreamId, connection.sendResetStream(1, .cancel));
 }
 
+test "HTTP/2 writeData rejects idle streams" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    // DATA frames are only valid after a stream has been opened by HEADERS.
+    // Rust h2 tracks pending-open streams so DATA never becomes the first frame
+    // on an idle stream; keep the same invariant for the low-level helper.
+    try std.testing.expectError(error.InvalidStreamId, connection.writeData(1, "body", true));
+    try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
+}
+
 test "HTTP/2 client request fails when response stream is reset" {
     const allocator = std.testing.allocator;
 
@@ -3869,6 +3893,7 @@ test "HTTP/2 runtime decodes padded priority HEADERS payloads" {
 
     const flags = flag_end_headers | @as(u8, (@as(http2.Flags, .{ .padded = true, .priority = true })).byte());
     try writeFrame(allocator, io, client.stream, .headers, flags, 1, payload.items);
+    try client.active_local_streams.append(allocator, 1);
     try client.writeData(1, "hello", true);
 
     var response = try client.readResponse(1, "POST", false);
@@ -4144,7 +4169,7 @@ test "HTTP/2 runtime handles pre-request stream frame ordering" {
             .max_body_bytes = 4096,
         });
         defer client.close();
-        try client.writeData(1, "body-before-headers", true);
+        try writeFrame(allocator, io, client.stream, .data, flag_end_stream, 1, "body-before-headers");
 
         thread.join();
         if (shared.err) |err| return err;
