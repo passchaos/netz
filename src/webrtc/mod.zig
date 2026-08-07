@@ -800,6 +800,22 @@ pub const sdp = struct {
         paused: bool = false,
     };
 
+    pub const TrackDetails = struct {
+        mid: []const u8,
+        kind: []const u8,
+        stream_id: []const u8 = "",
+        track_id: []const u8 = "",
+        ssrc: ?u32 = null,
+        rtx_ssrc: ?u32 = null,
+        fec_ssrc: ?u32 = null,
+        rids: []Rid = &.{},
+
+        pub fn deinit(self: *TrackDetails, allocator: std.mem.Allocator) void {
+            allocator.free(self.rids);
+            self.* = undefined;
+        }
+    };
+
     pub const DtlsSetupRole = enum {
         actpass,
         active,
@@ -1209,6 +1225,74 @@ pub const sdp = struct {
         return rids.toOwnedSlice(allocator);
     }
 
+    pub fn extractTrackDetails(allocator: std.mem.Allocator, session: Session) Error![]TrackDetails {
+        var tracks: std.ArrayList(TrackDetails) = .empty;
+        errdefer {
+            for (tracks.items) |*track| track.deinit(allocator);
+            tracks.deinit(allocator);
+        }
+
+        for (session.media) |media| {
+            if (findAttr(media.attributes, "recvonly") != null or findAttr(media.attributes, "inactive") != null) continue;
+            if (!std.ascii.eqlIgnoreCase(media.kind, "audio") and !std.ascii.eqlIgnoreCase(media.kind, "video")) continue;
+            const mid = findAttr(media.attributes, "mid") orelse continue;
+            var stream_id: []const u8 = "";
+            var track_id: []const u8 = "";
+            if (findAttr(media.attributes, "msid")) |msid| {
+                parseMsid(msid, &stream_id, &track_id);
+            }
+
+            var rtx_pairs: [16]SsrcPair = undefined;
+            var rtx_len: usize = 0;
+            var fec_pairs: [16]SsrcPair = undefined;
+            var fec_len: usize = 0;
+            collectSsrcGroups(media.attributes, &rtx_pairs, &rtx_len, &fec_pairs, &fec_len);
+
+            const rids = try extractRids(allocator, media);
+            errdefer allocator.free(rids);
+            if (rids.len != 0 and stream_id.len != 0 and track_id.len != 0) {
+                try tracks.append(allocator, .{
+                    .mid = mid,
+                    .kind = media.kind,
+                    .stream_id = stream_id,
+                    .track_id = track_id,
+                    .rids = rids,
+                });
+                continue;
+            }
+            allocator.free(rids);
+
+            for (media.attributes) |attr| {
+                if (!std.ascii.eqlIgnoreCase(attr.name, "ssrc")) continue;
+                var local_stream = stream_id;
+                var local_track = track_id;
+                const ssrc = parseSsrcAttribute(attr.value, &local_stream, &local_track) orelse continue;
+                if (repairBase(&rtx_pairs, rtx_len, ssrc) != null or repairBase(&fec_pairs, fec_len, ssrc) != null) continue;
+                const existing = findTrackBySsrc(tracks.items, ssrc);
+                if (existing) |track| {
+                    track.stream_id = local_stream;
+                    track.track_id = local_track;
+                    continue;
+                }
+                try tracks.append(allocator, .{
+                    .mid = mid,
+                    .kind = media.kind,
+                    .stream_id = local_stream,
+                    .track_id = local_track,
+                    .ssrc = ssrc,
+                    .rtx_ssrc = repairForBase(&rtx_pairs, rtx_len, ssrc),
+                    .fec_ssrc = repairForBase(&fec_pairs, fec_len, ssrc),
+                });
+            }
+        }
+        return tracks.toOwnedSlice(allocator);
+    }
+
+    pub fn freeTrackDetails(allocator: std.mem.Allocator, tracks: []TrackDetails) void {
+        for (tracks) |*track| track.deinit(allocator);
+        allocator.free(tracks);
+    }
+
     pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
         for (attrs) |attr| {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
@@ -1342,6 +1426,78 @@ pub const sdp = struct {
                 }
             }
         }
+    }
+
+    fn parseMsid(value: []const u8, stream_id: *[]const u8, track_id: *[]const u8) void {
+        var parts = std.mem.tokenizeAny(u8, value, " \t");
+        const stream = parts.next() orelse return;
+        const track = parts.next() orelse return;
+        stream_id.* = stream;
+        track_id.* = track;
+    }
+
+    fn parseSsrcAttribute(value: []const u8, stream_id: *[]const u8, track_id: *[]const u8) ?u32 {
+        var parts = std.mem.tokenizeAny(u8, value, " \t");
+        const ssrc_s = parts.next() orelse return null;
+        const ssrc = std.fmt.parseInt(u32, ssrc_s, 10) catch return null;
+        const maybe_msid = parts.next() orelse return ssrc;
+        if (std.mem.startsWith(u8, maybe_msid, "msid:")) {
+            if (parts.next()) |track| {
+                stream_id.* = maybe_msid["msid:".len..];
+                track_id.* = track;
+            }
+        }
+        return ssrc;
+    }
+
+    fn collectSsrcGroups(
+        attrs: []const Attribute,
+        rtx_pairs: *[16]SsrcPair,
+        rtx_len: *usize,
+        fec_pairs: *[16]SsrcPair,
+        fec_len: *usize,
+    ) void {
+        for (attrs) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, "ssrc-group")) continue;
+            var parts = std.mem.tokenizeAny(u8, attr.value, " \t");
+            const semantic = parts.next() orelse continue;
+            const base = std.fmt.parseInt(u32, parts.next() orelse continue, 10) catch continue;
+            const repair = std.fmt.parseInt(u32, parts.next() orelse continue, 10) catch continue;
+            if (std.mem.eql(u8, semantic, "FID")) {
+                if (rtx_len.* < rtx_pairs.len) {
+                    rtx_pairs[rtx_len.*] = .{ .base = base, .repair = repair };
+                    rtx_len.* += 1;
+                }
+            } else if (std.mem.eql(u8, semantic, "FEC-FR")) {
+                if (fec_len.* < fec_pairs.len) {
+                    fec_pairs[fec_len.*] = .{ .base = base, .repair = repair };
+                    fec_len.* += 1;
+                }
+            }
+        }
+    }
+
+    const SsrcPair = struct { base: u32, repair: u32 };
+
+    fn repairForBase(pairs: []const SsrcPair, len: usize, base: u32) ?u32 {
+        for (pairs[0..len]) |pair| {
+            if (pair.base == base) return pair.repair;
+        }
+        return null;
+    }
+
+    fn repairBase(pairs: []const SsrcPair, len: usize, repair: u32) ?u32 {
+        for (pairs[0..len]) |pair| {
+            if (pair.repair == repair) return pair.base;
+        }
+        return null;
+    }
+
+    fn findTrackBySsrc(tracks: []TrackDetails, ssrc: u32) ?*TrackDetails {
+        for (tracks) |*track| {
+            if (track.ssrc != null and track.ssrc.? == ssrc) return track;
+        }
+        return null;
     }
 
     fn parseMaxMessageSize(value: ?[]const u8) Error!u32 {
@@ -4948,6 +5104,51 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expect(rids[1].paused);
     try std.testing.expectEqualStrings("q", rids[2].id);
     try std.testing.expect(!rids[2].paused);
+
+    const track_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:audio\r\n" ++
+        "a=sendrecv\r\n" ++
+        "a=ssrc:2000 msid:audio_stream audio_track\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
+        "a=mid:video\r\n" ++
+        "a=sendrecv\r\n" ++
+        "a=ssrc-group:FID 3000 4000\r\n" ++
+        "a=ssrc-group:FEC-FR 3000 5000\r\n" ++
+        "a=ssrc:3000 msid:video_stream video_track\r\n" ++
+        "a=ssrc:4000 msid:rtx_stream rtx_track\r\n" ++
+        "a=ssrc:5000 msid:fec_stream fec_track\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
+        "a=mid:simulcast\r\n" ++
+        "a=msid:sim_stream sim_track\r\n" ++
+        "a=rid:f send pt=96\r\n" ++
+        "a=rid:h send pt=96\r\n" ++
+        "a=simulcast:send f;~h\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
+        "a=mid:inactive\r\n" ++
+        "a=inactive\r\n" ++
+        "a=ssrc:9000 msid:ignore ignore\r\n";
+    var track_session = try sdp.parse(allocator, track_text);
+    defer track_session.deinit(allocator);
+    const tracks = try sdp.extractTrackDetails(allocator, track_session);
+    defer sdp.freeTrackDetails(allocator, tracks);
+    try std.testing.expectEqual(@as(usize, 3), tracks.len);
+    try std.testing.expectEqualStrings("audio", tracks[0].mid);
+    try std.testing.expectEqual(@as(?u32, 2000), tracks[0].ssrc);
+    try std.testing.expectEqualStrings("audio_stream", tracks[0].stream_id);
+    try std.testing.expectEqualStrings("audio_track", tracks[0].track_id);
+    try std.testing.expectEqualStrings("video", tracks[1].mid);
+    try std.testing.expectEqual(@as(?u32, 3000), tracks[1].ssrc);
+    try std.testing.expectEqual(@as(?u32, 4000), tracks[1].rtx_ssrc);
+    try std.testing.expectEqual(@as(?u32, 5000), tracks[1].fec_ssrc);
+    try std.testing.expectEqualStrings("simulcast", tracks[2].mid);
+    try std.testing.expectEqualStrings("sim_stream", tracks[2].stream_id);
+    try std.testing.expectEqual(@as(usize, 2), tracks[2].rids.len);
+    try std.testing.expectEqualStrings("f", tracks[2].rids[0].id);
+    try std.testing.expect(tracks[2].rids[1].paused);
 
     const media_only =
         "v=0\r\n" ++
