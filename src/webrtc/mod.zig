@@ -1554,6 +1554,27 @@ pub const sdp = struct {
         allocator.free(tracks);
     }
 
+    pub fn trackDetailsForSsrc(tracks: []const TrackDetails, ssrc: u32) ?*const TrackDetails {
+        for (tracks, 0..) |track, index| {
+            // Match Pion's trackDetailsForSSRC behavior: only primary media
+            // SSRCs identify tracks here. RTX/FEC repair SSRCs are kept as
+            // metadata on the base track and must not independently demux to a
+            // remote track identity.
+            if (track.ssrc != null and track.ssrc.? == ssrc) return &tracks[index];
+        }
+        return null;
+    }
+
+    pub fn trackDetailsForRid(tracks: []const TrackDetails, mid: []const u8, rid: []const u8) ?*const TrackDetails {
+        for (tracks, 0..) |track, index| {
+            if (!std.mem.eql(u8, track.mid, mid)) continue;
+            for (track.rids) |track_rid| {
+                if (std.mem.eql(u8, track_rid.id, rid)) return &tracks[index];
+            }
+        }
+        return null;
+    }
+
     pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
         for (attrs) |attr| {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
@@ -7478,11 +7499,17 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(?u32, 3000), tracks[1].ssrc);
     try std.testing.expectEqual(@as(?u32, 4000), tracks[1].rtx_ssrc);
     try std.testing.expectEqual(@as(?u32, 5000), tracks[1].fec_ssrc);
+    try std.testing.expectEqualStrings("video_track", sdp.trackDetailsForSsrc(tracks, 3000).?.track_id);
+    try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 4000) == null);
+    try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 5000) == null);
     try std.testing.expectEqualStrings("simulcast", tracks[2].mid);
     try std.testing.expectEqualStrings("sim_stream", tracks[2].stream_id);
     try std.testing.expectEqual(@as(usize, 2), tracks[2].rids.len);
     try std.testing.expectEqualStrings("f", tracks[2].rids[0].id);
     try std.testing.expect(tracks[2].rids[1].paused);
+    try std.testing.expectEqualStrings("sim_track", sdp.trackDetailsForRid(tracks, "simulcast", "f").?.track_id);
+    try std.testing.expectEqualStrings("sim_track", sdp.trackDetailsForRid(tracks, "simulcast", "h").?.track_id);
+    try std.testing.expect(sdp.trackDetailsForRid(tracks, "video", "f") == null);
 
     const duplicate_ssrc_text =
         "v=0\r\n" ++
