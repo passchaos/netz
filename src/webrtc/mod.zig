@@ -996,11 +996,13 @@ pub const sdp = struct {
         }
     };
 
+    pub const sctp_data_channel_protocol = "webrtc-datachannel";
+
     pub const SctpParameters = struct {
         port: u16,
         max_message_size: u32 = sctp_max_message_size_unset,
         max_channels: ?u16 = null,
-        protocol: []const u8 = "webrtc-datachannel",
+        protocol: []const u8 = sctp_data_channel_protocol,
     };
 
     pub const sctp_max_message_size_unset: u32 = std.math.maxInt(u16);
@@ -1378,15 +1380,14 @@ pub const sdp = struct {
             // archived SDP from old browsers remains usable.
             port = parseSctpPort(firstFormatToken(media.formats) orelse return error.InvalidSdp);
         }
-        if (protocol == null) {
-            if (firstNonNumericFormat(media.formats)) |format| protocol = format;
-        }
+        const format_protocol = try dataChannelProtocolFromFormats(media.formats);
+        if (protocol == null) protocol = format_protocol;
 
         return .{
             .port = port orelse return error.InvalidSdp,
             .max_message_size = try parseMaxMessageSize(findAttr(media.attributes, "max-message-size")),
             .max_channels = max_channels,
-            .protocol = protocol orelse "webrtc-datachannel",
+            .protocol = protocol orelse sctp_data_channel_protocol,
         };
     }
 
@@ -1589,14 +1590,18 @@ pub const sdp = struct {
         var parts = std.mem.tokenizeAny(u8, raw, " \t");
         const port_s = parts.next() orelse return error.InvalidSdp;
         const protocol = parts.next() orelse return error.InvalidSdp;
-        if (protocol.len == 0) return error.InvalidSdp;
+        try validateSctpDataChannelProtocol(protocol);
         const max_channels_s = parts.next();
         if (parts.next() != null) return error.InvalidSdp;
         return .{
             .port = parseSctpPort(port_s) orelse return error.InvalidSdp,
-            .protocol = protocol,
+            .protocol = sctp_data_channel_protocol,
             .max_channels = if (max_channels_s) |value| std.fmt.parseInt(u16, value, 10) catch return error.InvalidSdp else null,
         };
+    }
+
+    fn validateSctpDataChannelProtocol(protocol: []const u8) Error!void {
+        if (!std.ascii.eqlIgnoreCase(protocol, sctp_data_channel_protocol)) return error.InvalidSdp;
     }
 
     fn parseSctpPort(value: []const u8) ?u16 {
@@ -1963,12 +1968,22 @@ pub const sdp = struct {
         return tokens.next();
     }
 
-    fn firstNonNumericFormat(formats: []const u8) ?[]const u8 {
+    fn dataChannelProtocolFromFormats(formats: []const u8) Error!?[]const u8 {
+        var protocol: ?[]const u8 = null;
         var tokens = std.mem.tokenizeAny(u8, formats, " \t");
         while (tokens.next()) |token| {
-            _ = std.fmt.parseInt(u16, token, 10) catch return token;
+            _ = std.fmt.parseInt(u16, token, 10) catch {
+                // RFC 8841 and Pion-generated SDP use a single application
+                // format token, "webrtc-datachannel", to identify SCTP Data
+                // Channels.  Treat any other non-numeric token as malformed
+                // SDP instead of silently negotiating an unsupported SCTP
+                // application protocol.
+                try validateSctpDataChannelProtocol(token);
+                protocol = sctp_data_channel_protocol;
+                continue;
+            };
         }
-        return null;
+        return protocol;
     }
 
     fn formatContains(formats: []const u8, needle: []const u8) bool {
@@ -7634,6 +7649,22 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
         "a=sctpmap:6000 webrtc-datachannel 256\r\n");
     defer mismatched_sctpmap.deinit(allocator);
     try std.testing.expectError(error.InvalidSdp, sdp.extractSctpParameters(mismatched_sctpmap));
+
+    var invalid_sctpmap_protocol = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=sctpmap:5000 not-datachannel 256\r\n");
+    defer invalid_sctpmap_protocol.deinit(allocator);
+    try std.testing.expectError(error.InvalidSdp, sdp.extractSctpParameters(invalid_sctpmap_protocol));
+
+    var invalid_format_protocol = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP not-datachannel\r\n" ++
+        "a=sctp-port:5000\r\n");
+    defer invalid_format_protocol.deinit(allocator);
+    try std.testing.expectError(error.InvalidSdp, sdp.extractSctpParameters(invalid_format_protocol));
 
     var invalid_setup = try sdp.parse(allocator, "v=0\r\n" ++
         "s=-\r\n" ++
