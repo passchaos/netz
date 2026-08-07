@@ -2059,10 +2059,24 @@ pub const rtp = struct {
         return std.mem.readInt(u16, value[0..2], .big);
     }
 
+    pub fn transportWideSequenceNumberPayload(sequence_number: u16) [2]u8 {
+        var out: [2]u8 = undefined;
+        std.mem.writeInt(u16, &out, sequence_number, .big);
+        return out;
+    }
+
     pub fn absoluteSendTime24(elements: []const HeaderExtensionElement, id: u8) Error!?u24 {
         const value = findHeaderExtension(elements, id) orelse return null;
         if (value.len != 3) return error.InvalidRtpPacket;
         return (@as(u24, value[0]) << 16) | (@as(u24, value[1]) << 8) | value[2];
+    }
+
+    pub fn absoluteSendTimePayload(timestamp: u24) [3]u8 {
+        return .{
+            @truncate(timestamp >> 16),
+            @truncate(timestamp >> 8),
+            @truncate(timestamp),
+        };
     }
 
     pub fn audioLevel(elements: []const HeaderExtensionElement, id: u8) Error!?AudioLevelExtension {
@@ -7017,10 +7031,12 @@ test "RTP packet extension padding and writer" {
     var one_byte_extensions: std.ArrayList(u8) = .empty;
     defer one_byte_extensions.deinit(allocator);
     const audio_level = try rtp.audioLevelPayload(8, true);
+    const twcc_payload = rtp.transportWideSequenceNumberPayload(0x1234);
+    const abs_send_time = rtp.absoluteSendTimePayload(0x010203);
     try rtp.writeOneByteHeaderExtensions(&one_byte_extensions, allocator, &.{
         .{ .id = 1, .data = "m" },
-        .{ .id = 3, .data = &.{ 0x12, 0x34 } },
-        .{ .id = 4, .data = &.{ 0x01, 0x02, 0x03 } },
+        .{ .id = 3, .data = &twcc_payload },
+        .{ .id = 4, .data = &abs_send_time },
         .{ .id = 5, .data = &audio_level },
     });
     try std.testing.expectEqual(@as(usize, 0), one_byte_extensions.items.len % 4);
