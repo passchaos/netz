@@ -1,12 +1,19 @@
 const std = @import("std");
 
 pub const token_len: usize = 16;
+pub const static_key_len: usize = 16;
 pub const min_datagram_len: usize = token_len + 5;
 
 pub const Error = error{
     InvalidLength,
     InvalidHeaderForm,
 } || std.mem.Allocator.Error;
+
+pub fn tokenForConnectionId(static_key: [static_key_len]u8, connection_id: []const u8) [token_len]u8 {
+    var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
+    std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, connection_id, &static_key);
+    return mac[0..token_len].*;
+}
 
 pub fn tokenCandidate(datagram: []const u8) ?[token_len]u8 {
     if (datagram.len < min_datagram_len) return null;
@@ -29,6 +36,16 @@ pub fn encode(list: *std.ArrayList(u8), allocator: std.mem.Allocator, unpredicta
     if (!validPrefix(unpredictable_prefix)) return error.InvalidHeaderForm;
     try list.appendSlice(allocator, unpredictable_prefix);
     try list.appendSlice(allocator, &token);
+}
+
+test "QUIC stateless reset token derives from static key and connection ID" {
+    const key = [_]u8{0x42} ** static_key_len;
+    const cid = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const other_cid = [_]u8{ 0x01, 0x02, 0x03, 0x05 };
+
+    const token = tokenForConnectionId(key, &cid);
+    try std.testing.expectEqual(token, tokenForConnectionId(key, &cid));
+    try std.testing.expect(!std.mem.eql(u8, &token, &tokenForConnectionId(key, &other_cid)));
 }
 
 test "QUIC stateless reset encodes and matches trailing token" {
