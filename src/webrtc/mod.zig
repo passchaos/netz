@@ -2475,6 +2475,7 @@ pub const sdp = struct {
                 var local_track = track_id;
                 const ssrc = parseSsrcAttribute(attr.value, &local_stream, &local_track) orelse continue;
                 if (repairBase(&rtx_pairs, rtx_len, ssrc) != null or repairBase(&fec_pairs, fec_len, ssrc) != null) continue;
+                if (local_stream.len == 0 or local_track.len == 0) continue;
                 const existing = findTrackBySsrc(media_tracks.items, ssrc);
                 if (existing) |track| {
                     track.stream_id = local_stream;
@@ -2866,6 +2867,11 @@ pub const sdp = struct {
         const maybe_msid = parts.next() orelse return ssrc;
         if (std.mem.startsWith(u8, maybe_msid, "msid:")) {
             if (parts.next()) |track| {
+                // Pion/webrtc-go only treats `a=ssrc:<ssrc> msid:<stream> <track>`
+                // as an MSID-bearing SSRC when it has exactly three fields.
+                // Ignoring malformed extras avoids binding a track to
+                // accidentally concatenated SDP attributes or vendor garbage.
+                if (parts.next() != null) return ssrc;
                 stream_id.* = maybe_msid["msid:".len..];
                 track_id.* = track;
             }
@@ -9664,6 +9670,10 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=mid:audio\r\n" ++
         "a=sendrecv\r\n" ++
         "a=ssrc:2000 msid:audio_stream audio_track\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:malformed-msid\r\n" ++
+        "a=sendrecv\r\n" ++
+        "a=ssrc:2500 msid:malformed_stream malformed_track extra\r\n" ++
         "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
         "a=mid:video\r\n" ++
         "a=sendrecv\r\n" ++
@@ -9700,6 +9710,8 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(?u32, 2000), tracks[0].ssrc);
     try std.testing.expectEqualStrings("audio_stream", tracks[0].stream_id);
     try std.testing.expectEqualStrings("audio_track", tracks[0].track_id);
+    try std.testing.expect(sdp.trackDetailsForMid(tracks, "malformed-msid") == null);
+    try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 2500) == null);
     try std.testing.expectEqualStrings("video", tracks[1].mid);
     try std.testing.expectEqual(@as(?u32, 3000), tracks[1].ssrc);
     try std.testing.expectEqual(@as(?u32, 4000), tracks[1].rtx_ssrc);
