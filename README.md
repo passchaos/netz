@@ -94,7 +94,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   reporting, sent ECN counter validation, ACK_ECN CE congestion response,
   reordered-ACK_ECN tolerance, and plain-ACK ECN fallback disablement, RFC 9002-style RTT/PTO estimation with negotiated ACK-delay
   encode/decode and adjustment, packet/time-threshold loss detection, earliest loss/PTO timer
-  deadlines, exponential PTO backoff, two-probe PTO service, and persistent
+  deadlines, capped exponential PTO backoff, two-probe PTO service, and persistent
   congestion detection that collapses the congestion window and resets the RTT
   measurement epoch after long contiguous lost periods, PMTUD/DPLPMTUD path MTU
   probe sizing state with IPv4/IPv6 ceilings, loss-driven search backoff, and

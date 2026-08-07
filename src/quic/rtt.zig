@@ -4,6 +4,7 @@ const std = @import("std");
 pub const timer_granularity_ns: u64 = 1_000_000;
 pub const default_initial_rtt_ns: u64 = 100_000_000;
 pub const default_max_ack_delay_ns: u64 = 25_000_000;
+pub const max_pto_ns: u64 = 60_000_000_000;
 pub const default_persistent_congestion_threshold: u64 = 3;
 pub const max_ack_delay_exponent: u64 = 20;
 

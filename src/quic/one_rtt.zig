@@ -659,9 +659,10 @@ pub const Connection = struct {
         var period = self.rtt_stats.pto(true);
         var remaining = self.pto_count;
         while (remaining != 0) : (remaining -= 1) {
-            period = std.math.mul(u64, period, 2) catch return std.math.maxInt(u64);
+            period = std.math.mul(u64, period, 2) catch return quic.rtt.max_pto_ns;
+            if (period >= quic.rtt.max_pto_ns) return quic.rtt.max_pto_ns;
         }
-        return @max(period, quic.rtt.timer_granularity_ns);
+        return @min(@max(period, quic.rtt.timer_granularity_ns), quic.rtt.max_pto_ns);
     }
 
     pub fn ptoDeadline(self: Connection) ?u64 {
@@ -4974,6 +4975,8 @@ test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
     defer probe.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 1), probe.packet.packet_number);
     try std.testing.expectEqual(@as(?u64, 610_000_000), client.ptoDeadline());
+    client.pto_count = 100;
+    try std.testing.expectEqual(quic.rtt.max_pto_ns, client.ptoPeriod());
 
     try server.sendAck(0);
     var ack = try client.receivePacket();
