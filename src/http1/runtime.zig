@@ -8,7 +8,9 @@ pub const Error = http1.Error || error{
     HeadersTooLarge,
     BodyTooLarge,
     ConnectionClosed,
+    InvalidUri,
     InvalidResponse,
+    UnsupportedScheme,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
@@ -201,6 +203,27 @@ pub const Client = struct {
         return readResponseFromStreamBufferedForRequest(self.allocator, self.io, self.stream, self.limits, .{}, &self.inbuf, request_options.method);
     }
 
+    pub fn requestUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+    ) Error!OwnedResponse {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
+        var host_buffer: [net.HostName.max_len]u8 = undefined;
+        const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+
+        var client = try Client.connectHost(allocator, io, host.bytes, uri.port orelse 80, limits);
+        defer client.close();
+        var options = request_options;
+        options.target = target;
+        return client.request(options);
+    }
+
     pub fn openConnectTunnel(self: *Client, target: []const u8, headers: []const http1.Header) Error!Tunnel {
         try http1.validateConnectTarget(target);
         try writeRequestToStream(self.allocator, self.io, self.stream, .{
@@ -331,6 +354,21 @@ pub const ResponseOptions = struct {
     /// be inferred from status/headers alone.
     request_method: ?http1.Method = null,
 };
+
+fn uriTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
+    const path_value = uriComponentBytes(uri.path);
+    const path = if (path_value.len == 0) "/" else path_value;
+    if (uri.query) |query| {
+        return try std.fmt.allocPrint(allocator, "{s}?{s}", .{ path, uriComponentBytes(query) });
+    }
+    return try allocator.dupe(u8, path);
+}
+
+fn uriComponentBytes(component: std.Uri.Component) []const u8 {
+    return switch (component) {
+        .raw, .percent_encoded => |value| value,
+    };
+}
 
 pub fn readRequestFromStream(
     allocator: std.mem.Allocator,
@@ -1503,6 +1541,64 @@ test "HTTP/1 client connects by host name" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("dns-ok", response.response.body);
+}
+
+test "HTTP/1 client sends request to URI" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/uri?x=1", request.request.target);
+            var expected_host: [32]u8 = undefined;
+            const rendered_host = try std.fmt.bufPrint(&expected_host, "localhost:{d}", .{server_ptr.address().ip4.port});
+            try std.testing.expectEqualStrings(rendered_host, request.request.header("host").?);
+            try connection.writeResponse(.{ .body = "uri-ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "http://localhost:{d}/uri?x=1", .{server.address().ip4.port});
+    defer allocator.free(uri);
+    var response = try Client.requestUri(allocator, io, uri, .{}, .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("uri-ok", response.response.body);
+
+    try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "https://localhost/", .{}, .{}));
+    try std.testing.expectError(error.InvalidUri, Client.requestUri(allocator, io, "http:///missing-host", .{}, .{}));
 }
 
 test "HTTP/1 server sends 100 Continue before reading expected body" {

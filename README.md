@@ -12,7 +12,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, and unsupported transfer-coding and HTTP/1.0 transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
-  persistence, optional Host/port synthesis, host-name DNS connect helpers, and a
+  persistence, optional Host/port synthesis, `http://` URI and host-name DNS connect helpers, and a
   `std.Io.async` concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder with RFC 7541 Huffman strings plus
@@ -195,19 +195,13 @@ var threaded = std.Io.Threaded.init(allocator, .{});
 defer threaded.deinit();
 const io = threaded.io();
 
-var client = try netz.http1.runtime.Client.connectHost(
+var response = try netz.http1.runtime.Client.requestUri(
     allocator,
     io,
-    "localhost",
-    8080,
+    "http://localhost:8080/",
+    .{},
     .{},
 );
-defer client.close();
-
-var response = try client.request(.{
-    .method = .GET,
-    .target = "/",
-});
 defer response.deinit(allocator);
 ```
 
