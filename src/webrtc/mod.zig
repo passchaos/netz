@@ -1286,6 +1286,19 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub fn formatMediaLine(allocator: std.mem.Allocator, kind: []const u8, port: u16, protocol: []const u8, formats: []const u8) Error![]u8 {
+        try validateSdpToken(kind);
+        try validateSdpToken(protocol);
+        try validateSdpAttributeValue(formats);
+        return std.fmt.allocPrint(allocator, "m={s} {d} {s} {s}\r\n", .{ kind, port, protocol, formats });
+    }
+
+    pub fn appendMediaLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, kind: []const u8, port: u16, protocol: []const u8, formats: []const u8) Error!void {
+        const line = try formatMediaLine(allocator, kind, port, protocol, formats);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub fn formatCandidateAttribute(allocator: std.mem.Allocator, candidate: ice.Candidate) Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -8795,6 +8808,16 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
     try std.testing.expectEqualStrings("mid", session.media[0].attributes[0].name);
+    const media_line = try sdp.formatMediaLine(allocator, session.media[0].kind, session.media[0].port, session.media[0].protocol, session.media[0].formats);
+    defer allocator.free(media_line);
+    try std.testing.expectEqualStrings("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n", media_line);
+    var media_lines: std.ArrayList(u8) = .empty;
+    defer media_lines.deinit(allocator);
+    try sdp.appendMediaLine(&media_lines, allocator, "video", 0, "UDP/TLS/RTP/SAVPF", "96 97");
+    try std.testing.expectEqualStrings("m=video 0 UDP/TLS/RTP/SAVPF 96 97\r\n", media_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatMediaLine(allocator, "", 9, "UDP/TLS/RTP/SAVPF", "96"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatMediaLine(allocator, "video", 9, "UDP TLS", "96"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatMediaLine(allocator, "video", 9, "UDP/TLS/RTP/SAVPF", ""));
     const mid_line = try sdp.formatMidLine(allocator, "0");
     defer allocator.free(mid_line);
     try std.testing.expectEqualStrings("a=mid:0\r\n", mid_line);
