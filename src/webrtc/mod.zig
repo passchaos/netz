@@ -1422,9 +1422,9 @@ pub const sdp = struct {
         // Pion/sdp handles the RTP/AVP static payload types without an rtpmap
         // attribute.  These appear in legacy offers and browser interop tests.
         return switch (payload_type) {
-            0 => .{ .payload_type = 0, .mime_type = "audio/PCMU", .codec_name = "PCMU", .clock_rate = 8000, .channels = 1 },
-            8 => .{ .payload_type = 8, .mime_type = "audio/PCMA", .codec_name = "PCMA", .clock_rate = 8000, .channels = 1 },
-            9 => .{ .payload_type = 9, .mime_type = "audio/G722", .codec_name = "G722", .clock_rate = 8000, .channels = 1 },
+            0 => .{ .payload_type = 0, .mime_type = "audio/PCMU", .codec_name = "PCMU", .clock_rate = 8000, .channels = 0 },
+            8 => .{ .payload_type = 8, .mime_type = "audio/PCMA", .codec_name = "PCMA", .clock_rate = 8000, .channels = 0 },
+            9 => .{ .payload_type = 9, .mime_type = "audio/G722", .codec_name = "G722", .clock_rate = 8000, .channels = 0 },
             else => null,
         };
     }
@@ -5273,7 +5273,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("audio/PCMU", static_codecs[0].mime_type);
     try std.testing.expectEqualStrings("PCMU", static_codecs[0].codec_name);
     try std.testing.expectEqual(@as(u32, 8000), static_codecs[0].clock_rate);
-    try std.testing.expectEqual(@as(u16, 1), static_codecs[0].channels);
+    try std.testing.expectEqual(@as(u16, 0), static_codecs[0].channels);
     try std.testing.expectEqualStrings("audio/PCMA", static_codecs[1].mime_type);
     try std.testing.expectEqualStrings("audio/G722", static_codecs[2].mime_type);
 
