@@ -4295,7 +4295,7 @@ pub const rtcp = struct {
         if (payload.len != expected_len) return error.InvalidRtcpPacket;
         const exponent: u6 = @truncate(bitrate_hi >> 2);
         const mantissa = (@as(u64, bitrate_hi & 0x03) << 16) | (@as(u64, bitrate_mid) << 8) | bitrate_lo;
-        const bitrate = std.math.shlExact(u64, mantissa, exponent) catch return error.InvalidRtcpPacket;
+        const bitrate = saturatedRembBitrate(mantissa, exponent);
         const ssrcs = try allocator.alloc(u32, num_ssrc);
         errdefer allocator.free(ssrcs);
         for (ssrcs) |*ssrc| ssrc.* = try cursor.readInt(u32, .big);
@@ -4304,6 +4304,17 @@ pub const rtcp = struct {
             .bitrate = bitrate,
             .ssrcs = ssrcs,
         };
+    }
+
+    fn saturatedRembBitrate(mantissa: u64, exponent: u6) u64 {
+        if (mantissa == 0) return 0;
+        const shift = @as(u32, exponent);
+        if (shift >= @bitSizeOf(u64)) return std.math.maxInt(u64);
+        const shift_amount: u6 = @intCast(shift);
+        if (mantissa > (@as(u64, std.math.maxInt(u64)) >> shift_amount)) {
+            return std.math.maxInt(u64);
+        }
+        return mantissa << shift_amount;
     }
 
     fn parseCongestionControlFeedback(allocator: std.mem.Allocator, payload: []const u8) Error!CongestionControlFeedback {
@@ -8815,6 +8826,17 @@ test "RTCP receiver report and feedback packets" {
 
     encoded.items[8] = 1; // REMB media SSRC must be zero.
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, encoded.items));
+
+    const max_remb_wire = [_]u8{
+        143, 206, 0,   4,
+        0,   0,   0,   0,
+        0,   0,   0,   0,
+        'R', 'E', 'M', 'B',
+        0,   255, 255, 255,
+    };
+    var max_remb = try rtcp.parsePacket(allocator, &max_remb_wire);
+    defer max_remb.deinit(allocator);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_remb.packet.receiver_estimated_maximum_bitrate.bitrate);
 }
 
 test "RTCP transport-wide congestion feedback" {
