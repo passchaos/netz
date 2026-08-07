@@ -759,6 +759,7 @@ pub const sdp = struct {
     pub const IceDetails = struct {
         credentials: IceCredentials,
         candidates: []IceCandidate,
+        end_of_candidates: bool = false,
 
         pub fn deinit(self: *IceDetails, allocator: std.mem.Allocator) void {
             for (self.candidates) |*candidate| candidate.deinit(allocator);
@@ -1072,6 +1073,11 @@ pub const sdp = struct {
         return candidates.toOwnedSlice(allocator);
     }
 
+    pub fn iceEndOfCandidates(session: Session) bool {
+        const media = candidateMedia(session) orelse return findAttr(session.attributes, "end-of-candidates") != null;
+        return findAttr(media.attributes, "end-of-candidates") != null or findAttr(session.attributes, "end-of-candidates") != null;
+    }
+
     pub fn extractIceDetails(allocator: std.mem.Allocator, session: Session) Error!IceDetails {
         const credentials = try extractIceCredentials(session);
         const candidates = try extractIceCandidates(allocator, session);
@@ -1079,7 +1085,11 @@ pub const sdp = struct {
             for (candidates) |*candidate| candidate.deinit(allocator);
             allocator.free(candidates);
         }
-        return .{ .credentials = credentials, .candidates = candidates };
+        return .{
+            .credentials = credentials,
+            .candidates = candidates,
+            .end_of_candidates = iceEndOfCandidates(session),
+        };
     }
 
     pub fn extractDtlsRole(session: Session) Error!DtlsRole {
@@ -4765,7 +4775,8 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=ice-ufrag:video-ufrag\r\n" ++
         "a=ice-pwd:video-pwd\r\n" ++
         "a=candidate:1 1 udp 2122162783 192.168.84.254 46492 typ host generation 0 network-id 2\r\n" ++
-        "a=candidate:2 1 udp not-a-priority 192.168.84.254 50000 typ host generation 0\r\n";
+        "a=candidate:2 1 udp not-a-priority 192.168.84.254 50000 typ host generation 0\r\n" ++
+        "a=end-of-candidates\r\n";
     var candidate_session = try sdp.parse(allocator, candidate_details_text);
     defer candidate_session.deinit(allocator);
     var ice_details = try sdp.extractIceDetails(allocator, candidate_session);
@@ -4778,6 +4789,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("192.168.84.254", ice_details.candidates[0].candidate.address);
     try std.testing.expectEqual(@as(u16, 46492), ice_details.candidates[0].candidate.port);
     try std.testing.expectEqual(@as(usize, 2), ice_details.candidates[0].candidate.extensions.len);
+    try std.testing.expect(ice_details.end_of_candidates);
 
     const unknown_candidate_text =
         "v=0\r\n" ++
@@ -4792,6 +4804,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     var unknown_candidate_details = try sdp.extractIceDetails(allocator, unknown_candidate_session);
     defer unknown_candidate_details.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), unknown_candidate_details.candidates.len);
+    try std.testing.expect(!unknown_candidate_details.end_of_candidates);
 
     const malformed_candidate_text =
         "v=0\r\n" ++
