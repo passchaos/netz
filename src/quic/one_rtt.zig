@@ -127,6 +127,7 @@ pub const ConnectionConfig = struct {
     enable_ack_frequency: bool = false,
     local_min_ack_delay: ?u64 = null,
     peer_min_ack_delay: ?u64 = null,
+    local_stateless_reset_key: ?[quic.stateless_reset.static_key_len]u8 = null,
 };
 
 const StreamFlowEntry = struct {
@@ -280,7 +281,11 @@ pub const Connection = struct {
             .recv_max_streams_bidi = config.initial_receive_max_streams_bidi,
             .recv_max_streams_uni = config.initial_receive_max_streams_uni,
         };
-        try connection.local_connection_ids.registerInitial(config.local_connection_id, [_]u8{0} ** 16);
+        if (config.local_stateless_reset_key) |key| {
+            try connection.local_connection_ids.registerInitialWithStaticKey(config.local_connection_id, key);
+        } else {
+            try connection.local_connection_ids.registerInitial(config.local_connection_id, [_]u8{0} ** 16);
+        }
         try connection.peer_connection_ids.add(0, config.peer_connection_id, [_]u8{0} ** 16);
         try connection.peer_connection_ids.markInUse(0);
         return connection;
@@ -1015,6 +1020,13 @@ pub const Connection = struct {
 
     pub fn sendNewConnectionId(self: *Connection, connection_id: []const u8, stateless_reset_token: [16]u8) Error!void {
         const frame = try self.local_connection_ids.issue(connection_id, stateless_reset_token);
+        const frames = [_]quic.Frame{frame};
+        try self.send(&frames);
+    }
+
+    pub fn sendNewConnectionIdWithDerivedToken(self: *Connection, connection_id: []const u8) Error!void {
+        const key = self.config.local_stateless_reset_key orelse return error.InvalidConnectionId;
+        const frame = try self.local_connection_ids.issueWithStaticKey(connection_id, key);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
     }
@@ -4046,6 +4058,58 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     var retire_packet = try server.receiveRoutedDatagram(routed);
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
+}
+
+test "QUIC 1-RTT derives local CID stateless reset tokens from config key" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const server_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    const reset_key = [_]u8{0x5c} ** quic.stateless_reset.static_key_len;
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe3} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .local_stateless_reset_key = reset_key,
+    });
+    defer server.deinit();
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &quic.stateless_reset.tokenForConnectionId(reset_key, &server_cid),
+        &server.local_connection_ids.entries[0].stateless_reset_token,
+    );
+
+    try server.sendNewConnectionIdWithDerivedToken("derived-cid");
+    var packet = try client.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &quic.stateless_reset.tokenForConnectionId(reset_key, "derived-cid"),
+        &packet.frames[0].new_connection_id.stateless_reset_token,
+    );
 }
 
 test "QUIC 1-RTT preflights RETIRE_CONNECTION_ID for packet destination CID" {

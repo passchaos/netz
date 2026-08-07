@@ -65,7 +65,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   packet server/client Finished flights, and handshake/application secret
   derivation for QUIC, an integrated minimal client/server handshake for QUIC v1/v2 that emits
   practical transport parameters and applies negotiated flow-control, stream,
-  and UDP-payload limits to established 1-RTT connection objects, static-key-derived stateless reset token helpers,
+  and UDP-payload limits to established 1-RTT connection objects with static-key-derived stateless reset token helpers,
   packet-number space ACK tracking with bounded duplicate/old packet suppression, ACK range semantic validation, receive-frame semantic preflight before multi-frame side effects, and adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, stream send/receive state with
   duplicate-overlap conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
