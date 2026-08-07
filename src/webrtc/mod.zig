@@ -4348,6 +4348,9 @@ pub const rtcp = struct {
         received_prior: u32 = 0,
         transit_prior: ?i64 = null,
         jitter_q4: u64 = 0,
+        last_sender_report: u32 = 0,
+        last_sender_report_arrival: u32 = 0,
+        has_last_sender_report: bool = false,
 
         pub fn observe(self: *ReceiverStats, packet: rtp.Packet, arrival_time_ns: u64) void {
             const seq = packet.header.sequence_number;
@@ -4377,6 +4380,12 @@ pub const rtcp = struct {
             self.transit_prior = transit_now;
         }
 
+        pub fn observeSenderReport(self: *ReceiverStats, report: SenderReport, arrival_time_ns: u64) void {
+            self.last_sender_report = compactNtpTimestamp(report.ntp_timestamp_msw, report.ntp_timestamp_lsw);
+            self.last_sender_report_arrival = compactNtpFromUnixNanos(arrival_time_ns);
+            self.has_last_sender_report = true;
+        }
+
         pub fn reportBlock(self: *ReceiverStats) ReportBlock {
             const expected = self.expectedPackets();
             const interval_expected = expected -% self.expected_prior;
@@ -4398,6 +4407,15 @@ pub const rtcp = struct {
                 .highest_sequence_number = self.extendedHighestSequenceNumber(),
                 .interarrival_jitter = @intCast(@min(@as(u64, std.math.maxInt(u32)), self.jitter_q4 >> 4)),
             };
+        }
+
+        pub fn reportBlockAt(self: *ReceiverStats, now_ns: u64) ReportBlock {
+            var block = self.reportBlock();
+            if (self.has_last_sender_report) {
+                block.last_sender_report = self.last_sender_report;
+                block.delay_since_last_sender_report = compactNtpFromUnixNanos(now_ns) -% self.last_sender_report_arrival;
+            }
+            return block;
         }
 
         pub fn expectedPackets(self: ReceiverStats) u32 {
@@ -9985,6 +10003,20 @@ test "RTCP receiver stats builds receiver report block" {
     try std.testing.expectEqual(@as(u24, 1), second.cumulative_lost);
     try std.testing.expectEqual(@as(u32, 5), second.highest_sequence_number);
     try std.testing.expect(second.interarrival_jitter > 0);
+
+    const sr_ntp = rtcp.ntpTimestamp(1_500_000_000);
+    stats.observeSenderReport(.{
+        .sender_ssrc = 0x01020304,
+        .ntp_timestamp_msw = sr_ntp.msw,
+        .ntp_timestamp_lsw = sr_ntp.lsw,
+        .rtp_timestamp = 0,
+        .sender_packet_count = 0,
+        .sender_octet_count = 0,
+    }, 2 * std.time.ns_per_s);
+    const third = stats.reportBlockAt(2 * std.time.ns_per_s + 250 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u32, 0x7e81_8000), third.last_sender_report);
+    try std.testing.expectEqual(@as(u32, 0x0000_4000), third.delay_since_last_sender_report);
+    try std.testing.expectEqual(@as(u64, 250 * std.time.ns_per_ms), rtcp.compactNtpDelayToNanos(third.delay_since_last_sender_report));
 }
 
 test "RTCP NACK tracker detects RTP gaps and wraparound" {
