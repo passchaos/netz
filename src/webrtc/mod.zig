@@ -1194,8 +1194,10 @@ pub const sdp = struct {
         var payloads = std.mem.tokenizeAny(u8, media.formats, " \t");
         while (payloads.next()) |payload_token| {
             const payload_type = std.fmt.parseInt(u8, payload_token, 10) catch return error.InvalidSdp;
-            const rtpmap = findPayloadAttribute(media.attributes, "rtpmap", payload_type) orelse return error.InvalidSdp;
-            var codec = try parseRtpMap(payload_type, media.kind, rtpmap);
+            var codec = if (findPayloadAttribute(media.attributes, "rtpmap", payload_type)) |rtpmap|
+                try parseRtpMap(payload_type, media.kind, rtpmap)
+            else
+                staticRtpCodec(payload_type) orelse return error.InvalidSdp;
             errdefer codec.deinit(allocator);
             if (findPayloadAttribute(media.attributes, "fmtp", payload_type)) |fmtp| codec.fmtp = fmtp;
             codec.rtcp_feedback = try collectRtcpFeedback(allocator, media.attributes, payload_type);
@@ -1354,6 +1356,17 @@ pub const sdp = struct {
             .mime_type = codec_name,
             .clock_rate = std.fmt.parseInt(u32, clock_s, 10) catch return error.InvalidSdp,
             .channels = if (channels_s) |channels| std.fmt.parseInt(u16, channels, 10) catch return error.InvalidSdp else defaultCodecChannels(media_kind),
+        };
+    }
+
+    fn staticRtpCodec(payload_type: u8) ?RtpCodec {
+        // Pion/sdp handles the RTP/AVP static payload types without an rtpmap
+        // attribute.  These appear in legacy offers and browser interop tests.
+        return switch (payload_type) {
+            0 => .{ .payload_type = 0, .mime_type = "PCMU", .clock_rate = 8000, .channels = 1 },
+            8 => .{ .payload_type = 8, .mime_type = "PCMA", .clock_rate = 8000, .channels = 1 },
+            9 => .{ .payload_type = 9, .mime_type = "G722", .clock_rate = 8000, .channels = 1 },
+            else => null,
         };
     }
 
@@ -5081,6 +5094,22 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("ccm", codecs[0].rtcp_feedback[1].typ);
     try std.testing.expectEqualStrings("fir", codecs[0].rtcp_feedback[1].parameter);
     try std.testing.expectEqualStrings("nack", codecs[0].rtcp_feedback[2].typ);
+
+    const static_codec_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=audio 9 RTP/AVP 0 8 9\r\n";
+    var static_codec_session = try sdp.parse(allocator, static_codec_text);
+    defer static_codec_session.deinit(allocator);
+    const static_codecs = try sdp.extractRtpCodecs(allocator, static_codec_session.media[0]);
+    defer sdp.freeRtpCodecs(allocator, static_codecs);
+    try std.testing.expectEqual(@as(usize, 3), static_codecs.len);
+    try std.testing.expectEqualStrings("PCMU", static_codecs[0].mime_type);
+    try std.testing.expectEqual(@as(u32, 8000), static_codecs[0].clock_rate);
+    try std.testing.expectEqual(@as(u16, 1), static_codecs[0].channels);
+    try std.testing.expectEqualStrings("PCMA", static_codecs[1].mime_type);
+    try std.testing.expectEqualStrings("G722", static_codecs[2].mime_type);
 
     const rid_text =
         "v=0\r\n" ++
