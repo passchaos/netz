@@ -101,7 +101,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   1-RTT PING+PADDING probe packets wired to ACK/loss feedback,
   a 1-RTT recovery queue for PTO plus packet-threshold and time-threshold
   retransmission of unacknowledged ack-eliciting frame payloads,
-  endpoint-level connection-ID routing and static-key token derivation primitives for stable multi-connection
+  endpoint-level connection-ID routing with unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route
   rejection, NEW_CONNECTION_ID receive/send active-limit, duplicate-CID/reset-token validation and RETIRE_CONNECTION_ID lifecycle/preflight state wired into

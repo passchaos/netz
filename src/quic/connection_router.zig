@@ -109,7 +109,8 @@ pub const Router = struct {
         const version = std.mem.readInt(u32, packet[1..5], .big);
         if (version == 0) return null;
         const dcid_len = packet[5];
-        if (dcid_len == 0 or dcid_len > max_connection_id_len) return error.InvalidConnectionId;
+        if (dcid_len == 0) return null;
+        if (dcid_len > max_connection_id_len) return error.InvalidConnectionId;
         const dcid_start: usize = 6;
         const dcid_end = dcid_start + @as(usize, dcid_len);
         if (packet.len < dcid_end) return error.InvalidPacket;
@@ -192,6 +193,9 @@ test "QUIC connection router routes short and long header datagrams" {
 
     const version_negotiation = [_]u8{ 0xc0, 0, 0, 0, 0, 3, 'a', 'b', 'c', 0, 0, 0 };
     try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&version_negotiation));
+
+    const zero_length_dcid = [_]u8{ 0xc0, 0, 0, 0, 1, 0, 0, 0 };
+    try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&zero_length_dcid));
 
     const fixed_bit_clear_short = [_]u8{ 0x00, 'a', 'b', 'c', 0x00 };
     try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&fixed_bit_clear_short));
