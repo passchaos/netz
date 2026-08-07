@@ -1239,6 +1239,12 @@ pub const sdp = struct {
         }
 
         for (session.media) |media| {
+            var media_tracks: std.ArrayList(TrackDetails) = .empty;
+            errdefer {
+                for (media_tracks.items) |*track| track.deinit(allocator);
+                media_tracks.deinit(allocator);
+            }
+
             if (findAttr(media.attributes, "recvonly") != null or findAttr(media.attributes, "inactive") != null) continue;
             if (!std.ascii.eqlIgnoreCase(media.kind, "audio") and !std.ascii.eqlIgnoreCase(media.kind, "video")) continue;
             const mid = findAttr(media.attributes, "mid") orelse continue;
@@ -1260,13 +1266,16 @@ pub const sdp = struct {
             const rids = try extractRids(allocator, media);
             errdefer allocator.free(rids);
             if (rids.len != 0 and stream_id.len != 0 and track_id.len != 0) {
-                try tracks.append(allocator, .{
+                try media_tracks.append(allocator, .{
                     .mid = mid,
                     .kind = media.kind,
                     .stream_id = stream_id,
                     .track_id = track_id,
                     .rids = rids,
                 });
+                try tracks.appendSlice(allocator, media_tracks.items);
+                media_tracks.deinit(allocator);
+                media_tracks = .empty;
                 continue;
             }
             allocator.free(rids);
@@ -1277,13 +1286,13 @@ pub const sdp = struct {
                 var local_track = track_id;
                 const ssrc = parseSsrcAttribute(attr.value, &local_stream, &local_track) orelse continue;
                 if (repairBase(&rtx_pairs, rtx_len, ssrc) != null or repairBase(&fec_pairs, fec_len, ssrc) != null) continue;
-                const existing = findTrackBySsrc(tracks.items, ssrc);
+                const existing = findTrackBySsrc(media_tracks.items, ssrc);
                 if (existing) |track| {
                     track.stream_id = local_stream;
                     track.track_id = local_track;
                     continue;
                 }
-                try tracks.append(allocator, .{
+                try media_tracks.append(allocator, .{
                     .mid = mid,
                     .kind = media.kind,
                     .stream_id = local_stream,
@@ -1293,6 +1302,9 @@ pub const sdp = struct {
                     .fec_ssrc = repairForBase(&fec_pairs, fec_len, ssrc),
                 });
             }
+            try tracks.appendSlice(allocator, media_tracks.items);
+            media_tracks.deinit(allocator);
+            media_tracks = .empty;
         }
         return tracks.toOwnedSlice(allocator);
     }
@@ -5286,6 +5298,26 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(usize, 2), tracks[2].rids.len);
     try std.testing.expectEqualStrings("f", tracks[2].rids[0].id);
     try std.testing.expect(tracks[2].rids[1].paused);
+
+    const duplicate_ssrc_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:dup-audio\r\n" ++
+        "a=ssrc:1234 msid:audio_stream audio_track\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
+        "a=mid:dup-video\r\n" ++
+        "a=ssrc:1234 msid:video_stream video_track\r\n";
+    var duplicate_ssrc_session = try sdp.parse(allocator, duplicate_ssrc_text);
+    defer duplicate_ssrc_session.deinit(allocator);
+    const duplicate_tracks = try sdp.extractTrackDetails(allocator, duplicate_ssrc_session);
+    defer sdp.freeTrackDetails(allocator, duplicate_tracks);
+    try std.testing.expectEqual(@as(usize, 2), duplicate_tracks.len);
+    try std.testing.expectEqualStrings("dup-audio", duplicate_tracks[0].mid);
+    try std.testing.expectEqualStrings("audio_track", duplicate_tracks[0].track_id);
+    try std.testing.expectEqualStrings("dup-video", duplicate_tracks[1].mid);
+    try std.testing.expectEqualStrings("video_track", duplicate_tracks[1].track_id);
 
     const media_only =
         "v=0\r\n" ++
