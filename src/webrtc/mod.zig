@@ -1144,6 +1144,26 @@ pub const sdp = struct {
         return false;
     }
 
+    pub fn rtcpFeedbackEquivalentIgnoreCase(a: RtcpFeedback, b: RtcpFeedback) bool {
+        return std.ascii.eqlIgnoreCase(a.typ, b.typ) and std.ascii.eqlIgnoreCase(a.parameter, b.parameter);
+    }
+
+    pub fn rtcpFeedbackContainsIgnoreCase(feedback: []const RtcpFeedback, needle: RtcpFeedback) bool {
+        for (feedback) |candidate| {
+            if (rtcpFeedbackEquivalentIgnoreCase(candidate, needle)) return true;
+        }
+        return false;
+    }
+
+    pub fn rtcpFeedbackDeduplicate(allocator: std.mem.Allocator, feedback: []const RtcpFeedback) Error![]RtcpFeedback {
+        var out: std.ArrayList(RtcpFeedback) = .empty;
+        errdefer out.deinit(allocator);
+        for (feedback) |candidate| {
+            if (!rtcpFeedbackContainsIgnoreCase(out.items, candidate)) try out.append(allocator, candidate);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
     pub fn rtcpFeedbackIntersection(allocator: std.mem.Allocator, local: []const RtcpFeedback, remote: []const RtcpFeedback) Error![]RtcpFeedback {
         var out: std.ArrayList(RtcpFeedback) = .empty;
         errdefer out.deinit(allocator);
@@ -8500,6 +8520,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("nack", codecs[0].rtcp_feedback[2].typ);
     try std.testing.expect(sdp.rtcpFeedbackContains(codecs[0].rtcp_feedback, .{ .typ = "nack" }));
     try std.testing.expect(!sdp.rtcpFeedbackContains(codecs[0].rtcp_feedback, .{ .typ = "NACK" }));
+    try std.testing.expect(sdp.rtcpFeedbackContainsIgnoreCase(codecs[0].rtcp_feedback, .{ .typ = "NACK" }));
     const negotiated_feedback = try sdp.rtcpFeedbackIntersection(allocator, &.{
         .{ .typ = "nack" },
         .{ .typ = "transport-cc" },
@@ -8510,6 +8531,17 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("nack", negotiated_feedback[0].typ);
     try std.testing.expectEqualStrings("ccm", negotiated_feedback[1].typ);
     try std.testing.expectEqualStrings("fir", negotiated_feedback[1].parameter);
+    const deduped_feedback = try sdp.rtcpFeedbackDeduplicate(allocator, &.{
+        .{ .typ = "nack" },
+        .{ .typ = "NACK" },
+        .{ .typ = "nack", .parameter = "pli" },
+        .{ .typ = "nack", .parameter = "PLI" },
+    });
+    defer allocator.free(deduped_feedback);
+    try std.testing.expectEqual(@as(usize, 2), deduped_feedback.len);
+    try std.testing.expectEqualStrings("nack", deduped_feedback[0].typ);
+    try std.testing.expectEqualStrings("nack", deduped_feedback[1].typ);
+    try std.testing.expectEqualStrings("pli", deduped_feedback[1].parameter);
 
     const fmtp_params = try sdp.parseFmtpParameters(allocator, " Key = Value ; flag ; apt=96 ");
     defer sdp.freeFmtpParameters(allocator, fmtp_params);
