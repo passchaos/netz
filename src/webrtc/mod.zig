@@ -3848,6 +3848,30 @@ pub const rtcp = struct {
 
     pub const XrChunk = u16;
 
+    pub const XrChunkType = enum {
+        run_length,
+        bit_vector,
+        terminating_null,
+    };
+
+    pub fn xrChunkType(chunk: XrChunk) XrChunkType {
+        if (chunk == 0) return .terminating_null;
+        return if ((chunk & 0x8000) == 0) .run_length else .bit_vector;
+    }
+
+    pub fn xrChunkRunType(chunk: XrChunk) Error!u1 {
+        if (xrChunkType(chunk) != .run_length) return error.InvalidRtcpPacket;
+        return @truncate((chunk >> 14) & 0x01);
+    }
+
+    pub fn xrChunkValue(chunk: XrChunk) u15 {
+        return switch (xrChunkType(chunk)) {
+            .run_length => @truncate(chunk & 0x3fff),
+            .bit_vector => @truncate(chunk & 0x7fff),
+            .terminating_null => 0,
+        };
+    }
+
     pub const RleReportBlock = struct {
         thinning: u4 = 0,
         ssrc: u32,
@@ -9415,8 +9439,18 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 0x12345689), xr.packet.extended_report.blocks[0].loss_rle.ssrc);
     try std.testing.expectEqual(@as(u16, 5), xr.packet.extended_report.blocks[0].loss_rle.begin_sequence);
     try std.testing.expectEqual(@as(u16, 0x4006), xr.packet.extended_report.blocks[0].loss_rle.chunks[0]);
+    try std.testing.expectEqual(rtcp.XrChunkType.run_length, rtcp.xrChunkType(xr.packet.extended_report.blocks[0].loss_rle.chunks[0]));
+    try std.testing.expectEqual(@as(u1, 1), try rtcp.xrChunkRunType(xr.packet.extended_report.blocks[0].loss_rle.chunks[0]));
+    try std.testing.expectEqual(@as(u15, 6), rtcp.xrChunkValue(xr.packet.extended_report.blocks[0].loss_rle.chunks[0]));
     try std.testing.expectEqual(@as(u4, 6), xr.packet.extended_report.blocks[1].duplicate_rle.thinning);
     try std.testing.expectEqual(@as(u16, 0x4123), xr.packet.extended_report.blocks[1].duplicate_rle.chunks[0]);
+    try std.testing.expectEqual(rtcp.XrChunkType.run_length, rtcp.xrChunkType(xr.packet.extended_report.blocks[1].duplicate_rle.chunks[0]));
+    try std.testing.expectEqual(@as(u1, 1), try rtcp.xrChunkRunType(xr.packet.extended_report.blocks[1].duplicate_rle.chunks[0]));
+    try std.testing.expectEqual(rtcp.XrChunkType.bit_vector, rtcp.xrChunkType(0x8123));
+    try std.testing.expectEqual(@as(u15, 0x0123), rtcp.xrChunkValue(0x8123));
+    try std.testing.expectEqual(rtcp.XrChunkType.terminating_null, rtcp.xrChunkType(0));
+    try std.testing.expectEqual(@as(u15, 0), rtcp.xrChunkValue(0));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.xrChunkRunType(0x8123));
     try std.testing.expectEqual(@as(u4, 3), xr.packet.extended_report.blocks[2].packet_receipt_times.thinning);
     try std.testing.expectEqual(@as(u32, 0x98765432), xr.packet.extended_report.blocks[2].packet_receipt_times.ssrc);
     try std.testing.expectEqual(@as(u16, 15432), xr.packet.extended_report.blocks[2].packet_receipt_times.begin_sequence);
