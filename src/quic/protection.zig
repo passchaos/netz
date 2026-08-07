@@ -527,6 +527,7 @@ pub fn openInitialPacket(
 
     var cursor = wire.Cursor.init(bytes);
     const protected_first_byte = try cursor.readByte();
+    try validateLongHeaderFixedBit(protected_first_byte);
     const version = try cursor.readInt(u32, .big);
     if (protectedLongPacketType(protected_first_byte, version) != .initial) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
@@ -541,6 +542,7 @@ pub fn openInitialPacket(
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .initial) return error.InvalidInitialPacket;
+    try validateLongHeaderFixedBit(bytes[0]);
     try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
@@ -620,6 +622,7 @@ pub fn openHandshakePacket(
 
     var cursor = wire.Cursor.init(bytes);
     const protected_first_byte = try cursor.readByte();
+    try validateLongHeaderFixedBit(protected_first_byte);
     const version = try cursor.readInt(u32, .big);
     if (protectedLongPacketType(protected_first_byte, version) != .handshake) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
@@ -632,6 +635,7 @@ pub fn openHandshakePacket(
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .handshake) return error.InvalidInitialPacket;
+    try validateLongHeaderFixedBit(bytes[0]);
     try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
@@ -708,6 +712,7 @@ pub fn openZeroRttPacket(
 
     var cursor = wire.Cursor.init(bytes);
     const protected_first_byte = try cursor.readByte();
+    try validateLongHeaderFixedBit(protected_first_byte);
     const version = try cursor.readInt(u32, .big);
     if (protectedLongPacketType(protected_first_byte, version) != .zero_rtt) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
@@ -720,6 +725,7 @@ pub fn openZeroRttPacket(
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .zero_rtt) return error.InvalidInitialPacket;
+    try validateLongHeaderFixedBit(bytes[0]);
     try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
@@ -987,6 +993,14 @@ fn validatePacketNumberLen(packet_number_len: u8) Error!void {
 
 fn validatePacketNumber(packet_number: u64) Error!void {
     if (packet_number > max_packet_number) return error.InvalidPacketNumber;
+}
+
+fn validateLongHeaderFixedBit(first_byte: u8) Error!void {
+    // The QUIC fixed bit is deliberately not masked by header protection.  Drop
+    // malformed encrypted long-header packets at the packet-codec boundary just
+    // like the generic long-header parser and mature stacks do, instead of
+    // spending AEAD work on datagrams that cannot be valid QUIC v1/v2 packets.
+    if ((first_byte & 0x40) == 0) return error.InvalidInitialPacket;
 }
 
 fn validateLongHeaderReservedBits(first_byte: u8) Error!void {
@@ -1456,6 +1470,57 @@ test "QUIC packet protection rejects reserved header bits after unprotect" {
         defer allocator.free(malformed);
         try std.testing.expectError(error.InvalidInitialPacket, openShortPacket(allocator, keys, malformed, dcid.len, 0));
     }
+}
+
+test "QUIC protected long packets reject a missing fixed bit before AEAD" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const scid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+
+    const initial_keys = deriveInitialSecrets(&dcid).client;
+    const initial = try sealInitialPacket(allocator, initial_keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 1,
+        .packet_number_len = 4,
+        .payload = "initial fixed bit",
+    });
+    defer allocator.free(initial);
+
+    var malformed_initial = try allocator.dupe(u8, initial);
+    defer allocator.free(malformed_initial);
+    malformed_initial[0] &= ~@as(u8, 0x40);
+    try std.testing.expectError(error.InvalidInitialPacket, openInitialPacket(allocator, initial_keys, malformed_initial, 0));
+
+    const handshake_keys = deriveAes128Keys([_]u8{0xce} ** secret_len);
+    const handshake = try sealHandshakePacket(allocator, handshake_keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 2,
+        .packet_number_len = 4,
+        .payload = "handshake fixed bit",
+    });
+    defer allocator.free(handshake);
+
+    var malformed_handshake = try allocator.dupe(u8, handshake);
+    defer allocator.free(malformed_handshake);
+    malformed_handshake[0] &= ~@as(u8, 0x40);
+    try std.testing.expectError(error.InvalidInitialPacket, openHandshakePacket(allocator, handshake_keys, malformed_handshake, 0));
+
+    const zero_rtt_keys = deriveAes128Keys([_]u8{0xcf} ** secret_len);
+    const zero_rtt = try sealZeroRttPacket(allocator, zero_rtt_keys, .{
+        .destination_connection_id = &dcid,
+        .source_connection_id = &scid,
+        .packet_number = 3,
+        .packet_number_len = 4,
+        .payload = "zero rtt fixed bit",
+    });
+    defer allocator.free(zero_rtt);
+
+    var malformed_zero_rtt = try allocator.dupe(u8, zero_rtt);
+    defer allocator.free(malformed_zero_rtt);
+    malformed_zero_rtt[0] &= ~@as(u8, 0x40);
+    try std.testing.expectError(error.InvalidInitialPacket, openZeroRttPacket(allocator, zero_rtt_keys, malformed_zero_rtt, 0));
 }
 
 test "QUIC short packet key update opens next and retained previous generations" {
