@@ -513,13 +513,21 @@ pub const Connection = struct {
     }
 
     pub fn sendClose(self: *Connection, code: websocket.CloseCode, reason: []const u8) Error!void {
+        try self.sendCloseFrame(.{ .code = code, .reason = reason });
+    }
+
+    pub fn sendCloseFrame(self: *Connection, close_frame: ?websocket.CloseFrame) Error!void {
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(self.allocator);
-        try payload.append(self.allocator, @truncate(@intFromEnum(code) >> 8));
-        try payload.append(self.allocator, @truncate(@intFromEnum(code)));
-        try payload.appendSlice(self.allocator, reason);
-        try websocket.validateClosePayload(payload.items);
+        try websocket.writeClosePayload(&payload, self.allocator, close_frame);
         try self.sendFrame(.close, payload.items);
+    }
+
+    pub fn receiveCloseFrame(self: *Connection) Error!?websocket.OwnedCloseFrame {
+        var frame = try self.receiveFrame();
+        defer frame.deinit(self.allocator);
+        if (frame.header.opcode != .close) return error.InvalidFrame;
+        return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
     }
 
     pub fn sendFrame(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
@@ -760,13 +768,21 @@ pub const H2Connection = struct {
     }
 
     pub fn sendClose(self: *H2Connection, code: websocket.CloseCode, reason: []const u8) Error!void {
+        try self.sendCloseFrame(.{ .code = code, .reason = reason });
+    }
+
+    pub fn sendCloseFrame(self: *H2Connection, close_frame: ?websocket.CloseFrame) Error!void {
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(self.allocator);
-        try payload.append(self.allocator, @truncate(@intFromEnum(code) >> 8));
-        try payload.append(self.allocator, @truncate(@intFromEnum(code)));
-        try payload.appendSlice(self.allocator, reason);
-        try websocket.validateClosePayload(payload.items);
+        try websocket.writeClosePayload(&payload, self.allocator, close_frame);
         try self.sendFrame(.close, payload.items);
+    }
+
+    pub fn receiveCloseFrame(self: *H2Connection) Error!?websocket.OwnedCloseFrame {
+        var frame = try self.receiveFrame();
+        defer frame.deinit(self.allocator);
+        if (frame.header.opcode != .close) return error.InvalidFrame;
+        return websocket.parseClosePayloadOwned(self.allocator, frame.payload);
     }
 
     pub fn sendFrame(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
@@ -2355,6 +2371,64 @@ test "WebSocket receiveFrameAuto replies to ping" {
     var close = try client.receiveFrame();
     defer close.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket runtime exposes typed close frames" {
+    const allocator = std.testing.allocator;
+
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    defer backend.deinit();
+    const io = backend.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+
+            try connection.sendCloseFrame(.{ .code = .going_away, .reason = "restart" });
+
+            var ack = (try connection.receiveCloseFrame()).?;
+            defer ack.deinit(connection.allocator);
+            try std.testing.expectEqual(websocket.CloseCode.normal_closure, ack.code);
+            try std.testing.expectEqualStrings("ack", ack.reason);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/typed-close",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+
+    var close_frame = (try client.receiveCloseFrame()).?;
+    defer close_frame.deinit(allocator);
+    try std.testing.expectEqual(websocket.CloseCode.going_away, close_frame.code);
+    try std.testing.expectEqualStrings("restart", close_frame.reason);
+    try client.sendCloseFrame(.{ .code = .normal_closure, .reason = "ack" });
 
     thread.join();
     if (shared.err) |err| return err;

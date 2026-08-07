@@ -55,6 +55,21 @@ pub const CloseCode = enum(u16) {
     _,
 };
 
+pub const CloseFrame = struct {
+    code: CloseCode,
+    reason: []const u8 = "",
+};
+
+pub const OwnedCloseFrame = struct {
+    code: CloseCode,
+    reason: []u8,
+
+    pub fn deinit(self: *OwnedCloseFrame, allocator: std.mem.Allocator) void {
+        allocator.free(self.reason);
+        self.* = undefined;
+    }
+};
+
 pub const FrameHeader = struct {
     fin: bool,
     rsv1: bool = false,
@@ -249,12 +264,34 @@ fn validatePayload(header: FrameHeader, payload: []const u8, options: ParseFrame
 }
 
 pub fn validateClosePayload(payload: []const u8) Error!void {
-    if (payload.len == 0) return;
+    _ = try parseClosePayload(payload);
+}
+
+pub fn parseClosePayload(payload: []const u8) Error!?CloseFrame {
+    if (payload.len == 0) return null;
     if (payload.len > 125) return error.InvalidControlFrame;
     if (payload.len == 1) return error.InvalidControlFrame;
     const code: CloseCode = @enumFromInt(std.mem.readInt(u16, payload[0..2], .big));
     if (!validCloseCode(code)) return error.InvalidCloseCode;
     if (!std.unicode.utf8ValidateSlice(payload[2..])) return error.InvalidUtf8;
+    return .{ .code = code, .reason = payload[2..] };
+}
+
+pub fn parseClosePayloadOwned(allocator: std.mem.Allocator, payload: []const u8) Error!?OwnedCloseFrame {
+    const parsed = try parseClosePayload(payload) orelse return null;
+    return .{
+        .code = parsed.code,
+        .reason = try allocator.dupe(u8, parsed.reason),
+    };
+}
+
+pub fn writeClosePayload(list: *std.ArrayList(u8), allocator: std.mem.Allocator, close_frame: ?CloseFrame) Error!void {
+    const frame = close_frame orelse return;
+    if (!validCloseCode(frame.code)) return error.InvalidCloseCode;
+    if (!std.unicode.utf8ValidateSlice(frame.reason)) return error.InvalidUtf8;
+    if (frame.reason.len > 123) return error.InvalidControlFrame;
+    try wire.appendInt(list, allocator, u16, @intFromEnum(frame.code), .big);
+    try list.appendSlice(allocator, frame.reason);
 }
 
 pub fn validCloseCode(code: CloseCode) bool {
@@ -812,14 +849,41 @@ test "WebSocket strict frame validation" {
 }
 
 test "WebSocket close payload validation" {
+    const allocator = std.testing.allocator;
     var good_payload = [_]u8{ 0x03, 0xe8, 'b', 'y', 'e' };
     try validateClosePayload(&good_payload);
+    const parsed = (try parseClosePayload(&good_payload)).?;
+    try std.testing.expectEqual(CloseCode.normal_closure, parsed.code);
+    try std.testing.expectEqualStrings("bye", parsed.reason);
+
+    var owned = (try parseClosePayloadOwned(allocator, &good_payload)).?;
+    defer owned.deinit(allocator);
+    try std.testing.expectEqual(CloseCode.normal_closure, owned.code);
+    try std.testing.expectEqualStrings("bye", owned.reason);
+
+    try std.testing.expect((try parseClosePayload(&.{})) == null);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeClosePayload(&encoded, allocator, .{ .code = .going_away, .reason = "restart" });
+    try std.testing.expectEqualSlices(u8, &.{ 0x03, 0xe9, 'r', 'e', 's', 't', 'a', 'r', 't' }, encoded.items);
+    const encoded_parsed = (try parseClosePayload(encoded.items)).?;
+    try std.testing.expectEqual(CloseCode.going_away, encoded_parsed.code);
+    try std.testing.expectEqualStrings("restart", encoded_parsed.reason);
+
+    encoded.clearRetainingCapacity();
+    try writeClosePayload(&encoded, allocator, null);
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
 
     var bad_reserved = [_]u8{ 0x03, 0xed };
     try std.testing.expectError(error.InvalidCloseCode, validateClosePayload(&bad_reserved));
+    try std.testing.expectError(error.InvalidCloseCode, writeClosePayload(&encoded, allocator, .{ .code = .no_status_received }));
 
     var bad_utf8 = [_]u8{ 0x03, 0xe8, 0xc0, 0x80 };
     try std.testing.expectError(error.InvalidUtf8, validateClosePayload(&bad_utf8));
+    try std.testing.expectError(error.InvalidUtf8, writeClosePayload(&encoded, allocator, .{ .code = .normal_closure, .reason = "\xc0\x80" }));
+
+    try std.testing.expectError(error.InvalidControlFrame, writeClosePayload(&encoded, allocator, .{ .code = .normal_closure, .reason = "x" ** 124 }));
 }
 
 test "WebSocket permessage-deflate helpers negotiate and roundtrip" {

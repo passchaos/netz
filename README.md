@@ -114,7 +114,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   plus a blocking UDP endpoint runtime for frame datagrams with a
   `std.Io.async` concurrent receive helper
 - WebSocket handshakes with Host authority, body-framing rejection, duplicate-subprotocol and nonce validation, frame masking, strict frame/control
-  validation including control/continuation RSV rejection, close payload checks, fragmented message assembly with aggregate
+  validation including control/continuation RSV rejection, typed close-frame parse/write helpers and close payload checks, fragmented message assembly with aggregate
   message-size limits, automatic PING→PONG and close echo/completed-close short-circuit handling,
   outbound text/close/control-frame validation plus codec-level invalid-frame write rejection,
   subprotocol token validation, split-header subprotocol and extension-offer negotiation, optional permessage-deflate negotiation with
