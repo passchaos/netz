@@ -3814,6 +3814,11 @@ pub const rtcp = struct {
             if (!self.received) return null;
             return ccFeedbackArrivalOffsetToMicros(self.arrival_time_offset);
         }
+
+        pub fn arrivalTimeMicros(self: CcFeedbackMetricBlock, report_timestamp: u32) ?u64 {
+            const offset_micros = self.arrivalOffsetMicros() orelse return null;
+            return ccFeedbackReportTimestampToMicros(report_timestamp) -| offset_micros;
+        }
     };
 
     pub const CcFeedbackReportBlock = struct {
@@ -3830,6 +3835,11 @@ pub const rtcp = struct {
         pub fn arrivalOffsetMicrosForSequence(self: CcFeedbackReportBlock, sequence_number: u16) ?u64 {
             const metric = self.metricForSequence(sequence_number) orelse return null;
             return metric.arrivalOffsetMicros();
+        }
+
+        pub fn arrivalTimeMicrosForSequence(self: CcFeedbackReportBlock, report_timestamp: u32, sequence_number: u16) ?u64 {
+            const metric = self.metricForSequence(sequence_number) orelse return null;
+            return metric.arrivalTimeMicros(report_timestamp);
         }
 
         pub fn deinit(self: *CcFeedbackReportBlock, allocator: std.mem.Allocator) void {
@@ -3860,12 +3870,25 @@ pub const rtcp = struct {
             const metric = self.metricForMediaSequence(media_ssrc, sequence_number) orelse return null;
             return metric.arrivalOffsetMicros();
         }
+
+        pub fn reportTimestampMicros(self: CongestionControlFeedback) u64 {
+            return ccFeedbackReportTimestampToMicros(self.report_timestamp);
+        }
+
+        pub fn arrivalTimeMicrosForMediaSequence(self: CongestionControlFeedback, media_ssrc: u32, sequence_number: u16) ?u64 {
+            const metric = self.metricForMediaSequence(media_ssrc, sequence_number) orelse return null;
+            return metric.arrivalTimeMicros(self.report_timestamp);
+        }
     };
 
     pub const cc_feedback_arrival_offset_units_per_second: u64 = 1024;
 
     pub fn ccFeedbackArrivalOffsetToMicros(offset: u16) u64 {
         return (@as(u64, offset & 0x1fff) * std.time.us_per_s) / cc_feedback_arrival_offset_units_per_second;
+    }
+
+    pub fn ccFeedbackReportTimestampToMicros(report_timestamp: u32) u64 {
+        return (@as(u64, report_timestamp) * std.time.us_per_s) / cc_feedback_arrival_offset_units_per_second;
     }
 
     pub const XrBlockType = enum(u8) {
@@ -9657,6 +9680,7 @@ test "RTCP receiver report and feedback packets" {
     defer ccfb.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 1), ccfb.packet.congestion_control_feedback.sender_ssrc);
     try std.testing.expectEqual(@as(u32, 1), ccfb.packet.congestion_control_feedback.report_timestamp);
+    try std.testing.expectEqual(@as(u64, (std.time.us_per_s) / 1024), ccfb.packet.congestion_control_feedback.reportTimestampMicros());
     try std.testing.expectEqual(@as(usize, 2), ccfb.packet.congestion_control_feedback.report_blocks.len);
     try std.testing.expectEqual(@as(u32, 1), ccfb.packet.congestion_control_feedback.report_blocks[0].media_ssrc);
     try std.testing.expectEqual(@as(u16, 2), ccfb.packet.congestion_control_feedback.report_blocks[0].begin_sequence);
@@ -9665,20 +9689,27 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(rtcp.Ecn.non_ect, ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].ecn);
     try std.testing.expectEqual(@as(u16, 8189), ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].arrival_time_offset);
     try std.testing.expectEqual(@as(u64, (8189 * std.time.us_per_s) / 1024), ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].arrivalOffsetMicros().?);
+    try std.testing.expectEqual(@as(u64, 0), ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[0].arrivalTimeMicros(ccfb.packet.congestion_control_feedback.report_timestamp).?);
     try std.testing.expect(!ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[2].received);
     try std.testing.expect(ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[2].arrivalOffsetMicros() == null);
     try std.testing.expectEqual(@as(u32, 2), ccfb.packet.congestion_control_feedback.report_blocks[1].media_ssrc);
     try std.testing.expectEqual(@as(usize, 3), ccfb.packet.congestion_control_feedback.report_blocks[1].metric_blocks.len);
     try std.testing.expectEqual(@as(u16, 8189), ccfb.packet.congestion_control_feedback.report_blocks[0].metricForSequence(2).?.arrival_time_offset);
     try std.testing.expectEqual(@as(u64, (8189 * std.time.us_per_s) / 1024), ccfb.packet.congestion_control_feedback.report_blocks[0].arrivalOffsetMicrosForSequence(2).?);
+    try std.testing.expectEqual(@as(u64, 0), ccfb.packet.congestion_control_feedback.report_blocks[0].arrivalTimeMicrosForSequence(ccfb.packet.congestion_control_feedback.report_timestamp, 2).?);
     try std.testing.expect(!ccfb.packet.congestion_control_feedback.report_blocks[0].metricForSequence(4).?.received);
     try std.testing.expect(ccfb.packet.congestion_control_feedback.report_blocks[0].arrivalOffsetMicrosForSequence(4) == null);
     try std.testing.expect(ccfb.packet.congestion_control_feedback.report_blocks[0].metricForSequence(6) == null);
     try std.testing.expectEqual(@as(u16, 8189), ccfb.packet.congestion_control_feedback.metricForMediaSequence(2, 2).?.arrival_time_offset);
     try std.testing.expectEqual(@as(u64, (8189 * std.time.us_per_s) / 1024), ccfb.packet.congestion_control_feedback.arrivalOffsetMicrosForMediaSequence(2, 2).?);
+    try std.testing.expectEqual(@as(u64, 0), ccfb.packet.congestion_control_feedback.arrivalTimeMicrosForMediaSequence(2, 2).?);
     try std.testing.expect(ccfb.packet.congestion_control_feedback.metricForMediaSequence(3, 2) == null);
     try std.testing.expect(ccfb.packet.congestion_control_feedback.arrivalOffsetMicrosForMediaSequence(3, 2) == null);
     try std.testing.expectEqual(@as(u64, 0), rtcp.ccFeedbackArrivalOffsetToMicros(0x2000));
+    try std.testing.expectEqual(@as(u64, 2 * std.time.us_per_s), (rtcp.CcFeedbackMetricBlock{
+        .received = true,
+        .arrival_time_offset = 1024,
+    }).arrivalTimeMicros(3 * 1024).?);
 
     var wrap_metrics = [_]rtcp.CcFeedbackMetricBlock{
         .{ .received = true, .arrival_time_offset = 1 },
