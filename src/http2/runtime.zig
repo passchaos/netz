@@ -1,9 +1,11 @@
 const std = @import("std");
 const http2 = @import("mod.zig");
+const http1 = @import("../http1/mod.zig");
+const http1_runtime = http1.runtime;
 
 const net = std.Io.net;
 
-pub const Error = http2.Error || error{
+pub const Error = http2.Error || http1_runtime.Error || error{
     ConnectionClosed,
     UnexpectedFrame,
     InvalidFrame,
@@ -219,6 +221,124 @@ pub const Client = struct {
         var connection = try connectStream(allocator, io, stream, limits);
         connection.default_authority = owned_host;
         return connection;
+    }
+
+    /// Perform an RFC 7540 h2c Upgrade request and return the response on
+    /// stream 1. `request_options` must include an authority (or Host header)
+    /// because the opening request is first sent as HTTP/1.1.
+    pub fn connectUpgrade(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        limits: Limits,
+        request_options: RequestOptions,
+    ) Error!OwnedResponse {
+        try validateLocalLimits(limits);
+        const stream = try address.connect(io, .{ .mode = .stream });
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, request_options);
+        stream_owned = false;
+        defer upgraded.deinit(allocator);
+        return upgraded.connection.readResponse(1, request_options.method, request_options.protocol != null);
+    }
+
+    pub fn requestUriUpgrade(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+    ) Error!OwnedResponse {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
+        var host_buffer: [net.HostName.max_len]u8 = undefined;
+        const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+
+        try validateLocalLimits(limits);
+        const host_name = try net.HostName.init(host.bytes);
+        const stream = try host_name.connect(io, uri.port orelse 80, .{ .mode = .stream });
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        var options = request_options;
+        options.path = target;
+        if (options.authority == null) options.authority = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host.bytes, uri.port orelse 80 });
+        defer if (request_options.authority == null) allocator.free(options.authority.?);
+        var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, options);
+        stream_owned = false;
+        defer upgraded.deinit(allocator);
+        return upgraded.connection.readResponse(1, options.method, options.protocol != null);
+    }
+
+    /// Upgrade an existing cleartext HTTP/1.1 stream to HTTP/2 and return the
+    /// established connection plus the consumed 101 response metadata.  The
+    /// caller owns both and should call `H2cUpgradeResult.deinit` on error paths
+    /// or close/deinit each field manually after taking ownership.
+    pub fn connectStreamUpgrade(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        limits: Limits,
+        request_options: RequestOptions,
+    ) Error!H2cUpgradeResult {
+        try validateLocalLimits(limits);
+        var connection = Connection{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .role = .client,
+            .limits = limits,
+            .awaiting_settings_ack = true,
+            .next_client_stream_id = 3,
+        };
+        connection.applyLocalLimits();
+        errdefer connection.close();
+
+        var settings_payload: std.ArrayList(u8) = .empty;
+        defer settings_payload.deinit(allocator);
+        try writeSettingsPayloadForLimits(allocator, &settings_payload, limits, .client);
+        const settings_value = try allocator.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(settings_payload.items.len));
+        defer allocator.free(settings_value);
+        _ = std.base64.url_safe_no_pad.Encoder.encode(settings_value, settings_payload.items);
+
+        var headers: std.ArrayList(http1.Header) = .empty;
+        defer headers.deinit(allocator);
+        if (request_options.authority) |authority| try headers.append(allocator, .{ .name = "Host", .value = authority });
+        try headers.appendSlice(allocator, &.{
+            .{ .name = "Connection", .value = "Upgrade, HTTP2-Settings" },
+            .{ .name = "Upgrade", .value = "h2c" },
+            .{ .name = "HTTP2-Settings", .value = settings_value },
+        });
+        for (request_options.headers) |header| try headers.append(allocator, .{ .name = header.name, .value = header.value });
+        try validateHeaderBlock(request_options.trailers, .request_trailers);
+        if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
+        const method = http1.Method.parse(request_options.method) catch return error.InvalidHeader;
+        try http1_runtime.writeRequestToStream(allocator, io, stream, .{
+            .method = method,
+            .target = request_options.path,
+            .headers = headers.items,
+        });
+
+        var upgrade = try http1_runtime.readResponseFromStreamForRequest(allocator, io, stream, limitsToHttp1(limits), .{}, method);
+        errdefer upgrade.deinit(allocator);
+        if (upgrade.response.status != 101) return error.InvalidResponse;
+        const connection_header = upgrade.response.header("connection") orelse return error.InvalidResponse;
+        const upgrade_header = upgrade.response.header("upgrade") orelse return error.InvalidResponse;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_header, " \t"), "h2c")) return error.InvalidResponse;
+        if (!containsHttpToken(connection_header, "upgrade")) return error.InvalidResponse;
+
+        try writeAll(io, stream, http2.connection_preface);
+        try writeFrame(allocator, io, stream, .settings, 0, 0, settings_payload.items);
+        var server_settings = try readFrame(allocator, io, stream, limits);
+        defer server_settings.deinit(allocator);
+        if (server_settings.frame.header.frame_type != .settings or (server_settings.frame.header.flags & flag_ack) != 0) return error.UnexpectedFrame;
+        const settings = try http2.parseSettings(allocator, server_settings.frame.payload);
+        defer allocator.free(settings);
+        try connection.applySettings(settings);
+        try writeFrame(allocator, io, stream, .settings, flag_ack, 0, &.{});
+        return .{ .connection = connection, .upgrade_response = upgrade };
     }
 
     fn connectStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!Connection {
@@ -1434,6 +1554,17 @@ pub const OwnedResponse = struct {
     }
 };
 
+pub const H2cUpgradeResult = struct {
+    connection: Connection,
+    upgrade_response: http1_runtime.OwnedResponse,
+
+    pub fn deinit(self: *H2cUpgradeResult, allocator: std.mem.Allocator) void {
+        self.upgrade_response.deinit(allocator);
+        self.connection.close();
+        self.* = undefined;
+    }
+};
+
 pub const ExtendedConnectRequest = struct {
     stream_id: u31,
     headers: []http2.Hpack.HeaderField,
@@ -1656,37 +1787,9 @@ fn validateLocalLimits(limits: Limits) Error!void {
 }
 
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
-    try validateLocalLimits(limits);
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
-    var settings_buf: [7]http2.Setting = undefined;
-    var count: usize = 0;
-    settings_buf[count] = .{ .id = .header_table_size, .value = @intCast(@min(limits.header_table_size, std.math.maxInt(u32))) };
-    count += 1;
-    settings_buf[count] = .{ .id = .initial_window_size, .value = limits.initial_window_size };
-    count += 1;
-    if (limits.max_concurrent_streams) |max_streams| {
-        settings_buf[count] = .{ .id = .max_concurrent_streams, .value = max_streams };
-        count += 1;
-    }
-    if (limits.max_frame_size != default_max_frame_size) {
-        settings_buf[count] = .{ .id = .max_frame_size, .value = @intCast(limits.max_frame_size) };
-        count += 1;
-    }
-    settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) };
-    count += 1;
-    if (limits.enable_connect_protocol) {
-        settings_buf[count] = .{ .id = .enable_connect_protocol, .value = 1 };
-        count += 1;
-    }
-    if (role == .client) {
-        // Like hyper/h2, this lightweight client opts out of server push until
-        // a full pushed-stream lifecycle is implemented.  A peer that still
-        // sends PUSH_PROMISE is treated as a protocol error by readResponse.
-        settings_buf[count] = .{ .id = .enable_push, .value = 0 };
-        count += 1;
-    }
-    try http2.writeSettings(&payload, allocator, settings_buf[0..count]);
+    try writeSettingsPayloadForLimits(allocator, &payload, limits, role);
     try writeFrame(allocator, io, stream, .settings, 0, 0, payload.items);
 }
 
@@ -2156,6 +2259,50 @@ fn requestAuthority(headers: []const http2.Hpack.HeaderField) ?[]const u8 {
     return findHeader(headers, "host");
 }
 
+fn writeSettingsPayloadForLimits(allocator: std.mem.Allocator, payload: *std.ArrayList(u8), limits: Limits, role: Role) Error!void {
+    try validateLocalLimits(limits);
+    var settings_buf: [7]http2.Setting = undefined;
+    var count: usize = 0;
+    settings_buf[count] = .{ .id = .header_table_size, .value = @intCast(@min(limits.header_table_size, std.math.maxInt(u32))) };
+    count += 1;
+    settings_buf[count] = .{ .id = .initial_window_size, .value = limits.initial_window_size };
+    count += 1;
+    if (limits.max_concurrent_streams) |max_streams| {
+        settings_buf[count] = .{ .id = .max_concurrent_streams, .value = max_streams };
+        count += 1;
+    }
+    if (limits.max_frame_size != default_max_frame_size) {
+        settings_buf[count] = .{ .id = .max_frame_size, .value = @intCast(limits.max_frame_size) };
+        count += 1;
+    }
+    settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(@min(limits.max_header_list_size, std.math.maxInt(u32))) };
+    count += 1;
+    if (limits.enable_connect_protocol) {
+        settings_buf[count] = .{ .id = .enable_connect_protocol, .value = 1 };
+        count += 1;
+    }
+    if (role == .client) {
+        settings_buf[count] = .{ .id = .enable_push, .value = 0 };
+        count += 1;
+    }
+    try http2.writeSettings(payload, allocator, settings_buf[0..count]);
+}
+
+fn limitsToHttp1(limits: Limits) http1_runtime.Limits {
+    return .{
+        .max_head_bytes = limits.max_header_list_size,
+        .max_body_bytes = limits.max_body_bytes,
+    };
+}
+
+fn containsHttpToken(value: []const u8, needle: []const u8) bool {
+    var tokens = std.mem.splitScalar(u8, value, ',');
+    while (tokens.next()) |raw| {
+        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, raw, " \t"), needle)) return true;
+    }
+    return false;
+}
+
 fn readExact(io: std.Io, stream: net.Stream, buffer: []u8) ReadExactError!void {
     var offset: usize = 0;
     while (offset < buffer.len) {
@@ -2386,6 +2533,82 @@ test "HTTP/2 client sends request to URI" {
 
     try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "https://localhost/", .{}, .{}));
     try std.testing.expectError(error.InvalidUri, Client.requestUri(allocator, io, "http:///missing-host", .{}, .{}));
+}
+
+test "HTTP/2 h2c upgrade request receives stream one response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try net.IpAddress.listen(&.{ .ip4 = .loopback(0) }, io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            const stream = try shared.listener.accept(shared.io);
+            defer stream.close(shared.io);
+
+            var request = try http1_runtime.readRequestFromStream(shared.allocator, shared.io, stream, .{
+                .max_head_bytes = 4096,
+                .max_body_bytes = 0,
+            }, .{});
+            defer request.deinit(shared.allocator);
+            try std.testing.expectEqualStrings("/upgrade?x=1", request.request.target);
+            try std.testing.expectEqualStrings("h2c", request.request.header("upgrade").?);
+            try std.testing.expect(containsHttpToken(request.request.header("connection").?, "http2-settings"));
+            try std.testing.expect(request.request.header("http2-settings") != null);
+
+            try writeAll(shared.io, stream, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n");
+
+            var preface: [http2.connection_preface.len]u8 = undefined;
+            try readExact(shared.io, stream, &preface);
+            try http2.validateClientPreface(&preface);
+            var client_settings = try readFrame(shared.allocator, shared.io, stream, .{ .max_frame_payload = 4096 });
+            defer client_settings.deinit(shared.allocator);
+            try std.testing.expectEqual(http2.FrameType.settings, client_settings.frame.header.frame_type);
+
+            var server_settings_payload: std.ArrayList(u8) = .empty;
+            defer server_settings_payload.deinit(shared.allocator);
+            try http2.writeSettings(&server_settings_payload, shared.allocator, &.{.{ .id = .max_frame_size, .value = 16_384 }});
+            try writeFrame(shared.allocator, shared.io, stream, .settings, 0, 0, server_settings_payload.items);
+            var client_ack = try readFrame(shared.allocator, shared.io, stream, .{ .max_frame_payload = 4096 });
+            defer client_ack.deinit(shared.allocator);
+            try std.testing.expectEqual(http2.FrameType.settings, client_ack.frame.header.frame_type);
+            try std.testing.expect((client_ack.frame.header.flags & flag_ack) != 0);
+
+            var response_block: std.ArrayList(u8) = .empty;
+            defer response_block.deinit(shared.allocator);
+            try http2.Hpack.encodeLiteralBlock(&response_block, shared.allocator, &.{.{ .name = ":status", .value = "200" }});
+            try writeFrame(shared.allocator, shared.io, stream, .headers, flag_end_headers, 1, response_block.items);
+            try writeFrame(shared.allocator, shared.io, stream, .data, flag_end_stream, 1, "upgraded");
+        }
+    };
+
+    var shared = Shared{ .allocator = allocator, .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "http://localhost:{d}/upgrade?x=1", .{listener.socket.address.ip4.port});
+    defer allocator.free(uri);
+    var response = try Client.requestUriUpgrade(allocator, io, uri, .{}, .{ .max_frame_payload = 4096, .max_body_bytes = 4096 });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("upgraded", response.body);
 }
 
 test "HTTP/2 readPing ignores ACK frames" {
