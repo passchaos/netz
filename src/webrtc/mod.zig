@@ -5555,18 +5555,7 @@ pub const rtcp = struct {
         try wire.appendU24(&payload, allocator, twcc.reference_time_64ms);
         try payload.append(allocator, twcc.feedback_packet_count);
 
-        var run_status: ?TwccPacketStatus = null;
-        var run_len: usize = 0;
-        for (twcc.packets) |packet| {
-            if (run_status != null and packet.status == run_status.? and run_len < 0x1fff) {
-                run_len += 1;
-                continue;
-            }
-            if (run_status) |status| try writeTwccRunLengthChunk(&payload, allocator, status, run_len);
-            run_status = packet.status;
-            run_len = 1;
-        }
-        if (run_status) |status| try writeTwccRunLengthChunk(&payload, allocator, status, run_len);
+        try writeTwccPacketStatusChunks(&payload, allocator, twcc.packets);
 
         for (twcc.packets) |packet| {
             switch (packet.status) {
@@ -5627,6 +5616,57 @@ pub const rtcp = struct {
         while (i < twccStatusVectorCapacity(symbol_size) and packets.items.len < packet_status_count) : (i += 1) {
             try packets.append(allocator, .{ .status = try twccStatusVectorSymbol(chunk, i) });
         }
+    }
+
+    fn writeTwccPacketStatusChunks(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packets: []const TwccPacketResult) Error!void {
+        var index: usize = 0;
+        while (index < packets.len) {
+            const run_len = twccSameStatusRunLength(packets, index, 0x1fff);
+            const current_status = packets[index].status;
+            const vector_capacity = if (twccStatusFitsOneBit(current_status))
+                twccStatusVectorCapacity(.one_bit)
+            else
+                twccStatusVectorCapacity(.two_bit);
+
+            // Long homogeneous runs are the case where RFC 8888-style status
+            // vectors lose to a run-length chunk.  Short runs are deliberately
+            // folded into vectors so mixed browser/Pion feedback frames do not
+            // bloat into one chunk per packet.
+            if (run_len > vector_capacity) {
+                try writeTwccRunLengthChunk(list, allocator, current_status, run_len);
+                index += run_len;
+                continue;
+            }
+
+            var symbol_size: TwccSymbolSize = .one_bit;
+            var vector_len = @min(twccStatusVectorCapacity(.one_bit), packets.len - index);
+            for (packets[index .. index + vector_len]) |packet| {
+                if (!twccStatusFitsOneBit(packet.status)) {
+                    symbol_size = .two_bit;
+                    vector_len = @min(twccStatusVectorCapacity(.two_bit), packets.len - index);
+                    break;
+                }
+            }
+
+            var statuses: [twccStatusVectorCapacity(.one_bit)]TwccPacketStatus = undefined;
+            for (statuses[0..vector_len], packets[index .. index + vector_len]) |*status, packet| {
+                status.* = packet.status;
+            }
+            const chunk = try twccStatusVectorChunk(symbol_size, statuses[0..vector_len]);
+            try wire.appendInt(list, allocator, u16, chunk, .big);
+            index += vector_len;
+        }
+    }
+
+    fn twccSameStatusRunLength(packets: []const TwccPacketResult, start: usize, max_len: usize) usize {
+        const status = packets[start].status;
+        var len: usize = 1;
+        while (start + len < packets.len and len < max_len and packets[start + len].status == status) : (len += 1) {}
+        return len;
+    }
+
+    fn twccStatusFitsOneBit(status: TwccPacketStatus) bool {
+        return status == .not_received or status == .small_delta;
     }
 
     fn writeTwccRunLengthChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, status: TwccPacketStatus, run_len: usize) Error!void {
@@ -9744,6 +9784,11 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, parsed.packet.transport_wide_cc.packetForSequence(501).?.status);
     try std.testing.expectEqual(@as(i16, -3), parsed.packet.transport_wide_cc.packetForSequence(502).?.delta_ticks);
     try std.testing.expect(parsed.packet.transport_wide_cc.packetForSequence(505) == null);
+    // Mixed packet statuses should be serialized as a compact status-vector
+    // chunk rather than as five tiny run-length chunks; this is the wire shape
+    // Pion's TWCC support and browser stacks commonly exchange.
+    try std.testing.expectEqual(@as(usize, 28), encoded.items.len);
+    try std.testing.expectEqual(@as(rtcp.TwccPacketStatusChunk, 0xd2d0), std.mem.readInt(u16, encoded.items[20..22], .big));
 
     const wrap_twcc = rtcp.TransportWideCc{
         .sender_ssrc = 1,
@@ -9780,10 +9825,22 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccStatusVectorSymbol(one_bit_vector, 14));
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccStatusVectorChunk(.one_bit, &.{.large_delta}));
 
+    var long_run: [15]rtcp.TwccPacketResult = undefined;
+    for (&long_run) |*packet| packet.* = .{ .status = .not_received };
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, .{ .transport_wide_cc = .{
+        .sender_ssrc = 1,
+        .media_ssrc = 2,
+        .base_sequence_number = 1,
+        .reference_time_64ms = 0,
+        .feedback_packet_count = 0,
+        .packets = &long_run,
+    } });
+    try std.testing.expectEqual(@as(rtcp.TwccPacketStatusChunk, 15), std.mem.readInt(u16, encoded.items[20..22], .big));
+
     // Also parse a hand-built status-vector chunk.  The writer intentionally
-    // emits simple run-length chunks for predictable output; receivers still
-    // need to accept the more compact one-/two-bit vector chunks that browser
-    // stacks and Pion's TWCC interceptor commonly generate.
+    // emits whichever chunk shape is compact for the status sequence, but this
+    // fixture keeps direct coverage for two-bit status-vector decoding.
     var vector_encoded: std.ArrayList(u8) = .empty;
     defer vector_encoded.deinit(allocator);
     try vector_encoded.append(allocator, @as(u8, 0x80) | @as(u8, rtcp.transport_feedback_twcc));
