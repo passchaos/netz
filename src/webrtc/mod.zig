@@ -4790,6 +4790,11 @@ pub const sctp = struct {
         parameter: u32,
     };
 
+    pub const DataChannelIdRole = enum {
+        dtls_client,
+        dtls_server,
+    };
+
     pub const DataChannelPayloadKind = enum {
         dcep,
         string,
@@ -6047,6 +6052,19 @@ pub const sctp = struct {
         };
     }
 
+    pub fn nextDataChannelId(role: DataChannelIdRole, used_ids: []const u16, max_channels: u16) Error!u16 {
+        if (max_channels == 0) return error.InvalidSctpPacket;
+        var candidate: u16 = switch (role) {
+            .dtls_client => 0,
+            .dtls_server => 1,
+        };
+        while (candidate < max_channels) : (candidate +%= 2) {
+            if (!dataChannelIdUsed(used_ids, candidate)) return candidate;
+            if (candidate > std.math.maxInt(u16) - 2) break;
+        }
+        return error.InvalidSctpPacket;
+    }
+
     pub fn writeDcepOpen(list: *std.ArrayList(u8), allocator: std.mem.Allocator, open: DataChannelOpen) Error!void {
         if (open.label.len > std.math.maxInt(u16) or open.protocol.len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
         try validateDataChannelType(open.channel_type);
@@ -6121,6 +6139,13 @@ pub const sctp = struct {
             => {},
             _ => return error.InvalidSctpPacket,
         }
+    }
+
+    fn dataChannelIdUsed(used_ids: []const u16, id: u16) bool {
+        for (used_ids) |used| {
+            if (used == id) return true;
+        }
+        return false;
     }
 
     fn isConstEmptyU32(value: []const u32) bool {
@@ -8560,6 +8585,17 @@ test "SCTP DATA packet and DCEP channel messages" {
         .parameter = 500,
     }, try sctp.dataChannelReliability(.partial_reliable_timed_unordered, 500));
     try std.testing.expectError(error.InvalidSctpPacket, sctp.dataChannelReliability(@enumFromInt(0x7f), 0));
+    try std.testing.expectEqual(@as(u16, 0), try sctp.nextDataChannelId(.dtls_client, &.{}, 16));
+    try std.testing.expectEqual(@as(u16, 0), try sctp.nextDataChannelId(.dtls_client, &.{1}, 16));
+    try std.testing.expectEqual(@as(u16, 2), try sctp.nextDataChannelId(.dtls_client, &.{0}, 16));
+    try std.testing.expectEqual(@as(u16, 4), try sctp.nextDataChannelId(.dtls_client, &.{ 0, 2 }, 16));
+    try std.testing.expectEqual(@as(u16, 2), try sctp.nextDataChannelId(.dtls_client, &.{ 0, 4 }, 16));
+    try std.testing.expectEqual(@as(u16, 1), try sctp.nextDataChannelId(.dtls_server, &.{}, 16));
+    try std.testing.expectEqual(@as(u16, 1), try sctp.nextDataChannelId(.dtls_server, &.{0}, 16));
+    try std.testing.expectEqual(@as(u16, 3), try sctp.nextDataChannelId(.dtls_server, &.{1}, 16));
+    try std.testing.expectEqual(@as(u16, 5), try sctp.nextDataChannelId(.dtls_server, &.{ 1, 3 }, 16));
+    try std.testing.expectEqual(@as(u16, 3), try sctp.nextDataChannelId(.dtls_server, &.{ 1, 5 }, 16));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.nextDataChannelId(.dtls_client, &.{ 0, 2 }, 3));
 
     packet_bytes.clearRetainingCapacity();
     try sctp.writeDataPacket(&packet_bytes, allocator, .{
