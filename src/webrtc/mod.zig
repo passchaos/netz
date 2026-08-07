@@ -1164,6 +1164,19 @@ pub const sdp = struct {
         return out.toOwnedSlice(allocator);
     }
 
+    pub fn formatRtcpFeedbackAttribute(allocator: std.mem.Allocator, payload_type: ?u8, feedback: RtcpFeedback) Error![]u8 {
+        if (payload_type) |payload| {
+            if (feedback.parameter.len == 0) {
+                return std.fmt.allocPrint(allocator, "{d} {s}", .{ payload, feedback.typ });
+            }
+            return std.fmt.allocPrint(allocator, "{d} {s} {s}", .{ payload, feedback.typ, feedback.parameter });
+        }
+        if (feedback.parameter.len == 0) {
+            return std.fmt.allocPrint(allocator, "* {s}", .{feedback.typ});
+        }
+        return std.fmt.allocPrint(allocator, "* {s} {s}", .{ feedback.typ, feedback.parameter });
+    }
+
     pub fn rtcpFeedbackIntersection(allocator: std.mem.Allocator, local: []const RtcpFeedback, remote: []const RtcpFeedback) Error![]RtcpFeedback {
         var out: std.ArrayList(RtcpFeedback) = .empty;
         errdefer out.deinit(allocator);
@@ -8542,6 +8555,15 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("nack", deduped_feedback[0].typ);
     try std.testing.expectEqualStrings("nack", deduped_feedback[1].typ);
     try std.testing.expectEqualStrings("pli", deduped_feedback[1].parameter);
+    const formatted_remb = try sdp.formatRtcpFeedbackAttribute(allocator, 111, codecs[0].rtcp_feedback[0]);
+    defer allocator.free(formatted_remb);
+    try std.testing.expectEqualStrings("111 goog-remb", formatted_remb);
+    const formatted_fir = try sdp.formatRtcpFeedbackAttribute(allocator, 111, codecs[0].rtcp_feedback[1]);
+    defer allocator.free(formatted_fir);
+    try std.testing.expectEqualStrings("111 ccm fir", formatted_fir);
+    const formatted_wildcard = try sdp.formatRtcpFeedbackAttribute(allocator, null, codecs[0].rtcp_feedback[2]);
+    defer allocator.free(formatted_wildcard);
+    try std.testing.expectEqualStrings("* nack", formatted_wildcard);
 
     const fmtp_params = try sdp.parseFmtpParameters(allocator, " Key = Value ; flag ; apt=96 ");
     defer sdp.freeFmtpParameters(allocator, fmtp_params);
