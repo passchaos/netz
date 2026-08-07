@@ -3036,7 +3036,7 @@ pub const rtp = struct {
         const remaining = payload.len - offset;
         var has_resolution = false;
         if (remaining != 0) {
-            if (remaining != layers.len * 5) return error.InvalidRtpPacket;
+            if (remaining < layers.len * 5) return error.InvalidRtpPacket;
             has_resolution = true;
             for (layers) |*layer| {
                 layer.width = std.mem.readInt(u16, payload[offset..][0..2], .big) + 1;
@@ -8704,6 +8704,14 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(u16, 1280), parsed_vla_with_resolution.active_spatial_layers[2].width);
     try std.testing.expectEqual(@as(u16, 720), parsed_vla_with_resolution.active_spatial_layers[2].height);
     try std.testing.expectEqual(@as(u8, 30), parsed_vla_with_resolution.active_spatial_layers[2].framerate);
+
+    try vla_payload.appendSlice(allocator, &.{ 0xaa, 0xbb });
+    const parsed_vla_with_trailing = try rtp.parseVideoLayerAllocationPayload(allocator, vla_payload.items);
+    defer rtp.freeVideoLayerAllocation(allocator, parsed_vla_with_trailing);
+    try std.testing.expect(parsed_vla_with_trailing.has_resolution_and_framerate);
+    try std.testing.expectEqual(@as(usize, 3), parsed_vla_with_trailing.active_spatial_layers.len);
+    try std.testing.expectEqual(@as(u16, 1280), parsed_vla_with_trailing.active_spatial_layers[2].width);
+
     try std.testing.expectError(error.InvalidRtpPacket, rtp.writeVideoLayerAllocationPayload(&vla_payload, allocator, .{
         .rtp_stream_id = 0,
         .rtp_stream_count = 5,
