@@ -589,6 +589,30 @@ pub const sdp = struct {
         password: []const u8,
     };
 
+    pub const DtlsRole = enum {
+        auto,
+        client,
+        server,
+    };
+
+    pub const DtlsSetupRole = enum {
+        actpass,
+        active,
+        passive,
+        holdconn,
+
+        pub fn dtlsRole(self: DtlsSetupRole) DtlsRole {
+            return switch (self) {
+                .active => .client,
+                .passive => .server,
+                // actpass is negotiated from the answer and holdconn means no
+                // connection is currently established; both leave the concrete
+                // DTLS endpoint role unresolved at SDP-parse time.
+                .actpass, .holdconn => .auto,
+            };
+        }
+    };
+
     pub const SctpParameters = struct {
         port: u16,
         max_message_size: u32 = 0,
@@ -832,6 +856,17 @@ pub const sdp = struct {
         };
     }
 
+    pub fn extractDtlsRole(session: Session) Error!DtlsRole {
+        if (candidateMedia(session)) |media| {
+            if (findAttr(media.attributes, "setup")) |setup| return (try parseDtlsSetupAttribute(setup)).dtlsRole();
+        }
+        if (findAttr(session.attributes, "setup")) |setup| return (try parseDtlsSetupAttribute(setup)).dtlsRole();
+        for (session.media) |media| {
+            if (findAttr(media.attributes, "setup")) |setup| return (try parseDtlsSetupAttribute(setup)).dtlsRole();
+        }
+        return .auto;
+    }
+
     pub fn extractSctpParameters(session: Session) Error!SctpParameters {
         const media = dataChannelMedia(session) orelse return error.InvalidSdp;
         var port: ?u16 = null;
@@ -876,6 +911,17 @@ pub const sdp = struct {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
         }
         return null;
+    }
+
+    pub fn parseDtlsSetupAttribute(raw: []const u8) Error!DtlsSetupRole {
+        var parts = std.mem.tokenizeAny(u8, raw, " \t");
+        const value = parts.next() orelse return error.InvalidSdp;
+        if (parts.next() != null) return error.InvalidSdp;
+        if (std.ascii.eqlIgnoreCase(value, "actpass")) return .actpass;
+        if (std.ascii.eqlIgnoreCase(value, "active")) return .active;
+        if (std.ascii.eqlIgnoreCase(value, "passive")) return .passive;
+        if (std.ascii.eqlIgnoreCase(value, "holdconn")) return .holdconn;
+        return error.InvalidSdp;
     }
 
     const SctpMap = struct {
@@ -4242,12 +4288,14 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=fingerprint:sha-256 11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:10:20:30:40:50:60:70:80:90:A0:B0:C0:D0:E0:F0:01\r\n" ++
         "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
         "a=mid:0\r\n" ++
+        "a=setup:passive\r\n" ++
         "a=ice-ufrag:wrong\r\n" ++
         "a=ice-pwd:wrong-pwd\r\n" ++
         "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r\n" ++
         "a=extmap:2/sendonly " ++ sdp.abs_send_time_uri ++ "\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
         "a=mid:1\r\n" ++
+        "a=setup:active\r\n" ++
         "a=ice-ufrag:bundle-ufrag\r\n" ++
         "a=ice-pwd:bundle-pwd\r\n" ++
         "a=fingerprint:sha-256 01:23:45:67:89:AB:CD:EF:FE:DC:BA:98:76:54:32:10:11:33:55:77:99:BB:DD:FF:00:22:44:66:88:AA:CC:EE\r\n" ++
@@ -4306,6 +4354,8 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const media_creds = try sdp.extractIceCredentials(media_session);
     try std.testing.expectEqualStrings("media-ufrag", media_creds.ufrag);
 
+    try std.testing.expectEqual(sdp.DtlsRole.client, try sdp.extractDtlsRole(session));
+
     const sctp_params = try sdp.extractSctpParameters(session);
     try std.testing.expectEqual(@as(u16, 5000), sctp_params.port);
     try std.testing.expectEqual(@as(u32, 262144), sctp_params.max_message_size);
@@ -4319,12 +4369,14 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "t=0 0\r\n" ++
         "m=application 63743 DTLS/SCTP 5000\r\n" ++
         "a=mid:data\r\n" ++
+        "a=setup:actpass\r\n" ++
         "a=sctpmap:5000 webrtc-datachannel 256\r\n" ++
         "a=fingerprint:sha-256 75:74:5A:A6:A4:E5:52:F4:A7:67:4C:01:C7:EE:91:3F:21:3D:A2:E3:53:7B:6F:30:86:F2:30:AA:65:FB:04:24\r\n" ++
         "a=ice-ufrag:media-ufrag\r\n" ++
         "a=ice-pwd:media-pwd\r\n";
     var legacy_session = try sdp.parse(allocator, legacy_datachannel);
     defer legacy_session.deinit(allocator);
+    try std.testing.expectEqual(sdp.DtlsRole.auto, try sdp.extractDtlsRole(legacy_session));
     const legacy_sctp = try sdp.extractSctpParameters(legacy_session);
     try std.testing.expectEqual(@as(u16, 5000), legacy_sctp.port);
     try std.testing.expectEqual(@as(u32, 0), legacy_sctp.max_message_size);
@@ -4383,6 +4435,22 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
         "a=sctpmap:6000 webrtc-datachannel 256\r\n");
     defer mismatched_sctpmap.deinit(allocator);
     try std.testing.expectError(error.InvalidSdp, sdp.extractSctpParameters(mismatched_sctpmap));
+
+    var invalid_setup = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=setup:sideways\r\n");
+    defer invalid_setup.deinit(allocator);
+    try std.testing.expectError(error.InvalidSdp, sdp.extractDtlsRole(invalid_setup));
+
+    var no_setup = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n");
+    defer no_setup.deinit(allocator);
+    try std.testing.expectEqual(sdp.DtlsRole.auto, try sdp.extractDtlsRole(no_setup));
+    try std.testing.expectEqual(sdp.DtlsRole.auto, (try sdp.parseDtlsSetupAttribute("holdconn")).dtlsRole());
 }
 
 test "RTP and DTLS record parsers" {
