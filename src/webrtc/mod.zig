@@ -1712,6 +1712,8 @@ pub const dtls = struct {
 pub const rtp = struct {
     pub const one_byte_header_extension_profile: u16 = 0xbede;
     pub const two_byte_header_extension_profile: u16 = 0x1000;
+    pub const cryptex_one_byte_header_extension_profile: u16 = 0xc0de;
+    pub const cryptex_two_byte_header_extension_profile: u16 = 0xc2de;
 
     pub const Extension = struct {
         profile: u16,
@@ -1729,8 +1731,8 @@ pub const rtp = struct {
     };
 
     pub fn headerExtensionFormat(profile: u16) ?HeaderExtensionFormat {
-        if (profile == one_byte_header_extension_profile) return .one_byte;
-        if ((profile & 0xfff0) == two_byte_header_extension_profile) return .two_byte;
+        if (profile == one_byte_header_extension_profile or profile == cryptex_one_byte_header_extension_profile) return .one_byte;
+        if ((profile & 0xfff0) == two_byte_header_extension_profile or profile == cryptex_two_byte_header_extension_profile) return .two_byte;
         return null;
     }
 
@@ -5549,6 +5551,13 @@ test "RTP packet extension padding and writer" {
     defer rtp.freeHeaderExtensionElements(allocator, lenient_reserved);
     try std.testing.expectEqual(@as(usize, 0), lenient_reserved.len);
 
+    const cryptex_one = try rtp.parseHeaderExtensionElements(allocator, .{
+        .profile = rtp.cryptex_one_byte_header_extension_profile,
+        .data = one_byte_extensions.items,
+    });
+    defer rtp.freeHeaderExtensionElements(allocator, cryptex_one);
+    try std.testing.expectEqualStrings("m", rtp.findHeaderExtension(cryptex_one, 1).?);
+
     var two_byte_extensions: std.ArrayList(u8) = .empty;
     defer two_byte_extensions.deinit(allocator);
     try rtp.writeTwoByteHeaderExtensions(&two_byte_extensions, allocator, &.{
@@ -5562,6 +5571,13 @@ test "RTP packet extension padding and writer" {
     defer rtp.freeHeaderExtensionElements(allocator, parsed_two);
     try std.testing.expectEqualStrings("rid", rtp.findHeaderExtension(parsed_two, 16).?);
     try std.testing.expectEqual(@as(usize, 0), rtp.findHeaderExtension(parsed_two, 20).?.len);
+
+    const cryptex_two = try rtp.parseHeaderExtensionElements(allocator, .{
+        .profile = rtp.cryptex_two_byte_header_extension_profile,
+        .data = two_byte_extensions.items,
+    });
+    defer rtp.freeHeaderExtensionElements(allocator, cryptex_two);
+    try std.testing.expectEqualStrings("rid", rtp.findHeaderExtension(cryptex_two, 16).?);
 
     try std.testing.expectError(error.InvalidRtpPacket, rtp.writeOneByteHeaderExtensions(&two_byte_extensions, allocator, &.{
         .{ .id = 15, .data = "reserved" },
