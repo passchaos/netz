@@ -3169,6 +3169,22 @@ pub const rtcp = struct {
         return ((a -% b) > 0x8000);
     }
 
+    fn appendExtendedReportDestinations(list: *std.ArrayList(u32), allocator: std.mem.Allocator, xr: ExtendedReport) Error!void {
+        try list.append(allocator, xr.sender_ssrc);
+        for (xr.blocks) |block| {
+            switch (block) {
+                .loss_rle => |rle| try list.append(allocator, rle.ssrc),
+                .duplicate_rle => |rle| try list.append(allocator, rle.ssrc),
+                .packet_receipt_times => |receipt| try list.append(allocator, receipt.ssrc),
+                .receiver_reference_time => {},
+                .dlrr => |dlrr| for (dlrr.reports) |report| try list.append(allocator, report.ssrc),
+                .statistics_summary => |summary| try list.append(allocator, summary.ssrc),
+                .voip_metrics => |metrics| try list.append(allocator, metrics.ssrc),
+                .unknown => {},
+            }
+        }
+    }
+
     pub const Unknown = struct {
         header: Header,
         payload: []const u8,
@@ -3208,6 +3224,32 @@ pub const rtcp = struct {
                 else => {},
             }
             self.* = undefined;
+        }
+
+        pub fn destinationSsrcs(self: Packet, allocator: std.mem.Allocator) Error![]u32 {
+            var out: std.ArrayList(u32) = .empty;
+            errdefer out.deinit(allocator);
+            switch (self) {
+                .sender_report => |report| {
+                    for (report.report_blocks) |block| try out.append(allocator, block.ssrc);
+                    try out.append(allocator, report.sender_ssrc);
+                },
+                .receiver_report => |report| for (report.report_blocks) |block| try out.append(allocator, block.ssrc),
+                .goodbye => |goodbye| try out.appendSlice(allocator, goodbye.sources),
+                .source_description => |sdes| for (sdes.chunks) |chunk| try out.append(allocator, chunk.ssrc),
+                .picture_loss_indication => |pli| try out.append(allocator, pli.media_ssrc),
+                .slice_loss_indication => |sli| try out.append(allocator, sli.media_ssrc),
+                .full_intra_request => |fir| for (fir.entries) |entry| try out.append(allocator, entry.ssrc),
+                .receiver_estimated_maximum_bitrate => |remb| try out.appendSlice(allocator, remb.ssrcs),
+                .application_defined => |app| try out.append(allocator, app.ssrc),
+                .extended_report => |xr| try appendExtendedReportDestinations(&out, allocator, xr),
+                .rapid_resynchronization_request => |rrr| try out.append(allocator, rrr.media_ssrc),
+                .congestion_control_feedback => |ccfb| for (ccfb.report_blocks) |block| try out.append(allocator, block.media_ssrc),
+                .transport_layer_nack => |nack| try out.append(allocator, nack.media_ssrc),
+                .transport_wide_cc => |twcc| try out.append(allocator, twcc.media_ssrc),
+                .unknown => {},
+            }
+            return out.toOwnedSlice(allocator);
         }
     };
 
@@ -7248,6 +7290,9 @@ test "RTCP receiver report and feedback packets" {
     defer pli.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x11111111), pli.packet.picture_loss_indication.sender_ssrc);
     try std.testing.expectEqual(@as(u32, 0x22222222), pli.packet.picture_loss_indication.media_ssrc);
+    const pli_destinations = try pli.packet.destinationSsrcs(allocator);
+    defer allocator.free(pli_destinations);
+    try std.testing.expectEqualSlices(u32, &.{0x22222222}, pli_destinations);
 
     encoded.clearRetainingCapacity();
     var sli_entries = [_]rtcp.SliEntry{.{
@@ -7323,6 +7368,9 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(!ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[2].received);
     try std.testing.expectEqual(@as(u32, 2), ccfb.packet.congestion_control_feedback.report_blocks[1].media_ssrc);
     try std.testing.expectEqual(@as(usize, 3), ccfb.packet.congestion_control_feedback.report_blocks[1].metric_blocks.len);
+    const ccfb_destinations = try ccfb.packet.destinationSsrcs(allocator);
+    defer allocator.free(ccfb_destinations);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, ccfb_destinations);
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, ccfb.packet);
@@ -7430,6 +7478,18 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u8, 0xab), xr.packet.extended_report.blocks[7].unknown.header.type_specific);
     try std.testing.expectEqual(@as(rtcp.XrBlockType, @enumFromInt(0x63)), xr.packet.extended_report.blocks[7].unknown.header.block_type);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad, 0xbe, 0xef }, xr.packet.extended_report.blocks[7].unknown.payload);
+    const xr_destinations = try xr.packet.destinationSsrcs(allocator);
+    defer allocator.free(xr_destinations);
+    try std.testing.expectEqualSlices(u32, &.{
+        0x01020304,
+        0x12345689,
+        0x12345689,
+        0x98765432,
+        0x88888888,
+        0x09090909,
+        0xfedcba98,
+        0x89abcdef,
+    }, xr_destinations);
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, xr.packet);
@@ -7452,6 +7512,9 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
     try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
+    const nack_destinations = try nack.packet.destinationSsrcs(allocator);
+    defer allocator.free(nack_destinations);
+    try std.testing.expectEqualSlices(u32, &.{0x44444444}, nack_destinations);
     const too_many_nacks = try allocator.alloc(rtcp.NackPair, (((@as(usize, std.math.maxInt(u16)) * 4) - 8) / 4) + 1);
     defer allocator.free(too_many_nacks);
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .transport_layer_nack = .{
