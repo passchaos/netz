@@ -267,13 +267,18 @@ const LongHeaderConnectionIds = struct {
 
 fn validateSupportedVersions(supported_versions: []const u32) Error!void {
     if (supported_versions.len == 0) return error.InvalidVersionNegotiation;
+    var has_real_version = false;
     for (supported_versions) |version| {
         if (version == quic.Version.negotiation.wireValue()) return error.InvalidVersionNegotiation;
+        if (!quic.isReservedVersionWire(version)) has_real_version = true;
     }
+    if (!has_real_version) return error.InvalidVersionNegotiation;
 }
 
 fn versionListContains(supported_versions: []const u32, version: u32) bool {
+    if (quic.isReservedVersionWire(version)) return false;
     for (supported_versions) |supported| {
+        if (quic.isReservedVersionWire(supported)) continue;
         if (supported == version) return true;
     }
     return false;
@@ -471,6 +476,19 @@ test "QUIC UDP endpoint builds Version Negotiation for unsupported versions" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x11, 0x22, 0x33 }, parsed.destination_connection_id);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, parsed.source_connection_id);
     try std.testing.expectEqualSlices(u32, &supported_versions, parsed.versions);
+
+    const supported_with_grease = [_]u32{
+        quic.Version.version_1.wireValue(),
+        0x0a0a0a0a,
+    };
+    var reserved_trigger = datagram;
+    std.mem.writeInt(u32, reserved_trigger[1..5], 0x0a0a0a0a, .big);
+    const greased_response = (try endpoint.versionNegotiationResponse(&reserved_trigger, &supported_with_grease)) orelse return error.TestUnexpectedResult;
+    defer allocator.free(greased_response);
+
+    var parsed_greased = try quic.parseVersionNegotiationPacket(allocator, greased_response);
+    defer parsed_greased.deinit(allocator);
+    try std.testing.expectEqualSlices(u32, &supported_with_grease, parsed_greased.versions);
 }
 
 test "QUIC UDP endpoint ignores non-triggering Version Negotiation inputs" {
@@ -548,6 +566,10 @@ test "QUIC UDP endpoint ignores non-triggering Version Negotiation inputs" {
     try std.testing.expectError(error.InvalidVersionNegotiation, endpoint.versionNegotiationResponse(
         &supported,
         &.{quic.Version.negotiation.wireValue()},
+    ));
+    try std.testing.expectError(error.InvalidVersionNegotiation, endpoint.versionNegotiationResponse(
+        &supported,
+        &.{0x0a0a0a0a},
     ));
 }
 

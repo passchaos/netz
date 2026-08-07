@@ -173,20 +173,23 @@ pub fn processClient(allocator: std.mem.Allocator, options: ProcessOptions, data
 pub fn selectMutualVersion(available_versions: []const quic.Version, server_versions: []const u32) ?quic.Version {
     for (available_versions) |version| {
         if (version == .negotiation) continue;
+        if (quic.isReservedVersionWire(version.wireValue())) continue;
         if (containsWireVersion(server_versions, version.wireValue())) return version;
     }
     return null;
 }
 
 fn containsWireVersion(versions: []const u32, value: u32) bool {
+    if (quic.isReservedVersionWire(value)) return false;
     for (versions) |version| {
+        if (quic.isReservedVersionWire(version)) continue;
         if (version == value) return true;
     }
     return false;
 }
 
 fn validateVersionList(chosen_version: quic.Version, available_versions: []const quic.Version) Error!void {
-    if (chosen_version == .negotiation) return error.InvalidVersionNegotiation;
+    if (chosen_version == .negotiation or quic.isReservedVersionWire(chosen_version.wireValue())) return error.InvalidVersionNegotiation;
     if (available_versions.len == 0) return error.InvalidVersionNegotiation;
     var has_chosen = false;
     for (available_versions) |version| {
@@ -256,6 +259,39 @@ test "QUIC client Version Negotiation selects mutual version once" {
     try std.testing.expectEqual(@as(usize, 0), followup.address_validation_token.len);
 
     try std.testing.expect((try state.process(datagram)) == null);
+}
+
+test "QUIC client Version Negotiation ignores reserved versions when selecting" {
+    const allocator = std.testing.allocator;
+    const odcid = [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
+    const client_scid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+
+    try std.testing.expectEqual(
+        quic.Version.version_2,
+        selectMutualVersion(&.{ @enumFromInt(0x0a0a0a0a), .version_2 }, &.{ 0x0a0a0a0a, quic.Version.version_2.wireValue() }).?,
+    );
+
+    const reserved_only = try writeNegotiation(allocator, &client_scid, &odcid, &.{0x0a0a0a0a});
+    defer allocator.free(reserved_only);
+    try std.testing.expectError(error.InvalidVersionNegotiation, processClient(allocator, .{
+        .chosen_version = .version_1,
+        .available_versions = &.{ .version_1, @enumFromInt(0x0a0a0a0a) },
+        .original_destination_connection_id = &odcid,
+        .initial_source_connection_id = &client_scid,
+    }, reserved_only));
+
+    const reserved_and_v2 = try writeNegotiation(allocator, &client_scid, &odcid, &.{ 0x0a0a0a0a, quic.Version.version_2.wireValue() });
+    defer allocator.free(reserved_and_v2);
+    var processed = (try processClient(allocator, .{
+        .chosen_version = .version_1,
+        .available_versions = &.{ .version_1, @enumFromInt(0x0a0a0a0a), .version_2 },
+        .original_destination_connection_id = &odcid,
+        .initial_source_connection_id = &client_scid,
+    }, reserved_and_v2)) orelse return error.TestUnexpectedResult;
+    defer processed.deinit(allocator);
+    try std.testing.expectEqual(quic.Version.version_2, processed.selected_version);
+
+    try std.testing.expectError(error.InvalidVersionNegotiation, ClientState.init(allocator, @enumFromInt(0x0a0a0a0a), &.{ @enumFromInt(0x0a0a0a0a), .version_1 }, &odcid, &client_scid));
 }
 
 test "QUIC client Version Negotiation ignores unsafe or mismatched packets" {
