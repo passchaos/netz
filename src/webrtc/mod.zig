@@ -650,6 +650,24 @@ pub const ice = struct {
         }
     };
 
+    pub fn pairPriority(controlling_priority: u32, controlled_priority: u32) u64 {
+        const min_priority = @as(u64, @min(controlling_priority, controlled_priority));
+        const max_priority = @as(u64, @max(controlling_priority, controlled_priority));
+        const tie_breaker: u64 = if (controlling_priority > controlled_priority) 1 else 0;
+        // RFC 5245 section 5.7.2 defines pair priority in terms of the
+        // controlling (G) and controlled (D) candidate priorities.  Pion uses
+        // 2^32-1 as the multiplier so the maxUint32/maxUint32 case remains in
+        // range for u64 while preserving the ordering semantics.
+        return (((@as(u64, 1) << 32) - 1) * min_priority) + (2 * max_priority) + tie_breaker;
+    }
+
+    pub fn pairPriorityForRole(local_priority: u32, remote_priority: u32, local_role: stun.IceRole) u64 {
+        return switch (local_role) {
+            .controlling => pairPriority(local_priority, remote_priority),
+            .controlled => pairPriority(remote_priority, local_priority),
+        };
+    }
+
     fn parseCandidateType(value: []const u8) ?CandidateType {
         inline for (std.meta.fields(CandidateType)) |field| {
             if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
@@ -6822,6 +6840,9 @@ test "ICE candidate parser and SDP parser" {
     const candidate = try ice.Candidate.parse(line);
     try std.testing.expectEqual(ice.CandidateType.host, candidate.candidate_type);
     try std.testing.expectEqual(@as(u16, 54400), candidate.port);
+    try std.testing.expectEqual(@as(u64, (((@as(u64, 1) << 32) - 1) * 100) + 2 * 200 + 1), ice.pairPriority(200, 100));
+    try std.testing.expectEqual(ice.pairPriority(200, 100), ice.pairPriorityForRole(200, 100, .controlling));
+    try std.testing.expectEqual(ice.pairPriority(200, 100), ice.pairPriorityForRole(100, 200, .controlled));
 
     const tcp = try ice.Candidate.parse("candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype active");
     try std.testing.expectEqual(ice.Transport.tcp, tcp.transport);
