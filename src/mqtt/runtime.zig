@@ -502,6 +502,7 @@ pub const Connection = struct {
 
     pub fn writePubRec(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
         try self.writeAckPacket(.pubrec, packet_id, reason_code, &.{});
+        self.completeIncomingPubRec(packet_id, reason_code);
     }
 
     pub fn readPubRec(self: *Connection) Error!OwnedAck {
@@ -535,6 +536,7 @@ pub const Connection = struct {
 
     pub fn writePubRecWithProperties(self: *Connection, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
         try self.writeAckPacket(.pubrec, packet_id, reason_code, properties);
+        self.completeIncomingPubRec(packet_id, reason_code);
     }
 
     pub fn writePubRelWithProperties(self: *Connection, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
@@ -771,6 +773,14 @@ pub const Connection = struct {
         if (!set.isSet(index)) return;
         set.setValue(index, false);
         self.incoming_inflight -= 1;
+    }
+
+    fn completeIncomingPubRec(self: *Connection, packet_id: u16, reason_code: u8) void {
+        // MQTT 5 negative PUBREC reason codes terminate the QoS 2 handshake:
+        // the sender must not continue with PUBREL.  Release the receive slot
+        // immediately, while success and "No matching subscribers" continue
+        // through PUBREL/PUBCOMP like rumqtt's QoS2 state machine.
+        if (reason_code >= 0x80) self.completeIncomingPublish(.pubcomp, packet_id);
     }
 
     fn validateOutgoingSubscribe(self: Connection, subscriptions: []const mqtt.Subscription, properties: []const mqtt.Property) Error!void {
@@ -1347,6 +1357,13 @@ test "MQTT connection keeps QoS2 receive slot until PUBCOMP" {
         .payload = "ok",
     });
     try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
+
+    connection.completeIncomingPubRec(21, 0x10); // No matching subscribers still completes via PUBREL/PUBCOMP.
+    try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
+    try connection.validateIncomingPubRel(21);
+    connection.completeIncomingPubRec(21, 0x80);
+    try std.testing.expectEqual(@as(u16, 0), connection.incoming_inflight);
+    try std.testing.expectError(error.InvalidPacketIdentifier, connection.validateIncomingPubRel(21));
 }
 
 test "MQTT connection enforces negotiated subscribe capabilities" {
