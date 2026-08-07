@@ -1365,12 +1365,13 @@ pub const Connection = struct {
     fn ensureStreamTrackedForOutboundHeaders(self: *Connection, stream_id: u31) Error!StreamActivation {
         if (stream_id == 0) return error.InvalidStreamId;
         if (self.outboundStreamIsActive(stream_id)) return .none;
-        if (self.role == .client and clientInitiatedStreamId(stream_id) or
-            self.role == .server and !clientInitiatedStreamId(stream_id))
-        {
+        const client_initiated = clientInitiatedStreamId(stream_id);
+        if (self.role == .client) {
+            if (!client_initiated) return error.InvalidStreamId;
             try self.active_local_streams.append(self.allocator, stream_id);
             return .local;
         }
+        if (!client_initiated) return error.InvalidStreamId;
         try self.active_peer_streams.append(self.allocator, stream_id);
         return .peer;
     }
@@ -3519,6 +3520,49 @@ test "HTTP/2 writeData rejects idle streams" {
     // on an idle stream; keep the same invariant for the low-level helper.
     try std.testing.expectError(error.InvalidStreamId, connection.writeData(1, "body", true));
     try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
+}
+
+test "HTTP/2 writeHeaders rejects wrong-direction idle streams" {
+    const fields = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+
+    var client = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        client.send_stream_windows.deinit(std.testing.allocator);
+        client.recv_stream_windows.deinit(std.testing.allocator);
+        client.active_local_streams.deinit(std.testing.allocator);
+        client.active_peer_streams.deinit(std.testing.allocator);
+        client.hpack_decoder.deinit(std.testing.allocator);
+        client.hpack_encoder.deinit(std.testing.allocator);
+    }
+    try std.testing.expectError(error.InvalidStreamId, client.writeHeaders(2, &fields, true));
+    try std.testing.expectEqual(@as(usize, 0), client.active_local_streams.items.len);
+
+    var server = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        server.send_stream_windows.deinit(std.testing.allocator);
+        server.recv_stream_windows.deinit(std.testing.allocator);
+        server.active_local_streams.deinit(std.testing.allocator);
+        server.active_peer_streams.deinit(std.testing.allocator);
+        server.hpack_decoder.deinit(std.testing.allocator);
+        server.hpack_encoder.deinit(std.testing.allocator);
+    }
+    try std.testing.expectError(error.InvalidStreamId, server.writeHeaders(2, &fields, true));
+    try std.testing.expectEqual(@as(usize, 0), server.active_local_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.active_peer_streams.items.len);
 }
 
 test "HTTP/2 client request fails when response stream is reset" {
