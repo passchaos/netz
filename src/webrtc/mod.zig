@@ -2776,10 +2776,10 @@ pub const rtp = struct {
 
     pub fn absCaptureTime(elements: []const HeaderExtensionElement, id: u8) Error!?AbsCaptureTimeExtension {
         const value = findHeaderExtension(elements, id) orelse return null;
-        if (value.len != 8 and value.len != 16) return error.InvalidRtpPacket;
+        if (value.len < 8) return error.InvalidRtpPacket;
         return .{
             .timestamp = std.mem.readInt(u64, value[0..8], .big),
-            .estimated_capture_clock_offset = if (value.len == 16) std.mem.readInt(i64, value[8..16], .big) else null,
+            .estimated_capture_clock_offset = if (value.len >= 16) std.mem.readInt(i64, value[8..16], .big) else null,
         };
     }
 
@@ -8448,6 +8448,14 @@ test "RTP packet extension padding and writer" {
         capture_time_ns - parsed_abs_capture_time.captureUnixNanos();
     try std.testing.expect(capture_diff <= 1);
     try std.testing.expectEqual(@as(i64, 1_250_000_000), parsed_abs_capture_time.estimatedCaptureClockOffsetNanos().?);
+    const short_abs_capture_time = (try rtp.absCaptureTime(&.{.{ .id = 7, .data = abs_capture_time[0..12] }}, 7)).?;
+    try std.testing.expect(short_abs_capture_time.estimated_capture_clock_offset == null);
+    var extra_abs_capture_time_buf: [17]u8 = undefined;
+    @memcpy(extra_abs_capture_time_buf[0..16], &abs_capture_time);
+    extra_abs_capture_time_buf[16] = 0xff;
+    const extra_abs_capture_time = (try rtp.absCaptureTime(&.{.{ .id = 7, .data = &extra_abs_capture_time_buf }}, 7)).?;
+    try std.testing.expectEqual(@as(i64, 1_250_000_000), extra_abs_capture_time.estimatedCaptureClockOffsetNanos().?);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.absCaptureTime(&.{.{ .id = 7, .data = abs_capture_time[0..7] }}, 7));
     try std.testing.expectEqual(@as(i64, -250_000_000), rtp.captureClockOffsetNanos(rtp.captureClockOffsetFromNanos(-250_000_000)));
     try std.testing.expectEqualStrings("video", rtp.mid(parsed_extensions, 9).?);
     try std.testing.expectEqualStrings("f", rtp.rtpStreamId(parsed_extensions, 10).?);
