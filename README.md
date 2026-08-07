@@ -118,7 +118,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
-  server helper and host-name DNS connect helpers with Host/port synthesis, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
+  server helper, `ws://` URI and host-name DNS connect helpers with Host/port synthesis, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
   `:protocol = websocket`, subprotocols, and permessage-deflate over an h2 DATA tunnel
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
   username/password payload support, PUBLISH,
@@ -214,12 +214,11 @@ defer response.deinit(allocator);
 WebSocket can upgrade over the same TCP layer:
 
 ```zig
-var ws = try netz.websocket.runtime.Client.connectHost(
+var ws = try netz.websocket.runtime.Client.connectUri(
     allocator,
     io,
-    "localhost",
-    8080,
-    .{ .target = "/chat" },
+    "ws://localhost:8080/chat",
+    .{},
 );
 defer ws.close();
 

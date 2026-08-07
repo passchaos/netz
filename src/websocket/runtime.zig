@@ -13,6 +13,8 @@ pub const Error = websocket.Error || http1_runtime.Error || http2_runtime.Error 
     ConnectionClosed,
     InvalidResponse,
     InvalidSubprotocol,
+    InvalidUri,
+    UnsupportedScheme,
     MessageTooLarge,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error;
 
@@ -209,6 +211,24 @@ pub const Client = struct {
         return connectStream(allocator, io, stream, connect_options);
     }
 
+    pub fn connectUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+    ) Error!Connection {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "ws")) return error.UnsupportedScheme;
+        var host_buffer: [net.HostName.max_len]u8 = undefined;
+        const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+
+        var connect_options = options;
+        connect_options.target = target;
+        return connectHost(allocator, io, host.bytes, uri.port orelse 80, connect_options);
+    }
+
     fn connectStream(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -276,6 +296,21 @@ pub const Client = struct {
         return connection;
     }
 };
+
+fn uriTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
+    const path_value = uriComponentBytes(uri.path);
+    const path = if (path_value.len == 0) "/" else path_value;
+    if (uri.query) |query| {
+        return try std.fmt.allocPrint(allocator, "{s}?{s}", .{ path, uriComponentBytes(query) });
+    }
+    return try allocator.dupe(u8, path);
+}
+
+fn uriComponentBytes(component: std.Uri.Component) []const u8 {
+    return switch (component) {
+        .raw, .percent_encoded => |value| value,
+    };
+}
 
 pub const ConnectOptions = struct {
     /// HTTP Host authority for the WebSocket opening handshake.  `connectHost`
@@ -1392,6 +1427,69 @@ test "WebSocket client connects by host name" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebSocket client connects by ws URI" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+
+            var request = try connection.receiveMessage();
+            defer request.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqualStrings("uri-hello", request.payload);
+            try connection.sendText("uri-world");
+
+            var close = try connection.receiveFrame();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "ws://localhost:{d}/uri?x=1", .{server.address().ip4.port});
+    defer allocator.free(uri);
+    var client = try Client.connectUri(allocator, io, uri, .{
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+
+    try client.sendText("uri-hello");
+    var response = try client.receiveMessage();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("uri-world", response.payload);
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectError(error.UnsupportedScheme, Client.connectUri(allocator, io, "wss://localhost/chat", .{}));
+    try std.testing.expectError(error.InvalidUri, Client.connectUri(allocator, io, "ws:///missing-host", .{}));
 }
 
 test "WebSocket runtime negotiates permessage-deflate" {
