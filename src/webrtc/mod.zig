@@ -1194,7 +1194,7 @@ pub const sdp = struct {
 
         var payloads = std.mem.tokenizeAny(u8, media.formats, " \t");
         while (payloads.next()) |payload_token| {
-            const payload_type = std.fmt.parseInt(u8, payload_token, 10) catch return error.InvalidSdp;
+            const payload_type = try parsePayloadType(payload_token);
             var codec = if (findPayloadAttribute(media.attributes, "rtpmap", payload_type)) |rtpmap|
                 try parseRtpMap(payload_type, media.kind, rtpmap)
             else
@@ -1363,6 +1363,12 @@ pub const sdp = struct {
         };
     }
 
+    fn parsePayloadType(value: []const u8) Error!u8 {
+        const payload = std.fmt.parseInt(u8, value, 10) catch return error.InvalidSdp;
+        if (payload > 127) return error.InvalidSdp;
+        return payload;
+    }
+
     fn staticRtpCodec(payload_type: u8) ?RtpCodec {
         // Pion/sdp handles the RTP/AVP static payload types without an rtpmap
         // attribute.  These appear in legacy offers and browser interop tests.
@@ -1383,7 +1389,7 @@ pub const sdp = struct {
             if (!std.ascii.eqlIgnoreCase(attr.name, name)) continue;
             var parts = std.mem.tokenizeAny(u8, attr.value, " \t");
             const payload_s = parts.next() orelse continue;
-            const payload = std.fmt.parseInt(u8, payload_s, 10) catch continue;
+            const payload = parsePayloadType(payload_s) catch continue;
             if (payload != payload_type) continue;
             const value_start = payload_s.len;
             return std.mem.trim(u8, attr.value[value_start..], " \t");
@@ -1399,7 +1405,7 @@ pub const sdp = struct {
             var parts = std.mem.tokenizeAny(u8, attr.value, " \t");
             const payload_s = parts.next() orelse return error.InvalidSdp;
             if (!std.mem.eql(u8, payload_s, "*")) {
-                const payload = std.fmt.parseInt(u8, payload_s, 10) catch return error.InvalidSdp;
+                const payload = try parsePayloadType(payload_s);
                 if (payload != payload_type) continue;
             }
             const typ = parts.next() orelse return error.InvalidSdp;
@@ -1414,7 +1420,7 @@ pub const sdp = struct {
         while (params.next()) |raw_param| {
             const param = std.mem.trim(u8, raw_param, " \t");
             if (!std.mem.startsWith(u8, param, "apt=")) continue;
-            return std.fmt.parseInt(u8, param["apt=".len..], 10) catch null;
+            return parsePayloadType(param["apt=".len..]) catch null;
         }
         return null;
     }
@@ -5128,6 +5134,29 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("rtx", rtx_codecs[1].mime_type);
     try std.testing.expectEqual(@as(?u8, 96), rtx_codecs[1].apt);
     try std.testing.expectEqualStrings("apt=96;rtx-time=3000", rtx_codecs[1].fmtp);
+
+    const invalid_payload_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 128\r\n" ++
+        "a=rtpmap:128 VP8/90000\r\n";
+    var invalid_payload_session = try sdp.parse(allocator, invalid_payload_text);
+    defer invalid_payload_session.deinit(allocator);
+    try std.testing.expectError(error.InvalidSdp, sdp.extractRtpCodecs(allocator, invalid_payload_session.media[0]));
+
+    const invalid_apt_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 97\r\n" ++
+        "a=rtpmap:97 rtx/90000\r\n" ++
+        "a=fmtp:97 apt=128\r\n";
+    var invalid_apt_session = try sdp.parse(allocator, invalid_apt_text);
+    defer invalid_apt_session.deinit(allocator);
+    const invalid_apt_codecs = try sdp.extractRtpCodecs(allocator, invalid_apt_session.media[0]);
+    defer sdp.freeRtpCodecs(allocator, invalid_apt_codecs);
+    try std.testing.expectEqual(@as(?u8, null), invalid_apt_codecs[0].apt);
 
     const static_codec_text =
         "v=0\r\n" ++
