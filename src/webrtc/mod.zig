@@ -2574,6 +2574,29 @@ pub const rtp = struct {
         elements.*[elements.*.len - 1] = .{ .id = id, .data = data };
     }
 
+    pub fn setHeaderExtensionForProfile(
+        allocator: std.mem.Allocator,
+        elements: *[]HeaderExtensionElement,
+        profile: u16,
+        id: u8,
+        data: []const u8,
+    ) Error!void {
+        switch (headerExtensionFormat(profile) orelse return error.InvalidRtpPacket) {
+            .one_byte => {
+                if (id == 0 or id >= 15 or data.len > 16) return error.InvalidRtpPacket;
+                try setHeaderExtension(allocator, elements, id, data);
+            },
+            .two_byte => {
+                if (id == 0 or data.len > std.math.maxInt(u8)) return error.InvalidRtpPacket;
+                try setHeaderExtension(allocator, elements, id, data);
+            },
+            .raw => {
+                if (id != 0) return error.InvalidRtpPacket;
+                try setRawHeaderExtension(allocator, elements, data);
+            },
+        }
+    }
+
     pub fn deleteHeaderExtension(allocator: std.mem.Allocator, elements: *[]HeaderExtensionElement, id: u8) Error!bool {
         for (elements.*, 0..) |element, index| {
             if (element.id != id) continue;
@@ -8480,10 +8503,16 @@ test "RTP packet extension padding and writer" {
     try rtp.setHeaderExtension(allocator, &mutable_extensions, 12, "new");
     try std.testing.expectEqual(@as(?u16, 0xabcd), try rtp.transportWideSequenceNumber(mutable_extensions, 3));
     try std.testing.expectEqualStrings("new", rtp.findHeaderExtension(mutable_extensions, 12).?);
+    try rtp.setHeaderExtensionForProfile(allocator, &mutable_extensions, rtp.one_byte_header_extension_profile, 14, "ok");
+    try std.testing.expectEqualStrings("ok", rtp.findHeaderExtension(mutable_extensions, 14).?);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.setHeaderExtensionForProfile(allocator, &mutable_extensions, rtp.one_byte_header_extension_profile, 15, "bad"));
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.setHeaderExtensionForProfile(allocator, &mutable_extensions, rtp.one_byte_header_extension_profile, 2, "0123456789abcdefg"));
+    try rtp.setHeaderExtensionForProfile(allocator, &mutable_extensions, rtp.two_byte_header_extension_profile, 200, "wide");
+    try std.testing.expectEqualStrings("wide", rtp.findHeaderExtension(mutable_extensions, 200).?);
     const mutable_ids = try rtp.headerExtensionIds(allocator, mutable_extensions);
     defer allocator.free(mutable_ids);
     try std.testing.expectEqual(@as(u8, 1), mutable_ids[0]);
-    try std.testing.expectEqual(@as(u8, 12), mutable_ids[mutable_ids.len - 1]);
+    try std.testing.expectEqual(@as(u8, 200), mutable_ids[mutable_ids.len - 1]);
     try std.testing.expect(try rtp.deleteHeaderExtension(allocator, &mutable_extensions, 1));
     try std.testing.expect(rtp.findHeaderExtension(mutable_extensions, 1) == null);
     try std.testing.expect(!(try rtp.deleteHeaderExtension(allocator, &mutable_extensions, 42)));
@@ -8579,6 +8608,9 @@ test "RTP packet extension padding and writer" {
     defer allocator.free(mutable_raw);
     try rtp.setRawHeaderExtension(allocator, &mutable_raw, &.{});
     try std.testing.expectEqual(@as(usize, 0), rtp.findHeaderExtension(mutable_raw, 0).?.len);
+    try rtp.setHeaderExtensionForProfile(allocator, &mutable_raw, 0xbeef, 0, "raw");
+    try std.testing.expectEqualStrings("raw", rtp.findHeaderExtension(mutable_raw, 0).?);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.setHeaderExtensionForProfile(allocator, &mutable_raw, 0xbeef, 1, "bad"));
     const raw_ids = try rtp.headerExtensionIds(allocator, mutable_raw);
     defer allocator.free(raw_ids);
     try std.testing.expectEqualSlices(u8, &.{0}, raw_ids);
