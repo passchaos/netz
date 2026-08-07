@@ -80,12 +80,20 @@ pub const Peer = struct {
         try self.endpoint.sendRtcpCompound(to, packets);
     }
 
+    pub fn sendRtcpPackets(self: *Peer, to: net.IpAddress, packets: []const webrtc.rtcp.Packet) Error!void {
+        try self.endpoint.sendRtcpPackets(to, packets);
+    }
+
     pub fn receiveRtcpPacket(self: *Peer) Error!RtcpDatagram {
         return self.endpoint.receiveRtcpPacket();
     }
 
     pub fn receiveRtcpCompound(self: *Peer) Error!RtcpCompoundDatagram {
         return self.endpoint.receiveRtcpCompound();
+    }
+
+    pub fn receiveRtcpPackets(self: *Peer) Error!RtcpPacketsDatagram {
+        return self.endpoint.receiveRtcpPackets();
     }
 
     pub fn sendSrtcpPacket(self: *Peer, to: net.IpAddress, context: *webrtc.srtp.Context, packet: webrtc.rtcp.Packet) Error!void {
@@ -96,12 +104,20 @@ pub const Peer = struct {
         try self.endpoint.sendSrtcpCompound(to, context, packets);
     }
 
+    pub fn sendSrtcpPackets(self: *Peer, to: net.IpAddress, context: *webrtc.srtp.Context, packets: []const webrtc.rtcp.Packet) Error!void {
+        try self.endpoint.sendSrtcpPackets(to, context, packets);
+    }
+
     pub fn receiveSrtcpPacket(self: *Peer, context: *webrtc.srtp.Context) Error!SrtcpDatagram {
         return self.endpoint.receiveSrtcpPacket(context);
     }
 
     pub fn receiveSrtcpCompound(self: *Peer, context: *webrtc.srtp.Context) Error!SrtcpCompoundDatagram {
         return self.endpoint.receiveSrtcpCompound(context);
+    }
+
+    pub fn receiveSrtcpPackets(self: *Peer, context: *webrtc.srtp.Context) Error!SrtcpPacketsDatagram {
+        return self.endpoint.receiveSrtcpPackets(context);
     }
 
     pub fn sendDtlsRecord(self: *Peer, to: net.IpAddress, options: webrtc.dtls.WriteOptions, fragment: []const u8) Error!void {
@@ -278,6 +294,13 @@ pub const PeerEndpoint = struct {
         try self.sendBytes(to, encoded.items);
     }
 
+    pub fn sendRtcpPackets(self: *PeerEndpoint, to: net.IpAddress, packets: []const webrtc.rtcp.Packet) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try webrtc.rtcp.writePackets(&encoded, self.allocator, packets);
+        try self.sendBytes(to, encoded.items);
+    }
+
     pub fn sendSrtcpPacket(self: *PeerEndpoint, to: net.IpAddress, context: *webrtc.srtp.Context, packet: webrtc.rtcp.Packet) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
@@ -289,6 +312,13 @@ pub const PeerEndpoint = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try context.protectRtcpCompound(&encoded, self.allocator, packets);
+        try self.sendBytes(to, encoded.items);
+    }
+
+    pub fn sendSrtcpPackets(self: *PeerEndpoint, to: net.IpAddress, context: *webrtc.srtp.Context, packets: []const webrtc.rtcp.Packet) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try context.protectRtcpPackets(&encoded, self.allocator, packets);
         try self.sendBytes(to, encoded.items);
     }
 
@@ -348,6 +378,20 @@ pub const PeerEndpoint = struct {
         }
     }
 
+    pub fn receiveRtcpPackets(self: *PeerEndpoint) Error!RtcpPacketsDatagram {
+        while (true) {
+            var raw = try self.receiveRaw();
+            errdefer raw.deinit(self.allocator);
+            if (!looksLikeRtcp(raw.bytes)) {
+                raw.deinit(self.allocator);
+                continue;
+            }
+            const packets = try webrtc.rtcp.parsePackets(self.allocator, raw.bytes);
+            errdefer webrtc.rtcp.freePackets(self.allocator, packets);
+            return .{ .from = raw.from, .bytes = raw.bytes, .packets = packets };
+        }
+    }
+
     pub fn receiveSrtcpPacket(self: *PeerEndpoint, context: *webrtc.srtp.Context) Error!SrtcpDatagram {
         while (true) {
             var raw = try self.receiveRaw();
@@ -371,6 +415,20 @@ pub const PeerEndpoint = struct {
                 continue;
             }
             var authenticated = try context.unprotectRtcpCompound(self.allocator, raw.bytes);
+            errdefer authenticated.deinit(self.allocator);
+            return .{ .from = raw.from, .bytes = raw.bytes, .authenticated = authenticated };
+        }
+    }
+
+    pub fn receiveSrtcpPackets(self: *PeerEndpoint, context: *webrtc.srtp.Context) Error!SrtcpPacketsDatagram {
+        while (true) {
+            var raw = try self.receiveRaw();
+            errdefer raw.deinit(self.allocator);
+            if (!looksLikeRtcp(raw.bytes)) {
+                raw.deinit(self.allocator);
+                continue;
+            }
+            var authenticated = try context.unprotectRtcpPackets(self.allocator, raw.bytes);
             errdefer authenticated.deinit(self.allocator);
             return .{ .from = raw.from, .bytes = raw.bytes, .authenticated = authenticated };
         }
@@ -631,6 +689,18 @@ pub const SrtcpCompoundDatagram = struct {
     }
 };
 
+pub const SrtcpPacketsDatagram = struct {
+    from: net.IpAddress,
+    bytes: []u8,
+    authenticated: webrtc.srtp.AuthenticatedRtcpPackets,
+
+    pub fn deinit(self: *SrtcpPacketsDatagram, allocator: std.mem.Allocator) void {
+        self.authenticated.deinit(allocator);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
 pub const DtlsDatagram = struct {
     from: net.IpAddress,
     bytes: []u8,
@@ -661,6 +731,18 @@ pub const RtcpCompoundDatagram = struct {
 
     pub fn deinit(self: *RtcpCompoundDatagram, allocator: std.mem.Allocator) void {
         webrtc.rtcp.freeCompound(allocator, self.packets);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+pub const RtcpPacketsDatagram = struct {
+    from: net.IpAddress,
+    bytes: []u8,
+    packets: []webrtc.rtcp.Packet,
+
+    pub fn deinit(self: *RtcpPacketsDatagram, allocator: std.mem.Allocator) void {
+        webrtc.rtcp.freePackets(allocator, self.packets);
         allocator.free(self.bytes);
         self.* = undefined;
     }
@@ -1291,6 +1373,63 @@ test "WebRTC peer runtime sends authenticated compound SRTCP" {
     try std.testing.expectEqual(@as(usize, 3), protected.authenticated.rtcp.len);
     try std.testing.expectEqualStrings("runtime@example.test", protected.authenticated.rtcp[1].source_description.cname(0x01020304).?);
     try std.testing.expectEqual(@as(u32, 0x11223344), protected.authenticated.rtcp[2].picture_loss_indication.media_ssrc);
+}
+
+test "WebRTC peer runtime sends reduced-size RTCP packets" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer receiver.deinit();
+    var sender = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer sender.deinit();
+
+    const packets = [_]webrtc.rtcp.Packet{
+        .{ .picture_loss_indication = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x11121314 } },
+        .{ .rapid_resynchronization_request = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x21222324 } },
+    };
+    try sender.sendRtcpPackets(receiver.address(), &packets);
+
+    var inbound = try receiver.receiveRtcpPackets();
+    defer inbound.deinit(allocator);
+    try std.testing.expect(inbound.from.eql(&sender.address()));
+    try std.testing.expectEqual(@as(usize, 2), inbound.packets.len);
+    try std.testing.expectEqual(@as(u32, 0x11121314), inbound.packets[0].picture_loss_indication.media_ssrc);
+    try std.testing.expectEqual(@as(u32, 0x21222324), inbound.packets[1].rapid_resynchronization_request.media_ssrc);
+}
+
+test "WebRTC peer runtime sends authenticated reduced-size SRTCP packets" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const auth_key = [_]u8{0x7c} ** webrtc.srtp.hmac_sha1_len;
+    var sender_context = webrtc.srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+    var receiver_context = webrtc.srtp.Context{ .keys = .{ .auth_key = &auth_key } };
+
+    var receiver = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer receiver.deinit();
+    var sender = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer sender.deinit();
+
+    const packets = [_]webrtc.rtcp.Packet{
+        .{ .picture_loss_indication = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x31323334 } },
+        .{ .rapid_resynchronization_request = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x41424344 } },
+    };
+    try sender.sendSrtcpPackets(receiver.address(), &sender_context, &packets);
+
+    var protected = try receiver.receiveSrtcpPackets(&receiver_context);
+    defer protected.deinit(allocator);
+    try std.testing.expect(protected.from.eql(&sender.address()));
+    try std.testing.expectEqual(@as(u31, 0), protected.authenticated.verified.index);
+    try std.testing.expectEqual(@as(usize, 2), protected.authenticated.rtcp.len);
+    try std.testing.expectEqual(@as(u32, 0x31323334), protected.authenticated.rtcp[0].picture_loss_indication.media_ssrc);
+    try std.testing.expectEqual(@as(u32, 0x41424344), protected.authenticated.rtcp[1].rapid_resynchronization_request.media_ssrc);
 }
 
 test "WebRTC peer runtime sends authenticated SRTP and rejects replay" {

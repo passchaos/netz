@@ -2936,6 +2936,13 @@ pub const srtp = struct {
             try self.protectRtcp(list, allocator, raw.items);
         }
 
+        pub fn protectRtcpPackets(self: *Context, list: *std.ArrayList(u8), allocator: std.mem.Allocator, packets: []const rtcp.Packet) Error!void {
+            var raw: std.ArrayList(u8) = .empty;
+            defer raw.deinit(allocator);
+            try rtcp.writePackets(&raw, allocator, packets);
+            try self.protectRtcp(list, allocator, raw.items);
+        }
+
         pub fn verifyRtcp(self: *Context, protected_packet: []const u8) Error!VerifiedRtcp {
             if (protected_packet.len <= 4 + auth_tag_len_80) return error.InvalidSrtpPacket;
             const auth_start = protected_packet.len - auth_tag_len_80;
@@ -2963,6 +2970,13 @@ pub const srtp = struct {
             const verified = try self.verifyRtcp(protected_packet);
             const packets = try rtcp.parseCompound(allocator, verified.packet);
             errdefer rtcp.freeCompound(allocator, packets);
+            return .{ .verified = verified, .rtcp = packets };
+        }
+
+        pub fn unprotectRtcpPackets(self: *Context, allocator: std.mem.Allocator, protected_packet: []const u8) Error!AuthenticatedRtcpPackets {
+            const verified = try self.verifyRtcp(protected_packet);
+            const packets = try rtcp.parsePackets(allocator, verified.packet);
+            errdefer rtcp.freePackets(allocator, packets);
             return .{ .verified = verified, .rtcp = packets };
         }
     };
@@ -3005,6 +3019,16 @@ pub const srtp = struct {
 
         pub fn deinit(self: *AuthenticatedRtcpCompound, allocator: std.mem.Allocator) void {
             rtcp.freeCompound(allocator, self.rtcp);
+            self.* = undefined;
+        }
+    };
+
+    pub const AuthenticatedRtcpPackets = struct {
+        verified: VerifiedRtcp,
+        rtcp: []rtcp.Packet,
+
+        pub fn deinit(self: *AuthenticatedRtcpPackets, allocator: std.mem.Allocator) void {
+            rtcp.freePackets(allocator, self.rtcp);
             self.* = undefined;
         }
     };
@@ -3928,6 +3952,18 @@ pub const rtcp = struct {
     }
 
     pub fn parseCompound(allocator: std.mem.Allocator, bytes: []const u8) Error![]Packet {
+        const packets = try parsePackets(allocator, bytes);
+        errdefer freePackets(allocator, packets);
+        try validateCompound(packets);
+        return packets;
+    }
+
+    pub fn parsePackets(allocator: std.mem.Allocator, bytes: []const u8) Error![]Packet {
+        // Reduced-size RTCP (RFC 5506), used by WebRTC when `a=rtcp-rsize`
+        // is negotiated, permits feedback-only datagrams that intentionally do
+        // not satisfy the compound RTCP SR/RR + SDES/CNAME envelope.  Keep this
+        // parser separate from parseCompound so callers must opt into accepting
+        // reduced-size datagrams instead of weakening compound validation.
         var packets: std.ArrayList(Packet) = .empty;
         errdefer {
             for (packets.items) |*packet| packet.deinit(allocator);
@@ -3942,13 +3978,17 @@ pub const rtcp = struct {
             parsed.packet = undefined;
             pos += parsed.consumed;
         }
-        try validateCompound(packets.items);
+        if (packets.items.len == 0) return error.InvalidRtcpPacket;
         return packets.toOwnedSlice(allocator);
     }
 
-    pub fn freeCompound(allocator: std.mem.Allocator, packets: []Packet) void {
+    pub fn freePackets(allocator: std.mem.Allocator, packets: []Packet) void {
         for (packets) |*packet| packet.deinit(allocator);
         allocator.free(packets);
+    }
+
+    pub fn freeCompound(allocator: std.mem.Allocator, packets: []Packet) void {
+        freePackets(allocator, packets);
     }
 
     pub fn compoundDestinationSsrcs(allocator: std.mem.Allocator, packets: []const Packet) Error![]u32 {
@@ -3958,6 +3998,11 @@ pub const rtcp = struct {
 
     pub fn writeCompound(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packets: []const Packet) Error!void {
         try validateCompound(packets);
+        try writePackets(list, allocator, packets);
+    }
+
+    pub fn writePackets(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packets: []const Packet) Error!void {
+        if (packets.len == 0) return error.InvalidRtcpPacket;
         for (packets) |packet| try writePacket(list, allocator, packet);
     }
 
@@ -7942,6 +7987,19 @@ test "SRTCP NULL_HMAC_SHA1_80 authenticates index and rejects replay" {
     try std.testing.expectEqual(@as(u32, 0x01020304), compound.rtcp[0].receiver_report.sender_ssrc);
     try std.testing.expectEqualStrings("compound@example.test", compound.rtcp[1].source_description.cname(0x01020304).?);
     try std.testing.expectEqual(@as(u32, 0x11121314), compound.rtcp[2].picture_loss_indication.media_ssrc);
+
+    encoded.clearRetainingCapacity();
+    const reduced_size_packets = [_]rtcp.Packet{
+        .{ .picture_loss_indication = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x21222324 } },
+        .{ .rapid_resynchronization_request = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x31323334 } },
+    };
+    try sender.protectRtcpPackets(&encoded, allocator, &reduced_size_packets);
+    var reduced = try receiver.unprotectRtcpPackets(allocator, encoded.items);
+    defer reduced.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 2), reduced.verified.index);
+    try std.testing.expectEqual(@as(usize, 2), reduced.rtcp.len);
+    try std.testing.expectEqual(@as(u32, 0x21222324), reduced.rtcp[0].picture_loss_indication.media_ssrc);
+    try std.testing.expectEqual(@as(u32, 0x31323334), reduced.rtcp[1].rapid_resynchronization_request.media_ssrc);
 }
 
 test "SRTP NULL_HMAC_SHA1_80 authenticates ROC and rejects replay" {
@@ -8044,6 +8102,20 @@ test "RTCP SDES and compound packets" {
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{
         .{ .picture_loss_indication = .{ .sender_ssrc = 1, .media_ssrc = 2 } },
     }));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePackets(&encoded, allocator, &.{}));
+
+    encoded.clearRetainingCapacity();
+    const reduced_size_packets = [_]rtcp.Packet{
+        .{ .picture_loss_indication = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x11121314 } },
+        .{ .rapid_resynchronization_request = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x21222324 } },
+    };
+    try rtcp.writePackets(&encoded, allocator, &reduced_size_packets);
+    const parsed_reduced = try rtcp.parsePackets(allocator, encoded.items);
+    defer rtcp.freePackets(allocator, parsed_reduced);
+    try std.testing.expectEqual(@as(usize, 2), parsed_reduced.len);
+    try std.testing.expectEqual(@as(u32, 0x11121314), parsed_reduced[0].picture_loss_indication.media_ssrc);
+    try std.testing.expectEqual(@as(u32, 0x21222324), parsed_reduced[1].rapid_resynchronization_request.media_ssrc);
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parseCompound(allocator, encoded.items));
 
     var no_cname_items = [_]rtcp.SdesItem{.{ .item_type = .name, .value = "alice" }};
     var no_cname_chunks = [_]rtcp.SdesChunk{.{ .ssrc = 0x01020304, .items = &no_cname_items }};
