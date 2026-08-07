@@ -69,6 +69,7 @@ pub const Frame = struct {
 
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
         try validateFrameType(self.frame_type);
+        try validateFramePayloadShape(self.frame_type, self.payload);
         try quic.varint.encode(list, allocator, self.frame_type);
         try quic.varint.encode(list, allocator, self.payload.len);
         try list.appendSlice(allocator, self.payload);
@@ -83,6 +84,20 @@ fn validateFrameType(frame_type: u64) Error!void {
         // frames; do the same at the frame parser boundary so every stream
         // context gets consistent behavior.
         0x02, 0x06, 0x08, 0x09 => return error.UnexpectedFrame,
+        else => {},
+    }
+}
+
+fn validateFramePayloadShape(frame_type: u64, payload: []const u8) Error!void {
+    switch (frame_type) {
+        FrameType.goaway,
+        FrameType.cancel_push,
+        FrameType.max_push_id,
+        => _ = try parseSingleVarintPayload(payload),
+        FrameType.push_promise => _ = try parsePushPromisePayload(payload),
+        FrameType.priority_update_request,
+        FrameType.priority_update_push,
+        => _ = try parsePriorityUpdatePayload(payload),
         else => {},
     }
 }
@@ -492,7 +507,7 @@ pub fn writePushPromiseFrame(
 
 pub fn parsePushPromisePayload(payload: []const u8) Error!PushPromisePayload {
     var cursor = wire.Cursor.init(payload);
-    const push_id = try quic.varint.decode(&cursor);
+    const push_id = quic.varint.decode(&cursor) catch return error.InvalidFrame;
     return .{ .push_id = push_id, .field_section = payload[cursor.pos..] };
 }
 
@@ -525,7 +540,7 @@ pub fn writePriorityUpdateFrameRaw(
 
 pub fn parsePriorityUpdatePayload(payload: []const u8) Error!PriorityUpdatePayload {
     var cursor = wire.Cursor.init(payload);
-    const id = try quic.varint.decode(&cursor);
+    const id = quic.varint.decode(&cursor) catch return error.InvalidFrame;
     return .{ .prioritized_element_id = id, .field_value = payload[cursor.pos..] };
 }
 
@@ -547,7 +562,7 @@ fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator
 
 fn parseSingleVarintPayload(payload: []const u8) Error!u64 {
     var cursor = wire.Cursor.init(payload);
-    const value = try quic.varint.decode(&cursor);
+    const value = quic.varint.decode(&cursor) catch return error.InvalidFrame;
     if (!cursor.eof()) return error.InvalidFrame;
     return value;
 }
@@ -558,8 +573,8 @@ pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]
     var settings: std.ArrayList(Setting) = .empty;
     errdefer settings.deinit(allocator);
     while (!cursor.eof()) {
-        const id = try quic.varint.decode(&cursor);
-        const value = try quic.varint.decode(&cursor);
+        const id = quic.varint.decode(&cursor) catch return error.InvalidSetting;
+        const value = quic.varint.decode(&cursor) catch return error.InvalidSetting;
         try validateSetting(id, value, settings.items);
         try settings.append(allocator, .{ .id = id, .value = value });
     }
@@ -1141,6 +1156,7 @@ fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!
         const frame = try Frame.parse(bytes[offset..]);
         if (frame.frame_type != FrameType.headers) {
             if (frame.frame_type == FrameType.data or requestStreamForbiddenFrame(frame.frame_type)) return error.ExpectedHeadersFrame;
+            if (frame.frame_type == FrameType.push_promise) _ = try parsePushPromisePayload(frame.payload);
             offset += frame.consumed;
             if (offset >= bytes.len) return error.MissingStatus;
             continue;
@@ -1166,6 +1182,7 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageS
         if (frame.frame_type == FrameType.headers) break frame;
         if (frame.frame_type == FrameType.push_promise) {
             if (kind == .request) return error.ExpectedHeadersFrame;
+            _ = try parsePushPromisePayload(frame.payload);
             offset += frame.consumed;
             if (offset >= bytes.len) return error.ExpectedHeadersFrame;
             continue;
@@ -1201,6 +1218,7 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageS
             },
             FrameType.push_promise => {
                 if (kind == .request or saw_trailers) return error.UnexpectedFrame;
+                _ = try parsePushPromisePayload(frame.payload);
             },
             else => if (requestStreamForbiddenFrame(frame.frame_type)) return error.UnexpectedFrame,
         }
@@ -1856,6 +1874,40 @@ test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
     try validatePushPromise(.{ .local_max_push_id = 3 }, promise.push_id);
     try std.testing.expectError(error.PushIdExceeded, validatePushPromise(.{}, promise.push_id));
     try std.testing.expectError(error.PushIdExceeded, validatePushPromise(.{ .local_max_push_id = 2 }, promise.push_id));
+}
+
+test "HTTP/3 rejects malformed structured frame payloads" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(error.InvalidFrame, parseGoAwayPayload(&.{}));
+    try std.testing.expectError(error.InvalidFrame, parseCancelPushPayload(&.{}));
+    try std.testing.expectError(error.InvalidFrame, parseMaxPushIdPayload(&.{}));
+    try std.testing.expectError(error.InvalidFrame, parsePushPromisePayload(&.{}));
+    try std.testing.expectError(error.InvalidFrame, parsePriorityUpdatePayload(&.{}));
+
+    const truncated_two_byte_varint = [_]u8{0x40};
+    try std.testing.expectError(error.InvalidFrame, parseGoAwayPayload(&truncated_two_byte_varint));
+    try std.testing.expectError(error.InvalidFrame, parsePushPromisePayload(&truncated_two_byte_varint));
+    try std.testing.expectError(error.InvalidFrame, parsePriorityUpdatePayload(&truncated_two_byte_varint));
+
+    var malformed_frame_write: std.ArrayList(u8) = .empty;
+    defer malformed_frame_write.deinit(allocator);
+    try std.testing.expectError(error.InvalidFrame, (Frame{ .frame_type = FrameType.goaway, .payload = &.{}, .consumed = 0 }).write(&malformed_frame_write, allocator));
+
+    var malformed_response: std.ArrayList(u8) = .empty;
+    defer malformed_response.deinit(allocator);
+    try quic.varint.encode(&malformed_response, allocator, FrameType.push_promise);
+    try quic.varint.encode(&malformed_response, allocator, 0);
+    var header_block: std.ArrayList(u8) = .empty;
+    defer header_block.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "200" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&malformed_response, allocator);
+    try std.testing.expectError(error.InvalidFrame, decodeResponse(allocator, malformed_response.items));
+
+    var malformed_settings: std.ArrayList(u8) = .empty;
+    defer malformed_settings.deinit(allocator);
+    try quic.varint.encode(&malformed_settings, allocator, @intFromEnum(SettingId.h3_datagram));
+    try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, malformed_settings.items));
 }
 
 test "HTTP/3 datagram" {
