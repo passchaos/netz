@@ -1299,6 +1299,32 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub fn appendSessionHeaderLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, session: Session) Error!void {
+        try validateSdpToken(session.version);
+        try validateSdpAttributeValue(session.origin);
+        try validateSdpAttributeValue(session.name);
+        try validateSdpAttributeValue(session.timing);
+        const version_line = try std.fmt.allocPrint(allocator, "v={s}\r\n", .{session.version});
+        defer allocator.free(version_line);
+        try list.appendSlice(allocator, version_line);
+        const origin_line = try std.fmt.allocPrint(allocator, "o={s}\r\n", .{session.origin});
+        defer allocator.free(origin_line);
+        try list.appendSlice(allocator, origin_line);
+        const name_line = try std.fmt.allocPrint(allocator, "s={s}\r\n", .{session.name});
+        defer allocator.free(name_line);
+        try list.appendSlice(allocator, name_line);
+        const timing_line = try std.fmt.allocPrint(allocator, "t={s}\r\n", .{session.timing});
+        defer allocator.free(timing_line);
+        try list.appendSlice(allocator, timing_line);
+    }
+
+    pub fn formatSessionHeaderLines(allocator: std.mem.Allocator, session: Session) Error![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try appendSessionHeaderLines(&out, allocator, session);
+        return out.toOwnedSlice(allocator);
+    }
+
     pub fn formatCandidateAttribute(allocator: std.mem.Allocator, candidate: ice.Candidate) Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -8808,6 +8834,22 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
     try std.testing.expectEqualStrings("mid", session.media[0].attributes[0].name);
+    const session_header = try sdp.formatSessionHeaderLines(allocator, session);
+    defer allocator.free(session_header);
+    try std.testing.expectEqualStrings(
+        "v=0\r\n" ++
+            "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
+            "s=-\r\n" ++
+            "t=0 0\r\n",
+        session_header,
+    );
+    var session_header_lines: std.ArrayList(u8) = .empty;
+    defer session_header_lines.deinit(allocator);
+    try sdp.appendSessionHeaderLines(&session_header_lines, allocator, session);
+    try std.testing.expectEqualStrings(session_header, session_header_lines.items);
+    var invalid_header_session = session;
+    invalid_header_session.name = "bad\nname";
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
     const media_line = try sdp.formatMediaLine(allocator, session.media[0].kind, session.media[0].port, session.media[0].protocol, session.media[0].formats);
     defer allocator.free(media_line);
     try std.testing.expectEqualStrings("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n", media_line);
