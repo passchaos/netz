@@ -1929,6 +1929,11 @@ pub const rtp = struct {
         voice: bool = false,
     };
 
+    pub const PlayoutDelayExtension = struct {
+        min_delay: u12,
+        max_delay: u12,
+    };
+
     pub const HeaderExtensionFormat = enum {
         one_byte,
         two_byte,
@@ -2118,6 +2123,24 @@ pub const rtp = struct {
     pub fn audioLevelPayload(level: u8, voice: bool) Error![1]u8 {
         if (level > 127) return error.InvalidRtpPacket;
         return .{(if (voice) @as(u8, 0x80) else 0) | level};
+    }
+
+    pub fn playoutDelay(elements: []const HeaderExtensionElement, id: u8) Error!?PlayoutDelayExtension {
+        const value = findHeaderExtension(elements, id) orelse return null;
+        if (value.len != 3) return error.InvalidRtpPacket;
+        return .{
+            .min_delay = @truncate(std.mem.readInt(u16, value[0..2], .big) >> 4),
+            .max_delay = @truncate(std.mem.readInt(u16, value[1..3], .big) & 0x0fff),
+        };
+    }
+
+    pub fn playoutDelayPayload(min_delay: u16, max_delay: u16) Error![3]u8 {
+        if (min_delay > 0x0fff or max_delay > 0x0fff) return error.InvalidRtpPacket;
+        return .{
+            @truncate(min_delay >> 4),
+            @as(u8, @truncate(min_delay << 4)) | @as(u8, @truncate(max_delay >> 8)),
+            @truncate(max_delay),
+        };
     }
 
     pub const Header = struct {
@@ -7060,11 +7083,13 @@ test "RTP packet extension padding and writer" {
     const audio_level = try rtp.audioLevelPayload(8, true);
     const twcc_payload = rtp.transportWideSequenceNumberPayload(0x1234);
     const abs_send_time = rtp.absoluteSendTimePayload(0x010203);
+    const playout_delay = try rtp.playoutDelayPayload(1 << 4, 1 << 8);
     try rtp.writeOneByteHeaderExtensions(&one_byte_extensions, allocator, &.{
         .{ .id = 1, .data = "m" },
         .{ .id = 3, .data = &twcc_payload },
         .{ .id = 4, .data = &abs_send_time },
         .{ .id = 5, .data = &audio_level },
+        .{ .id = 6, .data = &playout_delay },
     });
     try std.testing.expectEqual(@as(usize, 0), one_byte_extensions.items.len % 4);
 
@@ -7103,6 +7128,10 @@ test "RTP packet extension padding and writer" {
     try std.testing.expect(parsed_audio_level.voice);
     try std.testing.expectEqual(@as(u7, 8), parsed_audio_level.level);
     try std.testing.expectError(error.InvalidRtpPacket, rtp.audioLevelPayload(128, false));
+    const parsed_playout_delay = (try rtp.playoutDelay(parsed_extensions, 6)).?;
+    try std.testing.expectEqual(@as(u12, 1 << 4), parsed_playout_delay.min_delay);
+    try std.testing.expectEqual(@as(u12, 1 << 8), parsed_playout_delay.max_delay);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.playoutDelayPayload(1 << 12, 1 << 12));
     try std.testing.expectEqualStrings("opus", packet.payload);
     try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
 
