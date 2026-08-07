@@ -4900,6 +4900,20 @@ pub const rtcp = struct {
         return packets[0].destinationSsrcs(allocator);
     }
 
+    pub fn compoundCname(packets: []const Packet) Error![]const u8 {
+        try validateCompound(packets);
+        for (packets[1..]) |packet| {
+            if (packet != .source_description) continue;
+            const sdes = packet.source_description;
+            for (sdes.chunks) |chunk| {
+                for (chunk.items) |item| {
+                    if (item.item_type == .cname) return item.value;
+                }
+            }
+        }
+        return error.InvalidRtcpPacket;
+    }
+
     pub fn writeCompound(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packets: []const Packet) Error!void {
         try validateCompound(packets);
         try writePackets(list, allocator, packets);
@@ -9314,6 +9328,7 @@ test "RTCP SDES and compound packets" {
     try std.testing.expectEqual(@as(usize, 4), parsed.len);
     try std.testing.expectEqual(@as(u32, 0x01020304), parsed[0].receiver_report.sender_ssrc);
     try std.testing.expectEqualStrings("alice@example.test", parsed[1].source_description.cname(0x01020304).?);
+    try std.testing.expectEqualStrings("alice@example.test", try rtcp.compoundCname(parsed));
     try std.testing.expectEqual(@as(u32, 0x11121314), parsed[2].picture_loss_indication.media_ssrc);
     try std.testing.expectEqual(@as(u32, 0x01020304), parsed[3].goodbye.sources[0]);
     try std.testing.expectEqualStrings("done", parsed[3].goodbye.reason);
@@ -9351,6 +9366,7 @@ test "RTCP SDES and compound packets" {
     try std.testing.expectEqual(@as(u32, 0x11121314), parsed_reduced[0].picture_loss_indication.media_ssrc);
     try std.testing.expectEqual(@as(u32, 0x21222324), parsed_reduced[1].rapid_resynchronization_request.media_ssrc);
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parseCompound(allocator, encoded.items));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.compoundCname(parsed_reduced));
 
     var no_cname_items = [_]rtcp.SdesItem{.{ .item_type = .name, .value = "alice" }};
     var no_cname_chunks = [_]rtcp.SdesChunk{.{ .ssrc = 0x01020304, .items = &no_cname_items }};
