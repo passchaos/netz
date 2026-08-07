@@ -2484,6 +2484,7 @@ pub const rtcp = struct {
         application_defined = 204,
         transport_feedback = 205,
         payload_feedback = 206,
+        extended_report = 207,
         _,
     };
 
@@ -2701,6 +2702,74 @@ pub const rtcp = struct {
         pub fn deinit(self: *CongestionControlFeedback, allocator: std.mem.Allocator) void {
             for (self.report_blocks) |*block| block.deinit(allocator);
             allocator.free(self.report_blocks);
+            self.* = undefined;
+        }
+    };
+
+    pub const XrBlockType = enum(u8) {
+        loss_rle = 1,
+        duplicate_rle = 2,
+        packet_receipt_times = 3,
+        receiver_reference_time = 4,
+        dlrr = 5,
+        statistics_summary = 6,
+        voip_metrics = 7,
+        _,
+    };
+
+    pub const XrHeader = struct {
+        block_type: XrBlockType,
+        type_specific: u8 = 0,
+        block_length_words: u16 = 0,
+    };
+
+    pub const DlrrReport = struct {
+        ssrc: u32,
+        last_rr: u32,
+        dlrr: u32,
+    };
+
+    pub const DlrrReportBlock = struct {
+        reports: []DlrrReport,
+
+        pub fn deinit(self: *DlrrReportBlock, allocator: std.mem.Allocator) void {
+            allocator.free(self.reports);
+            self.* = undefined;
+        }
+    };
+
+    pub const UnknownXrBlock = struct {
+        header: XrHeader,
+        payload: []const u8,
+
+        pub fn deinit(self: *UnknownXrBlock, allocator: std.mem.Allocator) void {
+            allocator.free(@constCast(self.payload));
+            self.* = undefined;
+        }
+    };
+
+    pub const XrBlock = union(enum) {
+        receiver_reference_time: u64,
+        dlrr: DlrrReportBlock,
+        unknown: UnknownXrBlock,
+
+        pub fn deinit(self: *XrBlock, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .dlrr => |*dlrr| dlrr.deinit(allocator),
+                .unknown => |*unknown| unknown.deinit(allocator),
+                else => {},
+            }
+            self.* = undefined;
+        }
+    };
+
+    pub const ExtendedReport = struct {
+        sender_ssrc: u32,
+        blocks: []XrBlock = &.{},
+
+        pub fn deinit(self: *ExtendedReport, allocator: std.mem.Allocator) void {
+            for (self.blocks) |*block| block.deinit(allocator);
+            allocator.free(self.blocks);
             self.* = undefined;
         }
     };
@@ -2987,6 +3056,7 @@ pub const rtcp = struct {
         full_intra_request: FullIntraRequest,
         receiver_estimated_maximum_bitrate: ReceiverEstimatedMaximumBitrate,
         application_defined: ApplicationDefined,
+        extended_report: ExtendedReport,
         rapid_resynchronization_request: RapidResynchronizationRequest,
         congestion_control_feedback: CongestionControlFeedback,
         transport_layer_nack: TransportLayerNack,
@@ -3003,6 +3073,7 @@ pub const rtcp = struct {
                 .full_intra_request => |*fir| fir.deinit(allocator),
                 .receiver_estimated_maximum_bitrate => |*remb| remb.deinit(allocator),
                 .application_defined => |*app| app.deinit(allocator),
+                .extended_report => |*xr| xr.deinit(allocator),
                 .congestion_control_feedback => |*ccfb| ccfb.deinit(allocator),
                 .transport_layer_nack => |nack| allocator.free(nack.pairs),
                 .transport_wide_cc => |*twcc| twcc.deinit(allocator),
@@ -3035,6 +3106,7 @@ pub const rtcp = struct {
             .goodbye => .{ .goodbye = try parseGoodbye(allocator, header, payload) },
             .source_description => .{ .source_description = try parseSourceDescription(allocator, header, payload) },
             .application_defined => .{ .application_defined = try parseApplicationDefined(allocator, header, payload) },
+            .extended_report => .{ .extended_report = try parseExtendedReport(allocator, payload) },
             .payload_feedback => if (header.count_or_format == payload_feedback_pli)
                 .{ .picture_loss_indication = try parsePictureLossIndication(payload) }
             else if (header.count_or_format == payload_feedback_sli)
@@ -3089,6 +3161,7 @@ pub const rtcp = struct {
             .full_intra_request => |fir| try writeFullIntraRequest(list, allocator, fir),
             .receiver_estimated_maximum_bitrate => |remb| try writeReceiverEstimatedMaximumBitrate(list, allocator, remb),
             .application_defined => |app| try writeApplicationDefined(list, allocator, app),
+            .extended_report => |xr| try writeExtendedReport(list, allocator, xr),
             .rapid_resynchronization_request => |rrr| try writeRapidResynchronizationRequest(list, allocator, rrr),
             .congestion_control_feedback => |ccfb| try writeCongestionControlFeedback(list, allocator, ccfb),
             .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
@@ -3363,6 +3436,65 @@ pub const rtcp = struct {
         };
     }
 
+    fn parseExtendedReport(allocator: std.mem.Allocator, payload: []const u8) Error!ExtendedReport {
+        if (payload.len < 4 or (payload.len % 4) != 0) return error.InvalidRtcpPacket;
+        var cursor = wire.Cursor.init(payload);
+        const sender_ssrc = try cursor.readInt(u32, .big);
+        var blocks: std.ArrayList(XrBlock) = .empty;
+        errdefer {
+            for (blocks.items) |*block| block.deinit(allocator);
+            blocks.deinit(allocator);
+        }
+
+        while (!cursor.eof()) {
+            if (cursor.remaining() < 4) return error.InvalidRtcpPacket;
+            const block_type: XrBlockType = @enumFromInt(try cursor.readByte());
+            const type_specific = try cursor.readByte();
+            const block_length_words = try cursor.readInt(u16, .big);
+            const block_len = std.math.mul(usize, @as(usize, block_length_words) + 1, 4) catch return error.InvalidRtcpPacket;
+            if (block_len < 4 or cursor.remaining() < block_len - 4) return error.InvalidRtcpPacket;
+            const block_payload = try cursor.readSlice(block_len - 4);
+            try blocks.append(allocator, try parseXrBlock(allocator, .{
+                .block_type = block_type,
+                .type_specific = type_specific,
+                .block_length_words = block_length_words,
+            }, block_payload));
+        }
+
+        return .{
+            .sender_ssrc = sender_ssrc,
+            .blocks = try blocks.toOwnedSlice(allocator),
+        };
+    }
+
+    fn parseXrBlock(allocator: std.mem.Allocator, header: XrHeader, payload: []const u8) Error!XrBlock {
+        switch (header.block_type) {
+            .receiver_reference_time => {
+                if (header.type_specific != 0 or header.block_length_words != 2 or payload.len != 8) return error.InvalidRtcpPacket;
+                return .{ .receiver_reference_time = std.mem.readInt(u64, payload[0..8], .big) };
+            },
+            .dlrr => {
+                if (header.type_specific != 0 or (payload.len % 12) != 0) return error.InvalidRtcpPacket;
+                const reports = try allocator.alloc(DlrrReport, payload.len / 12);
+                errdefer allocator.free(reports);
+                var cursor = wire.Cursor.init(payload);
+                for (reports) |*report| {
+                    report.* = .{
+                        .ssrc = try cursor.readInt(u32, .big),
+                        .last_rr = try cursor.readInt(u32, .big),
+                        .dlrr = try cursor.readInt(u32, .big),
+                    };
+                }
+                return .{ .dlrr = .{ .reports = reports } };
+            },
+            else => {
+                const copy = try allocator.dupe(u8, payload);
+                errdefer allocator.free(copy);
+                return .{ .unknown = .{ .header = header, .payload = copy } };
+            },
+        }
+    }
+
     fn parseSourceDescription(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!SourceDescription {
         const chunk_count = @as(usize, header.count_or_format);
         var cursor = wire.Cursor.init(payload);
@@ -3620,6 +3752,49 @@ pub const rtcp = struct {
             raw |= metric.arrival_time_offset & 0x1fff;
         }
         try wire.appendInt(list, allocator, u16, raw, .big);
+    }
+
+    fn writeExtendedReport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, xr: ExtendedReport) Error!void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+
+        try wire.appendInt(&payload, allocator, u32, xr.sender_ssrc, .big);
+        for (xr.blocks) |block| try writeXrBlock(&payload, allocator, block);
+
+        try writeHeader(list, allocator, 0, .extended_report, payload.items.len);
+        try list.appendSlice(allocator, payload.items);
+    }
+
+    fn writeXrBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, block: XrBlock) Error!void {
+        switch (block) {
+            .receiver_reference_time => |ntp| {
+                try writeXrBlockHeader(list, allocator, .receiver_reference_time, 0, 2);
+                try wire.appendInt(list, allocator, u64, ntp, .big);
+            },
+            .dlrr => |dlrr| {
+                if (dlrr.reports.len > (max_rtcp_payload_len - 4) / 12) return error.InvalidRtcpPacket;
+                const block_length_words: u16 = @intCast(dlrr.reports.len * 3);
+                try writeXrBlockHeader(list, allocator, .dlrr, 0, block_length_words);
+                for (dlrr.reports) |report| {
+                    try wire.appendInt(list, allocator, u32, report.ssrc, .big);
+                    try wire.appendInt(list, allocator, u32, report.last_rr, .big);
+                    try wire.appendInt(list, allocator, u32, report.dlrr, .big);
+                }
+            },
+            .unknown => |unknown| {
+                if ((unknown.payload.len % 4) != 0) return error.InvalidRtcpPacket;
+                const words = unknown.payload.len / 4;
+                if (words > std.math.maxInt(u16)) return error.InvalidRtcpPacket;
+                try writeXrBlockHeader(list, allocator, unknown.header.block_type, unknown.header.type_specific, @intCast(words));
+                try list.appendSlice(allocator, unknown.payload);
+            },
+        }
+    }
+
+    fn writeXrBlockHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocator, block_type: XrBlockType, type_specific: u8, block_length_words: u16) Error!void {
+        try list.append(allocator, @intFromEnum(block_type));
+        try list.append(allocator, type_specific);
+        try wire.appendInt(list, allocator, u16, block_length_words, .big);
     }
 
     fn writeReceiverEstimatedMaximumBitrate(list: *std.ArrayList(u8), allocator: std.mem.Allocator, remb: ReceiverEstimatedMaximumBitrate) Error!void {
@@ -6593,6 +6768,40 @@ test "RTCP receiver report and feedback packets" {
         0x00, 0x00, 0x00, 0x01,
         0x00, 0x00, 0x00, 0x02,
     }, encoded.items);
+
+    const xr_wire = [_]u8{
+        0x80, 0xcf, 0x00, 0x0d,
+        0x01, 0x02, 0x03, 0x04,
+        0x04, 0x00, 0x00, 0x02,
+        0x01, 0x02, 0x03, 0x04,
+        0x05, 0x06, 0x07, 0x08,
+        0x05, 0x00, 0x00, 0x06,
+        0x88, 0x88, 0x88, 0x88,
+        0x12, 0x34, 0x56, 0x78,
+        0x99, 0x99, 0x99, 0x99,
+        0x09, 0x09, 0x09, 0x09,
+        0x11, 0x11, 0x11, 0x11,
+        0x22, 0x22, 0x22, 0x22,
+        0x63, 0xab, 0x00, 0x01,
+        0xde, 0xad, 0xbe, 0xef,
+    };
+    var xr = try rtcp.parsePacket(allocator, &xr_wire);
+    defer xr.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x01020304), xr.packet.extended_report.sender_ssrc);
+    try std.testing.expectEqual(@as(usize, 3), xr.packet.extended_report.blocks.len);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), xr.packet.extended_report.blocks[0].receiver_reference_time);
+    try std.testing.expectEqual(@as(usize, 2), xr.packet.extended_report.blocks[1].dlrr.reports.len);
+    try std.testing.expectEqual(@as(u32, 0x88888888), xr.packet.extended_report.blocks[1].dlrr.reports[0].ssrc);
+    try std.testing.expectEqual(@as(u32, 0x12345678), xr.packet.extended_report.blocks[1].dlrr.reports[0].last_rr);
+    try std.testing.expectEqual(@as(u32, 0x99999999), xr.packet.extended_report.blocks[1].dlrr.reports[0].dlrr);
+    try std.testing.expectEqual(@as(u32, 0x09090909), xr.packet.extended_report.blocks[1].dlrr.reports[1].ssrc);
+    try std.testing.expectEqual(@as(u8, 0xab), xr.packet.extended_report.blocks[2].unknown.header.type_specific);
+    try std.testing.expectEqual(@as(rtcp.XrBlockType, @enumFromInt(0x63)), xr.packet.extended_report.blocks[2].unknown.header.block_type);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad, 0xbe, 0xef }, xr.packet.extended_report.blocks[2].unknown.payload);
+
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, xr.packet);
+    try std.testing.expectEqualSlices(u8, &xr_wire, encoded.items);
 
     encoded.clearRetainingCapacity();
     var nack_pairs = [_]rtcp.NackPair{.{
