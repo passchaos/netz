@@ -4021,6 +4021,10 @@ pub const rtcp = struct {
         end_sequence: u16,
         chunks: []XrChunk = &.{},
 
+        pub fn wireLen(self: RleReportBlock) usize {
+            return 4 + 8 + self.chunks.len * 2;
+        }
+
         pub fn deinit(self: *RleReportBlock, allocator: std.mem.Allocator) void {
             allocator.free(self.chunks);
             self.* = undefined;
@@ -4033,6 +4037,10 @@ pub const rtcp = struct {
         begin_sequence: u16,
         end_sequence: u16,
         receipt_times: []u32 = &.{},
+
+        pub fn wireLen(self: PacketReceiptTimesReportBlock) usize {
+            return 4 + 8 + self.receipt_times.len * 4;
+        }
 
         pub fn deinit(self: *PacketReceiptTimesReportBlock, allocator: std.mem.Allocator) void {
             allocator.free(self.receipt_times);
@@ -4109,6 +4117,10 @@ pub const rtcp = struct {
     pub const DlrrReportBlock = struct {
         reports: []DlrrReport,
 
+        pub fn wireLen(self: DlrrReportBlock) usize {
+            return 4 + self.reports.len * 12;
+        }
+
         pub fn deinit(self: *DlrrReportBlock, allocator: std.mem.Allocator) void {
             allocator.free(self.reports);
             self.* = undefined;
@@ -4118,6 +4130,10 @@ pub const rtcp = struct {
     pub const UnknownXrBlock = struct {
         header: XrHeader,
         payload: []const u8,
+
+        pub fn wireLen(self: UnknownXrBlock) usize {
+            return 4 + self.payload.len;
+        }
 
         pub fn deinit(self: *UnknownXrBlock, allocator: std.mem.Allocator) void {
             allocator.free(@constCast(self.payload));
@@ -4146,11 +4162,30 @@ pub const rtcp = struct {
             }
             self.* = undefined;
         }
+
+        pub fn wireLen(self: XrBlock) usize {
+            return switch (self) {
+                .loss_rle => |rle| rle.wireLen(),
+                .duplicate_rle => |rle| rle.wireLen(),
+                .packet_receipt_times => |receipt| receipt.wireLen(),
+                .receiver_reference_time => 12,
+                .dlrr => |dlrr| dlrr.wireLen(),
+                .statistics_summary => 40,
+                .voip_metrics => 36,
+                .unknown => |unknown| unknown.wireLen(),
+            };
+        }
     };
 
     pub const ExtendedReport = struct {
         sender_ssrc: u32,
         blocks: []XrBlock = &.{},
+
+        pub fn wireLen(self: ExtendedReport) usize {
+            var len: usize = 8; // RTCP header + sender SSRC.
+            for (self.blocks) |block| len += block.wireLen();
+            return len;
+        }
 
         pub fn deinit(self: *ExtendedReport, allocator: std.mem.Allocator) void {
             for (self.blocks) |*block| block.deinit(allocator);
@@ -9919,10 +9954,12 @@ test "RTCP receiver report and feedback packets" {
     defer xr.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x01020304), xr.packet.extended_report.sender_ssrc);
     try std.testing.expectEqual(@as(usize, 8), xr.packet.extended_report.blocks.len);
+    try std.testing.expectEqual(@as(usize, xr_wire.len), xr.packet.extended_report.wireLen());
     try std.testing.expectEqual(@as(u4, 12), xr.packet.extended_report.blocks[0].loss_rle.thinning);
     try std.testing.expectEqual(@as(u32, 0x12345689), xr.packet.extended_report.blocks[0].loss_rle.ssrc);
     try std.testing.expectEqual(@as(u16, 5), xr.packet.extended_report.blocks[0].loss_rle.begin_sequence);
     try std.testing.expectEqual(@as(u16, 0x4006), xr.packet.extended_report.blocks[0].loss_rle.chunks[0]);
+    try std.testing.expectEqual(@as(usize, 20), xr.packet.extended_report.blocks[0].wireLen());
     try std.testing.expectEqual(@as(rtcp.XrChunk, 0x4006), rtcp.xrRunLengthChunk(1, 6));
     try std.testing.expectEqual(rtcp.XrChunkType.run_length, rtcp.xrChunkType(xr.packet.extended_report.blocks[0].loss_rle.chunks[0]));
     try std.testing.expectEqual(@as(u1, 1), try rtcp.xrChunkRunType(xr.packet.extended_report.blocks[0].loss_rle.chunks[0]));
@@ -9943,9 +9980,12 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u16, 15432), xr.packet.extended_report.blocks[2].packet_receipt_times.begin_sequence);
     try std.testing.expectEqual(@as(u16, 15577), xr.packet.extended_report.blocks[2].packet_receipt_times.end_sequence);
     try std.testing.expectEqual(@as(usize, 5), xr.packet.extended_report.blocks[2].packet_receipt_times.receipt_times.len);
+    try std.testing.expectEqual(@as(usize, 32), xr.packet.extended_report.blocks[2].wireLen());
     try std.testing.expectEqual(@as(u32, 0x33333333), xr.packet.extended_report.blocks[2].packet_receipt_times.receipt_times[2]);
     try std.testing.expectEqual(@as(u64, 0x0102030405060708), xr.packet.extended_report.blocks[3].receiver_reference_time);
+    try std.testing.expectEqual(@as(usize, 12), xr.packet.extended_report.blocks[3].wireLen());
     try std.testing.expectEqual(@as(usize, 2), xr.packet.extended_report.blocks[4].dlrr.reports.len);
+    try std.testing.expectEqual(@as(usize, 28), xr.packet.extended_report.blocks[4].wireLen());
     try std.testing.expectEqual(@as(u32, 0x88888888), xr.packet.extended_report.blocks[4].dlrr.reports[0].ssrc);
     try std.testing.expectEqual(@as(u32, 0x12345678), xr.packet.extended_report.blocks[4].dlrr.reports[0].last_rr);
     try std.testing.expectEqual(@as(u32, 0x99999999), xr.packet.extended_report.blocks[4].dlrr.reports[0].dlrr);
@@ -9963,14 +10003,17 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 0xfedcba98), xr.packet.extended_report.blocks[5].statistics_summary.ssrc);
     try std.testing.expectEqual(@as(u32, 0x11111111), xr.packet.extended_report.blocks[5].statistics_summary.lost_packets);
     try std.testing.expectEqual(@as(u8, 0x04), xr.packet.extended_report.blocks[5].statistics_summary.dev_ttl_or_hop_limit);
+    try std.testing.expectEqual(@as(usize, 40), xr.packet.extended_report.blocks[5].wireLen());
     try std.testing.expectEqual(@as(u32, 0x89abcdef), xr.packet.extended_report.blocks[6].voip_metrics.ssrc);
     try std.testing.expectEqual(@as(u8, 0x05), xr.packet.extended_report.blocks[6].voip_metrics.loss_rate);
     try std.testing.expectEqual(@as(u16, 0x1111), xr.packet.extended_report.blocks[6].voip_metrics.burst_duration);
     try std.testing.expectEqual(@as(u8, 0x99), xr.packet.extended_report.blocks[6].voip_metrics.rx_config);
     try std.testing.expectEqual(@as(u16, 0x5566), xr.packet.extended_report.blocks[6].voip_metrics.jb_abs_max);
+    try std.testing.expectEqual(@as(usize, 36), xr.packet.extended_report.blocks[6].wireLen());
     try std.testing.expectEqual(@as(u8, 0xab), xr.packet.extended_report.blocks[7].unknown.header.type_specific);
     try std.testing.expectEqual(@as(rtcp.XrBlockType, @enumFromInt(0x63)), xr.packet.extended_report.blocks[7].unknown.header.block_type);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad, 0xbe, 0xef }, xr.packet.extended_report.blocks[7].unknown.payload);
+    try std.testing.expectEqual(@as(usize, 8), xr.packet.extended_report.blocks[7].wireLen());
     const xr_destinations = try xr.packet.destinationSsrcs(allocator);
     defer allocator.free(xr_destinations);
     try std.testing.expectEqualSlices(u32, &.{
