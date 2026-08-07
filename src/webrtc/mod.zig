@@ -2726,7 +2726,7 @@ pub const rtp = struct {
 
     pub fn audioLevel(elements: []const HeaderExtensionElement, id: u8) Error!?AudioLevelExtension {
         const value = findHeaderExtension(elements, id) orelse return null;
-        if (value.len != 1) return error.InvalidRtpPacket;
+        if (value.len < 1) return error.InvalidRtpPacket;
         return .{
             .level = @truncate(value[0] & 0x7f),
             .voice = (value[0] & 0x80) != 0,
@@ -8419,6 +8419,10 @@ test "RTP packet extension padding and writer" {
     const parsed_audio_level = (try rtp.audioLevel(parsed_extensions, 5)).?;
     try std.testing.expect(parsed_audio_level.voice);
     try std.testing.expectEqual(@as(u7, 8), parsed_audio_level.level);
+    const extra_audio_level = (try rtp.audioLevel(&.{.{ .id = 5, .data = &.{ 0x88, 0xff } }}, 5)).?;
+    try std.testing.expect(extra_audio_level.voice);
+    try std.testing.expectEqual(@as(u7, 8), extra_audio_level.level);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.audioLevel(&.{.{ .id = 5, .data = &.{} }}, 5));
     try std.testing.expectError(error.InvalidRtpPacket, rtp.audioLevelPayload(128, false));
     const parsed_playout_delay = (try rtp.playoutDelay(parsed_extensions, 6)).?;
     try std.testing.expectEqual(@as(u12, 1 << 4), parsed_playout_delay.min_delay);
