@@ -207,8 +207,15 @@ pub const LocalPool = struct {
     }
 
     pub fn retire(self: *LocalPool, sequence_number: u64) Error!void {
+        try self.retireExceptPacketDestination(sequence_number, null);
+    }
+
+    pub fn retireExceptPacketDestination(self: *LocalPool, sequence_number: u64, packet_destination_connection_id: ?[]const u8) Error!void {
         for (&self.entries) |*entry| {
             if (entry.occupied and entry.sequence_number == sequence_number) {
+                if (packet_destination_connection_id) |dcid| {
+                    if (std.mem.eql(u8, entry.slice(), dcid)) return error.InvalidConnectionId;
+                }
                 entry.* = .{};
                 return;
             }
@@ -290,6 +297,16 @@ test "QUIC peer CID pool queues retire frames for retire_prior_to" {
 
     pool.discardRetireFrame();
     try std.testing.expectEqual(@as(usize, 0), pool.pendingRetireCount());
+}
+
+test "QUIC local CID pool rejects retiring packet DCID" {
+    var pool = LocalPool{};
+    try pool.registerInitial("init-cid", [_]u8{0} ** 16);
+    const frame = try pool.issue("new-cid", [_]u8{1} ** 16);
+    try std.testing.expectError(error.InvalidConnectionId, pool.retireExceptPacketDestination(1, frame.new_connection_id.connection_id));
+    try std.testing.expectEqual(@as(usize, 2), pool.count());
+    try pool.retireExceptPacketDestination(1, "other-cid");
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
 }
 
 test "QUIC local CID pool issues and retires NEW_CONNECTION_ID frames" {

@@ -1155,7 +1155,7 @@ pub const Connection = struct {
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns, .not_ect);
+        try self.applyReceivedFramesForDestination(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -1202,7 +1202,7 @@ pub const Connection = struct {
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns, .not_ect);
+        try self.applyReceivedFramesForDestination(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -1222,7 +1222,7 @@ pub const Connection = struct {
             self.config.max_frames_per_packet,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFrames(packet.packet.packet_number, packet.frames, now_ns, ecn);
+        try self.applyReceivedFramesForDestination(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -1231,6 +1231,17 @@ pub const Connection = struct {
     }
 
     fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!void {
+        try self.applyReceivedFramesForDestination(packet_number, frames, now_ns, ecn, null);
+    }
+
+    fn applyReceivedFramesForDestination(
+        self: *Connection,
+        packet_number: u64,
+        frames: []const quic.Frame,
+        now_ns: ?u64,
+        ecn: quic.packet_space.EcnCodepoint,
+        packet_destination_connection_id: ?[]const u8,
+    ) Error!void {
         if (!try self.received.wouldRecordFresh(packet_number)) return error.DuplicatePacket;
         try self.validateReceivedFramePreconditions(frames);
         if (!try self.received.recordWithEcn(packet_number, ecn)) return error.DuplicatePacket;
@@ -1296,7 +1307,7 @@ pub const Connection = struct {
                         self.config.active_connection_id_limit,
                     );
                 },
-                .retire_connection_id => |retire| try self.local_connection_ids.retire(retire.sequence_number),
+                .retire_connection_id => |retire| try self.local_connection_ids.retireExceptPacketDestination(retire.sequence_number, packet_destination_connection_id),
                 .path_challenge => |path_challenge| try self.path_validation.receiveChallenge(path_challenge.data),
                 .path_response => |path_response| {
                     if (!self.path_validation.receiveResponseValidated(path_response.data)) return error.UnknownPathResponse;
