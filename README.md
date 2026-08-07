@@ -207,7 +207,6 @@ defer client.close();
 var response = try client.request(.{
     .method = .GET,
     .target = "/",
-    .host = "localhost",
 });
 defer response.deinit(allocator);
 ```
