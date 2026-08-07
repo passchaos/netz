@@ -12,8 +12,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, and unsupported transfer-coding and HTTP/1.0 transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
-  persistence, optional Host/port synthesis, `http://` URI and host-name DNS connect helpers, and a
-  `std.Io.async` concurrent server helper
+  persistence, optional Host/port synthesis, `http://`/`https://` URI and
+  host-name DNS connect helpers, TLS client transport via Zig `std.crypto.tls`
+  with host verification plus OS/custom CA bundles, and a `std.Io.async`
+  concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder with RFC 7541 Huffman strings plus
   dynamic-table indexing/size-update state for long-lived runtimes with local decoder table-size enforcement and automatic
@@ -118,8 +120,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
-  server helper, `ws://` URI and host-name DNS connect helpers with Host/port synthesis, and RFC 8441 WebSocket-over-HTTP/2 adapters that negotiate
-  `:protocol = websocket`, subprotocols, and permessage-deflate over an h2 DATA tunnel
+  server helper, `ws://`/`wss://` URI and host-name DNS connect helpers with
+  Host/port synthesis, TLS client transport shared with HTTP/1, and RFC 8441
+  WebSocket-over-HTTP/2 adapters that negotiate `:protocol = websocket`,
+  subprotocols, and permessage-deflate over an h2 DATA tunnel
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
   username/password payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
@@ -145,9 +149,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   peer runtimes with SRTP/SRTCP send/receive helpers and a `std.Io.async` concurrent receive helper
 
 The lower protocol layers remain codec-first so they can be fuzzed and embedded,
-but practical runtime APIs are being added in priority order. HTTP/1,
-prior-knowledge HTTP/2 (h2c), and WebSocket now include blocking TCP
-client/server runtimes built on Zig 0.16 `std.Io.net`; QUIC has Initial
+but practical runtime APIs are being added in priority order. HTTP/1 now has
+blocking HTTP and HTTPS client/server-side transport helpers, prior-knowledge
+HTTP/2 (h2c) and WebSocket include blocking TCP runtimes, and WebSocket clients
+also support WSS over the shared TLS client transport; QUIC has Initial
 protection primitives plus a blocking UDP endpoint runtime for datagram/frame
 transport with endpoint-level Version Negotiation responses for unsupported
 long-header versions; MQTT has a blocking TCP client/server runtime for

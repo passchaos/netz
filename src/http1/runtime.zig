@@ -3,6 +3,8 @@ const http1 = @import("mod.zig");
 const wire = @import("../internal/wire.zig");
 
 const net = std.Io.net;
+const tls = std.crypto.tls;
+const CertificateBundle = std.crypto.Certificate.Bundle;
 
 pub const Error = http1.Error || error{
     HeadersTooLarge,
@@ -11,11 +13,152 @@ pub const Error = http1.Error || error{
     InvalidUri,
     InvalidResponse,
     UnsupportedScheme,
-} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
+} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || tls.Client.InitError || CertificateBundle.RescanError || std.Io.RandomSecureError || std.Io.Reader.ShortError || std.Io.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
+};
+
+pub const TlsCaBundle = struct {
+    bundle: *CertificateBundle,
+    lock: *std.Io.RwLock,
+};
+
+pub const TlsClientOptions = struct {
+    /// Verify the certificate chain and hostname.  Leave this enabled for
+    /// production HTTPS/WSS clients; tests or private tunnels can opt out.
+    verify_host: bool = true,
+    /// Optional caller-managed CA bundle.  When omitted and host verification is
+    /// enabled, the runtime loads the operating-system root store for the
+    /// handshake and frees it after TLS session establishment.
+    ca_bundle: ?TlsCaBundle = null,
+    /// Forward EOF without close_notify.  This is useful only when the HTTP
+    /// layer independently verifies body length (for example Content-Length).
+    allow_truncation_attacks: bool = false,
+};
+
+pub const TlsClientConnection = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    net_read_buf: []u8,
+    net_write_buf: []u8,
+    tls_read_buf: []u8,
+    tls_write_buf: []u8,
+    net_reader: net.Stream.Reader,
+    net_writer: net.Stream.Writer,
+    client: tls.Client,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        host: []const u8,
+        options: TlsClientOptions,
+    ) Error!*TlsClientConnection {
+        const net_read_buf = try allocator.alloc(u8, tls.Client.min_buffer_len);
+        errdefer allocator.free(net_read_buf);
+        const net_write_buf = try allocator.alloc(u8, tls.Client.min_buffer_len);
+        errdefer allocator.free(net_write_buf);
+        const tls_read_buf = try allocator.alloc(u8, tls.Client.min_buffer_len);
+        errdefer allocator.free(tls_read_buf);
+        const tls_write_buf = try allocator.alloc(u8, tls.Client.min_buffer_len);
+        errdefer allocator.free(tls_write_buf);
+
+        const conn = try allocator.create(TlsClientConnection);
+        errdefer allocator.destroy(conn);
+        conn.* = .{
+            .allocator = allocator,
+            .io = io,
+            .stream = stream,
+            .net_read_buf = net_read_buf,
+            .net_write_buf = net_write_buf,
+            .tls_read_buf = tls_read_buf,
+            .tls_write_buf = tls_write_buf,
+            .net_reader = undefined,
+            .net_writer = undefined,
+            .client = undefined,
+        };
+        conn.net_reader = net.Stream.reader(stream, io, conn.net_read_buf);
+        conn.net_writer = net.Stream.writer(stream, io, conn.net_write_buf);
+
+        var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
+        try std.Io.randomSecure(io, &entropy);
+        const now = std.Io.Timestamp.now(io, .real);
+
+        var local_bundle: CertificateBundle = .empty;
+        var local_lock: std.Io.RwLock = .init;
+        var loaded_local_bundle = false;
+        defer if (loaded_local_bundle) local_bundle.deinit(allocator);
+
+        var client_options: tls.Client.Options = .{
+            .host = if (options.verify_host) .{ .explicit = host } else .no_verification,
+            .ca = .no_verification,
+            .write_buffer = conn.tls_write_buf,
+            .read_buffer = conn.tls_read_buf,
+            .entropy = &entropy,
+            .realtime_now = now,
+            .allow_truncation_attacks = options.allow_truncation_attacks,
+        };
+        if (options.verify_host) {
+            client_options.ca = if (options.ca_bundle) |ca_bundle|
+                .{ .bundle = .{ .gpa = allocator, .io = io, .lock = ca_bundle.lock, .bundle = ca_bundle.bundle } }
+            else blk: {
+                try local_bundle.rescan(allocator, io, now);
+                loaded_local_bundle = true;
+                break :blk .{ .bundle = .{ .gpa = allocator, .io = io, .lock = &local_lock, .bundle = &local_bundle } };
+            };
+        }
+
+        conn.client = try tls.Client.init(&conn.net_reader.interface, &conn.net_writer.interface, client_options);
+        return conn;
+    }
+
+    pub fn deinit(self: *TlsClientConnection) void {
+        self.client.end() catch {};
+        self.net_writer.interface.flush() catch {};
+        self.stream.close(self.io);
+        const allocator = self.allocator;
+        allocator.free(self.net_read_buf);
+        allocator.free(self.net_write_buf);
+        allocator.free(self.tls_read_buf);
+        allocator.free(self.tls_write_buf);
+        allocator.destroy(self);
+    }
+
+    pub fn read(self: *TlsClientConnection, buffer: []u8) Error!usize {
+        if (buffer.len == 0) return 0;
+        return self.client.reader.readSliceShort(buffer) catch |err| switch (err) {
+            error.ReadFailed => return error.ReadFailed,
+        };
+    }
+
+    pub fn writeAll(self: *TlsClientConnection, bytes: []const u8) Error!void {
+        if (bytes.len == 0) return;
+        try self.client.writer.writeAll(bytes);
+        try self.client.writer.flush();
+        try self.net_writer.interface.flush();
+    }
+};
+
+const RuntimeTransport = union(enum) {
+    tcp: struct { io: std.Io, stream: net.Stream },
+    tls: *TlsClientConnection,
+
+    fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
+        return switch (self) {
+            .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
+            .tls => |conn| conn.read(buffer),
+        };
+    }
+
+    fn writeAll(self: RuntimeTransport, bytes: []const u8) Error!void {
+        return switch (self) {
+            .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
+            .tls => |conn| conn.writeAll(bytes),
+        };
+    }
 };
 
 pub const Server = struct {
@@ -160,6 +303,12 @@ pub const Client = struct {
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
     default_host: ?[]u8 = null,
+    tls_conn: ?*TlsClientConnection = null,
+
+    fn transport(self: *Client) RuntimeTransport {
+        if (self.tls_conn) |conn| return .{ .tls = conn };
+        return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
+    }
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Client {
         return .{
@@ -189,18 +338,49 @@ pub const Client = struct {
         };
     }
 
+    pub fn connectTlsHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+    ) Error!Client {
+        const host_name = try net.HostName.init(host);
+        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        const tls_conn = try TlsClientConnection.init(allocator, io, stream, host, tls_options);
+        stream_owned = false;
+        errdefer tls_conn.deinit();
+        const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+        errdefer allocator.free(owned_host);
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_host,
+            .tls_conn = tls_conn,
+        };
+    }
+
     pub fn close(self: *Client) void {
         if (self.default_host) |host| self.allocator.free(host);
         self.inbuf.deinit(self.allocator);
-        self.stream.close(self.io);
+        if (self.tls_conn) |conn| {
+            conn.deinit();
+        } else {
+            self.stream.close(self.io);
+        }
         self.* = undefined;
     }
 
     pub fn request(self: *Client, request_options: RequestOptions) Error!OwnedResponse {
         var options = request_options;
         if (options.host == null) options.host = self.default_host;
-        try writeRequestToStream(self.allocator, self.io, self.stream, options);
-        return readResponseFromStreamBufferedForRequest(self.allocator, self.io, self.stream, self.limits, .{}, &self.inbuf, request_options.method);
+        try writeRequestToTransport(self.allocator, self.transport(), options);
+        return readResponseFromTransportBufferedForRequest(self.allocator, self.transport(), self.limits, .{}, &self.inbuf, request_options.method);
     }
 
     pub fn requestUri(
@@ -210,14 +390,30 @@ pub const Client = struct {
         request_options: RequestOptions,
         limits: Limits,
     ) Error!OwnedResponse {
+        return requestUriTls(allocator, io, uri_text, request_options, limits, .{});
+    }
+
+    pub fn requestUriTls(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+    ) Error!OwnedResponse {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
-        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
+        const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
+        const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+        if (!is_http and !is_https) return error.UnsupportedScheme;
         var host_buffer: [net.HostName.max_len]u8 = undefined;
         const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
 
-        var client = try Client.connectHost(allocator, io, host.bytes, uri.port orelse 80, limits);
+        var client = if (is_https)
+            try Client.connectTlsHost(allocator, io, host.bytes, uri.port orelse 443, limits, tls_options)
+        else
+            try Client.connectHost(allocator, io, host.bytes, uri.port orelse 80, limits);
         defer client.close();
         var options = request_options;
         options.target = target;
@@ -226,13 +422,13 @@ pub const Client = struct {
 
     pub fn openConnectTunnel(self: *Client, target: []const u8, headers: []const http1.Header) Error!Tunnel {
         try http1.validateConnectTarget(target);
-        try writeRequestToStream(self.allocator, self.io, self.stream, .{
+        try writeRequestToTransport(self.allocator, self.transport(), .{
             .method = .CONNECT,
             .target = target,
             .host = target,
             .headers = headers,
         });
-        var response = try readResponseFromStreamBufferedForRequest(self.allocator, self.io, self.stream, self.limits, .{}, &self.inbuf, .CONNECT);
+        var response = try readResponseFromTransportBufferedForRequest(self.allocator, self.transport(), self.limits, .{}, &self.inbuf, .CONNECT);
         errdefer response.deinit(self.allocator);
         if (response.response.status < 200 or response.response.status >= 300) return error.InvalidResponse;
         if (response.response.body.len != 0 or response.response.trailers.len != 0) return error.InvalidResponse;
@@ -241,6 +437,7 @@ pub const Client = struct {
             .io = self.io,
             .allocator = self.allocator,
             .stream = self.stream,
+            .tls_conn = self.tls_conn,
             .inbuf = &self.inbuf,
         };
     }
@@ -289,10 +486,16 @@ pub const Tunnel = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: net.Stream,
+    tls_conn: ?*TlsClientConnection = null,
     inbuf: *std.ArrayList(u8),
 
+    fn transport(self: *Tunnel) RuntimeTransport {
+        if (self.tls_conn) |conn| return .{ .tls = conn };
+        return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
+    }
+
     pub fn write(self: *Tunnel, bytes: []const u8) Error!void {
-        try writeAll(self.io, self.stream, bytes);
+        try self.transport().writeAll(bytes);
     }
 
     pub fn read(self: *Tunnel, buffer: []u8) Error!usize {
@@ -302,7 +505,7 @@ pub const Tunnel = struct {
             discardPrefix(self.inbuf, n);
             return n;
         }
-        return readSome(self.io, self.stream, buffer);
+        return self.transport().read(buffer);
     }
 };
 
@@ -621,6 +824,10 @@ fn applyCloseDelimitedResponseBody(response: *http1.Response, bytes: []const u8,
 }
 
 pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: RequestOptions) Error!void {
+    try writeRequestToTransport(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, options);
+}
+
+fn writeRequestToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: RequestOptions) Error!void {
     try http1.validateRequestTargetForMethod(options.method, options.target);
     var request_headers: std.ArrayList(http1.Header) = .empty;
     defer request_headers.deinit(allocator);
@@ -662,7 +869,7 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
     } else {
         try encoded.appendSlice(allocator, options.body);
     }
-    try writeAll(io, stream, encoded.items);
+    try transport.writeAll(encoded.items);
 }
 
 fn appendRequestHeadersWithHost(
@@ -682,6 +889,10 @@ fn appendRequestHeadersWithHost(
 }
 
 pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: ResponseOptions) Error!void {
+    try writeResponseToTransport(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, options);
+}
+
+fn writeResponseToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: ResponseOptions) Error!void {
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
     try http1.validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
@@ -734,7 +945,7 @@ pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: n
     } else {
         try encoded.appendSlice(allocator, options.body);
     }
-    try writeAll(io, stream, encoded.items);
+    try transport.writeAll(encoded.items);
 }
 
 fn appendDefaultedHeaders(
@@ -943,21 +1154,20 @@ fn encodeChunkedForRuntime(
 }
 
 fn readMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
-    return readMessageBytesWithContext(allocator, io, stream, limits, null, false, true);
+    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, null, false, true);
 }
 
 fn readMessageBytesForResponse(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, request_method: http1.Method) Error![]u8 {
-    return readMessageBytesWithContext(allocator, io, stream, limits, request_method, false, true);
+    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, request_method, false, true);
 }
 
 fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
-    return readMessageBytesWithContext(allocator, io, stream, limits, null, true, false);
+    return readMessageBytesWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, null, true, false);
 }
 
 fn readMessageBytesWithContext(
     allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
+    transport: RuntimeTransport,
     limits: Limits,
     request_method: ?http1.Method,
     auto_continue: bool,
@@ -973,17 +1183,17 @@ fn readMessageBytesWithContext(
         // the next pipelined message.  Read the head one byte at a time until
         // CRLFCRLF so this API remains safe even without an explicit inbuf.
         const read_buf = scratch[0..1];
-        const n = try readSome(io, stream, read_buf);
+        const n = try transport.read(read_buf);
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
         head_end = try findHttpHeadEndWithinLimit(bytes.items, limits.max_head_bytes);
     }
-    try maybeWriteContinue(io, stream, bytes.items[0..head_end.?], bytes.items.len - (head_end.? + 4), auto_continue);
+    try maybeWriteContinue(transport, bytes.items[0..head_end.?], bytes.items.len - (head_end.? + 4), auto_continue);
 
     if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(bytes.items[0..head_end.?], request_method)) {
         const body_start = head_end.? + 4;
         while (true) {
-            const n = try readSome(io, stream, &scratch);
+            const n = try transport.read(&scratch);
             if (n == 0) break;
             try bytes.appendSlice(allocator, scratch[0..n]);
             if (bytes.items.len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
@@ -1000,7 +1210,7 @@ fn readMessageBytesWithContext(
                 // terminating chunk into a pipelined message.  Read one byte
                 // at a time until the body parser can compute the target.
                 const read_buf = scratch[0..1];
-                const n = try readSome(io, stream, read_buf);
+                const n = try transport.read(read_buf);
                 if (n == 0) return error.ConnectionClosed;
                 try bytes.appendSlice(allocator, scratch[0..n]);
                 if (bytes.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
@@ -1012,7 +1222,7 @@ fn readMessageBytesWithContext(
     };
     while (bytes.items.len < target_len) {
         const read_buf = scratch[0..@min(scratch.len, target_len - bytes.items.len)];
-        const n = try readSome(io, stream, read_buf);
+        const n = try transport.read(read_buf);
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
         if (bytes.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
@@ -1027,7 +1237,7 @@ fn readMessageBytesBuffered(
     limits: Limits,
     inbuf: *std.ArrayList(u8),
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, null, false, true);
+    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, inbuf, null, false, true);
 }
 
 fn readMessageBytesBufferedForResponse(
@@ -1038,7 +1248,7 @@ fn readMessageBytesBufferedForResponse(
     inbuf: *std.ArrayList(u8),
     request_method: http1.Method,
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, request_method, false, true);
+    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, inbuf, request_method, false, true);
 }
 
 fn readRequestMessageBytesBuffered(
@@ -1048,13 +1258,35 @@ fn readRequestMessageBytesBuffered(
     limits: Limits,
     inbuf: *std.ArrayList(u8),
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, io, stream, limits, inbuf, null, true, false);
+    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, inbuf, null, true, false);
+}
+
+fn readResponseFromTransportBufferedForRequest(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+    request_method: http1.Method,
+) Error!OwnedResponse {
+    while (true) {
+        const bytes = try readMessageBytesBufferedWithContext(allocator, transport, limits, inbuf, request_method, false, true);
+        errdefer allocator.free(bytes);
+        var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
+        errdefer response.deinit(allocator);
+        applyCloseDelimitedResponseBody(&response, bytes, request_method);
+        if (informationalResponseToSkip(response.status)) {
+            response.deinit(allocator);
+            allocator.free(bytes);
+            continue;
+        }
+        return .{ .bytes = bytes, .response = response };
+    }
 }
 
 fn readMessageBytesBufferedWithContext(
     allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
+    transport: RuntimeTransport,
     limits: Limits,
     inbuf: *std.ArrayList(u8),
     request_method: ?http1.Method,
@@ -1065,17 +1297,17 @@ fn readMessageBytesBufferedWithContext(
     var head_end: ?usize = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
     while (head_end == null) {
         const read_buf = scratch[0..@min(scratch.len, limits.max_head_bytes - inbuf.items.len)];
-        const n = try readSome(io, stream, read_buf);
+        const n = try transport.read(read_buf);
         if (n == 0) return error.ConnectionClosed;
         try inbuf.appendSlice(allocator, scratch[0..n]);
         head_end = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
     }
-    try maybeWriteContinue(io, stream, inbuf.items[0..head_end.?], inbuf.items.len - (head_end.? + 4), auto_continue);
+    try maybeWriteContinue(transport, inbuf.items[0..head_end.?], inbuf.items.len - (head_end.? + 4), auto_continue);
 
     if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(inbuf.items[0..head_end.?], request_method)) {
         const body_start = head_end.? + 4;
         while (true) {
-            const n = try readSome(io, stream, &scratch);
+            const n = try transport.read(&scratch);
             if (n == 0) break;
             try inbuf.appendSlice(allocator, scratch[0..n]);
             if (inbuf.items.len - body_start > limits.max_body_bytes) return error.BodyTooLarge;
@@ -1088,7 +1320,7 @@ fn readMessageBytesBufferedWithContext(
     const target_len = while (true) {
         const len = messageTargetLength(inbuf.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
             error.BufferTooShort => {
-                const n = try readSome(io, stream, &scratch);
+                const n = try transport.read(&scratch);
                 if (n == 0) return error.ConnectionClosed;
                 try inbuf.appendSlice(allocator, scratch[0..n]);
                 if (inbuf.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
@@ -1100,7 +1332,7 @@ fn readMessageBytesBufferedWithContext(
     };
 
     while (inbuf.items.len < target_len) {
-        const n = try readSome(io, stream, &scratch);
+        const n = try transport.read(&scratch);
         if (n == 0) return error.ConnectionClosed;
         try inbuf.appendSlice(allocator, scratch[0..n]);
         if (inbuf.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
@@ -1111,11 +1343,11 @@ fn readMessageBytesBufferedWithContext(
     return bytes;
 }
 
-fn maybeWriteContinue(io: std.Io, stream: net.Stream, head: []const u8, already_buffered_body_bytes: usize, auto_continue: bool) Error!void {
+fn maybeWriteContinue(transport: RuntimeTransport, head: []const u8, already_buffered_body_bytes: usize, auto_continue: bool) Error!void {
     _ = already_buffered_body_bytes;
     if (!auto_continue) return;
     if (!requestShouldSendContinue(head)) return;
-    try writeAll(io, stream, "HTTP/1.1 100 Continue\r\n\r\n");
+    try transport.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
 }
 
 fn discardPrefix(list: *std.ArrayList(u8), len: usize) void {
@@ -1349,7 +1581,7 @@ fn readExactForTest(io: std.Io, stream: net.Stream, buffer: []u8) Error!void {
     }
 }
 
-fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer.Error!void {
+fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer.Error!void {
     var written: usize = 0;
     while (written < bytes.len) {
         const n = try io.vtable.netWrite(io.userdata, stream.socket.handle, bytes[written..], &.{""}, 0);
@@ -1597,7 +1829,7 @@ test "HTTP/1 client sends request to URI" {
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("uri-ok", response.response.body);
 
-    try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "https://localhost/", .{}, .{}));
+    try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "ftp://localhost/", .{}, .{}));
     try std.testing.expectError(error.InvalidUri, Client.requestUri(allocator, io, "http:///missing-host", .{}, .{}));
 }
 
@@ -1653,7 +1885,7 @@ test "HTTP/1 server sends 100 Continue before reading expected body" {
     // Send only the head first.  A Hyper-compatible HTTP/1 server must emit
     // 100 Continue after seeing a valid HTTP/1.1 request with a body so the
     // client can safely stream a large payload without deadlocking.
-    try writeAll(io, client.stream, "POST /expect HTTP/1.1\r\n" ++
+    try writeAllToStream(io, client.stream, "POST /expect HTTP/1.1\r\n" ++
         "Host: 127.0.0.1\r\n" ++
         "Expect: 100-Continue\r\n" ++
         "Content-Length: 4\r\n" ++
@@ -1662,7 +1894,7 @@ test "HTTP/1 server sends 100 Continue before reading expected body" {
     try readExactForTest(io, client.stream, &interim);
     try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", &interim);
 
-    try writeAll(io, client.stream, "ping");
+    try writeAllToStream(io, client.stream, "ping");
     var response = try readResponseFromStreamBufferedForRequest(allocator, io, client.stream, client.limits, .{}, &client.inbuf, .POST);
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
@@ -1738,7 +1970,7 @@ test "HTTP/1 server sends 100 Continue even when body was pre-read" {
     var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
 
-    try writeAll(io, client.stream, "POST /expect HTTP/1.1\r\n" ++
+    try writeAllToStream(io, client.stream, "POST /expect HTTP/1.1\r\n" ++
         "Host: 127.0.0.1\r\n" ++
         "Expect: 100-continue\r\n" ++
         "Content-Length: 4\r\n" ++
@@ -1790,7 +2022,7 @@ test "HTTP/1 client skips interim responses before final response" {
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("/interim", request.request.target);
 
-            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 100 Continue\r\n\r\n" ++
+            try writeAllToStream(server_ptr.io, connection.stream, "HTTP/1.1 100 Continue\r\n\r\n" ++
                 "HTTP/1.1 102 Processing\r\n\r\n" ++
                 "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfinal");
         }
@@ -2102,7 +2334,7 @@ test "HTTP/1 client keeps pipelined response after HEAD response headers" {
             const raw =
                 "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\n" ++
                 "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong";
-            try writeAll(server_ptr.io, connection.stream, raw);
+            try writeAllToStream(server_ptr.io, connection.stream, raw);
         }
     };
 
@@ -2389,7 +2621,7 @@ test "HTTP/1 client reads close-delimited response body" {
             // No Content-Length or Transfer-Encoding: the response body is
             // delimited by closing the connection, which remains common for
             // simple HTTP/1.0-style origin/proxy responses.
-            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-delimited-body");
+            try writeAllToStream(server_ptr.io, connection.stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-delimited-body");
         }
     };
 
@@ -2449,7 +2681,7 @@ test "HTTP/1 client treats non-chunked response transfer coding as close-delimit
             // Hyper treats a response with a non-chunked transfer coding as
             // close-delimited.  Requests remain strict because accepting
             // unsupported request transfer codings is a smuggling risk.
-            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 200 OK\r\nTransfer-Encoding: yolo\r\nContent-Length: 999\r\nConnection: close\r\n\r\nclose-delimited-body");
+            try writeAllToStream(server_ptr.io, connection.stream, "HTTP/1.1 200 OK\r\nTransfer-Encoding: yolo\r\nContent-Length: 999\r\nConnection: close\r\n\r\nclose-delimited-body");
         }
     };
 
@@ -2509,7 +2741,7 @@ test "HTTP/1 status-forbidden body preserves pipelined response without request 
             var second = try connection.readRequest(.{});
             defer second.deinit(server_ptr.allocator);
 
-            try writeAll(server_ptr.io, connection.stream, "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\n" ++
+            try writeAllToStream(server_ptr.io, connection.stream, "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\n" ++
                 "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong");
         }
     };
@@ -2813,7 +3045,7 @@ test "HTTP/1 non-buffered request reader preserves pipelined bytes on socket" {
 
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    try writeAll(io, stream, "POST /first HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\n\r\nhello" ++
+    try writeAllToStream(io, stream, "POST /first HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\n\r\nhello" ++
         "POST /second HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\n\r\nworld");
 
     thread.join();
@@ -2870,7 +3102,7 @@ test "HTTP/1 non-buffered chunked reader preserves pipelined bytes on socket" {
 
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    try writeAll(io, stream, "POST /chunked HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nDigest: ok\r\n\r\n" ++
+    try writeAllToStream(io, stream, "POST /chunked HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nDigest: ok\r\n\r\n" ++
         "POST /second HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\n\r\nworld");
 
     thread.join();

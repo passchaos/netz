@@ -29,6 +29,25 @@ pub const Role = enum {
     server,
 };
 
+const RuntimeTransport = union(enum) {
+    tcp: struct { io: std.Io, stream: net.Stream },
+    tls: *http1_runtime.TlsClientConnection,
+
+    fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
+        return switch (self) {
+            .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
+            .tls => |conn| conn.read(buffer),
+        };
+    }
+
+    fn writeAll(self: RuntimeTransport, bytes: []const u8) Error!void {
+        return switch (self) {
+            .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
+            .tls => |conn| conn.writeAll(bytes),
+        };
+    }
+};
+
 pub const Server = struct {
     http: http1_runtime.Server,
     limits: Limits = .{},
@@ -85,7 +104,7 @@ pub const Server = struct {
         if (selected_extension) |extension| try headers.append(self.http.allocator, .{ .name = "Sec-WebSocket-Extensions", .value = extension });
         try headers.appendSlice(self.http.allocator, options.extra_headers);
         try websocket.writeServerHandshake(&response, self.http.allocator, key, headers.items);
-        try writeAll(http_conn.io, http_conn.stream, response.items);
+        try writeAllToStream(http_conn.io, http_conn.stream, response.items);
 
         const connection = Connection{
             .io = http_conn.io,
@@ -191,7 +210,7 @@ pub const Client = struct {
     ) Error!Connection {
         const stream = net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch |err| return err;
         errdefer stream.close(io);
-        return connectStream(allocator, io, stream, options);
+        return connectStream(allocator, io, stream, null, options);
     }
 
     pub fn connectHost(
@@ -208,7 +227,29 @@ pub const Client = struct {
         defer allocator.free(default_host);
         var connect_options = options;
         if (connect_options.host.len == 0) connect_options.host = default_host;
-        return connectStream(allocator, io, stream, connect_options);
+        return connectStream(allocator, io, stream, null, connect_options);
+    }
+
+    pub fn connectTlsHost(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!Connection {
+        const host_name = try net.HostName.init(host);
+        const stream = try host_name.connect(io, port, .{ .mode = .stream });
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        const tls_conn = try http1_runtime.TlsClientConnection.init(allocator, io, stream, host, tls_options);
+        stream_owned = false;
+        errdefer tls_conn.deinit();
+        const default_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+        defer allocator.free(default_host);
+        var connect_options = options;
+        if (connect_options.host.len == 0) connect_options.host = default_host;
+        return connectStream(allocator, io, stream, tls_conn, connect_options);
     }
 
     pub fn connectUri(
@@ -217,8 +258,20 @@ pub const Client = struct {
         uri_text: []const u8,
         options: ConnectOptions,
     ) Error!Connection {
+        return connectUriTls(allocator, io, uri_text, options, .{});
+    }
+
+    pub fn connectUriTls(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!Connection {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
-        if (!std.ascii.eqlIgnoreCase(uri.scheme, "ws")) return error.UnsupportedScheme;
+        const is_ws = std.ascii.eqlIgnoreCase(uri.scheme, "ws");
+        const is_wss = std.ascii.eqlIgnoreCase(uri.scheme, "wss");
+        if (!is_ws and !is_wss) return error.UnsupportedScheme;
         var host_buffer: [net.HostName.max_len]u8 = undefined;
         const host = uri.getHost(&host_buffer) catch return error.InvalidUri;
         const target = try uriTargetAlloc(allocator, uri);
@@ -226,13 +279,17 @@ pub const Client = struct {
 
         var connect_options = options;
         connect_options.target = target;
-        return connectHost(allocator, io, host.bytes, uri.port orelse 80, connect_options);
+        return if (is_wss)
+            connectTlsHost(allocator, io, host.bytes, uri.port orelse 443, connect_options, tls_options)
+        else
+            connectHost(allocator, io, host.bytes, uri.port orelse 80, connect_options);
     }
 
     fn connectStream(
         allocator: std.mem.Allocator,
         io: std.Io,
         stream: net.Stream,
+        tls_conn: ?*http1_runtime.TlsClientConnection,
         options: ConnectOptions,
     ) Error!Connection {
         var nonce: [16]u8 = undefined;
@@ -264,14 +321,15 @@ pub const Client = struct {
                 .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
             });
         }
-        try http1_runtime.writeRequestToStream(allocator, io, stream, .{
+        const transport: RuntimeTransport = if (tls_conn) |conn| .{ .tls = conn } else .{ .tcp = .{ .io = io, .stream = stream } };
+        try writeHttpUpgradeRequest(allocator, transport, .{
             .method = .GET,
             .target = options.target,
             .host = options.host,
             .headers = headers.items,
         });
 
-        var head = try readHttpHead(allocator, io, stream, options.limits.max_head_bytes);
+        var head = try readHttpHeadFromTransport(allocator, transport, options.limits.max_head_bytes);
         defer head.deinit(allocator);
         var response = try http1.parseResponse(allocator, head.head, .{});
         defer response.deinit(allocator);
@@ -285,6 +343,7 @@ pub const Client = struct {
             .io = io,
             .allocator = allocator,
             .stream = stream,
+            .tls_conn = tls_conn,
             .role = .client,
             .limits = options.limits,
             .selected_protocol = selected_protocol,
@@ -336,6 +395,7 @@ pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     stream: net.Stream,
+    tls_conn: ?*http1_runtime.TlsClientConnection = null,
     role: Role,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
@@ -349,10 +409,19 @@ pub const Connection = struct {
         try self.inbuf.appendSlice(self.allocator, bytes);
     }
 
+    fn transport(self: *Connection) RuntimeTransport {
+        if (self.tls_conn) |conn| return .{ .tls = conn };
+        return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
+    }
+
     pub fn close(self: *Connection) void {
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
         self.inbuf.deinit(self.allocator);
-        self.stream.close(self.io);
+        if (self.tls_conn) |conn| {
+            conn.deinit();
+        } else {
+            self.stream.close(self.io);
+        }
         self.* = undefined;
     }
 
@@ -508,13 +577,13 @@ pub const Connection = struct {
             .mask_key = mask_key,
             .rsv1 = options.rsv1,
         });
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.transport().writeAll(encoded.items);
     }
 
     fn ensureBuffered(self: *Connection, len: usize) Error!void {
         var scratch: [4096]u8 = undefined;
         while (self.inbuf.items.len < len) {
-            const n = try readSome(self.io, self.stream, &scratch);
+            const n = try self.transport().read(&scratch);
             if (n == 0) return error.ConnectionClosed;
             try self.inbuf.appendSlice(self.allocator, scratch[0..n]);
         }
@@ -901,7 +970,31 @@ const HttpHead = struct {
     }
 };
 
+fn writeHttpUpgradeRequest(allocator: std.mem.Allocator, transport: RuntimeTransport, options: http1_runtime.RequestOptions) Error!void {
+    try http1.validateRequestTargetForMethod(options.method, options.target);
+    var headers: std.ArrayList(http1.Header) = .empty;
+    defer headers.deinit(allocator);
+    var has_host = false;
+    for (options.headers) |header| {
+        if (header.eqlName("host")) has_host = true;
+        try headers.append(allocator, header);
+    }
+    if (!has_host) {
+        if (options.host) |host| try headers.append(allocator, .{ .name = "Host", .value = host });
+    }
+    try http1.validateHostHeaderBlock(options.version, headers.items);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try http1.writeRequestChecked(&encoded, allocator, options.method, options.target, options.version, headers.items, options.body);
+    try transport.writeAll(encoded.items);
+}
+
 fn readHttpHead(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, max_head_bytes: usize) Error!HttpHead {
+    return readHttpHeadFromTransport(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, max_head_bytes);
+}
+
+fn readHttpHeadFromTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, max_head_bytes: usize) Error!HttpHead {
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(allocator);
     var scratch: [4096]u8 = undefined;
@@ -916,7 +1009,7 @@ fn readHttpHead(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, ma
             };
         }
         const read_buf = scratch[0..@min(scratch.len, max_head_bytes - bytes.items.len)];
-        const n = try readSome(io, stream, read_buf);
+        const n = try transport.read(read_buf);
         if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
     }
@@ -1100,7 +1193,7 @@ fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Erro
     return io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
 }
 
-fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer.Error!void {
+fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer.Error!void {
     var written: usize = 0;
     while (written < bytes.len) {
         const n = try io.vtable.netWrite(io.userdata, stream.socket.handle, bytes[written..], &.{""}, 0);
@@ -1488,7 +1581,7 @@ test "WebSocket client connects by ws URI" {
     thread.join();
     if (shared.err) |err| return err;
 
-    try std.testing.expectError(error.UnsupportedScheme, Client.connectUri(allocator, io, "wss://localhost/chat", .{}));
+    try std.testing.expectError(error.UnsupportedScheme, Client.connectUri(allocator, io, "ftp://localhost/chat", .{}));
     try std.testing.expectError(error.InvalidUri, Client.connectUri(allocator, io, "ws:///missing-host", .{}));
 }
 
@@ -1683,7 +1776,7 @@ test "WebSocket client rejects unoffered subprotocol" {
             var response: std.ArrayList(u8) = .empty;
             defer response.deinit(server_ptr.http.allocator);
             try websocket.writeServerHandshake(&response, server_ptr.http.allocator, key, &.{.{ .name = "Sec-WebSocket-Protocol", .value = "not-offered" }});
-            try writeAll(http_conn.io, http_conn.stream, response.items);
+            try writeAllToStream(http_conn.io, http_conn.stream, response.items);
         }
     };
 
@@ -1741,7 +1834,7 @@ test "WebSocket client rejects HTTP/1.0 upgrade responses" {
             try response.appendSlice(server_ptr.http.allocator, "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ");
             try response.appendSlice(server_ptr.http.allocator, &accept);
             try response.appendSlice(server_ptr.http.allocator, "\r\n\r\n");
-            try writeAll(http_conn.io, http_conn.stream, response.items);
+            try writeAllToStream(http_conn.io, http_conn.stream, response.items);
         }
     };
 
@@ -1810,7 +1903,7 @@ test "WebSocket server rejects data sent with HTTP upgrade request" {
             "\r\n",
     );
     try websocket.writeFrame(&request, allocator, .text, "too early", .{ .mask_key = .{ 1, 2, 3, 4 } });
-    try writeAll(io, stream, request.items);
+    try writeAllToStream(io, stream, request.items);
 
     thread.join();
     if (shared.err) |err| return err;
