@@ -1460,6 +1460,46 @@ pub const sdp = struct {
         paused: bool = false,
     };
 
+    pub fn formatRidLine(allocator: std.mem.Allocator, rid: Rid) Error![]u8 {
+        try validateSdpToken(rid.id);
+        try validateSdpToken(rid.direction);
+        if (rid.parameters.len == 0) {
+            return std.fmt.allocPrint(allocator, "a=rid:{s} {s}\r\n", .{ rid.id, rid.direction });
+        }
+        try validateSdpAttributeValue(rid.parameters);
+        return std.fmt.allocPrint(allocator, "a=rid:{s} {s} {s}\r\n", .{ rid.id, rid.direction, rid.parameters });
+    }
+
+    pub fn appendRidLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, rid: Rid) Error!void {
+        const line = try formatRidLine(allocator, rid);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatSimulcastLine(allocator: std.mem.Allocator, direction: []const u8, rids: []const Rid) Error![]u8 {
+        try validateSdpToken(direction);
+        if (rids.len == 0) return error.InvalidSdp;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.appendSlice(allocator, "a=simulcast:");
+        try out.appendSlice(allocator, direction);
+        try out.append(allocator, ' ');
+        for (rids, 0..) |rid, index| {
+            try validateSdpToken(rid.id);
+            if (index != 0) try out.append(allocator, ';');
+            if (rid.paused) try out.append(allocator, '~');
+            try out.appendSlice(allocator, rid.id);
+        }
+        try out.appendSlice(allocator, "\r\n");
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn appendSimulcastLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, direction: []const u8, rids: []const Rid) Error!void {
+        const line = try formatSimulcastLine(allocator, direction, rids);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub const TrackDetails = struct {
         mid: []const u8,
         kind: []const u8,
@@ -9192,6 +9232,20 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("sim_track", sdp.trackDetailsForRid(tracks, "simulcast", "h").?.track_id);
     try std.testing.expect(sdp.trackDetailsForRid(tracks, "video", "f") == null);
     try std.testing.expect(!sdp.tracksContainRepeatedMid(tracks));
+    const rid_line = try sdp.formatRidLine(allocator, tracks[2].rids[0]);
+    defer allocator.free(rid_line);
+    try std.testing.expectEqualStrings("a=rid:f send pt=96\r\n", rid_line);
+    const simulcast_line = try sdp.formatSimulcastLine(allocator, "send", tracks[2].rids);
+    defer allocator.free(simulcast_line);
+    try std.testing.expectEqualStrings("a=simulcast:send f;~h\r\n", simulcast_line);
+    var rid_lines: std.ArrayList(u8) = .empty;
+    defer rid_lines.deinit(allocator);
+    try sdp.appendRidLine(&rid_lines, allocator, tracks[2].rids[0]);
+    try sdp.appendSimulcastLine(&rid_lines, allocator, "send", tracks[2].rids);
+    try std.testing.expectEqualStrings("a=rid:f send pt=96\r\na=simulcast:send f;~h\r\n", rid_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatRidLine(allocator, .{ .id = "", .direction = "send" }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatRidLine(allocator, .{ .id = "f", .direction = "send", .parameters = "bad\nparam" }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSimulcastLine(allocator, "send", &.{}));
     const ssrc_line = try sdp.formatSsrcLine(allocator, 3000, "msid", "video_stream video_track");
     defer allocator.free(ssrc_line);
     try std.testing.expectEqualStrings("a=ssrc:3000 msid:video_stream video_track\r\n", ssrc_line);
