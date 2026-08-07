@@ -2556,6 +2556,18 @@ pub const rtcp = struct {
         }
     };
 
+    pub const ApplicationDefined = struct {
+        subtype: u5 = 0,
+        ssrc: u32,
+        name: [4]u8,
+        data: []const u8 = &.{},
+
+        pub fn deinit(self: *ApplicationDefined, allocator: std.mem.Allocator) void {
+            allocator.free(@constCast(self.data));
+            self.* = undefined;
+        }
+    };
+
     pub const Goodbye = struct {
         sources: []u32 = &.{},
         reason: []const u8 = &.{},
@@ -2910,6 +2922,7 @@ pub const rtcp = struct {
         picture_loss_indication: PictureLossIndication,
         full_intra_request: FullIntraRequest,
         receiver_estimated_maximum_bitrate: ReceiverEstimatedMaximumBitrate,
+        application_defined: ApplicationDefined,
         transport_layer_nack: TransportLayerNack,
         transport_wide_cc: TransportWideCc,
         unknown: Unknown,
@@ -2922,6 +2935,7 @@ pub const rtcp = struct {
                 .source_description => |*sdes| sdes.deinit(allocator),
                 .full_intra_request => |*fir| fir.deinit(allocator),
                 .receiver_estimated_maximum_bitrate => |*remb| remb.deinit(allocator),
+                .application_defined => |*app| app.deinit(allocator),
                 .transport_layer_nack => |nack| allocator.free(nack.pairs),
                 .transport_wide_cc => |*twcc| twcc.deinit(allocator),
                 else => {},
@@ -2952,6 +2966,7 @@ pub const rtcp = struct {
             .receiver_report => .{ .receiver_report = try parseReceiverReport(allocator, header, payload) },
             .goodbye => .{ .goodbye = try parseGoodbye(allocator, header, payload) },
             .source_description => .{ .source_description = try parseSourceDescription(allocator, header, payload) },
+            .application_defined => .{ .application_defined = try parseApplicationDefined(allocator, header, payload) },
             .payload_feedback => if (header.count_or_format == payload_feedback_pli)
                 .{ .picture_loss_indication = try parsePictureLossIndication(payload) }
             else if (header.count_or_format == payload_feedback_fir)
@@ -2996,6 +3011,7 @@ pub const rtcp = struct {
             .picture_loss_indication => |pli| try writePictureLossIndication(list, allocator, pli),
             .full_intra_request => |fir| try writeFullIntraRequest(list, allocator, fir),
             .receiver_estimated_maximum_bitrate => |remb| try writeReceiverEstimatedMaximumBitrate(list, allocator, remb),
+            .application_defined => |app| try writeApplicationDefined(list, allocator, app),
             .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
             .transport_wide_cc => |twcc| try writeTransportWideCc(list, allocator, twcc),
             .unknown => |unknown| {
@@ -3109,6 +3125,18 @@ pub const rtcp = struct {
             // keep the same behavior so packets from browsers/Pion round-trip.
         }
         return .{ .sources = sources, .reason = reason };
+    }
+
+    fn parseApplicationDefined(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!ApplicationDefined {
+        if (payload.len < 8) return error.InvalidRtcpPacket;
+        const data = try allocator.dupe(u8, payload[8..]);
+        errdefer allocator.free(data);
+        return .{
+            .subtype = @intCast(header.count_or_format),
+            .ssrc = std.mem.readInt(u32, payload[0..4], .big),
+            .name = payload[4..8].*,
+            .data = data,
+        };
     }
 
     fn parsePictureLossIndication(payload: []const u8) Error!PictureLossIndication {
@@ -3334,6 +3362,23 @@ pub const rtcp = struct {
         try list.appendSlice(allocator, payload.items);
     }
 
+    fn writeApplicationDefined(list: *std.ArrayList(u8), allocator: std.mem.Allocator, app: ApplicationDefined) Error!void {
+        const padded_data_len = std.math.add(usize, app.data.len, (4 - (app.data.len % 4)) % 4) catch return error.InvalidRtcpPacket;
+        if (padded_data_len > max_rtcp_payload_len - 8) return error.InvalidRtcpPacket;
+        // RTCP APP packets use the common-header P bit when the
+        // application-dependent data is not naturally 32-bit aligned.  Pion/rtcp
+        // fills every padding octet with the padding count, not just the final
+        // octet, so preserve that wire image for deterministic interoperability.
+        try writeHeaderWithPadding(list, allocator, app.subtype, .application_defined, 8 + padded_data_len, padded_data_len != app.data.len);
+        try wire.appendInt(list, allocator, u32, app.ssrc, .big);
+        try list.appendSlice(allocator, &app.name);
+        try list.appendSlice(allocator, app.data);
+        if (padded_data_len != app.data.len) {
+            const padding_len: u8 = @intCast(padded_data_len - app.data.len);
+            try list.appendNTimes(allocator, padding_len, padding_len);
+        }
+    }
+
     fn writePictureLossIndication(list: *std.ArrayList(u8), allocator: std.mem.Allocator, pli: PictureLossIndication) Error!void {
         try writeHeader(list, allocator, payload_feedback_pli, .payload_feedback, 8);
         try wire.appendInt(list, allocator, u32, pli.sender_ssrc, .big);
@@ -3440,8 +3485,12 @@ pub const rtcp = struct {
     }
 
     fn writeHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocator, count_or_format: u5, packet_type: PacketType, payload_len: usize) Error!void {
+        try writeHeaderWithPadding(list, allocator, count_or_format, packet_type, payload_len, false);
+    }
+
+    fn writeHeaderWithPadding(list: *std.ArrayList(u8), allocator: std.mem.Allocator, count_or_format: u5, packet_type: PacketType, payload_len: usize, padding: bool) Error!void {
         if ((payload_len % 4) != 0 or payload_len / 4 > std.math.maxInt(u16)) return error.InvalidRtcpPacket;
-        try list.append(allocator, 0x80 | @as(u8, count_or_format));
+        try list.append(allocator, 0x80 | (if (padding) @as(u8, 0x20) else 0) | @as(u8, count_or_format));
         try list.append(allocator, @intFromEnum(packet_type));
         try wire.appendInt(list, allocator, u16, @intCast(payload_len / 4), .big);
     }
@@ -6078,6 +6127,69 @@ test "RTCP SDES and compound packets" {
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .goodbye = .{
         .sources = &single_bye_sources,
         .reason = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    } }));
+}
+
+test "RTCP application-defined APP packets" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try rtcp.writePacket(&encoded, allocator, .{ .application_defined = .{
+        .subtype = 31,
+        .ssrc = 0x4baae1ab,
+        .name = "NAME".*,
+        .data = "ABCD",
+    } });
+    try std.testing.expectEqualStrings(&.{
+        0x9f, 0xcc, 0x00, 0x03,
+        0x4b, 0xaa, 0xe1, 0xab,
+        0x4e, 0x41, 0x4d, 0x45,
+        0x41, 0x42, 0x43, 0x44,
+    }, encoded.items);
+    var parsed = try rtcp.parsePacket(allocator, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, encoded.items.len), parsed.consumed);
+    try std.testing.expectEqual(@as(u5, 31), parsed.packet.application_defined.subtype);
+    try std.testing.expectEqual(@as(u32, 0x4baae1ab), parsed.packet.application_defined.ssrc);
+    try std.testing.expectEqualStrings("NAME", &parsed.packet.application_defined.name);
+    try std.testing.expectEqualStrings("ABCD", parsed.packet.application_defined.data);
+
+    encoded.clearRetainingCapacity();
+    try rtcp.writePacket(&encoded, allocator, .{ .application_defined = .{
+        .ssrc = 0x4baae1ab,
+        .name = "NAME".*,
+        .data = "ABCDE",
+    } });
+    try std.testing.expectEqualStrings(&.{
+        0xa0, 0xcc, 0x00, 0x04,
+        0x4b, 0xaa, 0xe1, 0xab,
+        0x4e, 0x41, 0x4d, 0x45,
+        0x41, 0x42, 0x43, 0x44,
+        0x45, 0x03, 0x03, 0x03,
+    }, encoded.items);
+    var padded = try rtcp.parsePacket(allocator, encoded.items);
+    defer padded.deinit(allocator);
+    try std.testing.expectEqual(@as(u5, 0), padded.packet.application_defined.subtype);
+    try std.testing.expectEqualStrings("ABCDE", padded.packet.application_defined.data);
+
+    try std.testing.expectError(error.BufferTooShort, rtcp.parsePacket(allocator, &.{
+        0x80, 0xcc, 0x00, 0x02,
+        0x4b, 0xaa, 0xe1, 0xab,
+        0x4e, 0x41, 0x4d,
+    }));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, &.{
+        0x80, 0xcc, 0x00, 0x01,
+        0x4b, 0xaa, 0xe1, 0xab,
+    }));
+
+    encoded.clearRetainingCapacity();
+    const too_large = try allocator.alloc(u8, rtcp.max_rtcp_payload_len - 8 + 1);
+    defer allocator.free(too_large);
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .application_defined = .{
+        .ssrc = 0x4baae1ab,
+        .name = "NAME".*,
+        .data = too_large,
     } }));
 }
 
