@@ -1274,6 +1274,12 @@ pub const sdp = struct {
         }
     };
 
+    pub fn appendRtpCodecLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, codec: RtpCodec) Error!void {
+        try appendRtpMapLine(list, allocator, codec.payload_type, codec.codec_name, codec.clock_rate, codec.channels);
+        try appendFmtpLine(list, allocator, codec.payload_type, codec.fmtp);
+        try appendRtcpFeedbackLines(list, allocator, codec.payload_type, codec.rtcp_feedback);
+    }
+
     pub const FmtpParameter = struct {
         key: []const u8,
         value: []const u8 = "",
@@ -8718,6 +8724,17 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("a=rtpmap:111 opus/48000/2\r\n", rtpmap_lines.items);
     try std.testing.expectError(error.InvalidSdp, sdp.formatRtpMapLine(allocator, 111, "", 48_000, 2));
     try std.testing.expectError(error.InvalidSdp, sdp.formatRtpMapLine(allocator, 111, "opus", 0, 2));
+    var codec_lines: std.ArrayList(u8) = .empty;
+    defer codec_lines.deinit(allocator);
+    try sdp.appendRtpCodecLines(&codec_lines, allocator, codecs[0]);
+    try std.testing.expectEqualStrings(
+        "a=rtpmap:111 opus/48000/2\r\n" ++
+            "a=fmtp:111 minptime=10;useinbandfec=1\r\n" ++
+            "a=rtcp-fb:111 goog-remb\r\n" ++
+            "a=rtcp-fb:111 ccm fir\r\n" ++
+            "a=rtcp-fb:111 nack\r\n",
+        codec_lines.items,
+    );
 
     const fmtp_params = try sdp.parseFmtpParameters(allocator, " Key = Value ; flag ; apt=96 ");
     defer sdp.freeFmtpParameters(allocator, fmtp_params);
