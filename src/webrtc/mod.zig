@@ -4811,6 +4811,80 @@ pub const sctp = struct {
         }
     };
 
+    pub const DataChannelSendState = struct {
+        next_tsn: u32,
+        stream_sequence_number: u16 = 0,
+        next_ordered_message_id: u32 = 0,
+        next_unordered_message_id: u32 = 0,
+
+        pub fn fragmentMessage(
+            self: *DataChannelSendState,
+            allocator: std.mem.Allocator,
+            stream_id: u16,
+            reliability: DataChannelReliability,
+            interleaved: bool,
+            max_payload_size: usize,
+            is_string: bool,
+            user_data: []const u8,
+        ) Error![]DataChunk {
+            const message_id = if (interleaved) self.nextMessageId(reliability.unordered) else 0;
+            const chunks = try fragmentDataChannelMessage(allocator, .{
+                .first_tsn = self.next_tsn,
+                .stream_id = stream_id,
+                .stream_sequence_number = self.stream_sequence_number,
+                .message_identifier = message_id,
+                .reliability = reliability,
+                .interleaved = interleaved,
+                .is_string = is_string,
+                .max_payload_size = max_payload_size,
+            }, user_data);
+            self.advanceAfterSend(chunks.len, reliability.unordered, interleaved);
+            return chunks;
+        }
+
+        pub fn fragmentDcep(
+            self: *DataChannelSendState,
+            allocator: std.mem.Allocator,
+            stream_id: u16,
+            interleaved: bool,
+            max_payload_size: usize,
+            user_data: []const u8,
+        ) Error![]DataChunk {
+            const reliability = DataChannelReliability{ .unordered = false, .mode = .reliable, .parameter = 0 };
+            const message_id = if (interleaved) self.nextMessageId(false) else 0;
+            const chunks = try fragmentDcepMessage(allocator, .{
+                .first_tsn = self.next_tsn,
+                .stream_id = stream_id,
+                .stream_sequence_number = self.stream_sequence_number,
+                .message_identifier = message_id,
+                .reliability = reliability,
+                .interleaved = interleaved,
+                .max_payload_size = max_payload_size,
+            }, user_data);
+            self.advanceAfterSend(chunks.len, false, interleaved);
+            return chunks;
+        }
+
+        fn nextMessageId(self: *DataChannelSendState, unordered: bool) u32 {
+            if (unordered) {
+                const id = self.next_unordered_message_id;
+                self.next_unordered_message_id +%= 1;
+                return id;
+            }
+            const id = self.next_ordered_message_id;
+            self.next_ordered_message_id +%= 1;
+            return id;
+        }
+
+        fn advanceAfterSend(self: *DataChannelSendState, chunk_count: usize, unordered: bool, interleaved: bool) void {
+            self.next_tsn +%= @intCast(chunk_count);
+            // RFC 4960 section 6.6 / Pion-sctp: unordered non-interleaved DATA
+            // does not consume the Stream Sequence Number.  I-DATA uses MID
+            // spaces instead, so SSN remains unchanged there too.
+            if (!interleaved and !unordered) self.stream_sequence_number +%= 1;
+        }
+    };
+
     pub const DataChannelMessage = union(enum) {
         open: DataChannelOpen,
         ack: void,
@@ -8564,6 +8638,36 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expect(!dcep_fragments[1].unordered);
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_dcep, dcep_fragments[0].payload_protocol_identifier);
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_dcep, dcep_fragments[1].payload_protocol_identifier);
+
+    var send_state = sctp.DataChannelSendState{ .next_tsn = 100 };
+    const ordered_send = try send_state.fragmentMessage(allocator, 7, try sctp.dataChannelReliability(.reliable, 0), false, 3, false, "hello");
+    defer sctp.freeDataChannelFragments(allocator, ordered_send);
+    try std.testing.expectEqual(@as(usize, 2), ordered_send.len);
+    try std.testing.expectEqual(@as(u32, 100), ordered_send[0].tsn);
+    try std.testing.expectEqual(@as(u16, 0), ordered_send[0].stream_sequence_number);
+    try std.testing.expectEqual(@as(u32, 102), send_state.next_tsn);
+    try std.testing.expectEqual(@as(u16, 1), send_state.stream_sequence_number);
+
+    const unordered_send = try send_state.fragmentMessage(allocator, 7, unordered_reliability, false, 8, false, "u");
+    defer sctp.freeDataChannelFragments(allocator, unordered_send);
+    try std.testing.expect(unordered_send[0].unordered);
+    try std.testing.expectEqual(@as(u16, 1), unordered_send[0].stream_sequence_number);
+    try std.testing.expectEqual(@as(u16, 1), send_state.stream_sequence_number);
+    try std.testing.expectEqual(@as(u32, 103), send_state.next_tsn);
+
+    const interleaved_unordered = try send_state.fragmentMessage(allocator, 7, unordered_reliability, true, 2, true, "abc");
+    defer sctp.freeDataChannelFragments(allocator, interleaved_unordered);
+    try std.testing.expectEqual(@as(u32, 0), interleaved_unordered[0].message_identifier);
+    try std.testing.expectEqual(@as(u16, 0), interleaved_unordered[0].stream_sequence_number);
+    try std.testing.expectEqual(@as(u32, 1), send_state.next_unordered_message_id);
+    try std.testing.expectEqual(@as(u16, 1), send_state.stream_sequence_number);
+
+    const interleaved_dcep = try send_state.fragmentDcep(allocator, 7, true, 2, ack.items);
+    defer sctp.freeDataChannelFragments(allocator, interleaved_dcep);
+    try std.testing.expect(!interleaved_dcep[0].unordered);
+    try std.testing.expectEqual(@as(u32, 0), interleaved_dcep[0].message_identifier);
+    try std.testing.expectEqual(@as(u32, 1), send_state.next_ordered_message_id);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_dcep, interleaved_dcep[0].payload_protocol_identifier);
 
     var invalid_dcep: std.ArrayList(u8) = .empty;
     defer invalid_dcep.deinit(allocator);
