@@ -4342,6 +4342,8 @@ pub const rtcp = struct {
         initialized: bool = false,
         base_seq: u16 = 0,
         max_seq: u16 = 0,
+        /// RTCP extended highest sequence numbers store wrap cycles in the
+        /// upper 16 bits, so each RTP sequence rollover advances by 1<<16.
         cycles: u32 = 0,
         received: u32 = 0,
         expected_prior: u32 = 0,
@@ -4364,7 +4366,7 @@ pub const rtcp = struct {
                 return;
             }
 
-            if (seq < self.max_seq and self.max_seq - seq > 0x8000) self.cycles +%= 1;
+            if (seq < self.max_seq and self.max_seq - seq > 0x8000) self.cycles +%= 1 << 16;
             if (seqNewer(seq, self.max_seq)) self.max_seq = seq;
             self.received +|= 1;
 
@@ -10017,6 +10019,26 @@ test "RTCP receiver stats builds receiver report block" {
     try std.testing.expectEqual(@as(u32, 0x7e81_8000), third.last_sender_report);
     try std.testing.expectEqual(@as(u32, 0x0000_4000), third.delay_since_last_sender_report);
     try std.testing.expectEqual(@as(u64, 250 * std.time.ns_per_ms), rtcp.compactNtpDelayToNanos(third.delay_since_last_sender_report));
+
+    var wrap_stats = rtcp.ReceiverStats{ .clock_rate = 90_000 };
+    inline for (.{ 0xfffe, 0xffff, 0 }) |seq| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        try rtp.writePacket(&bytes, allocator, .{
+            .payload_type = 96,
+            .sequence_number = seq,
+            .timestamp = @as(u32, seq) * 3000,
+            .ssrc = 0x11223344,
+        }, "x");
+        var packet = try rtp.Packet.parse(allocator, bytes.items);
+        defer packet.deinit(allocator);
+        wrap_stats.observe(packet, @as(u64, seq) * std.time.ns_per_ms);
+    }
+    const wrap_report = wrap_stats.reportBlock();
+    try std.testing.expectEqual(@as(u32, 0x11223344), wrap_report.ssrc);
+    try std.testing.expectEqual(@as(u32, 0x0001_0000), wrap_report.highest_sequence_number);
+    try std.testing.expectEqual(@as(u32, 3), wrap_stats.expectedPackets());
+    try std.testing.expectEqual(@as(u24, 0), wrap_report.cumulative_lost);
 }
 
 test "RTCP NACK tracker detects RTP gaps and wraparound" {
