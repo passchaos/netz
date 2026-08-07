@@ -531,7 +531,7 @@ pub const Connection = struct {
     }
 
     pub fn sendFrame(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
-        if (self.close_sent) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
         try validateOutgoingFramePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
@@ -541,7 +541,7 @@ pub const Connection = struct {
 
     pub fn sendMessage(self: *Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
-        if (self.close_sent) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
         try validateOutgoingMessagePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.io);
         defer self.send_mutex.unlock(self.io);
@@ -556,7 +556,7 @@ pub const Connection = struct {
     }
 
     pub fn sendFragmented(self: *Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
-        if (self.close_sent) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
 
@@ -786,7 +786,7 @@ pub const H2Connection = struct {
     }
 
     pub fn sendFrame(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
-        if (self.close_sent) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
         try validateOutgoingFramePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
@@ -796,7 +796,7 @@ pub const H2Connection = struct {
 
     pub fn sendMessage(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8) Error!void {
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
-        if (self.close_sent) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
         try validateOutgoingMessagePayload(opcode, payload);
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
@@ -811,7 +811,7 @@ pub const H2Connection = struct {
     }
 
     pub fn sendFragmented(self: *H2Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
-        if (self.close_sent) return error.ConnectionClosed;
+        if (!canSendOpcode(opcode, self.close_sent, self.close_received)) return error.ConnectionClosed;
         if (opcode != .text and opcode != .binary) return error.InvalidFrame;
         if (fragments.len == 0) return error.InvalidFrame;
 
@@ -1103,6 +1103,12 @@ fn validateOutgoingFramePayload(opcode: websocket.Opcode, payload: []const u8) E
         .continuation => return error.InvalidFrame,
         _ => return error.InvalidFrame,
     }
+}
+
+fn canSendOpcode(opcode: websocket.Opcode, close_sent: bool, close_received: bool) bool {
+    if (close_sent) return false;
+    if (close_received and opcode != .close) return false;
+    return true;
 }
 
 fn finishIncomingMessage(
@@ -2694,6 +2700,14 @@ test "WebSocket runtimes reject duplicate close sends" {
     };
     try std.testing.expectError(error.ConnectionClosed, h2.sendFrame(.close, &.{}));
     try std.testing.expectError(error.ConnectionClosed, h2.sendClose(.normal_closure, "again"));
+}
+
+test "WebSocket send state blocks data after receiving close" {
+    try std.testing.expect(!canSendOpcode(.text, false, true));
+    try std.testing.expect(!canSendOpcode(.binary, false, true));
+    try std.testing.expect(!canSendOpcode(.ping, false, true));
+    try std.testing.expect(canSendOpcode(.close, false, true));
+    try std.testing.expect(!canSendOpcode(.close, true, true));
 }
 
 test "WebSocket runtimes return closed after close handshake completes" {
