@@ -3683,6 +3683,10 @@ pub const rtcp = struct {
         bitrate: u64,
         ssrcs: []const u32 = &.{},
 
+        pub fn wireLen(self: ReceiverEstimatedMaximumBitrate) usize {
+            return 20 + self.ssrcs.len * 4;
+        }
+
         pub fn deinit(self: *ReceiverEstimatedMaximumBitrate, allocator: std.mem.Allocator) void {
             allocator.free(@constCast(self.ssrcs));
             self.* = undefined;
@@ -9970,6 +9974,7 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 1), remb.packet.receiver_estimated_maximum_bitrate.sender_ssrc);
     try std.testing.expectEqual(@as(u64, 8_927_168), remb.packet.receiver_estimated_maximum_bitrate.bitrate);
     try std.testing.expectEqualSlices(u32, &[_]u32{1215622422}, remb.packet.receiver_estimated_maximum_bitrate.ssrcs);
+    try std.testing.expectEqual(@as(usize, 24), remb.packet.receiver_estimated_maximum_bitrate.wireLen());
 
     encoded.items[8] = 1; // REMB media SSRC must be zero.
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, encoded.items));
