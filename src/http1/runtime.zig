@@ -248,7 +248,7 @@ pub const TlsClientConnection = struct {
 const RuntimeTransport = union(enum) {
     tcp: struct { io: std.Io, stream: net.Stream },
     tls: *TlsClientConnection,
-    linux_io_uring: LinuxIoUringTransport,
+    linux_io_uring: LinuxIoUringStream,
 
     fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
         return switch (self) {
@@ -267,7 +267,7 @@ const RuntimeTransport = union(enum) {
     }
 };
 
-const LinuxIoUringTransport = if (builtin.os.tag == .linux) struct {
+pub const LinuxIoUringStream = if (builtin.os.tag == .linux) struct {
     ring: *linux.IoUring,
     fd: linux.fd_t,
 
@@ -278,14 +278,14 @@ const LinuxIoUringTransport = if (builtin.os.tag == .linux) struct {
         close = 4,
     };
 
-    pub fn connect(self: LinuxIoUringTransport, address: net.IpAddress) Error!void {
+    pub fn connect(self: LinuxIoUringStream, address: net.IpAddress) Error!void {
         var storage: PosixAddress = undefined;
         const address_len = ipAddressToPosix(&address, &storage);
         _ = self.ring.connect(@intFromEnum(Completion.connect), self.fd, &storage.any, address_len) catch return error.IoUringOperationFailed;
         _ = try self.submitOne(.connect);
     }
 
-    pub fn read(self: LinuxIoUringTransport, buffer: []u8) Error!usize {
+    pub fn read(self: LinuxIoUringStream, buffer: []u8) Error!usize {
         if (buffer.len == 0) return 0;
         _ = self.ring.recv(@intFromEnum(Completion.recv), self.fd, .{ .buffer = buffer }, 0) catch return error.IoUringOperationFailed;
         const cqe = try self.submitOne(.recv);
@@ -293,7 +293,7 @@ const LinuxIoUringTransport = if (builtin.os.tag == .linux) struct {
         return @intCast(cqe.res);
     }
 
-    pub fn writeAll(self: LinuxIoUringTransport, bytes: []const u8) Error!void {
+    pub fn writeAll(self: LinuxIoUringStream, bytes: []const u8) Error!void {
         var offset: usize = 0;
         while (offset < bytes.len) {
             _ = self.ring.send(@intFromEnum(Completion.send), self.fd, bytes[offset..], 0) catch return error.IoUringOperationFailed;
@@ -303,7 +303,7 @@ const LinuxIoUringTransport = if (builtin.os.tag == .linux) struct {
         }
     }
 
-    pub fn close(self: LinuxIoUringTransport) void {
+    pub fn close(self: LinuxIoUringStream) void {
         _ = self.ring.close(@intFromEnum(Completion.close), self.fd) catch {
             _ = linux.close(self.fd);
             return;
@@ -313,7 +313,7 @@ const LinuxIoUringTransport = if (builtin.os.tag == .linux) struct {
         };
     }
 
-    fn submitOne(self: LinuxIoUringTransport, expected: Completion) Error!linux.io_uring_cqe {
+    fn submitOne(self: LinuxIoUringStream, expected: Completion) Error!linux.io_uring_cqe {
         _ = self.ring.submit_and_wait(1) catch return error.IoUringOperationFailed;
         const cqe = self.ring.copy_cqe() catch return error.IoUringOperationFailed;
         if (cqe.user_data != @intFromEnum(expected)) return error.UnexpectedCompletion;
@@ -373,6 +373,16 @@ fn createLinuxTcpSocket(address: net.IpAddress) Error!linux.fd_t {
         .PROTONOSUPPORT => error.ProtocolUnsupportedBySystem,
         else => error.IoUringOperationFailed,
     };
+}
+
+pub fn connectIpLinuxIoUring(ring: *LinuxIoUringHandle, address: net.IpAddress) Error!LinuxIoUringStream {
+    if (comptime builtin.os.tag != .linux) return error.UnsupportedIoBackend;
+
+    const fd = try createLinuxTcpSocket(address);
+    var stream = LinuxIoUringStream{ .ring = ring, .fd = fd };
+    errdefer stream.close();
+    try stream.connect(address);
+    return stream;
 }
 
 pub const Server = struct {
@@ -686,12 +696,9 @@ pub const Client = struct {
             .host => return error.UnsupportedEndpoint,
         };
 
-        const fd = try createLinuxTcpSocket(address);
-        var uring_transport = LinuxIoUringTransport{ .ring = ring, .fd = fd };
+        var uring_transport = try connectIpLinuxIoUring(ring, address);
         var fd_open = true;
         errdefer if (fd_open) uring_transport.close();
-
-        try uring_transport.connect(address);
         var options = request_options;
         options.target = target;
         if (options.host == null) options.host = endpoint.authority;
