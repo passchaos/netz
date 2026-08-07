@@ -609,6 +609,7 @@ pub const Connection = struct {
         var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
+        if (self.close_received and frame.header.opcode != .close) return error.ConnectionClosed;
         if (frame.header.opcode == .close) self.close_received = true;
         return frame;
     }
@@ -864,6 +865,7 @@ pub const H2Connection = struct {
         var frame = try websocket.parseFrameOptions(self.allocator, self.inbuf.items[0..total_len], parse_options);
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
+        if (self.close_received and frame.header.opcode != .close) return error.ConnectionClosed;
         if (frame.header.opcode == .close) self.close_received = true;
         return frame;
     }
@@ -2708,6 +2710,35 @@ test "WebSocket send state blocks data after receiving close" {
     try std.testing.expect(!canSendOpcode(.ping, false, true));
     try std.testing.expect(canSendOpcode(.close, false, true));
     try std.testing.expect(!canSendOpcode(.close, true, true));
+}
+
+test "WebSocket runtimes reject frames after received close" {
+    const allocator = std.testing.allocator;
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer connection.inbuf.deinit(allocator);
+    try connection.inbuf.appendSlice(allocator, "\x88\x00" ++ "\x81\x02hi");
+    var close = try connection.receiveFrame();
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+    try std.testing.expectError(error.ConnectionClosed, connection.receiveFrame());
+
+    var h2 = H2Connection{
+        .allocator = allocator,
+        .tunnel = undefined,
+        .role = .client,
+    };
+    defer h2.inbuf.deinit(allocator);
+    try h2.inbuf.appendSlice(allocator, "\x88\x00" ++ "\x81\x02hi");
+    var h2_close = try h2.receiveFrame();
+    defer h2_close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, h2_close.header.opcode);
+    try std.testing.expectError(error.ConnectionClosed, h2.receiveFrame());
 }
 
 test "WebSocket runtimes return closed after close handshake completes" {
