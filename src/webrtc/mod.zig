@@ -119,9 +119,12 @@ pub const stun = struct {
         const cookie = try cursor.readInt(u32, .big);
         if (cookie != @This().magic_cookie) return error.InvalidStunMessage;
         const transaction_id = (try cursor.readSlice(12))[0..12].*;
-        if (bytes.len < 20 + @as(usize, len)) return error.BufferTooShort;
+        if ((len % 4) != 0) return error.InvalidStunMessage;
+        const message_end = 20 + @as(usize, len);
+        if (bytes.len < message_end) return error.BufferTooShort;
+        if (bytes.len != message_end) return error.InvalidStunMessage;
         const decoded_type = decodeType(typ);
-        var attr_cursor = wire.Cursor.init(bytes[20 .. 20 + @as(usize, len)]);
+        var attr_cursor = wire.Cursor.init(bytes[20..message_end]);
         var attrs: std.ArrayList(Attribute) = .empty;
         errdefer attrs.deinit(allocator);
         var seen_integrity = false;
@@ -442,8 +445,10 @@ pub const stun = struct {
     fn stunMessageEnd(bytes: []const u8) Error!usize {
         if (bytes.len < 20) return error.BufferTooShort;
         const payload_len = std.mem.readInt(u16, bytes[2..4], .big);
+        if ((payload_len % 4) != 0) return error.InvalidStunMessage;
         const end = 20 + @as(usize, payload_len);
         if (bytes.len < end) return error.BufferTooShort;
+        if (bytes.len != end) return error.InvalidStunMessage;
         return end;
     }
 };
@@ -3913,6 +3918,16 @@ test "STUN binding message roundtrip" {
     try std.testing.expectEqual(stun.Class.request, parsed.class);
     try std.testing.expectEqual(stun.Method.binding, parsed.method);
     try std.testing.expectEqualStrings("user:peer", parsed.attributes[0].value);
+
+    var trailing = try encoded.clone(allocator);
+    defer trailing.deinit(allocator);
+    try trailing.append(allocator, 0);
+    try std.testing.expectError(error.InvalidStunMessage, stun.parse(allocator, trailing.items));
+
+    var bad_length = try encoded.clone(allocator);
+    defer bad_length.deinit(allocator);
+    bad_length.items[3] = 1; // STUN message length must be 32-bit aligned.
+    try std.testing.expectError(error.InvalidStunMessage, stun.parse(allocator, bad_length.items));
 }
 
 test "STUN XOR-MAPPED-ADDRESS helper" {
