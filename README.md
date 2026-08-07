@@ -5,7 +5,7 @@ starts with deterministic parsers, serializers, and state helpers for:
 
 - HTTP/1.1 requests, responses, header field syntax validation, chunked transfer decoding with strict chunk-size grammar and extension limits, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with validated and repeated-value-merged trailer fields, opt-in obsolete folded-field
-  unfolding, request-target/status/reason-phrase start-line validation with method-specific asterisk/authority-form rules, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
+  unfolding, request-target/status/reason-phrase start-line validation with method-specific asterisk/authority-form and no-fragment rules, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
   byte buffering for persistent connections, method-aware response body
   handling for HEAD and successful CONNECT, authority-form CONNECT target validation including bracketed IPv6 and CONNECT tunnel helpers, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling even when body bytes are pre-read with invalid-head suppression, pure-digit Content-Length enforcement,

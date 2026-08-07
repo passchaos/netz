@@ -666,8 +666,10 @@ pub fn validateRequestTarget(target: []const u8) Error!void {
         // The request target is a single start-line token.  Rejecting SP/HTAB
         // and all control bytes prevents request-smuggling/start-line injection
         // while still allowing UTF-8/opaque octets that many origin-form paths
-        // carry in practice.
-        if (byte <= 0x20 or byte == 0x7f) return error.MalformedStartLine;
+        // carry in practice.  URI fragments are never sent in HTTP requests;
+        // clients such as hyper strip them before serialization, so reject raw
+        // '#' here to avoid origin/proxy disagreement.
+        if (byte <= 0x20 or byte == 0x7f or byte == '#') return error.MalformedStartLine;
     }
 }
 
@@ -1028,6 +1030,8 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "GET relative-token HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
     try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "GET example.com:80 HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
     try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "OPTIONS example.com:80 HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "GET /path#fragment HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, "GET http://example.com/path#fragment HTTP/1.1\r\nHost: example.com\r\n\r\n", .{}));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("/path"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("2001:db8::1:443"));
