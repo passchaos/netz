@@ -1013,6 +1013,7 @@ pub const Connection = struct {
         if (stream_id == 0) {
             try self.recv_connection_window.update(increment);
         } else {
+            if (!self.outboundStreamIsActive(stream_id) and !self.hasRecvStreamWindow(stream_id)) return error.InvalidStreamId;
             try (try self.recvStreamWindow(stream_id)).update(increment);
         }
         var encoded: std.ArrayList(u8) = .empty;
@@ -1669,6 +1670,13 @@ pub const Connection = struct {
             .window = .{ .value = @intCast(self.limits.initial_window_size) },
         });
         return &self.recv_stream_windows.items[self.recv_stream_windows.items.len - 1].window;
+    }
+
+    fn hasRecvStreamWindow(self: Connection, stream_id: u31) bool {
+        for (self.recv_stream_windows.items) |entry| {
+            if (entry.stream_id == stream_id) return true;
+        }
+        return false;
     }
 };
 
@@ -6189,7 +6197,7 @@ test "HTTP/2 DATA send waits for WINDOW_UPDATE capacity" {
             // connection and stream credit are restored, the blocked request
             // can continue without the application retrying the send.
             try connection.sendWindowUpdate(0, 64);
-            try connection.sendWindowUpdate(1, 64);
+            try writeFrame(server_ptr.allocator, server_ptr.io, connection.stream, .window_update, 0, 1, &.{ 0, 0, 0, 64 });
 
             var second = try readFrame(server_ptr.allocator, server_ptr.io, connection.stream, server_ptr.limits);
             defer second.deinit(server_ptr.allocator);
@@ -6617,6 +6625,29 @@ test "HTTP/2 stream window helpers reject connection stream id" {
     try std.testing.expectError(error.InvalidStreamId, connection.sendStreamWindow(0));
     try std.testing.expectError(error.InvalidStreamId, connection.recvStreamWindow(0));
     try std.testing.expectEqual(@as(usize, 0), connection.send_stream_windows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.recv_stream_windows.items.len);
+}
+
+test "HTTP/2 sendWindowUpdate rejects idle streams" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    // h2 only releases capacity for streams that exist in the state machine.
+    // Sending WINDOW_UPDATE on an idle stream is a protocol error, so the
+    // helper refuses before it mutates receive-window bookkeeping or writes.
+    try std.testing.expectError(error.InvalidStreamId, connection.sendWindowUpdate(1, 1));
     try std.testing.expectEqual(@as(usize, 0), connection.recv_stream_windows.items.len);
 }
 
