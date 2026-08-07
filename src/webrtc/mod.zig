@@ -1934,6 +1934,20 @@ pub const rtp = struct {
         max_delay: u12,
     };
 
+    pub const AbsCaptureTimeExtension = struct {
+        timestamp: u64,
+        estimated_capture_clock_offset: ?i64 = null,
+
+        pub fn captureUnixNanos(self: AbsCaptureTimeExtension) u64 {
+            return unixNanosFromNtpTime(self.timestamp);
+        }
+
+        pub fn estimatedCaptureClockOffsetNanos(self: AbsCaptureTimeExtension) ?i64 {
+            const raw = self.estimated_capture_clock_offset orelse return null;
+            return captureClockOffsetNanos(raw);
+        }
+    };
+
     pub const HeaderExtensionFormat = enum {
         one_byte,
         two_byte,
@@ -2141,6 +2155,54 @@ pub const rtp = struct {
             @as(u8, @truncate(min_delay << 4)) | @as(u8, @truncate(max_delay >> 8)),
             @truncate(max_delay),
         };
+    }
+
+    pub fn absCaptureTime(elements: []const HeaderExtensionElement, id: u8) Error!?AbsCaptureTimeExtension {
+        const value = findHeaderExtension(elements, id) orelse return null;
+        if (value.len != 8 and value.len != 16) return error.InvalidRtpPacket;
+        return .{
+            .timestamp = std.mem.readInt(u64, value[0..8], .big),
+            .estimated_capture_clock_offset = if (value.len == 16) std.mem.readInt(i64, value[8..16], .big) else null,
+        };
+    }
+
+    pub fn absCaptureTimePayload(timestamp: u64, offset: ?i64) [16]u8 {
+        var out: [16]u8 = undefined;
+        std.mem.writeInt(u64, out[0..8], timestamp, .big);
+        if (offset) |value| {
+            std.mem.writeInt(i64, out[8..16], value, .big);
+        } else {
+            @memset(out[8..16], 0);
+        }
+        return out;
+    }
+
+    pub fn absCaptureTimePayloadLen(offset: ?i64) usize {
+        return if (offset == null) 8 else 16;
+    }
+
+    pub fn absCaptureTimeFromUnixNanos(unix_time_ns: u64) u64 {
+        return ntpTimeFromUnixNanos(unix_time_ns);
+    }
+
+    pub fn captureClockOffsetFromNanos(offset_ns: i64) i64 {
+        const negative = offset_ns < 0;
+        const magnitude: u64 = @intCast(if (negative) -@as(i128, offset_ns) else @as(i128, offset_ns));
+        const seconds = magnitude / std.time.ns_per_s;
+        const fractional_ns = magnitude % std.time.ns_per_s;
+        const raw_u = (seconds << 32) | ((fractional_ns << 32) / std.time.ns_per_s);
+        const raw: i64 = @intCast(raw_u);
+        return if (negative) -raw else raw;
+    }
+
+    pub fn captureClockOffsetNanos(raw_offset: i64) i64 {
+        const negative = raw_offset < 0;
+        const magnitude: u64 = @intCast(if (negative) -@as(i128, raw_offset) else @as(i128, raw_offset));
+        const seconds = magnitude >> 32;
+        const fraction = magnitude & 0xffff_ffff;
+        const nanos = seconds * std.time.ns_per_s + ((fraction * std.time.ns_per_s) >> 32);
+        const signed: i64 = @intCast(nanos);
+        return if (negative) -signed else signed;
     }
 
     pub const Header = struct {
@@ -7084,12 +7146,16 @@ test "RTP packet extension padding and writer" {
     const twcc_payload = rtp.transportWideSequenceNumberPayload(0x1234);
     const abs_send_time = rtp.absoluteSendTimePayload(0x010203);
     const playout_delay = try rtp.playoutDelayPayload(1 << 4, 1 << 8);
+    const capture_time_ns: u64 = 1_650_000_000;
+    const capture_offset = rtp.captureClockOffsetFromNanos(1_250_000_000);
+    const abs_capture_time = rtp.absCaptureTimePayload(rtp.absCaptureTimeFromUnixNanos(capture_time_ns), capture_offset);
     try rtp.writeOneByteHeaderExtensions(&one_byte_extensions, allocator, &.{
         .{ .id = 1, .data = "m" },
         .{ .id = 3, .data = &twcc_payload },
         .{ .id = 4, .data = &abs_send_time },
         .{ .id = 5, .data = &audio_level },
         .{ .id = 6, .data = &playout_delay },
+        .{ .id = 7, .data = abs_capture_time[0..rtp.absCaptureTimePayloadLen(capture_offset)] },
     });
     try std.testing.expectEqual(@as(usize, 0), one_byte_extensions.items.len % 4);
 
@@ -7132,6 +7198,14 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(u12, 1 << 4), parsed_playout_delay.min_delay);
     try std.testing.expectEqual(@as(u12, 1 << 8), parsed_playout_delay.max_delay);
     try std.testing.expectError(error.InvalidRtpPacket, rtp.playoutDelayPayload(1 << 12, 1 << 12));
+    const parsed_abs_capture_time = (try rtp.absCaptureTime(parsed_extensions, 7)).?;
+    const capture_diff = if (parsed_abs_capture_time.captureUnixNanos() > capture_time_ns)
+        parsed_abs_capture_time.captureUnixNanos() - capture_time_ns
+    else
+        capture_time_ns - parsed_abs_capture_time.captureUnixNanos();
+    try std.testing.expect(capture_diff <= 1);
+    try std.testing.expectEqual(@as(i64, 1_250_000_000), parsed_abs_capture_time.estimatedCaptureClockOffsetNanos().?);
+    try std.testing.expectEqual(@as(i64, -250_000_000), rtp.captureClockOffsetNanos(rtp.captureClockOffsetFromNanos(-250_000_000)));
     try std.testing.expectEqualStrings("opus", packet.payload);
     try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
 
