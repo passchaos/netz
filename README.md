@@ -50,7 +50,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed
   RFC-defaulted transport-parameter encoding/validation (duplicate detection,
   endpoint-specific client/server parameter rules, preferred-address parsing and specified-address validation,
-  max UDP payload/idle-timeout/ACK delay/stream-count bounds), Retry packet codec
+  max UDP payload 1200..65527/idle-timeout/ACK delay/stream-count bounds), Retry packet codec
   with version-specific integrity-tag verification, plus CRYPTO stream reassembly with empty-frame no-op handling and duplicate-overlap conflict detection,
   v1/v2 Initial key/header/payload protection with version-aware salts, HKDF labels, long-header type bits, fixed-bit, connection-ID length, and supported-version validation, version-specific TLS QUIC packet-protection labels, protected Initial packet seal/open, long-header packet boundary peeking for coalesced datagrams, Version Negotiation packet codec with randomized response first byte and reserved-version greasing tolerance, RFC 9368 `version_information` transport parameters, endpoint-level unsupported-version responses, client-side Version Negotiation selection/restart helpers, and automatic handshake restart on negotiated versions,
   Initial CRYPTO byte exchange over UDP with RFC 9000 1200-byte Initial datagram padding/validation, client-carried Initial address tokens, server-side token validation hooks, and server-issued address-validation NEW_TOKEN frames, coalesced Initial+Handshake CRYPTO datagram helpers, HMAC-based
