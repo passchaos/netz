@@ -2881,7 +2881,10 @@ pub const sctp = struct {
                     .outgoing_ssn_reset_response => .{ .outgoing_ssn_reset_response = try parseOutgoingSsnResetResponse(value) },
                     else => .{ .unknown = .{ .param_type = param_type, .value = value } },
                 });
-                try cursor.skip((4 - (len % 4)) % 4);
+                const padding = (4 - (len % 4)) % 4;
+                if (cursor.remaining() < padding) return error.InvalidSctpPacket;
+                try validateZeroPadding(cursor.buf[cursor.pos .. cursor.pos + padding]);
+                try cursor.skip(padding);
             }
             if (params.items.len == 0) return error.InvalidSctpPacket;
             return .{ .parameters = try params.toOwnedSlice(allocator) };
@@ -3687,7 +3690,10 @@ pub const sctp = struct {
             if (len < 4 or cursor.remaining() < len - 4) return error.InvalidSctpPacket;
             const value = try cursor.readSlice(len - 4);
             try causes.append(allocator, .{ .code = code, .value = value });
-            try cursor.skip((4 - (len % 4)) % 4);
+            const padding = (4 - (len % 4)) % 4;
+            if (cursor.remaining() < padding) return error.InvalidSctpPacket;
+            try validateZeroPadding(cursor.buf[cursor.pos .. cursor.pos + padding]);
+            try cursor.skip(padding);
         }
         return causes.toOwnedSlice(allocator);
     }
@@ -4808,6 +4814,14 @@ test "SCTP ABORT and ERROR causes" {
     try std.testing.expectEqual(sctp.ErrorCauseCode.protocol_violation, error_chunk.causes[0].code);
     try std.testing.expectEqualStrings("bad chunk", error_chunk.causes[0].value);
 
+    encoded.items[encoded.items.len - 1] = 0xff; // non-zero ERROR cause padding
+    std.mem.writeInt(u32, encoded.items[8..12], 0, .little);
+    const repaired_error_checksum = try sctp.checksum(encoded.items);
+    std.mem.writeInt(u32, encoded.items[8..12], repaired_error_checksum, .little);
+    var bad_error_padding = try sctp.parsePacket(allocator, encoded.items, true);
+    defer bad_error_padding.deinit(allocator);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.ErrorChunk.parse(allocator, bad_error_padding.chunks[0]));
+
     encoded.clearRetainingCapacity();
     try std.testing.expectError(error.InvalidSctpPacket, sctp.writeErrorChunk(&encoded, allocator, &.{}));
 }
@@ -4980,6 +4994,18 @@ test "SCTP RE-CONFIG stream reset request and response" {
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);
     try std.testing.expectError(error.InvalidSctpPacket, sctp.writeReconfigChunk(&invalid, allocator, &.{}));
+
+    invalid.clearRetainingCapacity();
+    try wire.appendInt(&invalid, allocator, u16, 0x800d, .big); // unknown: skip and continue
+    try wire.appendInt(&invalid, allocator, u16, 5, .big);
+    try invalid.append(allocator, 0xaa);
+    try invalid.appendSlice(allocator, &.{ 0, 0, 0xff }); // invalid parameter padding
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.ReconfigChunk.parse(allocator, .{
+        .chunk_type = .reconfig,
+        .flags = 0,
+        .value = invalid.items,
+        .consumed = 0,
+    }));
 }
 
 test "SCTP INIT cookie echo and cookie ack packets" {
