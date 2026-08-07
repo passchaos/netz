@@ -1122,6 +1122,15 @@ pub const Connection = struct {
         return self.receivePacketAt(null);
     }
 
+    pub fn receivePacketOrDropAfterClose(self: *Connection) Error!?ReceivedPacket {
+        return self.receivePacketOrDropAfterCloseAt(null);
+    }
+
+    pub fn receivePacketOrDropAfterCloseAt(self: *Connection, now_ns: ?u64) Error!?ReceivedPacket {
+        if (self.close_info != null or self.idle_timed_out) return null;
+        return try self.receivePacketAt(now_ns);
+    }
+
     pub fn receivePacketAt(self: *Connection, now_ns: ?u64) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         var packet = try receiveWithKeyUpdate(
@@ -1142,6 +1151,15 @@ pub const Connection = struct {
 
     pub fn receiveRoutedDatagram(self: *Connection, routed: quic.runtime.RoutedBytes) Error!ReceivedPacket {
         return self.receiveRoutedDatagramAt(routed, null);
+    }
+
+    pub fn receiveRoutedDatagramOrDropAfterClose(self: *Connection, routed: quic.runtime.RoutedBytes) Error!?ReceivedPacket {
+        return self.receiveRoutedDatagramOrDropAfterCloseAt(routed, null);
+    }
+
+    pub fn receiveRoutedDatagramOrDropAfterCloseAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64) Error!?ReceivedPacket {
+        if (self.close_info != null or self.idle_timed_out) return null;
+        return try self.receiveRoutedDatagramAt(routed, now_ns);
     }
 
     pub fn receiveRoutedDatagramAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64) Error!ReceivedPacket {
@@ -2814,6 +2832,36 @@ test "QUIC 1-RTT connection decodes peer ACK delay" {
 
     connection.config.peer_ack_delay_exponent = quic.rtt.max_ack_delay_exponent + 1;
     try std.testing.expectError(error.InvalidFrame, connection.decodedPeerAckDelayNanos(ack));
+}
+
+test "QUIC 1-RTT draining state drops subsequent packets" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xaa} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+    });
+    defer connection.deinit();
+
+    try connection.applyReceivedFrames(0, &.{.{ .connection_close = .{
+        .error_code = 0,
+        .frame_type = 0,
+        .reason_phrase = "bye",
+    } }}, null, .not_ect);
+    try std.testing.expect(connection.draining());
+    try std.testing.expectError(error.ConnectionClosed, connection.receivePacket());
+    try std.testing.expect((try connection.receivePacketOrDropAfterClose()) == null);
 }
 
 test "QUIC 1-RTT connection models idle timeout deadlines" {
