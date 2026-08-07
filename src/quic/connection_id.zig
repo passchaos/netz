@@ -189,6 +189,14 @@ pub const LocalPool = struct {
         self.next_sequence_number = 1;
     }
 
+    pub fn registerInitialWithStaticKey(
+        self: *LocalPool,
+        connection_id: []const u8,
+        static_key: [quic.stateless_reset.static_key_len]u8,
+    ) Error!void {
+        try self.registerInitial(connection_id, quic.stateless_reset.tokenForConnectionId(static_key, connection_id));
+    }
+
     pub fn issue(self: *LocalPool, connection_id: []const u8, token: [16]u8) Error!quic.Frame {
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidConnectionId;
         for (&self.entries) |*entry| {
@@ -206,6 +214,14 @@ pub const LocalPool = struct {
             }
         }
         return error.PoolFull;
+    }
+
+    pub fn issueWithStaticKey(
+        self: *LocalPool,
+        connection_id: []const u8,
+        static_key: [quic.stateless_reset.static_key_len]u8,
+    ) Error!quic.Frame {
+        return try self.issue(connection_id, quic.stateless_reset.tokenForConnectionId(static_key, connection_id));
     }
 
     pub fn retire(self: *LocalPool, sequence_number: u64) Error!void {
@@ -333,4 +349,22 @@ test "QUIC local CID pool issues and retires NEW_CONNECTION_ID frames" {
     try std.testing.expectEqual(@as(usize, 2), pool.count());
     try pool.retire(0);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
+}
+
+test "QUIC local CID pool derives stateless reset tokens from static key" {
+    const key = [_]u8{0x42} ** quic.stateless_reset.static_key_len;
+    var pool = LocalPool{};
+    try pool.registerInitialWithStaticKey("init-cid", key);
+    try std.testing.expectEqualSlices(
+        u8,
+        &quic.stateless_reset.tokenForConnectionId(key, "init-cid"),
+        &pool.entries[0].stateless_reset_token,
+    );
+
+    const frame = try pool.issueWithStaticKey("new-cid", key);
+    try std.testing.expectEqualSlices(
+        u8,
+        &quic.stateless_reset.tokenForConnectionId(key, "new-cid"),
+        &frame.new_connection_id.stateless_reset_token,
+    );
 }
