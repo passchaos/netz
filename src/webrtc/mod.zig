@@ -1523,6 +1523,25 @@ pub const sdp = struct {
         return null;
     }
 
+    pub fn h264FmtpCompatible(local_fmtp: []const u8, remote_fmtp: []const u8) bool {
+        const local_packetization = fmtpParameter(local_fmtp, "packetization-mode") orelse return false;
+        const remote_packetization = fmtpParameter(remote_fmtp, "packetization-mode") orelse return false;
+        if (!std.mem.eql(u8, local_packetization, remote_packetization)) return false;
+
+        const local_profile = fmtpParameter(local_fmtp, "profile-level-id") orelse return false;
+        const remote_profile = fmtpParameter(remote_fmtp, "profile-level-id") orelse return false;
+        return h264ProfileLevelIdMatches(local_profile, remote_profile);
+    }
+
+    pub fn h264ProfileLevelIdMatches(a: []const u8, b: []const u8) bool {
+        if (a.len < 4 or b.len < 4) return false;
+        const a0 = std.fmt.parseInt(u8, a[0..2], 16) catch return false;
+        const a1 = std.fmt.parseInt(u8, a[2..4], 16) catch return false;
+        const b0 = std.fmt.parseInt(u8, b[0..2], 16) catch return false;
+        const b1 = std.fmt.parseInt(u8, b[2..4], 16) catch return false;
+        return a0 == b0 and a1 == b1;
+    }
+
     fn parseRidAttribute(raw: []const u8) Error!Rid {
         var parts = std.mem.tokenizeAny(u8, raw, " \t");
         const id = parts.next() orelse return error.InvalidSdp;
@@ -5281,6 +5300,19 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("", fmtp_params[1].value);
     try std.testing.expectEqualStrings("96", sdp.fmtpParameter(" Key = Value ; flag ; apt=96 ", "APT").?);
     try std.testing.expectEqualStrings("", sdp.fmtpParameter("flag", "flag").?);
+    try std.testing.expect(sdp.h264FmtpCompatible(
+        "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+        "packetization-mode=1;profile-level-id=42e029",
+    ));
+    try std.testing.expect(!sdp.h264FmtpCompatible(
+        "packetization-mode=0;profile-level-id=42e01f",
+        "packetization-mode=1;profile-level-id=42e01f",
+    ));
+    try std.testing.expect(!sdp.h264FmtpCompatible(
+        "packetization-mode=1;profile-level-id=42e01f",
+        "packetization-mode=1",
+    ));
+    try std.testing.expect(!sdp.h264ProfileLevelIdMatches("zzzzzz", "42e01f"));
 
     const no_channels_codec_text =
         "v=0\r\n" ++
