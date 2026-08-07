@@ -796,7 +796,10 @@ pub const Qpack = struct {
     pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
         try encodePrefix(list, allocator, 0, 0);
         for (fields) |field| {
-            if (findStaticMatch(field.name, field.value)) |match| {
+            var lower_name_storage: ?[]u8 = null;
+            defer if (lower_name_storage) |storage| allocator.free(storage);
+            const name = try normalizedFieldName(allocator, field.name, &lower_name_storage);
+            if (findStaticMatch(name, field.value)) |match| {
                 if (match.full_match) {
                     try encodePrefixedInteger(list, allocator, 6, 0xc0, match.index);
                 } else {
@@ -804,11 +807,23 @@ pub const Qpack = struct {
                     try encodeString(list, allocator, field.value);
                 }
             } else {
-                try encodePrefixedInteger(list, allocator, 3, 0x20, field.name.len);
-                try list.appendSlice(allocator, field.name);
+                try encodePrefixedInteger(list, allocator, 3, 0x20, name.len);
+                try list.appendSlice(allocator, name);
                 try encodeString(list, allocator, field.value);
             }
         }
+    }
+
+    fn normalizedFieldName(allocator: std.mem.Allocator, name: []const u8, storage: *?[]u8) ![]const u8 {
+        for (name) |byte| {
+            if (byte >= 'A' and byte <= 'Z') {
+                const lowered = try allocator.dupe(u8, name);
+                for (lowered) |*out| out.* = std.ascii.toLower(out.*);
+                storage.* = lowered;
+                return lowered;
+            }
+        }
+        return name;
     }
 
     pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
@@ -1844,6 +1859,18 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     try std.testing.expectEqualStrings("value", decoded[1].value);
     try std.testing.expectEqualStrings(":status", Qpack.staticEntry(25).?.name);
     try std.testing.expectEqualStrings("200", Qpack.staticEntry(25).?.value);
+
+    block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":StatuS", .value = "200" },
+        .{ .name = "X-Proto", .value = "QUIC" },
+    });
+    const lower_decoded = try Qpack.decodeLiteralBlock(allocator, block.items);
+    defer Qpack.freeDecodedFields(allocator, lower_decoded);
+    try std.testing.expectEqualStrings(":status", lower_decoded[0].name);
+    try std.testing.expectEqualStrings("200", lower_decoded[0].value);
+    try std.testing.expectEqualStrings("x-proto", lower_decoded[1].name);
+    try std.testing.expectEqualStrings("QUIC", lower_decoded[1].value);
 }
 
 test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
