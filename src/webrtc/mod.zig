@@ -1247,6 +1247,9 @@ pub const sdp = struct {
             if (findAttr(media.attributes, "msid")) |msid| {
                 parseMsid(msid, &stream_id, &track_id);
             }
+            if (stream_id.len == 0 or track_id.len == 0) {
+                inferMsidFromSsrc(media.attributes, &stream_id, &track_id);
+            }
 
             var rtx_pairs: [16]SsrcPair = undefined;
             var rtx_len: usize = 0;
@@ -1481,6 +1484,20 @@ pub const sdp = struct {
             }
         }
         return ssrc;
+    }
+
+    fn inferMsidFromSsrc(attrs: []const Attribute, stream_id: *[]const u8, track_id: *[]const u8) void {
+        for (attrs) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, "ssrc")) continue;
+            var local_stream = stream_id.*;
+            var local_track = track_id.*;
+            _ = parseSsrcAttribute(attr.value, &local_stream, &local_track) orelse continue;
+            if (local_stream.len != 0 and local_track.len != 0) {
+                stream_id.* = local_stream;
+                track_id.* = local_track;
+                return;
+            }
+        }
     }
 
     fn collectSsrcGroups(
@@ -5215,7 +5232,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=ssrc:5000 msid:fec_stream fec_track\r\n" ++
         "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
         "a=mid:simulcast\r\n" ++
-        "a=msid:sim_stream sim_track\r\n" ++
+        "a=ssrc:7000 msid:sim_stream sim_track\r\n" ++
         "a=rid:f send pt=96\r\n" ++
         "a=rid:h send pt=96\r\n" ++
         "a=simulcast:send f;~h\r\n" ++
