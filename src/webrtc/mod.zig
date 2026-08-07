@@ -3574,6 +3574,35 @@ pub const rtcp = struct {
                 bitmask >>= 1;
             }
         }
+
+        pub fn range(self: NackPair, context: anytype, comptime callback: fn (@TypeOf(context), u16) bool) void {
+            if (!callback(context, self.packet_id)) return;
+            var bitmask = self.lost_packet_bitmask;
+            var delta: u16 = 1;
+            while (bitmask != 0) : (delta += 1) {
+                if ((bitmask & 1) != 0) {
+                    if (!callback(context, self.packet_id +% delta)) return;
+                }
+                bitmask >>= 1;
+            }
+        }
+
+        pub fn packetList(self: NackPair, out: []u16) Error![]u16 {
+            if (out.len < self.sequenceCount()) return error.BufferTooShort;
+            var count: usize = 0;
+            const Collector = struct {
+                out: []u16,
+                count: *usize,
+
+                fn append(collector: @This(), sequence_number: u16) bool {
+                    collector.out[collector.count.*] = sequence_number;
+                    collector.count.* += 1;
+                    return true;
+                }
+            };
+            self.range(Collector{ .out = out, .count = &count }, Collector.append);
+            return out[0..count];
+        }
     };
 
     pub fn nackPairsFromSequenceNumbers(allocator: std.mem.Allocator, sequence_numbers: []const u16) Error![]NackPair {
@@ -8958,6 +8987,24 @@ test "RTCP NACK tracker detects RTP gaps and wraparound" {
     try std.testing.expectEqual(@as(u16, 100), pairs_from_list[0].packet_id);
     try std.testing.expect(pairs_from_list[0].contains(102));
     try std.testing.expect(pairs_from_list[0].contains(104));
+    var packet_list_buf: [17]u16 = undefined;
+    const packet_list = try pairs_from_list[0].packetList(&packet_list_buf);
+    try std.testing.expectEqualSlices(u16, &.{ 100, 102, 104 }, packet_list);
+    var too_small_packet_list: [2]u16 = undefined;
+    try std.testing.expectError(error.BufferTooShort, pairs_from_list[0].packetList(&too_small_packet_list));
+
+    const RangeCollector = struct {
+        list: *std.ArrayList(u16),
+
+        fn appendUntilSecond(collector: @This(), sequence_number: u16) bool {
+            collector.list.append(std.testing.allocator, sequence_number) catch unreachable;
+            return collector.list.items.len < 2;
+        }
+    };
+    var early_range: std.ArrayList(u16) = .empty;
+    defer early_range.deinit(allocator);
+    pairs_from_list[0].range(RangeCollector{ .list = &early_range }, RangeCollector.appendUntilSecond);
+    try std.testing.expectEqualSlices(u16, &.{ 100, 102 }, early_range.items);
     try std.testing.expectEqual(@as(u16, 117), pairs_from_list[1].packet_id);
     try std.testing.expectEqual(@as(u16, 0xfffe), pairs_from_list[2].packet_id);
     try std.testing.expect(pairs_from_list[2].contains(0xffff));
