@@ -1043,6 +1043,21 @@ pub const sdp = struct {
         value: []const u8,
     };
 
+    pub fn formatAttributeLine(allocator: std.mem.Allocator, attr: Attribute) Error![]u8 {
+        try validateSdpToken(attr.name);
+        if (attr.value.len == 0) {
+            return std.fmt.allocPrint(allocator, "a={s}\r\n", .{attr.name});
+        }
+        try validateSdpAttributeValue(attr.value);
+        return std.fmt.allocPrint(allocator, "a={s}:{s}\r\n", .{ attr.name, attr.value });
+    }
+
+    pub fn appendAttributeLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, attr: Attribute) Error!void {
+        const line = try formatAttributeLine(allocator, attr);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub const Media = struct {
         kind: []const u8,
         port: u16,
@@ -8834,6 +8849,19 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
     try std.testing.expectEqualStrings("mid", session.media[0].attributes[0].name);
+    const group_attr_line = try sdp.formatAttributeLine(allocator, session.attributes[0]);
+    defer allocator.free(group_attr_line);
+    try std.testing.expectEqualStrings("a=group:BUNDLE 0\r\n", group_attr_line);
+    const property_attr_line = try sdp.formatAttributeLine(allocator, .{ .name = "rtcp-mux", .value = "" });
+    defer allocator.free(property_attr_line);
+    try std.testing.expectEqualStrings("a=rtcp-mux\r\n", property_attr_line);
+    var generic_attr_lines: std.ArrayList(u8) = .empty;
+    defer generic_attr_lines.deinit(allocator);
+    try sdp.appendAttributeLine(&generic_attr_lines, allocator, session.media[0].attributes[0]);
+    try sdp.appendAttributeLine(&generic_attr_lines, allocator, .{ .name = "rtcp-mux", .value = "" });
+    try std.testing.expectEqualStrings("a=mid:0\r\na=rtcp-mux\r\n", generic_attr_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatAttributeLine(allocator, .{ .name = "bad name", .value = "" }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatAttributeLine(allocator, .{ .name = "mid", .value = "bad\nvalue" }));
     const session_header = try sdp.formatSessionHeaderLines(allocator, session);
     defer allocator.free(session_header);
     try std.testing.expectEqualStrings(
