@@ -768,6 +768,12 @@ pub const sdp = struct {
         }
     };
 
+    pub const TransportAttributes = struct {
+        ice_lite: bool = false,
+        rtcp_mux: bool = false,
+        rtcp_rsize: bool = false,
+    };
+
     pub const DtlsRole = enum {
         auto,
         client,
@@ -1144,6 +1150,15 @@ pub const sdp = struct {
             if (findAttr(media.attributes, "setup")) |setup| return (try parseDtlsSetupAttribute(setup)).dtlsRole();
         }
         return .auto;
+    }
+
+    pub fn extractTransportAttributes(session: Session) TransportAttributes {
+        const media = candidateMedia(session);
+        return .{
+            .ice_lite = findAttr(session.attributes, "ice-lite") != null,
+            .rtcp_mux = if (media) |selected| findAttr(selected.attributes, "rtcp-mux") != null else false,
+            .rtcp_rsize = if (media) |selected| findAttr(selected.attributes, "rtcp-rsize") != null else false,
+        };
     }
 
     pub fn extractSctpParameters(session: Session) Error!SctpParameters {
@@ -5091,6 +5106,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
         "s=-\r\n" ++
         "t=0 0\r\n" ++
+        "a=ice-lite\r\n" ++
         "a=group:BUNDLE 1 0\r\n" ++
         "a=extmap:9 " ++ sdp.audio_level_uri ++ "\r\n" ++
         "a=fingerprint:sha-256 11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:10:20:30:40:50:60:70:80:90:A0:B0:C0:D0:E0:F0:01\r\n" ++
@@ -5107,6 +5123,8 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=ice-ufrag:bundle-ufrag\r\n" ++
         "a=ice-pwd:bundle-pwd\r\n" ++
         "a=fingerprint:sha-256 01:23:45:67:89:AB:CD:EF:FE:DC:BA:98:76:54:32:10:11:33:55:77:99:BB:DD:FF:00:22:44:66:88:AA:CC:EE\r\n" ++
+        "a=rtcp-mux\r\n" ++
+        "a=rtcp-rsize\r\n" ++
         "a=sctp-port:5000\r\n" ++
         "a=max-message-size:262144\r\n" ++
         "a=extmap-allow-mixed\r\n" ++
@@ -5122,6 +5140,11 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const creds = try sdp.extractIceCredentials(session);
     try std.testing.expectEqualStrings("bundle-ufrag", creds.ufrag);
     try std.testing.expectEqualStrings("bundle-pwd", creds.password);
+
+    const transport = sdp.extractTransportAttributes(session);
+    try std.testing.expect(transport.ice_lite);
+    try std.testing.expect(transport.rtcp_mux);
+    try std.testing.expect(transport.rtcp_rsize);
 
     try std.testing.expect(sdp.extMapAllowMixed(session));
     const twcc = (try sdp.findExtMapInSession(session, sdp.transport_cc_uri)).?;
