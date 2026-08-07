@@ -589,6 +589,13 @@ pub const sdp = struct {
         password: []const u8,
     };
 
+    pub const SctpParameters = struct {
+        port: u16,
+        max_message_size: u32 = 0,
+        max_channels: ?u16 = null,
+        protocol: []const u8 = "webrtc-datachannel",
+    };
+
     pub const abs_send_time_uri = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
     pub const transport_cc_uri = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
     pub const sdes_mid_uri = "urn:ietf:params:rtp-hdrext:sdes:mid";
@@ -825,11 +832,122 @@ pub const sdp = struct {
         };
     }
 
+    pub fn extractSctpParameters(session: Session) Error!SctpParameters {
+        const media = dataChannelMedia(session) orelse return error.InvalidSdp;
+        var port: ?u16 = null;
+        var protocol: ?[]const u8 = null;
+        var max_channels: ?u16 = null;
+
+        if (findAttr(media.attributes, "sctp-port")) |raw_port| {
+            port = parseSctpPort(raw_port);
+        }
+        if (findAttr(media.attributes, "sctpmap")) |raw_map| {
+            const mapped = try parseSctpMapAttribute(raw_map);
+            if (port) |existing| {
+                if (existing != mapped.port) return error.InvalidSdp;
+            } else {
+                port = mapped.port;
+            }
+            protocol = mapped.protocol;
+            max_channels = mapped.max_channels;
+        }
+        if (port == null) {
+            // Older WebRTC stacks used `m=application ... DTLS/SCTP 5000`
+            // plus `a=sctpmap:5000 webrtc-datachannel 256` instead of the
+            // RFC 8841 `a=sctp-port:5000` form.  Pion still accepts these
+            // offers for interop; preserve that behavior here so generated or
+            // archived SDP from old browsers remains usable.
+            port = parseSctpPort(firstFormatToken(media.formats) orelse return error.InvalidSdp);
+        }
+        if (protocol == null) {
+            if (firstNonNumericFormat(media.formats)) |format| protocol = format;
+        }
+
+        return .{
+            .port = port orelse return error.InvalidSdp,
+            .max_message_size = try parseMaxMessageSize(findAttr(media.attributes, "max-message-size")),
+            .max_channels = max_channels,
+            .protocol = protocol orelse "webrtc-datachannel",
+        };
+    }
+
     pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
         for (attrs) |attr| {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
         }
         return null;
+    }
+
+    const SctpMap = struct {
+        port: u16,
+        protocol: []const u8,
+        max_channels: ?u16 = null,
+    };
+
+    fn parseSctpMapAttribute(raw: []const u8) Error!SctpMap {
+        var parts = std.mem.tokenizeAny(u8, raw, " \t");
+        const port_s = parts.next() orelse return error.InvalidSdp;
+        const protocol = parts.next() orelse return error.InvalidSdp;
+        if (protocol.len == 0) return error.InvalidSdp;
+        const max_channels_s = parts.next();
+        if (parts.next() != null) return error.InvalidSdp;
+        return .{
+            .port = parseSctpPort(port_s) orelse return error.InvalidSdp,
+            .protocol = protocol,
+            .max_channels = if (max_channels_s) |value| std.fmt.parseInt(u16, value, 10) catch return error.InvalidSdp else null,
+        };
+    }
+
+    fn parseSctpPort(value: []const u8) ?u16 {
+        if (value.len == 0) return null;
+        const port = std.fmt.parseInt(u16, value, 10) catch return null;
+        if (port == 0) return null;
+        return port;
+    }
+
+    fn parseMaxMessageSize(value: ?[]const u8) Error!u32 {
+        const raw = value orelse return 0;
+        if (raw.len == 0) return error.InvalidSdp;
+        return std.fmt.parseInt(u32, raw, 10) catch return error.InvalidSdp;
+    }
+
+    fn dataChannelMedia(session: Session) ?Media {
+        if (candidateMedia(session)) |media| {
+            if (mediaLooksLikeDataChannel(media)) return media;
+        }
+        for (session.media) |media| {
+            if (mediaLooksLikeDataChannel(media)) return media;
+        }
+        return null;
+    }
+
+    fn mediaLooksLikeDataChannel(media: Media) bool {
+        if (!std.ascii.eqlIgnoreCase(media.kind, "application")) return false;
+        if (findAttr(media.attributes, "sctp-port") != null or findAttr(media.attributes, "sctpmap") != null) return true;
+        if (std.ascii.indexOfIgnoreCase(media.protocol, "SCTP") != null) return true;
+        if (formatContains(media.formats, "webrtc-datachannel")) return true;
+        return false;
+    }
+
+    fn firstFormatToken(formats: []const u8) ?[]const u8 {
+        var tokens = std.mem.tokenizeAny(u8, formats, " \t");
+        return tokens.next();
+    }
+
+    fn firstNonNumericFormat(formats: []const u8) ?[]const u8 {
+        var tokens = std.mem.tokenizeAny(u8, formats, " \t");
+        while (tokens.next()) |token| {
+            _ = std.fmt.parseInt(u16, token, 10) catch return token;
+        }
+        return null;
+    }
+
+    fn formatContains(formats: []const u8, needle: []const u8) bool {
+        var tokens = std.mem.tokenizeAny(u8, formats, " \t");
+        while (tokens.next()) |token| {
+            if (std.ascii.eqlIgnoreCase(token, needle)) return true;
+        }
+        return false;
     }
 
     fn parseFingerprint(raw: []const u8) Error!Fingerprint {
@@ -4133,6 +4251,8 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=ice-ufrag:bundle-ufrag\r\n" ++
         "a=ice-pwd:bundle-pwd\r\n" ++
         "a=fingerprint:sha-256 01:23:45:67:89:AB:CD:EF:FE:DC:BA:98:76:54:32:10:11:33:55:77:99:BB:DD:FF:00:22:44:66:88:AA:CC:EE\r\n" ++
+        "a=sctp-port:5000\r\n" ++
+        "a=max-message-size:262144\r\n" ++
         "a=extmap-allow-mixed\r\n" ++
         "a=extmap:3/recvonly " ++ sdp.transport_cc_uri ++ " appdata\r\n" ++
         "a=extmap:4 " ++ sdp.sdes_mid_uri ++ "\r\n";
@@ -4185,6 +4305,31 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("75:74:5A:A6:A4:E5:52:F4:A7:67:4C:01:C7:EE:91:3F:21:3D:A2:E3:53:7B:6F:30:86:F2:30:AA:65:FB:04:24", media_fingerprint.value);
     const media_creds = try sdp.extractIceCredentials(media_session);
     try std.testing.expectEqualStrings("media-ufrag", media_creds.ufrag);
+
+    const sctp_params = try sdp.extractSctpParameters(session);
+    try std.testing.expectEqual(@as(u16, 5000), sctp_params.port);
+    try std.testing.expectEqual(@as(u32, 262144), sctp_params.max_message_size);
+    try std.testing.expectEqual(@as(?u16, null), sctp_params.max_channels);
+    try std.testing.expectEqualStrings("webrtc-datachannel", sctp_params.protocol);
+
+    const legacy_datachannel =
+        "v=0\r\n" ++
+        "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 63743 DTLS/SCTP 5000\r\n" ++
+        "a=mid:data\r\n" ++
+        "a=sctpmap:5000 webrtc-datachannel 256\r\n" ++
+        "a=fingerprint:sha-256 75:74:5A:A6:A4:E5:52:F4:A7:67:4C:01:C7:EE:91:3F:21:3D:A2:E3:53:7B:6F:30:86:F2:30:AA:65:FB:04:24\r\n" ++
+        "a=ice-ufrag:media-ufrag\r\n" ++
+        "a=ice-pwd:media-pwd\r\n";
+    var legacy_session = try sdp.parse(allocator, legacy_datachannel);
+    defer legacy_session.deinit(allocator);
+    const legacy_sctp = try sdp.extractSctpParameters(legacy_session);
+    try std.testing.expectEqual(@as(u16, 5000), legacy_sctp.port);
+    try std.testing.expectEqual(@as(u32, 0), legacy_sctp.max_message_size);
+    try std.testing.expectEqual(@as(?u16, 256), legacy_sctp.max_channels);
+    try std.testing.expectEqualStrings("webrtc-datachannel", legacy_sctp.protocol);
 }
 
 test "SDP rejects missing or malformed DTLS/ICE details" {
@@ -4221,6 +4366,23 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
         "a=ice-ufrag:ufrag\r\n");
     defer missing_pwd.deinit(allocator);
     try std.testing.expectError(error.MissingIcePwd, sdp.extractIceCredentials(missing_pwd));
+
+    var invalid_sctp_port = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=sctp-port:not-a-port\r\n");
+    defer invalid_sctp_port.deinit(allocator);
+    try std.testing.expectError(error.InvalidSdp, sdp.extractSctpParameters(invalid_sctp_port));
+
+    var mismatched_sctpmap = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=sctp-port:5000\r\n" ++
+        "a=sctpmap:6000 webrtc-datachannel 256\r\n");
+    defer mismatched_sctpmap.deinit(allocator);
+    try std.testing.expectError(error.InvalidSdp, sdp.extractSctpParameters(mismatched_sctpmap));
 }
 
 test "RTP and DTLS record parsers" {
