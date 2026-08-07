@@ -2475,7 +2475,6 @@ pub const sdp = struct {
                 var local_track = track_id;
                 const ssrc = parseSsrcAttribute(attr.value, &local_stream, &local_track) orelse continue;
                 if (repairBase(&rtx_pairs, rtx_len, ssrc) != null or repairBase(&fec_pairs, fec_len, ssrc) != null) continue;
-                if (local_stream.len == 0 or local_track.len == 0) continue;
                 const existing = findTrackBySsrc(media_tracks.items, ssrc);
                 if (existing) |track| {
                     track.stream_id = local_stream;
@@ -9674,6 +9673,10 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=mid:malformed-msid\r\n" ++
         "a=sendrecv\r\n" ++
         "a=ssrc:2500 msid:malformed_stream malformed_track extra\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:bare-ssrc\r\n" ++
+        "a=sendrecv\r\n" ++
+        "a=ssrc:2550\r\n" ++
         "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
         "a=mid:media-msid\r\n" ++
         "a=sendonly\r\n" ++
@@ -9701,7 +9704,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     defer track_session.deinit(allocator);
     const tracks = try sdp.extractTrackDetails(allocator, track_session);
     defer sdp.freeTrackDetails(allocator, tracks);
-    try std.testing.expectEqual(@as(usize, 4), tracks.len);
+    try std.testing.expectEqual(@as(usize, 6), tracks.len);
     try std.testing.expectEqual(sdp.MediaDirection.sendrecv, sdp.parseMediaDirection("SENDRECV").?);
     try std.testing.expect(sdp.parseMediaDirection("sideways") == null);
     const direction_line = try sdp.formatMediaDirectionLine(allocator, .sendrecv);
@@ -9715,39 +9718,45 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(?u32, 2000), tracks[0].ssrc);
     try std.testing.expectEqualStrings("audio_stream", tracks[0].stream_id);
     try std.testing.expectEqualStrings("audio_track", tracks[0].track_id);
-    try std.testing.expect(sdp.trackDetailsForMid(tracks, "malformed-msid") == null);
-    try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 2500) == null);
-    try std.testing.expectEqualStrings("media-msid", tracks[1].mid);
-    try std.testing.expectEqual(@as(?u32, 2600), tracks[1].ssrc);
-    try std.testing.expectEqualStrings("media_stream", tracks[1].stream_id);
-    try std.testing.expectEqualStrings("media_track", tracks[1].track_id);
-    try std.testing.expectEqualStrings("video", tracks[2].mid);
-    try std.testing.expectEqual(@as(?u32, 3000), tracks[2].ssrc);
-    try std.testing.expectEqual(@as(?u32, 4000), tracks[2].rtx_ssrc);
-    try std.testing.expectEqual(@as(?u32, 5000), tracks[2].fec_ssrc);
+    try std.testing.expectEqualStrings("malformed-msid", tracks[1].mid);
+    try std.testing.expectEqual(@as(?u32, 2500), tracks[1].ssrc);
+    try std.testing.expectEqualStrings("", tracks[1].stream_id);
+    try std.testing.expectEqualStrings("", tracks[1].track_id);
+    try std.testing.expectEqualStrings("bare-ssrc", tracks[2].mid);
+    try std.testing.expectEqual(@as(?u32, 2550), tracks[2].ssrc);
+    try std.testing.expectEqualStrings("", tracks[2].stream_id);
+    try std.testing.expectEqualStrings("", tracks[2].track_id);
+    try std.testing.expectEqualStrings("media-msid", tracks[3].mid);
+    try std.testing.expectEqual(@as(?u32, 2600), tracks[3].ssrc);
+    try std.testing.expectEqualStrings("media_stream", tracks[3].stream_id);
+    try std.testing.expectEqualStrings("media_track", tracks[3].track_id);
+    try std.testing.expectEqualStrings("video", tracks[4].mid);
+    try std.testing.expectEqual(@as(?u32, 3000), tracks[4].ssrc);
+    try std.testing.expectEqual(@as(?u32, 4000), tracks[4].rtx_ssrc);
+    try std.testing.expectEqual(@as(?u32, 5000), tracks[4].fec_ssrc);
     try std.testing.expectEqualStrings("video_track", sdp.trackDetailsForMid(tracks, "video").?.track_id);
     try std.testing.expectEqualStrings("video_track", sdp.trackDetailsForSsrc(tracks, 3000).?.track_id);
     try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 4000) == null);
     try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 5000) == null);
-    try std.testing.expectEqualStrings("simulcast", tracks[3].mid);
-    try std.testing.expectEqualStrings("sim_stream", tracks[3].stream_id);
-    try std.testing.expectEqual(@as(usize, 2), tracks[3].rids.len);
-    try std.testing.expectEqualStrings("f", tracks[3].rids[0].id);
-    try std.testing.expect(tracks[3].rids[1].paused);
+    try std.testing.expectEqualStrings("simulcast", tracks[5].mid);
+    try std.testing.expectEqualStrings("sim_stream", tracks[5].stream_id);
+    try std.testing.expectEqual(@as(usize, 2), tracks[5].rids.len);
+    try std.testing.expectEqualStrings("f", tracks[5].rids[0].id);
+    try std.testing.expect(tracks[5].rids[1].paused);
     try std.testing.expectEqualStrings("sim_track", sdp.trackDetailsForRid(tracks, "simulcast", "f").?.track_id);
     try std.testing.expectEqualStrings("sim_track", sdp.trackDetailsForRid(tracks, "simulcast", "h").?.track_id);
     try std.testing.expect(sdp.trackDetailsForRid(tracks, "video", "f") == null);
     try std.testing.expect(!sdp.tracksContainRepeatedMid(tracks));
-    const rid_line = try sdp.formatRidLine(allocator, tracks[3].rids[0]);
+    const rid_line = try sdp.formatRidLine(allocator, tracks[5].rids[0]);
     defer allocator.free(rid_line);
     try std.testing.expectEqualStrings("a=rid:f send pt=96\r\n", rid_line);
-    const simulcast_line = try sdp.formatSimulcastLine(allocator, "send", tracks[3].rids);
+    const simulcast_line = try sdp.formatSimulcastLine(allocator, "send", tracks[5].rids);
     defer allocator.free(simulcast_line);
     try std.testing.expectEqualStrings("a=simulcast:send f;~h\r\n", simulcast_line);
     var rid_lines: std.ArrayList(u8) = .empty;
     defer rid_lines.deinit(allocator);
-    try sdp.appendRidLine(&rid_lines, allocator, tracks[3].rids[0]);
-    try sdp.appendSimulcastLine(&rid_lines, allocator, "send", tracks[3].rids);
+    try sdp.appendRidLine(&rid_lines, allocator, tracks[5].rids[0]);
+    try sdp.appendSimulcastLine(&rid_lines, allocator, "send", tracks[5].rids);
     try std.testing.expectEqualStrings("a=rid:f send pt=96\r\na=simulcast:send f;~h\r\n", rid_lines.items);
     try std.testing.expectError(error.InvalidSdp, sdp.formatRidLine(allocator, .{ .id = "", .direction = "send" }));
     try std.testing.expectError(error.InvalidSdp, sdp.formatRidLine(allocator, .{ .id = "f", .direction = "send", .parameters = "bad\nparam" }));
