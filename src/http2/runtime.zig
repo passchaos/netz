@@ -41,6 +41,11 @@ pub const Limits = struct {
     max_frame_payload: usize = 16 * 1024 * 1024,
     max_body_bytes: usize = 16 * 1024 * 1024,
     max_header_fields: usize = 256,
+    /// Bounds HEADERS/PUSH_PROMISE continuation chains independently from byte
+    /// limits.  Rust h2 derives this from SETTINGS_MAX_HEADER_LIST_SIZE and the
+    /// receive frame size to prevent peers from sending endless empty
+    /// CONTINUATION frames that never grow the header block.
+    max_continuation_frames: ?usize = null,
     header_table_size: usize = http2.Hpack.default_dynamic_table_size,
     initial_window_size: u32 = @intCast(default_flow_window),
     max_concurrent_streams: ?u32 = null,
@@ -1488,17 +1493,26 @@ pub const Connection = struct {
         if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
 
         var flags = first.header.flags;
+        var continuation_count: usize = 0;
+        const max_continuations = self.maxContinuationFrames();
         while ((flags & flag_end_headers) == 0) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .continuation or frame.frame.header.stream_id != first.header.stream_id) {
                 return error.UnexpectedFrame;
             }
+            continuation_count += 1;
+            if (continuation_count > max_continuations) return error.MessageTooLarge;
             try block.appendSlice(self.allocator, frame.frame.payload);
             if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
             flags = frame.frame.header.flags;
         }
         return cloneDecodedHeaders(self.allocator, block.items, self.limits, &self.hpack_decoder);
+    }
+
+    fn maxContinuationFrames(self: Connection) usize {
+        if (self.limits.max_continuation_frames) |limit| return limit;
+        return calcMaxContinuationFrames(self.limits.max_header_list_size, self.limits.max_frame_size);
     }
 
     fn writeData(self: *Connection, stream_id: u31, data: []const u8, end_stream: bool) Error!void {
@@ -1988,6 +2002,13 @@ fn writeFrame(
 fn validateLocalLimits(limits: Limits) Error!void {
     if (limits.initial_window_size > std.math.maxInt(i31)) return error.InvalidSetting;
     if (limits.max_frame_size < default_max_frame_size or limits.max_frame_size > max_max_frame_size) return error.InvalidSetting;
+    if (limits.max_continuation_frames) |limit| if (limit == 0) return error.InvalidSetting;
+}
+
+fn calcMaxContinuationFrames(header_max: usize, frame_max: usize) usize {
+    const min_frames_for_list = @max(header_max / frame_max, 1);
+    const padding = min_frames_for_list >> 2;
+    return @max(min_frames_for_list +| padding, 5);
 }
 
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
@@ -3719,6 +3740,67 @@ test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("ok", response.body);
     try std.testing.expectEqualStrings(long_header_value, findHeader(response.headers, "x-long-response").?);
+}
+
+test "HTTP/2 runtime bounds CONTINUATION frame chains" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .max_continuation_frames = 2,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            try std.testing.expectError(error.MessageTooLarge, connection.readRequest());
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/continuation-flood" },
+        .{ .name = ":scheme", .value = "https" },
+    });
+    try writeFrame(allocator, io, client.stream, .headers, 0, 1, block.items);
+    try writeFrame(allocator, io, client.stream, .continuation, 0, 1, &.{});
+    try writeFrame(allocator, io, client.stream, .continuation, 0, 1, &.{});
+    try writeFrame(allocator, io, client.stream, .continuation, flag_end_headers, 1, &.{});
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 runtime decodes padded priority HEADERS payloads" {
