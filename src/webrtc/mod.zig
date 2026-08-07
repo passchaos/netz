@@ -4159,6 +4159,7 @@ pub const rtcp = struct {
     };
 
     pub const twcc_delta_tick_micros: i32 = 250;
+    pub const twcc_reference_time_unit_micros: u64 = 64 * 1000;
     pub const twcc_small_delta_max_micros: i32 = @as(i32, std.math.maxInt(u8)) * twcc_delta_tick_micros;
     pub const twcc_large_delta_min_micros: i32 = @as(i32, std.math.minInt(i16)) * twcc_delta_tick_micros;
     pub const twcc_large_delta_max_micros: i32 = @as(i32, std.math.maxInt(i16)) * twcc_delta_tick_micros;
@@ -4182,6 +4183,14 @@ pub const rtcp = struct {
         return @intCast(ticks);
     }
 
+    pub fn twccReferenceTimeFromUnixMicros(unix_time_micros: u64) u24 {
+        return @truncate(unix_time_micros / twcc_reference_time_unit_micros);
+    }
+
+    pub fn twccReferenceTimeToMicros(reference_time_64ms: u24) u64 {
+        return @as(u64, reference_time_64ms) * twcc_reference_time_unit_micros;
+    }
+
     pub const TransportWideCc = struct {
         sender_ssrc: u32,
         media_ssrc: u32,
@@ -4194,6 +4203,10 @@ pub const rtcp = struct {
             const delta = sequence_number -% self.base_sequence_number;
             if (delta >= self.packets.len) return null;
             return self.packets[delta];
+        }
+
+        pub fn referenceTimeMicros(self: TransportWideCc) u64 {
+            return twccReferenceTimeToMicros(self.reference_time_64ms);
         }
 
         pub fn deinit(self: *TransportWideCc, allocator: std.mem.Allocator) void {
@@ -9872,6 +9885,10 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(@as(u32, 0x01020304), parsed.packet.transport_wide_cc.sender_ssrc);
     try std.testing.expectEqual(@as(u16, 500), parsed.packet.transport_wide_cc.base_sequence_number);
     try std.testing.expectEqual(@as(u24, 0x00a0b0), parsed.packet.transport_wide_cc.reference_time_64ms);
+    try std.testing.expectEqual(@as(u64, 64_000), rtcp.twcc_reference_time_unit_micros);
+    try std.testing.expectEqual(@as(u64, 0x00a0b0 * 64_000), parsed.packet.transport_wide_cc.referenceTimeMicros());
+    try std.testing.expectEqual(@as(u24, 0x00a0b0), rtcp.twccReferenceTimeFromUnixMicros(parsed.packet.transport_wide_cc.referenceTimeMicros() + 63_999));
+    try std.testing.expectEqual(@as(u64, 0x00a0b0 * 64_000), rtcp.twccReferenceTimeToMicros(0x00a0b0));
     try std.testing.expectEqual(@as(u8, 7), parsed.packet.transport_wide_cc.feedback_packet_count);
     try std.testing.expectEqual(@as(usize, 5), parsed.packet.transport_wide_cc.packets.len);
     try std.testing.expect(parsed.packet.transport_wide_cc.packets[0].received());
