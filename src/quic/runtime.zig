@@ -8,9 +8,7 @@ pub const Error = quic.Error || error{
     DatagramTooLarge,
     TrailingBytes,
     NoConnectionRoute,
-} || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.Cancelable;
-
-pub const version_negotiation_response_first_byte: u8 = 0xc0;
+} || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError || std.Io.Cancelable;
 
 pub const Limits = struct {
     max_datagram_size: usize = 65_535,
@@ -139,7 +137,7 @@ pub const Endpoint = struct {
         var response: std.ArrayList(u8) = .empty;
         errdefer response.deinit(self.allocator);
         try quic.writeVersionNegotiationPacket(&response, self.allocator, .{
-            .first_byte = version_negotiation_response_first_byte,
+            .first_byte = try versionNegotiationFirstByte(self.io),
             .destination_connection_id = ids.source_connection_id,
             .source_connection_id = ids.destination_connection_id,
             .versions = supported_versions,
@@ -282,6 +280,15 @@ fn versionListContains(supported_versions: []const u32, version: u32) bool {
         if (supported == version) return true;
     }
     return false;
+}
+
+fn versionNegotiationFirstByte(io: std.Io) std.Io.RandomSecureError!u8 {
+    // RFC 9000 leaves the Version Negotiation first byte's lower bits unused.
+    // Mature stacks randomize them (while forcing Header Form=1) so endpoints do
+    // not ossify on one fixed long-header/type-specific pattern.
+    var byte: [1]u8 = undefined;
+    try std.Io.randomSecure(io, &byte);
+    return byte[0] | 0x80;
 }
 
 fn peekUnsupportedVersionConnectionIds(datagram: []const u8, supported_versions: []const u32) ?LongHeaderConnectionIds {
@@ -472,7 +479,7 @@ test "QUIC UDP endpoint builds Version Negotiation for unsupported versions" {
 
     var parsed = try quic.parseVersionNegotiationPacket(allocator, response);
     defer parsed.deinit(allocator);
-    try std.testing.expectEqual(version_negotiation_response_first_byte, parsed.first_byte);
+    try std.testing.expect((parsed.first_byte & 0x80) != 0);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x11, 0x22, 0x33 }, parsed.destination_connection_id);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, parsed.source_connection_id);
     try std.testing.expectEqualSlices(u32, &supported_versions, parsed.versions);
