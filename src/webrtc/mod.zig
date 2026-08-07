@@ -1181,8 +1181,10 @@ pub const rtp = struct {
         for (options.csrcs) |csrc| try wire.appendInt(list, allocator, u32, csrc, .big);
         if (options.extension) |extension| {
             if (extension.data.len % 4 != 0) return error.InvalidRtpPacket;
+            const extension_words = extension.data.len / 4;
+            if (extension_words > std.math.maxInt(u16)) return error.InvalidRtpPacket;
             try wire.appendInt(list, allocator, u16, extension.profile, .big);
-            try wire.appendInt(list, allocator, u16, @intCast(extension.data.len / 4), .big);
+            try wire.appendInt(list, allocator, u16, @intCast(extension_words), .big);
             try list.appendSlice(allocator, extension.data);
         }
         try list.appendSlice(allocator, payload);
@@ -4226,6 +4228,16 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectError(error.InvalidRtpPacket, rtp.writeOneByteHeaderExtensions(&two_byte_extensions, allocator, &.{
         .{ .id = 15, .data = "reserved" },
     }));
+
+    const too_large_extension = try allocator.alloc(u8, (@as(usize, std.math.maxInt(u16)) + 1) * 4);
+    defer allocator.free(too_large_extension);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.writePacket(&encoded, allocator, .{
+        .payload_type = 111,
+        .sequence_number = 11,
+        .timestamp = 100,
+        .ssrc = 0x01020304,
+        .extension = .{ .profile = rtp.one_byte_header_extension_profile, .data = too_large_extension },
+    }, ""));
 }
 
 test "SRTCP NULL_HMAC_SHA1_80 authenticates index and rejects replay" {
