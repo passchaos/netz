@@ -553,6 +553,18 @@ pub fn validatePushPromise(control: ControlState, push_id: u64) Error!void {
     if (push_id > max_push_id) return error.PushIdExceeded;
 }
 
+pub fn validateResponsePushPromises(control: ControlState, bytes: []const u8) Error!void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const frame = try Frame.parse(bytes[offset..]);
+        if (frame.frame_type == FrameType.push_promise) {
+            const promise = try parsePushPromisePayload(frame.payload);
+            try validatePushPromise(control, promise.push_id);
+        }
+        offset += frame.consumed;
+    }
+}
+
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
@@ -1874,6 +1886,17 @@ test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
     try validatePushPromise(.{ .local_max_push_id = 3 }, promise.push_id);
     try std.testing.expectError(error.PushIdExceeded, validatePushPromise(.{}, promise.push_id));
     try std.testing.expectError(error.PushIdExceeded, validatePushPromise(.{ .local_max_push_id = 2 }, promise.push_id));
+
+    var response_with_push: std.ArrayList(u8) = .empty;
+    defer response_with_push.deinit(allocator);
+    try writePushPromiseFrame(&response_with_push, allocator, 3, field_section.items);
+    var response_headers: std.ArrayList(u8) = .empty;
+    defer response_headers.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&response_headers, allocator, &.{.{ .name = ":status", .value = "200" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = response_headers.items, .consumed = 0 }).write(&response_with_push, allocator);
+    try validateResponsePushPromises(.{ .local_max_push_id = 3 }, response_with_push.items);
+    try std.testing.expectError(error.PushIdExceeded, validateResponsePushPromises(.{}, response_with_push.items));
+    try std.testing.expectError(error.PushIdExceeded, validateResponsePushPromises(.{ .local_max_push_id = 2 }, response_with_push.items));
 }
 
 test "HTTP/3 rejects malformed structured frame payloads" {

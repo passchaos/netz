@@ -144,6 +144,7 @@ pub const Client = struct {
                 continue;
             };
             if (stream.stream_id != stream_id) return error.UnexpectedStream;
+            try http3.validateResponsePushPromises(.{}, stream.data);
             var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, stream.data);
             errdefer response.deinit(self.quic_client.endpoint.allocator);
             return .{ .datagram = datagram, .response = response };
@@ -380,6 +381,7 @@ pub const HandshakeClient = struct {
         try sendConnectionMessage(&self.established.connection, stream_id, request_options, self.options);
         const assembled = try receiveConnectionStreamBytes(&self.established.connection, stream_id, self.options, &self.control, .client);
         errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
+        try http3.validateResponsePushPromises(self.control, assembled.bytes);
         var response = try http3.decodeResponse(self.established.connection.endpoint.allocator, assembled.bytes);
         errdefer response.deinit(self.established.connection.endpoint.allocator);
         return .{ .stream_bytes = assembled.bytes, .response = response };
@@ -573,6 +575,7 @@ pub const ProtectedClient = struct {
 
         const assembled = try self.receiveStreamBytes(stream_id);
         errdefer self.quic_client.endpoint.allocator.free(assembled.bytes);
+        try http3.validateResponsePushPromises(self.control, assembled.bytes);
         var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, assembled.bytes);
         errdefer response.deinit(self.quic_client.endpoint.allocator);
         return .{ .stream_bytes = assembled.bytes, .response = response };
