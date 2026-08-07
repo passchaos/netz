@@ -3965,6 +3965,16 @@ pub const rtcp = struct {
         ssrc: u32,
         last_rr: u32,
         dlrr: u32,
+
+        pub fn roundTripDelay65536(self: DlrrReport, now_compact_ntp: u32) ?u32 {
+            if (self.last_rr == 0 or self.dlrr == 0) return null;
+            return now_compact_ntp -% self.last_rr -% self.dlrr;
+        }
+
+        pub fn roundTripDelayNanos(self: DlrrReport, now_compact_ntp: u32) ?u64 {
+            const delay = self.roundTripDelay65536(now_compact_ntp) orelse return null;
+            return (@as(u64, delay) * std.time.ns_per_s) / 65_536;
+        }
     };
 
     pub const DlrrReportBlock = struct {
@@ -9477,6 +9487,12 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 0x88888888), xr.packet.extended_report.blocks[4].dlrr.reports[0].ssrc);
     try std.testing.expectEqual(@as(u32, 0x12345678), xr.packet.extended_report.blocks[4].dlrr.reports[0].last_rr);
     try std.testing.expectEqual(@as(u32, 0x99999999), xr.packet.extended_report.blocks[4].dlrr.reports[0].dlrr);
+    const dlrr_report = xr.packet.extended_report.blocks[4].dlrr.reports[0];
+    const now_compact_ntp = dlrr_report.last_rr +% dlrr_report.dlrr +% 0x00010000;
+    try std.testing.expectEqual(@as(u32, 0x00010000), dlrr_report.roundTripDelay65536(now_compact_ntp).?);
+    try std.testing.expectEqual(@as(u64, std.time.ns_per_s), dlrr_report.roundTripDelayNanos(now_compact_ntp).?);
+    try std.testing.expect((rtcp.DlrrReport{ .ssrc = 1, .last_rr = 0, .dlrr = 1 }).roundTripDelay65536(now_compact_ntp) == null);
+    try std.testing.expect((rtcp.DlrrReport{ .ssrc = 1, .last_rr = 1, .dlrr = 0 }).roundTripDelayNanos(now_compact_ntp) == null);
     try std.testing.expectEqual(@as(u32, 0x09090909), xr.packet.extended_report.blocks[4].dlrr.reports[1].ssrc);
     try std.testing.expect(xr.packet.extended_report.blocks[5].statistics_summary.loss_reports);
     try std.testing.expect(xr.packet.extended_report.blocks[5].statistics_summary.duplicate_reports);
