@@ -523,11 +523,42 @@ pub const ice = struct {
         srflx,
         prflx,
         relay,
+
+        pub fn preference(self: CandidateType) u8 {
+            return candidateTypePreference(self);
+        }
     };
 
     pub const Transport = enum {
         udp,
         tcp,
+    };
+
+    pub const TcpType = enum {
+        active,
+        passive,
+        so,
+    };
+
+    pub const RelayProtocol = enum {
+        udp,
+        tcp,
+        dtls,
+        tls,
+    };
+
+    pub const default_local_preference: u16 = 65_535;
+    pub const default_tcp_priority_offset: u8 = 27;
+    pub const max_tcp_direction_preference: u3 = 7;
+    pub const max_tcp_other_preference: u13 = 8_191;
+
+    pub const CandidatePriorityOptions = struct {
+        transport: Transport = .udp,
+        tcp_type: ?TcpType = null,
+        tcp_priority_offset: u8 = default_tcp_priority_offset,
+        relay_protocol: RelayProtocol = .udp,
+        local_preference: ?u16 = null,
+        tcp_other_preference: u13 = max_tcp_other_preference,
     };
 
     pub const CandidateExtension = struct {
@@ -624,6 +655,19 @@ pub const ice = struct {
             self.* = undefined;
         }
 
+        pub fn parsedTcpType(self: Candidate) Error!?TcpType {
+            const value = self.tcp_type orelse return null;
+            return parseTcpType(value) orelse error.InvalidIceCandidate;
+        }
+
+        pub fn computedPriority(self: Candidate, options: CandidatePriorityOptions) Error!u32 {
+            if (self.component == 0 or self.component > std.math.maxInt(u8)) return error.InvalidIceCandidate;
+            var effective = options;
+            effective.transport = self.transport;
+            if (effective.tcp_type == null) effective.tcp_type = try self.parsedTcpType();
+            return candidatePriority(self.candidate_type, @intCast(self.component), effective);
+        }
+
         pub fn write(self: Candidate, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
             try list.appendSlice(allocator, "candidate:");
             try list.appendSlice(allocator, self.foundation);
@@ -650,6 +694,64 @@ pub const ice = struct {
         }
     };
 
+    pub fn candidateTypePreference(candidate_type: CandidateType) u8 {
+        // RFC 5245/8445 recommended type preferences, mirrored by Pion ICE:
+        // host candidates win over peer-reflexive, then server-reflexive, while
+        // relayed candidates use local preference to rank relay transports.
+        return switch (candidate_type) {
+            .host => 126,
+            .prflx => 110,
+            .srflx => 100,
+            .relay => 0,
+        };
+    }
+
+    pub fn typePreference(candidate_type: CandidateType, options: CandidatePriorityOptions) u8 {
+        const base = candidateTypePreference(candidate_type);
+        if (base == 0 or options.transport != .tcp) return base;
+        return if (options.tcp_priority_offset >= base) 0 else base - options.tcp_priority_offset;
+    }
+
+    pub fn relayLocalPreference(protocol: RelayProtocol) u16 {
+        return switch (protocol) {
+            .tls => 0,
+            .tcp => 1,
+            .dtls => 2,
+            .udp => 3,
+        };
+    }
+
+    pub fn tcpLocalPreference(candidate_type: CandidateType, tcp_type: ?TcpType, other_preference: u13) u16 {
+        const direction_preference: u16 = switch (candidate_type) {
+            .host, .relay => switch (tcp_type orelse return @as(u16, other_preference)) {
+                .active => 6,
+                .passive => 4,
+                .so => 2,
+            },
+            .prflx, .srflx => switch (tcp_type orelse return @as(u16, other_preference)) {
+                .so => 6,
+                .active => 4,
+                .passive => 2,
+            },
+        };
+        // RFC 6544 folds TCP direction preference into the ICE local
+        // preference.  Keep other-pref explicit so multi-homed callers can
+        // provide stable per-interface ordering instead of relying on SDP order.
+        return (@as(u16, 1) << 13) * direction_preference + @as(u16, other_preference);
+    }
+
+    pub fn localPreference(candidate_type: CandidateType, options: CandidatePriorityOptions) u16 {
+        if (options.local_preference) |preference| return preference;
+        if (candidate_type == .relay) return relayLocalPreference(options.relay_protocol);
+        if (options.transport == .tcp) return tcpLocalPreference(candidate_type, options.tcp_type, options.tcp_other_preference);
+        return default_local_preference;
+    }
+
+    pub fn candidatePriority(candidate_type: CandidateType, component_id: u8, options: CandidatePriorityOptions) Error!u32 {
+        if (component_id == 0) return error.InvalidIceCandidate;
+        return stun.priority(typePreference(candidate_type, options), localPreference(candidate_type, options), component_id);
+    }
+
     pub fn pairPriority(controlling_priority: u32, controlled_priority: u32) u64 {
         const min_priority = @as(u64, @min(controlling_priority, controlled_priority));
         const max_priority = @as(u64, @max(controlling_priority, controlled_priority));
@@ -670,6 +772,13 @@ pub const ice = struct {
 
     fn parseCandidateType(value: []const u8) ?CandidateType {
         inline for (std.meta.fields(CandidateType)) |field| {
+            if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
+        }
+        return null;
+    }
+
+    fn parseTcpType(value: []const u8) ?TcpType {
+        inline for (std.meta.fields(TcpType)) |field| {
             if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
         }
         return null;
@@ -725,9 +834,7 @@ pub const ice = struct {
     }
 
     fn validTcpType(value: []const u8) bool {
-        return std.mem.eql(u8, value, "active") or
-            std.mem.eql(u8, value, "passive") or
-            std.mem.eql(u8, value, "so");
+        return parseTcpType(value) != null;
     }
 };
 
@@ -6841,6 +6948,8 @@ test "ICE candidate parser and SDP parser" {
     const candidate = try ice.Candidate.parse(line);
     try std.testing.expectEqual(ice.CandidateType.host, candidate.candidate_type);
     try std.testing.expectEqual(@as(u16, 54400), candidate.port);
+    try std.testing.expectEqual(@as(u8, 126), candidate.candidate_type.preference());
+    try std.testing.expectEqual(@as(u32, 2_130_706_431), try candidate.computedPriority(.{}));
     try std.testing.expectEqual(@as(u64, (((@as(u64, 1) << 32) - 1) * 100) + 2 * 200 + 1), ice.pairPriority(200, 100));
     try std.testing.expectEqual(ice.pairPriority(200, 100), ice.pairPriorityForRole(200, 100, .controlling));
     try std.testing.expectEqual(ice.pairPriority(200, 100), ice.pairPriorityForRole(100, 200, .controlled));
@@ -6848,11 +6957,14 @@ test "ICE candidate parser and SDP parser" {
     const tcp = try ice.Candidate.parse("candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype active");
     try std.testing.expectEqual(ice.Transport.tcp, tcp.transport);
     try std.testing.expectEqualStrings("active", tcp.tcp_type.?);
+    try std.testing.expectEqual(ice.TcpType.active, (try tcp.parsedTcpType()).?);
+    try std.testing.expectEqual(@as(u32, 1_675_624_447), try tcp.computedPriority(.{}));
 
     const relay = try ice.Candidate.parse("candidate:848194626 1 udp 16777215 50.0.0.1 5000 typ relay raddr 192.168.0.1 rport 5001");
     try std.testing.expectEqual(ice.CandidateType.relay, relay.candidate_type);
     try std.testing.expectEqualStrings("192.168.0.1", relay.related_address.?);
     try std.testing.expectEqual(@as(u16, 5001), relay.related_port.?);
+    try std.testing.expectEqual(@as(u32, 1_023), try relay.computedPriority(.{}));
 
     var extended = try ice.Candidate.parseOwned(allocator, "candidate:4207374052 1 tcp 1685790463 192.0.2.15 50000 typ prflx raddr 10.0.0.1 rport 12345 generation 0 network-id 2 network-cost 10");
     defer extended.deinit(allocator);
@@ -6890,6 +7002,38 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
     try std.testing.expectEqualStrings("mid", session.media[0].attributes[0].name);
+}
+
+test "ICE candidate priority helpers mirror RFC and Pion defaults" {
+    try std.testing.expectEqual(@as(u8, 126), ice.candidateTypePreference(.host));
+    try std.testing.expectEqual(@as(u8, 110), ice.candidateTypePreference(.prflx));
+    try std.testing.expectEqual(@as(u8, 100), ice.candidateTypePreference(.srflx));
+    try std.testing.expectEqual(@as(u8, 0), ice.candidateTypePreference(.relay));
+
+    try std.testing.expectEqual(@as(u8, 99), ice.typePreference(.host, .{ .transport = .tcp }));
+    try std.testing.expectEqual(@as(u8, 116), ice.typePreference(.host, .{ .transport = .tcp, .tcp_priority_offset = 10 }));
+    try std.testing.expectEqual(@as(u8, 0), ice.typePreference(.relay, .{ .transport = .tcp }));
+
+    try std.testing.expectEqual(@as(u16, 65_535), ice.localPreference(.host, .{}));
+    try std.testing.expectEqual(@as(u16, 3), ice.relayLocalPreference(.udp));
+    try std.testing.expectEqual(@as(u16, 1), ice.relayLocalPreference(.tcp));
+    try std.testing.expectEqual(@as(u16, (6 << 13) + 8_191), ice.tcpLocalPreference(.host, .active, ice.max_tcp_other_preference));
+    try std.testing.expectEqual(@as(u16, (6 << 13) + 8_191), ice.tcpLocalPreference(.prflx, .so, ice.max_tcp_other_preference));
+    try std.testing.expectEqual(@as(u16, 1234), ice.localPreference(.srflx, .{ .local_preference = 1234 }));
+
+    // These vectors are taken from Pion ICE's Candidate.Priority tests.  The
+    // helper keeps generated SDP priorities aligned with common WebRTC stacks
+    // without callers having to remember the RFC bit layout.
+    try std.testing.expectEqual(@as(u32, 2_130_706_431), try ice.candidatePriority(.host, 1, .{}));
+    try std.testing.expectEqual(@as(u32, 1_675_624_447), try ice.candidatePriority(.host, 1, .{ .transport = .tcp, .tcp_type = .active }));
+    try std.testing.expectEqual(@as(u32, 1_671_430_143), try ice.candidatePriority(.host, 1, .{ .transport = .tcp, .tcp_type = .passive }));
+    try std.testing.expectEqual(@as(u32, 1_667_235_839), try ice.candidatePriority(.host, 1, .{ .transport = .tcp, .tcp_type = .so }));
+    try std.testing.expectEqual(@as(u32, 1_862_270_975), try ice.candidatePriority(.prflx, 1, .{}));
+    try std.testing.expectEqual(@as(u32, 1_407_188_991), try ice.candidatePriority(.prflx, 1, .{ .transport = .tcp, .tcp_type = .so }));
+    try std.testing.expectEqual(@as(u32, 1_694_498_815), try ice.candidatePriority(.srflx, 1, .{}));
+    try std.testing.expectEqual(@as(u32, 1_023), try ice.candidatePriority(.relay, 1, .{ .relay_protocol = .udp }));
+    try std.testing.expectEqual(@as(u32, 511), try ice.candidatePriority(.relay, 1, .{ .relay_protocol = .tcp }));
+    try std.testing.expectError(error.InvalidIceCandidate, ice.candidatePriority(.host, 0, .{}));
 }
 
 test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
