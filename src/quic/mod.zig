@@ -105,16 +105,12 @@ pub const LongHeader = struct {
             token = try cursor.readSlice(std.math.cast(usize, token_len) orelse return error.IntegerOverflow);
             payload_len = try varint.decode(&cursor);
             const pn_len: usize = @as(usize, (first & 0x03)) + 1;
-            const payload_len_usize = std.math.cast(usize, payload_len.?) orelse return error.IntegerOverflow;
-            if (payload_len_usize < pn_len) return error.InvalidFrameLength;
-            if (bytes.len < cursor.pos + payload_len_usize) return error.BufferTooShort;
+            try validateLongHeaderPayloadBounds(bytes.len, cursor.pos, payload_len.?, pn_len);
             packet_number = try cursor.readSlice(pn_len);
         } else if (packet_type == .zero_rtt or packet_type == .handshake) {
             payload_len = try varint.decode(&cursor);
             const pn_len: usize = @as(usize, (first & 0x03)) + 1;
-            const payload_len_usize = std.math.cast(usize, payload_len.?) orelse return error.IntegerOverflow;
-            if (payload_len_usize < pn_len) return error.InvalidFrameLength;
-            if (bytes.len < cursor.pos + payload_len_usize) return error.BufferTooShort;
+            try validateLongHeaderPayloadBounds(bytes.len, cursor.pos, payload_len.?, pn_len);
             packet_number = try cursor.readSlice(pn_len);
         } else if (packet_type == .retry) {
             const remaining = bytes[cursor.pos..];
@@ -137,6 +133,13 @@ pub const LongHeader = struct {
         };
     }
 };
+
+fn validateLongHeaderPayloadBounds(datagram_len: usize, payload_offset: usize, payload_len: u64, pn_len: usize) Error!void {
+    const payload_len_usize = std.math.cast(usize, payload_len) orelse return error.IntegerOverflow;
+    if (payload_len_usize < pn_len) return error.InvalidFrameLength;
+    const packet_end = std.math.add(usize, payload_offset, payload_len_usize) catch return error.IntegerOverflow;
+    if (datagram_len < packet_end) return error.BufferTooShort;
+}
 
 pub const RetryPacket = struct {
     version: u32,
