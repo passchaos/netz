@@ -1034,6 +1034,7 @@ pub const Connection = struct {
 
     fn reserveNextClientStreamId(self: *Connection) Error!u31 {
         const stream_id = self.next_client_stream_id;
+        if (stream_id > std.math.maxInt(u31) - 2) return error.InvalidStreamId;
         if (self.peer_goaway_last_stream_id) |last| {
             if (stream_id > last) return error.ConnectionGoAway;
         }
@@ -6612,6 +6613,30 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
         .error_code = .no_error,
         .debug_data = &.{},
     }));
+}
+
+test "HTTP/2 client stream id allocation detects overflow" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+        .next_client_stream_id = std.math.maxInt(u31),
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    // Rust h2's StreamId::next_id returns an overflow error instead of wrapping
+    // once the 31-bit stream-id space is exhausted.  Keep the same invariant so
+    // long-lived clients cannot wrap to an invalid/previously-used stream id.
+    try std.testing.expectError(error.InvalidStreamId, connection.reserveNextClientStreamId());
+    try std.testing.expectEqual(@as(u31, std.math.maxInt(u31)), connection.next_client_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
 }
 
 test "HTTP/2 local max concurrent streams limits peer opened streams" {
