@@ -993,21 +993,27 @@ pub const sdp = struct {
     }
 
     pub fn extractIceCredentials(session: Session) Error!IceCredentials {
-        var ufrag = findAttr(session.attributes, "ice-ufrag");
-        var password = findAttr(session.attributes, "ice-pwd");
-
-        if (ufrag == null or password == null) {
-            const media = candidateMedia(session);
-            if (media) |selected| {
-                if (ufrag == null) ufrag = findAttr(selected.attributes, "ice-ufrag");
-                if (password == null) password = findAttr(selected.attributes, "ice-pwd");
-            }
+        const session_ufrag = findAttr(session.attributes, "ice-ufrag");
+        const session_password = findAttr(session.attributes, "ice-pwd");
+        if (session_ufrag != null or session_password != null) {
+            // Pion treats session-level ICE credentials as an atomic override.
+            // Mixing a session ufrag with a media password (or vice versa)
+            // could authenticate checks against credentials that never appeared
+            // together in SDP, so report the missing session half instead.
+            return .{
+                .ufrag = session_ufrag orelse return error.MissingIceUfrag,
+                .password = session_password orelse return error.MissingIcePwd,
+            };
         }
 
-        return .{
-            .ufrag = ufrag orelse return error.MissingIceUfrag,
-            .password = password orelse return error.MissingIcePwd,
-        };
+        if (candidateMedia(session)) |selected| {
+            return .{
+                .ufrag = findAttr(selected.attributes, "ice-ufrag") orelse return error.MissingIceUfrag,
+                .password = findAttr(selected.attributes, "ice-pwd") orelse return error.MissingIcePwd,
+            };
+        }
+
+        return error.MissingIceUfrag;
     }
 
     pub fn extractDtlsRole(session: Session) Error!DtlsRole {
@@ -4610,6 +4616,26 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
         "a=ice-ufrag:ufrag\r\n");
     defer missing_pwd.deinit(allocator);
     try std.testing.expectError(error.MissingIcePwd, sdp.extractIceCredentials(missing_pwd));
+
+    var session_ufrag_media_pwd = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=ice-ufrag:session-ufrag\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=ice-ufrag:media-ufrag\r\n" ++
+        "a=ice-pwd:media-pwd\r\n");
+    defer session_ufrag_media_pwd.deinit(allocator);
+    try std.testing.expectError(error.MissingIcePwd, sdp.extractIceCredentials(session_ufrag_media_pwd));
+
+    var session_pwd_media_ufrag = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=ice-pwd:session-pwd\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=ice-ufrag:media-ufrag\r\n" ++
+        "a=ice-pwd:media-pwd\r\n");
+    defer session_pwd_media_ufrag.deinit(allocator);
+    try std.testing.expectError(error.MissingIceUfrag, sdp.extractIceCredentials(session_pwd_media_ufrag));
 
     var invalid_sctp_port = try sdp.parse(allocator, "v=0\r\n" ++
         "s=-\r\n" ++
