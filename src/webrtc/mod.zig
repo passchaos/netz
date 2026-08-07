@@ -1179,6 +1179,39 @@ pub const sdp = struct {
         if (options.extmap_allow_mixed) try list.appendSlice(allocator, "a=extmap-allow-mixed\r\n");
     }
 
+    pub fn formatCandidateAttribute(allocator: std.mem.Allocator, candidate: ice.Candidate) Error![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        candidate.write(&out, allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.OutOfMemory,
+        };
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn formatCandidateLine(allocator: std.mem.Allocator, candidate: ice.Candidate) Error![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.append(allocator, 'a');
+        try out.append(allocator, '=');
+        candidate.write(&out, allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.OutOfMemory,
+        };
+        try out.appendSlice(allocator, "\r\n");
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn appendCandidateLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, candidate: ice.Candidate) Error!void {
+        const line = try formatCandidateLine(allocator, candidate);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn appendEndOfCandidatesLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        try list.appendSlice(allocator, "a=end-of-candidates\r\n");
+    }
+
     pub const RtcpFeedback = struct {
         typ: []const u8,
         parameter: []const u8 = "",
@@ -8497,6 +8530,24 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings(
         "candidate:4207374052 1 tcp 1685790463 192.0.2.15 50000 typ prflx raddr 10.0.0.1 rport 12345 generation 0 network-id 2 network-cost 10",
         extended_line.items,
+    );
+    const extended_attr = try sdp.formatCandidateAttribute(allocator, extended);
+    defer allocator.free(extended_attr);
+    try std.testing.expectEqualStrings(extended_line.items, extended_attr);
+    const extended_sdp_line = try sdp.formatCandidateLine(allocator, extended);
+    defer allocator.free(extended_sdp_line);
+    try std.testing.expectEqualStrings(
+        "a=candidate:4207374052 1 tcp 1685790463 192.0.2.15 50000 typ prflx raddr 10.0.0.1 rport 12345 generation 0 network-id 2 network-cost 10\r\n",
+        extended_sdp_line,
+    );
+    var candidate_lines: std.ArrayList(u8) = .empty;
+    defer candidate_lines.deinit(allocator);
+    try sdp.appendCandidateLine(&candidate_lines, allocator, extended);
+    try sdp.appendEndOfCandidatesLine(&candidate_lines, allocator);
+    try std.testing.expectEqualStrings(
+        "a=candidate:4207374052 1 tcp 1685790463 192.0.2.15 50000 typ prflx raddr 10.0.0.1 rport 12345 generation 0 network-id 2 network-cost 10\r\n" ++
+            "a=end-of-candidates\r\n",
+        candidate_lines.items,
     );
 
     var empty_ext = try ice.Candidate.parseOwned(allocator, "candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype active empty-value-1  empty-value-2 ");
