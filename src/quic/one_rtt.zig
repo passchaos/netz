@@ -746,6 +746,20 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn sendAckForDelayNs(self: *Connection, ack_delay_ns: u64) Error!void {
+        try self.sendAck(try self.encodedLocalAckDelayNanos(ack_delay_ns));
+    }
+
+    pub fn sendAckWithEcnForDelayNs(self: *Connection, ack_delay_ns: u64, ecn_counts: quic.EcnCounts) Error!void {
+        try self.sendAckWithEcn(try self.encodedLocalAckDelayNanos(ack_delay_ns), ecn_counts);
+    }
+
+    pub fn encodedLocalAckDelayNanos(self: Connection, ack_delay_ns: u64) Error!u64 {
+        return quic.rtt.encodeAckDelayNanos(ack_delay_ns, self.config.local_ack_delay_exponent) catch |err| switch (err) {
+            error.InvalidAckDelayExponent => error.InvalidFrame,
+        };
+    }
+
     pub fn resetStream(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
         const entry = try self.sendStreamEntry(stream_id);
         try self.sendResetStream(stream_id, application_error_code, entry.highest_sent_end);
@@ -2368,6 +2382,7 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
         .local_endpoint = .server,
+        .local_ack_delay_exponent = 3,
     });
     defer server.deinit();
 
@@ -2380,11 +2395,13 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     var received = try server.receivePacket();
     defer received.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 0), received.packet.packet_number);
-    try server.sendAck(0);
+    try std.testing.expectEqual(@as(u64, 25), try server.encodedLocalAckDelayNanos(200_000));
+    try server.sendAckForDelayNs(200_000);
 
     var ack_packet = try client.receivePacket();
     defer ack_packet.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 25), ack_packet.frames[0].ack.ack_delay);
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
     try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);

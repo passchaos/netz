@@ -107,6 +107,16 @@ pub fn decodeAckDelayNanos(encoded_ack_delay: u64, ack_delay_exponent: u64) !u64
     return std.math.mul(u64, micros, 1_000) catch error.AckDelayOverflow;
 }
 
+pub fn encodeAckDelayMicros(ack_delay_micros: u64, ack_delay_exponent: u64) !u64 {
+    if (ack_delay_exponent > max_ack_delay_exponent) return error.InvalidAckDelayExponent;
+    const divisor = std.math.shl(u64, 1, @as(u6, @intCast(ack_delay_exponent)));
+    return ack_delay_micros / divisor;
+}
+
+pub fn encodeAckDelayNanos(ack_delay_nanos: u64, ack_delay_exponent: u64) !u64 {
+    return try encodeAckDelayMicros(ack_delay_nanos / 1_000, ack_delay_exponent);
+}
+
 test "QUIC RTT estimator initializes and computes PTO" {
     var stats = Stats{};
     try std.testing.expect(!stats.has_measurement);
@@ -171,4 +181,11 @@ test "QUIC ACK delay decoding applies negotiated exponent" {
     try std.testing.expectEqual(@as(u64, 25 * 8 * 1_000), try decodeAckDelayNanos(25, 3));
     try std.testing.expectError(error.InvalidAckDelayExponent, decodeAckDelayMicros(1, max_ack_delay_exponent + 1));
     try std.testing.expectError(error.AckDelayOverflow, decodeAckDelayNanos(std.math.maxInt(u64), 3));
+}
+
+test "QUIC ACK delay encoding applies local exponent" {
+    try std.testing.expectEqual(@as(u64, 25), try encodeAckDelayMicros(25 * 8, 3));
+    try std.testing.expectEqual(@as(u64, 25), try encodeAckDelayNanos(25 * 8 * 1_000, 3));
+    try std.testing.expectEqual(@as(u64, 0), try encodeAckDelayNanos(7_999, 3));
+    try std.testing.expectError(error.InvalidAckDelayExponent, encodeAckDelayMicros(1, max_ack_delay_exponent + 1));
 }
