@@ -185,8 +185,9 @@ zig build examples
 zig build run-http1-hello
 zig build run-http2-h2c
 zig build run-websocket-echo
-# Linux only: raw std.os.linux.IoUring connect/send/recv example
+# Linux only: raw std.os.linux.IoUring-backed clients
 zig build run-linux-io-uring-http1
+zig build run-linux-io-uring-websocket
 ```
 
 The build script pins the package to Zig `0.16.0`.
@@ -244,9 +245,11 @@ literals such as `http://[::1]:8080/` and `ws://[::1]:8080/chat`.
 
 On Zig 0.16, `std.Io.Uring` exists but its `std.Io.net` networking hooks are
 still unavailable. The portable runtimes therefore use the `std.Io` abstraction
-with `std.Io.Threaded` in portable examples, while `examples/linux_io_uring_http1.zig`
-uses the reusable Linux-only HTTP/1 client path backed by raw
-`std.os.linux.IoUring` `connect`/`send`/`recv` operations.
+with `std.Io.Threaded` in portable examples. Linux-only HTTP/1 and cleartext
+WebSocket client helpers (`requestUriLinuxIoUring` / `connectUriLinuxIoUring`)
+use raw `std.os.linux.IoUring` `connect`/`send`/`recv` operations for IP-literal
+URIs; `examples/linux_io_uring_http1.zig` and
+`examples/linux_io_uring_websocket.zig` demonstrate both paths.
 
 Handshake-backed WebTransport sessions expose the negotiated DATAGRAM budget so
 callers can avoid sending a payload the underlying QUIC peer will reject:

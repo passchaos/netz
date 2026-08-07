@@ -32,11 +32,13 @@ pub const Role = enum {
 const RuntimeTransport = union(enum) {
     tcp: struct { io: std.Io, stream: net.Stream },
     tls: *http1_runtime.TlsClientConnection,
+    linux_io_uring: http1_runtime.LinuxIoUringStream,
 
     fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
         return switch (self) {
             .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
             .tls => |conn| conn.read(buffer),
+            .linux_io_uring => |conn| conn.read(buffer),
         };
     }
 
@@ -44,6 +46,7 @@ const RuntimeTransport = union(enum) {
         return switch (self) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
             .tls => |conn| conn.writeAll(bytes),
+            .linux_io_uring => |conn| conn.writeAll(bytes),
         };
     }
 };
@@ -295,11 +298,65 @@ pub const Client = struct {
         return connection;
     }
 
+    /// Linux-only `ws://` client path backed by `std.os.linux.IoUring`.
+    ///
+    /// This mirrors the HTTP/1 io_uring client support and reuses the same
+    /// WebSocket handshake/framing logic as the normal TCP runtime.  It is
+    /// limited to cleartext `ws://` and literal IP authorities because TLS and
+    /// DNS still depend on the higher-level `std.Io.net`/TLS layers.
+    pub fn connectUriLinuxIoUring(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        ring: *http1_runtime.LinuxIoUringHandle,
+        uri_text: []const u8,
+        options: ConnectOptions,
+    ) Error!Connection {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "ws")) return error.UnsupportedScheme;
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+        var endpoint = try http1_runtime.uriEndpoint(allocator, uri, 80);
+        defer endpoint.deinit();
+        const address = switch (endpoint.target) {
+            .ip => |address| address,
+            .host => return error.UnsupportedEndpoint,
+        };
+
+        var connect_options = options;
+        connect_options.target = target;
+        if (connect_options.host.len == 0) connect_options.host = endpoint.authority;
+
+        var uring_stream = try http1_runtime.connectIpLinuxIoUring(ring, address);
+        errdefer uring_stream.close();
+        return connectTransport(
+            allocator,
+            io,
+            .{ .linux_io_uring = uring_stream },
+            undefined,
+            null,
+            uring_stream,
+            connect_options,
+        );
+    }
+
     fn connectStream(
         allocator: std.mem.Allocator,
         io: std.Io,
         stream: net.Stream,
         tls_conn: ?*http1_runtime.TlsClientConnection,
+        options: ConnectOptions,
+    ) Error!Connection {
+        const transport: RuntimeTransport = if (tls_conn) |conn| .{ .tls = conn } else .{ .tcp = .{ .io = io, .stream = stream } };
+        return connectTransport(allocator, io, transport, stream, tls_conn, null, options);
+    }
+
+    fn connectTransport(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        transport: RuntimeTransport,
+        stream: net.Stream,
+        tls_conn: ?*http1_runtime.TlsClientConnection,
+        linux_io_uring: ?http1_runtime.LinuxIoUringStream,
         options: ConnectOptions,
     ) Error!Connection {
         var nonce: [16]u8 = undefined;
@@ -331,7 +388,6 @@ pub const Client = struct {
                 .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
             });
         }
-        const transport: RuntimeTransport = if (tls_conn) |conn| .{ .tls = conn } else .{ .tcp = .{ .io = io, .stream = stream } };
         try writeHttpUpgradeRequest(allocator, transport, .{
             .method = .GET,
             .target = options.target,
@@ -354,6 +410,7 @@ pub const Client = struct {
             .allocator = allocator,
             .stream = stream,
             .tls_conn = tls_conn,
+            .linux_io_uring = linux_io_uring,
             .role = .client,
             .limits = options.limits,
             .selected_protocol = selected_protocol,
@@ -406,6 +463,7 @@ pub const Connection = struct {
     allocator: std.mem.Allocator,
     stream: net.Stream,
     tls_conn: ?*http1_runtime.TlsClientConnection = null,
+    linux_io_uring: ?http1_runtime.LinuxIoUringStream = null,
     role: Role,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
@@ -420,6 +478,7 @@ pub const Connection = struct {
     }
 
     fn transport(self: *Connection) RuntimeTransport {
+        if (self.linux_io_uring) |conn| return .{ .linux_io_uring = conn };
         if (self.tls_conn) |conn| return .{ .tls = conn };
         return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
     }
@@ -429,6 +488,8 @@ pub const Connection = struct {
         self.inbuf.deinit(self.allocator);
         if (self.tls_conn) |conn| {
             conn.deinit();
+        } else if (self.linux_io_uring) |conn| {
+            conn.close();
         } else {
             self.stream.close(self.io);
         }
@@ -1683,6 +1744,83 @@ test "WebSocket client connects by ws URI" {
 
     try std.testing.expectError(error.UnsupportedScheme, Client.connectUri(allocator, io, "ftp://localhost/chat", .{}));
     try std.testing.expectError(error.InvalidUri, Client.connectUri(allocator, io, "ws:///missing-host", .{}));
+}
+
+test "WebSocket client connects over Linux io_uring" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var ring = std.os.linux.IoUring.init(16, 0) catch |err| switch (err) {
+        error.PermissionDenied, error.SystemOutdated => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer ring.deinit();
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{
+                .protocols = &.{"chat.v1"},
+                .enable_permessage_deflate = true,
+            });
+            defer connection.close();
+            try std.testing.expectEqualStrings("chat.v1", connection.selected_protocol.?);
+            try std.testing.expect(connection.permessage_deflate);
+
+            var request = try connection.receiveMessage();
+            defer request.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqualStrings("uring-websocket-hello", request.payload);
+            try connection.sendFragmented(.text, &.{ "uring ", "websocket ", "world" });
+
+            var close = try connection.receiveFrame();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "ws://127.0.0.1:{d}/uring-ws", .{server.address().ip4.port});
+    defer allocator.free(uri);
+    var client = try Client.connectUriLinuxIoUring(allocator, io, &ring, uri, .{
+        .protocols = &.{"chat.v1"},
+        .enable_permessage_deflate = true,
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
+    });
+    defer client.close();
+    try std.testing.expectEqualStrings("chat.v1", client.selected_protocol.?);
+    try std.testing.expect(client.permessage_deflate);
+
+    try client.sendText("uring-websocket-hello");
+    var response = try client.receiveMessage();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("uring websocket world", response.payload);
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "WebSocket client connects by bracketed IPv6 URI" {

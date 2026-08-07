@@ -79,6 +79,12 @@ pub fn build(b: *std.Build) void {
             .run_step = "run-linux-io-uring-http1",
             .description = "Run the Linux io_uring HTTP/1 raw transport example",
         },
+        .{
+            .exe_name = "netz-linux-io-uring-websocket",
+            .path = "examples/linux_io_uring_websocket.zig",
+            .run_step = "run-linux-io-uring-websocket",
+            .description = "Run the Linux io_uring WebSocket client example",
+        },
     };
 
     const examples_step = b.step("examples", "Build all examples");
