@@ -794,6 +794,9 @@ fn parsePreferredAddress(value: []const u8) Error!PreferredAddress {
 }
 
 fn validatePreferredAddress(preferred: PreferredAddress) Error!void {
+    const has_ipv4 = !std.mem.eql(u8, &preferred.ipv4_address, &([_]u8{0} ** 4)) or preferred.ipv4_port != 0;
+    const has_ipv6 = !std.mem.eql(u8, &preferred.ipv6_address, &([_]u8{0} ** 16)) or preferred.ipv6_port != 0;
+    if (!has_ipv4 and !has_ipv6) return error.InvalidTransportParameter;
     try validateTransportConnectionId(preferred.connection_id, true);
 }
 
@@ -1915,6 +1918,23 @@ test "QUIC server transport parameters include preferred address" {
     try std.testing.expectEqualSlices(u8, &token, &decoded.stateless_reset_token.?);
     try std.testing.expectEqual(@as(u16, 4433), decoded.preferred_address.?.ipv4_port);
     try std.testing.expectEqualSlices(u8, &preferred_cid, decoded.preferred_address.?.connection_id);
+
+    var unspecified = params;
+    unspecified.preferred_address = .{
+        .connection_id = &preferred_cid,
+        .stateless_reset_token = token,
+    };
+    bytes.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidTransportParameter, encodeTransportParameters(&bytes, allocator, unspecified));
+
+    bytes.clearRetainingCapacity();
+    try encodeTransportParameter(
+        &bytes,
+        allocator,
+        @intFromEnum(TransportParameterId.preferred_address),
+        &([_]u8{0} ** 4 ++ [_]u8{0} ** 2 ++ [_]u8{0} ** 16 ++ [_]u8{0} ** 2 ++ [_]u8{4} ++ preferred_cid ++ token),
+    );
+    try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, bytes.items, .server));
 }
 
 test "QUIC stream and crypto frame codec" {

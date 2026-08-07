@@ -49,7 +49,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed
   RFC-defaulted transport-parameter encoding/validation (duplicate detection,
-  endpoint-specific client/server parameter rules, preferred-address parsing,
+  endpoint-specific client/server parameter rules, preferred-address parsing and specified-address validation,
   max UDP payload/idle-timeout/ACK delay/stream-count bounds), Retry packet codec
   with version-specific integrity-tag verification, plus CRYPTO stream reassembly with duplicate-overlap conflict detection,
   v1/v2 Initial key/header/payload protection with version-aware salts, HKDF labels, long-header type bits, fixed-bit, connection-ID length, and supported-version validation, version-specific TLS QUIC packet-protection labels, protected Initial packet seal/open, long-header packet boundary peeking for coalesced datagrams, Version Negotiation packet codec with randomized response first byte and reserved-version greasing tolerance, RFC 9368 `version_information` transport parameters, endpoint-level unsupported-version responses, client-side Version Negotiation selection/restart helpers, and automatic handshake restart on negotiated versions,
