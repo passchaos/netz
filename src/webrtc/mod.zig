@@ -2872,15 +2872,20 @@ pub const sctp = struct {
             }
             while (!cursor.eof()) {
                 if (cursor.remaining() < 4) return error.InvalidSctpPacket;
-                const param_type: ReconfigParameterType = @enumFromInt(try cursor.readInt(u16, .big));
+                const raw_type = try cursor.readInt(u16, .big);
+                const param_type: ReconfigParameterType = @enumFromInt(raw_type);
                 const len = try cursor.readInt(u16, .big);
                 if (len < 4 or cursor.remaining() < len - 4) return error.InvalidSctpPacket;
                 const value = try cursor.readSlice(len - 4);
-                try params.append(allocator, switch (param_type) {
-                    .outgoing_ssn_reset_request => .{ .outgoing_ssn_reset_request = try parseOutgoingSsnResetRequest(allocator, value) },
-                    .outgoing_ssn_reset_response => .{ .outgoing_ssn_reset_response = try parseOutgoingSsnResetResponse(value) },
-                    else => .{ .unknown = .{ .param_type = param_type, .value = value } },
-                });
+                switch (param_type) {
+                    .outgoing_ssn_reset_request => try params.append(allocator, .{ .outgoing_ssn_reset_request = try parseOutgoingSsnResetRequest(allocator, value) }),
+                    .outgoing_ssn_reset_response => try params.append(allocator, .{ .outgoing_ssn_reset_response = try parseOutgoingSsnResetResponse(value) }),
+                    else => switch (raw_type & 0xc000) {
+                        0x0000, 0x4000 => return error.InvalidSctpPacket,
+                        0x8000, 0xc000 => {},
+                        else => unreachable,
+                    },
+                }
                 const padding = (4 - (len % 4)) % 4;
                 if (cursor.remaining() < padding) return error.InvalidSctpPacket;
                 try validateZeroPadding(cursor.buf[cursor.pos .. cursor.pos + padding]);
@@ -4994,6 +4999,33 @@ test "SCTP RE-CONFIG stream reset request and response" {
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);
     try std.testing.expectError(error.InvalidSctpPacket, sctp.writeReconfigChunk(&invalid, allocator, &.{}));
+
+    invalid.clearRetainingCapacity();
+    try wire.appendInt(&invalid, allocator, u16, 0x800d, .big); // unknown: skip and continue
+    try wire.appendInt(&invalid, allocator, u16, 4, .big);
+    try wire.appendInt(&invalid, allocator, u16, @intFromEnum(sctp.ReconfigParameterType.outgoing_ssn_reset_response), .big);
+    try wire.appendInt(&invalid, allocator, u16, 12, .big);
+    try wire.appendInt(&invalid, allocator, u32, 22, .big);
+    try wire.appendInt(&invalid, allocator, u32, @intFromEnum(sctp.ReconfigResult.success_nothing_to_do), .big);
+    var skipped_unknown = try sctp.ReconfigChunk.parse(allocator, .{
+        .chunk_type = .reconfig,
+        .flags = 0,
+        .value = invalid.items,
+        .consumed = 0,
+    });
+    defer skipped_unknown.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), skipped_unknown.parameters.len);
+    try std.testing.expectEqual(@as(u32, 22), skipped_unknown.parameters[0].outgoing_ssn_reset_response.response_sequence_number);
+
+    invalid.clearRetainingCapacity();
+    try wire.appendInt(&invalid, allocator, u16, 0x0020, .big); // unknown: stop/report as error
+    try wire.appendInt(&invalid, allocator, u16, 4, .big);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.ReconfigChunk.parse(allocator, .{
+        .chunk_type = .reconfig,
+        .flags = 0,
+        .value = invalid.items,
+        .consumed = 0,
+    }));
 
     invalid.clearRetainingCapacity();
     try wire.appendInt(&invalid, allocator, u16, 0x800d, .big); // unknown: skip and continue
