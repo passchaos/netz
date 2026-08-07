@@ -2143,8 +2143,9 @@ pub const rtcp = struct {
         const chunk_count = @as(usize, header.count_or_format);
         var cursor = wire.Cursor.init(payload);
         const chunks = try allocator.alloc(SdesChunk, chunk_count);
+        var initialized_chunks: usize = 0;
         errdefer {
-            for (chunks) |chunk| allocator.free(chunk.items);
+            for (chunks[0..initialized_chunks]) |chunk| allocator.free(chunk.items);
             allocator.free(chunks);
         }
         for (chunks) |*chunk| {
@@ -2161,8 +2162,14 @@ pub const rtcp = struct {
                 try items.append(allocator, .{ .item_type = typ, .value = value });
             }
             const consumed = cursor.pos - chunk_start;
-            try cursor.skip((4 - (consumed % 4)) % 4);
+            const padding = (4 - (consumed % 4)) % 4;
+            if (cursor.remaining() < padding) return error.InvalidRtcpPacket;
+            for (cursor.buf[cursor.pos .. cursor.pos + padding]) |byte| {
+                if (byte != 0) return error.InvalidRtcpPacket;
+            }
+            try cursor.skip(padding);
             chunk.* = .{ .ssrc = ssrc, .items = try items.toOwnedSlice(allocator) };
+            initialized_chunks += 1;
         }
         if (!cursor.eof()) return error.InvalidRtcpPacket;
         return .{ .chunks = chunks };
@@ -4414,6 +4421,13 @@ test "RTCP SDES and compound packets" {
     var single = try rtcp.parsePacket(allocator, encoded.items[parsed[0].receiver_report.report_blocks.len..]);
     defer single.deinit(allocator);
     try std.testing.expect(single.consumed > 0);
+
+    encoded.clearRetainingCapacity();
+    var short_cname_items = [_]rtcp.SdesItem{.{ .item_type = .cname, .value = "AB" }};
+    var short_cname_chunks = [_]rtcp.SdesChunk{.{ .ssrc = 0x01020304, .items = &short_cname_items }};
+    try rtcp.writePacket(&encoded, allocator, .{ .source_description = .{ .chunks = &short_cname_chunks } });
+    encoded.items[encoded.items.len - 1] = 0xff;
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, encoded.items));
 
     encoded.clearRetainingCapacity();
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{}));
