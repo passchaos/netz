@@ -2379,6 +2379,35 @@ pub const dtls = struct {
         try wire.appendInt(list, allocator, u16, @intCast(fragment.len), .big);
         try list.appendSlice(allocator, fragment);
     }
+
+    pub fn parseRecords(allocator: std.mem.Allocator, bytes: []const u8) Error![]Record {
+        var records: std.ArrayList(Record) = .empty;
+        errdefer records.deinit(allocator);
+
+        var cursor = wire.Cursor.init(bytes);
+        while (!cursor.eof()) {
+            const content_type: ContentType = @enumFromInt(try cursor.readByte());
+            const version = try cursor.readInt(u16, .big);
+            const epoch = try cursor.readInt(u16, .big);
+            const seq_hi = try cursor.readInt(u16, .big);
+            const seq_lo = try cursor.readInt(u32, .big);
+            const len = try cursor.readInt(u16, .big);
+            const fragment = try cursor.readSlice(len);
+            try records.append(allocator, .{
+                .content_type = content_type,
+                .version = version,
+                .epoch = epoch,
+                .sequence_number = (@as(u48, seq_hi) << 32) | seq_lo,
+                .fragment = fragment,
+            });
+        }
+        if (records.items.len == 0) return error.InvalidDtlsRecord;
+        return records.toOwnedSlice(allocator);
+    }
+
+    pub fn freeRecords(allocator: std.mem.Allocator, records: []Record) void {
+        allocator.free(records);
+    }
 };
 
 pub const rtp = struct {
@@ -8283,6 +8312,17 @@ test "RTP and DTLS record parsers" {
     try std.testing.expectEqual(@as(u16, 1), written_record.epoch);
     try std.testing.expectEqual(@as(u48, 3), written_record.sequence_number);
     try std.testing.expectEqualStrings("dtls", written_record.fragment);
+
+    try dtls.writeRecord(&written, allocator, .{ .content_type = .alert, .epoch = 1, .sequence_number = 4 }, "alert");
+    const records = try dtls.parseRecords(allocator, written.items);
+    defer dtls.freeRecords(allocator, records);
+    try std.testing.expectEqual(@as(usize, 2), records.len);
+    try std.testing.expectEqual(dtls.ContentType.application_data, records[0].content_type);
+    try std.testing.expectEqualStrings("dtls", records[0].fragment);
+    try std.testing.expectEqual(dtls.ContentType.alert, records[1].content_type);
+    try std.testing.expectEqual(@as(u48, 4), records[1].sequence_number);
+    try std.testing.expectEqualStrings("alert", records[1].fragment);
+    try std.testing.expectError(error.BufferTooShort, dtls.parseRecords(allocator, written.items[0 .. written.items.len - 1]));
 }
 
 test "RTP packet extension padding and writer" {
