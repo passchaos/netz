@@ -917,7 +917,13 @@ pub const Connection = struct {
                 try writeFrame(self.allocator, self.io, self.stream, .ping, flag_ack, 0, &ping_payload.data);
                 continue;
             }
-            return (try http2.PingPayload.parse(frame.frame)).data;
+            const ack_payload = (try http2.PingPayload.parse(frame.frame)).data;
+            // Rust h2 keeps outstanding user/shutdown PING payloads and only
+            // completes the operation when the ACK echoes that exact opaque
+            // value.  Unknown ACKs are legal on the wire, but treating them as
+            // completion lets a stale peer ACK satisfy a newer health check.
+            if (!std.mem.eql(u8, &ack_payload, &data)) continue;
+            return ack_payload;
         }
     }
 
@@ -3052,6 +3058,7 @@ test "HTTP/2 ping helpers handle interleaved control frames" {
             defer connection.close();
 
             try connection.sendWindowUpdate(0, 321);
+            try writeFrame(server_ptr.allocator, server_ptr.io, connection.stream, .ping, flag_ack, 0, &.{ 9, 9, 9, 9, 9, 9, 9, 9 });
             const observed = try connection.readPing();
             try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, &observed);
         }
