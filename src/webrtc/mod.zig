@@ -5560,9 +5560,10 @@ pub const rtcp = struct {
     fn writeCcFeedbackMetricBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, metric: CcFeedbackMetricBlock) Error!void {
         var raw: u16 = 0;
         if (metric.received) {
+            if (metric.arrival_time_offset > 0x1fff) return error.InvalidRtcpPacket;
             raw |= 0x8000;
             raw |= (@as(u16, @intFromEnum(metric.ecn)) & 0x03) << 13;
-            raw |= metric.arrival_time_offset & 0x1fff;
+            raw |= metric.arrival_time_offset;
         }
         try wire.appendInt(list, allocator, u16, raw, .big);
     }
@@ -9732,6 +9733,18 @@ test "RTCP receiver report and feedback packets" {
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, ccfb.packet);
     try std.testing.expectEqualSlices(u8, &ccfb_wire, encoded.items);
+
+    encoded.clearRetainingCapacity();
+    var invalid_ccfb_metric = [_]rtcp.CcFeedbackMetricBlock{.{ .received = true, .arrival_time_offset = 0x2000 }};
+    var invalid_ccfb_blocks = [_]rtcp.CcFeedbackReportBlock{.{
+        .media_ssrc = 1,
+        .metric_blocks = &invalid_ccfb_metric,
+    }};
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .congestion_control_feedback = .{
+        .sender_ssrc = 1,
+        .report_blocks = &invalid_ccfb_blocks,
+        .report_timestamp = 2,
+    } }));
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, .{ .congestion_control_feedback = .{
