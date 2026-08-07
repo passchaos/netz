@@ -5127,6 +5127,18 @@ pub const rtcp = struct {
         for (packets) |packet| try writePacket(list, allocator, packet);
     }
 
+    pub fn packetsWireLen(packets: []const Packet) Error!usize {
+        if (packets.len == 0) return error.InvalidRtcpPacket;
+        var len: usize = 0;
+        for (packets) |packet| len += try packet.wireLen();
+        return len;
+    }
+
+    pub fn compoundWireLen(packets: []const Packet) Error!usize {
+        try validateCompound(packets);
+        return packetsWireLen(packets);
+    }
+
     fn validateCompound(packets: []const Packet) Error!void {
         if (packets.len == 0) return error.InvalidRtcpPacket;
         switch (packets[0]) {
@@ -9593,6 +9605,7 @@ test "RTCP SDES and compound packets" {
     };
 
     try rtcp.writeCompound(&encoded, allocator, &packets);
+    try std.testing.expectEqual(@as(usize, encoded.items.len), try rtcp.compoundWireLen(&packets));
     const parsed = try rtcp.parseCompound(allocator, encoded.items);
     defer rtcp.freeCompound(allocator, parsed);
     try std.testing.expectEqual(@as(usize, 4), parsed.len);
@@ -9623,6 +9636,8 @@ test "RTCP SDES and compound packets" {
 
     encoded.clearRetainingCapacity();
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{}));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.compoundWireLen(&.{}));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.packetsWireLen(&.{}));
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{
         .{ .picture_loss_indication = .{ .sender_ssrc = 1, .media_ssrc = 2 } },
     }));
@@ -9634,6 +9649,8 @@ test "RTCP SDES and compound packets" {
         .{ .rapid_resynchronization_request = .{ .sender_ssrc = 0x01020304, .media_ssrc = 0x21222324 } },
     };
     try rtcp.writePackets(&encoded, allocator, &reduced_size_packets);
+    try std.testing.expectEqual(@as(usize, encoded.items.len), try rtcp.packetsWireLen(&reduced_size_packets));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.compoundWireLen(&reduced_size_packets));
     const parsed_reduced = try rtcp.parsePackets(allocator, encoded.items);
     defer rtcp.freePackets(allocator, parsed_reduced);
     try std.testing.expectEqual(@as(usize, 2), parsed_reduced.len);
