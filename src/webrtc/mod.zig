@@ -1184,6 +1184,18 @@ pub const sdp = struct {
         return false;
     }
 
+    pub fn supportsIceRenomination(session: Session) bool {
+        if (findAttr(session.attributes, "ice-options")) |value| {
+            if (iceOptionsHasToken(value, "renomination")) return true;
+        }
+        for (session.media) |media| {
+            if (findAttr(media.attributes, "ice-options")) |value| {
+                if (iceOptionsHasToken(value, "renomination")) return true;
+            }
+        }
+        return false;
+    }
+
     pub fn extractExtMaps(allocator: std.mem.Allocator, session: Session) Error![]ExtMap {
         var out: std.ArrayList(ExtMap) = .empty;
         errdefer out.deinit(allocator);
@@ -7507,6 +7519,15 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=ice-options:renomination\tTrIcKlE\r\n");
     defer media_trickle.deinit(allocator);
     try std.testing.expect(sdp.supportsIceTrickle(media_trickle));
+    try std.testing.expect(sdp.supportsIceRenomination(media_trickle));
+
+    var session_renomination = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=ice-options:ReNomination\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n");
+    defer session_renomination.deinit(allocator);
+    try std.testing.expect(sdp.supportsIceRenomination(session_renomination));
 
     var no_trickle = try sdp.parse(allocator, "v=0\r\n" ++
         "s=-\r\n" ++
@@ -7515,6 +7536,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n");
     defer no_trickle.deinit(allocator);
     try std.testing.expect(!sdp.supportsIceTrickle(no_trickle));
+    try std.testing.expect(!sdp.supportsIceRenomination(no_trickle));
 
     const codec_text =
         "v=0\r\n" ++
