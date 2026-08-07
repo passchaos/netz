@@ -66,6 +66,7 @@ pub const Frame = struct {
     }
 
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+        try validateFrameType(self.frame_type);
         try quic.varint.encode(list, allocator, self.frame_type);
         try quic.varint.encode(list, allocator, self.payload.len);
         try list.appendSlice(allocator, self.payload);
@@ -1506,6 +1507,11 @@ test "HTTP/3 frame settings and qpack literal block" {
     const parsed_settings = try parseSettings(allocator, frame.payload);
     defer allocator.free(parsed_settings);
     try std.testing.expectEqual(@as(u64, 1), parsed_settings[0].value);
+    try std.testing.expectError(error.UnexpectedFrame, (Frame{
+        .frame_type = 0x02, // HTTP/2 PRIORITY is reserved in HTTP/3.
+        .payload = &.{},
+        .consumed = 0,
+    }).write(&encoded_frame, allocator));
 
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(allocator);
@@ -1525,7 +1531,9 @@ test "HTTP/3 rejects reserved HTTP/2 frame types" {
     for (reserved_frame_types) |frame_type| {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(allocator);
-        try (Frame{ .frame_type = frame_type, .payload = "", .consumed = 0 }).write(&encoded, allocator);
+        try std.testing.expectError(error.UnexpectedFrame, (Frame{ .frame_type = frame_type, .payload = "", .consumed = 0 }).write(&encoded, allocator));
+        try quic.varint.encode(&encoded, allocator, frame_type);
+        try quic.varint.encode(&encoded, allocator, 0);
         try std.testing.expectError(error.UnexpectedFrame, Frame.parse(encoded.items));
     }
 }
