@@ -485,11 +485,16 @@ pub const ice = struct {
             if (!std.mem.startsWith(u8, body, prefix)) return error.InvalidIceCandidate;
             var it = std.mem.tokenizeScalar(u8, body[prefix.len..], ' ');
             const foundation = it.next() orelse return error.InvalidIceCandidate;
+            try validateIceFoundation(foundation);
             const component_s = it.next() orelse return error.InvalidIceCandidate;
+            try validateDecimalToken(component_s, 5);
             const transport_s = it.next() orelse return error.InvalidIceCandidate;
             const priority_s = it.next() orelse return error.InvalidIceCandidate;
+            try validateDecimalToken(priority_s, 10);
             const address = it.next() orelse return error.InvalidIceCandidate;
+            try validateCandidateAddress(address);
             const port_s = it.next() orelse return error.InvalidIceCandidate;
+            try validateDecimalToken(port_s, 5);
             const typ_label = it.next() orelse return error.InvalidIceCandidate;
             if (!std.mem.eql(u8, typ_label, "typ")) return error.InvalidIceCandidate;
             const typ_s = it.next() orelse return error.InvalidIceCandidate;
@@ -505,8 +510,24 @@ pub const ice = struct {
             };
 
             while (it.next()) |key| {
+                try validateCandidateByteString(key);
                 const value = it.next() orelse return error.InvalidIceCandidate;
-                if (std.mem.eql(u8, key, "raddr")) candidate.related_address = value else if (std.mem.eql(u8, key, "rport")) candidate.related_port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidIceCandidate else if (std.mem.eql(u8, key, "tcptype")) candidate.tcp_type = value;
+                try validateCandidateByteString(value);
+                if (std.mem.eql(u8, key, "raddr")) {
+                    if (candidate.related_address != null or candidate.related_port != null) return error.InvalidIceCandidate;
+                    try validateCandidateAddress(value);
+                    candidate.related_address = value;
+                    const rport_key = it.next() orelse return error.InvalidIceCandidate;
+                    if (!std.mem.eql(u8, rport_key, "rport")) return error.InvalidIceCandidate;
+                    const rport_value = it.next() orelse return error.InvalidIceCandidate;
+                    try validateDecimalToken(rport_value, 5);
+                    candidate.related_port = std.fmt.parseInt(u16, rport_value, 10) catch return error.InvalidIceCandidate;
+                } else if (std.mem.eql(u8, key, "rport")) {
+                    return error.InvalidIceCandidate;
+                } else if (std.mem.eql(u8, key, "tcptype")) {
+                    if (!validTcpType(value)) return error.InvalidIceCandidate;
+                    candidate.tcp_type = value;
+                }
             }
             return candidate;
         }
@@ -539,6 +560,61 @@ pub const ice = struct {
             if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
         }
         return null;
+    }
+
+    fn validateIceFoundation(value: []const u8) Error!void {
+        // RFC 8445 keeps the foundation to 1*32 ice-char.  Pion's ICE parser
+        // applies the same bound before candidate construction so malformed SDP
+        // cannot sneak control bytes or path-like tokens into later ICE state.
+        if (value.len == 0 or value.len > 32) return error.InvalidIceCandidate;
+        for (value) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and byte != '+' and byte != '/') return error.InvalidIceCandidate;
+        }
+    }
+
+    fn validateDecimalToken(value: []const u8, max_len: usize) Error!void {
+        if (value.len == 0 or value.len > max_len) return error.InvalidIceCandidate;
+        for (value) |byte| {
+            if (!std.ascii.isDigit(byte)) return error.InvalidIceCandidate;
+        }
+    }
+
+    fn validateCandidateByteString(value: []const u8) Error!void {
+        if (value.len == 0) return error.InvalidIceCandidate;
+        for (value) |byte| {
+            // RFC 4566 byte-string excludes NUL, CR, and LF.  This catches SDP
+            // line injection in extension attributes while preserving mDNS
+            // hostnames and IPv6 literals that are common in WebRTC candidates.
+            if (byte == 0 or byte == '\r' or byte == '\n') return error.InvalidIceCandidate;
+        }
+    }
+
+    fn validateCandidateAddress(value: []const u8) Error!void {
+        try validateCandidateByteString(value);
+        if (std.Io.net.IpAddress.parse(value, 0)) |_| {
+            return;
+        } else |_| {}
+        try validateHostname(value);
+    }
+
+    fn validateHostname(value: []const u8) Error!void {
+        if (value.len == 0 or value.len > 253) return error.InvalidIceCandidate;
+        var labels = std.mem.splitScalar(u8, value, '.');
+        var saw_label = false;
+        while (labels.next()) |label| {
+            if (label.len == 0 or label.len > 63) return error.InvalidIceCandidate;
+            saw_label = true;
+            for (label) |byte| {
+                if (!std.ascii.isAlphanumeric(byte) and byte != '-') return error.InvalidIceCandidate;
+            }
+        }
+        if (!saw_label) return error.InvalidIceCandidate;
+    }
+
+    fn validTcpType(value: []const u8) bool {
+        return std.mem.eql(u8, value, "active") or
+            std.mem.eql(u8, value, "passive") or
+            std.mem.eql(u8, value, "so");
     }
 };
 
@@ -4267,6 +4343,29 @@ test "ICE candidate parser and SDP parser" {
     const candidate = try ice.Candidate.parse(line);
     try std.testing.expectEqual(ice.CandidateType.host, candidate.candidate_type);
     try std.testing.expectEqual(@as(u16, 54400), candidate.port);
+
+    const tcp = try ice.Candidate.parse("candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype active");
+    try std.testing.expectEqual(ice.Transport.tcp, tcp.transport);
+    try std.testing.expectEqualStrings("active", tcp.tcp_type.?);
+
+    const relay = try ice.Candidate.parse("candidate:848194626 1 udp 16777215 50.0.0.1 5000 typ relay raddr 192.168.0.1 rport 5001");
+    try std.testing.expectEqual(ice.CandidateType.relay, relay.candidate_type);
+    try std.testing.expectEqualStrings("192.168.0.1", relay.related_address.?);
+    try std.testing.expectEqual(@as(u16, 5001), relay.related_port.?);
+
+    const mdns = try ice.Candidate.parse("candidate:1380287402 1 udp 2130706431 e2494022-4d9a-4c1e-a750-cc48d4f8d6ee.local 60542 typ host");
+    try std.testing.expectEqualStrings("e2494022-4d9a-4c1e-a750-cc48d4f8d6ee.local", mdns.address);
+
+    // Match the mature Pion ICE parser's defensive checks for SDP candidate
+    // lines: malformed addresses, incomplete related-address pairs, invalid
+    // TCP directions, and CR/LF injection in extension fields must be rejected
+    // before candidates enter ICE pair selection.
+    try std.testing.expectError(error.InvalidIceCandidate, ice.Candidate.parse("candidate:111111111111111111111111111111111 1 udp 500 127.0.0.1 80 typ host"));
+    try std.testing.expectError(error.InvalidIceCandidate, ice.Candidate.parse("candidate:3$3 1 udp 500 127.0.0.1 80 typ host"));
+    try std.testing.expectError(error.InvalidIceCandidate, ice.Candidate.parse("candidate:4207374051 1 udp 1685790463 191.228.238.68 99999999 typ srflx raddr 192.168.0.278 rport 53991"));
+    try std.testing.expectError(error.InvalidIceCandidate, ice.Candidate.parse("candidate:848194626 1 udp 16777215 50.0.0.1 5000 typ relay raddr 192.168.0.1"));
+    try std.testing.expectError(error.InvalidIceCandidate, ice.Candidate.parse("candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype INVALID"));
+    try std.testing.expectError(error.InvalidIceCandidate, ice.Candidate.parse("candidate:750 1 udp 500 fcd9:e3b8:12ce:9fc5:74a5:c6bb:d8b:e08a 53987 typ host ext valu\nu"));
 
     const text = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:0\r\n";
     var session = try sdp.parse(allocator, text);
