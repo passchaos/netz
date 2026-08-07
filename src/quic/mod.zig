@@ -1166,9 +1166,10 @@ pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool
             .streams_blocked_bidi,
             .streams_blocked_uni,
             .path_challenge,
+            .application_close,
             .datagram,
             => true,
-            // ACK, CRYPTO, CONNECTION_CLOSE, HANDSHAKE_DONE, NEW_TOKEN,
+            // ACK, CRYPTO, transport CONNECTION_CLOSE (0x1c), HANDSHAKE_DONE, NEW_TOKEN,
             // NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, PATH_RESPONSE, and the
             // ACK_FREQUENCY draft control frames are not 0-RTT frames.  tquic
             // and quic-zig both keep these 1-RTT-only because peers cannot
@@ -1729,7 +1730,7 @@ test "QUIC Retry packet supports version 2 type mapping" {
 test "QUIC Retry rejects unsupported versions" {
     const allocator = std.testing.allocator;
     const cid = [_]u8{ 1, 2, 3, 4 };
-    const token = [_]u8{ 9 };
+    const token = [_]u8{9};
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -1743,7 +1744,10 @@ test "QUIC Retry rejects unsupported versions" {
 
     const retry_without_tag = [_]u8{
         0xf0,
-        0x0a, 0x0a, 0x0a, 0x0a,
+        0x0a,
+        0x0a,
+        0x0a,
+        0x0a,
         0x00, // dcid len
         0x00, // scid len
         0x01, // token byte
@@ -2025,8 +2029,9 @@ test "QUIC frame packet context rules follow RFC 9000" {
         .connection_id = "new-cid",
         .stateless_reset_token = [_]u8{0} ** 16,
     } }, .zero_rtt));
-    try std.testing.expect(!frameAllowedInPacketType(app_close, .zero_rtt));
-    try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(app_close, .zero_rtt));
+    try std.testing.expect(frameAllowedInPacketType(app_close, .zero_rtt));
+    try validateFrameForPacketType(app_close, .zero_rtt);
+    try std.testing.expect(!frameAllowedInPacketType(.{ .connection_close = .{ .error_code = 0, .frame_type = 0, .reason_phrase = "" } }, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .handshake_done = {} }, .one_rtt));
     try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(stream, .initial));
 }
