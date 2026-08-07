@@ -1,6 +1,7 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const quic = @import("../quic/mod.zig");
+const hpack_huffman = @import("../http2/hpack_huffman.zig");
 
 pub const runtime = @import("runtime.zig");
 
@@ -648,6 +649,12 @@ pub const Qpack = struct {
     pub const HeaderField = struct {
         name: []const u8,
         value: []const u8,
+        /// Set when a decoded Huffman string had to be materialized.  Call
+        /// `Qpack.freeDecodedFields` for decoder output so these allocations
+        /// are released while non-Huffman strings can continue borrowing from
+        /// the encoded field section.
+        name_storage: ?[]u8 = null,
+        value_storage: ?[]u8 = null,
     };
 
     const StaticEntry = struct {
@@ -811,7 +818,10 @@ pub const Qpack = struct {
         if (required_insert_count != 0 or base != 0) return error.QpackDynamicTableUnsupported;
 
         var fields: std.ArrayList(HeaderField) = .empty;
-        errdefer fields.deinit(allocator);
+        errdefer {
+            freeFieldStorages(allocator, fields.items);
+            fields.deinit(allocator);
+        }
         while (!cursor.eof()) {
             const first = try cursor.readByte();
             if ((first & 0xc0) == 0xc0) {
@@ -821,16 +831,26 @@ pub const Qpack = struct {
             } else if ((first & 0xc0) == 0x40) {
                 const is_static = (first & 0x10) != 0;
                 const index = try decodePrefixedInteger(&cursor, 4, first);
-                const value = try decodeString(&cursor);
+                var value = try decodeString(allocator, &cursor);
+                errdefer if (value.storage) |storage| allocator.free(storage);
                 if (!is_static) return error.QpackDynamicTableUnsupported;
                 const entry = staticEntry(index) orelse return error.InvalidFrame;
-                try fields.append(allocator, .{ .name = entry.name, .value = value });
+                try fields.append(allocator, .{ .name = entry.name, .value = value.value, .value_storage = value.storage });
+                value.storage = null;
             } else if ((first & 0xe0) == 0x20) {
                 const name_len = try decodePrefixedInteger(&cursor, 3, first);
-                if ((first & 0x08) != 0) return error.QpackDynamicTableUnsupported;
-                const name = try cursor.readSlice(name_len);
-                const value = try decodeString(&cursor);
-                try fields.append(allocator, .{ .name = name, .value = value });
+                var name = try decodeMaybeHuffman(allocator, try cursor.readSlice(name_len), (first & 0x08) != 0);
+                errdefer if (name.storage) |storage| allocator.free(storage);
+                var value = try decodeString(allocator, &cursor);
+                errdefer if (value.storage) |storage| allocator.free(storage);
+                try fields.append(allocator, .{
+                    .name = name.value,
+                    .value = value.value,
+                    .name_storage = name.storage,
+                    .value_storage = value.storage,
+                });
+                name.storage = null;
+                value.storage = null;
             } else {
                 return error.QpackDynamicTableUnsupported;
             }
@@ -838,16 +858,112 @@ pub const Qpack = struct {
         return fields.toOwnedSlice(allocator);
     }
 
-    fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
-        try encodePrefixedInteger(list, allocator, 7, 0x00, value.len);
-        try list.appendSlice(allocator, value);
+    pub fn freeDecodedFields(allocator: std.mem.Allocator, fields: []HeaderField) void {
+        freeFieldStorages(allocator, fields);
+        allocator.free(fields);
     }
 
-    fn decodeString(cursor: *wire.Cursor) ![]const u8 {
+    fn freeFieldStorages(allocator: std.mem.Allocator, fields: []HeaderField) void {
+        for (fields) |field| {
+            if (field.name_storage) |storage| allocator.free(storage);
+            if (field.value_storage) |storage| allocator.free(storage);
+        }
+    }
+
+    fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+        const huffman = try encodeHuffman(allocator, value);
+        defer allocator.free(huffman);
+        if (huffman.len < value.len) {
+            try encodePrefixedInteger(list, allocator, 7, 0x80, huffman.len);
+            try list.appendSlice(allocator, huffman);
+        } else {
+            try encodePrefixedInteger(list, allocator, 7, 0x00, value.len);
+            try list.appendSlice(allocator, value);
+        }
+    }
+
+    const DecodedString = struct {
+        value: []const u8,
+        storage: ?[]u8 = null,
+    };
+
+    fn decodeString(allocator: std.mem.Allocator, cursor: *wire.Cursor) !DecodedString {
         const first = try cursor.readByte();
-        if ((first & 0x80) != 0) return error.QpackDynamicTableUnsupported;
         const len = try decodePrefixedInteger(cursor, 7, first);
-        return cursor.readSlice(len);
+        const raw = try cursor.readSlice(len);
+        return decodeMaybeHuffman(allocator, raw, (first & 0x80) != 0);
+    }
+
+    fn decodeMaybeHuffman(allocator: std.mem.Allocator, raw: []const u8, huffman: bool) !DecodedString {
+        if (!huffman) return .{ .value = raw };
+        const decoded = try decodeHuffman(allocator, raw);
+        return .{ .value = decoded, .storage = decoded };
+    }
+
+    fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+
+        var bits: u64 = 0;
+        var bits_left: u6 = 40;
+        for (value) |byte| {
+            const entry = hpack_huffman.encode_table[byte];
+            bits |= @as(u64, entry.code) << @intCast(bits_left - entry.bits);
+            bits_left -= entry.bits;
+
+            while (bits_left <= 32) {
+                try out.append(allocator, @truncate(bits >> 32));
+                bits <<= 8;
+                bits_left += 8;
+            }
+        }
+
+        if (bits_left != 40) {
+            // QPACK reuses HPACK's canonical Huffman code (RFC 9204 §4.1.2),
+            // including EOS-prefix padding of the final octet.
+            bits |= (@as(u64, 1) << bits_left) - 1;
+            try out.append(allocator, @truncate(bits >> 32));
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+
+        var code: u32 = 0;
+        var code_len: u6 = 0;
+        for (encoded) |byte| {
+            var bit_index: u4 = 0;
+            while (bit_index < 8) : (bit_index += 1) {
+                const shift: u3 = @intCast(7 - bit_index);
+                code = (code << 1) | @as(u32, (byte >> shift) & 1);
+                code_len += 1;
+                if (code_len > 30) return error.InvalidEncoding;
+                if (huffmanSymbol(code, code_len)) |symbol| {
+                    if (symbol == hpack_huffman.eos_symbol) return error.InvalidEncoding;
+                    try out.append(allocator, @intCast(symbol));
+                    code = 0;
+                    code_len = 0;
+                }
+            }
+        }
+
+        if (code_len != 0) {
+            if (code_len > 7) return error.InvalidEncoding;
+            const pad_shift: u5 = @intCast(code_len);
+            const pad = (@as(u32, 1) << pad_shift) - 1;
+            if (code != pad) return error.InvalidEncoding;
+        }
+
+        return out.toOwnedSlice(allocator);
+    }
+
+    fn huffmanSymbol(code: u32, bits: u6) ?usize {
+        for (hpack_huffman.encode_table, 0..) |entry, symbol| {
+            if (entry.bits == bits and entry.code == code) return symbol;
+        }
+        return null;
     }
 
     fn encodePrefixedInteger(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime prefix_bits: u4, first_prefix: u8, value: u64) !void {
@@ -1027,8 +1143,8 @@ pub const DecodedRequest = struct {
     /// names/values still borrow from the encoded stream bytes; callers must
     /// keep those bytes alive while reading `headers` or `trailers`.
     pub fn deinit(self: *DecodedRequest, allocator: std.mem.Allocator) void {
-        allocator.free(self.headers);
-        allocator.free(self.trailers);
+        Qpack.freeDecodedFields(allocator, self.headers);
+        Qpack.freeDecodedFields(allocator, self.trailers);
         if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
     }
@@ -1050,8 +1166,8 @@ pub const DecodedResponse = struct {
     /// names/values still borrow from the encoded stream bytes; callers must
     /// keep those bytes alive while reading `headers` or `trailers`.
     pub fn deinit(self: *DecodedResponse, allocator: std.mem.Allocator) void {
-        allocator.free(self.headers);
-        allocator.free(self.trailers);
+        Qpack.freeDecodedFields(allocator, self.headers);
+        Qpack.freeDecodedFields(allocator, self.trailers);
         if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
     }
@@ -1136,8 +1252,8 @@ const DecodedMessage = struct {
     consumed: usize,
 
     fn deinit(self: *DecodedMessage, allocator: std.mem.Allocator) void {
-        allocator.free(self.headers);
-        allocator.free(self.trailers);
+        Qpack.freeDecodedFields(allocator, self.headers);
+        Qpack.freeDecodedFields(allocator, self.trailers);
         if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
     }
@@ -1210,7 +1326,7 @@ fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8, max_fi
             continue;
         }
         const headers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
-        defer allocator.free(headers);
+        defer Qpack.freeDecodedFields(allocator, headers);
         try validateHeaderBlock(headers, .response);
         try validateFieldSectionSize(headers, max_field_section_size);
         const status = try responseStatus(headers);
@@ -1244,14 +1360,14 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageS
         if (offset >= bytes.len) return error.ExpectedHeadersFrame;
     };
     const headers = try Qpack.decodeLiteralBlock(allocator, headers_frame.payload);
-    errdefer allocator.free(headers);
+    errdefer Qpack.freeDecodedFields(allocator, headers);
     try validateFieldSectionSize(headers, max_field_section_size);
 
     var consumed = offset + headers_frame.consumed;
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(allocator);
     var trailers: []Qpack.HeaderField = &.{};
-    errdefer allocator.free(trailers);
+    errdefer Qpack.freeDecodedFields(allocator, trailers);
     var saw_trailers = false;
     while (consumed < bytes.len) {
         const frame = try Frame.parse(bytes[consumed..]);
@@ -1264,7 +1380,7 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageS
             FrameType.headers => {
                 if (saw_trailers) return error.UnexpectedFrame;
                 const decoded_trailers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
-                errdefer allocator.free(decoded_trailers);
+                errdefer Qpack.freeDecodedFields(allocator, decoded_trailers);
                 try validateFieldSectionSize(decoded_trailers, max_field_section_size);
                 trailers = decoded_trailers;
                 saw_trailers = true;
@@ -1684,7 +1800,7 @@ test "HTTP/3 frame settings and qpack literal block" {
     try std.testing.expectEqual(@as(u8, 0xd1), block.items[2]); // static index 17, :method GET
     try std.testing.expectEqual(@as(u8, 0xc1), block.items[3]); // static index 1, :path /
     const decoded = try Qpack.decodeLiteralBlock(allocator, block.items);
-    defer allocator.free(decoded);
+    defer Qpack.freeDecodedFields(allocator, decoded);
     try std.testing.expectEqualStrings(":method", decoded[0].name);
     try std.testing.expectEqualStrings("GET", decoded[0].value);
 }
@@ -1706,6 +1822,13 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     const allocator = std.testing.allocator;
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(allocator);
+    const huffman = try Qpack.encodeHuffman(allocator, "www.example.com");
+    defer allocator.free(huffman);
+    try std.testing.expectEqualSlices(u8, &.{ 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff }, huffman);
+    const decoded_huffman = try Qpack.decodeHuffman(allocator, huffman);
+    defer allocator.free(decoded_huffman);
+    try std.testing.expectEqualStrings("www.example.com", decoded_huffman);
+
     const fields = [_]Qpack.HeaderField{
         .{ .name = "content-type", .value = "application/problem+json" },
         .{ .name = "x-custom", .value = "value" },
@@ -1714,7 +1837,7 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     try std.testing.expectEqual(@as(u8, 0x5f), block.items[2]); // static name ref with extended index, content-type
 
     const decoded = try Qpack.decodeLiteralBlock(allocator, block.items);
-    defer allocator.free(decoded);
+    defer Qpack.freeDecodedFields(allocator, decoded);
     try std.testing.expectEqualStrings("content-type", decoded[0].name);
     try std.testing.expectEqualStrings("application/problem+json", decoded[0].value);
     try std.testing.expectEqualStrings("x-custom", decoded[1].name);
@@ -1935,7 +2058,7 @@ test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
     const promise = try parsePushPromisePayload(frame.payload);
     try std.testing.expectEqual(@as(u64, 3), promise.push_id);
     const decoded = try Qpack.decodeLiteralBlock(allocator, promise.field_section);
-    defer allocator.free(decoded);
+    defer Qpack.freeDecodedFields(allocator, decoded);
     try std.testing.expectEqualStrings("/pushed.css", decoded[1].value);
 
     try validatePushPromise(.{ .local_max_push_id = 3 }, promise.push_id);

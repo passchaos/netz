@@ -40,7 +40,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   RFC 9218 Priority field parsing/serialization,
   request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, response-side PUSH_PROMISE tolerance, interim 1xx response skipping and runtime emission before final responses, and forbidden trailer-field rejection,
   HTTP/3 pseudo-header/lowercase field-name, `:method`/`:protocol` token, URI path/scheme/authority, Host/`:authority`, traditional CONNECT body rules, and connection-specific header validation,
-  DATA-frame aggregation, pure-digit content-length, three-digit `:status`, and status-forbidden response-body validation, stateless QPACK helpers with RFC 9204 static-table references plus literal fallback, a cleartext development runtime over the QUIC
+  DATA-frame aggregation, pure-digit content-length, three-digit `:status`, and status-forbidden response-body validation, stateless QPACK helpers with RFC 9204 static-table references, Huffman string literals, and literal fallback, a cleartext development runtime over the QUIC
   UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with STREAM frame
   splitting/reassembly and SETTINGS exchange, and a handshake-backed protected
   client/server runtime, plus a `std.Io.async` request receive helper for the
