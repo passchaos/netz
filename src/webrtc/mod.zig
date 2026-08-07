@@ -3364,6 +3364,12 @@ pub const rtcp = struct {
         begin_sequence: u16 = 0,
         metric_blocks: []CcFeedbackMetricBlock = &.{},
 
+        pub fn metricForSequence(self: CcFeedbackReportBlock, sequence_number: u16) ?CcFeedbackMetricBlock {
+            const delta = sequence_number -% self.begin_sequence;
+            if (delta >= self.metric_blocks.len) return null;
+            return self.metric_blocks[delta];
+        }
+
         pub fn deinit(self: *CcFeedbackReportBlock, allocator: std.mem.Allocator) void {
             allocator.free(self.metric_blocks);
             self.* = undefined;
@@ -3379,6 +3385,13 @@ pub const rtcp = struct {
             for (self.report_blocks) |*block| block.deinit(allocator);
             allocator.free(self.report_blocks);
             self.* = undefined;
+        }
+
+        pub fn metricForMediaSequence(self: CongestionControlFeedback, media_ssrc: u32, sequence_number: u16) ?CcFeedbackMetricBlock {
+            for (self.report_blocks) |block| {
+                if (block.media_ssrc == media_ssrc) return block.metricForSequence(sequence_number);
+            }
+            return null;
         }
     };
 
@@ -8560,6 +8573,26 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(!ccfb.packet.congestion_control_feedback.report_blocks[0].metric_blocks[2].received);
     try std.testing.expectEqual(@as(u32, 2), ccfb.packet.congestion_control_feedback.report_blocks[1].media_ssrc);
     try std.testing.expectEqual(@as(usize, 3), ccfb.packet.congestion_control_feedback.report_blocks[1].metric_blocks.len);
+    try std.testing.expectEqual(@as(u16, 8189), ccfb.packet.congestion_control_feedback.report_blocks[0].metricForSequence(2).?.arrival_time_offset);
+    try std.testing.expect(!ccfb.packet.congestion_control_feedback.report_blocks[0].metricForSequence(4).?.received);
+    try std.testing.expect(ccfb.packet.congestion_control_feedback.report_blocks[0].metricForSequence(6) == null);
+    try std.testing.expectEqual(@as(u16, 8189), ccfb.packet.congestion_control_feedback.metricForMediaSequence(2, 2).?.arrival_time_offset);
+    try std.testing.expect(ccfb.packet.congestion_control_feedback.metricForMediaSequence(3, 2) == null);
+
+    var wrap_metrics = [_]rtcp.CcFeedbackMetricBlock{
+        .{ .received = true, .arrival_time_offset = 1 },
+        .{ .received = true, .arrival_time_offset = 2 },
+        .{ .received = true, .arrival_time_offset = 3 },
+    };
+    const wrap_block = rtcp.CcFeedbackReportBlock{
+        .media_ssrc = 9,
+        .begin_sequence = 0xfffe,
+        .metric_blocks = &wrap_metrics,
+    };
+    try std.testing.expectEqual(@as(u16, 1), wrap_block.metricForSequence(0xfffe).?.arrival_time_offset);
+    try std.testing.expectEqual(@as(u16, 2), wrap_block.metricForSequence(0xffff).?.arrival_time_offset);
+    try std.testing.expectEqual(@as(u16, 3), wrap_block.metricForSequence(0).?.arrival_time_offset);
+    try std.testing.expect(wrap_block.metricForSequence(1) == null);
     const ccfb_destinations = try ccfb.packet.destinationSsrcs(allocator);
     defer allocator.free(ccfb_destinations);
     try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, ccfb_destinations);
