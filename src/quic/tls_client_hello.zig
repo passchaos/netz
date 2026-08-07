@@ -722,6 +722,62 @@ fn clientHelloOffsetsForTest(bytes: []const u8) Error!ClientHelloOffsetsForTest 
     return .{ .cipher_suites_start = cipher_suites_start, .compression_start = compression_start };
 }
 
+fn appendServerHelloExtensionForTest(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    typ: u16,
+    payload: []const u8,
+) Error!void {
+    if (list.items.len < 4 or list.items[0] != handshake_type_server_hello) return error.InvalidServerHello;
+    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
+    if (body_len + 4 != list.items.len) return error.InvalidServerHello;
+
+    var pos: usize = 4 + 2 + 32;
+    if (pos >= list.items.len) return error.InvalidServerHello;
+    const session_id_len = list.items[pos];
+    pos += 1 + @as(usize, session_id_len) + 2 + 1; // session id + cipher suite + compression
+    if (pos + 2 > list.items.len) return error.InvalidServerHello;
+    try appendHandshakeExtensionForTest(list, allocator, pos, typ, payload, error.InvalidServerHello);
+}
+
+fn appendEncryptedExtensionsExtensionForTest(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    typ: u16,
+    payload: []const u8,
+) Error!void {
+    if (list.items.len < 6 or list.items[0] != handshake_type_encrypted_extensions) return error.InvalidEncryptedExtensions;
+    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
+    if (body_len + 4 != list.items.len) return error.InvalidEncryptedExtensions;
+    try appendHandshakeExtensionForTest(list, allocator, 4, typ, payload, error.InvalidEncryptedExtensions);
+}
+
+fn appendHandshakeExtensionForTest(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    extensions_len_pos: usize,
+    typ: u16,
+    payload: []const u8,
+    err: Error,
+) Error!void {
+    if (extensions_len_pos + 2 > list.items.len) return err;
+    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
+    const extensions_len = std.mem.readInt(u16, list.items[extensions_len_pos..][0..2], .big);
+    if (extensions_len_pos + 2 + @as(usize, extensions_len) != list.items.len) return err;
+    const added_len = std.math.add(usize, 4, payload.len) catch return err;
+    const next_extensions_len = std.math.add(usize, extensions_len, added_len) catch return err;
+    const next_body_len = std.math.add(usize, body_len, added_len) catch return err;
+    if (next_extensions_len > std.math.maxInt(u16) or next_body_len > std.math.maxInt(u24)) return err;
+
+    try appendInt(list, allocator, u16, typ);
+    try appendU16Len(list, allocator, payload.len, err);
+    try list.appendSlice(allocator, payload);
+    std.mem.writeInt(u16, list.items[extensions_len_pos..][0..2], @intCast(next_extensions_len), .big);
+    list.items[1] = @truncate(next_body_len >> 16);
+    list.items[2] = @truncate(next_body_len >> 8);
+    list.items[3] = @truncate(next_body_len);
+}
+
 test "QUIC TLS ClientHello travels over Initial CRYPTO exchange" {
     const allocator = std.testing.allocator;
 
@@ -791,6 +847,11 @@ test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
     const parsed_server = try parseServerHello(server_hello.items);
     const client_shared = try x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
     try std.testing.expectEqualSlices(u8, &client_shared, &server_shared);
+
+    var duplicate_server_supported_versions = try server_hello.clone(allocator);
+    defer duplicate_server_supported_versions.deinit(allocator);
+    try appendServerHelloExtensionForTest(&duplicate_server_supported_versions, allocator, ext_supported_versions, &.{ 0x03, 0x04 });
+    try std.testing.expectError(error.InvalidServerHello, parseServerHello(duplicate_server_supported_versions.items));
 
     const th = transcriptHash(client_hello.items, server_hello.items);
     const client_keys = deriveHandshakeSecrets(client_shared, th);
@@ -906,6 +967,11 @@ test "QUIC TLS EncryptedExtensions and Finished verify data" {
     const params = try quic.parseTransportParameters(allocator, parsed_ee.transport_parameters);
     defer allocator.free(params);
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.TransportParameterId.initial_max_data)), params[0].id);
+
+    var duplicate_ee_alpn = try ee.clone(allocator);
+    defer duplicate_ee_alpn.deinit(allocator);
+    try appendEncryptedExtensionsExtensionForTest(&duplicate_ee_alpn, allocator, ext_alpn, &.{ 0x00, 0x03, 0x02, 'h', '3' });
+    try std.testing.expectError(error.InvalidEncryptedExtensions, parseEncryptedExtensions(duplicate_ee_alpn.items));
 
     const base_key = [_]u8{0x5a} ** 32;
     var transcript_hash: [32]u8 = undefined;
