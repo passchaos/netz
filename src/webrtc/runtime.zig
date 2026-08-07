@@ -475,8 +475,14 @@ pub const PeerEndpoint = struct {
                 return .{ .stun = .{ .from = raw.from, .bytes = raw.bytes, .message = message } };
             }
             if (looksLikeDtls(raw.bytes)) {
-                const record = try webrtc.dtls.Record.parse(raw.bytes);
-                return .{ .dtls = .{ .from = raw.from, .bytes = raw.bytes, .record = record } };
+                const records = try webrtc.dtls.parseRecords(self.allocator, raw.bytes);
+                errdefer webrtc.dtls.freeRecords(self.allocator, records);
+                if (records.len == 1) {
+                    const record = records[0];
+                    webrtc.dtls.freeRecords(self.allocator, records);
+                    return .{ .dtls = .{ .from = raw.from, .bytes = raw.bytes, .record = record } };
+                }
+                return .{ .dtls_records = .{ .from = raw.from, .bytes = raw.bytes, .records = records } };
             }
             if (looksLikeRtcp(raw.bytes)) {
                 var parsed = try webrtc.rtcp.parsePacket(self.allocator, raw.bytes);
@@ -781,6 +787,7 @@ pub const RtcpPacketsDatagram = struct {
 pub const PeerDatagram = union(enum) {
     stun: StunDatagram,
     dtls: DtlsDatagram,
+    dtls_records: DtlsRecordsDatagram,
     rtcp: RtcpDatagram,
     rtp: RtpDatagram,
 
@@ -788,6 +795,7 @@ pub const PeerDatagram = union(enum) {
         switch (self.*) {
             .stun => |*datagram| datagram.deinit(allocator),
             .dtls => |*datagram| datagram.deinit(allocator),
+            .dtls_records => |*datagram| datagram.deinit(allocator),
             .rtcp => |*datagram| datagram.deinit(allocator),
             .rtp => |*datagram| datagram.deinit(allocator),
         }
@@ -1497,6 +1505,18 @@ test "WebRTC peer runtime receives multi-record DTLS datagrams" {
     try std.testing.expectEqual(webrtc.dtls.ContentType.alert, datagram.records[1].content_type);
     try std.testing.expectEqual(@as(u48, 2), datagram.records[1].sequence_number);
     try std.testing.expectEqualStrings("warn", datagram.records[1].fragment);
+
+    try sender.endpoint.sendBytes(receiver.address(), encoded.items);
+    var any = try receiver.endpoint.receiveAny();
+    defer any.deinit(allocator);
+    switch (any) {
+        .dtls_records => |records_datagram| {
+            try std.testing.expectEqual(@as(usize, 2), records_datagram.records.len);
+            try std.testing.expectEqualStrings("hello", records_datagram.records[0].fragment);
+            try std.testing.expectEqualStrings("warn", records_datagram.records[1].fragment);
+        },
+        else => return error.UnexpectedStunMessage,
+    }
 }
 
 test "WebRTC peer runtime sends authenticated SRTP and rejects replay" {
@@ -1759,6 +1779,7 @@ test "WebRTC peer receives mixed datagrams with std.Io async demux" {
                 saw_rtp = true;
             },
             .rtcp => return error.UnexpectedStunMessage,
+            .dtls_records => return error.UnexpectedStunMessage,
             .stun => return error.UnexpectedStunMessage,
         }
     }
