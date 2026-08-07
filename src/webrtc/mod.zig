@@ -677,7 +677,7 @@ pub const ice = struct {
         related_address: ?[]const u8 = null,
         related_port: ?u16 = null,
         tcp_type: ?[]const u8 = null,
-        extensions: []const CandidateExtension = &.{},
+        extensions: []CandidateExtension = &.{},
 
         pub fn parse(line: []const u8) Error!Candidate {
             return parseInternal(null, line);
@@ -768,6 +768,44 @@ pub const ice = struct {
                 if (std.ascii.eqlIgnoreCase(extension.key, key)) return extension.value;
             }
             return null;
+        }
+
+        pub fn addExtension(self: *Candidate, allocator: std.mem.Allocator, extension: CandidateExtension) Error!void {
+            try validateCandidateByteString(extension.key);
+            try validateCandidateExtensionByteString(extension.value);
+            if (std.mem.eql(u8, extension.key, "tcptype")) {
+                if (!validTcpType(extension.value)) return error.InvalidIceCandidate;
+                self.tcp_type = extension.value;
+                return;
+            }
+            for (self.extensions) |*existing| {
+                if (std.mem.eql(u8, existing.key, extension.key)) {
+                    existing.* = extension;
+                    return;
+                }
+            }
+            if (self.extensions.len == 0) {
+                self.extensions = try allocator.alloc(CandidateExtension, 1);
+                self.extensions[0] = extension;
+                return;
+            }
+            self.extensions = try allocator.realloc(self.extensions, self.extensions.len + 1);
+            self.extensions[self.extensions.len - 1] = extension;
+        }
+
+        pub fn removeExtension(self: *Candidate, allocator: std.mem.Allocator, key: []const u8) Error!bool {
+            var removed = false;
+            if (std.mem.eql(u8, key, "tcptype") and self.tcp_type != null) {
+                self.tcp_type = null;
+                removed = true;
+            }
+            for (self.extensions, 0..) |extension, index| {
+                if (!std.mem.eql(u8, extension.key, key)) continue;
+                std.mem.copyForwards(CandidateExtension, self.extensions[index .. self.extensions.len - 1], self.extensions[index + 1 ..]);
+                self.extensions = try allocator.realloc(self.extensions, self.extensions.len - 1);
+                return true;
+            }
+            return removed;
         }
 
         pub fn computedPriority(self: Candidate, options: CandidatePriorityOptions) Error!u32 {
@@ -7473,6 +7511,20 @@ test "ICE candidate parser and SDP parser" {
         "candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype active empty-value-1  empty-value-2 ",
         empty_ext_line.items,
     );
+
+    try empty_ext.addExtension(allocator, .{ .key = "empty-value-1", .value = "updated" });
+    try std.testing.expectEqualStrings("updated", empty_ext.extensionValue("empty-value-1").?);
+    try empty_ext.addExtension(allocator, .{ .key = "new-empty", .value = "" });
+    try std.testing.expectEqual(@as(usize, 0), empty_ext.extensionValue("new-empty").?.len);
+    try empty_ext.addExtension(allocator, .{ .key = "tcptype", .value = "passive" });
+    try std.testing.expectEqualStrings("passive", empty_ext.extensionValue("tcptype").?);
+    try std.testing.expectError(error.InvalidIceCandidate, empty_ext.addExtension(allocator, .{ .key = "tcptype", .value = "INVALID" }));
+    try std.testing.expectError(error.InvalidIceCandidate, empty_ext.addExtension(allocator, .{ .key = "", .value = "" }));
+    try std.testing.expect(try empty_ext.removeExtension(allocator, "empty-value-2"));
+    try std.testing.expect(empty_ext.extensionValue("empty-value-2") == null);
+    try std.testing.expect(try empty_ext.removeExtension(allocator, "tcptype"));
+    try std.testing.expect(empty_ext.extensionValue("tcptype") == null);
+    try std.testing.expect(!(try empty_ext.removeExtension(allocator, "missing")));
 
     const mdns = try ice.Candidate.parse("candidate:1380287402 1 udp 2130706431 e2494022-4d9a-4c1e-a750-cc48d4f8d6ee.local 60542 typ host");
     try std.testing.expectEqualStrings("e2494022-4d9a-4c1e-a750-cc48d4f8d6ee.local", mdns.address);
