@@ -4105,6 +4105,7 @@ test "QUIC 1-RTT stateless reset enters draining" {
     defer connection.deinit();
 
     try connection.peer_connection_ids.addWithLimit(1, "reset-cid", [_]u8{0xaa} ** 16, 4);
+    try connection.peer_connection_ids.markInUse(1);
     var reset_datagram: std.ArrayList(u8) = .empty;
     defer reset_datagram.deinit(allocator);
     try quic.stateless_reset.encode(&reset_datagram, allocator, &.{ 0x40, 1, 2, 3, 4 }, [_]u8{0xaa} ** 16);
@@ -4138,6 +4139,7 @@ test "QUIC routed receive detects stateless reset before decrypt" {
 
     const token = [_]u8{0x5d} ** 16;
     try connection.peer_connection_ids.addWithLimit(2, "reset-cid", token, 4);
+    try connection.peer_connection_ids.markInUse(2);
     var reset_datagram: std.ArrayList(u8) = .empty;
     defer reset_datagram.deinit(allocator);
     try quic.stateless_reset.encode(&reset_datagram, allocator, &.{ 0x40, 9, 8, 7, 6 }, token);

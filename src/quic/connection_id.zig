@@ -139,7 +139,7 @@ pub const PeerPool = struct {
 
     pub fn detectStatelessReset(self: *const PeerPool, datagram: []const u8) ?u64 {
         for (&self.entries) |*entry| {
-            if (!entry.occupied) continue;
+            if (!entry.occupied or !entry.in_use) continue;
             if (quic.stateless_reset.matches(datagram, entry.stateless_reset_token)) return entry.sequence_number;
         }
         return null;
@@ -249,6 +249,11 @@ test "QUIC peer CID pool detects stateless reset token" {
     var datagram: std.ArrayList(u8) = .empty;
     defer datagram.deinit(allocator);
     try quic.stateless_reset.encode(&datagram, allocator, &.{ 0x40, 9, 8, 7, 6 }, token);
+    // RFC 9000 §10.3.1: only check tokens for connection IDs the endpoint has
+    // actually used.  A peer can issue a CID before we switch to it; that token
+    // must not be accepted until the CID is active.
+    try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(datagram.items));
+    try pool.markInUse(7);
     try std.testing.expectEqual(@as(?u64, 7), pool.detectStatelessReset(datagram.items));
     try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(&.{ 0x40, 1, 2 }));
 }
