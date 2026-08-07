@@ -1314,7 +1314,7 @@ pub const Disconnect = struct {
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const reason_code = if (!cursor.eof()) try cursor.readByte() else 0;
         if (protocol == .v5) try validateDisconnectReason(reason_code);
-        const props = if (protocol == .v5 and fixed.remaining_len != 0) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (protocol == .v5 and !cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
         if (protocol == .v5) try validatePropertiesFor(.disconnect, props);
         if (!cursor.eof()) return error.InvalidPacketType;
@@ -1328,10 +1328,15 @@ pub const Disconnect = struct {
         reason_code: u8,
         properties: []const Property,
     ) Error!void {
-        if (protocol == .v5) try validateDisconnectReason(reason_code);
+        if (protocol == .v3_1_1) {
+            if (reason_code != 0) return error.InvalidReasonCode;
+            if (properties.len != 0) return error.InvalidProperty;
+        } else try validateDisconnectReason(reason_code);
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
-        if (protocol == .v5 and (reason_code != 0 or properties.len != 0)) {
+        if (protocol == .v5 and reason_code != 0 and properties.len == 0) {
+            try variable.append(allocator, reason_code);
+        } else if (protocol == .v5 and (reason_code != 0 or properties.len != 0)) {
             try variable.append(allocator, reason_code);
             try validatePropertiesFor(.disconnect, properties);
             try writeProperties(&variable, allocator, properties);
@@ -2241,8 +2246,18 @@ test "MQTT disconnect control" {
     disconnect.deinit(allocator);
     disconnect = try Disconnect.parse(allocator, .v5, encoded.items);
     try std.testing.expectEqual(@as(u8, 0x8d), disconnect.reason_code);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xe0, 0x01, 0x8d }, encoded.items);
+    encoded.clearRetainingCapacity();
+    try encoded.appendSlice(allocator, &.{ 0xe0, 0x01, 0x8d });
+    disconnect.deinit(allocator);
+    disconnect = try Disconnect.parse(allocator, .v5, encoded.items);
+    try std.testing.expectEqual(@as(u8, 0x8d), disconnect.reason_code);
+    try std.testing.expectEqual(@as(usize, 0), disconnect.properties.len);
     try std.testing.expectError(error.InvalidReasonCode, Disconnect.write(&encoded, allocator, .v5, 0x05, &.{}));
-    try std.testing.expectError(error.BufferTooShort, Disconnect.parse(allocator, .v5, &.{ 0xe0, 0x01, 0x8d }));
+    try std.testing.expectError(error.InvalidReasonCode, Disconnect.write(&encoded, allocator, .v3_1_1, 0x8d, &.{}));
+    try std.testing.expectError(error.InvalidProperty, Disconnect.write(&encoded, allocator, .v3_1_1, 0, &.{
+        .{ .utf8 = .{ .id = .reason_string, .value = "v3 has no properties" } },
+    }));
 
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);
