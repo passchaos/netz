@@ -2370,6 +2370,11 @@ pub const dtls = struct {
         sequence_number: u48,
     };
 
+    pub const RecordToWrite = struct {
+        options: WriteOptions,
+        fragment: []const u8,
+    };
+
     pub fn writeRecord(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: WriteOptions, fragment: []const u8) Error!void {
         if (fragment.len > std.math.maxInt(u16)) return error.InvalidDtlsRecord;
         try list.append(allocator, @intFromEnum(options.content_type));
@@ -2379,6 +2384,11 @@ pub const dtls = struct {
         try wire.appendInt(list, allocator, u32, @truncate(options.sequence_number), .big);
         try wire.appendInt(list, allocator, u16, @intCast(fragment.len), .big);
         try list.appendSlice(allocator, fragment);
+    }
+
+    pub fn writeRecords(list: *std.ArrayList(u8), allocator: std.mem.Allocator, records: []const RecordToWrite) Error!void {
+        if (records.len == 0) return error.InvalidDtlsRecord;
+        for (records) |record| try writeRecord(list, allocator, record.options, record.fragment);
     }
 
     pub fn parseRecords(allocator: std.mem.Allocator, bytes: []const u8) Error![]Record {
@@ -8324,7 +8334,11 @@ test "RTP and DTLS record parsers" {
     try std.testing.expectEqual(@as(u48, 3), written_record.sequence_number);
     try std.testing.expectEqualStrings("dtls", written_record.fragment);
 
-    try dtls.writeRecord(&written, allocator, .{ .content_type = .alert, .epoch = 1, .sequence_number = 4 }, "alert");
+    written.clearRetainingCapacity();
+    try dtls.writeRecords(&written, allocator, &.{
+        .{ .options = .{ .content_type = .application_data, .epoch = 1, .sequence_number = 3 }, .fragment = "dtls" },
+        .{ .options = .{ .content_type = .alert, .epoch = 1, .sequence_number = 4 }, .fragment = "alert" },
+    });
     const records = try dtls.parseRecords(allocator, written.items);
     defer dtls.freeRecords(allocator, records);
     try std.testing.expectEqual(@as(usize, 2), records.len);
@@ -8334,6 +8348,7 @@ test "RTP and DTLS record parsers" {
     try std.testing.expectEqual(@as(u48, 4), records[1].sequence_number);
     try std.testing.expectEqualStrings("alert", records[1].fragment);
     try std.testing.expectError(error.BufferTooShort, dtls.parseRecords(allocator, written.items[0 .. written.items.len - 1]));
+    try std.testing.expectError(error.InvalidDtlsRecord, dtls.writeRecords(&written, allocator, &.{}));
 
     var invalid_dtls = try written.clone(allocator);
     defer invalid_dtls.deinit(allocator);

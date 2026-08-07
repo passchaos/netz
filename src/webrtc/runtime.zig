@@ -124,6 +124,10 @@ pub const Peer = struct {
         try self.endpoint.sendDtlsRecord(to, options, fragment);
     }
 
+    pub fn sendDtlsRecords(self: *Peer, to: net.IpAddress, records: []const webrtc.dtls.RecordToWrite) Error!void {
+        try self.endpoint.sendDtlsRecords(to, records);
+    }
+
     pub fn receiveDtlsRecord(self: *Peer) Error!DtlsDatagram {
         return self.endpoint.receiveDtlsRecord();
     }
@@ -281,6 +285,13 @@ pub const PeerEndpoint = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try webrtc.dtls.writeRecord(&encoded, self.allocator, options, fragment);
+        try self.sendBytes(to, encoded.items);
+    }
+
+    pub fn sendDtlsRecords(self: *PeerEndpoint, to: net.IpAddress, records: []const webrtc.dtls.RecordToWrite) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try webrtc.dtls.writeRecords(&encoded, self.allocator, records);
         try self.sendBytes(to, encoded.items);
     }
 
@@ -1482,19 +1493,11 @@ test "WebRTC peer runtime receives multi-record DTLS datagrams" {
     var sender = try Peer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer sender.deinit();
 
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try webrtc.dtls.writeRecord(&encoded, allocator, .{
-        .content_type = .handshake,
-        .epoch = 0,
-        .sequence_number = 1,
-    }, "hello");
-    try webrtc.dtls.writeRecord(&encoded, allocator, .{
-        .content_type = .alert,
-        .epoch = 0,
-        .sequence_number = 2,
-    }, "warn");
-    try sender.endpoint.sendBytes(receiver.address(), encoded.items);
+    const records_to_send = [_]webrtc.dtls.RecordToWrite{
+        .{ .options = .{ .content_type = .handshake, .epoch = 0, .sequence_number = 1 }, .fragment = "hello" },
+        .{ .options = .{ .content_type = .alert, .epoch = 0, .sequence_number = 2 }, .fragment = "warn" },
+    };
+    try sender.sendDtlsRecords(receiver.address(), &records_to_send);
 
     var datagram = try receiver.receiveDtlsRecords();
     defer datagram.deinit(allocator);
@@ -1506,7 +1509,7 @@ test "WebRTC peer runtime receives multi-record DTLS datagrams" {
     try std.testing.expectEqual(@as(u48, 2), datagram.records[1].sequence_number);
     try std.testing.expectEqualStrings("warn", datagram.records[1].fragment);
 
-    try sender.endpoint.sendBytes(receiver.address(), encoded.items);
+    try sender.sendDtlsRecords(receiver.address(), &records_to_send);
     var any = try receiver.endpoint.receiveAny();
     defer any.deinit(allocator);
     switch (any) {
