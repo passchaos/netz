@@ -4387,6 +4387,23 @@ pub const rtcp = struct {
             return self.arrivalTimeMicrosForIndex(delta);
         }
 
+        pub fn wireLen(self: TransportWideCc) Error!usize {
+            if (self.packets.len > std.math.maxInt(u16)) return error.InvalidRtcpPacket;
+            var payload_len: usize = 16 + twccPacketStatusChunksWireLen(self.packets);
+            for (self.packets) |packet| {
+                switch (packet.status) {
+                    .not_received, .received_without_delta => {},
+                    .small_delta => {
+                        if (packet.delta_ticks < 0 or packet.delta_ticks > std.math.maxInt(u8)) return error.InvalidRtcpPacket;
+                        payload_len += 1;
+                    },
+                    .large_delta => payload_len += 2,
+                }
+            }
+            payload_len = std.mem.alignForward(usize, payload_len, 4);
+            return 4 + payload_len;
+        }
+
         pub fn deinit(self: *TransportWideCc, allocator: std.mem.Allocator) void {
             allocator.free(self.packets);
             self.* = undefined;
@@ -5952,6 +5969,36 @@ pub const rtcp = struct {
             try wire.appendInt(list, allocator, u16, chunk, .big);
             index += vector_len;
         }
+    }
+
+    fn twccPacketStatusChunksWireLen(packets: []const TwccPacketResult) usize {
+        var index: usize = 0;
+        var len: usize = 0;
+        while (index < packets.len) {
+            const run_len = twccSameStatusRunLength(packets, index, 0x1fff);
+            const current_status = packets[index].status;
+            const vector_capacity = if (twccStatusFitsOneBit(current_status))
+                twccStatusVectorCapacity(.one_bit)
+            else
+                twccStatusVectorCapacity(.two_bit);
+
+            if (run_len > vector_capacity) {
+                len += 2;
+                index += run_len;
+                continue;
+            }
+
+            var vector_len = @min(twccStatusVectorCapacity(.one_bit), packets.len - index);
+            for (packets[index .. index + vector_len]) |packet| {
+                if (!twccStatusFitsOneBit(packet.status)) {
+                    vector_len = @min(twccStatusVectorCapacity(.two_bit), packets.len - index);
+                    break;
+                }
+            }
+            len += 2;
+            index += vector_len;
+        }
+        return len;
     }
 
     fn twccSameStatusRunLength(packets: []const TwccPacketResult, start: usize, max_len: usize) usize {
@@ -10137,6 +10184,7 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(@as(u64, 0x00a0b0 * 64_000), parsed.packet.transport_wide_cc.referenceTimeMicros());
     try std.testing.expectEqual(@as(u24, 0x00a0b0), rtcp.twccReferenceTimeFromUnixMicros(parsed.packet.transport_wide_cc.referenceTimeMicros() + 63_999));
     try std.testing.expectEqual(@as(u64, 0x00a0b0 * 64_000), rtcp.twccReferenceTimeToMicros(0x00a0b0));
+    try std.testing.expectEqual(@as(usize, encoded.items.len), try parsed.packet.transport_wide_cc.wireLen());
     try std.testing.expectEqual(@as(u8, 7), parsed.packet.transport_wide_cc.feedback_packet_count);
     try std.testing.expectEqual(@as(usize, 5), parsed.packet.transport_wide_cc.packets.len);
     try std.testing.expect(parsed.packet.transport_wide_cc.packets[0].received());
@@ -10236,6 +10284,15 @@ test "RTCP transport-wide congestion feedback" {
         .packets = &long_run,
     } });
     try std.testing.expectEqual(@as(rtcp.TwccPacketStatusChunk, 15), std.mem.readInt(u16, encoded.items[20..22], .big));
+    var invalid_twcc_delta = [_]rtcp.TwccPacketResult{.{ .status = .small_delta, .delta_ticks = -1 }};
+    try std.testing.expectError(error.InvalidRtcpPacket, (rtcp.TransportWideCc{
+        .sender_ssrc = 1,
+        .media_ssrc = 2,
+        .base_sequence_number = 1,
+        .reference_time_64ms = 0,
+        .feedback_packet_count = 0,
+        .packets = &invalid_twcc_delta,
+    }).wireLen());
 
     // Also parse a hand-built status-vector chunk.  The writer intentionally
     // emits whichever chunk shape is compact for the status sequence, but this
