@@ -1222,6 +1222,47 @@ pub const sdp = struct {
         }
     }
 
+    fn validateSdpAttributeValue(value: []const u8) Error!void {
+        if (value.len == 0) return error.InvalidSdp;
+        for (value) |byte| {
+            if (byte == 0 or byte == '\r' or byte == '\n') return error.InvalidSdp;
+        }
+    }
+
+    pub fn formatSsrcLine(allocator: std.mem.Allocator, ssrc: u32, attribute: []const u8, value: []const u8) Error![]u8 {
+        try validateSdpToken(attribute);
+        try validateSdpAttributeValue(value);
+        return std.fmt.allocPrint(allocator, "a=ssrc:{d} {s}:{s}\r\n", .{ ssrc, attribute, value });
+    }
+
+    pub fn appendSsrcLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ssrc: u32, attribute: []const u8, value: []const u8) Error!void {
+        const line = try formatSsrcLine(allocator, ssrc, attribute, value);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatSsrcGroupLine(allocator: std.mem.Allocator, semantics: []const u8, ssrcs: []const u32) Error![]u8 {
+        try validateSdpToken(semantics);
+        if (ssrcs.len < 2) return error.InvalidSdp;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.appendSlice(allocator, "a=ssrc-group:");
+        try out.appendSlice(allocator, semantics);
+        for (ssrcs) |ssrc| {
+            const item = try std.fmt.allocPrint(allocator, " {d}", .{ssrc});
+            defer allocator.free(item);
+            try out.appendSlice(allocator, item);
+        }
+        try out.appendSlice(allocator, "\r\n");
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn appendSsrcGroupLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, semantics: []const u8, ssrcs: []const u32) Error!void {
+        const line = try formatSsrcGroupLine(allocator, semantics, ssrcs);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub fn formatCandidateAttribute(allocator: std.mem.Allocator, candidate: ice.Candidate) Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -9151,6 +9192,20 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("sim_track", sdp.trackDetailsForRid(tracks, "simulcast", "h").?.track_id);
     try std.testing.expect(sdp.trackDetailsForRid(tracks, "video", "f") == null);
     try std.testing.expect(!sdp.tracksContainRepeatedMid(tracks));
+    const ssrc_line = try sdp.formatSsrcLine(allocator, 3000, "msid", "video_stream video_track");
+    defer allocator.free(ssrc_line);
+    try std.testing.expectEqualStrings("a=ssrc:3000 msid:video_stream video_track\r\n", ssrc_line);
+    const fid_line = try sdp.formatSsrcGroupLine(allocator, "FID", &.{ 3000, 4000 });
+    defer allocator.free(fid_line);
+    try std.testing.expectEqualStrings("a=ssrc-group:FID 3000 4000\r\n", fid_line);
+    var ssrc_lines: std.ArrayList(u8) = .empty;
+    defer ssrc_lines.deinit(allocator);
+    try sdp.appendSsrcGroupLine(&ssrc_lines, allocator, "FEC-FR", &.{ 3000, 5000 });
+    try sdp.appendSsrcLine(&ssrc_lines, allocator, 3000, "cname", "stream-id");
+    try std.testing.expectEqualStrings("a=ssrc-group:FEC-FR 3000 5000\r\na=ssrc:3000 cname:stream-id\r\n", ssrc_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSsrcLine(allocator, 3000, "", "value"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSsrcLine(allocator, 3000, "msid", "bad\nvalue"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSsrcGroupLine(allocator, "FID", &.{3000}));
 
     const duplicate_ssrc_text =
         "v=0\r\n" ++
