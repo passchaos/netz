@@ -180,6 +180,18 @@ pub const Server = struct {
         return .{ .connection = connection, .request = request, .stream_id = 1 };
     }
 
+    pub fn serveConnection(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (*HandlerContext, OwnedRequest) Error!ResponseOptions,
+        max_requests: usize,
+    ) Error!usize {
+        var connection = try self.accept();
+        defer connection.close();
+        return connection.serve(HandlerContext, context, handler, max_requests);
+    }
+
     pub fn serveConcurrent(
         self: *Server,
         comptime HandlerContext: type,
@@ -839,6 +851,34 @@ pub const Connection = struct {
             if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
         }
         self.releasePeerStream(stream_id);
+    }
+
+    pub fn serveOne(
+        self: *Connection,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (*HandlerContext, OwnedRequest) Error!ResponseOptions,
+    ) Error!void {
+        var owned_request = try self.readRequest();
+        defer owned_request.deinit(self.allocator);
+        var response = try handler(context, owned_request);
+        if (response.request_method == null) response.request_method = owned_request.method;
+        response.extended_connect = owned_request.protocol != null;
+        try self.writeResponse(owned_request.stream_id, response);
+    }
+
+    pub fn serve(
+        self: *Connection,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (*HandlerContext, OwnedRequest) Error!ResponseOptions,
+        max_requests: usize,
+    ) Error!usize {
+        var served: usize = 0;
+        while (served < max_requests) : (served += 1) {
+            try self.serveOne(HandlerContext, context, handler);
+        }
+        return served;
     }
 
     pub fn writeInformationalResponse(self: *Connection, stream_id: u31, status_code: u16, headers: []const http2.Hpack.HeaderField) Error!void {
@@ -2558,6 +2598,66 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);
     try std.testing.expectEqualStrings("done", goaway.goaway.debug_data);
+}
+
+test "HTTP/2 serveConnection handles sequential requests" {
+    const allocator = std.testing.allocator;
+
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    defer backend.deinit();
+    const io = backend.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        count: usize = 0,
+        fn handle(ctx: *@This(), request: OwnedRequest) Error!ResponseOptions {
+            ctx.count += 1;
+            if (std.mem.eql(u8, request.path, "/one")) return .{ .body = "first" };
+            if (std.mem.eql(u8, request.path, "/two")) return .{ .body = "second" };
+            return .{ .status = 404, .body = "missing" };
+        }
+    };
+
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        served: usize = 0,
+        err: ?anyerror = null,
+        fn run(shared: *@This()) void {
+            shared.served = shared.server.serveConnection(Context, &shared.context, Context.handle, 2) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var first = try client.request(.{ .path = "/one" });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("first", first.body);
+    var second = try client.request(.{ .path = "/two" });
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("second", second.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.served);
+    try std.testing.expectEqual(@as(usize, 2), shared.context.count);
 }
 
 test "HTTP/2 client connects by host name" {
