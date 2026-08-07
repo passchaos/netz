@@ -1257,6 +1257,17 @@ pub const sdp = struct {
         allocator.free(codecs);
     }
 
+    pub fn rtpCodecCompatible(local: RtpCodec, remote: RtpCodec) bool {
+        if (!std.ascii.eqlIgnoreCase(local.mime_type, remote.mime_type)) return false;
+        if (!codecClockRateEqual(local.mime_type, local.clock_rate, remote.clock_rate)) return false;
+        if (!codecChannelsEqual(local.mime_type, local.channels, remote.channels)) return false;
+
+        if (std.ascii.eqlIgnoreCase(local.mime_type, "video/H264")) return h264FmtpCompatible(local.fmtp, remote.fmtp);
+        if (std.ascii.eqlIgnoreCase(local.mime_type, "video/VP9")) return vp9FmtpCompatible(local.fmtp, remote.fmtp);
+        if (std.ascii.eqlIgnoreCase(local.mime_type, "video/AV1")) return av1FmtpCompatible(local.fmtp, remote.fmtp);
+        return genericFmtpCompatible(local.fmtp, remote.fmtp);
+    }
+
     pub fn extractRids(allocator: std.mem.Allocator, media: Media) Error![]Rid {
         var rids: std.ArrayList(Rid) = .empty;
         errdefer rids.deinit(allocator);
@@ -1552,6 +1563,56 @@ pub const sdp = struct {
         const local_profile = fmtpParameter(local_fmtp, "profile") orelse "0";
         const remote_profile = fmtpParameter(remote_fmtp, "profile") orelse "0";
         return std.mem.eql(u8, local_profile, remote_profile);
+    }
+
+    fn genericFmtpCompatible(local_fmtp: []const u8, remote_fmtp: []const u8) bool {
+        return fmtpParamsContain(local_fmtp, remote_fmtp) and fmtpParamsContain(remote_fmtp, local_fmtp);
+    }
+
+    fn fmtpParamsContain(a: []const u8, b: []const u8) bool {
+        var params = std.mem.splitScalar(u8, a, ';');
+        while (params.next()) |raw_param| {
+            const param = std.mem.trim(u8, raw_param, " \t");
+            if (param.len == 0) continue;
+            const eq = std.mem.indexOfScalar(u8, param, '=') orelse {
+                if (fmtpParameter(b, param) == null) return false;
+                continue;
+            };
+            const key = std.mem.trim(u8, param[0..eq], " \t");
+            const value = std.mem.trim(u8, param[eq + 1 ..], " \t");
+            const other = fmtpParameter(b, key) orelse return false;
+            if (!std.ascii.eqlIgnoreCase(value, other)) return false;
+        }
+        return true;
+    }
+
+    fn codecClockRateEqual(mime_type: []const u8, a: u32, b: u32) bool {
+        const left = if (a == 0) defaultClockRate(mime_type) else a;
+        const right = if (b == 0) defaultClockRate(mime_type) else b;
+        return left == right;
+    }
+
+    fn codecChannelsEqual(mime_type: []const u8, a: u16, b: u16) bool {
+        var left = if (a == 0) defaultChannels(mime_type) else a;
+        var right = if (b == 0) defaultChannels(mime_type) else b;
+        if (left == 0) left = 1;
+        if (right == 0) right = 1;
+        return left == right;
+    }
+
+    fn defaultClockRate(mime_type: []const u8) u32 {
+        if (std.ascii.eqlIgnoreCase(mime_type, "audio/opus")) return 48000;
+        if (std.ascii.eqlIgnoreCase(mime_type, "audio/PCMU")) return 8000;
+        if (std.ascii.eqlIgnoreCase(mime_type, "audio/PCMA")) return 8000;
+        if (std.ascii.eqlIgnoreCase(mime_type, "audio/G722")) return 8000;
+        if (std.ascii.startsWithIgnoreCase(mime_type, "video/")) return 90000;
+        return 0;
+    }
+
+    fn defaultChannels(mime_type: []const u8) u16 {
+        if (std.ascii.eqlIgnoreCase(mime_type, "audio/opus")) return 2;
+        if (std.ascii.startsWithIgnoreCase(mime_type, "audio/")) return 1;
+        return 0;
     }
 
     fn parseRidAttribute(raw: []const u8) Error!Rid {
@@ -5331,6 +5392,23 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expect(sdp.av1FmtpCompatible("profile=0", ""));
     try std.testing.expect(sdp.av1FmtpCompatible("profile=1", "profile=1"));
     try std.testing.expect(!sdp.av1FmtpCompatible("", "profile=1"));
+
+    try std.testing.expect(sdp.rtpCodecCompatible(
+        .{ .payload_type = 111, .mime_type = "audio/opus", .codec_name = "opus", .clock_rate = 0, .channels = 0 },
+        .{ .payload_type = 111, .mime_type = "audio/OPUS", .codec_name = "opus", .clock_rate = 48000, .channels = 2 },
+    ));
+    try std.testing.expect(!sdp.rtpCodecCompatible(
+        .{ .payload_type = 111, .mime_type = "audio/opus", .codec_name = "opus", .clock_rate = 48000, .channels = 2 },
+        .{ .payload_type = 111, .mime_type = "audio/opus", .codec_name = "opus", .clock_rate = 44100, .channels = 2 },
+    ));
+    try std.testing.expect(sdp.rtpCodecCompatible(
+        .{ .payload_type = 96, .mime_type = "video/H264", .codec_name = "H264", .clock_rate = 90000, .fmtp = "packetization-mode=1;profile-level-id=42e01f" },
+        .{ .payload_type = 126, .mime_type = "video/h264", .codec_name = "H264", .clock_rate = 90000, .fmtp = "packetization-mode=1;profile-level-id=42e029" },
+    ));
+    try std.testing.expect(!sdp.rtpCodecCompatible(
+        .{ .payload_type = 96, .mime_type = "video/VP9", .codec_name = "VP9", .clock_rate = 90000, .fmtp = "" },
+        .{ .payload_type = 98, .mime_type = "video/VP9", .codec_name = "VP9", .clock_rate = 90000, .fmtp = "profile-id=1" },
+    ));
 
     const no_channels_codec_text =
         "v=0\r\n" ++
