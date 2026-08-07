@@ -333,6 +333,7 @@ pub const Connection = struct {
     keep_alive_seconds: u16 = 30,
     peer_maximum_qos: mqtt.QoS = .exactly_once,
     peer_retain_available: bool = true,
+    local_retain_available: bool = true,
     peer_wildcard_subscription_available: bool = true,
     peer_subscription_identifier_available: bool = true,
     peer_shared_subscription_available: bool = true,
@@ -413,6 +414,7 @@ pub const Connection = struct {
         if (self.protocol == .v5) {
             self.max_incoming_inflight = mqtt.receiveMaximum(properties.items) orelse self.max_incoming_inflight;
             self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(properties.items) orelse self.incoming_topic_alias_maximum;
+            self.local_retain_available = mqtt.retainAvailable(properties.items) orelse options.retain_available;
             self.local_wildcard_subscription_available = mqtt.wildcardSubscriptionAvailable(properties.items) orelse options.wildcard_subscription_available;
             self.local_subscription_identifier_available = mqtt.subscriptionIdentifierAvailable(properties.items) orelse options.subscription_identifier_available;
             self.local_shared_subscription_available = mqtt.sharedSubscriptionAvailable(properties.items) orelse options.shared_subscription_available;
@@ -481,6 +483,7 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != .publish) return error.UnexpectedPacket;
         var publish_packet = try mqtt.Publish.parse(self.allocator, self.protocol, packet.bytes);
         errdefer publish_packet.deinit(self.allocator);
+        try self.validateIncomingPublishCapabilities(publish_packet);
         try self.applyIncomingTopicAlias(&publish_packet);
         try self.recordIncomingPublish(publish_packet);
         return .{ .packet = packet, .publish = publish_packet };
@@ -713,6 +716,10 @@ pub const Connection = struct {
         }
         const stored = self.incoming_topic_aliases[index] orelse return error.InvalidTopic;
         publish_packet.topic = stored;
+    }
+
+    fn validateIncomingPublishCapabilities(self: Connection, publish_packet: mqtt.Publish) Error!void {
+        if (publish_packet.retain and !self.local_retain_available) return error.InvalidProperty;
     }
 
     fn recordIncomingPublish(self: *Connection, publish_packet: mqtt.Publish) Error!void {
@@ -1427,6 +1434,24 @@ test "MQTT connection enforces peer publish capabilities" {
 
     try std.testing.expectError(error.InvalidQoS, connection.publish("topic", "payload", .{ .qos = .at_least_once }));
     try std.testing.expectError(error.InvalidProperty, connection.publish("topic", "payload", .{ .retain = true }));
+
+    connection.local_retain_available = false;
+    try std.testing.expectError(error.InvalidProperty, connection.validateIncomingPublishCapabilities(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "retained/in",
+        .packet_id = null,
+        .payload = "blocked",
+    }));
+    try connection.validateIncomingPublishCapabilities(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = false,
+        .topic = "normal/in",
+        .packet_id = null,
+        .payload = "ok",
+    });
 }
 
 test "MQTT runtime surfaces negative publish acknowledgements" {
