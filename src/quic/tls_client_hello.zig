@@ -186,10 +186,11 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
 
     const cipher_suites_len = try body_cursor.readInt(u16, .big);
     if (cipher_suites_len == 0 or cipher_suites_len % 2 != 0) return error.InvalidClientHello;
-    try body_cursor.skip(cipher_suites_len);
+    const cipher_suites = try body_cursor.readSlice(cipher_suites_len);
+    if (!cipherSuitesContain(cipher_suites, cipher_tls_aes_128_gcm_sha256)) return error.InvalidClientHello;
     const compression_len = try body_cursor.readByte();
-    if (compression_len == 0) return error.InvalidClientHello;
-    try body_cursor.skip(compression_len);
+    if (compression_len != 1) return error.InvalidClientHello;
+    if (try body_cursor.readByte() != 0) return error.InvalidClientHello;
 
     const extensions_len = try body_cursor.readInt(u16, .big);
     const extensions = try body_cursor.readSlice(extensions_len);
@@ -412,6 +413,14 @@ const SeenExtensions = struct {
     }
 };
 
+fn cipherSuitesContain(cipher_suites: []const u8, wanted: u16) bool {
+    var pos: usize = 0;
+    while (pos < cipher_suites.len) : (pos += 2) {
+        if (std.mem.readInt(u16, cipher_suites[pos..][0..2], .big) == wanted) return true;
+    }
+    return false;
+}
+
 fn writeServerNameExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) Error!void {
     const server_name_len = std.math.add(usize, 1 + 2, name.len) catch return error.InvalidClientHello;
     if (name.len > std.math.maxInt(u16) or server_name_len > std.math.maxInt(u16)) return error.InvalidClientHello;
@@ -607,6 +616,17 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     try appendClientHelloExtensionForTest(&duplicate_transport_parameters, allocator, ext_quic_transport_parameters, &.{});
     try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, duplicate_transport_parameters.items));
 
+    const offsets = try clientHelloOffsetsForTest(hello.items);
+    var unsupported_cipher = try hello.clone(allocator);
+    defer unsupported_cipher.deinit(allocator);
+    std.mem.writeInt(u16, unsupported_cipher.items[offsets.cipher_suites_start..][0..2], 0x1302, .big);
+    try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, unsupported_cipher.items));
+
+    var non_null_compression = try hello.clone(allocator);
+    defer non_null_compression.deinit(allocator);
+    non_null_compression.items[offsets.compression_start] = 1;
+    try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, non_null_compression.items));
+
     const huge_transport_parameters = try allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) + 1);
     defer allocator.free(huge_transport_parameters);
     try std.testing.expectError(error.InvalidClientHello, writeClientHello(&hello, allocator, .{
@@ -675,6 +695,31 @@ fn appendClientHelloExtensionForTest(
     list.items[1] = @truncate(next_body_len >> 16);
     list.items[2] = @truncate(next_body_len >> 8);
     list.items[3] = @truncate(next_body_len);
+}
+
+const ClientHelloOffsetsForTest = struct {
+    cipher_suites_start: usize,
+    compression_start: usize,
+};
+
+fn clientHelloOffsetsForTest(bytes: []const u8) Error!ClientHelloOffsetsForTest {
+    if (bytes.len < 4 or bytes[0] != handshake_type_client_hello) return error.InvalidClientHello;
+    const body_len = (@as(usize, bytes[1]) << 16) | (@as(usize, bytes[2]) << 8) | bytes[3];
+    if (body_len + 4 != bytes.len) return error.InvalidClientHello;
+
+    var pos: usize = 4 + 2 + 32;
+    if (pos >= bytes.len) return error.InvalidClientHello;
+    const session_id_len = bytes[pos];
+    pos += 1 + @as(usize, session_id_len);
+    if (pos + 2 > bytes.len) return error.InvalidClientHello;
+    const cipher_suites_len = std.mem.readInt(u16, bytes[pos..][0..2], .big);
+    const cipher_suites_start = pos + 2;
+    pos += 2 + @as(usize, cipher_suites_len);
+    if (pos >= bytes.len) return error.InvalidClientHello;
+    const compression_len = bytes[pos];
+    const compression_start = pos + 1;
+    if (compression_start + @as(usize, compression_len) > bytes.len) return error.InvalidClientHello;
+    return .{ .cipher_suites_start = cipher_suites_start, .compression_start = compression_start };
 }
 
 test "QUIC TLS ClientHello travels over Initial CRYPTO exchange" {
