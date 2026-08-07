@@ -4233,6 +4233,7 @@ pub const rtcp = struct {
     fn parseTransportLayerNack(allocator: std.mem.Allocator, payload: []const u8) Error!TransportLayerNack {
         if (payload.len < 8 or ((payload.len - 8) % 4) != 0) return error.InvalidRtcpPacket;
         const pair_count = (payload.len - 8) / 4;
+        if (pair_count == 0) return error.InvalidRtcpPacket;
         const pairs = try allocator.alloc(NackPair, pair_count);
         errdefer allocator.free(pairs);
         var cursor = wire.Cursor.init(payload);
@@ -4599,7 +4600,7 @@ pub const rtcp = struct {
     }
 
     fn writeTransportLayerNack(list: *std.ArrayList(u8), allocator: std.mem.Allocator, nack: TransportLayerNack) Error!void {
-        if (nack.pairs.len > (max_rtcp_payload_len - 8) / 4) return error.InvalidRtcpPacket;
+        if (nack.pairs.len == 0 or nack.pairs.len > (max_rtcp_payload_len - 8) / 4) return error.InvalidRtcpPacket;
         try writeHeader(list, allocator, transport_feedback_nack, .transport_feedback, 8 + nack.pairs.len * 4);
         try wire.appendInt(list, allocator, u32, nack.sender_ssrc, .big);
         try wire.appendInt(list, allocator, u32, nack.media_ssrc, .big);
@@ -8222,6 +8223,16 @@ test "RTCP receiver report and feedback packets" {
         .media_ssrc = 2,
         .pairs = too_many_nacks,
     } }));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .transport_layer_nack = .{
+        .sender_ssrc = 1,
+        .media_ssrc = 2,
+        .pairs = &.{},
+    } }));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, &.{
+        0x81, 0xcd, 0x00, 0x02,
+        0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x02,
+    }));
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, .{ .receiver_estimated_maximum_bitrate = .{
