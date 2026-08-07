@@ -9,6 +9,7 @@ pub const Error = mqtt.Error || error{
     UnexpectedPacket,
     ConnectRefused,
     InflightFull,
+    ReceiveMaximumExceeded,
     OutgoingPacketTooLarge,
     PublishRefused,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
@@ -16,6 +17,8 @@ pub const Error = mqtt.Error || error{
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
 };
+
+const packet_identifier_slots = @as(usize, std.math.maxInt(u16)) + 1;
 
 pub const Server = struct {
     io: std.Io,
@@ -185,6 +188,7 @@ pub const Client = struct {
             .protocol = options.protocol,
             .limits = options.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
+            .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
         };
         errdefer connection.close();
@@ -202,6 +206,9 @@ pub const Client = struct {
         }
         if (options.protocol == .v5 and mqtt.topicAliasMaximum(options.properties) == null) {
             try connect_properties.append(allocator, .{ .two_byte = .{ .id = .topic_alias_maximum, .value = options.topic_alias_maximum } });
+        }
+        if (options.protocol == .v5) {
+            connection.max_incoming_inflight = mqtt.receiveMaximum(connect_properties.items) orelse connection.max_incoming_inflight;
         }
         try mqtt.writeConnectPacket(&encoded, allocator, options.protocol, .{
             .client_id = options.client_id,
@@ -264,12 +271,16 @@ pub const Connection = struct {
     next_packet_id: u16 = 1,
     outgoing_inflight: u16 = 0,
     max_outgoing_inflight: u16 = 16,
+    incoming_inflight: u16 = 0,
+    max_incoming_inflight: u16 = 16,
     peer_max_packet_size: usize = std.math.maxInt(usize),
     incoming_topic_alias_maximum: u16 = 16,
     peer_topic_alias_maximum: u16 = 0,
     keep_alive_seconds: u16 = 30,
     peer_maximum_qos: mqtt.QoS = .exactly_once,
     peer_retain_available: bool = true,
+    incoming_qos1: std.StaticBitSet(packet_identifier_slots) = .empty,
+    incoming_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
     incoming_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
     outgoing_topic_aliases: [16]?[]u8 = [_]?[]u8{null} ** 16,
 
@@ -330,6 +341,9 @@ pub const Connection = struct {
         }
         try mqtt.ConnAck.write(&encoded, self.allocator, self.protocol, options.session_present, options.reason_code, properties.items);
         try self.writePacket(encoded.items);
+        if (self.protocol == .v5) {
+            self.max_incoming_inflight = mqtt.receiveMaximum(properties.items) orelse self.max_incoming_inflight;
+        }
     }
 
     pub fn readConnAck(self: *Connection) Error!OwnedConnAck {
@@ -395,11 +409,13 @@ pub const Connection = struct {
         var publish_packet = try mqtt.Publish.parse(self.allocator, self.protocol, packet.bytes);
         errdefer publish_packet.deinit(self.allocator);
         try self.applyIncomingTopicAlias(&publish_packet);
+        try self.recordIncomingPublish(publish_packet);
         return .{ .packet = packet, .publish = publish_packet };
     }
 
     pub fn writePubAck(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
         try self.writeAckPacket(.puback, packet_id, reason_code, &.{});
+        self.completeIncomingPublish(.puback, packet_id);
     }
 
     pub fn readPubAck(self: *Connection) Error!OwnedAck {
@@ -424,6 +440,7 @@ pub const Connection = struct {
 
     pub fn writePubComp(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
         try self.writeAckPacket(.pubcomp, packet_id, reason_code, &.{});
+        self.completeIncomingPublish(.pubcomp, packet_id);
     }
 
     pub fn readPubComp(self: *Connection) Error!OwnedAck {
@@ -432,6 +449,7 @@ pub const Connection = struct {
 
     pub fn writePubAckWithProperties(self: *Connection, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
         try self.writeAckPacket(.puback, packet_id, reason_code, properties);
+        self.completeIncomingPublish(.puback, packet_id);
     }
 
     pub fn writePubRecWithProperties(self: *Connection, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
@@ -444,6 +462,7 @@ pub const Connection = struct {
 
     pub fn writePubCompWithProperties(self: *Connection, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
         try self.writeAckPacket(.pubcomp, packet_id, reason_code, properties);
+        self.completeIncomingPublish(.pubcomp, packet_id);
     }
 
     fn writeAckPacket(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
@@ -619,6 +638,43 @@ pub const Connection = struct {
         }
         const stored = self.incoming_topic_aliases[index] orelse return error.InvalidTopic;
         publish_packet.topic = stored;
+    }
+
+    fn recordIncomingPublish(self: *Connection, publish_packet: mqtt.Publish) Error!void {
+        const packet_id = publish_packet.packet_id orelse return;
+        const index = @as(usize, packet_id);
+        const set = switch (publish_packet.qos) {
+            .at_most_once => return,
+            .at_least_once => &self.incoming_qos1,
+            .exactly_once => &self.incoming_qos2,
+        };
+        const other_set = switch (publish_packet.qos) {
+            .at_most_once => unreachable,
+            .at_least_once => &self.incoming_qos2,
+            .exactly_once => &self.incoming_qos1,
+        };
+
+        if (other_set.isSet(index)) return error.InvalidPacketIdentifier;
+        // Retransmissions reuse the same Packet Identifier and must not consume
+        // another Receive Maximum slot.  This mirrors rumqtt's fixed-bitset
+        // state tables: Packet Identifier is the stable O(1) lookup key, so a
+        // retry cannot grow memory or make the connection look over quota.
+        if (set.isSet(index)) return;
+        if (self.incoming_inflight >= self.max_incoming_inflight) return error.ReceiveMaximumExceeded;
+        set.set(index);
+        self.incoming_inflight += 1;
+    }
+
+    fn completeIncomingPublish(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16) void {
+        const set = switch (packet_type) {
+            .puback => &self.incoming_qos1,
+            .pubcomp => &self.incoming_qos2,
+            else => return,
+        };
+        const index = @as(usize, packet_id);
+        if (!set.isSet(index)) return;
+        set.setValue(index, false);
+        self.incoming_inflight -= 1;
     }
 
     fn writePacket(self: *Connection, bytes: []const u8) Error!void {
@@ -1054,6 +1110,104 @@ test "MQTT runtime enforces incoming maximum packet size on full frame" {
     // rumqtt's outbound size check and preventing tiny limits from being
     // bypassed by packets with empty variable headers/payloads.
     try std.testing.expectError(error.PacketTooLarge, readPacket(allocator, io, server_stream, .{ .max_packet_size = 1 }));
+}
+
+test "MQTT connection enforces incoming receive maximum" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .protocol = .v5,
+        .max_incoming_inflight = 1,
+    };
+
+    const first = mqtt.Publish{
+        .dup = false,
+        .qos = .at_least_once,
+        .retain = false,
+        .topic = "receive/one",
+        .packet_id = 10,
+        .payload = "first",
+    };
+    try connection.recordIncomingPublish(first);
+    try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
+
+    var retry = first;
+    retry.dup = true;
+    try connection.recordIncomingPublish(retry);
+    try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
+
+    try std.testing.expectError(error.ReceiveMaximumExceeded, connection.recordIncomingPublish(.{
+        .dup = false,
+        .qos = .at_least_once,
+        .retain = false,
+        .topic = "receive/two",
+        .packet_id = 11,
+        .payload = "second",
+    }));
+
+    connection.completeIncomingPublish(.puback, 10);
+    try std.testing.expectEqual(@as(u16, 0), connection.incoming_inflight);
+    try connection.recordIncomingPublish(.{
+        .dup = false,
+        .qos = .at_least_once,
+        .retain = false,
+        .topic = "receive/two",
+        .packet_id = 11,
+        .payload = "second",
+    });
+    try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
+}
+
+test "MQTT connection keeps QoS2 receive slot until PUBCOMP" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .protocol = .v5,
+        .max_incoming_inflight = 1,
+    };
+
+    try connection.recordIncomingPublish(.{
+        .dup = false,
+        .qos = .exactly_once,
+        .retain = false,
+        .topic = "receive/qos2",
+        .packet_id = 20,
+        .payload = "first",
+    });
+    try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
+    try std.testing.expectError(error.InvalidPacketIdentifier, connection.recordIncomingPublish(.{
+        .dup = false,
+        .qos = .at_least_once,
+        .retain = false,
+        .topic = "receive/reuse",
+        .packet_id = 20,
+        .payload = "reuse",
+    }));
+
+    connection.completeIncomingPublish(.puback, 20);
+    try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
+    try std.testing.expectError(error.ReceiveMaximumExceeded, connection.recordIncomingPublish(.{
+        .dup = false,
+        .qos = .exactly_once,
+        .retain = false,
+        .topic = "receive/blocked",
+        .packet_id = 21,
+        .payload = "blocked",
+    }));
+
+    connection.completeIncomingPublish(.pubcomp, 20);
+    try std.testing.expectEqual(@as(u16, 0), connection.incoming_inflight);
+    try connection.recordIncomingPublish(.{
+        .dup = false,
+        .qos = .exactly_once,
+        .retain = false,
+        .topic = "receive/after-comp",
+        .packet_id = 21,
+        .payload = "ok",
+    });
+    try std.testing.expectEqual(@as(u16, 1), connection.incoming_inflight);
 }
 
 test "MQTT connection rejects topic aliases beyond negotiated maximum" {
