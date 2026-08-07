@@ -1114,6 +1114,14 @@ pub const sdp = struct {
         rtcp_rsize: bool = false,
     };
 
+    pub const TransportLineOptions = struct {
+        ice_credentials: ?IceCredentials = null,
+        fingerprint: ?Fingerprint = null,
+        dtls_role: ?DtlsRole = null,
+        transport_attributes: TransportAttributes = .{},
+        extmap_allow_mixed: bool = false,
+    };
+
     pub const DtlsRole = enum {
         auto,
         client,
@@ -1127,6 +1135,49 @@ pub const sdp = struct {
             };
         }
     };
+
+    pub fn formatIceUfragLine(allocator: std.mem.Allocator, credentials: IceCredentials) Error![]u8 {
+        if (credentials.ufrag.len == 0) return error.InvalidSdp;
+        return std.fmt.allocPrint(allocator, "a=ice-ufrag:{s}\r\n", .{credentials.ufrag});
+    }
+
+    pub fn formatIcePwdLine(allocator: std.mem.Allocator, credentials: IceCredentials) Error![]u8 {
+        if (credentials.password.len == 0) return error.InvalidSdp;
+        return std.fmt.allocPrint(allocator, "a=ice-pwd:{s}\r\n", .{credentials.password});
+    }
+
+    pub fn formatFingerprintLine(allocator: std.mem.Allocator, fingerprint: Fingerprint) Error![]u8 {
+        if (fingerprint.algorithm.len == 0 or fingerprint.value.len == 0) return error.InvalidSdp;
+        return std.fmt.allocPrint(allocator, "a=fingerprint:{s} {s}\r\n", .{ fingerprint.algorithm, fingerprint.value });
+    }
+
+    pub fn formatDtlsSetupLine(allocator: std.mem.Allocator, role: DtlsRole) Error![]u8 {
+        return std.fmt.allocPrint(allocator, "a=setup:{s}\r\n", .{role.setupAttribute()});
+    }
+
+    pub fn appendTransportAttributeLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: TransportLineOptions) Error!void {
+        if (options.dtls_role) |role| {
+            const line = try formatDtlsSetupLine(allocator, role);
+            defer allocator.free(line);
+            try list.appendSlice(allocator, line);
+        }
+        if (options.fingerprint) |fingerprint| {
+            const line = try formatFingerprintLine(allocator, fingerprint);
+            defer allocator.free(line);
+            try list.appendSlice(allocator, line);
+        }
+        if (options.ice_credentials) |credentials| {
+            const ufrag = try formatIceUfragLine(allocator, credentials);
+            defer allocator.free(ufrag);
+            try list.appendSlice(allocator, ufrag);
+            const pwd = try formatIcePwdLine(allocator, credentials);
+            defer allocator.free(pwd);
+            try list.appendSlice(allocator, pwd);
+        }
+        if (options.transport_attributes.rtcp_mux) try list.appendSlice(allocator, "a=rtcp-mux\r\n");
+        if (options.transport_attributes.rtcp_rsize) try list.appendSlice(allocator, "a=rtcp-rsize\r\n");
+        if (options.extmap_allow_mixed) try list.appendSlice(allocator, "a=extmap-allow-mixed\r\n");
+    }
 
     pub const RtcpFeedback = struct {
         typ: []const u8,
@@ -9273,6 +9324,41 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
     try std.testing.expectEqualStrings("actpass", sdp.DtlsRole.auto.setupAttribute());
     try std.testing.expectEqualStrings("active", sdp.DtlsRole.client.setupAttribute());
     try std.testing.expectEqualStrings("passive", sdp.DtlsRole.server.setupAttribute());
+    const setup_line = try sdp.formatDtlsSetupLine(allocator, .client);
+    defer allocator.free(setup_line);
+    try std.testing.expectEqualStrings("a=setup:active\r\n", setup_line);
+    const fingerprint_line = try sdp.formatFingerprintLine(allocator, .{ .algorithm = "sha-256", .value = "AA:BB" });
+    defer allocator.free(fingerprint_line);
+    try std.testing.expectEqualStrings("a=fingerprint:sha-256 AA:BB\r\n", fingerprint_line);
+    const creds_line = sdp.IceCredentials{ .ufrag = "ufrag", .password = "pwd" };
+    const ufrag_line = try sdp.formatIceUfragLine(allocator, creds_line);
+    defer allocator.free(ufrag_line);
+    try std.testing.expectEqualStrings("a=ice-ufrag:ufrag\r\n", ufrag_line);
+    const pwd_line = try sdp.formatIcePwdLine(allocator, creds_line);
+    defer allocator.free(pwd_line);
+    try std.testing.expectEqualStrings("a=ice-pwd:pwd\r\n", pwd_line);
+    var transport_lines: std.ArrayList(u8) = .empty;
+    defer transport_lines.deinit(allocator);
+    try sdp.appendTransportAttributeLines(&transport_lines, allocator, .{
+        .ice_credentials = creds_line,
+        .fingerprint = .{ .algorithm = "sha-256", .value = "AA:BB" },
+        .dtls_role = .client,
+        .transport_attributes = .{ .rtcp_mux = true, .rtcp_rsize = true },
+        .extmap_allow_mixed = true,
+    });
+    try std.testing.expectEqualStrings(
+        "a=setup:active\r\n" ++
+            "a=fingerprint:sha-256 AA:BB\r\n" ++
+            "a=ice-ufrag:ufrag\r\n" ++
+            "a=ice-pwd:pwd\r\n" ++
+            "a=rtcp-mux\r\n" ++
+            "a=rtcp-rsize\r\n" ++
+            "a=extmap-allow-mixed\r\n",
+        transport_lines.items,
+    );
+    try std.testing.expectError(error.InvalidSdp, sdp.formatIceUfragLine(allocator, .{ .ufrag = "", .password = "pwd" }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatIcePwdLine(allocator, .{ .ufrag = "ufrag", .password = "" }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatFingerprintLine(allocator, .{ .algorithm = "", .value = "AA:BB" }));
 }
 
 test "RTP and DTLS record parsers" {
