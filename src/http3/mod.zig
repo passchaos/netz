@@ -112,7 +112,11 @@ pub const Setting = struct {
 
 pub const Settings = struct {
     qpack_max_table_capacity: u64 = 0,
-    max_field_section_size: u64 = 16 * 1024,
+    /// RFC 9114 inherits the HTTP semantics that an omitted
+    /// SETTINGS_MAX_FIELD_SECTION_SIZE means "no advertised limit".  Mature
+    /// stacks such as tquic represent this as None/unbounded; use maxInt here
+    /// so callers can still compare against a concrete value.
+    max_field_section_size: u64 = std.math.maxInt(u64),
     qpack_blocked_streams: u64 = 0,
     enable_connect_protocol: bool = false,
     h3_datagram: bool = false,
@@ -160,7 +164,7 @@ pub const Settings = struct {
 
     pub fn writePayload(self: Settings, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         if (self.qpack_max_table_capacity != 0) try writeSetting(list, allocator, .qpack_max_table_capacity, self.qpack_max_table_capacity);
-        if (self.max_field_section_size != 16 * 1024) try writeSetting(list, allocator, .max_field_section_size, self.max_field_section_size);
+        if (self.max_field_section_size != std.math.maxInt(u64)) try writeSetting(list, allocator, .max_field_section_size, self.max_field_section_size);
         if (self.qpack_blocked_streams != 0) try writeSetting(list, allocator, .qpack_blocked_streams, self.qpack_blocked_streams);
         if (self.enable_connect_protocol) try writeSetting(list, allocator, .enable_connect_protocol, 1);
         if (self.h3_datagram) try writeSetting(list, allocator, .h3_datagram, 1);
@@ -1620,6 +1624,13 @@ test "HTTP/3 control stream rejects request frames" {
 
 test "HTTP/3 typed settings state tracks negotiation" {
     const allocator = std.testing.allocator;
+    const defaults = Settings{};
+    try std.testing.expectEqual(std.math.maxInt(u64), defaults.max_field_section_size);
+    var default_payload: std.ArrayList(u8) = .empty;
+    defer default_payload.deinit(allocator);
+    try defaults.writePayload(&default_payload, allocator);
+    try std.testing.expectEqual(@as(usize, 0), default_payload.items.len);
+
     const local = Settings{
         .max_field_section_size = 32 * 1024,
         .enable_connect_protocol = true,
