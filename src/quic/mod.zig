@@ -89,6 +89,7 @@ pub const LongHeader = struct {
         // traffic or ossification probes advance into packet-type-specific logic.
         if ((first & 0x40) == 0) return error.InvalidEncoding;
         const version_value = try cursor.readInt(u32, .big);
+        if (version_value == Version.negotiation.wireValue()) return error.InvalidVersionNegotiation;
         const dcid_len = try cursor.readByte();
         try validatePacketConnectionIdLen(dcid_len);
         const dcid = try cursor.readSlice(dcid_len);
@@ -1553,6 +1554,12 @@ test "QUIC long initial header parse" {
 
     bytes.items[0] &= ~@as(u8, 0x40);
     try std.testing.expectError(error.InvalidEncoding, LongHeader.parse(bytes.items));
+
+    var version_zero = try bytes.clone(allocator);
+    defer version_zero.deinit(allocator);
+    version_zero.items[0] |= 0x40;
+    std.mem.writeInt(u32, version_zero.items[1..5], Version.negotiation.wireValue(), .big);
+    try std.testing.expectError(error.InvalidVersionNegotiation, LongHeader.parse(version_zero.items));
 }
 
 test "QUIC version negotiation packet roundtrip" {
