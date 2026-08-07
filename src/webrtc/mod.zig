@@ -4763,6 +4763,21 @@ pub const sctp = struct {
         effective_len: usize,
     };
 
+    pub const DataChannelChunkOptions = struct {
+        tsn: u32,
+        stream_id: u16,
+        stream_sequence_number: u16 = 0,
+        message_identifier: u32 = 0,
+        reliability: DataChannelReliability = .{
+            .unordered = false,
+            .mode = .reliable,
+            .parameter = 0,
+        },
+        interleaved: bool = false,
+        is_string: bool = false,
+        immediate_sack: bool = false,
+    };
+
     pub const DataChannelOpen = struct {
         channel_type: DataChannelType = .reliable,
         priority: u16 = 0,
@@ -5788,6 +5803,41 @@ pub const sctp = struct {
             .webrtc_string_empty => .{ .kind = .string, .is_string = true, .empty = true, .effective_len = 0 },
             .webrtc_binary_empty => .{ .kind = .binary, .empty = true, .effective_len = 0 },
             _ => error.InvalidSctpPacket,
+        };
+    }
+
+    pub fn dataChannelChunk(options: DataChannelChunkOptions, user_data: []const u8) DataChunk {
+        const ppid = dataChannelPayloadProtocol(options.is_string, user_data.len);
+        const empty = user_data.len == 0;
+        const payload = if (empty) &[_]u8{0} else user_data;
+        return .{
+            .unordered = ppid != .webrtc_dcep and options.reliability.unordered,
+            .interleaved = options.interleaved,
+            .immediate_sack = options.immediate_sack,
+            .tsn = options.tsn,
+            .stream_id = options.stream_id,
+            .stream_sequence_number = options.stream_sequence_number,
+            .message_identifier = options.message_identifier,
+            .payload_protocol_identifier = ppid,
+            .user_data = payload,
+        };
+    }
+
+    pub fn dataChannelDcepChunk(options: DataChannelChunkOptions, user_data: []const u8) DataChunk {
+        // Pion/sctp follows the DCEP requirement from draft-ietf-rtcweb-data-
+        // protocol section 6: DATA_CHANNEL_OPEN/ACK messages are always sent
+        // with ordered, reliable delivery, even when the negotiated user data
+        // channel itself is unordered or partially reliable.
+        return .{
+            .unordered = false,
+            .interleaved = options.interleaved,
+            .immediate_sack = options.immediate_sack,
+            .tsn = options.tsn,
+            .stream_id = options.stream_id,
+            .stream_sequence_number = options.stream_sequence_number,
+            .message_identifier = options.message_identifier,
+            .payload_protocol_identifier = .webrtc_dcep,
+            .user_data = user_data,
         };
     }
 
@@ -8324,6 +8374,36 @@ test "SCTP DATA packet and DCEP channel messages" {
         .effective_len = 4,
     }, try sctp.dataChannelPayloadInfo(.webrtc_dcep, 4));
     try std.testing.expectError(error.InvalidSctpPacket, sctp.dataChannelPayloadInfo(@enumFromInt(@as(u32, 0)), 0));
+
+    const unordered_reliability = try sctp.dataChannelReliability(.partial_reliable_retransmit_unordered, 3);
+    const empty_text_chunk = sctp.dataChannelChunk(.{
+        .tsn = 12,
+        .stream_id = 2,
+        .stream_sequence_number = 2,
+        .reliability = unordered_reliability,
+        .is_string = true,
+    }, "");
+    try std.testing.expect(empty_text_chunk.unordered);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string_empty, empty_text_chunk.payload_protocol_identifier);
+    try std.testing.expectEqualSlices(u8, &.{0}, empty_text_chunk.user_data);
+    const binary_chunk = sctp.dataChannelChunk(.{
+        .tsn = 13,
+        .stream_id = 2,
+        .stream_sequence_number = 3,
+        .reliability = unordered_reliability,
+    }, "bin");
+    try std.testing.expect(binary_chunk.unordered);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_binary, binary_chunk.payload_protocol_identifier);
+    try std.testing.expectEqualStrings("bin", binary_chunk.user_data);
+    const dcep_chunk = sctp.dataChannelDcepChunk(.{
+        .tsn = 14,
+        .stream_id = 2,
+        .stream_sequence_number = 4,
+        .reliability = unordered_reliability,
+    }, ack.items);
+    try std.testing.expect(!dcep_chunk.unordered);
+    try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_dcep, dcep_chunk.payload_protocol_identifier);
+    try std.testing.expectEqualSlices(u8, ack.items, dcep_chunk.user_data);
 
     var invalid_dcep: std.ArrayList(u8) = .empty;
     defer invalid_dcep.deinit(allocator);
