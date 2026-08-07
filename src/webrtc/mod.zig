@@ -3839,6 +3839,8 @@ pub const sctp = struct {
 
     pub fn writeDcepOpen(list: *std.ArrayList(u8), allocator: std.mem.Allocator, open: DataChannelOpen) Error!void {
         if (open.label.len > std.math.maxInt(u16) or open.protocol.len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
+        try validateDcepString(open.label);
+        try validateDcepString(open.protocol);
         try list.append(allocator, 0x03); // DATA_CHANNEL_OPEN
         try list.append(allocator, @intFromEnum(open.channel_type));
         try wire.appendInt(list, allocator, u16, open.priority, .big);
@@ -3871,16 +3873,24 @@ pub const sctp = struct {
                 const protocol_start = label_start + @as(usize, label_len);
                 const end = protocol_start + @as(usize, protocol_len);
                 if (end != bytes.len) return error.InvalidSctpPacket;
+                const label = bytes[label_start..protocol_start];
+                const protocol = bytes[protocol_start..end];
+                try validateDcepString(label);
+                try validateDcepString(protocol);
                 break :blk .{ .open = .{
                     .channel_type = channel_type,
                     .priority = priority,
                     .reliability_parameter = reliability_parameter,
-                    .label = bytes[label_start..protocol_start],
-                    .protocol = bytes[protocol_start..end],
+                    .label = label,
+                    .protocol = protocol,
                 } };
             },
             else => error.InvalidSctpPacket,
         };
+    }
+
+    fn validateDcepString(value: []const u8) Error!void {
+        if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidSctpPacket;
     }
 
     fn isConstEmptyU32(value: []const u32) bool {
@@ -5348,6 +5358,24 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expect(try sctp.parseDcepMessage(ack.items) == .ack);
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string_empty, sctp.dataChannelPayloadProtocol(true, 0));
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_binary, sctp.dataChannelPayloadProtocol(false, 4));
+
+    var invalid_dcep: std.ArrayList(u8) = .empty;
+    defer invalid_dcep.deinit(allocator);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeDcepOpen(&invalid_dcep, allocator, .{
+        .label = "\xc0\x80",
+    }));
+
+    invalid_dcep.clearRetainingCapacity();
+    try invalid_dcep.appendSlice(allocator, &.{
+        0x03, // DATA_CHANNEL_OPEN
+        @intFromEnum(sctp.DataChannelType.reliable),
+        0x00, 0x00, // priority
+        0x00, 0x00, 0x00, 0x00, // reliability
+        0x00, 0x02, // label length
+        0x00, 0x00, // protocol length
+        0xc0, 0x80, // invalid UTF-8 label
+    });
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parseDcepMessage(invalid_dcep.items));
 }
 
 test {
