@@ -1350,6 +1350,15 @@ pub const sdp = struct {
         sendonly,
         recvonly,
         inactive,
+
+        pub fn suffix(self: ExtMapDirection) []const u8 {
+            return switch (self) {
+                .sendrecv => "",
+                .sendonly => "/sendonly",
+                .recvonly => "/recvonly",
+                .inactive => "/inactive",
+            };
+        }
     };
 
     pub const ExtMap = struct {
@@ -1368,6 +1377,30 @@ pub const sdp = struct {
         uri: []const u8,
         id: u8,
     };
+
+    pub fn formatExtMapAttribute(allocator: std.mem.Allocator, extmap: ExtMap) Error![]u8 {
+        _ = try extmap.rtpId();
+        if (extmap.uri.len == 0) return error.InvalidSdp;
+        if (extmap.extension_attributes.len == 0) {
+            return std.fmt.allocPrint(allocator, "{d}{s} {s}", .{ extmap.id, extmap.direction.suffix(), extmap.uri });
+        }
+        return std.fmt.allocPrint(allocator, "{d}{s} {s} {s}", .{ extmap.id, extmap.direction.suffix(), extmap.uri, extmap.extension_attributes });
+    }
+
+    pub fn formatExtMapLine(allocator: std.mem.Allocator, extmap: ExtMap) Error![]u8 {
+        _ = try extmap.rtpId();
+        if (extmap.uri.len == 0) return error.InvalidSdp;
+        if (extmap.extension_attributes.len == 0) {
+            return std.fmt.allocPrint(allocator, "a=extmap:{d}{s} {s}\r\n", .{ extmap.id, extmap.direction.suffix(), extmap.uri });
+        }
+        return std.fmt.allocPrint(allocator, "a=extmap:{d}{s} {s} {s}\r\n", .{ extmap.id, extmap.direction.suffix(), extmap.uri, extmap.extension_attributes });
+    }
+
+    pub fn appendExtMapLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, extmap: ExtMap) Error!void {
+        const line = try formatExtMapLine(allocator, extmap);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
 
     pub fn parseExtMapAttribute(raw: []const u8) Error!ExtMap {
         const trimmed = std.mem.trim(u8, raw, " \t");
@@ -8588,6 +8621,19 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(sdp.ExtMapDirection.inactive, parsed_extmap.direction);
     try std.testing.expectEqualStrings("urn:example:ext", parsed_extmap.uri);
     try std.testing.expectEqualStrings("attrs", parsed_extmap.extension_attributes);
+    try std.testing.expectEqualStrings("/inactive", parsed_extmap.direction.suffix());
+    const formatted_extmap = try sdp.formatExtMapAttribute(allocator, parsed_extmap);
+    defer allocator.free(formatted_extmap);
+    try std.testing.expectEqualStrings("7/inactive urn:example:ext attrs", formatted_extmap);
+    const formatted_extmap_line = try sdp.formatExtMapLine(allocator, parsed_extmap);
+    defer allocator.free(formatted_extmap_line);
+    try std.testing.expectEqualStrings("a=extmap:7/inactive urn:example:ext attrs\r\n", formatted_extmap_line);
+    var extmap_lines: std.ArrayList(u8) = .empty;
+    defer extmap_lines.deinit(allocator);
+    try sdp.appendExtMapLine(&extmap_lines, allocator, .{ .id = 4, .uri = sdp.sdes_mid_uri });
+    try std.testing.expectEqualStrings("a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n", extmap_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatExtMapLine(allocator, .{ .id = 0, .uri = "urn:bad" }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatExtMapLine(allocator, .{ .id = 1, .uri = "" }));
 
     try std.testing.expectError(error.InvalidSdp, sdp.parseExtMapAttribute("0 " ++ sdp.sdes_mid_uri));
 
