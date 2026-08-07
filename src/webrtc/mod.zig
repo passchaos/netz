@@ -3605,6 +3605,7 @@ pub const rtcp = struct {
     pub const payload_feedback_sli: u5 = 2;
     pub const payload_feedback_fir: u5 = 4;
     pub const payload_feedback_remb: u5 = 15;
+    pub const compact_ntp_units_per_second: u64 = 65_536;
     const max_rtcp_payload_len: usize = @as(usize, std.math.maxInt(u16)) * 4;
 
     pub const Header = struct {
@@ -3641,6 +3642,15 @@ pub const rtcp = struct {
         interarrival_jitter: u32 = 0,
         last_sender_report: u32 = 0,
         delay_since_last_sender_report: u32 = 0,
+
+        pub fn roundTripDelay65536(self: ReportBlock, now_compact_ntp: u32) ?u32 {
+            return roundTripDelayFromCompact(self.last_sender_report, self.delay_since_last_sender_report, now_compact_ntp);
+        }
+
+        pub fn roundTripDelayNanos(self: ReportBlock, now_compact_ntp: u32) ?u64 {
+            const delay = self.roundTripDelay65536(now_compact_ntp) orelse return null;
+            return compactNtpDelayToNanos(delay);
+        }
     };
 
     pub const SenderReport = struct {
@@ -3967,13 +3977,12 @@ pub const rtcp = struct {
         dlrr: u32,
 
         pub fn roundTripDelay65536(self: DlrrReport, now_compact_ntp: u32) ?u32 {
-            if (self.last_rr == 0 or self.dlrr == 0) return null;
-            return now_compact_ntp -% self.last_rr -% self.dlrr;
+            return roundTripDelayFromCompact(self.last_rr, self.dlrr, now_compact_ntp);
         }
 
         pub fn roundTripDelayNanos(self: DlrrReport, now_compact_ntp: u32) ?u64 {
             const delay = self.roundTripDelay65536(now_compact_ntp) orelse return null;
-            return (@as(u64, delay) * std.time.ns_per_s) / 65_536;
+            return compactNtpDelayToNanos(delay);
         }
     };
 
@@ -4198,6 +4207,27 @@ pub const rtcp = struct {
         const fractional_ns = unix_time_ns % std.time.ns_per_s;
         const fraction = (fractional_ns << 32) / std.time.ns_per_s;
         return .{ .msw = @truncate(seconds), .lsw = @truncate(fraction) };
+    }
+
+    pub fn compactNtpTimestamp(ntp_msw: u32, ntp_lsw: u32) u32 {
+        // RTCP LSR/DLSR and XR DLRR use the middle 32 bits of the 64-bit NTP
+        // timestamp: low 16 bits of the seconds word and high 16 bits of the
+        // fractional word, in 1/65536-second units.
+        return ((ntp_msw & 0xffff) << 16) | (ntp_lsw >> 16);
+    }
+
+    pub fn compactNtpFromUnixNanos(unix_time_ns: u64) u32 {
+        const ntp = ntpTimestamp(unix_time_ns);
+        return compactNtpTimestamp(ntp.msw, ntp.lsw);
+    }
+
+    pub fn compactNtpDelayToNanos(delay_units: u32) u64 {
+        return (@as(u64, delay_units) * std.time.ns_per_s) / compact_ntp_units_per_second;
+    }
+
+    fn roundTripDelayFromCompact(last_report: u32, delay_since_report: u32, now_compact_ntp: u32) ?u32 {
+        if (last_report == 0 or delay_since_report == 0) return null;
+        return now_compact_ntp -% last_report -% delay_since_report;
     }
 
     pub const ReceiverStats = struct {
@@ -9240,6 +9270,12 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u24, 3), rr.packet.receiver_report.report_blocks[0].cumulative_lost);
     try std.testing.expectEqual(@as(u32, 44), rr.packet.receiver_report.report_blocks[0].interarrival_jitter);
     try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0, 0 }, rr.packet.receiver_report.profile_extensions);
+    const report_block = rr.packet.receiver_report.report_blocks[0];
+    const rr_now_compact_ntp = report_block.last_sender_report +% report_block.delay_since_last_sender_report +% 0x00008000;
+    try std.testing.expectEqual(@as(u32, 0x00008000), report_block.roundTripDelay65536(rr_now_compact_ntp).?);
+    try std.testing.expectEqual(@as(u64, std.time.ns_per_s / 2), report_block.roundTripDelayNanos(rr_now_compact_ntp).?);
+    try std.testing.expect((rtcp.ReportBlock{ .ssrc = 1, .last_sender_report = 0, .delay_since_last_sender_report = 1 }).roundTripDelay65536(rr_now_compact_ntp) == null);
+    try std.testing.expect((rtcp.ReportBlock{ .ssrc = 1, .last_sender_report = 1, .delay_since_last_sender_report = 0 }).roundTripDelayNanos(rr_now_compact_ntp) == null);
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, .{ .sender_report = .{
@@ -9709,6 +9745,9 @@ test "RTCP sender stats builds sender report" {
     const ntp = rtcp.ntpTimestamp(1_500_000_000);
     try std.testing.expectEqual(@as(u32, 2_208_988_801), ntp.msw);
     try std.testing.expectEqual(@as(u32, 0x8000_0000), ntp.lsw);
+    try std.testing.expectEqual(@as(u32, 0x7e81_8000), rtcp.compactNtpTimestamp(ntp.msw, ntp.lsw));
+    try std.testing.expectEqual(@as(u32, 0x7e81_8000), rtcp.compactNtpFromUnixNanos(1_500_000_000));
+    try std.testing.expectEqual(@as(u64, std.time.ns_per_s / 2), rtcp.compactNtpDelayToNanos(0x0000_8000));
 
     const report = stats.senderReport(1_500_000_000, &.{});
     try std.testing.expectEqual(@as(u32, 0x11223344), report.sender_ssrc);
