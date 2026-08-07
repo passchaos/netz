@@ -860,6 +860,7 @@ pub const sdp = struct {
     pub const sdes_rtp_stream_id_uri = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
     pub const sdes_repaired_rtp_stream_id_uri = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
     pub const audio_level_uri = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+    pub const video_orientation_uri = "urn:3gpp:video-orientation";
 
     pub const ExtMapDirection = enum {
         sendrecv,
@@ -1934,6 +1935,19 @@ pub const rtp = struct {
         max_delay: u12,
     };
 
+    pub const VideoRotation = enum(u2) {
+        rotate_0 = 0,
+        rotate_90 = 1,
+        rotate_180 = 2,
+        rotate_270 = 3,
+    };
+
+    pub const VideoOrientationExtension = struct {
+        rotation: VideoRotation = .rotate_0,
+        flip: bool = false,
+        camera: bool = false,
+    };
+
     pub const AbsCaptureTimeExtension = struct {
         timestamp: u64,
         estimated_capture_clock_offset: ?i64 = null,
@@ -2170,6 +2184,24 @@ pub const rtp = struct {
             @truncate(min_delay >> 4),
             @as(u8, @truncate(min_delay << 4)) | @as(u8, @truncate(max_delay >> 8)),
             @truncate(max_delay),
+        };
+    }
+
+    pub fn videoOrientation(elements: []const HeaderExtensionElement, id: u8) Error!?VideoOrientationExtension {
+        const value = findHeaderExtension(elements, id) orelse return null;
+        if (value.len != 1 or (value[0] & 0xf0) != 0) return error.InvalidRtpPacket;
+        return .{
+            .rotation = @enumFromInt(value[0] & 0x03),
+            .flip = (value[0] & 0x04) != 0,
+            .camera = (value[0] & 0x08) != 0,
+        };
+    }
+
+    pub fn videoOrientationPayload(orientation: VideoOrientationExtension) [1]u8 {
+        return .{
+            @intFromEnum(orientation.rotation) |
+                (if (orientation.flip) @as(u8, 0x04) else 0) |
+                (if (orientation.camera) @as(u8, 0x08) else 0),
         };
     }
 
@@ -7361,6 +7393,7 @@ test "RTP packet extension padding and writer" {
     const twcc_payload = rtp.transportWideSequenceNumberPayload(0x1234);
     const abs_send_time = rtp.absoluteSendTimePayload(0x010203);
     const playout_delay = try rtp.playoutDelayPayload(1 << 4, 1 << 8);
+    const video_orientation = rtp.videoOrientationPayload(.{ .rotation = .rotate_90, .flip = true, .camera = true });
     const capture_time_ns: u64 = 1_650_000_000;
     const capture_offset = rtp.captureClockOffsetFromNanos(1_250_000_000);
     const abs_capture_time = rtp.absCaptureTimePayload(rtp.absCaptureTimeFromUnixNanos(capture_time_ns), capture_offset);
@@ -7370,6 +7403,7 @@ test "RTP packet extension padding and writer" {
         .{ .id = 4, .data = &abs_send_time },
         .{ .id = 5, .data = &audio_level },
         .{ .id = 6, .data = &playout_delay },
+        .{ .id = 8, .data = &video_orientation },
         .{ .id = 7, .data = abs_capture_time[0..rtp.absCaptureTimePayloadLen(capture_offset)] },
     });
     try std.testing.expectEqual(@as(usize, 0), one_byte_extensions.items.len % 4);
@@ -7413,6 +7447,11 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(u12, 1 << 4), parsed_playout_delay.min_delay);
     try std.testing.expectEqual(@as(u12, 1 << 8), parsed_playout_delay.max_delay);
     try std.testing.expectError(error.InvalidRtpPacket, rtp.playoutDelayPayload(1 << 12, 1 << 12));
+    const parsed_video_orientation = (try rtp.videoOrientation(parsed_extensions, 8)).?;
+    try std.testing.expectEqual(rtp.VideoRotation.rotate_90, parsed_video_orientation.rotation);
+    try std.testing.expect(parsed_video_orientation.flip);
+    try std.testing.expect(parsed_video_orientation.camera);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.videoOrientation(&.{.{ .id = 8, .data = &.{0xf0} }}, 8));
     const parsed_abs_capture_time = (try rtp.absCaptureTime(parsed_extensions, 7)).?;
     const capture_diff = if (parsed_abs_capture_time.captureUnixNanos() > capture_time_ns)
         parsed_abs_capture_time.captureUnixNanos() - capture_time_ns
