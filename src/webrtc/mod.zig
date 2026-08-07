@@ -4719,6 +4719,33 @@ pub const sctp = struct {
         partial_reliable_retransmit_unordered = 0x81,
         partial_reliable_timed_unordered = 0x82,
         _,
+
+        pub fn unordered(self: DataChannelType) Error!bool {
+            try validateDataChannelType(self);
+            return (@intFromEnum(self) & 0x80) != 0;
+        }
+
+        pub fn reliabilityMode(self: DataChannelType) Error!DataChannelReliabilityMode {
+            try validateDataChannelType(self);
+            return switch (@intFromEnum(self) & 0x7f) {
+                0x00 => .reliable,
+                0x01 => .retransmit,
+                0x02 => .timed,
+                else => unreachable,
+            };
+        }
+    };
+
+    pub const DataChannelReliabilityMode = enum {
+        reliable,
+        retransmit,
+        timed,
+    };
+
+    pub const DataChannelReliability = struct {
+        unordered: bool,
+        mode: DataChannelReliabilityMode,
+        parameter: u32,
     };
 
     pub const DataChannelOpen = struct {
@@ -4727,6 +4754,10 @@ pub const sctp = struct {
         reliability_parameter: u32 = 0,
         label: []const u8,
         protocol: []const u8 = &.{},
+
+        pub fn reliability(self: DataChannelOpen) Error!DataChannelReliability {
+            return dataChannelReliability(self.channel_type, self.reliability_parameter);
+        }
     };
 
     pub const DataChannelMessage = union(enum) {
@@ -5732,6 +5763,14 @@ pub const sctp = struct {
     pub fn dataChannelPayloadProtocol(is_string: bool, len: usize) PayloadProtocolIdentifier {
         if (is_string) return if (len == 0) .webrtc_string_empty else .webrtc_string;
         return if (len == 0) .webrtc_binary_empty else .webrtc_binary;
+    }
+
+    pub fn dataChannelReliability(channel_type: DataChannelType, reliability_parameter: u32) Error!DataChannelReliability {
+        return .{
+            .unordered = try channel_type.unordered(),
+            .mode = try channel_type.reliabilityMode(),
+            .parameter = reliability_parameter,
+        };
     }
 
     pub fn writeDcepOpen(list: *std.ArrayList(u8), allocator: std.mem.Allocator, open: DataChannelOpen) Error!void {
@@ -8182,6 +8221,32 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expectEqual(@as(u32, 3), dcep.open.reliability_parameter);
     try std.testing.expectEqualStrings("chat", dcep.open.label);
     try std.testing.expectEqualStrings("json", dcep.open.protocol);
+    const dcep_reliability = try dcep.open.reliability();
+    try std.testing.expect(dcep_reliability.unordered);
+    try std.testing.expectEqual(sctp.DataChannelReliabilityMode.retransmit, dcep_reliability.mode);
+    try std.testing.expectEqual(@as(u32, 3), dcep_reliability.parameter);
+
+    try std.testing.expectEqual(sctp.DataChannelReliability{
+        .unordered = false,
+        .mode = .reliable,
+        .parameter = 0,
+    }, try sctp.dataChannelReliability(.reliable, 0));
+    try std.testing.expectEqual(sctp.DataChannelReliability{
+        .unordered = true,
+        .mode = .reliable,
+        .parameter = 7,
+    }, try sctp.dataChannelReliability(.reliable_unordered, 7));
+    try std.testing.expectEqual(sctp.DataChannelReliability{
+        .unordered = false,
+        .mode = .timed,
+        .parameter = 500,
+    }, try sctp.dataChannelReliability(.partial_reliable_timed, 500));
+    try std.testing.expectEqual(sctp.DataChannelReliability{
+        .unordered = true,
+        .mode = .timed,
+        .parameter = 500,
+    }, try sctp.dataChannelReliability(.partial_reliable_timed_unordered, 500));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.dataChannelReliability(@enumFromInt(0x7f), 0));
 
     packet_bytes.clearRetainingCapacity();
     try sctp.writeDataPacket(&packet_bytes, allocator, .{
