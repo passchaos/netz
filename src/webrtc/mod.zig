@@ -3736,6 +3736,8 @@ pub const sctp = struct {
                 }
             }
             const padding = (4 - (len % 4)) % 4;
+            if (cursor.remaining() < padding) return error.InvalidSctpPacket;
+            try validateZeroPadding(cursor.buf[cursor.pos .. cursor.pos + padding]);
             try cursor.skip(padding);
         }
         return params.toOwnedSlice(allocator);
@@ -5063,6 +5065,14 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     defer skip_unknown.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), skip_unknown.parameters.len);
     try std.testing.expectEqual(sctp.InitParameterType.supported_extensions, skip_unknown.parameters[0].param_type);
+    skip_unknown_value.items[skip_unknown_value.items.len - 1] = 0xff;
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.InitChunk.parse(allocator, .{
+        .chunk_type = .init,
+        .flags = 0,
+        .value = skip_unknown_value.items,
+        .consumed = 0,
+    }));
+    skip_unknown_value.items[skip_unknown_value.items.len - 1] = 0;
 
     var stop_unknown_value = try std.ArrayList(u8).initCapacity(allocator, skip_unknown_value.items.len);
     defer stop_unknown_value.deinit(allocator);
