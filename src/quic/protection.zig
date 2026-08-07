@@ -547,6 +547,7 @@ pub fn openInitialPacket(
     const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
     const pn_offset = cursor.pos;
     if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
+    try validateLongHeaderProtectionSampleBounds(protected_len);
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .initial) return error.InvalidInitialPacket;
@@ -644,6 +645,7 @@ pub fn openHandshakePacket(
     const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
     const pn_offset = cursor.pos;
     if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
+    try validateLongHeaderProtectionSampleBounds(protected_len);
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .handshake) return error.InvalidInitialPacket;
@@ -738,6 +740,7 @@ pub fn openZeroRttPacket(
     const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
     const pn_offset = cursor.pos;
     if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
+    try validateLongHeaderProtectionSampleBounds(protected_len);
 
     try removeHeaderProtection(keys.hp, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .zero_rtt) return error.InvalidInitialPacket;
@@ -1038,6 +1041,14 @@ fn validateLongHeaderConnectionIdLen(len: usize) Error!void {
     // encrypted open paths equally strict so oversized IDs cannot bypass the
     // shared parsing invariant.
     if (len > 20) return error.InvalidInitialPacket;
+}
+
+fn validateLongHeaderProtectionSampleBounds(protected_len: usize) Error!void {
+    // Header protection samples 16 bytes starting four bytes after the packet
+    // number offset.  Long-header packets carry an explicit Length field, so
+    // the sample must be wholly inside that packet, not borrowed from a
+    // following coalesced packet in the same UDP datagram.
+    if (protected_len < 4 + header_protection_sample_len) return error.InvalidHeaderProtectionSample;
 }
 
 fn validateLongHeaderReservedBits(first_byte: u8) Error!void {
@@ -1637,6 +1648,53 @@ test "QUIC protected long packets reject unsupported versions" {
     try std.testing.expectError(error.UnsupportedVersion, openHandshakePacket(allocator, keys, &unsupported_handshake, 0));
     try std.testing.expectError(error.UnsupportedVersion, openZeroRttPacket(allocator, keys, &unsupported_zero_rtt, 0));
     try std.testing.expectError(error.UnsupportedVersion, peekProtectedLongPacketInfo(&unsupported_initial));
+}
+
+test "QUIC protected long packet samples stay inside packet length" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const scid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const keys = deriveInitialSecrets(&dcid).client;
+
+    var initial: std.ArrayList(u8) = .empty;
+    defer initial.deinit(allocator);
+    try initial.append(allocator, longHeaderFirstByte(version_1_wire, .initial, 1));
+    try wire.appendInt(&initial, allocator, u32, version_1_wire, .big);
+    try initial.append(allocator, @intCast(dcid.len));
+    try initial.appendSlice(allocator, &dcid);
+    try initial.append(allocator, @intCast(scid.len));
+    try initial.appendSlice(allocator, &scid);
+    try varint.encode(&initial, allocator, 0);
+    try varint.encode(&initial, allocator, 17);
+    try initial.appendNTimes(allocator, 0, 17);
+    try initial.appendNTimes(allocator, 0xaa, 32);
+    try std.testing.expectError(error.InvalidHeaderProtectionSample, openInitialPacket(allocator, keys, initial.items, 0));
+
+    var handshake: std.ArrayList(u8) = .empty;
+    defer handshake.deinit(allocator);
+    try handshake.append(allocator, longHeaderFirstByte(version_1_wire, .handshake, 1));
+    try wire.appendInt(&handshake, allocator, u32, version_1_wire, .big);
+    try handshake.append(allocator, @intCast(dcid.len));
+    try handshake.appendSlice(allocator, &dcid);
+    try handshake.append(allocator, @intCast(scid.len));
+    try handshake.appendSlice(allocator, &scid);
+    try varint.encode(&handshake, allocator, 17);
+    try handshake.appendNTimes(allocator, 0, 17);
+    try handshake.appendNTimes(allocator, 0xaa, 32);
+    try std.testing.expectError(error.InvalidHeaderProtectionSample, openHandshakePacket(allocator, keys, handshake.items, 0));
+
+    var zero_rtt: std.ArrayList(u8) = .empty;
+    defer zero_rtt.deinit(allocator);
+    try zero_rtt.append(allocator, longHeaderFirstByte(version_1_wire, .zero_rtt, 1));
+    try wire.appendInt(&zero_rtt, allocator, u32, version_1_wire, .big);
+    try zero_rtt.append(allocator, @intCast(dcid.len));
+    try zero_rtt.appendSlice(allocator, &dcid);
+    try zero_rtt.append(allocator, @intCast(scid.len));
+    try zero_rtt.appendSlice(allocator, &scid);
+    try varint.encode(&zero_rtt, allocator, 17);
+    try zero_rtt.appendNTimes(allocator, 0, 17);
+    try zero_rtt.appendNTimes(allocator, 0xaa, 32);
+    try std.testing.expectError(error.InvalidHeaderProtectionSample, openZeroRttPacket(allocator, keys, zero_rtt.items, 0));
 }
 
 test "QUIC short packet key update opens next and retained previous generations" {
