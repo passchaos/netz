@@ -4901,6 +4901,10 @@ pub const sctp = struct {
             allocator.free(self.data);
             self.* = undefined;
         }
+
+        pub fn dataChannelPayload(self: ReassembledMessage) Error!DataChannelPayload {
+            return sctp.dataChannelPayload(self.payload_protocol_identifier, self.data);
+        }
     };
 
     pub const ReceiveState = struct {
@@ -8140,6 +8144,24 @@ test "SCTP DATA reassembler handles fragmented messages" {
     })).?;
     defer single.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, single.data);
+    const single_payload = try single.dataChannelPayload();
+    try std.testing.expectEqual(sctp.DataChannelPayloadKind.binary, single_payload.info.kind);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, single_payload.data);
+
+    var empty = (try reassembler.push(.{
+        .tsn = 8,
+        .stream_id = 2,
+        .stream_sequence_number = 1,
+        .payload_protocol_identifier = .webrtc_string_empty,
+        .beginning = true,
+        .ending = true,
+        .user_data = &.{0},
+    })).?;
+    defer empty.deinit(allocator);
+    const empty_payload = try empty.dataChannelPayload();
+    try std.testing.expect(empty_payload.info.is_string);
+    try std.testing.expect(empty_payload.info.empty);
+    try std.testing.expectEqual(@as(usize, 0), empty_payload.data.len);
 
     try std.testing.expect((try reassembler.push(.{
         .tsn = 5,
