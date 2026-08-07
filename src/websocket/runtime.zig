@@ -69,9 +69,9 @@ pub const Server = struct {
         const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
         const selected_protocol = try selectHttp1Subprotocol(self.http.allocator, request.headers, options.protocols);
         errdefer if (selected_protocol) |protocol| self.http.allocator.free(protocol);
-        const selected_extension = try websocket.ExtensionNegotiation.accept(
+        const selected_extension = try websocket.ExtensionNegotiation.acceptClientHeaders(
             self.http.allocator,
-            request.header("sec-websocket-extensions"),
+            request.headers,
             options.enable_permessage_deflate,
         );
         defer if (selected_extension) |extension| self.http.allocator.free(extension);
@@ -776,11 +776,7 @@ pub const H2Server = struct {
 
         const selected_protocol = try selectSubprotocol(allocator, try optionalH2SingletonHeader(request.headers, "sec-websocket-protocol"), options.protocols);
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
-        const selected_extension = try websocket.ExtensionNegotiation.accept(
-            allocator,
-            try optionalH2SingletonHeader(request.headers, "sec-websocket-extensions"),
-            options.enable_permessage_deflate,
-        );
+        const selected_extension = try acceptH2Extensions(allocator, request.headers, options.enable_permessage_deflate);
         defer if (selected_extension) |extension| allocator.free(extension);
 
         var response_headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
@@ -988,6 +984,19 @@ fn optionalH2SingletonHeader(headers: []const http2.Hpack.HeaderField, name: []c
     return found;
 }
 
+fn acceptH2Extensions(
+    allocator: std.mem.Allocator,
+    headers: []const http2.Hpack.HeaderField,
+    enable_permessage_deflate: bool,
+) Error!?[]u8 {
+    if (!enable_permessage_deflate) return null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "sec-websocket-extensions")) continue;
+        if (try websocket.ExtensionNegotiation.accept(allocator, header.value, true)) |accepted| return accepted;
+    }
+    return null;
+}
+
 fn findH2Header(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
     for (headers) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
@@ -1142,6 +1151,8 @@ test "WebSocket server negotiates split subprotocol request headers" {
 }
 
 test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
+    const allocator = std.testing.allocator;
+
     const duplicate_request_version = [_]http2.Hpack.HeaderField{
         .{ .name = "sec-websocket-version", .value = "13" },
         .{ .name = "sec-websocket-version", .value = "13" },
@@ -1159,6 +1170,14 @@ test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
         .{ .name = "sec-websocket-extensions", .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover" },
     };
     try std.testing.expectError(error.InvalidHandshake, optionalH2SingletonHeader(&duplicate_extensions, "sec-websocket-extensions"));
+
+    const split_offer = [_]http2.Hpack.HeaderField{
+        .{ .name = "sec-websocket-extensions", .value = "x-unknown" },
+        .{ .name = "sec-websocket-extensions", .value = "permessage-deflate; client_no_context_takeover; server_max_window_bits=15" },
+    };
+    const accepted = try acceptH2Extensions(allocator, &split_offer, true);
+    defer if (accepted) |value| allocator.free(value);
+    try std.testing.expect(accepted != null);
 }
 
 test "WebSocket runtime client and server exchange over TCP" {

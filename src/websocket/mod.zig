@@ -145,6 +145,19 @@ pub const ExtensionNegotiation = struct {
         return try value.toOwnedSlice(allocator);
     }
 
+    pub fn acceptClientHeaders(
+        allocator: std.mem.Allocator,
+        headers: []const http1.Header,
+        enable_permessage_deflate: bool,
+    ) Error!?[]u8 {
+        if (!enable_permessage_deflate) return null;
+        for (headers) |header| {
+            if (!header.eqlName("sec-websocket-extensions")) continue;
+            if (try accept(allocator, header.value, true)) |accepted| return accepted;
+        }
+        return null;
+    }
+
     pub fn validateResponse(header_value: ?[]const u8) Error!ExtensionNegotiation {
         const raw = header_value orelse return .{};
         var negotiated: ?ExtensionNegotiation = null;
@@ -824,6 +837,15 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     try std.testing.expect(response.permessage_deflate);
     try std.testing.expect(response.client_no_context_takeover);
     try std.testing.expect(response.server_no_context_takeover);
+
+    const split_headers = [_]http1.Header{
+        .{ .name = "Sec-WebSocket-Extensions", .value = "x-unknown" },
+        .{ .name = "Sec-WebSocket-Extensions", .value = "permessage-deflate; client_no_context_takeover; server_max_window_bits=15" },
+    };
+    const accepted_split = try ExtensionNegotiation.acceptClientHeaders(allocator, &split_headers, true);
+    defer if (accepted_split) |value| allocator.free(value);
+    try std.testing.expect(accepted_split != null);
+    try std.testing.expect(std.mem.startsWith(u8, accepted_split.?, "permessage-deflate"));
 
     const unsupported_window = try ExtensionNegotiation.accept(
         allocator,
