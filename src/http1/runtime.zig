@@ -580,11 +580,13 @@ pub const Server = struct {
     pub fn serveOne(self: *Server, context: anytype, comptime handler: anytype) Error!void {
         var connection = try self.accept();
         defer connection.close();
-        var request = try connection.readRequest(.{});
-        defer request.deinit(self.allocator);
-        var response = try handler(context, request.request);
-        if (response.request_method == null) response.request_method = request.request.method;
-        try connection.writeResponse(response);
+        try connection.serveOne(context, handler);
+    }
+
+    pub fn serveConnection(self: *Server, context: anytype, comptime handler: anytype, max_requests: usize) Error!usize {
+        var connection = try self.accept();
+        defer connection.close();
+        return connection.serve(context, handler, max_requests);
     }
 
     pub fn serveConcurrent(
@@ -921,6 +923,26 @@ pub const Connection = struct {
 
     pub fn writeResponse(self: *Connection, response: ResponseOptions) Error!void {
         try writeResponseToStream(self.allocator, self.io, self.stream, response);
+    }
+
+    pub fn serveOne(self: *Connection, context: anytype, comptime handler: anytype) Error!bool {
+        var request = try self.readRequest(.{});
+        defer request.deinit(self.allocator);
+        const keep_alive = request.request.keepAlive();
+        var response = try handler(context, request.request);
+        if (response.request_method == null) response.request_method = request.request.method;
+        const response_keep_alive = responseOptionsKeepAlive(response);
+        try self.writeResponse(response);
+        return keep_alive and response_keep_alive;
+    }
+
+    pub fn serve(self: *Connection, context: anytype, comptime handler: anytype, max_requests: usize) Error!usize {
+        var served: usize = 0;
+        while (served < max_requests) : (served += 1) {
+            const keep_going = try self.serveOne(context, handler);
+            if (!keep_going) return served + 1;
+        }
+        return served;
     }
 
     pub fn acceptConnectTunnel(self: *Connection, request: http1.Request, response_headers: []const http1.Header) Error!Tunnel {
@@ -1506,6 +1528,15 @@ fn validateDeclaredResponseBodyLength(
     if (declared) |len| {
         if (len != body_len) return error.InvalidContentLength;
     }
+}
+
+fn responseOptionsKeepAlive(response: ResponseOptions) bool {
+    for (response.headers) |header| {
+        if (!header.eqlName("connection")) continue;
+        if (wire.containsToken(header.value, "close")) return false;
+        if (wire.containsToken(header.value, "keep-alive")) return true;
+    }
+    return response.version == .http_1_1;
 }
 
 fn responseWriteSuppressesBody(status: u16, request_method: ?http1.Method) bool {
@@ -2112,7 +2143,7 @@ test "HTTP/1 runtime client and server exchange over TCP" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     var response = try client.request(.{
         .method = .POST,
@@ -2543,7 +2574,7 @@ test "HTTP/1 server sends 100 Continue before reading expected body" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
 
     // Send only the head first.  A Hyper-compatible HTTP/1 server must emit
@@ -2631,7 +2662,7 @@ test "HTTP/1 server sends 100 Continue even when body was pre-read" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
 
     try writeAllToStream(io, client.stream, "POST /expect HTTP/1.1\r\n" ++
@@ -2695,7 +2726,7 @@ test "HTTP/1 client skips interim responses before final response" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     var response = try client.request(.{
         .method = .GET,
@@ -2805,6 +2836,75 @@ test "HTTP/1 async std.Io server handles concurrent clients" {
     try std.testing.expectEqual(@as(usize, 2), result.successCount());
 }
 
+test "HTTP/1 serveConnection handles keep-alive requests" {
+    const allocator = std.testing.allocator;
+
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    defer backend.deinit();
+    const io = backend.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        count: usize = 0,
+
+        fn handle(ctx: *@This(), request: http1.Request) Error!ResponseOptions {
+            ctx.count += 1;
+            if (std.mem.eql(u8, request.target, "/first")) {
+                return .{
+                    .headers = &.{.{ .name = "Connection", .value = "keep-alive" }},
+                    .body = "one",
+                };
+            }
+            if (std.mem.eql(u8, request.target, "/second")) {
+                return .{
+                    .headers = &.{.{ .name = "Connection", .value = "close" }},
+                    .body = "two",
+                };
+            }
+            return .{ .status = 404, .reason = "Not Found", .headers = &.{.{ .name = "Connection", .value = "close" }} };
+        }
+    };
+
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        served: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            shared.served = shared.server.serveConnection(&shared.context, Context.handle, 8) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    const keep_alive = [_]http1.Header{.{ .name = "Connection", .value = "keep-alive" }};
+    var first = try client.request(.{ .target = "/first", .headers = &keep_alive });
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.response.body);
+    var second = try client.request(.{ .target = "/second" });
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.served);
+    try std.testing.expectEqual(@as(usize, 2), shared.context.count);
+}
+
 test "HTTP/1 runtime reuses persistent connection and preserves pipelined bytes" {
     const allocator = std.testing.allocator;
 
@@ -2857,7 +2957,7 @@ test "HTTP/1 runtime reuses persistent connection and preserves pipelined bytes"
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     const keep_alive = [_]http1.Header{.{ .name = "Connection", .value = "keep-alive" }};
     try writeRequestToStream(allocator, io, client.stream, .{
@@ -2931,7 +3031,7 @@ test "HTTP/1 client reuses default HTTP/1.1 persistent connection" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
 
     var first = try client.request(.{
@@ -3005,7 +3105,7 @@ test "HTTP/1 client keeps pipelined response after HEAD response headers" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     const keep_alive = [_]http1.Header{.{ .name = "Connection", .value = "keep-alive" }};
     try writeRequestToStream(allocator, io, client.stream, .{
@@ -3084,7 +3184,7 @@ test "HTTP/1 runtime writes request trailers with chunked framing" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     var response = try client.request(.{
         .method = .POST,
@@ -3155,7 +3255,7 @@ test "HTTP/1 runtime writes response trailers with chunked framing" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     var response = try client.request(.{
         .method = .GET,
@@ -3226,7 +3326,7 @@ test "HTTP/1 runtime honors explicit transfer-encoding chunked writes" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     var response = try client.request(.{
         .method = .POST,
@@ -3292,7 +3392,7 @@ test "HTTP/1 client reads close-delimited response body" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     var response = try client.request(.{
         .method = .GET,
@@ -3352,7 +3452,7 @@ test "HTTP/1 client treats non-chunked response transfer coding as close-delimit
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     var response = try client.request(.{
         .method = .GET,
@@ -3413,7 +3513,7 @@ test "HTTP/1 status-forbidden body preserves pipelined response without request 
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    var client = try Client.connect(allocator, io, server.address(), .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
     defer client.close();
     const keep_alive = [_]http1.Header{.{ .name = "Connection", .value = "keep-alive" }};
     try writeRequestToStream(allocator, io, client.stream, .{ .target = "/no-content", .headers = &.{ keep_alive[0], .{ .name = "Host", .value = "localhost" } } });
