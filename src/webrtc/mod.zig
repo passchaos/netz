@@ -1227,6 +1227,28 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub fn formatRtpMapAttribute(allocator: std.mem.Allocator, payload_type: u8, codec_name: []const u8, clock_rate: u32, channels: u16) Error![]u8 {
+        if (codec_name.len == 0 or clock_rate == 0) return error.InvalidSdp;
+        if (channels == 0) {
+            return std.fmt.allocPrint(allocator, "{d} {s}/{d}", .{ payload_type, codec_name, clock_rate });
+        }
+        return std.fmt.allocPrint(allocator, "{d} {s}/{d}/{d}", .{ payload_type, codec_name, clock_rate, channels });
+    }
+
+    pub fn formatRtpMapLine(allocator: std.mem.Allocator, payload_type: u8, codec_name: []const u8, clock_rate: u32, channels: u16) Error![]u8 {
+        if (codec_name.len == 0 or clock_rate == 0) return error.InvalidSdp;
+        if (channels == 0) {
+            return std.fmt.allocPrint(allocator, "a=rtpmap:{d} {s}/{d}\r\n", .{ payload_type, codec_name, clock_rate });
+        }
+        return std.fmt.allocPrint(allocator, "a=rtpmap:{d} {s}/{d}/{d}\r\n", .{ payload_type, codec_name, clock_rate, channels });
+    }
+
+    pub fn appendRtpMapLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, payload_type: u8, codec_name: []const u8, clock_rate: u32, channels: u16) Error!void {
+        const line = try formatRtpMapLine(allocator, payload_type, codec_name, clock_rate, channels);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub fn rtcpFeedbackIntersection(allocator: std.mem.Allocator, local: []const RtcpFeedback, remote: []const RtcpFeedback) Error![]RtcpFeedback {
         var out: std.ArrayList(RtcpFeedback) = .empty;
         errdefer out.deinit(allocator);
@@ -8681,6 +8703,21 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try sdp.appendFmtpLine(&fmtp_lines, allocator, 111, "");
     try std.testing.expectEqualStrings("a=fmtp:111 minptime=10;useinbandfec=1\r\n", fmtp_lines.items);
     try std.testing.expectError(error.InvalidSdp, sdp.formatFmtpLine(allocator, 111, ""));
+    const formatted_rtpmap = try sdp.formatRtpMapAttribute(allocator, codecs[0].payload_type, codecs[0].codec_name, codecs[0].clock_rate, codecs[0].channels);
+    defer allocator.free(formatted_rtpmap);
+    try std.testing.expectEqualStrings("111 opus/48000/2", formatted_rtpmap);
+    const formatted_rtpmap_line = try sdp.formatRtpMapLine(allocator, codecs[0].payload_type, codecs[0].codec_name, codecs[0].clock_rate, codecs[0].channels);
+    defer allocator.free(formatted_rtpmap_line);
+    try std.testing.expectEqualStrings("a=rtpmap:111 opus/48000/2\r\n", formatted_rtpmap_line);
+    const formatted_video_rtpmap_line = try sdp.formatRtpMapLine(allocator, 96, "VP8", 90_000, 0);
+    defer allocator.free(formatted_video_rtpmap_line);
+    try std.testing.expectEqualStrings("a=rtpmap:96 VP8/90000\r\n", formatted_video_rtpmap_line);
+    var rtpmap_lines: std.ArrayList(u8) = .empty;
+    defer rtpmap_lines.deinit(allocator);
+    try sdp.appendRtpMapLine(&rtpmap_lines, allocator, codecs[0].payload_type, codecs[0].codec_name, codecs[0].clock_rate, codecs[0].channels);
+    try std.testing.expectEqualStrings("a=rtpmap:111 opus/48000/2\r\n", rtpmap_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatRtpMapLine(allocator, 111, "", 48_000, 2));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatRtpMapLine(allocator, 111, "opus", 0, 2));
 
     const fmtp_params = try sdp.parseFmtpParameters(allocator, " Key = Value ; flag ; apt=96 ");
     defer sdp.freeFmtpParameters(allocator, fmtp_params);
