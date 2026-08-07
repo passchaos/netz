@@ -9,6 +9,7 @@ pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || q
     UnexpectedStream,
     GoAwayReceived,
     RequestRejected,
+    ClosedCriticalStream,
 };
 
 const client_control_stream_id: u62 = 2;
@@ -909,7 +910,10 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
     // HTTP/3 control and QPACK streams are unidirectional QUIC streams.  Offset
     // zero carries the stream type varint; subsequent frames on an already
     // registered critical stream contain only that stream's payload.
-    if ((stream.stream_id & 0x02) == 0 or stream.data.len == 0) return false;
+    if ((stream.stream_id & 0x02) == 0) return false;
+    if (isRegisteredCriticalStream(control.*, stream.stream_id)) {
+        try rejectClosedCriticalStream(stream);
+    }
     if (stream.offset != 0) {
         if (control.peer_control_stream_id != null and control.peer_control_stream_id.? == stream.stream_id) {
             try control.applyControlPayload(allocator, stream.data);
@@ -923,21 +927,39 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
         return false;
     }
 
+    if (stream.data.len == 0) return false;
     var prefix_cursor = @import("../internal/wire.zig").Cursor.init(stream.data);
     const stream_type = peekUniStreamType(stream) orelse return false;
     _ = quic.varint.decode(&prefix_cursor) catch unreachable;
     switch (stream_type) {
         .control => {
+            try rejectClosedCriticalStream(stream);
             try control.registerControlStream(stream.stream_id);
             try control.applyControlPayload(allocator, stream.data[prefix_cursor.pos..]);
         },
         .qpack_encoder, .qpack_decoder => {
+            try rejectClosedCriticalStream(stream);
             try control.registerQpackStream(stream_type, stream.stream_id);
             if (stream.data[prefix_cursor.pos..].len != 0) return error.QpackDynamicTableUnsupported;
         },
         else => return false,
     }
     return true;
+}
+
+fn isRegisteredCriticalStream(control: http3.ControlState, stream_id: u64) bool {
+    return (control.peer_control_stream_id != null and control.peer_control_stream_id.? == stream_id) or
+        (control.peer_qpack_encoder_stream_id != null and control.peer_qpack_encoder_stream_id.? == stream_id) or
+        (control.peer_qpack_decoder_stream_id != null and control.peer_qpack_decoder_stream_id.? == stream_id);
+}
+
+fn rejectClosedCriticalStream(stream: quic.StreamFrame) Error!void {
+    // RFC 9114 §6.2.1 and RFC 9204 §4.2 make the control stream and both
+    // QPACK streams connection-long-lived critical streams.  Mature stacks
+    // (tquic, quic-zig) surface a FIN on any of these streams as
+    // H3_CLOSED_CRITICAL_STREAM instead of silently accepting a truncated
+    // control/QPACK context.
+    if (stream.fin) return error.ClosedCriticalStream;
 }
 
 fn sendProtectedFrames(
@@ -1187,6 +1209,62 @@ test "HTTP/3 runtime rejects non-empty QPACK critical streams" {
         .data = payload.items,
     }));
     try std.testing.expectEqual(@as(?u64, client_qpack_encoder_stream_id), control.peer_qpack_encoder_stream_id);
+}
+
+test "HTTP/3 runtime rejects closed critical streams" {
+    const allocator = std.testing.allocator;
+
+    var control_bytes: std.ArrayList(u8) = .empty;
+    defer control_bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&control_bytes, allocator);
+    try http3.writeSettingsFrame(&control_bytes, allocator, .{});
+
+    var control = http3.ControlState{};
+    try std.testing.expectError(error.ClosedCriticalStream, applyControlStreamFrame(&control, allocator, .{
+        .stream_id = client_control_stream_id,
+        .offset = 0,
+        .fin = true,
+        .data = control_bytes.items,
+    }));
+    try std.testing.expect(control.peer_control_stream_id == null);
+
+    try std.testing.expect(try applyControlStreamFrame(&control, allocator, .{
+        .stream_id = client_control_stream_id,
+        .offset = 0,
+        .fin = false,
+        .data = control_bytes.items,
+    }));
+    try std.testing.expectError(error.ClosedCriticalStream, applyControlStreamFrame(&control, allocator, .{
+        .stream_id = client_control_stream_id,
+        .offset = control_bytes.items.len,
+        .fin = true,
+        .data = &.{},
+    }));
+
+    var qpack_encoder: std.ArrayList(u8) = .empty;
+    defer qpack_encoder.deinit(allocator);
+    try http3.writeQpackEncoderStreamPrefix(&qpack_encoder, allocator);
+
+    var qpack_control = http3.ControlState{};
+    try std.testing.expectError(error.ClosedCriticalStream, applyControlStreamFrame(&qpack_control, allocator, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .offset = 0,
+        .fin = true,
+        .data = qpack_encoder.items,
+    }));
+
+    try std.testing.expect(try applyControlStreamFrame(&qpack_control, allocator, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .offset = 0,
+        .fin = false,
+        .data = qpack_encoder.items,
+    }));
+    try std.testing.expectError(error.ClosedCriticalStream, applyControlStreamFrame(&qpack_control, allocator, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .offset = qpack_encoder.items.len,
+        .fin = true,
+        .data = &.{},
+    }));
 }
 
 test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
