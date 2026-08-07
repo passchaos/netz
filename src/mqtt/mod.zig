@@ -1237,7 +1237,7 @@ pub const Disconnect = struct {
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const reason_code = if (!cursor.eof()) try cursor.readByte() else 0;
         if (protocol == .v5) try validateDisconnectReason(reason_code);
-        const props = if (protocol == .v5 and !cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (protocol == .v5 and fixed.remaining_len != 0) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
         if (protocol == .v5) try validatePropertiesFor(.disconnect, props);
         if (!cursor.eof()) return error.InvalidPacketType;
@@ -2107,6 +2107,7 @@ test "MQTT disconnect control" {
     disconnect = try Disconnect.parse(allocator, .v5, encoded.items);
     try std.testing.expectEqual(@as(u8, 0x8d), disconnect.reason_code);
     try std.testing.expectError(error.InvalidReasonCode, Disconnect.write(&encoded, allocator, .v5, 0x05, &.{}));
+    try std.testing.expectError(error.BufferTooShort, Disconnect.parse(allocator, .v5, &.{ 0xe0, 0x01, 0x8d }));
 
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);
