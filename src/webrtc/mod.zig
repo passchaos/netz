@@ -2871,7 +2871,48 @@ pub const rtcp = struct {
             if (delta == 0 or delta > 16) return false;
             return ((self.lost_packet_bitmask >> @intCast(delta - 1)) & 1) != 0;
         }
+
+        pub fn sequenceCount(self: NackPair) usize {
+            return 1 + @popCount(self.lost_packet_bitmask);
+        }
+
+        pub fn appendSequences(self: NackPair, list: *std.ArrayList(u16), allocator: std.mem.Allocator) Error!void {
+            try list.append(allocator, self.packet_id);
+            var bitmask = self.lost_packet_bitmask;
+            var delta: u16 = 1;
+            while (bitmask != 0) : (delta += 1) {
+                if ((bitmask & 1) != 0) try list.append(allocator, self.packet_id +% delta);
+                bitmask >>= 1;
+            }
+        }
     };
+
+    pub fn nackPairsFromSequenceNumbers(allocator: std.mem.Allocator, sequence_numbers: []const u16) Error![]NackPair {
+        if (sequence_numbers.len == 0) return allocator.alloc(NackPair, 0);
+        var pairs: std.ArrayList(NackPair) = .empty;
+        errdefer pairs.deinit(allocator);
+
+        var pair = NackPair{ .packet_id = sequence_numbers[0] };
+        for (sequence_numbers[1..]) |sequence_number| {
+            const delta = sequence_number -% pair.packet_id;
+            if (delta == 0) continue;
+            if (delta > 16) {
+                try pairs.append(allocator, pair);
+                pair = .{ .packet_id = sequence_number };
+                continue;
+            }
+            pair.lost_packet_bitmask |= @as(u16, 1) << @intCast(delta - 1);
+        }
+        try pairs.append(allocator, pair);
+        return pairs.toOwnedSlice(allocator);
+    }
+
+    pub fn nackSequenceNumbers(allocator: std.mem.Allocator, pairs: []const NackPair) Error![]u16 {
+        var sequence_numbers: std.ArrayList(u16) = .empty;
+        errdefer sequence_numbers.deinit(allocator);
+        for (pairs) |pair| try pair.appendSequences(&sequence_numbers, allocator);
+        return sequence_numbers.toOwnedSlice(allocator);
+    }
 
     pub const TransportLayerNack = struct {
         sender_ssrc: u32,
@@ -7310,6 +7351,23 @@ test "RTCP receiver stats builds receiver report block" {
 }
 
 test "RTCP NACK tracker detects RTP gaps and wraparound" {
+    const allocator = std.testing.allocator;
+    const sequence_numbers = [_]u16{ 100, 102, 104, 117, 0xfffe, 0xffff, 0 };
+    const pairs_from_list = try rtcp.nackPairsFromSequenceNumbers(allocator, &sequence_numbers);
+    defer allocator.free(pairs_from_list);
+    try std.testing.expectEqual(@as(usize, 3), pairs_from_list.len);
+    try std.testing.expectEqual(@as(u16, 100), pairs_from_list[0].packet_id);
+    try std.testing.expect(pairs_from_list[0].contains(102));
+    try std.testing.expect(pairs_from_list[0].contains(104));
+    try std.testing.expectEqual(@as(u16, 117), pairs_from_list[1].packet_id);
+    try std.testing.expectEqual(@as(u16, 0xfffe), pairs_from_list[2].packet_id);
+    try std.testing.expect(pairs_from_list[2].contains(0xffff));
+    try std.testing.expect(pairs_from_list[2].contains(0));
+
+    const expanded = try rtcp.nackSequenceNumbers(allocator, pairs_from_list);
+    defer allocator.free(expanded);
+    try std.testing.expectEqualSlices(u16, &sequence_numbers, expanded);
+
     var tracker = rtcp.NackTracker{};
     tracker.observe(1000);
     tracker.observe(1003);
