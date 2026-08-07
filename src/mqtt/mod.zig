@@ -941,7 +941,7 @@ pub const AckPacket = struct {
     pub fn parse(allocator: std.mem.Allocator, protocol: ProtocolVersion, packet: []const u8) Error!AckPacket {
         const fixed = try FixedHeader.parse(packet);
         switch (fixed.packet_type) {
-            .puback, .pubrec, .pubrel, .pubcomp, .unsuback => {},
+            .puback, .pubrec, .pubrel, .pubcomp => {},
             else => return error.InvalidPacketType,
         }
         try validateControlFlags(fixed);
@@ -975,7 +975,7 @@ pub const AckPacket = struct {
     ) Error!void {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         switch (packet_type) {
-            .puback, .pubrec, .pubrel, .pubcomp, .unsuback => {},
+            .puback, .pubrec, .pubrel, .pubcomp => {},
             else => return error.InvalidPacketType,
         }
         if (protocol == .v3_1_1) {
@@ -1028,14 +1028,13 @@ fn validateAckReasonCode(packet_type: PacketType, reason_code: u8) Error!void {
             => {},
             else => return error.InvalidReasonCode,
         },
-        .unsuback => try validateUnsubAckReason(reason_code),
         else => return error.InvalidPacketType,
     }
 }
 
 fn validateAckProperties(packet_type: PacketType, properties: []const Property) Error!void {
     switch (packet_type) {
-        .puback, .pubrec, .pubrel, .pubcomp, .unsuback => {},
+        .puback, .pubrec, .pubrel, .pubcomp => {},
         else => return error.InvalidPacketType,
     }
     try validatePropertiesFor(.ack, properties);
@@ -2215,6 +2214,10 @@ test "MQTT connack ack and ping controls" {
         .{ .two_byte = .{ .id = .topic_alias, .value = 1 } },
     }));
     try std.testing.expectError(error.InvalidReasonCode, AckPacket.write(&puback_bytes, allocator, .v3_1_1, .puback, 44, 0x80, &.{}));
+    try std.testing.expectError(error.InvalidPacketType, AckPacket.write(&puback_bytes, allocator, .v5, .unsuback, 44, 0, &.{}));
+    puback_bytes.clearRetainingCapacity();
+    try UnsubAck.write(&puback_bytes, allocator, .v5, 44, &.{}, &.{0x00});
+    try std.testing.expectError(error.InvalidPacketType, AckPacket.parse(allocator, .v5, puback_bytes.items));
 
     var ping: std.ArrayList(u8) = .empty;
     defer ping.deinit(allocator);
