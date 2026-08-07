@@ -4763,6 +4763,11 @@ pub const sctp = struct {
         effective_len: usize,
     };
 
+    pub const DataChannelPayload = struct {
+        info: DataChannelPayloadInfo,
+        data: []const u8,
+    };
+
     pub const DataChannelChunkOptions = struct {
         tsn: u32,
         stream_id: u16,
@@ -5819,6 +5824,14 @@ pub const sctp = struct {
             .webrtc_string_empty => .{ .kind = .string, .is_string = true, .empty = true, .effective_len = 0 },
             .webrtc_binary_empty => .{ .kind = .binary, .empty = true, .effective_len = 0 },
             _ => error.InvalidSctpPacket,
+        };
+    }
+
+    pub fn dataChannelPayload(ppid: PayloadProtocolIdentifier, user_data: []const u8) Error!DataChannelPayload {
+        const info = try dataChannelPayloadInfo(ppid, user_data.len);
+        return .{
+            .info = info,
+            .data = if (info.empty) user_data[0..0] else user_data[0..info.effective_len],
         };
     }
 
@@ -8439,6 +8452,16 @@ test "SCTP DATA packet and DCEP channel messages" {
         .effective_len = 4,
     }, try sctp.dataChannelPayloadInfo(.webrtc_dcep, 4));
     try std.testing.expectError(error.InvalidSctpPacket, sctp.dataChannelPayloadInfo(@enumFromInt(@as(u32, 0)), 0));
+    const empty_text_payload = try sctp.dataChannelPayload(.webrtc_string_empty, &.{0});
+    try std.testing.expect(empty_text_payload.info.is_string);
+    try std.testing.expect(empty_text_payload.info.empty);
+    try std.testing.expectEqual(@as(usize, 0), empty_text_payload.data.len);
+    const binary_payload = try sctp.dataChannelPayload(.webrtc_binary, "bytes");
+    try std.testing.expect(!binary_payload.info.is_string);
+    try std.testing.expectEqualStrings("bytes", binary_payload.data);
+    const dcep_payload = try sctp.dataChannelPayload(.webrtc_dcep, ack.items);
+    try std.testing.expectEqual(sctp.DataChannelPayloadKind.dcep, dcep_payload.info.kind);
+    try std.testing.expectEqualSlices(u8, ack.items, dcep_payload.data);
 
     const unordered_reliability = try sctp.dataChannelReliability(.partial_reliable_retransmit_unordered, 3);
     const empty_text_chunk = sctp.dataChannelChunk(.{
