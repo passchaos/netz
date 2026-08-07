@@ -192,15 +192,21 @@ pub fn validTopicFilter(filter: []const u8) bool {
 }
 
 fn validSharedTopicFilter(filter: []const u8) bool {
+    return sharedTopicFilterInner(filter) != null;
+}
+
+fn sharedTopicFilterInner(filter: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, filter, "$share/")) return null;
     const rest = filter["$share/".len..];
-    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return false;
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
     const group = rest[0..slash];
     const shared_filter = rest[slash + 1 ..];
     // MQTT 5 shared subscriptions use "$share/{ShareName}/{TopicFilter}".
     // The share name is a literal name, not a topic level, so reject empty
     // groups and wildcard characters before validating the nested TopicFilter.
-    if (group.len == 0 or hasWildcards(group)) return false;
-    return validTopicFilterLevels(shared_filter);
+    if (group.len == 0 or hasWildcards(group)) return null;
+    if (!validTopicFilterLevels(shared_filter)) return null;
+    return shared_filter;
 }
 
 fn validTopicFilterLevels(filter: []const u8) bool {
@@ -234,12 +240,19 @@ pub fn validateTopicFilter(filter: []const u8) Error!void {
 }
 
 pub fn topicMatchesFilter(topic: []const u8, filter: []const u8) bool {
-    // MQTT reserves `$` topics from being matched by a leading wildcard.  A
-    // filter that explicitly starts with `$` still matches normally.
-    if (std.mem.startsWith(u8, topic, "$") and !std.mem.startsWith(u8, filter, "$")) return false;
+    const effective_filter = if (std.mem.startsWith(u8, filter, "$share/"))
+        sharedTopicFilterInner(filter) orelse return false
+    else
+        filter;
+
+    // MQTT reserves `$` topics from being matched by a leading wildcard.  For
+    // shared subscriptions the reservation applies to the nested Topic Filter,
+    // not to the `$share/` wrapper itself; otherwise `$share/group/+` would
+    // accidentally match `$SYS/...` topics.
+    if (std.mem.startsWith(u8, topic, "$") and !std.mem.startsWith(u8, effective_filter, "$")) return false;
 
     var topic_levels = std.mem.splitScalar(u8, topic, '/');
-    var filter_levels = std.mem.splitScalar(u8, filter, '/');
+    var filter_levels = std.mem.splitScalar(u8, effective_filter, '/');
     while (filter_levels.next()) |filter_level| {
         if (std.mem.eql(u8, filter_level, "#")) return true;
 
@@ -1937,6 +1950,10 @@ test "MQTT topic validation and filter matching" {
     try std.testing.expect(!topicMatchesFilter("a/b", "a/b/+"));
     try std.testing.expect(!topicMatchesFilter("$system/metrics", "+/+"));
     try std.testing.expect(topicMatchesFilter("$system/metrics", "$system/+"));
+    try std.testing.expect(topicMatchesFilter("sensors/temp", "$share/workers/sensors/+"));
+    try std.testing.expect(!topicMatchesFilter("$system/metrics", "$share/workers/+"));
+    try std.testing.expect(topicMatchesFilter("$system/metrics", "$share/workers/$system/+"));
+    try std.testing.expect(!topicMatchesFilter("sensors/temp", "$share//sensors/+"));
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(std.testing.allocator);
