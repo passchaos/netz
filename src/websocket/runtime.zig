@@ -774,7 +774,7 @@ pub const H2Server = struct {
         const version = try requiredH2SingletonHeader(request.headers, "sec-websocket-version");
         if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
 
-        const selected_protocol = try selectSubprotocol(allocator, try optionalH2SingletonHeader(request.headers, "sec-websocket-protocol"), options.protocols);
+        const selected_protocol = try selectH2Subprotocol(allocator, request.headers, options.protocols);
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
         const selected_extension = try acceptH2Extensions(allocator, request.headers, options.enable_permessage_deflate);
         defer if (selected_extension) |extension| allocator.free(extension);
@@ -1028,6 +1028,17 @@ fn selectHttp1Subprotocol(allocator: std.mem.Allocator, headers: []const http1.H
     return null;
 }
 
+fn selectH2Subprotocol(allocator: std.mem.Allocator, headers: []const http2.Hpack.HeaderField, supported: []const []const u8) Error!?[]u8 {
+    try validateSupportedSubprotocols(supported);
+    var selected: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "sec-websocket-protocol")) continue;
+        try considerSubprotocolHeader(header.value, supported, &selected);
+    }
+    if (selected) |protocol| return try allocator.dupe(u8, protocol);
+    return null;
+}
+
 fn validateSupportedSubprotocols(supported: []const []const u8) Error!void {
     for (supported) |protocol| {
         if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
@@ -1178,6 +1189,20 @@ test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
     const accepted = try acceptH2Extensions(allocator, &split_offer, true);
     defer if (accepted) |value| allocator.free(value);
     try std.testing.expect(accepted != null);
+
+    const split_protocol_offer = [_]http2.Hpack.HeaderField{
+        .{ .name = "sec-websocket-protocol", .value = "unknown" },
+        .{ .name = "sec-websocket-protocol", .value = "chat.v2, chat.v1" },
+    };
+    const selected = (try selectH2Subprotocol(allocator, &split_protocol_offer, &.{ "chat.v1", "chat.v2" })).?;
+    defer allocator.free(selected);
+    try std.testing.expectEqualStrings("chat.v2", selected);
+
+    const invalid_split_protocol = [_]http2.Hpack.HeaderField{
+        .{ .name = "sec-websocket-protocol", .value = "chat.v1" },
+        .{ .name = "sec-websocket-protocol", .value = "bad protocol" },
+    };
+    try std.testing.expectError(error.InvalidSubprotocol, selectH2Subprotocol(allocator, &invalid_split_protocol, &.{"chat.v1"}));
 }
 
 test "WebSocket runtime client and server exchange over TCP" {
