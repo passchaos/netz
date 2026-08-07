@@ -1073,6 +1073,7 @@ pub const Subscribe = struct {
             try validateTopicFilter(topic_filter);
             const options = try cursor.readByte();
             try validateSubscriptionOptions(protocol, options);
+            try validateSharedSubscriptionOptions(protocol, topic_filter, options);
             try subs.append(allocator, .{
                 .topic_filter = topic_filter,
                 .qos = std.enums.fromInt(QoS, @as(u2, @truncate(options & 0x03))) orelse return error.InvalidQoS,
@@ -1112,6 +1113,7 @@ pub const Subscribe = struct {
                 (if (subscription.retain_as_published) @as(u8, 0x08) else 0) |
                 (@as(u8, subscription.retain_handling) << 4);
             try validateSubscriptionOptions(protocol, options);
+            try validateSharedSubscriptionOptions(protocol, subscription.topic_filter, options);
             try variable.append(allocator, options);
         }
         try (FixedHeader{ .packet_type = .subscribe, .flags = PacketType.subscribe.defaultFlags(), .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
@@ -1431,6 +1433,15 @@ fn validateSubscriptionOptions(protocol: ProtocolVersion, options: u8) Error!voi
             if (((options >> 4) & 0x03) == 3) return error.InvalidSubscription;
         },
     }
+}
+
+fn validateSharedSubscriptionOptions(protocol: ProtocolVersion, topic_filter: []const u8, options: u8) Error!void {
+    if (protocol != .v5) return;
+    if ((options & 0x04) == 0) return;
+    // MQTT 5 forbids No Local on Shared Subscriptions: delivery is mediated by
+    // the shared group, not by an individual subscriber identity, so the option
+    // is defined as a protocol error for `$share/{group}/{filter}` filters.
+    if (std.mem.startsWith(u8, topic_filter, "$share/")) return error.InvalidSubscription;
 }
 
 fn validateSubAckReason(protocol: ProtocolVersion, code: u8) Error!void {
@@ -2240,6 +2251,10 @@ test "MQTT subscribe and suback controls" {
         .topic_filter = "v3/retain-handling",
         .retain_handling = 1,
     }}));
+    try std.testing.expectError(error.InvalidSubscription, Subscribe.write(&subscribe_bytes, allocator, .v5, 13, &.{}, &.{.{
+        .topic_filter = "$share/workers/sensors/+",
+        .no_local = true,
+    }}));
 
     var invalid_v3_options: std.ArrayList(u8) = .empty;
     defer invalid_v3_options.deinit(allocator);
@@ -2256,6 +2271,23 @@ test "MQTT subscribe and suback controls" {
     }).write(&invalid_v3_options, allocator);
     try invalid_v3_options.appendSlice(allocator, invalid_v3_variable.items);
     try std.testing.expectError(error.InvalidSubscription, Subscribe.parse(allocator, .v3_1_1, invalid_v3_options.items));
+
+    var invalid_shared_no_local: std.ArrayList(u8) = .empty;
+    defer invalid_shared_no_local.deinit(allocator);
+    var invalid_shared_variable: std.ArrayList(u8) = .empty;
+    defer invalid_shared_variable.deinit(allocator);
+    try wire.appendInt(&invalid_shared_variable, allocator, u16, 14, .big);
+    try writeProperties(&invalid_shared_variable, allocator, &.{});
+    try writeUtf8(&invalid_shared_variable, allocator, "$share/workers/sensors/+");
+    try invalid_shared_variable.append(allocator, 0x04);
+    try (FixedHeader{
+        .packet_type = .subscribe,
+        .flags = PacketType.subscribe.defaultFlags(),
+        .remaining_len = invalid_shared_variable.items.len,
+        .header_len = 0,
+    }).write(&invalid_shared_no_local, allocator);
+    try invalid_shared_no_local.appendSlice(allocator, invalid_shared_variable.items);
+    try std.testing.expectError(error.InvalidSubscription, Subscribe.parse(allocator, .v5, invalid_shared_no_local.items));
 
     var suback_bytes: std.ArrayList(u8) = .empty;
     defer suback_bytes.deinit(allocator);
