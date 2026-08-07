@@ -3796,6 +3796,7 @@ pub const rtcp = struct {
     pub const Unknown = struct {
         header: Header,
         payload: []const u8,
+        raw: []const u8 = &.{},
     };
 
     pub const Packet = union(enum) {
@@ -3894,7 +3895,7 @@ pub const rtcp = struct {
             else if (header.count_or_format == payload_feedback_remb)
                 .{ .receiver_estimated_maximum_bitrate = try parseReceiverEstimatedMaximumBitrate(allocator, payload) }
             else
-                .{ .unknown = .{ .header = header, .payload = payload } },
+                .{ .unknown = .{ .header = header, .payload = payload, .raw = bytes[0..packet_len] } },
             .transport_feedback => if (header.count_or_format == transport_feedback_nack)
                 .{ .transport_layer_nack = try parseTransportLayerNack(allocator, payload) }
             else if (header.count_or_format == transport_feedback_sli)
@@ -3906,8 +3907,8 @@ pub const rtcp = struct {
             else if (header.count_or_format == transport_feedback_twcc)
                 .{ .transport_wide_cc = try parseTransportWideCc(allocator, payload) }
             else
-                .{ .unknown = .{ .header = header, .payload = payload } },
-            else => .{ .unknown = .{ .header = header, .payload = payload } },
+                .{ .unknown = .{ .header = header, .payload = payload, .raw = bytes[0..packet_len] } },
+            else => .{ .unknown = .{ .header = header, .payload = payload, .raw = bytes[0..packet_len] } },
         };
         return .{ .packet = packet, .consumed = packet_len };
     }
@@ -3945,6 +3946,17 @@ pub const rtcp = struct {
             .transport_layer_nack => |nack| try writeTransportLayerNack(list, allocator, nack),
             .transport_wide_cc => |twcc| try writeTransportWideCc(list, allocator, twcc),
             .unknown => |unknown| {
+                if (unknown.raw.len != 0) {
+                    // Mirror Pion/rtcp RawPacket: unknown packets are a
+                    // byte-for-byte compatibility escape hatch.  Preserve the
+                    // original wire image, including the padding bit and
+                    // trailing padding octets, instead of reconstructing a
+                    // subtly different packet from the stripped payload.
+                    const raw_header = try Header.parse(unknown.raw);
+                    if (raw_header.packetLen() != unknown.raw.len) return error.InvalidRtcpPacket;
+                    try list.appendSlice(allocator, unknown.raw);
+                    return;
+                }
                 try writeHeader(list, allocator, unknown.header.count_or_format, unknown.header.packet_type, unknown.payload.len);
                 try list.appendSlice(allocator, unknown.payload);
             },
@@ -8264,6 +8276,44 @@ test "RTCP full intra request feedback" {
         .sender_ssrc = 1,
         .entries = too_many_fir_entries,
     } }));
+}
+
+test "RTCP unknown packets preserve raw wire image" {
+    const allocator = std.testing.allocator;
+    // Unknown RTCP types are treated like Pion's RawPacket escape hatch: the
+    // full packet bytes must survive parse/write unchanged, including padding.
+    const raw = [_]u8{
+        0xa2, 0xfa, 0x00, 0x02,
+        0xde, 0xad, 0xbe, 0xef,
+        0x00, 0x00, 0x00, 0x04,
+    };
+
+    var parsed = try rtcp.parsePacket(allocator, &raw);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(u5, 2), parsed.packet.unknown.header.count_or_format);
+    try std.testing.expect(parsed.packet.unknown.header.padding);
+    try std.testing.expectEqual(@as(usize, 4), parsed.packet.unknown.payload.len);
+    try std.testing.expectEqualSlices(u8, raw[4..8], parsed.packet.unknown.payload);
+    try std.testing.expectEqualSlices(u8, &raw, parsed.packet.unknown.raw);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try rtcp.writePacket(&encoded, allocator, parsed.packet);
+    try std.testing.expectEqualSlices(u8, &raw, encoded.items);
+
+    var manual: std.ArrayList(u8) = .empty;
+    defer manual.deinit(allocator);
+    try rtcp.writePacket(&manual, allocator, .{ .unknown = .{
+        .header = .{
+            .version = 2,
+            .padding = false,
+            .count_or_format = 3,
+            .packet_type = @enumFromInt(0xfb),
+            .length_words_minus_one = 1,
+        },
+        .payload = &.{ 0xca, 0xfe, 0xba, 0xbe },
+    } });
+    try std.testing.expectEqualSlices(u8, &.{ 0x83, 0xfb, 0x00, 0x01, 0xca, 0xfe, 0xba, 0xbe }, manual.items);
 }
 
 test "RTCP receiver report and feedback packets" {
