@@ -4795,6 +4795,46 @@ pub const sctp = struct {
         dtls_server,
     };
 
+    pub const DataChannelIdRegistry = struct {
+        allocator: std.mem.Allocator,
+        used_ids: std.ArrayList(u16) = .empty,
+        max_channels: u16,
+
+        pub fn init(allocator: std.mem.Allocator, max_channels: u16) Error!DataChannelIdRegistry {
+            if (max_channels == 0) return error.InvalidSctpPacket;
+            return .{ .allocator = allocator, .max_channels = max_channels };
+        }
+
+        pub fn deinit(self: *DataChannelIdRegistry) void {
+            self.used_ids.deinit(self.allocator);
+            self.* = undefined;
+        }
+
+        pub fn reserve(self: *DataChannelIdRegistry, id: u16) Error!void {
+            if (id >= self.max_channels or dataChannelIdUsed(self.used_ids.items, id)) return error.InvalidSctpPacket;
+            try self.used_ids.append(self.allocator, id);
+        }
+
+        pub fn release(self: *DataChannelIdRegistry, id: u16) void {
+            for (self.used_ids.items, 0..) |used, index| {
+                if (used == id) {
+                    _ = self.used_ids.swapRemove(index);
+                    return;
+                }
+            }
+        }
+
+        pub fn allocate(self: *DataChannelIdRegistry, role: DataChannelIdRole) Error!u16 {
+            const id = try nextDataChannelId(role, self.used_ids.items, self.max_channels);
+            try self.reserve(id);
+            return id;
+        }
+
+        pub fn contains(self: DataChannelIdRegistry, id: u16) bool {
+            return dataChannelIdUsed(self.used_ids.items, id);
+        }
+    };
+
     pub const DataChannelPayloadKind = enum {
         dcep,
         string,
@@ -8596,6 +8636,20 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expectEqual(@as(u16, 5), try sctp.nextDataChannelId(.dtls_server, &.{ 1, 3 }, 16));
     try std.testing.expectEqual(@as(u16, 3), try sctp.nextDataChannelId(.dtls_server, &.{ 1, 5 }, 16));
     try std.testing.expectError(error.InvalidSctpPacket, sctp.nextDataChannelId(.dtls_client, &.{ 0, 2 }, 3));
+    var id_registry = try sctp.DataChannelIdRegistry.init(allocator, 8);
+    defer id_registry.deinit();
+    try std.testing.expectEqual(@as(u16, 0), try id_registry.allocate(.dtls_client));
+    try std.testing.expectEqual(@as(u16, 2), try id_registry.allocate(.dtls_client));
+    try std.testing.expectEqual(@as(u16, 1), try id_registry.allocate(.dtls_server));
+    try std.testing.expect(id_registry.contains(2));
+    try std.testing.expectError(error.InvalidSctpPacket, id_registry.reserve(2));
+    id_registry.release(2);
+    try std.testing.expect(!id_registry.contains(2));
+    try std.testing.expectEqual(@as(u16, 2), try id_registry.allocate(.dtls_client));
+    try id_registry.reserve(3);
+    try id_registry.reserve(5);
+    try id_registry.reserve(7);
+    try std.testing.expectError(error.InvalidSctpPacket, id_registry.allocate(.dtls_server));
 
     packet_bytes.clearRetainingCapacity();
     try sctp.writeDataPacket(&packet_bytes, allocator, .{
