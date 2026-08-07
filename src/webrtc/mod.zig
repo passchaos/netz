@@ -1468,6 +1468,7 @@ pub const rtcp = struct {
     pub const payload_feedback_pli: u5 = 1;
     pub const payload_feedback_fir: u5 = 4;
     pub const payload_feedback_remb: u5 = 15;
+    const max_rtcp_payload_len: usize = @as(usize, std.math.maxInt(u16)) * 4;
 
     pub const Header = struct {
         version: u2,
@@ -2317,6 +2318,7 @@ pub const rtcp = struct {
 
     fn writeFullIntraRequest(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fir: FullIntraRequest) Error!void {
         if (fir.entries.len == 0) return error.InvalidRtcpPacket;
+        if (fir.entries.len > (max_rtcp_payload_len - 8) / 8) return error.InvalidRtcpPacket;
         try writeHeader(list, allocator, payload_feedback_fir, .payload_feedback, 8 + fir.entries.len * 8);
         try wire.appendInt(list, allocator, u32, fir.sender_ssrc, .big);
         try wire.appendInt(list, allocator, u32, fir.media_ssrc, .big);
@@ -2350,6 +2352,7 @@ pub const rtcp = struct {
     }
 
     fn writeTransportLayerNack(list: *std.ArrayList(u8), allocator: std.mem.Allocator, nack: TransportLayerNack) Error!void {
+        if (nack.pairs.len > (max_rtcp_payload_len - 8) / 4) return error.InvalidRtcpPacket;
         try writeHeader(list, allocator, transport_feedback_nack, .transport_feedback, 8 + nack.pairs.len * 4);
         try wire.appendInt(list, allocator, u32, nack.sender_ssrc, .big);
         try wire.appendInt(list, allocator, u32, nack.media_ssrc, .big);
@@ -4495,6 +4498,12 @@ test "RTCP full intra request feedback" {
         .sender_ssrc = 1,
         .entries = &.{},
     } }));
+    const too_many_fir_entries = try allocator.alloc(rtcp.FirEntry, (((@as(usize, std.math.maxInt(u16)) * 4) - 8) / 8) + 1);
+    defer allocator.free(too_many_fir_entries);
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .full_intra_request = .{
+        .sender_ssrc = 1,
+        .entries = too_many_fir_entries,
+    } }));
 }
 
 test "RTCP receiver report and feedback packets" {
@@ -4566,6 +4575,13 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
     try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
+    const too_many_nacks = try allocator.alloc(rtcp.NackPair, (((@as(usize, std.math.maxInt(u16)) * 4) - 8) / 4) + 1);
+    defer allocator.free(too_many_nacks);
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .transport_layer_nack = .{
+        .sender_ssrc = 1,
+        .media_ssrc = 2,
+        .pairs = too_many_nacks,
+    } }));
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, .{ .receiver_estimated_maximum_bitrate = .{
