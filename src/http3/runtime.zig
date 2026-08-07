@@ -870,6 +870,9 @@ const ControlStreamRole = enum {
 };
 
 fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.mem.Allocator, stream: quic.StreamFrame, role: ControlStreamRole) Error!bool {
+    if (role == .server and (stream.stream_id & 0x02) != 0 and stream.offset == 0) {
+        if (peekUniStreamType(stream) == .push) return error.StreamCreationError;
+    }
     const previous = control.*;
     const previous_priority_present = previous.latest_priority_update != null;
     const handled = try applyControlStreamFrame(control, allocator, stream);
@@ -897,6 +900,11 @@ fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.m
     return handled;
 }
 
+fn peekUniStreamType(stream: quic.StreamFrame) ?http3.StreamType {
+    var prefix_cursor = @import("../internal/wire.zig").Cursor.init(stream.data);
+    return @enumFromInt(quic.varint.decode(&prefix_cursor) catch return null);
+}
+
 fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allocator, stream: quic.StreamFrame) Error!bool {
     // HTTP/3 control and QPACK streams are unidirectional QUIC streams.  Offset
     // zero carries the stream type varint; subsequent frames on an already
@@ -916,7 +924,8 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
     }
 
     var prefix_cursor = @import("../internal/wire.zig").Cursor.init(stream.data);
-    const stream_type: http3.StreamType = @enumFromInt(quic.varint.decode(&prefix_cursor) catch return false);
+    const stream_type = peekUniStreamType(stream) orelse return false;
+    _ = quic.varint.decode(&prefix_cursor) catch unreachable;
     switch (stream_type) {
         .control => {
             try control.registerControlStream(stream.stream_id);
@@ -1089,6 +1098,24 @@ test "HTTP/3 client rejects server-only control frames" {
         .data = stream_bytes.items,
     }, .server));
     try std.testing.expect(server_control.latest_priority_update != null);
+
+    stream_bytes.clearRetainingCapacity();
+    try quic.varint.encode(&stream_bytes, allocator, @intFromEnum(http3.StreamType.push));
+    server_control = .{};
+    try std.testing.expectError(error.StreamCreationError, applyControlStreamFrameForRole(&server_control, allocator, .{
+        .stream_id = 2,
+        .offset = 0,
+        .fin = false,
+        .data = stream_bytes.items,
+    }, .server));
+
+    var client_control_for_push = http3.ControlState{};
+    try std.testing.expect(!try applyControlStreamFrameForRole(&client_control_for_push, allocator, .{
+        .stream_id = 3,
+        .offset = 0,
+        .fin = false,
+        .data = stream_bytes.items,
+    }, .client));
 }
 
 test "HTTP/3 connection control frames advance control stream offset" {
