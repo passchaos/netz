@@ -4146,9 +4146,33 @@ pub const rtcp = struct {
         }
 
         pub fn deltaMicros(self: TwccPacketResult) i32 {
-            return @as(i32, self.delta_ticks) * 250;
+            return twccDeltaTicksToMicros(self.delta_ticks);
         }
     };
+
+    pub const twcc_delta_tick_micros: i32 = 250;
+    pub const twcc_small_delta_max_micros: i32 = @as(i32, std.math.maxInt(u8)) * twcc_delta_tick_micros;
+    pub const twcc_large_delta_min_micros: i32 = @as(i32, std.math.minInt(i16)) * twcc_delta_tick_micros;
+    pub const twcc_large_delta_max_micros: i32 = @as(i32, std.math.maxInt(i16)) * twcc_delta_tick_micros;
+
+    pub fn twccDeltaTicksToMicros(delta_ticks: i16) i32 {
+        return @as(i32, delta_ticks) * twcc_delta_tick_micros;
+    }
+
+    pub fn twccSmallDeltaFromMicros(delta_micros: i32) Error!u8 {
+        // Match Pion/rtcp's RecvDelta.Marshal quantization: convert
+        // microseconds to 250us wire ticks with truncation toward zero, then
+        // validate the encoded tick range.
+        const ticks = @divTrunc(delta_micros, twcc_delta_tick_micros);
+        if (ticks < 0 or ticks > std.math.maxInt(u8)) return error.InvalidRtcpPacket;
+        return @intCast(ticks);
+    }
+
+    pub fn twccLargeDeltaFromMicros(delta_micros: i32) Error!i16 {
+        const ticks = @divTrunc(delta_micros, twcc_delta_tick_micros);
+        if (ticks < std.math.minInt(i16) or ticks > std.math.maxInt(i16)) return error.InvalidRtcpPacket;
+        return @intCast(ticks);
+    }
 
     pub const TransportWideCc = struct {
         sender_ssrc: u32,
@@ -9776,6 +9800,17 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(@as(usize, 5), parsed.packet.transport_wide_cc.packets.len);
     try std.testing.expect(parsed.packet.transport_wide_cc.packets[0].received());
     try std.testing.expectEqual(@as(i32, 1000), parsed.packet.transport_wide_cc.packets[0].deltaMicros());
+    try std.testing.expectEqual(@as(i32, 250), rtcp.twcc_delta_tick_micros);
+    try std.testing.expectEqual(@as(i32, 63_750), rtcp.twcc_small_delta_max_micros);
+    try std.testing.expectEqual(@as(i32, -8_192_000), rtcp.twcc_large_delta_min_micros);
+    try std.testing.expectEqual(@as(i32, 8_191_750), rtcp.twcc_large_delta_max_micros);
+    try std.testing.expectEqual(@as(i32, -8_192_000), rtcp.twccDeltaTicksToMicros(std.math.minInt(i16)));
+    try std.testing.expectEqual(@as(u8, 255), try rtcp.twccSmallDeltaFromMicros(63_999));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccSmallDeltaFromMicros(-250));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccSmallDeltaFromMicros(64_000));
+    try std.testing.expectEqual(@as(i16, 32767), try rtcp.twccLargeDeltaFromMicros(8_191_999));
+    try std.testing.expectEqual(@as(i16, -32768), try rtcp.twccLargeDeltaFromMicros(-8_192_000));
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.twccLargeDeltaFromMicros(-8_192_250));
     try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, parsed.packet.transport_wide_cc.packets[1].status);
     try std.testing.expectEqual(@as(i16, -3), parsed.packet.transport_wide_cc.packets[2].delta_ticks);
     try std.testing.expect(parsed.packet.transport_wide_cc.packets[3].received());
