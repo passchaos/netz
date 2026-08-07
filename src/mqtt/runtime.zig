@@ -63,7 +63,9 @@ pub const Server = struct {
 
         var connect = try connection.readConnect();
         errdefer connect.deinit(self.allocator);
-        if (mqtt.receiveMaximum(connect.connect.properties)) |receive_maximum| connection.max_outgoing_inflight = receive_maximum;
+        if (mqtt.receiveMaximum(connect.connect.properties)) |receive_maximum| {
+            connection.max_outgoing_inflight = negotiatedOutgoingInflightLimit(connection.max_outgoing_inflight, receive_maximum);
+        }
         if (mqtt.maximumPacketSize(connect.connect.properties)) |maximum_packet_size| connection.peer_max_packet_size = maximum_packet_size;
         if (mqtt.topicAliasMaximum(connect.connect.properties)) |topic_alias_maximum| connection.peer_topic_alias_maximum = topic_alias_maximum;
         try connection.writeConnAck(.{
@@ -233,7 +235,9 @@ pub const Client = struct {
         var connack = try connection.readConnAck();
         defer connack.deinit(allocator);
         if (connack.connack.reason_code != 0) return error.ConnectRefused;
-        if (mqtt.receiveMaximum(connack.connack.properties)) |receive_maximum| connection.max_outgoing_inflight = receive_maximum;
+        if (mqtt.receiveMaximum(connack.connack.properties)) |receive_maximum| {
+            connection.max_outgoing_inflight = negotiatedOutgoingInflightLimit(connection.max_outgoing_inflight, receive_maximum);
+        }
         if (mqtt.maximumPacketSize(connack.connack.properties)) |maximum_packet_size| connection.peer_max_packet_size = maximum_packet_size;
         if (mqtt.topicAliasMaximum(connack.connack.properties)) |topic_alias_maximum| connection.peer_topic_alias_maximum = topic_alias_maximum;
         if (mqtt.serverKeepAlive(connack.connack.properties)) |server_keep_alive| connection.keep_alive_seconds = server_keep_alive;
@@ -279,6 +283,14 @@ pub const ConnAckOptions = struct {
 
 fn effectiveTopicAliasMaximum(configured: u16) u16 {
     return @min(configured, @as(u16, @intCast(topic_alias_slots)));
+}
+
+fn negotiatedOutgoingInflightLimit(local_upper_limit: u16, peer_receive_maximum: u16) u16 {
+    // MQTT 5 Receive Maximum is the peer's limit for QoS 1/2 PUBLISH packets
+    // that we may have in flight.  Like rumqtt, keep the configured local
+    // upper bound as a hard ceiling so a peer cannot enlarge local queue/window
+    // state by advertising a larger value in CONNECT/CONNACK.
+    return @min(local_upper_limit, peer_receive_maximum);
 }
 
 fn validateTopicAliasMaximumFitsRuntime(properties: []const mqtt.Property) Error!void {
@@ -1022,7 +1034,7 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqual(@as(?u16, 3), mqtt.receiveMaximum(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(?u32, 4096), mqtt.maximumPacketSize(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(?u16, 4), mqtt.topicAliasMaximum(accepted.connect.connect.properties));
-            try std.testing.expectEqual(@as(u16, 3), accepted.connection.max_outgoing_inflight);
+            try std.testing.expectEqual(@as(u16, 2), accepted.connection.max_outgoing_inflight);
             try std.testing.expectEqual(@as(usize, 4096), accepted.connection.peer_max_packet_size);
             try std.testing.expectEqual(@as(u16, 30), accepted.connection.keep_alive_seconds);
 
@@ -1169,6 +1181,12 @@ test "MQTT connection enforces outgoing inflight limit before writing" {
 
     try std.testing.expectError(error.InflightFull, connection.publish("limited/topic", "blocked", .{ .qos = .at_least_once }));
     try std.testing.expectEqual(@as(u16, 1), connection.outgoing_inflight);
+}
+
+test "MQTT Receive Maximum cannot raise local outgoing inflight cap" {
+    try std.testing.expectEqual(@as(u16, 2), negotiatedOutgoingInflightLimit(2, 3));
+    try std.testing.expectEqual(@as(u16, 2), negotiatedOutgoingInflightLimit(3, 2));
+    try std.testing.expectEqual(@as(u16, 1), negotiatedOutgoingInflightLimit(1, 1));
 }
 
 test "MQTT connection enforces negotiated maximum packet size" {
