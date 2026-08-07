@@ -998,10 +998,12 @@ pub const sdp = struct {
 
     pub const SctpParameters = struct {
         port: u16,
-        max_message_size: u32 = 0,
+        max_message_size: u32 = sctp_max_message_size_unset,
         max_channels: ?u16 = null,
         protocol: []const u8 = "webrtc-datachannel",
     };
+
+    pub const sctp_max_message_size_unset: u32 = std.math.maxInt(u16);
 
     pub const abs_send_time_uri = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
     pub const transport_cc_uri = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
@@ -1900,7 +1902,10 @@ pub const sdp = struct {
     }
 
     fn parseMaxMessageSize(value: ?[]const u8) Error!u32 {
-        const raw = value orelse return 0;
+        // Pion reports an absent a=max-message-size as the SCTP unset value
+        // (65535), while an explicit "0" remains the RFC 8841 unlimited
+        // sentinel.  Preserve that distinction for capability negotiation.
+        const raw = value orelse return sctp_max_message_size_unset;
         if (raw.len == 0) return error.InvalidSdp;
         return std.fmt.parseInt(u32, raw, 10) catch return error.InvalidSdp;
     }
@@ -7477,7 +7482,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(sdp.DtlsRole.auto, try sdp.extractDtlsRole(legacy_session));
     const legacy_sctp = try sdp.extractSctpParameters(legacy_session);
     try std.testing.expectEqual(@as(u16, 5000), legacy_sctp.port);
-    try std.testing.expectEqual(@as(u32, 0), legacy_sctp.max_message_size);
+    try std.testing.expectEqual(sdp.sctp_max_message_size_unset, legacy_sctp.max_message_size);
     try std.testing.expectEqual(@as(?u16, 256), legacy_sctp.max_channels);
     try std.testing.expectEqualStrings("webrtc-datachannel", legacy_sctp.protocol);
 }
