@@ -2145,6 +2145,13 @@ pub const rtp = struct {
         data: []const u8,
     };
 
+    pub const UnknownRtpDemuxDetails = struct {
+        mid: []const u8 = "",
+        rid: []const u8 = "",
+        repaired_rid: []const u8 = "",
+        padding_only: bool = false,
+    };
+
     pub const AudioLevelExtension = struct {
         level: u7,
         voice: bool = false,
@@ -2232,6 +2239,46 @@ pub const rtp = struct {
             if (element.id == id) return element.data;
         }
         return null;
+    }
+
+    pub fn mid(elements: []const HeaderExtensionElement, id: u8) ?[]const u8 {
+        return findHeaderExtension(elements, id);
+    }
+
+    pub fn rtpStreamId(elements: []const HeaderExtensionElement, id: u8) ?[]const u8 {
+        return findHeaderExtension(elements, id);
+    }
+
+    pub fn repairedRtpStreamId(elements: []const HeaderExtensionElement, id: u8) ?[]const u8 {
+        return findHeaderExtension(elements, id);
+    }
+
+    pub fn unknownRtpDemuxDetails(
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+        mid_extension_id: u8,
+        stream_id_extension_id: u8,
+        repair_stream_id_extension_id: u8,
+    ) Error!UnknownRtpDemuxDetails {
+        var packet = try Packet.parse(allocator, bytes);
+        defer packet.deinit(allocator);
+
+        var details = UnknownRtpDemuxDetails{
+            .padding_only = packet.header.padding and packet.payload.len == 0,
+        };
+        const extension = packet.extension orelse return details;
+        const elements = try parseHeaderExtensionElementsLenient(allocator, extension);
+        defer freeHeaderExtensionElements(allocator, elements);
+
+        // This mirrors Pion's handleUnknownRTPPacket helper used during
+        // simulcast/late-SSRC demux: MID, RID and repaired RID are optional
+        // raw UTF-8-ish byte strings carried in RTP header extensions.  The
+        // helper intentionally returns borrowed packet slices so callers can
+        // make a demux decision without allocating per packet.
+        details.mid = mid(elements, mid_extension_id) orelse "";
+        details.rid = rtpStreamId(elements, stream_id_extension_id) orelse "";
+        details.repaired_rid = repairedRtpStreamId(elements, repair_stream_id_extension_id) orelse "";
+        return details;
     }
 
     pub fn parseOneByteHeaderExtensions(allocator: std.mem.Allocator, data: []const u8) Error![]HeaderExtensionElement {
@@ -7814,6 +7861,9 @@ test "RTP packet extension padding and writer" {
         .{ .id = 6, .data = &playout_delay },
         .{ .id = 8, .data = &video_orientation },
         .{ .id = 7, .data = abs_capture_time[0..rtp.absCaptureTimePayloadLen(capture_offset)] },
+        .{ .id = 9, .data = "video" },
+        .{ .id = 10, .data = "f" },
+        .{ .id = 11, .data = "rtx-f" },
     });
     try std.testing.expectEqual(@as(usize, 0), one_byte_extensions.items.len % 4);
 
@@ -7869,8 +7919,29 @@ test "RTP packet extension padding and writer" {
     try std.testing.expect(capture_diff <= 1);
     try std.testing.expectEqual(@as(i64, 1_250_000_000), parsed_abs_capture_time.estimatedCaptureClockOffsetNanos().?);
     try std.testing.expectEqual(@as(i64, -250_000_000), rtp.captureClockOffsetNanos(rtp.captureClockOffsetFromNanos(-250_000_000)));
+    try std.testing.expectEqualStrings("video", rtp.mid(parsed_extensions, 9).?);
+    try std.testing.expectEqualStrings("f", rtp.rtpStreamId(parsed_extensions, 10).?);
+    try std.testing.expectEqualStrings("rtx-f", rtp.repairedRtpStreamId(parsed_extensions, 11).?);
     try std.testing.expectEqualStrings("opus", packet.payload);
     try std.testing.expectEqual(@as(u8, 4), packet.padding_len);
+    const demux = try rtp.unknownRtpDemuxDetails(allocator, encoded.items, 9, 10, 11);
+    try std.testing.expectEqualStrings("video", demux.mid);
+    try std.testing.expectEqualStrings("f", demux.rid);
+    try std.testing.expectEqualStrings("rtx-f", demux.repaired_rid);
+    try std.testing.expect(!demux.padding_only);
+
+    encoded.clearRetainingCapacity();
+    try rtp.writePacket(&encoded, allocator, .{
+        .payload_type = 111,
+        .sequence_number = 11,
+        .timestamp = 100,
+        .ssrc = 0x01020304,
+        .extension = .{ .profile = rtp.one_byte_header_extension_profile, .data = one_byte_extensions.items },
+        .padding_len = 4,
+    }, "");
+    const padding_only_demux = try rtp.unknownRtpDemuxDetails(allocator, encoded.items, 9, 10, 11);
+    try std.testing.expect(padding_only_demux.padding_only);
+    try std.testing.expectEqualStrings("video", padding_only_demux.mid);
 
     const reserved_extension = rtp.Extension{
         .profile = rtp.one_byte_header_extension_profile,
