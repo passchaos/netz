@@ -1411,7 +1411,7 @@ pub const sdp = struct {
             .mime_type = fullMimeType(media_kind, codec_name),
             .codec_name = codec_name,
             .clock_rate = std.fmt.parseInt(u32, clock_s, 10) catch return error.InvalidSdp,
-            .channels = if (channels_s) |channels| std.fmt.parseInt(u16, channels, 10) catch return error.InvalidSdp else defaultCodecChannels(media_kind),
+            .channels = if (channels_s) |channels| std.fmt.parseInt(u16, channels, 10) catch return error.InvalidSdp else 0,
         };
     }
 
@@ -1447,10 +1447,6 @@ pub const sdp = struct {
             9 => .{ .payload_type = 9, .mime_type = "audio/G722", .codec_name = "G722", .clock_rate = 8000, .channels = 0 },
             else => null,
         };
-    }
-
-    fn defaultCodecChannels(media_kind: []const u8) u16 {
-        return if (std.ascii.eqlIgnoreCase(media_kind, "audio")) 1 else 0;
     }
 
     fn findPayloadAttribute(attrs: []const Attribute, name: []const u8, payload_type: u8) ?[]const u8 {
@@ -5242,6 +5238,18 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("ccm", codecs[0].rtcp_feedback[1].typ);
     try std.testing.expectEqualStrings("fir", codecs[0].rtcp_feedback[1].parameter);
     try std.testing.expectEqualStrings("nack", codecs[0].rtcp_feedback[2].typ);
+
+    const no_channels_codec_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 101\r\n" ++
+        "a=rtpmap:101 opus/90000\r\n";
+    var no_channels_codec_session = try sdp.parse(allocator, no_channels_codec_text);
+    defer no_channels_codec_session.deinit(allocator);
+    const no_channels_codecs = try sdp.extractRtpCodecs(allocator, no_channels_codec_session.media[0]);
+    defer sdp.freeRtpCodecs(allocator, no_channels_codecs);
+    try std.testing.expectEqual(@as(u16, 0), no_channels_codecs[0].channels);
 
     const rtx_codec_text =
         "v=0\r\n" ++
