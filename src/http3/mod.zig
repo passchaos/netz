@@ -576,8 +576,9 @@ fn validateSetting(id: u64, value: u64, seen: []const Setting) Error!void {
     }
 }
 
-pub fn writeSettings(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: []const Setting) !void {
-    for (settings) |setting| {
+pub fn writeSettings(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: []const Setting) Error!void {
+    for (settings, 0..) |setting, index| {
+        try validateSetting(setting.id, setting.value, settings[0..index]);
         try quic.varint.encode(list, allocator, setting.id);
         try quic.varint.encode(list, allocator, setting.value);
     }
@@ -1676,12 +1677,20 @@ test "HTTP/3 control stream enforces SETTINGS first and GOAWAY monotonicity" {
 
     var bad_settings: std.ArrayList(u8) = .empty;
     defer bad_settings.deinit(allocator);
-    try writeSettings(&bad_settings, allocator, &[_]Setting{.{ .id = 0x04, .value = 1 }});
+    try quic.varint.encode(&bad_settings, allocator, 0x04);
+    try quic.varint.encode(&bad_settings, allocator, 1);
     try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, bad_settings.items));
 
     bad_settings.clearRetainingCapacity();
-    try writeSettings(&bad_settings, allocator, &[_]Setting{.{ .id = @intFromEnum(SettingId.h3_datagram), .value = 2 }});
+    try quic.varint.encode(&bad_settings, allocator, @intFromEnum(SettingId.h3_datagram));
+    try quic.varint.encode(&bad_settings, allocator, 2);
     try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, bad_settings.items));
+
+    try std.testing.expectError(error.InvalidSetting, writeSettings(&bad_settings, allocator, &[_]Setting{
+        .{ .id = @intFromEnum(SettingId.h3_datagram), .value = 1 },
+        .{ .id = @intFromEnum(SettingId.h3_datagram), .value = 1 },
+    }));
+    try std.testing.expectError(error.InvalidSetting, writeSettings(&bad_settings, allocator, &[_]Setting{.{ .id = 0x04, .value = 0 }}));
 
     var duplicate_settings = ControlState{};
     var duplicate: std.ArrayList(u8) = .empty;
