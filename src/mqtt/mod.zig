@@ -1220,6 +1220,8 @@ pub const Unsubscribe = struct {
         if (protocol == .v5) {
             try validatePropertiesFor(.unsubscribe, properties);
             try writeProperties(&variable, allocator, properties);
+        } else if (properties.len != 0) {
+            return error.InvalidProperty;
         }
         for (topic_filters) |filter| {
             try validateTopicFilter(filter);
@@ -1288,8 +1290,9 @@ pub const UnsubAck = struct {
                 try validateUnsubAckReason(code);
                 try variable.append(allocator, code);
             }
-        } else if (reason_codes.len != 1 or reason_codes[0] != 0x00) {
-            return error.InvalidReasonCode;
+        } else {
+            if (properties.len != 0) return error.InvalidProperty;
+            if (reason_codes.len != 1 or reason_codes[0] != 0x00) return error.InvalidReasonCode;
         }
         try (FixedHeader{ .packet_type = .unsuback, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
         try list.appendSlice(allocator, variable.items);
@@ -2217,6 +2220,13 @@ test "MQTT unsubscribe and unsuback controls" {
     try std.testing.expectEqualStrings("sensors/+", unsubscribe.topic_filters[0]);
     try std.testing.expectEqualStrings("alerts/#", unsubscribe.topic_filters[1]);
 
+    unsubscribe_bytes.clearRetainingCapacity();
+    try Unsubscribe.write(&unsubscribe_bytes, allocator, .v3_1_1, 12, &.{}, &filters);
+    unsubscribe.deinit(allocator);
+    unsubscribe = try Unsubscribe.parse(allocator, .v3_1_1, unsubscribe_bytes.items);
+    try std.testing.expectEqual(@as(u16, 12), unsubscribe.packet_id);
+    try std.testing.expectEqual(@as(usize, 2), unsubscribe.topic_filters.len);
+
     var unsuback_bytes: std.ArrayList(u8) = .empty;
     defer unsuback_bytes.deinit(allocator);
     const reasons = [_]u8{ 0x00, 0x11 };
@@ -2231,6 +2241,12 @@ test "MQTT unsubscribe and unsuback controls" {
     try std.testing.expectError(error.InvalidSubscription, Unsubscribe.write(&invalid, allocator, .v5, 1, &.{}, &[_][]const u8{}));
     try std.testing.expectError(error.InvalidSubscription, Unsubscribe.write(&invalid, allocator, .v5, 1, &.{}, &[_][]const u8{"bad/#/filter"}));
     try std.testing.expectError(error.InvalidReasonCode, UnsubAck.write(&invalid, allocator, .v5, 1, &.{}, &[_]u8{0x42}));
+    try std.testing.expectError(error.InvalidProperty, Unsubscribe.write(&invalid, allocator, .v3_1_1, 1, &.{
+        .{ .utf8_pair = .{ .id = .user_property, .key = "k", .value = "v" } },
+    }, &filters));
+    try std.testing.expectError(error.InvalidProperty, UnsubAck.write(&invalid, allocator, .v3_1_1, 1, &.{
+        .{ .utf8 = .{ .id = .reason_string, .value = "v3 has no properties" } },
+    }, &[_]u8{0x00}));
 }
 
 test "MQTT disconnect control" {
