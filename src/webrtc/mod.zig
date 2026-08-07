@@ -801,6 +801,11 @@ pub const sdp = struct {
         }
     };
 
+    pub const FmtpParameter = struct {
+        key: []const u8,
+        value: []const u8 = "",
+    };
+
     pub const Rid = struct {
         id: []const u8,
         direction: []const u8,
@@ -1238,7 +1243,7 @@ pub const sdp = struct {
             errdefer codec.deinit(allocator);
             if (findPayloadAttribute(media.attributes, "fmtp", payload_type)) |fmtp| {
                 codec.fmtp = fmtp;
-                codec.apt = parseFmtpApt(fmtp);
+                codec.apt = if (fmtpParameter(fmtp, "apt")) |apt| parsePayloadType(apt) catch null else null;
             }
             codec.rtcp_feedback = try collectRtcpFeedback(allocator, media.attributes, payload_type);
             try codecs.append(allocator, codec);
@@ -1480,12 +1485,40 @@ pub const sdp = struct {
         return feedback.toOwnedSlice(allocator);
     }
 
-    fn parseFmtpApt(fmtp: []const u8) ?u8 {
+    pub fn parseFmtpParameters(allocator: std.mem.Allocator, fmtp: []const u8) Error![]FmtpParameter {
+        var parameters: std.ArrayList(FmtpParameter) = .empty;
+        errdefer parameters.deinit(allocator);
+        var parts = std.mem.splitScalar(u8, fmtp, ';');
+        while (parts.next()) |raw_param| {
+            const param = std.mem.trim(u8, raw_param, " \t");
+            if (param.len == 0) continue;
+            if (std.mem.indexOfScalar(u8, param, '=')) |eq| {
+                try parameters.append(allocator, .{
+                    .key = std.mem.trim(u8, param[0..eq], " \t"),
+                    .value = std.mem.trim(u8, param[eq + 1 ..], " \t"),
+                });
+            } else {
+                try parameters.append(allocator, .{ .key = param, .value = "" });
+            }
+        }
+        return parameters.toOwnedSlice(allocator);
+    }
+
+    pub fn freeFmtpParameters(allocator: std.mem.Allocator, parameters: []FmtpParameter) void {
+        allocator.free(parameters);
+    }
+
+    pub fn fmtpParameter(fmtp: []const u8, key: []const u8) ?[]const u8 {
         var params = std.mem.splitScalar(u8, fmtp, ';');
         while (params.next()) |raw_param| {
             const param = std.mem.trim(u8, raw_param, " \t");
-            if (!std.mem.startsWith(u8, param, "apt=")) continue;
-            return parsePayloadType(param["apt=".len..]) catch null;
+            if (param.len == 0) continue;
+            const eq = std.mem.indexOfScalar(u8, param, '=') orelse {
+                if (std.ascii.eqlIgnoreCase(param, key)) return "";
+                continue;
+            };
+            const param_key = std.mem.trim(u8, param[0..eq], " \t");
+            if (std.ascii.eqlIgnoreCase(param_key, key)) return std.mem.trim(u8, param[eq + 1 ..], " \t");
         }
         return null;
     }
@@ -5238,6 +5271,16 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("ccm", codecs[0].rtcp_feedback[1].typ);
     try std.testing.expectEqualStrings("fir", codecs[0].rtcp_feedback[1].parameter);
     try std.testing.expectEqualStrings("nack", codecs[0].rtcp_feedback[2].typ);
+
+    const fmtp_params = try sdp.parseFmtpParameters(allocator, " Key = Value ; flag ; apt=96 ");
+    defer sdp.freeFmtpParameters(allocator, fmtp_params);
+    try std.testing.expectEqual(@as(usize, 3), fmtp_params.len);
+    try std.testing.expectEqualStrings("Key", fmtp_params[0].key);
+    try std.testing.expectEqualStrings("Value", fmtp_params[0].value);
+    try std.testing.expectEqualStrings("flag", fmtp_params[1].key);
+    try std.testing.expectEqualStrings("", fmtp_params[1].value);
+    try std.testing.expectEqualStrings("96", sdp.fmtpParameter(" Key = Value ; flag ; apt=96 ", "APT").?);
+    try std.testing.expectEqualStrings("", sdp.fmtpParameter("flag", "flag").?);
 
     const no_channels_codec_text =
         "v=0\r\n" ++
