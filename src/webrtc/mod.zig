@@ -2584,6 +2584,22 @@ pub const rtp = struct {
         return false;
     }
 
+    pub fn setRawHeaderExtension(allocator: std.mem.Allocator, elements: *[]HeaderExtensionElement, data: []const u8) Error!void {
+        for (elements.*) |*element| {
+            if (element.id == 0) {
+                element.data = data;
+                return;
+            }
+        }
+        if (elements.*.len == 0) {
+            elements.* = try allocator.alloc(HeaderExtensionElement, 1);
+            elements.*[0] = .{ .id = 0, .data = data };
+            return;
+        }
+        elements.* = try allocator.realloc(elements.*, elements.*.len + 1);
+        elements.*[elements.*.len - 1] = .{ .id = 0, .data = data };
+    }
+
     pub fn mid(elements: []const HeaderExtensionElement, id: u8) ?[]const u8 {
         return findHeaderExtension(elements, id);
     }
@@ -8559,6 +8575,15 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(usize, 1), raw_extension.len);
     try std.testing.expectEqual(@as(u8, 0), raw_extension[0].id);
     try std.testing.expectEqualSlices(u8, &.{ 0xde, 0xad, 0xbe, 0xef }, raw_extension[0].data);
+    var mutable_raw = try allocator.dupe(rtp.HeaderExtensionElement, raw_extension);
+    defer allocator.free(mutable_raw);
+    try rtp.setRawHeaderExtension(allocator, &mutable_raw, &.{});
+    try std.testing.expectEqual(@as(usize, 0), rtp.findHeaderExtension(mutable_raw, 0).?.len);
+    const raw_ids = try rtp.headerExtensionIds(allocator, mutable_raw);
+    defer allocator.free(raw_ids);
+    try std.testing.expectEqualSlices(u8, &.{0}, raw_ids);
+    try std.testing.expect(try rtp.deleteHeaderExtension(allocator, &mutable_raw, 0));
+    try std.testing.expect(rtp.findHeaderExtension(mutable_raw, 0) == null);
 
     const cryptex_one = try rtp.parseHeaderExtensionElements(allocator, .{
         .profile = rtp.cryptex_one_byte_header_extension_profile,
