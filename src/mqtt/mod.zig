@@ -870,6 +870,8 @@ pub const ConnAck = struct {
         if (protocol == .v5) {
             try validatePropertiesFor(.connack, properties);
             try writeProperties(&variable, allocator, properties);
+        } else if (properties.len != 0) {
+            return error.InvalidProperty;
         }
         try (FixedHeader{ .packet_type = .connack, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
         try list.appendSlice(allocator, variable.items);
@@ -1096,6 +1098,8 @@ pub const Subscribe = struct {
         if (protocol == .v5) {
             try validatePropertiesFor(.subscribe, properties);
             try writeProperties(&variable, allocator, properties);
+        } else if (properties.len != 0) {
+            return error.InvalidProperty;
         }
         for (subscriptions) |subscription| {
             try validateTopicFilter(subscription.topic_filter);
@@ -1588,6 +1592,8 @@ pub fn writeConnectPacket(
     if (protocol == .v5) {
         try validatePropertiesFor(.connect, options.properties);
         try writeProperties(&variable, allocator, options.properties);
+    } else if (options.properties.len != 0) {
+        return error.InvalidProperty;
     }
     try writeUtf8(&variable, allocator, options.client_id);
     if (options.will) |will| {
@@ -1596,6 +1602,8 @@ pub fn writeConnectPacket(
             try validatePropertiesFor(.will, will.properties);
             try validatePayloadFormat(will.properties, will.payload);
             try writeProperties(&variable, allocator, will.properties);
+        } else if (will.properties.len != 0) {
+            return error.InvalidProperty;
         }
         try writeUtf8(&variable, allocator, will.topic);
         try writeBinary(&variable, allocator, will.payload);
@@ -1628,7 +1636,11 @@ pub fn writePublish(
     if (topic.len == 0) {
         if (protocol != .v5 or topicAlias(options.properties) == null) return error.InvalidTopic;
     } else try validateTopicName(topic);
-    if (protocol == .v5) try validatePayloadFormat(options.properties, payload);
+    if (protocol == .v5) {
+        try validatePayloadFormat(options.properties, payload);
+    } else if (options.properties.len != 0) {
+        return error.InvalidProperty;
+    }
     if (options.qos == .at_most_once) {
         if (options.packet_id != null) return error.InvalidPacketIdentifier;
     } else if (options.packet_id == null or options.packet_id.? == 0) {
@@ -1906,6 +1918,28 @@ test "MQTT v5 packet-specific properties are validated" {
     try std.testing.expectError(error.InvalidProperty, Subscribe.write(&encoded, allocator, .v5, 1, &.{
         .{ .varint = .{ .id = .subscription_identifier, .value = 1 } },
         .{ .varint = .{ .id = .subscription_identifier, .value = 2 } },
+    }, &.{.{ .topic_filter = "topic" }}));
+    try std.testing.expectError(error.InvalidProperty, writeConnectPacket(&encoded, allocator, .v3_1_1, .{
+        .client_id = "client",
+        .properties = &.{.{ .utf8_pair = .{ .id = .user_property, .key = "k", .value = "v" } }},
+    }));
+    var v3_will_props = [_]Property{.{ .utf8_pair = .{ .id = .user_property, .key = "will-k", .value = "will-v" } }};
+    try std.testing.expectError(error.InvalidProperty, writeConnectPacket(&encoded, allocator, .v3_1_1, .{
+        .client_id = "client",
+        .will = .{
+            .topic = "status/client",
+            .payload = "offline",
+            .properties = &v3_will_props,
+        },
+    }));
+    try std.testing.expectError(error.InvalidProperty, ConnAck.write(&encoded, allocator, .v3_1_1, false, 0, &.{
+        .{ .utf8_pair = .{ .id = .user_property, .key = "k", .value = "v" } },
+    }));
+    try std.testing.expectError(error.InvalidProperty, writePublish(&encoded, allocator, .v3_1_1, "topic", "payload", .{
+        .properties = &.{.{ .utf8_pair = .{ .id = .user_property, .key = "k", .value = "v" } }},
+    }));
+    try std.testing.expectError(error.InvalidProperty, Subscribe.write(&encoded, allocator, .v3_1_1, 1, &.{
+        .{ .utf8_pair = .{ .id = .user_property, .key = "k", .value = "v" } },
     }, &.{.{ .topic_filter = "topic" }}));
     try std.testing.expectError(error.InvalidProperty, Unsubscribe.write(&encoded, allocator, .v5, 1, &.{
         .{ .varint = .{ .id = .subscription_identifier, .value = 1 } },
