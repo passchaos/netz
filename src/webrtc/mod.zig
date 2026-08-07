@@ -1568,6 +1568,41 @@ pub const sdp = struct {
 
     pub const sctp_max_message_size_unset: u32 = std.math.maxInt(u16);
 
+    pub fn formatSctpPortLine(allocator: std.mem.Allocator, port: u16) Error![]u8 {
+        if (port == 0) return error.InvalidSdp;
+        return std.fmt.allocPrint(allocator, "a=sctp-port:{d}\r\n", .{port});
+    }
+
+    pub fn formatMaxMessageSizeLine(allocator: std.mem.Allocator, max_message_size: u32) Error![]u8 {
+        return std.fmt.allocPrint(allocator, "a=max-message-size:{d}\r\n", .{max_message_size});
+    }
+
+    pub fn formatSctpMapLine(allocator: std.mem.Allocator, port: u16, max_channels: ?u16) Error![]u8 {
+        if (port == 0) return error.InvalidSdp;
+        if (max_channels) |channels| {
+            return std.fmt.allocPrint(allocator, "a=sctpmap:{d} " ++ sctp_data_channel_protocol ++ " {d}\r\n", .{ port, channels });
+        }
+        return std.fmt.allocPrint(allocator, "a=sctpmap:{d} " ++ sctp_data_channel_protocol ++ "\r\n", .{port});
+    }
+
+    pub fn appendSctpDataChannelLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, params: SctpParameters, legacy_sctpmap: bool) Error!void {
+        if (!std.ascii.eqlIgnoreCase(params.protocol, sctp_data_channel_protocol)) return error.InvalidSdp;
+        if (legacy_sctpmap) {
+            const line = try formatSctpMapLine(allocator, params.port, params.max_channels);
+            defer allocator.free(line);
+            try list.appendSlice(allocator, line);
+        } else {
+            const line = try formatSctpPortLine(allocator, params.port);
+            defer allocator.free(line);
+            try list.appendSlice(allocator, line);
+        }
+        if (params.max_message_size != sctp_max_message_size_unset) {
+            const max_line = try formatMaxMessageSizeLine(allocator, params.max_message_size);
+            defer allocator.free(max_line);
+            try list.appendSlice(allocator, max_line);
+        }
+    }
+
     pub const abs_send_time_uri = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
     pub const transport_cc_uri = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
     pub const sdes_mid_uri = "urn:ietf:params:rtp-hdrext:sdes:mid";
@@ -9427,6 +9462,21 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(u32, 262144), sctp_params.max_message_size);
     try std.testing.expectEqual(@as(?u16, null), sctp_params.max_channels);
     try std.testing.expectEqualStrings("webrtc-datachannel", sctp_params.protocol);
+    const sctp_port_line = try sdp.formatSctpPortLine(allocator, sctp_params.port);
+    defer allocator.free(sctp_port_line);
+    try std.testing.expectEqualStrings("a=sctp-port:5000\r\n", sctp_port_line);
+    const max_message_size_line = try sdp.formatMaxMessageSizeLine(allocator, sctp_params.max_message_size);
+    defer allocator.free(max_message_size_line);
+    try std.testing.expectEqualStrings("a=max-message-size:262144\r\n", max_message_size_line);
+    var sctp_lines: std.ArrayList(u8) = .empty;
+    defer sctp_lines.deinit(allocator);
+    try sdp.appendSctpDataChannelLines(&sctp_lines, allocator, sctp_params, false);
+    try std.testing.expectEqualStrings("a=sctp-port:5000\r\na=max-message-size:262144\r\n", sctp_lines.items);
+    const legacy_sctpmap_line = try sdp.formatSctpMapLine(allocator, 5000, 256);
+    defer allocator.free(legacy_sctpmap_line);
+    try std.testing.expectEqualStrings("a=sctpmap:5000 webrtc-datachannel 256\r\n", legacy_sctpmap_line);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSctpPortLine(allocator, 0));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSctpMapLine(allocator, 0, null));
     try std.testing.expect((try sdp.extractSctpInit(allocator, session)) == null);
 
     const sctp_init_datachannel =
