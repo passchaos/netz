@@ -11,6 +11,7 @@ pub const Error = error{
     ActiveConnectionIdLimit,
     PoolFull,
     UnknownConnectionId,
+    RetireQueueFull,
 } || std.mem.Allocator.Error;
 
 pub const Entry = struct {
@@ -26,11 +27,37 @@ pub const Entry = struct {
     }
 };
 
+pub const max_retire_queue_len: usize = max_pool_size * 4;
+
 pub const PeerPool = struct {
     entries: [max_pool_size]Entry = .{Entry{}} ** max_pool_size,
+    retire_queue: [max_retire_queue_len]u64 = .{0} ** max_retire_queue_len,
+    retire_queue_len: usize = 0,
+    largest_retire_prior_to: u64 = 0,
 
     pub fn add(self: *PeerPool, sequence_number: u64, connection_id: []const u8, token: [16]u8) Error!void {
         try self.addWithLimit(sequence_number, connection_id, token, max_pool_size);
+    }
+
+    pub fn addWithRetirePriorTo(
+        self: *PeerPool,
+        sequence_number: u64,
+        retire_prior_to: u64,
+        connection_id: []const u8,
+        token: [16]u8,
+        active_limit: usize,
+    ) Error!void {
+        try self.retirePriorTo(retire_prior_to);
+        // RFC 9000 §19.15: if a NEW_CONNECTION_ID arrives below a previously
+        // advertised Retire Prior To, the endpoint sends RETIRE_CONNECTION_ID
+        // rather than making the stale CID active again.  Keeping this in the
+        // pool layer lets receive preflight use a value-copy shadow pool without
+        // committing partial CID lifecycle changes.
+        if (sequence_number < self.largest_retire_prior_to) {
+            try self.queueRetire(sequence_number);
+            return;
+        }
+        try self.addWithLimit(sequence_number, connection_id, token, active_limit);
     }
 
     pub fn addWithLimit(self: *PeerPool, sequence_number: u64, connection_id: []const u8, token: [16]u8, active_limit: usize) Error!void {
@@ -57,10 +84,42 @@ pub const PeerPool = struct {
         return error.PoolFull;
     }
 
-    pub fn retirePriorTo(self: *PeerPool, sequence_number: u64) void {
+    pub fn retirePriorTo(self: *PeerPool, sequence_number: u64) Error!void {
+        if (sequence_number <= self.largest_retire_prior_to) return;
         for (&self.entries) |*entry| {
-            if (entry.occupied and entry.sequence_number < sequence_number) entry.* = .{};
+            if (entry.occupied and entry.sequence_number < sequence_number) {
+                try self.queueRetire(entry.sequence_number);
+                entry.* = .{};
+            }
         }
+        self.largest_retire_prior_to = sequence_number;
+    }
+
+    pub fn pendingRetireCount(self: *const PeerPool) usize {
+        return self.retire_queue_len;
+    }
+
+    pub fn peekRetireFrame(self: *const PeerPool) ?quic.Frame {
+        if (self.retire_queue_len == 0) return null;
+        return .{ .retire_connection_id = .{ .sequence_number = self.retire_queue[0] } };
+    }
+
+    pub fn discardRetireFrame(self: *PeerPool) void {
+        if (self.retire_queue_len == 0) return;
+        if (self.retire_queue_len > 1) {
+            std.mem.copyForwards(u64, self.retire_queue[0 .. self.retire_queue_len - 1], self.retire_queue[1..self.retire_queue_len]);
+        }
+        self.retire_queue_len -= 1;
+        self.retire_queue[self.retire_queue_len] = 0;
+    }
+
+    fn queueRetire(self: *PeerPool, sequence_number: u64) Error!void {
+        for (self.retire_queue[0..self.retire_queue_len]) |queued| {
+            if (queued == sequence_number) return;
+        }
+        if (self.retire_queue_len >= self.retire_queue.len) return error.RetireQueueFull;
+        self.retire_queue[self.retire_queue_len] = sequence_number;
+        self.retire_queue_len += 1;
     }
 
     pub fn consumeUnused(self: *PeerPool) ?*Entry {
@@ -171,8 +230,10 @@ test "QUIC peer CID pool stores retires and consumes IDs" {
     try pool.add(1, "cid-one", [_]u8{1} ** 16);
     try pool.add(2, "cid-two", [_]u8{2} ** 16);
     try std.testing.expectEqual(@as(usize, 2), pool.count());
-    pool.retirePriorTo(2);
+    try pool.retirePriorTo(2);
     try std.testing.expectEqual(@as(usize, 1), pool.count());
+    try std.testing.expectEqual(@as(usize, 1), pool.pendingRetireCount());
+    try std.testing.expectEqual(@as(u64, 1), pool.peekRetireFrame().?.retire_connection_id.sequence_number);
     const entry = pool.consumeUnused().?;
     try std.testing.expectEqual(@as(u64, 2), entry.sequence_number);
     try std.testing.expectEqualStrings("cid-two", entry.slice());
@@ -206,6 +267,24 @@ test "QUIC peer CID pool validates duplicate IDs tokens and active limit" {
     try std.testing.expectError(error.DuplicateResetToken, pool.addWithLimit(1, "cid-b", token_a, 2));
     try pool.addWithLimit(1, "cid-b", token_b, 2);
     try std.testing.expectError(error.ActiveConnectionIdLimit, pool.addWithLimit(2, "cid-c", [_]u8{0xcc} ** 16, 2));
+}
+
+test "QUIC peer CID pool queues retire frames for retire_prior_to" {
+    var pool = PeerPool{};
+    try pool.addWithRetirePriorTo(0, 0, "cid-zero", [_]u8{0} ** 16, 4);
+    try pool.addWithRetirePriorTo(2, 1, "cid-two", [_]u8{2} ** 16, 4);
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
+    try std.testing.expectEqual(@as(usize, 1), pool.pendingRetireCount());
+    try std.testing.expectEqual(@as(u64, 0), pool.peekRetireFrame().?.retire_connection_id.sequence_number);
+
+    // A reordered NEW_CONNECTION_ID below the largest Retire Prior To is not
+    // reactivated; a matching RETIRE_CONNECTION_ID is queued once instead.
+    try pool.addWithRetirePriorTo(0, 0, "cid-zero-again", [_]u8{3} ** 16, 4);
+    try std.testing.expectEqual(@as(usize, 1), pool.count());
+    try std.testing.expectEqual(@as(usize, 1), pool.pendingRetireCount());
+
+    pool.discardRetireFrame();
+    try std.testing.expectEqual(@as(usize, 0), pool.pendingRetireCount());
 }
 
 test "QUIC local CID pool issues and retires NEW_CONNECTION_ID frames" {

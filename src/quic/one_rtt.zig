@@ -1030,6 +1030,20 @@ pub const Connection = struct {
         return true;
     }
 
+    pub fn pendingRetireConnectionIdCount(self: Connection) usize {
+        return self.peer_connection_ids.pendingRetireCount();
+    }
+
+    pub fn sendPendingRetireConnectionIds(self: *Connection) Error!usize {
+        var sent: usize = 0;
+        while (self.peer_connection_ids.peekRetireFrame()) |frame| {
+            try self.send(&[_]quic.Frame{frame});
+            self.peer_connection_ids.discardRetireFrame();
+            sent += 1;
+        }
+        return sent;
+    }
+
     pub fn detectStatelessReset(self: Connection, datagram: []const u8) ?u64 {
         return self.peer_connection_ids.detectStatelessReset(datagram);
     }
@@ -1228,9 +1242,9 @@ pub const Connection = struct {
                 .streams_blocked_bidi => |blocked| try self.receiveStreamsBlocked(blocked.maximum_streams, .bidirectional),
                 .streams_blocked_uni => |blocked| try self.receiveStreamsBlocked(blocked.maximum_streams, .unidirectional),
                 .new_connection_id => |new_connection_id| {
-                    self.peer_connection_ids.retirePriorTo(new_connection_id.retire_prior_to);
-                    try self.peer_connection_ids.addWithLimit(
+                    try self.peer_connection_ids.addWithRetirePriorTo(
                         new_connection_id.sequence_number,
+                        new_connection_id.retire_prior_to,
                         new_connection_id.connection_id,
                         new_connection_id.stateless_reset_token,
                         self.config.active_connection_id_limit,
@@ -1316,13 +1330,13 @@ pub const Connection = struct {
                 .stop_sending => |stop| try self.validateStreamSendControlId(stop.stream_id),
                 .new_connection_id => |new_connection_id| {
                     // CID frames mutate fixed-size pools and can fail because of
-                    // duplicate CIDs/tokens or active_connection_id_limit. Apply
-                    // them to shadow pools first so an invalid CID frame later
-                    // in the packet cannot leave earlier STREAM/ACK effects
-                    // committed.
-                    peer_connection_ids.retirePriorTo(new_connection_id.retire_prior_to);
-                    try peer_connection_ids.addWithLimit(
+                    // duplicate CIDs/tokens, active_connection_id_limit, or
+                    // retire-prior-to queue pressure. Apply them to shadow pools
+                    // first so an invalid CID frame later in the packet cannot
+                    // leave earlier STREAM/ACK effects committed.
+                    try peer_connection_ids.addWithRetirePriorTo(
                         new_connection_id.sequence_number,
+                        new_connection_id.retire_prior_to,
                         new_connection_id.connection_id,
                         new_connection_id.stateless_reset_token,
                         self.config.active_connection_id_limit,
@@ -3877,6 +3891,70 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     var retire_packet = try server.receiveRoutedDatagram(routed);
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
+}
+
+test "QUIC 1-RTT queues RETIRE_CONNECTION_ID for retired peer IDs" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x79, 0x7a, 0x7b, 0x7c };
+    const server_cid = [_]u8{ 0x7d, 0x7e, 0x7f, 0x80 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe7} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .active_connection_id_limit = 4,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
+        .destination_connection_id = &client_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .new_connection_id = .{
+            .sequence_number = 2,
+            .retire_prior_to = 1,
+            .connection_id = "server-cid-two",
+            .stateless_reset_token = [_]u8{0x77} ** 16,
+        } }},
+    });
+    var new_cid_packet = try client.receivePacket();
+    defer new_cid_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRetireConnectionIdCount());
+    try std.testing.expect(client.switchToNextPeerConnectionId());
+    try std.testing.expectEqualStrings("server-cid-two", client.config.peer_connection_id);
+
+    try std.testing.expectEqual(@as(usize, 1), try client.sendPendingRetireConnectionIds());
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRetireConnectionIdCount());
+
+    var router = quic.connection_router.Router.init(allocator);
+    defer router.deinit();
+    try router.register("server-cid-two", .{ .connection_index = 0, .sequence_number = 2 });
+    var routed = try server_endpoint.receiveRoutedBytes(router);
+    defer routed.deinit(allocator);
+    var retire_packet = try server.receiveRoutedDatagram(routed);
+    defer retire_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), server.local_connection_ids.count());
 }
 
 test "QUIC 1-RTT stateless reset enters draining" {
