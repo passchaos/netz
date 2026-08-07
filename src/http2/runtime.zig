@@ -976,6 +976,7 @@ pub const Connection = struct {
     }
 
     pub fn sendResetStream(self: *Connection, stream_id: u31, error_code: http2.ErrorCode) Error!void {
+        if (!self.outboundStreamIsActive(stream_id)) return error.InvalidStreamId;
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try http2.ResetStreamPayload.write(&encoded, self.allocator, stream_id, error_code);
@@ -996,7 +997,10 @@ pub const Connection = struct {
                 frame.deinit(self.allocator);
                 return error.UnexpectedFrame;
             }
-            return .{ .frame = frame, .reset = try http2.ResetStreamPayload.parse(frame.frame) };
+            const reset = try http2.ResetStreamPayload.parse(frame.frame);
+            self.releaseLocalStream(reset.stream_id);
+            self.releasePeerStream(reset.stream_id);
+            return .{ .frame = frame, .reset = reset };
         }
     }
 
@@ -1320,10 +1324,35 @@ pub const Connection = struct {
 
     fn writeHeaders(self: *Connection, stream_id: u31, headers: []const http2.Hpack.HeaderField, end_stream: bool) Error!void {
         try validateHeaderListSize(headers, self.peer_max_header_list_size);
+        const activation = try self.ensureStreamTrackedForOutboundHeaders(stream_id);
+        errdefer self.undoStreamActivation(activation, stream_id);
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
         try self.hpack_encoder.encodeBlock(&block, self.allocator, headers);
         try self.writeHeaderBlock(stream_id, block.items, end_stream);
+    }
+
+    const StreamActivation = enum { none, local, peer };
+
+    fn ensureStreamTrackedForOutboundHeaders(self: *Connection, stream_id: u31) Error!StreamActivation {
+        if (stream_id == 0) return error.InvalidStreamId;
+        if (self.outboundStreamIsActive(stream_id)) return .none;
+        if (self.role == .client and clientInitiatedStreamId(stream_id) or
+            self.role == .server and !clientInitiatedStreamId(stream_id))
+        {
+            try self.active_local_streams.append(self.allocator, stream_id);
+            return .local;
+        }
+        try self.active_peer_streams.append(self.allocator, stream_id);
+        return .peer;
+    }
+
+    fn undoStreamActivation(self: *Connection, activation: StreamActivation, stream_id: u31) void {
+        switch (activation) {
+            .none => {},
+            .local => self.releaseLocalStream(stream_id),
+            .peer => self.releasePeerStream(stream_id),
+        }
     }
 
     fn writeExtendedConnectResponse(
@@ -3385,16 +3414,43 @@ test "HTTP/2 runtime sends and receives RST_STREAM" {
         .{ .name = ":authority", .value = "localhost" },
     };
     try client.writeHeaders(1, &fields, true);
+    try client.sendResetStream(1, .no_error);
 
     var inbound_reset = try client.readResetStream();
     defer inbound_reset.deinit(allocator);
     try std.testing.expectEqual(@as(u31, 1), inbound_reset.reset.stream_id);
     try std.testing.expectEqual(http2.ErrorCode.cancel, inbound_reset.reset.error_code);
 
-    try client.sendResetStream(1, .no_error);
-
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 sendResetStream rejects idle streams" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    // Rust h2 deliberately avoids making RST_STREAM the first frame on an idle
+    // stream: RFC 9113 only permits HEADERS/PRIORITY there, and a reset before
+    // the stream is opened is a connection-level protocol error.  The guard is
+    // checked before touching the transport, so this also protects callers from
+    // accidentally resetting a stream that has already been fully released.
+    try std.testing.expectError(error.InvalidStreamId, connection.sendResetStream(1, .cancel));
+
+    try connection.active_local_streams.append(std.testing.allocator, 1);
+    connection.releaseLocalStream(1);
+    try std.testing.expectError(error.InvalidStreamId, connection.sendResetStream(1, .cancel));
 }
 
 test "HTTP/2 client request fails when response stream is reset" {
