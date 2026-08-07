@@ -605,26 +605,35 @@ pub const Connection = struct {
         return frame;
     }
 
+    pub fn receiveFrameAuto(self: *Connection) Error!websocket.Frame {
+        while (true) {
+            var frame = try self.receiveFrame();
+            errdefer frame.deinit(self.allocator);
+            switch (frame.header.opcode) {
+                .ping => {
+                    try self.sendPong(frame.payload);
+                    return frame;
+                },
+                .close => {
+                    self.close_received = true;
+                    if (!self.close_sent) try self.sendFrame(.close, frame.payload);
+                    return frame;
+                },
+                else => return frame,
+            }
+        }
+    }
+
     pub fn receiveMessage(self: *Connection) Error!OwnedMessage {
         var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
         defer assembler.deinit();
 
         while (true) {
-            var frame = try self.receiveFrame();
+            var frame = try self.receiveFrameAuto();
             defer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
-                .ping => {
-                    try self.sendPong(frame.payload);
-                    continue;
-                },
-                .pong => continue,
-                .close => {
-                    self.close_received = true;
-                    if (!self.close_sent) {
-                        try self.sendFrame(.close, frame.payload);
-                    }
-                    return error.ConnectionClosed;
-                },
+                .ping, .pong => continue,
+                .close => return error.ConnectionClosed,
                 else => {
                     const maybe_message = try assembler.feed(frame);
                     if (maybe_message) |message| {
@@ -843,24 +852,35 @@ pub const H2Connection = struct {
         return frame;
     }
 
+    pub fn receiveFrameAuto(self: *H2Connection) Error!websocket.Frame {
+        while (true) {
+            var frame = try self.receiveFrame();
+            errdefer frame.deinit(self.allocator);
+            switch (frame.header.opcode) {
+                .ping => {
+                    try self.sendPong(frame.payload);
+                    return frame;
+                },
+                .close => {
+                    self.close_received = true;
+                    if (!self.close_sent) try self.sendFrame(.close, frame.payload);
+                    return frame;
+                },
+                else => return frame,
+            }
+        }
+    }
+
     pub fn receiveMessage(self: *H2Connection) Error!OwnedMessage {
         var assembler = websocket.MessageAssembler.initLimited(self.allocator, self.limits.max_message_bytes);
         defer assembler.deinit();
 
         while (true) {
-            var frame = try self.receiveFrame();
+            var frame = try self.receiveFrameAuto();
             defer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
-                .ping => {
-                    try self.sendPong(frame.payload);
-                    continue;
-                },
-                .pong => continue,
-                .close => {
-                    self.close_received = true;
-                    if (!self.close_sent) try self.sendFrame(.close, frame.payload);
-                    return error.ConnectionClosed;
-                },
+                .ping, .pong => continue,
+                .close => return error.ConnectionClosed,
                 else => {
                     const maybe_message = try assembler.feed(frame);
                     if (maybe_message) |message| {
@@ -2209,6 +2229,66 @@ test "WebSocket server rejects data sent with HTTP upgrade request" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expect(shared.saw_expected);
+}
+
+test "WebSocket receiveFrameAuto replies to ping" {
+    const allocator = std.testing.allocator;
+
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    defer backend.deinit();
+    const io = backend.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{});
+            defer connection.close();
+            var ping = try connection.receiveFrameAuto();
+            defer ping.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.ping, ping.header.opcode);
+            try std.testing.expectEqualStrings("auto?", ping.payload);
+            var close = try connection.receiveFrameAuto();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/auto-pong",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+
+    try client.sendPing("auto?");
+    var pong = try client.receiveFrame();
+    defer pong.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.pong, pong.header.opcode);
+    try std.testing.expectEqualStrings("auto?", pong.payload);
+    try client.sendClose(.normal_closure, "bye");
+    var close = try client.receiveFrame();
+    defer close.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "WebSocket receiveMessage assembles fragments and handles control frames" {
