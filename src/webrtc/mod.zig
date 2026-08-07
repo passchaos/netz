@@ -3761,6 +3761,10 @@ pub const rtcp = struct {
     pub const PictureLossIndication = struct {
         sender_ssrc: u32,
         media_ssrc: u32,
+
+        pub fn wireLen(_: PictureLossIndication) usize {
+            return 12;
+        }
     };
 
     pub const SliEntry = struct {
@@ -3773,6 +3777,10 @@ pub const rtcp = struct {
         sender_ssrc: u32,
         media_ssrc: u32,
         entries: []SliEntry,
+
+        pub fn wireLen(self: SliceLossIndication) usize {
+            return 12 + self.entries.len * 4;
+        }
 
         pub fn deinit(self: *SliceLossIndication, allocator: std.mem.Allocator) void {
             allocator.free(self.entries);
@@ -3790,6 +3798,10 @@ pub const rtcp = struct {
         media_ssrc: u32 = 0,
         entries: []FirEntry,
 
+        pub fn wireLen(self: FullIntraRequest) usize {
+            return 12 + self.entries.len * 8;
+        }
+
         pub fn deinit(self: *FullIntraRequest, allocator: std.mem.Allocator) void {
             allocator.free(self.entries);
             self.* = undefined;
@@ -3799,6 +3811,10 @@ pub const rtcp = struct {
     pub const RapidResynchronizationRequest = struct {
         sender_ssrc: u32,
         media_ssrc: u32,
+
+        pub fn wireLen(_: RapidResynchronizationRequest) usize {
+            return 12;
+        }
     };
 
     pub const Ecn = enum(u2) {
@@ -4191,6 +4207,10 @@ pub const rtcp = struct {
         sender_ssrc: u32,
         media_ssrc: u32,
         pairs: []NackPair,
+
+        pub fn wireLen(self: TransportLayerNack) usize {
+            return 12 + self.pairs.len * 4;
+        }
     };
 
     pub const TwccPacketStatus = enum(u2) {
@@ -9507,6 +9527,7 @@ test "RTCP full intra request feedback" {
     try std.testing.expectEqual(@as(usize, 2), parsed.packet.full_intra_request.entries.len);
     try std.testing.expectEqual(@as(u32, 0x11121314), parsed.packet.full_intra_request.entries[0].ssrc);
     try std.testing.expectEqual(@as(u8, 7), parsed.packet.full_intra_request.entries[0].sequence_number);
+    try std.testing.expectEqual(@as(usize, 28), parsed.packet.full_intra_request.wireLen());
 
     encoded.clearRetainingCapacity();
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .full_intra_request = .{
@@ -9643,6 +9664,7 @@ test "RTCP receiver report and feedback packets" {
     defer pli.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x11111111), pli.packet.picture_loss_indication.sender_ssrc);
     try std.testing.expectEqual(@as(u32, 0x22222222), pli.packet.picture_loss_indication.media_ssrc);
+    try std.testing.expectEqual(@as(usize, 12), pli.packet.picture_loss_indication.wireLen());
     const pli_destinations = try pli.packet.destinationSsrcs(allocator);
     defer allocator.free(pli_destinations);
     try std.testing.expectEqualSlices(u32, &.{0x22222222}, pli_destinations);
@@ -9671,6 +9693,7 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u16, 0x0aaa), sli.packet.slice_loss_indication.entries[0].first);
     try std.testing.expectEqual(@as(u16, 0), sli.packet.slice_loss_indication.entries[0].number);
     try std.testing.expectEqual(@as(u8, 0x2c), sli.packet.slice_loss_indication.entries[0].picture);
+    try std.testing.expectEqual(@as(usize, 16), sli.packet.slice_loss_indication.wireLen());
 
     var psfb_sli_bytes = try allocator.dupe(u8, encoded.items);
     defer allocator.free(psfb_sli_bytes);
@@ -9693,6 +9716,7 @@ test "RTCP receiver report and feedback packets" {
     defer rrr.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x902f9e2e), rrr.packet.rapid_resynchronization_request.sender_ssrc);
     try std.testing.expectEqual(@as(u32, 0xbc5e9a40), rrr.packet.rapid_resynchronization_request.media_ssrc);
+    try std.testing.expectEqual(@as(usize, 12), rrr.packet.rapid_resynchronization_request.wireLen());
 
     const ccfb_wire = [_]u8{
         0x8b, 0xcd, 0x00, 0x0a,
@@ -9934,6 +9958,7 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(102));
     try std.testing.expect(nack.packet.transport_layer_nack.pairs[0].contains(104));
     try std.testing.expect(!nack.packet.transport_layer_nack.pairs[0].contains(101));
+    try std.testing.expectEqual(@as(usize, 16), nack.packet.transport_layer_nack.wireLen());
     const nack_destinations = try nack.packet.destinationSsrcs(allocator);
     defer allocator.free(nack_destinations);
     try std.testing.expectEqualSlices(u32, &.{0x44444444}, nack_destinations);
