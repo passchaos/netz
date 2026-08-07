@@ -2751,6 +2751,57 @@ pub const rtcp = struct {
         }
     };
 
+    pub const TtlOrHopLimit = enum(u2) {
+        missing = 0,
+        ipv4 = 1,
+        ipv6 = 2,
+        reserved = 3,
+    };
+
+    pub const StatisticsSummaryReportBlock = struct {
+        loss_reports: bool = false,
+        duplicate_reports: bool = false,
+        jitter_reports: bool = false,
+        ttl_or_hop_limit: TtlOrHopLimit = .missing,
+        ssrc: u32,
+        begin_sequence: u16,
+        end_sequence: u16,
+        lost_packets: u32 = 0,
+        duplicate_packets: u32 = 0,
+        min_jitter: u32 = 0,
+        max_jitter: u32 = 0,
+        mean_jitter: u32 = 0,
+        dev_jitter: u32 = 0,
+        min_ttl_or_hop_limit: u8 = 0,
+        max_ttl_or_hop_limit: u8 = 0,
+        mean_ttl_or_hop_limit: u8 = 0,
+        dev_ttl_or_hop_limit: u8 = 0,
+    };
+
+    pub const VoipMetricsReportBlock = struct {
+        ssrc: u32,
+        loss_rate: u8 = 0,
+        discard_rate: u8 = 0,
+        burst_density: u8 = 0,
+        gap_density: u8 = 0,
+        burst_duration: u16 = 0,
+        gap_duration: u16 = 0,
+        round_trip_delay: u16 = 0,
+        end_system_delay: u16 = 0,
+        signal_level: u8 = 0,
+        noise_level: u8 = 0,
+        rerl: u8 = 0,
+        gmin: u8 = 0,
+        r_factor: u8 = 0,
+        ext_r_factor: u8 = 0,
+        mos_lq: u8 = 0,
+        mos_cq: u8 = 0,
+        rx_config: u8 = 0,
+        jb_nominal: u16 = 0,
+        jb_maximum: u16 = 0,
+        jb_abs_max: u16 = 0,
+    };
+
     pub const DlrrReport = struct {
         ssrc: u32,
         last_rr: u32,
@@ -2782,6 +2833,8 @@ pub const rtcp = struct {
         packet_receipt_times: PacketReceiptTimesReportBlock,
         receiver_reference_time: u64,
         dlrr: DlrrReportBlock,
+        statistics_summary: StatisticsSummaryReportBlock,
+        voip_metrics: VoipMetricsReportBlock,
         unknown: UnknownXrBlock,
 
         pub fn deinit(self: *XrBlock, allocator: std.mem.Allocator) void {
@@ -3524,6 +3577,8 @@ pub const rtcp = struct {
                 }
                 return .{ .dlrr = .{ .reports = reports } };
             },
+            .statistics_summary => return .{ .statistics_summary = try parseStatisticsSummaryReportBlock(header, payload) },
+            .voip_metrics => return .{ .voip_metrics = try parseVoipMetricsReportBlock(header, payload) },
             else => {
                 const copy = try allocator.dupe(u8, payload);
                 errdefer allocator.free(copy);
@@ -3567,6 +3622,56 @@ pub const rtcp = struct {
             .begin_sequence = begin_sequence,
             .end_sequence = end_sequence,
             .receipt_times = receipt_times,
+        };
+    }
+
+    fn parseStatisticsSummaryReportBlock(header: XrHeader, payload: []const u8) Error!StatisticsSummaryReportBlock {
+        if (header.block_length_words != 9 or payload.len != 36) return error.InvalidRtcpPacket;
+        return .{
+            .loss_reports = (header.type_specific & 0x80) != 0,
+            .duplicate_reports = (header.type_specific & 0x40) != 0,
+            .jitter_reports = (header.type_specific & 0x20) != 0,
+            .ttl_or_hop_limit = @enumFromInt((header.type_specific >> 3) & 0x03),
+            .ssrc = std.mem.readInt(u32, payload[0..4], .big),
+            .begin_sequence = std.mem.readInt(u16, payload[4..6], .big),
+            .end_sequence = std.mem.readInt(u16, payload[6..8], .big),
+            .lost_packets = std.mem.readInt(u32, payload[8..12], .big),
+            .duplicate_packets = std.mem.readInt(u32, payload[12..16], .big),
+            .min_jitter = std.mem.readInt(u32, payload[16..20], .big),
+            .max_jitter = std.mem.readInt(u32, payload[20..24], .big),
+            .mean_jitter = std.mem.readInt(u32, payload[24..28], .big),
+            .dev_jitter = std.mem.readInt(u32, payload[28..32], .big),
+            .min_ttl_or_hop_limit = payload[32],
+            .max_ttl_or_hop_limit = payload[33],
+            .mean_ttl_or_hop_limit = payload[34],
+            .dev_ttl_or_hop_limit = payload[35],
+        };
+    }
+
+    fn parseVoipMetricsReportBlock(header: XrHeader, payload: []const u8) Error!VoipMetricsReportBlock {
+        if (header.type_specific != 0 or header.block_length_words != 8 or payload.len != 32) return error.InvalidRtcpPacket;
+        return .{
+            .ssrc = std.mem.readInt(u32, payload[0..4], .big),
+            .loss_rate = payload[4],
+            .discard_rate = payload[5],
+            .burst_density = payload[6],
+            .gap_density = payload[7],
+            .burst_duration = std.mem.readInt(u16, payload[8..10], .big),
+            .gap_duration = std.mem.readInt(u16, payload[10..12], .big),
+            .round_trip_delay = std.mem.readInt(u16, payload[12..14], .big),
+            .end_system_delay = std.mem.readInt(u16, payload[14..16], .big),
+            .signal_level = payload[16],
+            .noise_level = payload[17],
+            .rerl = payload[18],
+            .gmin = payload[19],
+            .r_factor = payload[20],
+            .ext_r_factor = payload[21],
+            .mos_lq = payload[22],
+            .mos_cq = payload[23],
+            .rx_config = payload[24],
+            .jb_nominal = std.mem.readInt(u16, payload[26..28], .big),
+            .jb_maximum = std.mem.readInt(u16, payload[28..30], .big),
+            .jb_abs_max = std.mem.readInt(u16, payload[30..32], .big),
         };
     }
 
@@ -3859,6 +3964,8 @@ pub const rtcp = struct {
                     try wire.appendInt(list, allocator, u32, report.dlrr, .big);
                 }
             },
+            .statistics_summary => |summary| try writeStatisticsSummaryReportBlock(list, allocator, summary),
+            .voip_metrics => |metrics| try writeVoipMetricsReportBlock(list, allocator, metrics),
             .unknown => |unknown| {
                 if ((unknown.payload.len % 4) != 0) return error.InvalidRtcpPacket;
                 const words = unknown.payload.len / 4;
@@ -3888,6 +3995,54 @@ pub const rtcp = struct {
         try wire.appendInt(list, allocator, u16, receipt.begin_sequence, .big);
         try wire.appendInt(list, allocator, u16, receipt.end_sequence, .big);
         for (receipt.receipt_times) |receipt_time| try wire.appendInt(list, allocator, u32, receipt_time, .big);
+    }
+
+    fn writeStatisticsSummaryReportBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, summary: StatisticsSummaryReportBlock) Error!void {
+        var type_specific: u8 = 0;
+        if (summary.loss_reports) type_specific |= 0x80;
+        if (summary.duplicate_reports) type_specific |= 0x40;
+        if (summary.jitter_reports) type_specific |= 0x20;
+        type_specific |= (@as(u8, @intFromEnum(summary.ttl_or_hop_limit)) & 0x03) << 3;
+        try writeXrBlockHeader(list, allocator, .statistics_summary, type_specific, 9);
+        try wire.appendInt(list, allocator, u32, summary.ssrc, .big);
+        try wire.appendInt(list, allocator, u16, summary.begin_sequence, .big);
+        try wire.appendInt(list, allocator, u16, summary.end_sequence, .big);
+        try wire.appendInt(list, allocator, u32, summary.lost_packets, .big);
+        try wire.appendInt(list, allocator, u32, summary.duplicate_packets, .big);
+        try wire.appendInt(list, allocator, u32, summary.min_jitter, .big);
+        try wire.appendInt(list, allocator, u32, summary.max_jitter, .big);
+        try wire.appendInt(list, allocator, u32, summary.mean_jitter, .big);
+        try wire.appendInt(list, allocator, u32, summary.dev_jitter, .big);
+        try list.append(allocator, summary.min_ttl_or_hop_limit);
+        try list.append(allocator, summary.max_ttl_or_hop_limit);
+        try list.append(allocator, summary.mean_ttl_or_hop_limit);
+        try list.append(allocator, summary.dev_ttl_or_hop_limit);
+    }
+
+    fn writeVoipMetricsReportBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, metrics: VoipMetricsReportBlock) Error!void {
+        try writeXrBlockHeader(list, allocator, .voip_metrics, 0, 8);
+        try wire.appendInt(list, allocator, u32, metrics.ssrc, .big);
+        try list.append(allocator, metrics.loss_rate);
+        try list.append(allocator, metrics.discard_rate);
+        try list.append(allocator, metrics.burst_density);
+        try list.append(allocator, metrics.gap_density);
+        try wire.appendInt(list, allocator, u16, metrics.burst_duration, .big);
+        try wire.appendInt(list, allocator, u16, metrics.gap_duration, .big);
+        try wire.appendInt(list, allocator, u16, metrics.round_trip_delay, .big);
+        try wire.appendInt(list, allocator, u16, metrics.end_system_delay, .big);
+        try list.append(allocator, metrics.signal_level);
+        try list.append(allocator, metrics.noise_level);
+        try list.append(allocator, metrics.rerl);
+        try list.append(allocator, metrics.gmin);
+        try list.append(allocator, metrics.r_factor);
+        try list.append(allocator, metrics.ext_r_factor);
+        try list.append(allocator, metrics.mos_lq);
+        try list.append(allocator, metrics.mos_cq);
+        try list.append(allocator, metrics.rx_config);
+        try list.append(allocator, 0); // Reserved byte in RFC 3611 section 4.7.
+        try wire.appendInt(list, allocator, u16, metrics.jb_nominal, .big);
+        try wire.appendInt(list, allocator, u16, metrics.jb_maximum, .big);
+        try wire.appendInt(list, allocator, u16, metrics.jb_abs_max, .big);
     }
 
     fn writeXrBlockHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocator, block_type: XrBlockType, type_specific: u8, block_length_words: u16) Error!void {
@@ -6869,7 +7024,7 @@ test "RTCP receiver report and feedback packets" {
     }, encoded.items);
 
     const xr_wire = [_]u8{
-        0x80, 0xcf, 0x00, 0x1f,
+        0x80, 0xcf, 0x00, 0x32,
         0x01, 0x02, 0x03, 0x04,
         0x01, 0x0c, 0x00, 0x04,
         0x12, 0x34, 0x56, 0x89,
@@ -6899,13 +7054,32 @@ test "RTCP receiver report and feedback packets" {
         0x09, 0x09, 0x09, 0x09,
         0x11, 0x11, 0x11, 0x11,
         0x22, 0x22, 0x22, 0x22,
+        0x06, 0xe8, 0x00, 0x09,
+        0xfe, 0xdc, 0xba, 0x98,
+        0x12, 0x34, 0x56, 0x78,
+        0x11, 0x11, 0x11, 0x11,
+        0x22, 0x22, 0x22, 0x22,
+        0x33, 0x33, 0x33, 0x33,
+        0x44, 0x44, 0x44, 0x44,
+        0x55, 0x55, 0x55, 0x55,
+        0x66, 0x66, 0x66, 0x66,
+        0x01, 0x02, 0x03, 0x04,
+        0x07, 0x00, 0x00, 0x08,
+        0x89, 0xab, 0xcd, 0xef,
+        0x05, 0x06, 0x07, 0x08,
+        0x11, 0x11, 0x22, 0x22,
+        0x33, 0x33, 0x44, 0x44,
+        0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88,
+        0x99, 0x00, 0x11, 0x22,
+        0x33, 0x44, 0x55, 0x66,
         0x63, 0xab, 0x00, 0x01,
         0xde, 0xad, 0xbe, 0xef,
     };
     var xr = try rtcp.parsePacket(allocator, &xr_wire);
     defer xr.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x01020304), xr.packet.extended_report.sender_ssrc);
-    try std.testing.expectEqual(@as(usize, 6), xr.packet.extended_report.blocks.len);
+    try std.testing.expectEqual(@as(usize, 8), xr.packet.extended_report.blocks.len);
     try std.testing.expectEqual(@as(u4, 12), xr.packet.extended_report.blocks[0].loss_rle.thinning);
     try std.testing.expectEqual(@as(u32, 0x12345689), xr.packet.extended_report.blocks[0].loss_rle.ssrc);
     try std.testing.expectEqual(@as(u16, 5), xr.packet.extended_report.blocks[0].loss_rle.begin_sequence);
@@ -6924,9 +7098,21 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 0x12345678), xr.packet.extended_report.blocks[4].dlrr.reports[0].last_rr);
     try std.testing.expectEqual(@as(u32, 0x99999999), xr.packet.extended_report.blocks[4].dlrr.reports[0].dlrr);
     try std.testing.expectEqual(@as(u32, 0x09090909), xr.packet.extended_report.blocks[4].dlrr.reports[1].ssrc);
-    try std.testing.expectEqual(@as(u8, 0xab), xr.packet.extended_report.blocks[5].unknown.header.type_specific);
-    try std.testing.expectEqual(@as(rtcp.XrBlockType, @enumFromInt(0x63)), xr.packet.extended_report.blocks[5].unknown.header.block_type);
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad, 0xbe, 0xef }, xr.packet.extended_report.blocks[5].unknown.payload);
+    try std.testing.expect(xr.packet.extended_report.blocks[5].statistics_summary.loss_reports);
+    try std.testing.expect(xr.packet.extended_report.blocks[5].statistics_summary.duplicate_reports);
+    try std.testing.expect(xr.packet.extended_report.blocks[5].statistics_summary.jitter_reports);
+    try std.testing.expectEqual(rtcp.TtlOrHopLimit.ipv4, xr.packet.extended_report.blocks[5].statistics_summary.ttl_or_hop_limit);
+    try std.testing.expectEqual(@as(u32, 0xfedcba98), xr.packet.extended_report.blocks[5].statistics_summary.ssrc);
+    try std.testing.expectEqual(@as(u32, 0x11111111), xr.packet.extended_report.blocks[5].statistics_summary.lost_packets);
+    try std.testing.expectEqual(@as(u8, 0x04), xr.packet.extended_report.blocks[5].statistics_summary.dev_ttl_or_hop_limit);
+    try std.testing.expectEqual(@as(u32, 0x89abcdef), xr.packet.extended_report.blocks[6].voip_metrics.ssrc);
+    try std.testing.expectEqual(@as(u8, 0x05), xr.packet.extended_report.blocks[6].voip_metrics.loss_rate);
+    try std.testing.expectEqual(@as(u16, 0x1111), xr.packet.extended_report.blocks[6].voip_metrics.burst_duration);
+    try std.testing.expectEqual(@as(u8, 0x99), xr.packet.extended_report.blocks[6].voip_metrics.rx_config);
+    try std.testing.expectEqual(@as(u16, 0x5566), xr.packet.extended_report.blocks[6].voip_metrics.jb_abs_max);
+    try std.testing.expectEqual(@as(u8, 0xab), xr.packet.extended_report.blocks[7].unknown.header.type_specific);
+    try std.testing.expectEqual(@as(rtcp.XrBlockType, @enumFromInt(0x63)), xr.packet.extended_report.blocks[7].unknown.header.block_type);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad, 0xbe, 0xef }, xr.packet.extended_report.blocks[7].unknown.payload);
 
     encoded.clearRetainingCapacity();
     try rtcp.writePacket(&encoded, allocator, xr.packet);
