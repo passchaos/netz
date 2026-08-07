@@ -3277,7 +3277,7 @@ pub const rtcp = struct {
         not_received = 0,
         small_delta = 1,
         large_delta = 2,
-        reserved = 3,
+        received_without_delta = 3,
     };
 
     pub const TwccPacketResult = struct {
@@ -3288,7 +3288,7 @@ pub const rtcp = struct {
         delta_ticks: i16 = 0,
 
         pub fn received(self: TwccPacketResult) bool {
-            return self.status == .small_delta or self.status == .large_delta;
+            return self.status == .small_delta or self.status == .large_delta or self.status == .received_without_delta;
         }
 
         pub fn deltaMicros(self: TwccPacketResult) i32 {
@@ -4201,7 +4201,7 @@ pub const rtcp = struct {
                     packet.delta_ticks = byte;
                 },
                 .large_delta => packet.delta_ticks = try cursor.readInt(i16, .big),
-                .reserved => return error.InvalidRtcpPacket,
+                .received_without_delta => {},
             }
         }
 
@@ -4550,7 +4550,6 @@ pub const rtcp = struct {
         var run_status: ?TwccPacketStatus = null;
         var run_len: usize = 0;
         for (twcc.packets) |packet| {
-            if (packet.status == .reserved) return error.InvalidRtcpPacket;
             if (run_status != null and packet.status == run_status.? and run_len < 0x1fff) {
                 run_len += 1;
                 continue;
@@ -4569,7 +4568,7 @@ pub const rtcp = struct {
                     try payload.append(allocator, @intCast(packet.delta_ticks));
                 },
                 .large_delta => try wire.appendInt(&payload, allocator, i16, packet.delta_ticks, .big),
-                .reserved => unreachable,
+                .received_without_delta => {},
             }
         }
 
@@ -4607,7 +4606,6 @@ pub const rtcp = struct {
     ) Error!void {
         if ((chunk & 0x8000) == 0) {
             const status: TwccPacketStatus = @enumFromInt((chunk >> 13) & 0x03);
-            if (status == .reserved) return error.InvalidRtcpPacket;
             const run_len = chunk & 0x1fff;
             if (run_len == 0) return error.InvalidRtcpPacket;
             var i: usize = 0;
@@ -4623,7 +4621,6 @@ pub const rtcp = struct {
             while (i < 7 and packets.items.len < packet_status_count) : (i += 1) {
                 const shift: u4 = @intCast(12 - 2 * i);
                 const status: TwccPacketStatus = @enumFromInt((chunk >> shift) & 0x03);
-                if (status == .reserved) return error.InvalidRtcpPacket;
                 try packets.append(allocator, .{ .status = status });
             }
         } else {
@@ -4637,7 +4634,7 @@ pub const rtcp = struct {
     }
 
     fn writeTwccRunLengthChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, status: TwccPacketStatus, run_len: usize) Error!void {
-        if (run_len == 0 or run_len > 0x1fff or status == .reserved) return error.InvalidRtcpPacket;
+        if (run_len == 0 or run_len > 0x1fff) return error.InvalidRtcpPacket;
         const value = (@as(u16, @intFromEnum(status)) << 13) | @as(u16, @intCast(run_len));
         try wire.appendInt(list, allocator, u16, value, .big);
     }
@@ -8164,6 +8161,7 @@ test "RTCP transport-wide congestion feedback" {
         .{ .status = .small_delta, .delta_ticks = 4 },
         .{ .status = .not_received },
         .{ .status = .large_delta, .delta_ticks = -3 },
+        .{ .status = .received_without_delta },
         .{ .status = .small_delta, .delta_ticks = 1 },
     };
 
@@ -8185,11 +8183,13 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(@as(u16, 500), parsed.packet.transport_wide_cc.base_sequence_number);
     try std.testing.expectEqual(@as(u24, 0x00a0b0), parsed.packet.transport_wide_cc.reference_time_64ms);
     try std.testing.expectEqual(@as(u8, 7), parsed.packet.transport_wide_cc.feedback_packet_count);
-    try std.testing.expectEqual(@as(usize, 4), parsed.packet.transport_wide_cc.packets.len);
+    try std.testing.expectEqual(@as(usize, 5), parsed.packet.transport_wide_cc.packets.len);
     try std.testing.expect(parsed.packet.transport_wide_cc.packets[0].received());
     try std.testing.expectEqual(@as(i32, 1000), parsed.packet.transport_wide_cc.packets[0].deltaMicros());
     try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, parsed.packet.transport_wide_cc.packets[1].status);
     try std.testing.expectEqual(@as(i16, -3), parsed.packet.transport_wide_cc.packets[2].delta_ticks);
+    try std.testing.expect(parsed.packet.transport_wide_cc.packets[3].received());
+    try std.testing.expectEqual(@as(i16, 0), parsed.packet.transport_wide_cc.packets[3].delta_ticks);
 
     // Also parse a hand-built status-vector chunk.  The writer intentionally
     // emits simple run-length chunks for predictable output; receivers still
@@ -8211,12 +8211,11 @@ test "RTCP transport-wide congestion feedback" {
         (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.small_delta)) << 12) |
         (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.not_received)) << 10) |
         (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.large_delta)) << 8) |
-        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.small_delta)) << 6);
+        (@as(u16, @intFromEnum(rtcp.TwccPacketStatus.received_without_delta)) << 6);
     try wire.appendInt(&vector_encoded, allocator, u16, two_bit_vector, .big);
     try vector_encoded.append(allocator, 8);
     try wire.appendInt(&vector_encoded, allocator, i16, -2, .big);
-    try vector_encoded.append(allocator, 1);
-    try vector_encoded.appendNTimes(allocator, 0, 2);
+    try vector_encoded.appendNTimes(allocator, 0, 3);
 
     var parsed_vector = try rtcp.parsePacket(allocator, vector_encoded.items);
     defer parsed_vector.deinit(allocator);
@@ -8225,7 +8224,7 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(@as(i16, 8), parsed_vector.packet.transport_wide_cc.packets[0].delta_ticks);
     try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, parsed_vector.packet.transport_wide_cc.packets[1].status);
     try std.testing.expectEqual(@as(i16, -2), parsed_vector.packet.transport_wide_cc.packets[2].delta_ticks);
-    try std.testing.expectEqual(@as(i16, 1), parsed_vector.packet.transport_wide_cc.packets[3].delta_ticks);
+    try std.testing.expectEqual(rtcp.TwccPacketStatus.received_without_delta, parsed_vector.packet.transport_wide_cc.packets[3].status);
 }
 
 test "RTCP sender stats builds sender report" {
