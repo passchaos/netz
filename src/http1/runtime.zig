@@ -87,7 +87,10 @@ pub fn uriEndpoint(allocator: std.mem.Allocator, uri: std.Uri, default_port: u16
     errdefer allocator.free(host_storage);
 
     const port = uri.port orelse default_port;
-    const authority = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host_storage, port });
+    const authority = if (uri.port == null)
+        try allocator.dupe(u8, host_storage)
+    else
+        try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host_storage, port });
     errdefer allocator.free(authority);
 
     const target, const tls_host = try uriTargetForHost(host_storage, port);
@@ -140,6 +143,12 @@ test "URI endpoint handles bracketed IPv6 literals" {
         },
         .host => return error.InvalidUri,
     }
+
+    const default_port_uri = try std.Uri.parse("http://example.com/path");
+    var default_endpoint = try uriEndpoint(allocator, default_port_uri, 80);
+    defer default_endpoint.deinit();
+    try std.testing.expectEqualStrings("example.com", default_endpoint.authority);
+    try std.testing.expectEqual(@as(u16, 80), default_endpoint.port);
 }
 
 pub const TlsClientConnection = struct {
