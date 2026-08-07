@@ -2679,6 +2679,7 @@ pub const rtp = struct {
             if (header == 0) continue; // 0 bytes are padding in both RFC5285 forms.
             const id = header >> 4;
             if (id == 15) return error.InvalidRtpPacket; // Reserved by RFC 5285.
+            if (id == 0) return error.InvalidRtpPacket; // Non-zero padding length is invalid in RFC 5285.
             const len = @as(usize, header & 0x0f) + 1;
             if (pos + len > data.len) return error.InvalidRtpPacket;
             try elements.append(allocator, .{ .id = id, .data = data[pos .. pos + len] });
@@ -2697,7 +2698,7 @@ pub const rtp = struct {
             pos += 1;
             if (header == 0) continue;
             const id = header >> 4;
-            if (id == 15) break;
+            if (id == 15 or id == 0) break;
             const len = @as(usize, header & 0x0f) + 1;
             if (pos + len > data.len) break;
             try elements.append(allocator, .{ .id = id, .data = data[pos .. pos + len] });
@@ -8642,6 +8643,15 @@ test "RTP packet extension padding and writer" {
     const lenient_reserved = try rtp.parseHeaderExtensionElementsLenient(allocator, reserved_extension);
     defer rtp.freeHeaderExtensionElements(allocator, lenient_reserved);
     try std.testing.expectEqual(@as(usize, 0), lenient_reserved.len);
+
+    const non_zero_padding = rtp.Extension{
+        .profile = rtp.one_byte_header_extension_profile,
+        .data = &.{ 0x01, 0xaa, 0xbb, 0xcc },
+    };
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.parseHeaderExtensionElements(allocator, non_zero_padding));
+    const lenient_non_zero_padding = try rtp.parseHeaderExtensionElementsLenient(allocator, non_zero_padding);
+    defer rtp.freeHeaderExtensionElements(allocator, lenient_non_zero_padding);
+    try std.testing.expectEqual(@as(usize, 0), lenient_non_zero_padding.len);
 
     const raw_extension = try rtp.parseHeaderExtensionElements(allocator, .{
         .profile = 0xbeef,
