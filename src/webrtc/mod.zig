@@ -366,6 +366,19 @@ pub const stun = struct {
         return .{ .code = code, .reason = value[4..] };
     }
 
+    pub fn writeUnknownAttributesValue(list: *std.ArrayList(u8), allocator: std.mem.Allocator, attrs: []const AttributeType) Error!void {
+        for (attrs) |attr| try wire.appendInt(list, allocator, u16, @intFromEnum(attr), .big);
+    }
+
+    pub fn parseUnknownAttributesValue(allocator: std.mem.Allocator, value: []const u8) Error![]AttributeType {
+        if ((value.len % 2) != 0) return error.InvalidStunAttribute;
+        const attrs = try allocator.alloc(AttributeType, value.len / 2);
+        errdefer allocator.free(attrs);
+        var cursor = wire.Cursor.init(value);
+        for (attrs) |*attr| attr.* = @enumFromInt(try cursor.readInt(u16, .big));
+        return attrs;
+    }
+
     pub fn validateFingerprint(bytes: []const u8) Error!void {
         const located = (try findAttributeBytes(bytes, .fingerprint)) orelse return error.MissingStunAttribute;
         if (located.value.len != fingerprint_len) return error.InvalidStunAttribute;
@@ -7243,6 +7256,19 @@ test "STUN binding message roundtrip" {
     try std.testing.expectEqualStrings("user", stun.iceUsernameLocalUfrag("user"));
     try std.testing.expect(stun.iceUsernameRemoteUfrag("user") == null);
     try std.testing.expectEqualStrings("", stun.iceUsernameLocalUfrag(":peer"));
+
+    var unknown_attrs_value: std.ArrayList(u8) = .empty;
+    defer unknown_attrs_value.deinit(allocator);
+    try stun.writeUnknownAttributesValue(&unknown_attrs_value, allocator, &.{
+        .software,
+        .use_candidate,
+    });
+    const unknown_attrs = try stun.parseUnknownAttributesValue(allocator, unknown_attrs_value.items);
+    defer allocator.free(unknown_attrs);
+    try std.testing.expectEqual(@as(usize, 2), unknown_attrs.len);
+    try std.testing.expectEqual(stun.AttributeType.software, unknown_attrs[0]);
+    try std.testing.expectEqual(stun.AttributeType.use_candidate, unknown_attrs[1]);
+    try std.testing.expectError(error.InvalidStunAttribute, stun.parseUnknownAttributesValue(allocator, &.{0x00}));
 
     var trailing = try encoded.clone(allocator);
     defer trailing.deinit(allocator);
