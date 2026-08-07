@@ -2623,6 +2623,11 @@ pub const rtp = struct {
         elements.*[elements.*.len - 1] = .{ .id = 0, .data = data };
     }
 
+    pub fn clearHeaderExtensions(allocator: std.mem.Allocator, elements: *[]HeaderExtensionElement) void {
+        allocator.free(elements.*);
+        elements.* = &.{};
+    }
+
     pub fn mid(elements: []const HeaderExtensionElement, id: u8) ?[]const u8 {
         return findHeaderExtension(elements, id);
     }
@@ -8517,6 +8522,8 @@ test "RTP packet extension padding and writer" {
     try std.testing.expect(rtp.findHeaderExtension(mutable_extensions, 1) == null);
     try std.testing.expect(!(try rtp.deleteHeaderExtension(allocator, &mutable_extensions, 42)));
     try std.testing.expectError(error.InvalidRtpPacket, rtp.setHeaderExtension(allocator, &mutable_extensions, 0, "bad"));
+    rtp.clearHeaderExtensions(allocator, &mutable_extensions);
+    try std.testing.expectEqual(@as(usize, 0), mutable_extensions.len);
     const send_ntp: u64 = 0xa0c65b1000100000;
     const receive_ntp: u64 = 0xa0c65b1001000000;
     const send_unix_ns = rtp.unixNanosFromNtpTime(send_ntp);
