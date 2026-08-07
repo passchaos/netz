@@ -1797,6 +1797,7 @@ test "WebSocket client connects by ws URI" {
 
     try std.testing.expectError(error.UnsupportedScheme, Client.connectUri(allocator, io, "ftp://localhost/chat", .{}));
     try std.testing.expectError(error.InvalidUri, Client.connectUri(allocator, io, "ws:///missing-host", .{}));
+    try std.testing.expectError(error.InvalidUri, Client.connectUri(allocator, io, "ws://user:pass@localhost/chat", .{}));
 }
 
 test "WebSocket client connects over Linux io_uring" {

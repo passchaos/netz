@@ -13,7 +13,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   across repeated/coalesced `Content-Length`, and unsupported transfer-coding and HTTP/1.0 transfer-coding rejection,
   and a blocking `std.Io.net` TCP client/server runtime with HTTP/1.1 default
   persistence, optional Host/port, CONNECT authority, and absolute-form authority synthesis, `http://`/`https://` URI helpers
-  with host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
+  with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
   with host verification plus OS/custom CA bundles, and a `std.Io.async`
   concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing and active-stream reset propagation, a bootstrap
@@ -121,7 +121,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
-  server helper, `ws://`/`wss://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
+  server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
   Host/port synthesis, TLS client transport shared with HTTP/1, and RFC 8441
   WebSocket-over-HTTP/2 adapters that negotiate `:protocol = websocket`,
   subprotocols, permessage-deflate, and transport-derived `:scheme` over an h2 DATA tunnel

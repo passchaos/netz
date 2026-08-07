@@ -81,6 +81,7 @@ pub const UriEndpoint = struct {
 };
 
 pub fn uriEndpoint(allocator: std.mem.Allocator, uri: std.Uri, default_port: u16) Error!UriEndpoint {
+    if (uri.user != null or uri.password != null) return error.InvalidUri;
     const host_component = uri.host orelse return error.InvalidUri;
     const host_storage = try uriHostToOwned(allocator, host_component);
     errdefer allocator.free(host_storage);
@@ -2454,6 +2455,7 @@ test "HTTP/1 client sends request to URI" {
 
     try std.testing.expectError(error.UnsupportedScheme, Client.requestUri(allocator, io, "ftp://localhost/", .{}, .{}));
     try std.testing.expectError(error.InvalidUri, Client.requestUri(allocator, io, "http:///missing-host", .{}, .{}));
+    try std.testing.expectError(error.InvalidUri, Client.requestUri(allocator, io, "http://user:pass@localhost/", .{}, .{}));
 }
 
 test "HTTP/1 client sends request to bracketed IPv6 URI" {
