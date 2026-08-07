@@ -3489,6 +3489,20 @@ pub const sctp = struct {
             return try self.tryReassemble(chunk);
         }
 
+        pub fn forwardTsn(self: *Reassembler, forward_tsn: ForwardTsnChunk) void {
+            self.dropFragmentsThroughTsn(forward_tsn.new_cumulative_tsn);
+            for (forward_tsn.skipped_streams) |stream| {
+                self.dropIncompleteOrdered(stream.stream_id, stream.stream_sequence_number);
+            }
+        }
+
+        pub fn forwardIForwardTsn(self: *Reassembler, forward_tsn: IForwardTsnChunk) void {
+            self.dropFragmentsThroughTsn(forward_tsn.new_cumulative_tsn);
+            for (forward_tsn.skipped_messages) |message| {
+                self.dropIncompleteInterleaved(message.stream_id, message.unordered, message.message_identifier);
+            }
+        }
+
         fn storeFragment(self: *Reassembler, chunk: DataChunk) Error!void {
             const next_buffered = std.math.add(usize, self.buffered_bytes, chunk.user_data.len) catch return error.InvalidSctpPacket;
             if (next_buffered > self.max_buffered) return error.InvalidSctpPacket;
@@ -3588,13 +3602,91 @@ pub const sctp = struct {
             var i: usize = 0;
             while (i < self.fragments.items.len) {
                 if (sameMessage(self.fragments.items[i].chunk, target)) {
-                    const removed = self.fragments.swapRemove(i);
-                    self.buffered_bytes -= removed.data.len;
-                    self.allocator.free(removed.data);
+                    self.removeFragmentAt(i);
                     continue;
                 }
                 i += 1;
             }
+        }
+
+        fn dropFragmentsThroughTsn(self: *Reassembler, cumulative_tsn: u32) void {
+            var i: usize = 0;
+            while (i < self.fragments.items.len) {
+                if (!tsnAfter(self.fragments.items[i].chunk.tsn, cumulative_tsn)) {
+                    self.removeFragmentAt(i);
+                    continue;
+                }
+                i += 1;
+            }
+        }
+
+        fn dropIncompleteOrdered(self: *Reassembler, stream_id: u16, last_ssn: u16) void {
+            var i: usize = 0;
+            while (i < self.fragments.items.len) {
+                const chunk = self.fragments.items[i].chunk;
+                if (!chunk.interleaved and !chunk.unordered and chunk.stream_id == stream_id and !ssnAfter(chunk.stream_sequence_number, last_ssn)) {
+                    if (!self.messageComplete(chunk)) {
+                        self.removeFragmentAt(i);
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        fn dropIncompleteInterleaved(self: *Reassembler, stream_id: u16, unordered: bool, last_mid: u32) void {
+            var i: usize = 0;
+            while (i < self.fragments.items.len) {
+                const chunk = self.fragments.items[i].chunk;
+                if (chunk.interleaved and chunk.stream_id == stream_id and chunk.unordered == unordered and !tsnAfter(chunk.message_identifier, last_mid)) {
+                    if (!self.messageComplete(chunk)) {
+                        self.removeFragmentAt(i);
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        fn messageComplete(self: Reassembler, target: DataChunk) bool {
+            return self.tryReassembleable(target) catch false;
+        }
+
+        fn tryReassembleable(self: Reassembler, target: DataChunk) Error!bool {
+            var begin_index: ?usize = null;
+            var end_index: ?usize = null;
+            for (self.fragments.items, 0..) |fragment, i| {
+                if (!sameMessage(fragment.chunk, target)) continue;
+                if (fragment.chunk.beginning) begin_index = i;
+                if (fragment.chunk.ending) end_index = i;
+            }
+            const begin = begin_index orelse return false;
+            _ = end_index orelse return false;
+            const begin_chunk = self.fragments.items[begin].chunk;
+            if (begin_chunk.interleaved) {
+                var fsn: u32 = 0;
+                while (true) : (fsn +%= 1) {
+                    const index = self.findFragmentByFsn(begin_chunk, fsn) orelse return false;
+                    const fragment = self.fragments.items[index];
+                    if (fragment.chunk.beginning and fsn != 0) return error.InvalidSctpPacket;
+                    if (fragment.chunk.ending) return true;
+                }
+            } else {
+                const ppid = begin_chunk.payload_protocol_identifier;
+                var current_tsn = begin_chunk.tsn;
+                while (true) : (current_tsn +%= 1) {
+                    const index = self.findFragmentIndex(current_tsn, begin_chunk) orelse return false;
+                    const fragment = self.fragments.items[index];
+                    if (fragment.chunk.payload_protocol_identifier != ppid) return error.InvalidSctpPacket;
+                    if (fragment.chunk.ending) return true;
+                }
+            }
+        }
+
+        fn removeFragmentAt(self: *Reassembler, index: usize) void {
+            const removed = self.fragments.swapRemove(index);
+            self.buffered_bytes -= removed.data.len;
+            self.allocator.free(removed.data);
         }
 
         fn sameMessage(chunk: DataChunk, target: DataChunk) bool {
@@ -4300,6 +4392,10 @@ pub const sctp = struct {
 
     fn tsnAfter(a: u32, b: u32) bool {
         return a != b and ((a -% b) < 0x8000_0000);
+    }
+
+    fn ssnAfter(a: u16, b: u16) bool {
+        return a != b and ((a -% b) < 0x8000);
     }
 
     fn tsnLessThan(_: void, a: u32, b: u32) bool {
@@ -5821,6 +5917,95 @@ test "SCTP DATA reassembler handles fragmented messages" {
     try std.testing.expectEqual(@as(u16, 9), i_message.stream_sequence_number);
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string, i_message.payload_protocol_identifier);
     try std.testing.expectEqualStrings("interleaved data", i_message.data);
+}
+
+test "SCTP DATA reassembler handles Forward-TSN skips" {
+    const allocator = std.testing.allocator;
+
+    var ordered = sctp.Reassembler.init(allocator, 64);
+    defer ordered.deinit();
+    try std.testing.expect((try ordered.push(.{
+        .tsn = 10,
+        .stream_id = 1,
+        .stream_sequence_number = 0,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = true,
+        .ending = false,
+        .user_data = "DROP",
+    })) == null);
+    try std.testing.expect((try ordered.push(.{
+        .tsn = 11,
+        .stream_id = 1,
+        .stream_sequence_number = 2,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = true,
+        .ending = false,
+        .user_data = "NE",
+    })) == null);
+    try std.testing.expectEqual(@as(usize, 6), ordered.buffered_bytes);
+
+    var skipped = [_]sctp.SkippedStream{.{ .stream_id = 1, .stream_sequence_number = 0 }};
+    ordered.forwardTsn(.{ .new_cumulative_tsn = 10, .skipped_streams = &skipped });
+    try std.testing.expectEqual(@as(usize, 2), ordered.buffered_bytes);
+
+    var kept = (try ordered.push(.{
+        .tsn = 12,
+        .stream_id = 1,
+        .stream_sequence_number = 2,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = false,
+        .ending = true,
+        .user_data = "XT",
+    })).?;
+    defer kept.deinit(allocator);
+    try std.testing.expectEqualStrings("NEXT", kept.data);
+    try std.testing.expectEqual(@as(usize, 0), ordered.buffered_bytes);
+
+    var interleaved = sctp.Reassembler.init(allocator, 64);
+    defer interleaved.deinit();
+    try std.testing.expect((try interleaved.push(.{
+        .interleaved = true,
+        .unordered = true,
+        .tsn = 20,
+        .stream_id = 2,
+        .message_identifier = 2,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = true,
+        .ending = false,
+        .user_data = "drop",
+    })) == null);
+    try std.testing.expect((try interleaved.push(.{
+        .interleaved = true,
+        .unordered = true,
+        .tsn = 21,
+        .stream_id = 2,
+        .message_identifier = 5,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = true,
+        .ending = false,
+        .user_data = "later",
+    })) == null);
+    try std.testing.expectEqual(@as(usize, 9), interleaved.buffered_bytes);
+
+    var skipped_messages = [_]sctp.SkippedMessage{.{ .stream_id = 2, .unordered = true, .message_identifier = 2 }};
+    interleaved.forwardIForwardTsn(.{ .new_cumulative_tsn = 20, .skipped_messages = &skipped_messages });
+    try std.testing.expectEqual(@as(usize, 5), interleaved.buffered_bytes);
+
+    var later = (try interleaved.push(.{
+        .interleaved = true,
+        .unordered = true,
+        .tsn = 22,
+        .stream_id = 2,
+        .message_identifier = 5,
+        .fragment_sequence_number = 1,
+        .payload_protocol_identifier = @enumFromInt(@as(u32, 0)),
+        .beginning = false,
+        .ending = true,
+        .user_data = "!",
+    })).?;
+    defer later.deinit(allocator);
+    try std.testing.expectEqualStrings("later!", later.data);
+    try std.testing.expectEqual(@as(usize, 0), interleaved.buffered_bytes);
 }
 
 test "SCTP SACK packet roundtrip" {
