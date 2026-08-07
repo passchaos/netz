@@ -1189,6 +1189,19 @@ pub const sdp = struct {
         return std.fmt.allocPrint(allocator, "* {s} {s}", .{ feedback.typ, feedback.parameter });
     }
 
+    pub fn formatRtcpFeedbackLine(allocator: std.mem.Allocator, payload_type: ?u8, feedback: RtcpFeedback) Error![]u8 {
+        if (payload_type) |payload| {
+            if (feedback.parameter.len == 0) {
+                return std.fmt.allocPrint(allocator, "a=rtcp-fb:{d} {s}\r\n", .{ payload, feedback.typ });
+            }
+            return std.fmt.allocPrint(allocator, "a=rtcp-fb:{d} {s} {s}\r\n", .{ payload, feedback.typ, feedback.parameter });
+        }
+        if (feedback.parameter.len == 0) {
+            return std.fmt.allocPrint(allocator, "a=rtcp-fb:* {s}\r\n", .{feedback.typ});
+        }
+        return std.fmt.allocPrint(allocator, "a=rtcp-fb:* {s} {s}\r\n", .{ feedback.typ, feedback.parameter });
+    }
+
     pub fn rtcpFeedbackIntersection(allocator: std.mem.Allocator, local: []const RtcpFeedback, remote: []const RtcpFeedback) Error![]RtcpFeedback {
         var out: std.ArrayList(RtcpFeedback) = .empty;
         errdefer out.deinit(allocator);
@@ -8616,6 +8629,12 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const formatted_wildcard = try sdp.formatRtcpFeedbackAttribute(allocator, null, codecs[0].rtcp_feedback[2]);
     defer allocator.free(formatted_wildcard);
     try std.testing.expectEqualStrings("* nack", formatted_wildcard);
+    const formatted_line = try sdp.formatRtcpFeedbackLine(allocator, 111, codecs[0].rtcp_feedback[1]);
+    defer allocator.free(formatted_line);
+    try std.testing.expectEqualStrings("a=rtcp-fb:111 ccm fir\r\n", formatted_line);
+    const formatted_wildcard_line = try sdp.formatRtcpFeedbackLine(allocator, null, codecs[0].rtcp_feedback[2]);
+    defer allocator.free(formatted_wildcard_line);
+    try std.testing.expectEqualStrings("a=rtcp-fb:* nack\r\n", formatted_wildcard_line);
 
     const fmtp_params = try sdp.parseFmtpParameters(allocator, " Key = Value ; flag ; apt=96 ");
     defer sdp.freeFmtpParameters(allocator, fmtp_params);
