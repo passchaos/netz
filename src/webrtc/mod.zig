@@ -1118,6 +1118,9 @@ pub const sdp = struct {
         password: []const u8,
     };
 
+    pub const ice_option_trickle = "trickle";
+    pub const ice_option_renomination = "renomination";
+
     pub const IceCandidate = struct {
         candidate: ice.Candidate,
         sdp_mid: ?[]const u8 = null,
@@ -1211,6 +1214,32 @@ pub const sdp = struct {
     pub fn formatIcePwdLine(allocator: std.mem.Allocator, credentials: IceCredentials) Error![]u8 {
         if (credentials.password.len == 0) return error.InvalidSdp;
         return std.fmt.allocPrint(allocator, "a=ice-pwd:{s}\r\n", .{credentials.password});
+    }
+
+    pub fn formatIceOptionsAttribute(allocator: std.mem.Allocator, options: []const []const u8) Error![]u8 {
+        if (options.len == 0) return error.InvalidSdp;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        for (options, 0..) |option, index| {
+            try validateSdpToken(option);
+            if (iceOptionSliceHasToken(options[0..index], option)) continue;
+            if (out.items.len != 0) try out.append(allocator, ' ');
+            try out.appendSlice(allocator, option);
+        }
+        if (out.items.len == 0) return error.InvalidSdp;
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn formatIceOptionsLine(allocator: std.mem.Allocator, options: []const []const u8) Error![]u8 {
+        const attr = try formatIceOptionsAttribute(allocator, options);
+        defer allocator.free(attr);
+        return std.fmt.allocPrint(allocator, "a=ice-options:{s}\r\n", .{attr});
+    }
+
+    pub fn appendIceOptionsLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: []const []const u8) Error!void {
+        const line = try formatIceOptionsLine(allocator, options);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
     }
 
     pub fn formatFingerprintLine(allocator: std.mem.Allocator, fingerprint: Fingerprint) Error![]u8 {
@@ -1921,25 +1950,17 @@ pub const sdp = struct {
     }
 
     pub fn supportsIceTrickle(session: Session) bool {
-        if (findAttr(session.attributes, "ice-options")) |value| {
-            if (iceOptionsHasToken(value, "trickle")) return true;
-        }
+        if (iceOptionsAttributesHaveToken(session.attributes, ice_option_trickle)) return true;
         for (session.media) |media| {
-            if (findAttr(media.attributes, "ice-options")) |value| {
-                if (iceOptionsHasToken(value, "trickle")) return true;
-            }
+            if (iceOptionsAttributesHaveToken(media.attributes, ice_option_trickle)) return true;
         }
         return false;
     }
 
     pub fn supportsIceRenomination(session: Session) bool {
-        if (findAttr(session.attributes, "ice-options")) |value| {
-            if (iceOptionsHasToken(value, "renomination")) return true;
-        }
+        if (iceOptionsAttributesHaveToken(session.attributes, ice_option_renomination)) return true;
         for (session.media) |media| {
-            if (findAttr(media.attributes, "ice-options")) |value| {
-                if (iceOptionsHasToken(value, "renomination")) return true;
-            }
+            if (iceOptionsAttributesHaveToken(media.attributes, ice_option_renomination)) return true;
         }
         return false;
     }
@@ -2490,6 +2511,20 @@ pub const sdp = struct {
         var parts = std.mem.tokenizeAny(u8, value, " \t");
         while (parts.next()) |part| {
             if (std.ascii.eqlIgnoreCase(part, token)) return true;
+        }
+        return false;
+    }
+
+    fn iceOptionSliceHasToken(options: []const []const u8, token: []const u8) bool {
+        for (options) |option| {
+            if (std.ascii.eqlIgnoreCase(option, token)) return true;
+        }
+        return false;
+    }
+
+    fn iceOptionsAttributesHaveToken(attrs: []const Attribute, token: []const u8) bool {
+        for (attrs) |attr| {
+            if (std.ascii.eqlIgnoreCase(attr.name, "ice-options") and iceOptionsHasToken(attr.value, token)) return true;
         }
         return false;
     }
@@ -9255,6 +9290,20 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
 
     try std.testing.expectError(error.InvalidSdp, sdp.parseExtMapAttribute("0 " ++ sdp.sdes_mid_uri));
 
+    const ice_options_attr = try sdp.formatIceOptionsAttribute(allocator, &.{ sdp.ice_option_trickle, "google-ice", "TrIcKlE" });
+    defer allocator.free(ice_options_attr);
+    try std.testing.expectEqualStrings("trickle google-ice", ice_options_attr);
+    const ice_options_line = try sdp.formatIceOptionsLine(allocator, &.{ sdp.ice_option_renomination, sdp.ice_option_trickle });
+    defer allocator.free(ice_options_line);
+    try std.testing.expectEqualStrings("a=ice-options:renomination trickle\r\n", ice_options_line);
+    var ice_option_lines: std.ArrayList(u8) = .empty;
+    defer ice_option_lines.deinit(allocator);
+    try sdp.appendIceOptionsLine(&ice_option_lines, allocator, &.{sdp.ice_option_trickle});
+    try std.testing.expectEqualStrings("a=ice-options:trickle\r\n", ice_option_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatIceOptionsAttribute(allocator, &.{}));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatIceOptionsLine(allocator, &.{""}));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatIceOptionsLine(allocator, &.{"bad option"}));
+
     var media_trickle = try sdp.parse(allocator, "v=0\r\n" ++
         "s=-\r\n" ++
         "t=0 0\r\n" ++
@@ -9264,6 +9313,15 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     defer media_trickle.deinit(allocator);
     try std.testing.expect(sdp.supportsIceTrickle(media_trickle));
     try std.testing.expect(sdp.supportsIceRenomination(media_trickle));
+
+    var repeated_session_options = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=ice-options:google-ice\r\n" ++
+        "a=ice-options:trickle\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n");
+    defer repeated_session_options.deinit(allocator);
+    try std.testing.expect(sdp.supportsIceTrickle(repeated_session_options));
 
     var session_renomination = try sdp.parse(allocator, "v=0\r\n" ++
         "s=-\r\n" ++
