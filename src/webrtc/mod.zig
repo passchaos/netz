@@ -2362,6 +2362,11 @@ pub const rtp = struct {
         };
     }
 
+    pub fn videoLayerAllocation(allocator: std.mem.Allocator, elements: []const HeaderExtensionElement, id: u8) Error!?VideoLayerAllocation {
+        const value = findHeaderExtension(elements, id) orelse return null;
+        return try parseVideoLayerAllocationPayload(allocator, value);
+    }
+
     pub fn freeVideoLayerAllocation(allocator: std.mem.Allocator, vla: VideoLayerAllocation) void {
         for (vla.active_spatial_layers) |layer| allocator.free(@constCast(layer.target_bitrates_kbps));
         allocator.free(@constCast(vla.active_spatial_layers));
@@ -7469,6 +7474,11 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(usize, 3), parsed_vla.active_spatial_layers.len);
     try std.testing.expectEqual(@as(u32, 150), parsed_vla.active_spatial_layers[0].target_bitrates_kbps[0]);
     try std.testing.expectEqual(@as(u32, 400), parsed_vla.active_spatial_layers[1].target_bitrates_kbps[1]);
+    const vla_element = [_]rtp.HeaderExtensionElement{.{ .id = 22, .data = vla_payload.items }};
+    const parsed_vla_from_element = (try rtp.videoLayerAllocation(allocator, &vla_element, 22)).?;
+    defer rtp.freeVideoLayerAllocation(allocator, parsed_vla_from_element);
+    try std.testing.expectEqual(@as(u2, 0), parsed_vla_from_element.rtp_stream_id);
+    try std.testing.expect((try rtp.videoLayerAllocation(allocator, &vla_element, 23)) == null);
 
     vla_payload.clearRetainingCapacity();
     const vla_layers_with_resolution = [_]rtp.SpatialLayer{
