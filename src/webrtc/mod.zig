@@ -747,6 +747,16 @@ pub const ice = struct {
             return parseTcpType(value) orelse error.InvalidIceCandidate;
         }
 
+        pub fn extensionValue(self: Candidate, key: []const u8) ?[]const u8 {
+            if (std.ascii.eqlIgnoreCase(key, "tcptype")) {
+                if (self.tcp_type) |value| return value;
+            }
+            for (self.extensions) |extension| {
+                if (std.ascii.eqlIgnoreCase(extension.key, key)) return extension.value;
+            }
+            return null;
+        }
+
         pub fn computedPriority(self: Candidate, options: CandidatePriorityOptions) Error!u32 {
             if (self.component == 0 or self.component > std.math.maxInt(u8)) return error.InvalidIceCandidate;
             var effective = options;
@@ -1431,10 +1441,7 @@ pub const sdp = struct {
     }
 
     pub fn candidateUfrag(candidate: ice.Candidate) ?[]const u8 {
-        for (candidate.extensions) |extension| {
-            if (std.ascii.eqlIgnoreCase(extension.key, "ufrag")) return extension.value;
-        }
-        return null;
+        return candidate.extensionValue("ufrag");
     }
 
     pub fn candidateMatchesDescriptionUfrag(session: Session, candidate: ice.Candidate) bool {
@@ -7373,6 +7380,7 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqual(ice.Transport.tcp, tcp.transport);
     try std.testing.expectEqualStrings("active", tcp.tcp_type.?);
     try std.testing.expectEqual(ice.TcpType.active, (try tcp.parsedTcpType()).?);
+    try std.testing.expectEqualStrings("active", tcp.extensionValue("tcptype").?);
     try std.testing.expectEqual(@as(u32, 1_675_624_447), try tcp.computedPriority(.{}));
 
     const relay = try ice.Candidate.parse("candidate:848194626 1 udp 16777215 50.0.0.1 5000 typ relay raddr 192.168.0.1 rport 5001");
@@ -7388,6 +7396,8 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("0", extended.extensions[0].value);
     try std.testing.expectEqualStrings("network-cost", extended.extensions[2].key);
     try std.testing.expectEqualStrings("10", extended.extensions[2].value);
+    try std.testing.expectEqualStrings("2", extended.extensionValue("network-id").?);
+    try std.testing.expectEqualStrings("10", extended.extensionValue("NETWORK-COST").?);
     var extended_line: std.ArrayList(u8) = .empty;
     defer extended_line.deinit(allocator);
     try extended.write(&extended_line, allocator);
