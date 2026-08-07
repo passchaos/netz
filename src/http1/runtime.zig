@@ -1329,6 +1329,9 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
 fn writeRequestToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: RequestOptions) Error!void {
     try http1.validateRequestTargetForMethod(options.method, options.target);
     const target_authority = if (options.method == .CONNECT) options.target else http1.absoluteFormAuthority(options.target);
+    if (options.method != .CONNECT and std.mem.indexOf(u8, options.target, "://") != null and target_authority == null) {
+        return error.InvalidHost;
+    }
     const synthesized_host = options.host orelse target_authority;
     var request_headers: std.ArrayList(http1.Header) = .empty;
     defer request_headers.deinit(allocator);
@@ -3927,6 +3930,14 @@ test "HTTP/1 runtime validates outbound request and response framing before writ
         .method = .GET,
         .target = "http://example.com/absolute",
         .headers = &.{.{ .name = "Host", .value = "other.example" }},
+    }));
+    try std.testing.expectError(error.InvalidHost, writeRequestToStream(allocator, io, stream, .{
+        .method = .GET,
+        .target = "http:///absolute",
+    }));
+    try std.testing.expectError(error.InvalidHost, writeRequestToStream(allocator, io, stream, .{
+        .method = .GET,
+        .target = "http://?q=1",
     }));
     try std.testing.expectError(error.InvalidHost, writeRequestToStream(allocator, io, stream, .{
         .method = .CONNECT,
