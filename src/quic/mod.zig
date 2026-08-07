@@ -105,10 +105,16 @@ pub const LongHeader = struct {
             token = try cursor.readSlice(std.math.cast(usize, token_len) orelse return error.IntegerOverflow);
             payload_len = try varint.decode(&cursor);
             const pn_len: usize = @as(usize, (first & 0x03)) + 1;
+            const payload_len_usize = std.math.cast(usize, payload_len.?) orelse return error.IntegerOverflow;
+            if (payload_len_usize < pn_len) return error.InvalidFrameLength;
+            if (bytes.len < cursor.pos + payload_len_usize) return error.BufferTooShort;
             packet_number = try cursor.readSlice(pn_len);
         } else if (packet_type == .zero_rtt or packet_type == .handshake) {
             payload_len = try varint.decode(&cursor);
             const pn_len: usize = @as(usize, (first & 0x03)) + 1;
+            const payload_len_usize = std.math.cast(usize, payload_len.?) orelse return error.IntegerOverflow;
+            if (payload_len_usize < pn_len) return error.InvalidFrameLength;
+            if (bytes.len < cursor.pos + payload_len_usize) return error.BufferTooShort;
             packet_number = try cursor.readSlice(pn_len);
         } else if (packet_type == .retry) {
             const remaining = bytes[cursor.pos..];
@@ -1521,6 +1527,26 @@ test "QUIC long initial header parse" {
     try std.testing.expectEqual(PacketType.initial, parsed.packet_type);
     try std.testing.expectEqualStrings("dcid", parsed.destination_connection_id);
     try std.testing.expectEqual(@as(u64, 4), parsed.length.?);
+
+    var too_short_len = try bytes.clone(allocator);
+    defer too_short_len.deinit(allocator);
+    // Replace the one-byte Length varint immediately before the 4-byte packet
+    // number with 3.  Long-header Length covers packet number + payload, so it
+    // must be at least the encoded packet-number length before any payload
+    // decryption is attempted.
+    too_short_len.items[too_short_len.items.len - 5] = 3;
+    try std.testing.expectError(error.InvalidFrameLength, LongHeader.parse(too_short_len.items));
+
+    var truncated = try bytes.clone(allocator);
+    defer truncated.deinit(allocator);
+    truncated.items[truncated.items.len - 5] = 8;
+    try std.testing.expectError(error.BufferTooShort, LongHeader.parse(truncated.items));
+
+    var coalesced = try bytes.clone(allocator);
+    defer coalesced.deinit(allocator);
+    try coalesced.appendSlice(allocator, &.{ 0xaa, 0xbb, 0xcc });
+    const coalesced_header = try LongHeader.parse(coalesced.items);
+    try std.testing.expectEqual(@as(u64, 4), coalesced_header.length.?);
 
     bytes.items[0] &= ~@as(u8, 0x40);
     try std.testing.expectError(error.InvalidEncoding, LongHeader.parse(bytes.items));
