@@ -1129,6 +1129,39 @@ pub const sdp = struct {
         rtcp_rsize: bool = false,
     };
 
+    pub const MediaDirection = enum {
+        sendrecv,
+        sendonly,
+        recvonly,
+        inactive,
+
+        pub fn attribute(self: MediaDirection) []const u8 {
+            return switch (self) {
+                .sendrecv => "sendrecv",
+                .sendonly => "sendonly",
+                .recvonly => "recvonly",
+                .inactive => "inactive",
+            };
+        }
+    };
+
+    pub fn parseMediaDirection(value: []const u8) ?MediaDirection {
+        inline for (std.meta.fields(MediaDirection)) |field| {
+            if (std.ascii.eqlIgnoreCase(value, field.name)) return @enumFromInt(field.value);
+        }
+        return null;
+    }
+
+    pub fn formatMediaDirectionLine(allocator: std.mem.Allocator, direction: MediaDirection) Error![]u8 {
+        return std.fmt.allocPrint(allocator, "a={s}\r\n", .{direction.attribute()});
+    }
+
+    pub fn appendMediaDirectionLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, direction: MediaDirection) Error!void {
+        const line = try formatMediaDirectionLine(allocator, direction);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub const TransportLineOptions = struct {
         ice_credentials: ?IceCredentials = null,
         fingerprint: ?Fingerprint = null,
@@ -9385,6 +9418,15 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const tracks = try sdp.extractTrackDetails(allocator, track_session);
     defer sdp.freeTrackDetails(allocator, tracks);
     try std.testing.expectEqual(@as(usize, 3), tracks.len);
+    try std.testing.expectEqual(sdp.MediaDirection.sendrecv, sdp.parseMediaDirection("SENDRECV").?);
+    try std.testing.expect(sdp.parseMediaDirection("sideways") == null);
+    const direction_line = try sdp.formatMediaDirectionLine(allocator, .sendrecv);
+    defer allocator.free(direction_line);
+    try std.testing.expectEqualStrings("a=sendrecv\r\n", direction_line);
+    var direction_lines: std.ArrayList(u8) = .empty;
+    defer direction_lines.deinit(allocator);
+    try sdp.appendMediaDirectionLine(&direction_lines, allocator, .inactive);
+    try std.testing.expectEqualStrings("a=inactive\r\n", direction_lines.items);
     try std.testing.expectEqualStrings("audio", tracks[0].mid);
     try std.testing.expectEqual(@as(?u32, 2000), tracks[0].ssrc);
     try std.testing.expectEqualStrings("audio_stream", tracks[0].stream_id);
