@@ -1210,7 +1210,9 @@ pub fn parseFrameOwned(allocator: std.mem.Allocator, bytes: []const u8) Error!Pa
 
 fn parseFrameWithAllocator(allocator: ?std.mem.Allocator, bytes: []const u8) Error!ParsedFrame {
     var cursor = wire.Cursor.init(bytes);
+    const frame_type_len = varint.encodedLen(try cursor.peekByte());
     const frame_type = try varint.decode(&cursor);
+    try validateFrameTypeEncoding(frame_type, frame_type_len);
 
     if (frame_type == @intFromEnum(FrameType.padding)) {
         while (!cursor.eof() and cursor.buf[cursor.pos] == @intFromEnum(FrameType.padding)) {
@@ -1484,6 +1486,15 @@ fn validateStreamFramePayload(stream: StreamFrame) Error!void {
     // the codec boundary keeps packet composition from carrying ambiguous
     // no-op STREAM frames that are better represented as PADDING/PING.
     if (stream.data.len == 0 and !stream.fin) return error.InvalidFrame;
+}
+
+fn validateFrameTypeEncoding(frame_type: u64, encoded_len: u8) Error!void {
+    // QUIC varints can usually be encoded in a longer form, but RFC 9000
+    // singles out the Frame Type field: it MUST use the shortest possible
+    // encoding.  This keeps frame dispatch canonical and matches tquic's codec
+    // boundary before any frame-specific parsing runs.
+    const shortest = varint.length(frame_type) catch return error.UnsupportedFrameType;
+    if (encoded_len != shortest) return error.InvalidFrame;
 }
 
 fn validateQuicVarint(value: u64) Error!void {
@@ -2071,6 +2082,17 @@ test "QUIC frame packet context rules follow RFC 9000" {
     try std.testing.expect(!frameAllowedInPacketType(.{ .connection_close = .{ .error_code = 0, .frame_type = 0, .reason_phrase = "" } }, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .handshake_done = {} }, .one_rtt));
     try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(stream, .initial));
+}
+
+test "QUIC frame type uses shortest varint encoding" {
+    const overlong_ping = [_]u8{ 0x40, @intFromEnum(FrameType.ping) };
+    try std.testing.expectError(error.InvalidFrame, parseFrame(&overlong_ping));
+
+    const overlong_padding = [_]u8{ 0x40, @intFromEnum(FrameType.padding) };
+    try std.testing.expectError(error.InvalidFrame, parseFrame(&overlong_padding));
+
+    const ping = try parseFrame(&[_]u8{@intFromEnum(FrameType.ping)});
+    try std.testing.expect(ping.frame == .ping);
 }
 
 test "QUIC STREAM frame rejects empty non-FIN no-ops" {
