@@ -25,6 +25,7 @@ pub const Error = wire.Error || error{
     StreamCreationError,
     InvalidContentLength,
     IntegerOverflow,
+    ExcessiveLoad,
     QpackDynamicTableUnsupported,
 } || std.mem.Allocator.Error;
 
@@ -1030,7 +1031,11 @@ pub const DecodedResponse = struct {
 };
 
 pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedRequest {
-    var message = try decodeMessage(allocator, bytes, .request);
+    return decodeRequestWithSettings(allocator, bytes, .{});
+}
+
+pub fn decodeRequestWithSettings(allocator: std.mem.Allocator, bytes: []const u8, settings: Settings) Error!DecodedRequest {
+    var message = try decodeMessage(allocator, bytes, .request, settings.max_field_section_size);
     errdefer message.deinit(allocator);
 
     try validateHeaderBlock(message.headers, .request);
@@ -1072,7 +1077,11 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!Deco
 }
 
 pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedResponse {
-    var message = try decodeResponseMessage(allocator, bytes);
+    return decodeResponseWithSettings(allocator, bytes, .{});
+}
+
+pub fn decodeResponseWithSettings(allocator: std.mem.Allocator, bytes: []const u8, settings: Settings) Error!DecodedResponse {
+    var message = try decodeResponseMessage(allocator, bytes, settings.max_field_section_size);
     errdefer message.deinit(allocator);
 
     try validateHeaderBlock(message.headers, .response);
@@ -1162,7 +1171,7 @@ fn responseStatus(headers: []const Qpack.HeaderField) Error!u16 {
     return error.MissingStatus;
 }
 
-fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedMessage {
+fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8, max_field_section_size: u64) Error!DecodedMessage {
     var offset: usize = 0;
     while (true) {
         const frame = try Frame.parse(bytes[offset..]);
@@ -1176,6 +1185,7 @@ fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!
         const headers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
         defer allocator.free(headers);
         try validateHeaderBlock(headers, .response);
+        try validateFieldSectionSize(headers, max_field_section_size);
         const status = try responseStatus(headers);
         if (status < 200) {
             offset += frame.consumed;
@@ -1184,10 +1194,10 @@ fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8) Error!
         }
         break;
     }
-    return decodeMessage(allocator, bytes[offset..], .response);
+    return decodeMessage(allocator, bytes[offset..], .response, max_field_section_size);
 }
 
-fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageStreamKind) Error!DecodedMessage {
+fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageStreamKind, max_field_section_size: u64) Error!DecodedMessage {
     var offset: usize = 0;
     const headers_frame = while (true) {
         const frame = try Frame.parse(bytes[offset..]);
@@ -1208,6 +1218,7 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageS
     };
     const headers = try Qpack.decodeLiteralBlock(allocator, headers_frame.payload);
     errdefer allocator.free(headers);
+    try validateFieldSectionSize(headers, max_field_section_size);
 
     var consumed = offset + headers_frame.consumed;
     var body: std.ArrayList(u8) = .empty;
@@ -1225,7 +1236,10 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageS
             },
             FrameType.headers => {
                 if (saw_trailers) return error.UnexpectedFrame;
-                trailers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
+                const decoded_trailers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
+                errdefer allocator.free(decoded_trailers);
+                try validateFieldSectionSize(decoded_trailers, max_field_section_size);
+                trailers = decoded_trailers;
                 saw_trailers = true;
             },
             FrameType.push_promise => {
@@ -1254,6 +1268,20 @@ fn appendHeaderField(out: []Qpack.HeaderField, count: *usize, field: Qpack.Heade
     if (count.* >= out.len) return error.InvalidFrame;
     out[count.*] = field;
     count.* += 1;
+}
+
+fn validateFieldSectionSize(headers: []const Qpack.HeaderField, max_field_section_size: u64) Error!void {
+    var size: u64 = 0;
+    for (headers) |header| {
+        size = std.math.add(u64, size, header.name.len) catch return error.ExcessiveLoad;
+        size = std.math.add(u64, size, header.value.len) catch return error.ExcessiveLoad;
+        // RFC 9114 §4.2.2 carries over the HTTP/2/QPACK accounting rule: the
+        // field section size is the uncompressed name/value bytes plus 32 bytes
+        // per field.  Enforce the advertised limit after decoding so compressed
+        // representations cannot bypass SETTINGS_MAX_FIELD_SECTION_SIZE.
+        size = std.math.add(u64, size, 32) catch return error.ExcessiveLoad;
+        if (size > max_field_section_size) return error.ExcessiveLoad;
+    }
 }
 
 fn contentLength(headers: []const Qpack.HeaderField) Error!?usize {
@@ -1897,6 +1925,37 @@ test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
     try validateResponsePushPromises(.{ .local_max_push_id = 3 }, response_with_push.items);
     try std.testing.expectError(error.PushIdExceeded, validateResponsePushPromises(.{}, response_with_push.items));
     try std.testing.expectError(error.PushIdExceeded, validateResponsePushPromises(.{ .local_max_push_id = 2 }, response_with_push.items));
+}
+
+test "HTTP/3 enforces SETTINGS_MAX_FIELD_SECTION_SIZE" {
+    const allocator = std.testing.allocator;
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(allocator);
+    try (Request{
+        .method = "GET",
+        .path = "/limited",
+        .authority = "example.com",
+    }).write(&request_bytes, allocator);
+    var decoded_request = try decodeRequest(allocator, request_bytes.items);
+    decoded_request.deinit(allocator);
+    try std.testing.expectError(error.ExcessiveLoad, decodeRequestWithSettings(allocator, request_bytes.items, .{
+        .max_field_section_size = 1,
+    }));
+
+    var response_bytes: std.ArrayList(u8) = .empty;
+    defer response_bytes.deinit(allocator);
+    try (Response{
+        .status = 200,
+        .trailers = &.{.{ .name = "grpc-status", .value = "0" }},
+    }).write(&response_bytes, allocator);
+    var decoded_response = try decodeResponseWithSettings(allocator, response_bytes.items, .{
+        .max_field_section_size = 44,
+    });
+    decoded_response.deinit(allocator);
+    try std.testing.expectError(error.ExcessiveLoad, decodeResponseWithSettings(allocator, response_bytes.items, .{
+        .max_field_section_size = 43,
+    }));
 }
 
 test "HTTP/3 rejects malformed structured frame payloads" {

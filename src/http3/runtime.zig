@@ -303,7 +303,7 @@ pub const HandshakeServerSession = struct {
     pub fn receiveRequest(self: *HandshakeServerSession) Error!OwnedHandshakeRequest {
         const assembled = try receiveConnectionStreamBytes(&self.established.connection, null, self.options, &self.control, .server);
         errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
-        var request = try http3.decodeRequest(self.established.connection.endpoint.allocator, assembled.bytes);
+        var request = try http3.decodeRequestWithSettings(self.established.connection.endpoint.allocator, assembled.bytes, self.options.local_settings);
         errdefer request.deinit(self.established.connection.endpoint.allocator);
         return .{
             .from = assembled.from,
@@ -382,7 +382,7 @@ pub const HandshakeClient = struct {
         const assembled = try receiveConnectionStreamBytes(&self.established.connection, stream_id, self.options, &self.control, .client);
         errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
         try http3.validateResponsePushPromises(self.control, assembled.bytes);
-        var response = try http3.decodeResponse(self.established.connection.endpoint.allocator, assembled.bytes);
+        var response = try http3.decodeResponseWithSettings(self.established.connection.endpoint.allocator, assembled.bytes, self.control.settings.local);
         errdefer response.deinit(self.established.connection.endpoint.allocator);
         return .{ .stream_bytes = assembled.bytes, .response = response };
     }
@@ -442,7 +442,7 @@ pub const ProtectedServer = struct {
     pub fn receiveRequest(self: *ProtectedServer) Error!OwnedProtectedRequest {
         const assembled = try self.receiveStreamBytes(null);
         errdefer self.quic_server.endpoint.allocator.free(assembled.bytes);
-        var request = try http3.decodeRequest(self.quic_server.endpoint.allocator, assembled.bytes);
+        var request = try http3.decodeRequestWithSettings(self.quic_server.endpoint.allocator, assembled.bytes, self.config.local_settings);
         errdefer request.deinit(self.quic_server.endpoint.allocator);
         return .{
             .from = assembled.from,
@@ -576,7 +576,7 @@ pub const ProtectedClient = struct {
         const assembled = try self.receiveStreamBytes(stream_id);
         errdefer self.quic_client.endpoint.allocator.free(assembled.bytes);
         try http3.validateResponsePushPromises(self.control, assembled.bytes);
-        var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, assembled.bytes);
+        var response = try http3.decodeResponseWithSettings(self.quic_client.endpoint.allocator, assembled.bytes, self.control.settings.local);
         errdefer response.deinit(self.quic_client.endpoint.allocator);
         return .{ .stream_bytes = assembled.bytes, .response = response };
     }
