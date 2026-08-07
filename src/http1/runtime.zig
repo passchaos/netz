@@ -276,6 +276,7 @@ pub const LinuxIoUringStream = if (builtin.os.tag == .linux) struct {
         send = 2,
         recv = 3,
         close = 4,
+        accept = 5,
     };
 
     pub fn connect(self: LinuxIoUringStream, address: net.IpAddress) Error!void {
@@ -304,13 +305,7 @@ pub const LinuxIoUringStream = if (builtin.os.tag == .linux) struct {
     }
 
     pub fn close(self: LinuxIoUringStream) void {
-        _ = self.ring.close(@intFromEnum(Completion.close), self.fd) catch {
-            _ = linux.close(self.fd);
-            return;
-        };
-        _ = self.submitOne(.close) catch {
-            _ = linux.close(self.fd);
-        };
+        closeLinuxIoUringFd(self.ring, self.fd);
     }
 
     fn submitOne(self: LinuxIoUringStream, expected: Completion) Error!linux.io_uring_cqe {
@@ -335,6 +330,98 @@ const PosixAddress = if (builtin.os.tag == .linux) extern union {
     in: posix.sockaddr.in,
     in6: posix.sockaddr.in6,
 } else void;
+
+fn closeLinuxIoUringFd(ring: *LinuxIoUringHandle, fd: linux.fd_t) void {
+    if (comptime builtin.os.tag != .linux) return;
+    _ = ring.close(@intFromEnum(LinuxIoUringStream.Completion.close), fd) catch {
+        _ = linux.close(fd);
+        return;
+    };
+    _ = (LinuxIoUringStream{ .ring = ring, .fd = fd }).submitOne(.close) catch {
+        _ = linux.close(fd);
+    };
+}
+
+fn setLinuxSocketOption(fd: linux.fd_t, level: i32, opt_name: u32, option: u32) Error!void {
+    const bytes: []const u8 = @ptrCast(&option);
+    const rc = linux.setsockopt(fd, level, opt_name, bytes.ptr, @intCast(bytes.len));
+    return switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .BADF => error.IoUringOperationFailed,
+        .FAULT => error.IoUringOperationFailed,
+        .INVAL => error.IoUringOperationFailed,
+        .NOMEM => error.SystemResources,
+        .NOPROTOOPT => error.ProtocolUnsupportedBySystem,
+        .NOTSOCK => error.IoUringOperationFailed,
+        else => error.IoUringOperationFailed,
+    };
+}
+
+fn bindLinuxSocket(fd: linux.fd_t, address: net.IpAddress) Error!void {
+    var storage: PosixAddress = undefined;
+    const len = ipAddressToPosix(&address, &storage);
+    const rc = linux.bind(fd, &storage.any, len);
+    return switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .ACCES, .PERM => error.AccessDenied,
+        .ADDRINUSE => error.AddressInUse,
+        .ADDRNOTAVAIL => error.AddressUnavailable,
+        .AFNOSUPPORT => error.AddressFamilyUnsupported,
+        .BADF => error.IoUringOperationFailed,
+        .INVAL => error.IoUringOperationFailed,
+        .LOOP => error.IoUringOperationFailed,
+        .NAMETOOLONG => error.IoUringOperationFailed,
+        .NOENT => error.IoUringOperationFailed,
+        .NOMEM => error.SystemResources,
+        .NOTDIR => error.IoUringOperationFailed,
+        .ROFS => error.AccessDenied,
+        else => error.IoUringOperationFailed,
+    };
+}
+
+fn listenLinuxSocket(fd: linux.fd_t, backlog: u31) Error!void {
+    const rc = linux.listen(fd, backlog);
+    return switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .ADDRINUSE => error.AddressInUse,
+        .BADF => error.IoUringOperationFailed,
+        .DESTADDRREQ => error.IoUringOperationFailed,
+        .INVAL => error.IoUringOperationFailed,
+        .NOTSOCK => error.IoUringOperationFailed,
+        .OPNOTSUPP => error.SocketModeUnsupported,
+        else => error.IoUringOperationFailed,
+    };
+}
+
+fn linuxSocketName(fd: linux.fd_t) Error!net.IpAddress {
+    var storage: PosixAddress = undefined;
+    var len: linux.socklen_t = @sizeOf(PosixAddress);
+    const rc = linux.getsockname(fd, &storage.any, &len);
+    return switch (linux.errno(rc)) {
+        .SUCCESS => addressFromPosix(&storage),
+        .BADF => error.IoUringOperationFailed,
+        .FAULT => error.IoUringOperationFailed,
+        .INVAL => error.IoUringOperationFailed,
+        .NOTSOCK => error.IoUringOperationFailed,
+        else => error.IoUringOperationFailed,
+    };
+}
+
+fn addressFromPosix(posix_address: *const PosixAddress) net.IpAddress {
+    return switch (posix_address.any.family) {
+        linux.AF.INET => .{ .ip4 = .{
+            .port = std.mem.bigToNative(u16, posix_address.in.port),
+            .bytes = @bitCast(posix_address.in.addr),
+        } },
+        linux.AF.INET6 => .{ .ip6 = .{
+            .port = std.mem.bigToNative(u16, posix_address.in6.port),
+            .bytes = posix_address.in6.addr,
+            .flow = posix_address.in6.flowinfo,
+            .interface = .{ .index = posix_address.in6.scope_id },
+        } },
+        else => .{ .ip4 = .loopback(0) },
+    };
+}
 
 fn ipAddressToPosix(address: *const net.IpAddress, storage: *PosixAddress) posix.socklen_t {
     return switch (address.*) {
@@ -384,6 +471,78 @@ pub fn connectIpLinuxIoUring(ring: *LinuxIoUringHandle, address: net.IpAddress) 
     try stream.connect(address);
     return stream;
 }
+
+pub const LinuxIoUringServer = if (builtin.os.tag == .linux) struct {
+    allocator: std.mem.Allocator,
+    ring: *LinuxIoUringHandle,
+    fd: linux.fd_t,
+    address: net.IpAddress,
+    limits: Limits = .{},
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        ring: *LinuxIoUringHandle,
+        bind_address: net.IpAddress,
+        limits: Limits,
+        options: net.IpAddress.ListenOptions,
+    ) Error!LinuxIoUringServer {
+        if (options.mode != .stream or options.protocol != .tcp) return error.SocketModeUnsupported;
+        const fd = try createLinuxTcpSocket(bind_address);
+        errdefer _ = linux.close(fd);
+        if (options.reuse_address) {
+            try setLinuxSocketOption(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, 1);
+            try setLinuxSocketOption(fd, linux.SOL.SOCKET, linux.SO.REUSEPORT, 1);
+        }
+        try bindLinuxSocket(fd, bind_address);
+        try listenLinuxSocket(fd, options.kernel_backlog);
+        return .{
+            .allocator = allocator,
+            .ring = ring,
+            .fd = fd,
+            .address = try linuxSocketName(fd),
+            .limits = limits,
+        };
+    }
+
+    pub fn deinit(self: *LinuxIoUringServer) void {
+        closeLinuxIoUringFd(self.ring, self.fd);
+        self.* = undefined;
+    }
+
+    pub fn accept(self: *LinuxIoUringServer) Error!LinuxIoUringConnection {
+        var storage: PosixAddress = undefined;
+        var len: linux.socklen_t = @sizeOf(PosixAddress);
+        _ = self.ring.accept(@intFromEnum(LinuxIoUringStream.Completion.accept), self.fd, &storage.any, &len, linux.SOCK.CLOEXEC) catch return error.IoUringOperationFailed;
+        const cqe = try (LinuxIoUringStream{ .ring = self.ring, .fd = self.fd }).submitOne(.accept);
+        if (cqe.res < 0) return error.IoUringOperationFailed;
+        return .{
+            .allocator = self.allocator,
+            .stream = .{ .ring = self.ring, .fd = @intCast(cqe.res) },
+            .limits = self.limits,
+        };
+    }
+};
+
+pub const LinuxIoUringConnection = if (builtin.os.tag == .linux) struct {
+    allocator: std.mem.Allocator,
+    stream: LinuxIoUringStream,
+    limits: Limits = .{},
+    inbuf: std.ArrayList(u8) = .empty,
+
+    pub fn close(self: *LinuxIoUringConnection) void {
+        self.inbuf.deinit(self.allocator);
+        self.stream.close();
+        self.* = undefined;
+    }
+
+    pub fn readRequest(self: *LinuxIoUringConnection, options: http1.ParseOptions) Error!OwnedRequest {
+        return readRequestFromTransportBuffered(self.allocator, .{ .linux_io_uring = self.stream }, self.limits, options, &self.inbuf);
+    }
+
+    pub fn writeResponse(self: *LinuxIoUringConnection, response: ResponseOptions) Error!void {
+        try writeResponseToTransport(self.allocator, .{ .linux_io_uring = self.stream }, response);
+    }
+};
 
 pub const Server = struct {
     io: std.Io,
@@ -897,6 +1056,21 @@ pub fn readRequestFromStreamBuffered(
     inbuf: *std.ArrayList(u8),
 ) Error!OwnedRequest {
     const bytes = try readRequestMessageBytesBuffered(allocator, io, stream, limits, inbuf);
+    errdefer allocator.free(bytes);
+    var request = try http1.parseRequest(allocator, bytes, options);
+    errdefer request.deinit(allocator);
+    try http1.validateRequestHost(request);
+    return .{ .bytes = bytes, .request = request };
+}
+
+fn readRequestFromTransportBuffered(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    limits: Limits,
+    options: http1.ParseOptions,
+    inbuf: *std.ArrayList(u8),
+) Error!OwnedRequest {
+    const bytes = try readMessageBytesBufferedWithContext(allocator, transport, limits, inbuf, null, true, false);
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
@@ -2189,6 +2363,71 @@ test "HTTP/1 client sends request to bracketed IPv6 URI" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("ipv6-uri-ok", response.response.body);
+}
+
+test "HTTP/1 Linux io_uring server accepts request" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var ring = linux.IoUring.init(16, 0) catch |err| switch (err) {
+        error.PermissionDenied, error.SystemOutdated => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer ring.deinit();
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try LinuxIoUringServer.listen(
+        allocator,
+        &ring,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+        .{ .reuse_address = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *LinuxIoUringServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *LinuxIoUringServer) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/uring-server", request.request.target);
+            try connection.writeResponse(.{
+                .body = "uring-server-ok",
+                .request_method = request.request.method,
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/uring-server", .{server.address.ip4.port});
+    defer allocator.free(uri);
+    var response = try Client.requestUri(allocator, io, uri, .{}, .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("uring-server-ok", response.response.body);
 }
 
 test "HTTP/1 Linux io_uring client sends request to IP URI" {

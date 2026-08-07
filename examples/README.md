@@ -35,10 +35,10 @@ Zig 0.16 includes two related APIs:
   `std.Io.Threaded` for real TCP today.
 - `std.os.linux.IoUring`, the low-level Linux ring wrapper. The HTTP/1 runtime
   exposes a Linux-only `Client.requestUriLinuxIoUring` helper that uses it for
-  `connect`, `send`, `recv`, and `close`; WebSocket exposes the analogous
-  `Client.connectUriLinuxIoUring` for cleartext `ws://` IP-literal clients.
-  `linux_io_uring_http1.zig` and `linux_io_uring_websocket.zig` demonstrate
-  those reusable paths.
+  `connect`, `send`, `recv`, and `close`; HTTP/1 also exposes
+  `LinuxIoUringServer` for accept/read/write response flows. WebSocket exposes
+  the analogous `Client.connectUriLinuxIoUring` for cleartext `ws://`
+  IP-literal clients. The Linux examples demonstrate those reusable paths.
 
 Because netz runtimes take a `std.Io` value, they can switch to the standard
 Uring backend as soon as Zig wires networking into it. The raw Linux example is
