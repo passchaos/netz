@@ -928,12 +928,19 @@ pub const Connection = struct {
     pub fn serveOne(self: *Connection, context: anytype, comptime handler: anytype) Error!bool {
         var request = try self.readRequest(.{});
         defer request.deinit(self.allocator);
-        const keep_alive = request.request.keepAlive();
+        const request_keep_alive = request.request.keepAlive();
         var response = try handler(context, request.request);
+        var close_headers_owned = false;
+        if (!request_keep_alive) {
+            const closed = try closeResponseForServeLoop(self.allocator, response);
+            response = closed.response;
+            close_headers_owned = closed.headers_owned;
+        }
+        defer if (close_headers_owned) self.allocator.free(response.headers);
         if (response.request_method == null) response.request_method = request.request.method;
         const response_keep_alive = responseOptionsKeepAlive(response);
         try self.writeResponse(response);
-        return keep_alive and response_keep_alive;
+        return request_keep_alive and response_keep_alive;
     }
 
     pub fn serve(self: *Connection, context: anytype, comptime handler: anytype, max_requests: usize) Error!usize {
@@ -1528,6 +1535,28 @@ fn validateDeclaredResponseBodyLength(
     if (declared) |len| {
         if (len != body_len) return error.InvalidContentLength;
     }
+}
+
+const ServeLoopResponse = struct {
+    response: ResponseOptions,
+    headers_owned: bool = false,
+};
+
+fn closeResponseForServeLoop(allocator: std.mem.Allocator, response: ResponseOptions) Error!ServeLoopResponse {
+    if (hasHeader(response.headers, "connection")) return .{ .response = response };
+    const headers = try allocator.alloc(http1.Header, response.headers.len + 1);
+    @memcpy(headers[0..response.headers.len], response.headers);
+    headers[response.headers.len] = .{ .name = "Connection", .value = "close" };
+    var out = response;
+    out.headers = headers;
+    return .{ .response = out, .headers_owned = true };
+}
+
+fn hasHeader(headers: []const http1.Header, name: []const u8) bool {
+    for (headers) |header| {
+        if (header.eqlName(name)) return true;
+    }
+    return false;
 }
 
 fn responseOptionsKeepAlive(response: ResponseOptions) bool {
@@ -2903,6 +2932,54 @@ test "HTTP/1 serveConnection handles keep-alive requests" {
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), shared.served);
     try std.testing.expectEqual(@as(usize, 2), shared.context.count);
+}
+
+test "HTTP/1 serveConnection adds close for request close" {
+    const allocator = std.testing.allocator;
+
+    var backend = try @import("../runtime.zig").Backend.initAuto(allocator, .evented_then_threaded);
+    defer backend.deinit();
+    const io = backend.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        fn handle(_: *@This(), _: http1.Request) Error!ResponseOptions {
+            return .{ .body = "closing" };
+        }
+    };
+
+    const Shared = struct {
+        server: *Server,
+        context: Context = .{},
+        err: ?anyerror = null,
+        fn run(shared: *@This()) void {
+            _ = shared.server.serveConnection(&shared.context, Context.handle, 4) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
+    defer client.close();
+    const close_header = [_]http1.Header{.{ .name = "Connection", .value = "close" }};
+    var response = try client.request(.{ .target = "/close", .headers = &close_header });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("closing", response.response.body);
+    try std.testing.expectEqualStrings("close", response.response.header("connection").?);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 runtime reuses persistent connection and preserves pipelined bytes" {
