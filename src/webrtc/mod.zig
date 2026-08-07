@@ -217,6 +217,20 @@ pub const stun = struct {
         use_candidate: bool = false,
     };
 
+    pub fn iceUsernameLocalUfrag(username: []const u8) []const u8 {
+        // ICE USERNAME is "local-ufrag:remote-ufrag".  Pion's UDP/TCP muxes
+        // route inbound STUN packets by taking the text before ':'; expose the
+        // same small helper so netz runtimes can demux without duplicating
+        // string-splitting edge cases.
+        if (std.mem.indexOfScalar(u8, username, ':')) |colon| return username[0..colon];
+        return username;
+    }
+
+    pub fn iceUsernameRemoteUfrag(username: []const u8) ?[]const u8 {
+        const colon = std.mem.indexOfScalar(u8, username, ':') orelse return null;
+        return username[colon + 1 ..];
+    }
+
     pub fn writeIceBindingRequest(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: BindingRequestOptions) Error!void {
         var priority_value: [4]u8 = undefined;
         std.mem.writeInt(u32, &priority_value, options.priority, .big);
@@ -7188,6 +7202,11 @@ test "STUN binding message roundtrip" {
     try std.testing.expectEqual(stun.Class.request, parsed.class);
     try std.testing.expectEqual(stun.Method.binding, parsed.method);
     try std.testing.expectEqualStrings("user:peer", parsed.attributes[0].value);
+    try std.testing.expectEqualStrings("user", stun.iceUsernameLocalUfrag(parsed.attributes[0].value));
+    try std.testing.expectEqualStrings("peer", stun.iceUsernameRemoteUfrag(parsed.attributes[0].value).?);
+    try std.testing.expectEqualStrings("user", stun.iceUsernameLocalUfrag("user"));
+    try std.testing.expect(stun.iceUsernameRemoteUfrag("user") == null);
+    try std.testing.expectEqualStrings("", stun.iceUsernameLocalUfrag(":peer"));
 
     var trailing = try encoded.clone(allocator);
     defer trailing.deinit(allocator);
