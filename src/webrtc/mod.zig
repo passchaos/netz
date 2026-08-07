@@ -2685,7 +2685,7 @@ pub const rtp = struct {
 
     pub fn absoluteSendTime24(elements: []const HeaderExtensionElement, id: u8) Error!?u24 {
         const value = findHeaderExtension(elements, id) orelse return null;
-        if (value.len != 3) return error.InvalidRtpPacket;
+        if (value.len < 3) return error.InvalidRtpPacket;
         return (@as(u24, value[0]) << 16) | (@as(u24, value[1]) << 8) | value[2];
     }
 
@@ -8409,6 +8409,8 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqual(@as(?u16, 2), try rtp.transportWideSequenceNumber(&.{.{ .id = 3, .data = &.{ 0x00, 0x02, 0xff } }}, 3));
     try std.testing.expectError(error.InvalidRtpPacket, rtp.transportWideSequenceNumber(&.{.{ .id = 3, .data = &.{0x00} }}, 3));
     try std.testing.expectEqual(@as(?u24, 0x010203), try rtp.absoluteSendTime24(parsed_extensions, 4));
+    try std.testing.expectEqual(@as(?u24, 0x010203), try rtp.absoluteSendTime24(&.{.{ .id = 4, .data = &.{ 0x01, 0x02, 0x03, 0xff } }}, 4));
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.absoluteSendTime24(&.{.{ .id = 4, .data = &.{ 0x01, 0x02 } }}, 4));
     const send_ntp: u64 = 0xa0c65b1000100000;
     const receive_ntp: u64 = 0xa0c65b1001000000;
     const send_unix_ns = rtp.unixNanosFromNtpTime(send_ntp);
