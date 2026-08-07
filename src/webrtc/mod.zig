@@ -1811,6 +1811,22 @@ pub const sdp = struct {
         return null;
     }
 
+    pub fn trackDetailsForMid(tracks: []const TrackDetails, mid: []const u8) ?*const TrackDetails {
+        for (tracks, 0..) |track, index| {
+            if (std.mem.eql(u8, track.mid, mid)) return &tracks[index];
+        }
+        return null;
+    }
+
+    pub fn tracksContainRepeatedMid(tracks: []const TrackDetails) bool {
+        for (tracks, 0..) |track, index| {
+            for (tracks[0..index]) |prior| {
+                if (std.mem.eql(u8, prior.mid, track.mid)) return true;
+            }
+        }
+        return false;
+    }
+
     pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
         for (attrs) |attr| {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
@@ -7946,6 +7962,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(?u32, 3000), tracks[1].ssrc);
     try std.testing.expectEqual(@as(?u32, 4000), tracks[1].rtx_ssrc);
     try std.testing.expectEqual(@as(?u32, 5000), tracks[1].fec_ssrc);
+    try std.testing.expectEqualStrings("video_track", sdp.trackDetailsForMid(tracks, "video").?.track_id);
     try std.testing.expectEqualStrings("video_track", sdp.trackDetailsForSsrc(tracks, 3000).?.track_id);
     try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 4000) == null);
     try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 5000) == null);
@@ -7957,6 +7974,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("sim_track", sdp.trackDetailsForRid(tracks, "simulcast", "f").?.track_id);
     try std.testing.expectEqualStrings("sim_track", sdp.trackDetailsForRid(tracks, "simulcast", "h").?.track_id);
     try std.testing.expect(sdp.trackDetailsForRid(tracks, "video", "f") == null);
+    try std.testing.expect(!sdp.tracksContainRepeatedMid(tracks));
 
     const duplicate_ssrc_text =
         "v=0\r\n" ++
@@ -7977,6 +7995,23 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("audio_track", duplicate_tracks[0].track_id);
     try std.testing.expectEqualStrings("dup-video", duplicate_tracks[1].mid);
     try std.testing.expectEqualStrings("video_track", duplicate_tracks[1].track_id);
+
+    const plan_b_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
+        "a=mid:plan-b\r\n" ++
+        "a=sendrecv\r\n" ++
+        "a=ssrc:1111 msid:stream track-a\r\n" ++
+        "a=ssrc:2222 msid:stream track-b\r\n";
+    var plan_b_session = try sdp.parse(allocator, plan_b_text);
+    defer plan_b_session.deinit(allocator);
+    const plan_b_tracks = try sdp.extractTrackDetails(allocator, plan_b_session);
+    defer sdp.freeTrackDetails(allocator, plan_b_tracks);
+    try std.testing.expectEqual(@as(usize, 2), plan_b_tracks.len);
+    try std.testing.expect(sdp.tracksContainRepeatedMid(plan_b_tracks));
+    try std.testing.expectEqualStrings("track-a", sdp.trackDetailsForMid(plan_b_tracks, "plan-b").?.track_id);
 
     const media_only =
         "v=0\r\n" ++
