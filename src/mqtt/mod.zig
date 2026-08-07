@@ -294,6 +294,61 @@ pub const PropertyId = enum(u8) {
     shared_subscription_available = 0x2a,
 };
 
+const PropertyWireType = enum {
+    byte,
+    two_byte,
+    four_byte,
+    varint,
+    binary,
+    utf8,
+    utf8_pair,
+};
+
+fn propertyWireType(id: PropertyId) PropertyWireType {
+    return switch (id) {
+        .payload_format_indicator,
+        .request_problem_information,
+        .request_response_information,
+        .maximum_qos,
+        .retain_available,
+        .wildcard_subscription_available,
+        .subscription_identifier_available,
+        .shared_subscription_available,
+        => .byte,
+
+        .server_keep_alive,
+        .receive_maximum,
+        .topic_alias_maximum,
+        .topic_alias,
+        => .two_byte,
+
+        .message_expiry_interval,
+        .session_expiry_interval,
+        .will_delay_interval,
+        .maximum_packet_size,
+        => .four_byte,
+
+        .subscription_identifier,
+        => .varint,
+
+        .correlation_data,
+        .authentication_data,
+        => .binary,
+
+        .content_type,
+        .response_topic,
+        .assigned_client_identifier,
+        .authentication_method,
+        .response_information,
+        .server_reference,
+        .reason_string,
+        => .utf8,
+
+        .user_property,
+        => .utf8_pair,
+    };
+}
+
 pub const Property = union(enum) {
     byte: struct { id: PropertyId, value: u8 },
     two_byte: struct { id: PropertyId, value: u16 },
@@ -314,54 +369,21 @@ pub fn parseProperties(allocator: std.mem.Allocator, cursor: *wire.Cursor) Error
     while (!prop_cursor.eof()) {
         const id_byte = try prop_cursor.readByte();
         const id = std.enums.fromInt(PropertyId, id_byte) orelse return error.InvalidProperty;
-        const prop = switch (id) {
-            .payload_format_indicator,
-            .request_problem_information,
-            .request_response_information,
-            .maximum_qos,
-            .retain_available,
-            .wildcard_subscription_available,
-            .subscription_identifier_available,
-            .shared_subscription_available,
-            => Property{ .byte = .{ .id = id, .value = try prop_cursor.readByte() } },
-
-            .server_keep_alive,
-            .receive_maximum,
-            .topic_alias_maximum,
-            .topic_alias,
-            => Property{ .two_byte = .{ .id = id, .value = try prop_cursor.readInt(u16, .big) } },
-
-            .message_expiry_interval,
-            .session_expiry_interval,
-            .will_delay_interval,
-            .maximum_packet_size,
-            => Property{ .four_byte = .{ .id = id, .value = try prop_cursor.readInt(u32, .big) } },
-
-            .subscription_identifier,
-            => blk: {
+        const prop = switch (propertyWireType(id)) {
+            .byte => Property{ .byte = .{ .id = id, .value = try prop_cursor.readByte() } },
+            .two_byte => Property{ .two_byte = .{ .id = id, .value = try prop_cursor.readInt(u16, .big) } },
+            .four_byte => Property{ .four_byte = .{ .id = id, .value = try prop_cursor.readInt(u32, .big) } },
+            .varint => blk: {
                 const decoded = try decodeRemainingLength(prop_cursor.buf[prop_cursor.pos..]);
                 prop_cursor.pos += decoded.len;
                 break :blk Property{ .varint = .{ .id = id, .value = decoded.value } };
             },
-
-            .correlation_data,
-            .authentication_data,
-            => blk: {
+            .binary => blk: {
                 const len = try prop_cursor.readInt(u16, .big);
                 break :blk Property{ .binary = .{ .id = id, .value = try prop_cursor.readSlice(len) } };
             },
-
-            .content_type,
-            .response_topic,
-            .assigned_client_identifier,
-            .authentication_method,
-            .response_information,
-            .server_reference,
-            .reason_string,
-            => Property{ .utf8 = .{ .id = id, .value = try readUtf8(&prop_cursor) } },
-
-            .user_property,
-            => Property{ .utf8_pair = .{ .id = id, .key = try readUtf8(&prop_cursor), .value = try readUtf8(&prop_cursor) } },
+            .utf8 => Property{ .utf8 = .{ .id = id, .value = try readUtf8(&prop_cursor) } },
+            .utf8_pair => Property{ .utf8_pair = .{ .id = id, .key = try readUtf8(&prop_cursor), .value = try readUtf8(&prop_cursor) } },
         };
         try validateProperty(prop);
         try validatePropertyNotDuplicate(prop, props.items);
@@ -477,6 +499,8 @@ pub fn writeProperties(list: *std.ArrayList(u8), allocator: std.mem.Allocator, p
 }
 
 fn validateProperty(property: Property) Error!void {
+    if (!propertyHasExpectedWireType(property)) return error.InvalidProperty;
+
     switch (property) {
         .byte => |p| switch (p.id) {
             .payload_format_indicator,
@@ -508,6 +532,18 @@ fn validateProperty(property: Property) Error!void {
         },
         else => {},
     }
+}
+
+fn propertyHasExpectedWireType(property: Property) bool {
+    return switch (property) {
+        .byte => |p| propertyWireType(p.id) == .byte,
+        .two_byte => |p| propertyWireType(p.id) == .two_byte,
+        .four_byte => |p| propertyWireType(p.id) == .four_byte,
+        .varint => |p| propertyWireType(p.id) == .varint,
+        .binary => |p| propertyWireType(p.id) == .binary,
+        .utf8 => |p| propertyWireType(p.id) == .utf8,
+        .utf8_pair => |p| propertyWireType(p.id) == .utf8_pair,
+    };
 }
 
 fn validatePropertyNotDuplicate(property: Property, previous: []const Property) Error!void {
@@ -1717,6 +1753,13 @@ test "MQTT v5 property values are validated" {
     defer invalid_write.deinit(allocator);
     try std.testing.expectError(error.InvalidProperty, writeProperties(&invalid_write, allocator, &.{
         .{ .two_byte = .{ .id = .receive_maximum, .value = 0 } },
+    }));
+    // Public callers construct Property unions directly, so reject mismatched
+    // union tags instead of serializing a semantically wrong property id with a
+    // different wire width.  rumqtt models each packet's properties as typed
+    // fields; this check preserves that safety for netz's compact union API.
+    try std.testing.expectError(error.InvalidProperty, writeProperties(&invalid_write, allocator, &.{
+        .{ .two_byte = .{ .id = .payload_format_indicator, .value = 1 } },
     }));
 
     const Cases = struct {

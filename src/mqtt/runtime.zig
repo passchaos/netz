@@ -797,9 +797,13 @@ fn readPacket(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limi
     }
 
     const decoded = try mqtt.decodeRemainingLength(remaining_bytes[0 .. remaining_len_len + 1]);
-    if (decoded.value > limits.max_packet_size) return error.PacketTooLarge;
     const payload_start = encoded.items.len;
-    try encoded.resize(allocator, payload_start + decoded.value);
+    const packet_len = std.math.add(usize, payload_start, decoded.value) catch return error.PacketTooLarge;
+    // MQTT 5 Maximum Packet Size is defined over the entire Control Packet,
+    // not just the Remaining Length payload.  Enforce the local limit before
+    // allocating the payload so a peer cannot make us buffer an oversize frame.
+    if (packet_len > limits.max_packet_size) return error.PacketTooLarge;
+    try encoded.resize(allocator, packet_len);
     try readExact(io, stream, encoded.items[payload_start..]);
 
     const bytes = try encoded.toOwnedSlice(allocator);
@@ -1024,6 +1028,32 @@ test "MQTT connection enforces negotiated maximum packet size" {
     };
 
     try std.testing.expectError(error.OutgoingPacketTooLarge, connection.publish("limited/topic", "payload too large", .{}));
+}
+
+test "MQTT runtime enforces incoming maximum packet size on full frame" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer client_stream.close(io);
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+
+    var ping: std.ArrayList(u8) = .empty;
+    defer ping.deinit(allocator);
+    try mqtt.writePing(&ping, allocator, false);
+    try writeAll(io, client_stream, ping.items);
+
+    // A PINGREQ has Remaining Length 0 but a total Control Packet length of 2.
+    // MQTT 5's Maximum Packet Size applies to that total length, matching
+    // rumqtt's outbound size check and preventing tiny limits from being
+    // bypassed by packets with empty variable headers/payloads.
+    try std.testing.expectError(error.PacketTooLarge, readPacket(allocator, io, server_stream, .{ .max_packet_size = 1 }));
 }
 
 test "MQTT connection rejects topic aliases beyond negotiated maximum" {
