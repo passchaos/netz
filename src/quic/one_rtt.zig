@@ -4159,6 +4159,48 @@ test "QUIC routed receive detects stateless reset before decrypt" {
     try std.testing.expectEqual(@as(?u64, 110), connection.closeExpiryDeadlineMillis());
 }
 
+test "QUIC routed receive drops after stateless reset" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe4} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local-cid",
+        .peer_connection_id = "peer-cid",
+    });
+    defer connection.deinit();
+
+    try connection.applyReceivedFrames(0, &.{.{ .connection_close = .{
+        .error_code = 0,
+        .frame_type = 0,
+        .reason_phrase = "done",
+    } }}, null, .not_ect);
+    try std.testing.expect(connection.draining());
+
+    const raw = quic.runtime.OwnedBytes{
+        .from = endpoint.address(),
+        .bytes = try allocator.dupe(u8, &.{ 0x40, 1, 2, 3, 4, 5 }),
+    };
+    var routed = quic.runtime.RoutedBytes{
+        .datagram = raw,
+        .route = .{ .connection_index = 0 },
+        .destination_connection_id = "local-cid",
+    };
+    defer routed.deinit(allocator);
+
+    const result = try connection.receiveRoutedDatagramOrStatelessReset(routed, 20, 30);
+    try std.testing.expect(result == .dropped_after_close);
+}
+
 test "QUIC 1-RTT rejects invalid NEW_CONNECTION_ID lifecycle updates" {
     const allocator = std.testing.allocator;
 
