@@ -84,6 +84,15 @@ pub const stun = struct {
 
     pub const AddressFamily = enum { ipv4, ipv6 };
 
+    pub const ErrorCodeAttribute = struct {
+        code: u16,
+        reason: []const u8,
+    };
+
+    pub const error_code_role_conflict: u16 = 487;
+    pub const role_conflict_reason = "Role Conflict";
+    pub const error_code_reason_max_len: usize = 763;
+
     pub const Message = struct {
         class: Class,
         method: Method,
@@ -247,6 +256,30 @@ pub const stun = struct {
         try writeAuthenticated(list, allocator, .success_response, .binding, transaction_id, &attrs, password);
     }
 
+    pub fn writeAuthenticatedBindingError(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        transaction_id: [12]u8,
+        code: u16,
+        reason: []const u8,
+        password: []const u8,
+    ) Error!void {
+        var error_value: std.ArrayList(u8) = .empty;
+        defer error_value.deinit(allocator);
+        try writeErrorCodeValue(&error_value, allocator, code, reason);
+        const attrs = [_]Attribute{.{ .attr_type = .error_code, .value = error_value.items }};
+        try writeAuthenticated(list, allocator, .error_response, .binding, transaction_id, &attrs, password);
+    }
+
+    pub fn writeIceRoleConflictError(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        transaction_id: [12]u8,
+        password: []const u8,
+    ) Error!void {
+        try writeAuthenticatedBindingError(list, allocator, transaction_id, error_code_role_conflict, role_conflict_reason, password);
+    }
+
     pub fn validateIceBindingRequest(
         bytes: []const u8,
         message: Message,
@@ -300,6 +333,23 @@ pub const stun = struct {
             .controlling => if (local_is_greater_or_equal) .reject_role_conflict else .switch_role,
             .controlled => if (!local_is_greater_or_equal) .reject_role_conflict else .switch_role,
         };
+    }
+
+    pub fn writeErrorCodeValue(list: *std.ArrayList(u8), allocator: std.mem.Allocator, code: u16, reason: []const u8) Error!void {
+        if (reason.len > error_code_reason_max_len) return error.InvalidStunAttribute;
+        const class = code / 100;
+        const number = code % 100;
+        // Follow pion/stun's ERROR-CODE wire layout: two reserved zero bytes,
+        // one class byte, one modulo-100 number byte, then the reason phrase.
+        if (class > std.math.maxInt(u8)) return error.InvalidStunAttribute;
+        try list.appendSlice(allocator, &.{ 0, 0, @intCast(class), @intCast(number) });
+        try list.appendSlice(allocator, reason);
+    }
+
+    pub fn parseErrorCodeAttribute(value: []const u8) Error!ErrorCodeAttribute {
+        if (value.len < 4) return error.InvalidStunAttribute;
+        const code = @as(u16, value[2]) * 100 + value[3];
+        return .{ .code = code, .reason = value[4..] };
     }
 
     pub fn validateFingerprint(bytes: []const u8) Error!void {
@@ -7177,6 +7227,21 @@ test "STUN ICE binding request authenticates integrity and fingerprint" {
     };
     try std.testing.expectEqual(stun.IceRoleConflictDecision.reject_role_conflict, stun.resolveRoleConflict(.controlled, 9, controlled_request));
     try std.testing.expectEqual(stun.IceRoleConflictDecision.switch_role, stun.resolveRoleConflict(.controlled, 10, controlled_request));
+
+    encoded.clearRetainingCapacity();
+    try stun.writeIceRoleConflictError(&encoded, allocator, tid, "ice-password");
+    var conflict = try stun.parse(allocator, encoded.items);
+    defer conflict.deinit(allocator);
+    try std.testing.expectEqual(stun.Class.error_response, conflict.class);
+    const role_conflict = try stun.parseErrorCodeAttribute(stun.attrValue(conflict, .error_code).?);
+    try std.testing.expectEqual(@as(u16, stun.error_code_role_conflict), role_conflict.code);
+    try std.testing.expectEqualStrings(stun.role_conflict_reason, role_conflict.reason);
+    try stun.validateMessageIntegrity(encoded.items, "ice-password");
+    try stun.validateFingerprint(encoded.items);
+    try std.testing.expectError(error.InvalidStunAttribute, stun.parseErrorCodeAttribute(&.{ 0, 0, 4 }));
+    const too_long_reason = try allocator.alloc(u8, stun.error_code_reason_max_len + 1);
+    defer allocator.free(too_long_reason);
+    try std.testing.expectError(error.InvalidStunAttribute, stun.writeAuthenticatedBindingError(&encoded, allocator, tid, 400, too_long_reason, "ice-password"));
 
     var malformed_fingerprint_order = try std.ArrayList(u8).initCapacity(allocator, encoded.items.len + 8);
     defer malformed_fingerprint_order.deinit(allocator);
