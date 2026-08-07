@@ -620,7 +620,12 @@ pub const Connection = struct {
             errdefer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping => {
-                    try self.sendPong(frame.payload);
+                    // tungstenite queues automatic Pong replies only while the
+                    // connection is still active.  After we have sent Close,
+                    // the peer may still deliver in-flight control frames, but
+                    // replying with a fresh Pong would write after our close
+                    // handshake started.
+                    if (!self.close_sent) try self.sendPong(frame.payload);
                     return frame;
                 },
                 .close => {
@@ -876,7 +881,7 @@ pub const H2Connection = struct {
             errdefer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping => {
-                    try self.sendPong(frame.payload);
+                    if (!self.close_sent) try self.sendPong(frame.payload);
                     return frame;
                 },
                 .close => {
@@ -2382,6 +2387,37 @@ test "WebSocket receiveFrameAuto replies to ping" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "WebSocket receiveFrameAuto does not pong after sending close" {
+    const allocator = std.testing.allocator;
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .close_sent = true,
+    };
+    defer connection.inbuf.deinit(allocator);
+    try connection.inbuf.appendSlice(allocator, "\x89\x01?");
+    var ping = try connection.receiveFrameAuto();
+    defer ping.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.ping, ping.header.opcode);
+    try std.testing.expectEqualStrings("?", ping.payload);
+
+    var h2 = H2Connection{
+        .allocator = allocator,
+        .tunnel = undefined,
+        .role = .client,
+        .close_sent = true,
+    };
+    defer h2.inbuf.deinit(allocator);
+    try h2.inbuf.appendSlice(allocator, "\x89\x01?");
+    var h2_ping = try h2.receiveFrameAuto();
+    defer h2_ping.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.ping, h2_ping.header.opcode);
+    try std.testing.expectEqualStrings("?", h2_ping.payload);
 }
 
 test "WebSocket runtime exposes typed close frames" {
