@@ -1378,6 +1378,16 @@ pub const sdp = struct {
         };
     }
 
+    pub fn extractSctpInit(allocator: std.mem.Allocator, session: Session) Error!?[]u8 {
+        const media = dataChannelMedia(session) orelse return null;
+        const raw = findAttr(media.attributes, "sctp-init") orelse return null;
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(raw) catch return error.InvalidSdp;
+        const decoded = try allocator.alloc(u8, decoded_len);
+        errdefer allocator.free(decoded);
+        std.base64.standard.Decoder.decode(decoded, raw) catch return error.InvalidSdp;
+        return decoded;
+    }
+
     pub fn extractRtpCodecs(allocator: std.mem.Allocator, media: Media) Error![]RtpCodec {
         var codecs: std.ArrayList(RtpCodec) = .empty;
         errdefer {
@@ -7464,6 +7474,22 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(u32, 262144), sctp_params.max_message_size);
     try std.testing.expectEqual(@as(?u16, null), sctp_params.max_channels);
     try std.testing.expectEqualStrings("webrtc-datachannel", sctp_params.protocol);
+    try std.testing.expect((try sdp.extractSctpInit(allocator, session)) == null);
+
+    const sctp_init_datachannel =
+        "v=0\r\n" ++
+        "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=mid:data\r\n" ++
+        "a=sctp-port:5000\r\n" ++
+        "a=sctp-init:Q29va2llTW9uc3Rlcg==\r\n";
+    var sctp_init_session = try sdp.parse(allocator, sctp_init_datachannel);
+    defer sctp_init_session.deinit(allocator);
+    const sctp_init = (try sdp.extractSctpInit(allocator, sctp_init_session)).?;
+    defer allocator.free(sctp_init);
+    try std.testing.expectEqualStrings("CookieMonster", sctp_init);
 
     const legacy_datachannel =
         "v=0\r\n" ++
@@ -7485,6 +7511,15 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(sdp.sctp_max_message_size_unset, legacy_sctp.max_message_size);
     try std.testing.expectEqual(@as(?u16, 256), legacy_sctp.max_channels);
     try std.testing.expectEqualStrings("webrtc-datachannel", legacy_sctp.protocol);
+
+    var invalid_sctp_init = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=sctp-port:5000\r\n" ++
+        "a=sctp-init:*\r\n");
+    defer invalid_sctp_init.deinit(allocator);
+    try std.testing.expectError(error.InvalidSdp, sdp.extractSctpInit(allocator, invalid_sctp_init));
 }
 
 test "SDP rejects missing or malformed DTLS/ICE details" {
