@@ -764,6 +764,7 @@ pub const ConnAck = struct {
         if ((ack_flags & 0xfe) != 0) return error.InvalidFlags;
         const reason_code = try cursor.readByte();
         try validateConnAckReason(protocol, reason_code);
+        try validateConnAckSessionPresent((ack_flags & 0x01) != 0, reason_code);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
         if (protocol == .v5) try validatePropertiesFor(.connack, props);
@@ -784,6 +785,7 @@ pub const ConnAck = struct {
         properties: []const Property,
     ) Error!void {
         try validateConnAckReason(protocol, reason_code);
+        try validateConnAckSessionPresent(session_present, reason_code);
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
         try variable.append(allocator, if (session_present) 0x01 else 0x00);
@@ -1313,6 +1315,13 @@ pub const Auth = struct {
         try list.appendSlice(allocator, variable.items);
     }
 };
+
+fn validateConnAckSessionPresent(session_present: bool, reason_code: u8) Error!void {
+    // MQTT 3.1.1/5 both require Session Present to be 0 when the connection is
+    // refused.  Accepting `session_present=true` on failures lets clients
+    // mistakenly resume state after a rejected CONNECT.
+    if (session_present and reason_code != 0) return error.InvalidFlags;
+}
 
 fn validateSubscriptionOptions(options: u8) Error!void {
     if ((options & 0xc0) != 0) return error.InvalidSubscription;
@@ -1946,6 +1955,7 @@ test "MQTT connack ack and ping controls" {
     defer connack.deinit(allocator);
     try std.testing.expect(connack.session_present);
     try std.testing.expectEqual(@as(u8, 0), connack.reason_code);
+    try std.testing.expectError(error.InvalidFlags, ConnAck.write(&connack_bytes, allocator, .v5, true, 0x80, &.{}));
     try std.testing.expectError(error.InvalidReasonCode, ConnAck.write(&connack_bytes, allocator, .v5, false, 0x8b, &.{}));
     connack_bytes.clearRetainingCapacity();
     try ConnAck.write(&connack_bytes, allocator, .v3_1_1, false, 0x05, &.{});
@@ -1964,6 +1974,16 @@ test "MQTT connack ack and ping controls" {
     }).write(&invalid_connack, allocator);
     try invalid_connack.appendSlice(allocator, &.{ 0x00, 0x8b, 0x00 });
     try std.testing.expectError(error.InvalidReasonCode, ConnAck.parse(allocator, .v5, invalid_connack.items));
+
+    invalid_connack.clearRetainingCapacity();
+    try (FixedHeader{
+        .packet_type = .connack,
+        .flags = 0,
+        .remaining_len = 3,
+        .header_len = 0,
+    }).write(&invalid_connack, allocator);
+    try invalid_connack.appendSlice(allocator, &.{ 0x01, 0x80, 0x00 });
+    try std.testing.expectError(error.InvalidFlags, ConnAck.parse(allocator, .v5, invalid_connack.items));
 
     var puback_bytes: std.ArrayList(u8) = .empty;
     defer puback_bytes.deinit(allocator);
