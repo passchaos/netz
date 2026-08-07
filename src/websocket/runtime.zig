@@ -963,7 +963,11 @@ pub const H2Server = struct {
 pub const H2ConnectOptions = struct {
     authority: ?[]const u8 = null,
     path: []const u8 = "/",
-    scheme: []const u8 = "https",
+    /// Optional RFC 8441 `:scheme`.  When omitted, the HTTP/2 runtime uses the
+    /// underlying connection's default (`http` for h2c, `https` for future TLS
+    /// h2 connections), matching how mature stacks derive `:scheme` from the
+    /// selected transport rather than hard-coding secure origins.
+    scheme: ?[]const u8 = null,
     protocols: []const []const u8 = &.{},
     extra_headers: []const http2.Hpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,

@@ -273,7 +273,9 @@ pub const Client = struct {
         try validateLocalLimits(limits);
         const stream = try address.connect(io, .{ .mode = .stream });
         errdefer stream.close(io);
-        return connectStream(allocator, io, stream, limits);
+        var connection = try connectStream(allocator, io, stream, limits);
+        connection.default_scheme = "http";
+        return connection;
     }
 
     pub fn connectHost(
@@ -291,6 +293,7 @@ pub const Client = struct {
         errdefer stream.close(io);
         var connection = try connectStream(allocator, io, stream, limits);
         connection.default_authority = owned_host;
+        connection.default_scheme = "http";
         return connection;
     }
 
@@ -337,6 +340,7 @@ pub const Client = struct {
         options.path = target;
         if (options.authority == null) options.authority = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host.bytes, uri.port orelse 80 });
         defer if (request_options.authority == null) allocator.free(options.authority.?);
+        if (options.scheme == null) options.scheme = uri.scheme;
         var upgraded = try connectStreamUpgrade(allocator, io, stream, limits, options);
         stream_owned = false;
         defer upgraded.deinit(allocator);
@@ -363,6 +367,7 @@ pub const Client = struct {
             .limits = limits,
             .awaiting_settings_ack = true,
             .next_client_stream_id = 3,
+            .default_scheme = "http",
         };
         connection.applyLocalLimits();
         errdefer connection.close();
@@ -467,6 +472,7 @@ pub const Client = struct {
         defer connection.close();
         var options = request_options;
         options.path = target;
+        if (options.scheme == null) options.scheme = uri.scheme;
         return connection.request(options);
     }
 };
@@ -544,6 +550,10 @@ pub const Connection = struct {
     peer_goaway_last_stream_id: ?u31 = null,
     local_goaway_last_stream_id: ?u31 = null,
     default_authority: ?[]u8 = null,
+    /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
+    /// runtime constructors set this to "http"; a future ALPN/TLS constructor
+    /// can set it to "https" without changing request call sites.
+    default_scheme: ?[]const u8 = null,
 
     pub fn close(self: *Connection) void {
         if (self.default_authority) |authority| self.allocator.free(authority);
@@ -562,6 +572,7 @@ pub const Connection = struct {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
         if (request_options.authority == null) request_options.authority = self.default_authority;
+        const scheme = request_options.scheme orelse self.default_scheme orelse "https";
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
@@ -573,7 +584,7 @@ pub const Connection = struct {
         try fields.append(self.allocator, .{ .name = ":method", .value = request_options.method });
         if (!method_is_connect or extended_connect) {
             try fields.append(self.allocator, .{ .name = ":path", .value = request_options.path });
-            try fields.append(self.allocator, .{ .name = ":scheme", .value = request_options.scheme });
+            try fields.append(self.allocator, .{ .name = ":scheme", .value = scheme });
         }
         if (request_options.protocol) |protocol| {
             if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
@@ -600,12 +611,13 @@ pub const Connection = struct {
         const protocol = request_options.protocol orelse return error.InvalidHeader;
         if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
         if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
+        const scheme = request_options.scheme orelse self.default_scheme orelse "https";
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
         try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
         try fields.append(self.allocator, .{ .name = ":path", .value = request_options.path });
-        try fields.append(self.allocator, .{ .name = ":scheme", .value = request_options.scheme });
+        try fields.append(self.allocator, .{ .name = ":scheme", .value = scheme });
         try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
         if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
         for (request_options.headers) |header| try fields.append(self.allocator, header);
@@ -1540,7 +1552,10 @@ pub const Connection = struct {
 pub const RequestOptions = struct {
     method: []const u8 = "GET",
     path: []const u8 = "/",
-    scheme: []const u8 = "https",
+    /// Optional request URI scheme for the `:scheme` pseudo-header.  When
+    /// omitted, the runtime uses the connection's transport-derived default
+    /// (`http` for the h2c helpers in this module, `https` for generic callers).
+    scheme: ?[]const u8 = null,
     /// RFC 8441 extended CONNECT `:protocol` pseudo-header.  Sending it
     /// requires the peer to advertise SETTINGS_ENABLE_CONNECT_PROTOCOL = 1.
     protocol: ?[]const u8 = null,
@@ -2571,6 +2586,7 @@ test "HTTP/2 client connects by host name" {
 
             var request = try connection.readRequest();
             defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("http", request.scheme);
             var expected_authority: [32]u8 = undefined;
             const rendered_authority = try std.fmt.bufPrint(&expected_authority, "localhost:{d}", .{server_ptr.address().ip4.port});
             try std.testing.expectEqualStrings(rendered_authority, request.authority.?);
@@ -2630,6 +2646,7 @@ test "HTTP/2 client sends request to URI" {
             var request = try connection.readRequest();
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("/h2-uri?x=1", request.path);
+            try std.testing.expectEqualStrings("http", request.scheme);
             var expected_authority: [32]u8 = undefined;
             const rendered_authority = try std.fmt.bufPrint(&expected_authority, "localhost:{d}", .{server_ptr.address().ip4.port});
             try std.testing.expectEqualStrings(rendered_authority, request.authority.?);
@@ -5508,7 +5525,7 @@ test "HTTP/2 runtime supports RFC 8441 extended CONNECT" {
                 shared.err = err;
                 return;
             };
-            std.testing.expectEqualStrings("https", request.scheme) catch |err| {
+            std.testing.expectEqualStrings("http", request.scheme) catch |err| {
                 shared.err = err;
                 return;
             };
@@ -5544,7 +5561,6 @@ test "HTTP/2 runtime supports RFC 8441 extended CONNECT" {
     var response = try client.request(.{
         .method = "CONNECT",
         .path = "/chat",
-        .scheme = "https",
         .authority = "example.com",
         .protocol = "websocket",
         .body = "client bytes",
@@ -5563,6 +5579,7 @@ test "HTTP/2 extended CONNECT requires peer opt-in" {
         .allocator = std.testing.allocator,
         .stream = undefined,
         .role = .client,
+        .default_scheme = "http",
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
@@ -5574,7 +5591,6 @@ test "HTTP/2 extended CONNECT requires peer opt-in" {
     try std.testing.expectError(error.ExtendedConnectDisabled, connection.request(.{
         .method = "CONNECT",
         .path = "/chat",
-        .scheme = "https",
         .authority = "example.com",
         .protocol = "websocket",
     }));

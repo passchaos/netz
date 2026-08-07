@@ -31,7 +31,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   status-forbidden response-body write rejection,
   traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body/Content-Length rules, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
-  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis,
+  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`,
   `http://` URI and host-name DNS connect helpers, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, and QPACK encoder/decoder critical stream registration with explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
@@ -123,7 +123,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   server helper, `ws://`/`wss://` URI and host-name DNS connect helpers with
   Host/port synthesis, TLS client transport shared with HTTP/1, and RFC 8441
   WebSocket-over-HTTP/2 adapters that negotiate `:protocol = websocket`,
-  subprotocols, and permessage-deflate over an h2 DATA tunnel
+  subprotocols, permessage-deflate, and transport-derived `:scheme` over an h2 DATA tunnel
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
   username/password payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
