@@ -2079,6 +2079,33 @@ pub const rtp = struct {
         };
     }
 
+    pub fn absoluteSendTimeFromUnixNanos(unix_time_ns: u64) u24 {
+        return @truncate(ntpTimeFromUnixNanos(unix_time_ns) >> 14);
+    }
+
+    pub fn estimateAbsoluteSendTimeUnixNanos(timestamp: u24, receive_unix_time_ns: u64) u64 {
+        const receive_ntp = ntpTimeFromUnixNanos(receive_unix_time_ns);
+        var ntp = (receive_ntp & 0xffff_ffc0_0000_0000) | (@as(u64, timestamp) << 14);
+        if (receive_ntp < ntp) ntp -%= @as(u64, 0x1_000000) << 14;
+        return unixNanosFromNtpTime(ntp);
+    }
+
+    pub fn ntpTimeFromUnixNanos(unix_time_ns: u64) u64 {
+        const ntp_epoch_offset_seconds: u64 = 2_208_988_800;
+        const seconds = unix_time_ns / std.time.ns_per_s + ntp_epoch_offset_seconds;
+        const fractional_ns = unix_time_ns % std.time.ns_per_s;
+        const fraction = (fractional_ns << 32) / std.time.ns_per_s;
+        return (seconds << 32) | fraction;
+    }
+
+    pub fn unixNanosFromNtpTime(ntp_time: u64) u64 {
+        const ntp_epoch_offset_seconds: u64 = 2_208_988_800;
+        const seconds = (ntp_time >> 32) - ntp_epoch_offset_seconds;
+        const fraction = ntp_time & 0xffff_ffff;
+        const fractional_ns = (fraction * std.time.ns_per_s) >> 32;
+        return seconds * std.time.ns_per_s + fractional_ns;
+    }
+
     pub fn audioLevel(elements: []const HeaderExtensionElement, id: u8) Error!?AudioLevelExtension {
         const value = findHeaderExtension(elements, id) orelse return null;
         if (value.len != 1) return error.InvalidRtpPacket;
@@ -7063,6 +7090,15 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqualStrings("m", rtp.findHeaderExtension(parsed_extensions, 1).?);
     try std.testing.expectEqual(@as(?u16, 0x1234), try rtp.transportWideSequenceNumber(parsed_extensions, 3));
     try std.testing.expectEqual(@as(?u24, 0x010203), try rtp.absoluteSendTime24(parsed_extensions, 4));
+    const send_ntp: u64 = 0xa0c65b1000100000;
+    const receive_ntp: u64 = 0xa0c65b1001000000;
+    const send_unix_ns = rtp.unixNanosFromNtpTime(send_ntp);
+    const receive_unix_ns = rtp.unixNanosFromNtpTime(receive_ntp);
+    const send_timestamp = rtp.absoluteSendTimeFromUnixNanos(send_unix_ns);
+    try std.testing.expectEqual(@as(u24, @truncate(rtp.ntpTimeFromUnixNanos(send_unix_ns) >> 14)), send_timestamp);
+    const estimated_unix_ns = rtp.estimateAbsoluteSendTimeUnixNanos(send_timestamp, receive_unix_ns);
+    const diff = if (estimated_unix_ns > send_unix_ns) estimated_unix_ns - send_unix_ns else send_unix_ns - estimated_unix_ns;
+    try std.testing.expect(diff <= 4 * std.time.ns_per_us);
     const parsed_audio_level = (try rtp.audioLevel(parsed_extensions, 5)).?;
     try std.testing.expect(parsed_audio_level.voice);
     try std.testing.expectEqual(@as(u7, 8), parsed_audio_level.level);
