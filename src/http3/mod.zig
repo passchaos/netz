@@ -28,6 +28,8 @@ pub const Error = wire.Error || error{
     QpackDynamicTableUnsupported,
 } || std.mem.Allocator.Error;
 
+pub const max_settings_payload_size: usize = 256;
+
 pub const FrameType = struct {
     pub const data: u64 = 0x00;
     pub const headers: u64 = 0x01;
@@ -551,6 +553,7 @@ fn parseSingleVarintPayload(payload: []const u8) Error!u64 {
 }
 
 pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]Setting {
+    if (payload.len > max_settings_payload_size) return error.InvalidSetting;
     var cursor = wire.Cursor.init(payload);
     var settings: std.ArrayList(Setting) = .empty;
     errdefer settings.deinit(allocator);
@@ -1745,6 +1748,11 @@ test "HTTP/3 control stream enforces SETTINGS first and GOAWAY monotonicity" {
         .{ .id = @intFromEnum(SettingId.h3_datagram), .value = 1 },
     }));
     try std.testing.expectError(error.InvalidSetting, writeSettings(&bad_settings, allocator, &[_]Setting{.{ .id = 0x04, .value = 0 }}));
+
+    var excessive_settings: std.ArrayList(u8) = .empty;
+    defer excessive_settings.deinit(allocator);
+    try excessive_settings.appendNTimes(allocator, 0, max_settings_payload_size + 1);
+    try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, excessive_settings.items));
 
     var duplicate_settings = ControlState{};
     var duplicate: std.ArrayList(u8) = .empty;
