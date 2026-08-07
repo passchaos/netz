@@ -4209,6 +4209,33 @@ pub const rtcp = struct {
             return twccReferenceTimeToMicros(self.reference_time_64ms);
         }
 
+        pub fn arrivalTimeMicrosForIndex(self: TransportWideCc, packet_index: usize) ?u64 {
+            if (packet_index >= self.packets.len) return null;
+            if (self.packets[packet_index].status == .not_received or self.packets[packet_index].status == .received_without_delta) return null;
+            var arrival_micros = self.referenceTimeMicros();
+            for (self.packets[0 .. packet_index + 1]) |packet| {
+                switch (packet.status) {
+                    .small_delta, .large_delta => {
+                        const delta_micros = packet.deltaMicros();
+                        if (delta_micros >= 0) {
+                            arrival_micros +|= @intCast(delta_micros);
+                        } else {
+                            arrival_micros -|= @intCast(-delta_micros);
+                        }
+                    },
+                    .received_without_delta => return null,
+                    .not_received => {},
+                }
+            }
+            return arrival_micros;
+        }
+
+        pub fn arrivalTimeMicrosForSequence(self: TransportWideCc, sequence_number: u16) ?u64 {
+            const delta = sequence_number -% self.base_sequence_number;
+            if (delta >= self.packets.len) return null;
+            return self.arrivalTimeMicrosForIndex(delta);
+        }
+
         pub fn deinit(self: *TransportWideCc, allocator: std.mem.Allocator) void {
             allocator.free(self.packets);
             self.* = undefined;
@@ -9912,6 +9939,29 @@ test "RTCP transport-wide congestion feedback" {
     try std.testing.expectEqual(rtcp.TwccPacketStatus.not_received, parsed.packet.transport_wide_cc.packetForSequence(501).?.status);
     try std.testing.expectEqual(@as(i16, -3), parsed.packet.transport_wide_cc.packetForSequence(502).?.delta_ticks);
     try std.testing.expect(parsed.packet.transport_wide_cc.packetForSequence(505) == null);
+    try std.testing.expectEqual(parsed.packet.transport_wide_cc.referenceTimeMicros() + 1000, parsed.packet.transport_wide_cc.arrivalTimeMicrosForSequence(500).?);
+    try std.testing.expect(parsed.packet.transport_wide_cc.arrivalTimeMicrosForSequence(501) == null);
+    try std.testing.expectEqual(parsed.packet.transport_wide_cc.referenceTimeMicros() + 250, parsed.packet.transport_wide_cc.arrivalTimeMicrosForSequence(502).?);
+    try std.testing.expect(parsed.packet.transport_wide_cc.arrivalTimeMicrosForSequence(503) == null);
+    try std.testing.expect(parsed.packet.transport_wide_cc.arrivalTimeMicrosForIndex(4) == null);
+    try std.testing.expect(parsed.packet.transport_wide_cc.arrivalTimeMicrosForIndex(5) == null);
+
+    var continuous_packets = [_]rtcp.TwccPacketResult{
+        .{ .status = .small_delta, .delta_ticks = 4 },
+        .{ .status = .not_received },
+        .{ .status = .large_delta, .delta_ticks = -3 },
+        .{ .status = .small_delta, .delta_ticks = 1 },
+    };
+    const continuous_twcc = rtcp.TransportWideCc{
+        .sender_ssrc = 1,
+        .media_ssrc = 2,
+        .base_sequence_number = 10,
+        .reference_time_64ms = 3,
+        .feedback_packet_count = 0,
+        .packets = &continuous_packets,
+    };
+    try std.testing.expectEqual(continuous_twcc.referenceTimeMicros() + 500, continuous_twcc.arrivalTimeMicrosForIndex(3).?);
+    try std.testing.expectEqual(continuous_twcc.referenceTimeMicros() + 250, continuous_twcc.arrivalTimeMicrosForSequence(12).?);
     // Mixed packet statuses should be serialized as a compact status-vector
     // chunk rather than as five tiny run-length chunks; this is the wire shape
     // Pion's TWCC support and browser stacks commonly exchange.
