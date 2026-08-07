@@ -785,6 +785,7 @@ pub const sdp = struct {
         clock_rate: u32,
         channels: u16 = 0,
         fmtp: []const u8 = "",
+        apt: ?u8 = null,
         rtcp_feedback: []RtcpFeedback = &.{},
 
         pub fn deinit(self: *RtpCodec, allocator: std.mem.Allocator) void {
@@ -1199,7 +1200,10 @@ pub const sdp = struct {
             else
                 staticRtpCodec(payload_type) orelse return error.InvalidSdp;
             errdefer codec.deinit(allocator);
-            if (findPayloadAttribute(media.attributes, "fmtp", payload_type)) |fmtp| codec.fmtp = fmtp;
+            if (findPayloadAttribute(media.attributes, "fmtp", payload_type)) |fmtp| {
+                codec.fmtp = fmtp;
+                codec.apt = parseFmtpApt(fmtp);
+            }
             codec.rtcp_feedback = try collectRtcpFeedback(allocator, media.attributes, payload_type);
             try codecs.append(allocator, codec);
             codec.rtcp_feedback = &.{};
@@ -1403,6 +1407,16 @@ pub const sdp = struct {
             try feedback.append(allocator, .{ .typ = typ, .parameter = std.mem.trim(u8, parameter, " \t") });
         }
         return feedback.toOwnedSlice(allocator);
+    }
+
+    fn parseFmtpApt(fmtp: []const u8) ?u8 {
+        var params = std.mem.splitScalar(u8, fmtp, ';');
+        while (params.next()) |raw_param| {
+            const param = std.mem.trim(u8, raw_param, " \t");
+            if (!std.mem.startsWith(u8, param, "apt=")) continue;
+            return std.fmt.parseInt(u8, param["apt=".len..], 10) catch null;
+        }
+        return null;
     }
 
     fn parseRidAttribute(raw: []const u8) Error!Rid {
@@ -5094,6 +5108,26 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("ccm", codecs[0].rtcp_feedback[1].typ);
     try std.testing.expectEqualStrings("fir", codecs[0].rtcp_feedback[1].parameter);
     try std.testing.expectEqualStrings("nack", codecs[0].rtcp_feedback[2].typ);
+
+    const rtx_codec_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n" ++
+        "a=rtpmap:96 VP8/90000\r\n" ++
+        "a=rtcp-fb:96 nack pli\r\n" ++
+        "a=rtpmap:97 rtx/90000\r\n" ++
+        "a=fmtp:97 apt=96;rtx-time=3000\r\n";
+    var rtx_codec_session = try sdp.parse(allocator, rtx_codec_text);
+    defer rtx_codec_session.deinit(allocator);
+    const rtx_codecs = try sdp.extractRtpCodecs(allocator, rtx_codec_session.media[0]);
+    defer sdp.freeRtpCodecs(allocator, rtx_codecs);
+    try std.testing.expectEqual(@as(usize, 2), rtx_codecs.len);
+    try std.testing.expectEqualStrings("VP8", rtx_codecs[0].mime_type);
+    try std.testing.expectEqual(@as(?u8, null), rtx_codecs[0].apt);
+    try std.testing.expectEqualStrings("rtx", rtx_codecs[1].mime_type);
+    try std.testing.expectEqual(@as(?u8, 96), rtx_codecs[1].apt);
+    try std.testing.expectEqualStrings("apt=96;rtx-time=3000", rtx_codecs[1].fmtp);
 
     const static_codec_text =
         "v=0\r\n" ++
