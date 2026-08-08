@@ -200,6 +200,8 @@ pub const Client = struct {
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(options.topic_alias_maximum),
+            .peer_maximum_qos = options.peer_maximum_qos,
+            .peer_retain_available = options.peer_retain_available,
         };
         errdefer connection.close();
 
@@ -256,6 +258,9 @@ pub const ConnectOptions = struct {
     client_id: []const u8,
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,
+    /// Baseline broker publish capabilities to enforce when MQTT 5 CONNACK
+    /// omits the corresponding Maximum QoS / Retain Available properties.
+    /// Explicit CONNACK properties still take precedence after negotiation.
     peer_maximum_qos: mqtt.QoS = .exactly_once,
     peer_retain_available: bool = true,
     properties: []const mqtt.Property = &.{},
@@ -1497,6 +1502,58 @@ test "MQTT connection enforces peer publish capabilities" {
         .packet_id = null,
         .payload = "ok",
     });
+}
+
+test "MQTT client applies configured peer publish defaults" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_packet_size = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var accepted = try server_ptr.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(server_ptr.allocator);
+
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(u8, 0), disconnect.disconnect.reason_code);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .protocol = .v5,
+        .client_id = "peer-default-client",
+        .limits = .{ .max_packet_size = 4096 },
+        .peer_maximum_qos = .at_most_once,
+        .peer_retain_available = false,
+    });
+    defer client.close();
+
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, client.peer_maximum_qos);
+    try std.testing.expect(!client.peer_retain_available);
+    try std.testing.expectError(error.InvalidQoS, client.publish("peer/defaults", "qos1", .{ .qos = .at_least_once }));
+    try std.testing.expectError(error.InvalidProperty, client.publish("peer/defaults", "retain", .{ .retain = true }));
+    try client.disconnect(0);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "MQTT runtime surfaces negative publish acknowledgements" {
