@@ -624,6 +624,10 @@ pub const ice = struct {
         prflx,
         relay,
 
+        pub fn string(self: CandidateType) []const u8 {
+            return @tagName(self);
+        }
+
         pub fn preference(self: CandidateType) u8 {
             return candidateTypePreference(self);
         }
@@ -718,7 +722,7 @@ pub const ice = struct {
                 .priority = std.fmt.parseInt(u32, priority_s, 10) catch return error.InvalidIceCandidate,
                 .address = address,
                 .port = std.fmt.parseInt(u16, port_s, 10) catch return error.InvalidIceCandidate,
-                .candidate_type = parseCandidateType(typ_s) orelse return error.UnknownIceCandidateType,
+                .candidate_type = candidateTypeFromString(typ_s) orelse return error.UnknownIceCandidateType,
             };
 
             var ext_pos: usize = 0;
@@ -930,7 +934,7 @@ pub const ice = struct {
         };
     }
 
-    fn parseCandidateType(value: []const u8) ?CandidateType {
+    pub fn candidateTypeFromString(value: []const u8) ?CandidateType {
         inline for (std.meta.fields(CandidateType)) |field| {
             if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
         }
@@ -9683,6 +9687,9 @@ test "ICE candidate parser and SDP parser" {
     const line = "candidate:1 1 UDP 2130706431 192.0.2.1 54400 typ host";
     const candidate = try ice.Candidate.parse(line);
     try std.testing.expectEqual(ice.CandidateType.host, candidate.candidate_type);
+    try std.testing.expectEqualStrings("host", candidate.candidate_type.string());
+    try std.testing.expectEqual(ice.CandidateType.srflx, ice.candidateTypeFromString("srflx").?);
+    try std.testing.expect(ice.candidateTypeFromString("SRFLX") == null);
     try std.testing.expectEqual(@as(u16, 54400), candidate.port);
     try std.testing.expectEqual(@as(u8, 126), candidate.candidate_type.preference());
     try std.testing.expectEqual(@as(u32, 2_130_706_431), try candidate.computedPriority(.{}));
