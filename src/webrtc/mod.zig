@@ -929,7 +929,8 @@ pub const ice = struct {
             return candidatePriority(self.candidate_type, @intCast(self.component), effective);
         }
 
-        pub fn write(self: Candidate, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+        pub fn write(self: Candidate, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+            try self.validateForWrite();
             try list.appendSlice(allocator, "candidate:");
             try list.appendSlice(allocator, self.foundation);
             try appendFmt(list, allocator, " {} {s} {} {s} {} typ {s}", .{
@@ -951,6 +952,23 @@ pub const ice = struct {
             }
             for (self.extensions) |extension| {
                 try appendFmt(list, allocator, " {s} {s}", .{ extension.key, extension.value });
+            }
+        }
+
+        fn validateForWrite(self: Candidate) Error!void {
+            try validateIceFoundation(self.foundation);
+            try validateCandidateAddress(self.address);
+            if (self.related_address) |addr| try validateCandidateAddress(addr);
+            if (self.related_port != null and self.related_address == null) return error.InvalidIceCandidate;
+            if (self.tcp_type) |tcp| {
+                if (!validTcpType(tcp)) return error.InvalidIceCandidate;
+            }
+            for (self.extensions) |extension| {
+                try validateCandidateByteString(extension.key);
+                try validateCandidateExtensionByteString(extension.value);
+                if (std.mem.eql(u8, extension.key, "raddr") or
+                    std.mem.eql(u8, extension.key, "rport") or
+                    std.mem.eql(u8, extension.key, "tcptype")) return error.InvalidIceCandidate;
             }
         }
     };
@@ -2204,10 +2222,7 @@ pub const sdp = struct {
     pub fn formatCandidateAttribute(allocator: std.mem.Allocator, candidate: ice.Candidate) Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
-        candidate.write(&out, allocator) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.OutOfMemory,
-        };
+        try candidate.write(&out, allocator);
         return out.toOwnedSlice(allocator);
     }
 
@@ -2216,10 +2231,7 @@ pub const sdp = struct {
         errdefer out.deinit(allocator);
         try out.append(allocator, 'a');
         try out.append(allocator, '=');
-        candidate.write(&out, allocator) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.OutOfMemory,
-        };
+        try candidate.write(&out, allocator);
         try out.appendSlice(allocator, "\r\n");
         return out.toOwnedSlice(allocator);
     }
@@ -9627,9 +9639,9 @@ pub const sctp = struct {
 
 pub const magic_cookie = stun.magic_cookie;
 
-fn appendFmt(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
-    var tmp: [256]u8 = undefined;
-    const rendered = try std.fmt.bufPrint(&tmp, fmt, args);
+fn appendFmt(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!void {
+    const rendered = try std.fmt.allocPrint(allocator, fmt, args);
+    defer allocator.free(rendered);
     try list.appendSlice(allocator, rendered);
 }
 
