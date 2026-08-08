@@ -1089,7 +1089,6 @@ pub const Frame = union(enum) {
                 try list.appendSlice(allocator, crypto.data);
             },
             .stream => |stream| {
-                try validateStreamFramePayload(stream);
                 try validateEndOffset(stream.offset, stream.data.len);
                 var frame_type: u64 = @intFromEnum(FrameType.stream) | 0x02; // always include Length for unambiguous composition.
                 if (stream.offset != 0) frame_type |= 0x04;
@@ -1459,7 +1458,6 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
             .fin = (frame_type & 0x01) != 0,
             .data = try cursor.readSlice(len),
         };
-        try validateStreamFramePayload(stream);
         return .{ .stream = stream };
     }
 
@@ -1616,14 +1614,6 @@ fn validateEndOffset(offset: u64, data_len: usize) Error!void {
     const data_len_u64 = std.math.cast(u64, data_len) orelse return error.InvalidFrameLength;
     const end = std.math.add(u64, offset, data_len_u64) catch return error.InvalidFrameLength;
     if (end > varint.max_value) return error.InvalidFrameLength;
-}
-
-fn validateStreamFramePayload(stream: StreamFrame) Error!void {
-    // A zero-length STREAM without FIN has no stream-data or final-size effect.
-    // Production send paths (tquic/quic-zig) avoid emitting it; rejecting it at
-    // the codec boundary keeps packet composition from carrying ambiguous
-    // no-op STREAM frames that are better represented as PADDING/PING.
-    if (stream.data.len == 0 and !stream.fin) return error.InvalidFrame;
 }
 
 fn validateFrameTypeEncoding(frame_type: u64, encoded_len: u8) Error!void {
@@ -2301,25 +2291,31 @@ test "QUIC frame type uses shortest varint encoding" {
     try std.testing.expect(ping.frame == .ping);
 }
 
-test "QUIC STREAM frame rejects empty non-FIN no-ops" {
+test "QUIC STREAM frame permits empty non-FIN frames" {
     const allocator = std.testing.allocator;
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
 
-    try std.testing.expectError(error.InvalidFrame, (Frame{ .stream = .{
+    try (Frame{ .stream = .{
         .stream_id = 0,
         .data = &.{},
         .fin = false,
-    } }).write(&encoded, allocator));
+    } }).write(&encoded, allocator);
+    var parsed = try parseFrame(encoded.items);
+    try std.testing.expect(!parsed.frame.stream.fin);
+    try std.testing.expectEqual(@as(usize, 0), parsed.frame.stream.data.len);
 
+    encoded.clearRetainingCapacity();
     try varint.encode(&encoded, allocator, @intFromEnum(FrameType.stream) | 0x02);
     try varint.encode(&encoded, allocator, 0);
     try varint.encode(&encoded, allocator, 0);
-    try std.testing.expectError(error.InvalidFrame, parseFrame(encoded.items));
+    parsed = try parseFrame(encoded.items);
+    try std.testing.expect(!parsed.frame.stream.fin);
+    try std.testing.expectEqual(@as(usize, 0), parsed.frame.stream.data.len);
 
     encoded.clearRetainingCapacity();
     try (Frame{ .stream = .{ .stream_id = 0, .data = &.{}, .fin = true } }).write(&encoded, allocator);
-    const parsed = try parseFrame(encoded.items);
+    parsed = try parseFrame(encoded.items);
     try std.testing.expect(parsed.frame.stream.fin);
     try std.testing.expectEqual(@as(usize, 0), parsed.frame.stream.data.len);
 }
