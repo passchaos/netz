@@ -1181,12 +1181,13 @@ pub const Connection = struct {
 
     pub fn receivePacketAt(self: *Connection, now_ns: ?u64) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        var packet = try receiveWithKeyUpdate(
-            self.endpoint,
-            self.receive_key_phase.keyUpdateKeys(),
+        var datagram = try self.endpoint.receiveBytes();
+        defer datagram.deinit(self.endpoint.allocator);
+        var packet = try self.openReceivedBytesWithFrameClose(
+            datagram.from,
+            datagram.bytes,
             self.config.local_connection_id.len,
-            self.expected_packet_number,
-            self.config.max_frames_per_packet,
+            now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFramesForDestination(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
@@ -1226,14 +1227,11 @@ pub const Connection = struct {
 
     pub fn receiveRoutedDatagramAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        var packet = try openReceivedBytesWithKeyUpdate(
-            self.endpoint,
+        var packet = try self.openReceivedBytesWithFrameClose(
             routed.datagram.from,
             routed.datagram.bytes,
-            self.receive_key_phase.keyUpdateKeys(),
             routed.destination_connection_id.len,
-            self.expected_packet_number,
-            self.config.max_frames_per_packet,
+            now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFramesForDestination(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
@@ -1246,14 +1244,11 @@ pub const Connection = struct {
 
     pub fn receiveRoutedDatagramWithEcnAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        var packet = try openReceivedBytesWithKeyUpdate(
-            self.endpoint,
+        var packet = try self.openReceivedBytesWithFrameClose(
             routed.datagram.from,
             routed.datagram.bytes,
-            self.receive_key_phase.keyUpdateKeys(),
             routed.destination_connection_id.len,
-            self.expected_packet_number,
-            self.config.max_frames_per_packet,
+            now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFramesForDestination(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
@@ -1262,6 +1257,40 @@ pub const Connection = struct {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
         }
         return packet;
+    }
+
+    fn openReceivedBytesWithFrameClose(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []const u8,
+        destination_connection_id_len: usize,
+        now_ns: ?u64,
+    ) Error!ReceivedPacket {
+        var decoded = try quic.protection.openShortPacketWithKeyUpdate(
+            self.endpoint.allocator,
+            self.receive_key_phase.keyUpdateKeys(),
+            bytes,
+            destination_connection_id_len,
+            self.expected_packet_number,
+        );
+        errdefer decoded.deinit(self.endpoint.allocator);
+
+        if (try quic.classifyFramePayloadCloseError(self.endpoint.allocator, decoded.packet.payload, .one_rtt)) |close| {
+            try self.closeTransportAt(@intFromEnum(close.code), close.frame_type, close.reason_phrase, nsToMs(now_ns), null);
+            return error.InvalidFrame;
+        }
+
+        const frames = try parsePacketFramesForType(self.endpoint, decoded.packet.payload, self.config.max_frames_per_packet, .one_rtt);
+        errdefer {
+            quic.deinitOwnedFrameSlice(frames, self.endpoint.allocator);
+            self.endpoint.allocator.free(frames);
+        }
+        return .{
+            .from = from,
+            .packet = decoded.packet,
+            .frames = frames,
+            .peer_initiated_key_update = decoded.peer_initiated_key_update,
+        };
     }
 
     fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!void {
@@ -1954,6 +1983,11 @@ fn closeExpiryMillis(now_ms: ?u64, pto_ms: ?u64) ?u64 {
     const pto = pto_ms orelse return null;
     const duration = std.math.mul(u64, pto, 3) catch return std.math.maxInt(u64);
     return std.math.add(u64, now, duration) catch std.math.maxInt(u64);
+}
+
+fn nsToMs(now_ns: ?u64) ?u64 {
+    const ns = now_ns orelse return null;
+    return ns / 1_000_000;
 }
 
 pub fn sendFrames(
@@ -2989,6 +3023,52 @@ test "QUIC 1-RTT draining state drops subsequent packets" {
     try std.testing.expect(connection.draining());
     try std.testing.expectError(error.ConnectionClosed, connection.receivePacket());
     try std.testing.expect((try connection.receivePacketOrDropAfterClose()) == null);
+}
+
+test "QUIC 1-RTT receive closes on frame payload errors" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const server_cid = [_]u8{ 0x35, 0x36, 0x37, 0x38 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0xb4} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0xb5} ** quic.protection.secret_len);
+
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try sendPayload(&client_endpoint, server_endpoint.address(), client_keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .payload = &.{0x21},
+    });
+
+    try std.testing.expectError(error.InvalidFrame, server.receivePacketAt(1_000_000));
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.frame_encoding_error), server.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, 0x21), server.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("frame encoding", server.close_info.?.reason_phrase);
+
+    var close_packet = try receive(&client_endpoint, server_keys, client_cid.len, 0, 8);
+    defer close_packet.deinit(allocator);
+    try std.testing.expectEqual(quic.Frame.connection_close, std.meta.activeTag(close_packet.frames[0]));
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.frame_encoding_error), close_packet.frames[0].connection_close.error_code);
+    try std.testing.expectEqual(@as(u64, 0x21), close_packet.frames[0].connection_close.frame_type);
 }
 
 test "QUIC 1-RTT connection models idle timeout deadlines" {
