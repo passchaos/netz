@@ -1,8 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const wire = @import("../internal/wire.zig");
 const http1 = @import("../http1/mod.zig");
 
 pub const runtime = @import("runtime.zig");
+
+const backend_supports_vectors = switch (builtin.zig_backend) {
+    .stage2_llvm, .stage2_c => true,
+    else => false,
+};
+
 pub const handshake_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub const Error = error{
@@ -401,8 +408,40 @@ fn validateOutgoingFrame(
 }
 
 pub fn applyMask(payload: []u8, mask_key: [4]u8, offset: usize) void {
-    for (payload, 0..) |*byte, i| {
-        byte.* ^= mask_key[(offset + i) & 3];
+    if (payload.len == 0) return;
+    const rotated = rotatedMask(mask_key, offset);
+    var data = payload;
+
+    if (comptime backend_supports_vectors) {
+        const vector_size = std.simd.suggestVectorLength(u8) orelse @sizeOf(usize);
+        if (data.len >= vector_size) {
+            const mask_vector = std.simd.repeat(vector_size, @as(@Vector(4, u8), rotated));
+            while (data.len >= vector_size) {
+                const slice = data[0..vector_size];
+                const in: @Vector(vector_size, u8) = slice.*;
+                slice.* = in ^ mask_vector;
+                data = data[vector_size..];
+            }
+        }
+    }
+
+    applyMaskScalar(data, rotated);
+}
+
+fn rotatedMask(mask_key: [4]u8, offset: usize) [4]u8 {
+    const start = offset & 3;
+    return .{
+        mask_key[start],
+        mask_key[(start + 1) & 3],
+        mask_key[(start + 2) & 3],
+        mask_key[(start + 3) & 3],
+    };
+}
+
+fn applyMaskScalar(payload: []u8, mask_key: [4]u8) void {
+    @setRuntimeSafety(false);
+    for (payload, 0..) |byte, i| {
+        payload[i] = byte ^ mask_key[i & 3];
     }
 }
 
@@ -751,6 +790,20 @@ test "WebSocket frame masked roundtrip" {
     defer frame.deinit(allocator);
     try std.testing.expectEqual(Opcode.text, frame.header.opcode);
     try std.testing.expectEqualStrings("Hello", frame.payload);
+
+    var payload = [_]u8{
+        0, 1, 2, 3, 4, 5, 6, 7,
+        8, 9, 10, 11, 12, 13, 14, 15,
+        16, 17, 18, 19, 20, 21, 22, 23,
+        24, 25, 26, 27, 28, 29, 30, 31,
+        32, 33, 34,
+    };
+    var expected = payload;
+    const mask_key = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const offset = 3;
+    for (&expected, 0..) |*byte, i| byte.* ^= mask_key[(offset + i) & 3];
+    applyMask(&payload, mask_key, offset);
+    try std.testing.expectEqualSlices(u8, &expected, &payload);
 }
 
 test "WebSocket handshake validation" {
