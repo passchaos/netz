@@ -1436,7 +1436,7 @@ fn writeResponseToTransport(allocator: std.mem.Allocator, transport: RuntimeTran
         options.body.len,
         options.trailers,
         use_chunked,
-        !http1.statusCodeForbidsBody(options.status),
+        responseShouldDefaultContentLength(options.status, options.request_method),
         &len_buf,
         &trailer_value,
     );
@@ -1620,6 +1620,18 @@ fn responseWriteSuppressesBody(status: u16, request_method: ?http1.Method) bool 
         if (method == .CONNECT and status >= 200 and status < 300) return true;
     }
     return false;
+}
+
+fn responseShouldDefaultContentLength(status: u16, request_method: ?http1.Method) bool {
+    if (http1.statusCodeForbidsBody(status)) return false;
+    if (request_method) |method| {
+        // Hyper/h1 never emits Content-Length or Transfer-Encoding on a
+        // successful CONNECT response: the byte stream after CRLFCRLF is the
+        // tunnel, not an HTTP response body.  Do not synthesize CL: 0 here,
+        // because some intermediaries treat it as conflicting framing.
+        if (method == .CONNECT and status >= 200 and status < 300) return false;
+    }
+    return true;
 }
 
 fn chunkedWriteFraming(version: http1.Version, headers: []const http1.Header, trailers: []const http1.Header) Error!bool {
@@ -3980,6 +3992,43 @@ test "HTTP/1 runtime validates outbound request and response framing before writ
         .headers = &.{.{ .name = "Content-Length", .value = "0" }},
         .request_method = .CONNECT,
     }));
+
+    try std.testing.expect(!responseShouldDefaultContentLength(200, .CONNECT));
+    try std.testing.expect(responseShouldDefaultContentLength(400, .CONNECT));
+    try std.testing.expect(!responseShouldDefaultContentLength(204, null));
+
+    var connect_headers: std.ArrayList(http1.Header) = .empty;
+    defer connect_headers.deinit(allocator);
+    var len_buf: [32]u8 = undefined;
+    var trailer_value: std.ArrayList(u8) = .empty;
+    defer trailer_value.deinit(allocator);
+    try appendDefaultedHeaders(
+        &connect_headers,
+        allocator,
+        &.{},
+        0,
+        &.{},
+        false,
+        responseShouldDefaultContentLength(200, .CONNECT),
+        &len_buf,
+        &trailer_value,
+    );
+    try std.testing.expect(!hasHeader(connect_headers.items, "content-length"));
+
+    var ok_headers: std.ArrayList(http1.Header) = .empty;
+    defer ok_headers.deinit(allocator);
+    try appendDefaultedHeaders(
+        &ok_headers,
+        allocator,
+        &.{},
+        0,
+        &.{},
+        false,
+        responseShouldDefaultContentLength(200, .GET),
+        &len_buf,
+        &trailer_value,
+    );
+    try std.testing.expectEqualStrings("0", wire.findHeader(ok_headers.items, "content-length").?);
 }
 
 test "HTTP/1 runtime target length rejects ambiguous head framing" {
