@@ -2239,6 +2239,7 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
             for (status) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
             const parsed_status = std.fmt.parseInt(u16, status, 10) catch return error.InvalidStatus;
             if (parsed_status < 100) return error.InvalidStatus;
+            if (parsed_status == 101) return error.InvalidStatus;
         },
         .request_trailers, .response_trailers => {},
     }
@@ -2503,7 +2504,7 @@ fn validateDeclaredResponseLength(
 }
 
 fn informationalResponseToSkip(status: u16) bool {
-    return statusIsInformational(status);
+    return statusIsInformational(status) and status != 101;
 }
 
 fn statusIsInformational(status: u16) bool {
@@ -4418,10 +4419,6 @@ test "HTTP/2 client skips informational responses before final response" {
             try std.testing.expectEqualStrings("/interim-h2", request.path);
 
             try connection.writeInformationalResponse(request.stream_id, 103, &.{.{ .name = "link", .value = "</style.css>; rel=preload" }});
-            // h2 treats every 1xx status as informational.  HTTP/2 should not
-            // switch protocols on 101 like HTTP/1.1; the client keeps waiting
-            // for the final response HEADERS on the same stream.
-            try connection.writeInformationalResponse(request.stream_id, 101, &.{});
             try connection.writeResponse(request.stream_id, .{ .body = "final" });
         }
     };
@@ -4447,6 +4444,67 @@ test "HTTP/2 client skips informational responses before final response" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("final", response.body);
+}
+
+test "HTTP/2 client rejects 101 switching protocols response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/bad-101-h2", request.path);
+
+            // RFC 9113 has no 101 upgrade path; HTTP/2 peers must use extended
+            // CONNECT instead.  Send raw HEADERS so this remains a receive-path
+            // regression even if the writer helper rejects 101 in the future.
+            try connection.writeHeaders(request.stream_id, &.{
+                .{ .name = ":status", .value = "101" },
+            }, false);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.InvalidStatus, client.request(.{
+        .method = "GET",
+        .path = "/bad-101-h2",
+        .authority = "localhost",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 client rejects END_STREAM on informational response" {
@@ -5409,6 +5467,11 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = ":status", .value = "099" },
     };
     try std.testing.expectError(error.InvalidStatus, validateHeaderBlock(&low_status, .response));
+
+    const switching_protocols = [_]http2.Hpack.HeaderField{
+        .{ .name = ":status", .value = "101" },
+    };
+    try std.testing.expectError(error.InvalidStatus, validateHeaderBlock(&switching_protocols, .response));
 
     const connection_header = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "GET" },
