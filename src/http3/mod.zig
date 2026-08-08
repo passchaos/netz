@@ -1649,6 +1649,7 @@ fn validateHeaderBlock(headers: []const Qpack.HeaderField, kind: HeaderBlockKind
                         for (header.value) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
                         const parsed_status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
                         if (parsed_status < 100) return error.InvalidStatus;
+                        if (parsed_status == 101) return error.InvalidStatus;
                     }
                 },
                 .trailers => return error.InvalidHeader,
@@ -2442,6 +2443,15 @@ test "HTTP/3 message rejects bad frame order and content length" {
     header_block.clearRetainingCapacity();
     try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "20x" }});
     try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&malformed_status, allocator);
+    try std.testing.expectError(error.InvalidStatus, decodeResponse(allocator, malformed_status.items));
+
+    malformed_status.clearRetainingCapacity();
+    header_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&header_block, allocator, &.{.{ .name = ":status", .value = "101" }});
+    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&malformed_status, allocator);
+    // HTTP/3 has no HTTP/1.1 Upgrade/Switching Protocols path.  Reject 101 at
+    // the header-validation boundary instead of silently treating it as a
+    // skippable informational response.
     try std.testing.expectError(error.InvalidStatus, decodeResponse(allocator, malformed_status.items));
 
     var informational_response: std.ArrayList(u8) = .empty;
