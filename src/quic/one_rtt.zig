@@ -1519,6 +1519,7 @@ pub const Connection = struct {
             error.DuplicateResetToken => connectionIdFrameClose(frames, .protocol_violation, "reset token reuse"),
             error.ActiveConnectionIdLimit => connectionIdFrameClose(frames, .connection_id_limit_error, "connection id limit"),
             error.InvalidConnectionId, error.UnknownConnectionId => retireConnectionIdFrameClose(frames),
+            error.AckFrequencyDisabled => ackFrequencyFrameClose(frames),
             else => null,
         };
     }
@@ -1531,6 +1532,14 @@ pub const Connection = struct {
     fn ackFrameClose(frames: []const quic.Frame) ?quic.FramePayloadCloseError {
         for (frames) |frame| {
             if (frame == .ack) return semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.ack), "ack");
+        }
+        return null;
+    }
+
+    fn ackFrequencyFrameClose(frames: []const quic.Frame) ?quic.FramePayloadCloseError {
+        for (frames) |frame| {
+            if (frame == .ack_frequency) return semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.ack_frequency), "ack frequency");
+            if (frame == .immediate_ack) return semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.immediate_ack), "immediate ack");
         }
         return null;
     }
@@ -6049,4 +6058,36 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
         .frames = &[_]quic.Frame{.{ .immediate_ack = {} }},
     });
     try std.testing.expectError(error.AckFrequencyDisabled, disabled.receivePacket());
+    try std.testing.expect(disabled.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), disabled.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.immediate_ack)), disabled.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("immediate ack", disabled.close_info.?.reason_phrase);
+
+    var disabled2_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer disabled2_endpoint.deinit();
+    const disabled2_cid = [_]u8{ 0xf9, 0xfa, 0xfb, 0xfc };
+    var disabled2 = try Connection.init(&disabled2_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &disabled2_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer disabled2.deinit();
+    try sendFrames(&client_endpoint, disabled2_endpoint.address(), keys, .{
+        .destination_connection_id = &disabled2_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .ack_frequency = .{
+            .sequence_number = 0,
+            .ack_eliciting_threshold = 2,
+            .request_max_ack_delay = 10,
+            .reordering_threshold = 2,
+        } }},
+    });
+    try std.testing.expectError(error.AckFrequencyDisabled, disabled2.receivePacket());
+    try std.testing.expect(disabled2.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), disabled2.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.ack_frequency)), disabled2.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("ack frequency", disabled2.close_info.?.reason_phrase);
 }
