@@ -3148,6 +3148,18 @@ pub const sdp = struct {
         return findCodecByPayloadType(codecs, apt);
     }
 
+    pub fn rtxPayloadTypeForPrimary(codecs: []const RtpCodec, primary_payload_type: u8) ?u8 {
+        for (codecs) |codec| {
+            if (!std.ascii.eqlIgnoreCase(codec.mime_type, "video/rtx")) continue;
+            if (codec.apt != null and codec.apt.? == primary_payload_type) return codec.payload_type;
+        }
+        return null;
+    }
+
+    pub fn rtxPrimaryPayloadExists(codecs: []const RtpCodec, rtx: RtpCodec) bool {
+        return rtxAssociatedCodec(codecs, rtx) != null;
+    }
+
     pub fn extractRids(allocator: std.mem.Allocator, media: Media) Error![]Rid {
         var rids: std.ArrayList(Rid) = .empty;
         errdefer rids.deinit(allocator);
@@ -10727,6 +10739,9 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const associated_vp8 = sdp.rtxAssociatedCodec(rtx_codecs, rtx_codecs[1]).?;
     try std.testing.expectEqual(@as(u8, 96), associated_vp8.payload_type);
     try std.testing.expectEqualStrings("video/VP8", associated_vp8.mime_type);
+    try std.testing.expectEqual(@as(?u8, 97), sdp.rtxPayloadTypeForPrimary(rtx_codecs, 96));
+    try std.testing.expectEqual(@as(?u8, null), sdp.rtxPayloadTypeForPrimary(rtx_codecs, 42));
+    try std.testing.expect(sdp.rtxPrimaryPayloadExists(rtx_codecs, rtx_codecs[1]));
     try std.testing.expect(sdp.findCodecByPayloadType(rtx_codecs, 42) == null);
 
     const invalid_payload_text =
@@ -10751,6 +10766,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     const invalid_apt_codecs = try sdp.extractRtpCodecs(allocator, invalid_apt_session.media[0]);
     defer sdp.freeRtpCodecs(allocator, invalid_apt_codecs);
     try std.testing.expectEqual(@as(?u8, null), invalid_apt_codecs[0].apt);
+    try std.testing.expect(!sdp.rtxPrimaryPayloadExists(invalid_apt_codecs, invalid_apt_codecs[0]));
 
     const static_codec_text =
         "v=0\r\n" ++
