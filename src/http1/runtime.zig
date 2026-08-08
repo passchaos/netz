@@ -1985,6 +1985,7 @@ fn transferEncodingState(head: []const u8) Error!TransferEncodingState {
     var saw_transfer_encoding = false;
     var saw_chunked = false;
     var saw_non_chunked = false;
+    var final_is_chunked = false;
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     _ = lines.next();
     while (lines.next()) |line| {
@@ -1995,18 +1996,21 @@ fn transferEncodingState(head: []const u8) Error!TransferEncodingState {
         while (tokens.next()) |raw| {
             const token = wire.trimOws(raw);
             if (token.len == 0) return error.InvalidTransferEncoding;
-            if (std.ascii.eqlIgnoreCase(token, "chunked")) {
+            const is_chunked = std.ascii.eqlIgnoreCase(token, "chunked");
+            if (is_chunked) {
                 if (saw_chunked) return error.InvalidTransferEncoding;
                 saw_chunked = true;
             } else {
                 saw_non_chunked = true;
             }
+            final_is_chunked = is_chunked;
         }
     }
     if (!saw_transfer_encoding) return .none;
+    if (saw_chunked and final_is_chunked) return .chunked;
     if (saw_non_chunked) return .non_chunked;
-    if (!saw_chunked) return error.InvalidTransferEncoding;
-    return .chunked;
+    if (saw_chunked) return .non_chunked;
+    return error.InvalidTransferEncoding;
 }
 
 fn contentLengthFromHead(head: []const u8) Error!?usize {
@@ -4044,9 +4048,13 @@ test "HTTP/1 runtime target length rejects ambiguous head framing" {
     const signed_length_head_end = std.mem.indexOf(u8, signed_length, "\r\n\r\n").?;
     try std.testing.expectError(error.InvalidContentLength, messageTargetLength(signed_length, signed_length_head_end, 1024, null));
 
-    const unsupported_te = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
-    const unsupported_te_head_end = std.mem.indexOf(u8, unsupported_te, "\r\n\r\n").?;
-    try std.testing.expectError(error.InvalidTransferEncoding, messageTargetLength(unsupported_te, unsupported_te_head_end, 1024, null));
+    const stacked_te = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    const stacked_te_head_end = std.mem.indexOf(u8, stacked_te, "\r\n\r\n").?;
+    try std.testing.expectEqual(stacked_te.len, try messageTargetLength(stacked_te, stacked_te_head_end, 1024, null));
+
+    const non_final_chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n";
+    const non_final_chunked_head_end = std.mem.indexOf(u8, non_final_chunked, "\r\n\r\n").?;
+    try std.testing.expectError(error.InvalidTransferEncoding, messageTargetLength(non_final_chunked, non_final_chunked_head_end, 1024, null));
 
     const signed_chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+5\r\nhello\r\n0\r\n\r\n";
     const signed_chunk_head_end = std.mem.indexOf(u8, signed_chunk, "\r\n\r\n").?;

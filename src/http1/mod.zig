@@ -494,6 +494,7 @@ fn parseContentLengthFieldValue(value: []const u8, previous: ?usize) Error!?usiz
 fn transferEncodingFraming(headers: []const Header) Error!?BodyFraming {
     var saw_transfer_encoding = false;
     var saw_chunked = false;
+    var final_is_chunked = false;
 
     for (headers) |header| {
         if (!header.eqlName("transfer-encoding")) continue;
@@ -502,17 +503,22 @@ fn transferEncodingFraming(headers: []const Header) Error!?BodyFraming {
         while (tokens.next()) |raw_token| {
             const token = wire.trimOws(raw_token);
             if (token.len == 0) return error.InvalidTransferEncoding;
-            // This codec layer only decodes chunked transfer coding.  Rejecting
-            // stacked codings avoids returning a body that is still gzip/deflate
-            // transfer-coded while appearing fully decoded to callers.
-            if (!std.ascii.eqlIgnoreCase(token, "chunked")) return error.InvalidTransferEncoding;
-            if (saw_chunked) return error.InvalidTransferEncoding;
-            saw_chunked = true;
+            const is_chunked = std.ascii.eqlIgnoreCase(token, "chunked");
+            if (is_chunked) {
+                // RFC 9112 allows other transfer codings before chunked, but
+                // chunked itself may only be applied once and must be final.  We
+                // decode the final chunk framing while leaving any preceding
+                // transfer-coded bytes for the caller that understands that
+                // coding (matching Hyper's message-length decision).
+                if (saw_chunked) return error.InvalidTransferEncoding;
+                saw_chunked = true;
+            }
+            final_is_chunked = is_chunked;
         }
     }
 
     if (!saw_transfer_encoding) return null;
-    if (!saw_chunked) return error.InvalidTransferEncoding;
+    if (!saw_chunked or !final_is_chunked) return error.InvalidTransferEncoding;
     return .chunked;
 }
 
@@ -1310,8 +1316,23 @@ test "HTTP/1 parser rejects ambiguous body lengths" {
     try std.testing.expectEqual(BodyFraming.content_length, req.body_framing);
     try std.testing.expectEqualStrings("hello", req.body);
 
-    const unsupported_te = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n";
-    try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, unsupported_te, .{}));
+    const stacked_te = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    var stacked = try parseRequest(allocator, stacked_te, .{});
+    defer stacked.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.chunked, stacked.body_framing);
+    try std.testing.expectEqualStrings("hello", stacked.body);
+
+    const split_stacked_te = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    var split_stacked = try parseRequest(allocator, split_stacked_te, .{});
+    defer split_stacked.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.chunked, split_stacked.body_framing);
+    try std.testing.expectEqualStrings("hello", split_stacked.body);
+
+    const non_final_chunked = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n";
+    try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, non_final_chunked, .{}));
+
+    const split_non_final_chunked = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n0\r\n\r\n";
+    try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, split_non_final_chunked, .{}));
 
     const http10_te = "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
     try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, http10_te, .{}));
@@ -1334,6 +1355,22 @@ test "HTTP/1 response body framing helpers" {
     try std.testing.expectEqual(BodyFraming.chunked, chunked_resp.body_framing);
     try std.testing.expect(chunked_resp.header("content-length") == null);
     try std.testing.expectEqualStrings("pong", chunked_resp.body);
+
+    const stacked_final_chunked = "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nTransfer-Encoding: gzip, chunked\r\n\r\n4\r\npong\r\n0\r\n\r\n";
+    var stacked_final_chunked_resp = try parseResponse(allocator, stacked_final_chunked, .{});
+    defer stacked_final_chunked_resp.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.chunked, stacked_final_chunked_resp.body_framing);
+    try std.testing.expect(stacked_final_chunked_resp.header("content-length") == null);
+    try std.testing.expectEqualStrings("gzip, chunked", stacked_final_chunked_resp.header("transfer-encoding").?);
+    try std.testing.expectEqualStrings("pong", stacked_final_chunked_resp.body);
+
+    const stacked_non_final_chunked = "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nTransfer-Encoding: chunked, gzip\r\n\r\ncompressed-until-close";
+    var stacked_non_final_chunked_resp = try parseResponse(allocator, stacked_non_final_chunked, .{});
+    defer stacked_non_final_chunked_resp.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.close_delimited, stacked_non_final_chunked_resp.body_framing);
+    try std.testing.expect(stacked_non_final_chunked_resp.header("content-length") == null);
+    try std.testing.expectEqualStrings("chunked, gzip", stacked_non_final_chunked_resp.header("transfer-encoding").?);
+    try std.testing.expectEqualStrings("compressed-until-close", stacked_non_final_chunked_resp.body);
 
     const non_chunked_te = "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nTransfer-Encoding: gzip\r\n\r\ncompressed-until-close";
     var close_delimited_resp = try parseResponse(allocator, non_chunked_te, .{});
