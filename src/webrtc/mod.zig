@@ -6800,7 +6800,11 @@ pub const rtcp = struct {
     }
 
     fn parseRapidResynchronizationRequest(payload: []const u8) Error!RapidResynchronizationRequest {
-        if (payload.len != 8) return error.InvalidRtcpPacket;
+        // Pion/rtcp mirrors PLI here: the RRR FCI has no semantic fields, so its
+        // unmarshaller reads only the mandatory sender/media SSRCs and ignores
+        // any trailing bytes.  Accept that wire image while keeping writer output
+        // canonical.
+        if (payload.len < 8) return error.InvalidRtcpPacket;
         return .{
             .sender_ssrc = std.mem.readInt(u32, payload[0..4], .big),
             .media_ssrc = std.mem.readInt(u32, payload[4..8], .big),
@@ -12577,6 +12581,17 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u32, 0x902f9e2e), rrr.packet.rapid_resynchronization_request.sender_ssrc);
     try std.testing.expectEqual(@as(u32, 0xbc5e9a40), rrr.packet.rapid_resynchronization_request.media_ssrc);
     try std.testing.expectEqual(@as(usize, 12), rrr.packet.rapid_resynchronization_request.wireLen());
+
+    const rrr_with_trailing_fci = [_]u8{
+        0x85, @intFromEnum(rtcp.PacketType.transport_feedback), 0x00, 0x03,
+        0x90, 0x2f, 0x9e, 0x2e,
+        0xbc, 0x5e, 0x9a, 0x40,
+        0xde, 0xad, 0xbe, 0xef,
+    };
+    var tolerant_rrr = try rtcp.parsePacket(allocator, &rrr_with_trailing_fci);
+    defer tolerant_rrr.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x902f9e2e), tolerant_rrr.packet.rapid_resynchronization_request.sender_ssrc);
+    try std.testing.expectEqual(@as(u32, 0xbc5e9a40), tolerant_rrr.packet.rapid_resynchronization_request.media_ssrc);
 
     const ccfb_wire = [_]u8{
         0x8b, 0xcd, 0x00, 0x0a,
