@@ -1190,7 +1190,7 @@ pub const Connection = struct {
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFramesForDestination(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
+        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -1234,7 +1234,7 @@ pub const Connection = struct {
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFramesForDestination(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
+        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -1251,7 +1251,7 @@ pub const Connection = struct {
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFramesForDestination(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
+        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -1295,6 +1295,22 @@ pub const Connection = struct {
 
     fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!void {
         try self.applyReceivedFramesForDestination(packet_number, frames, now_ns, ecn, null);
+    }
+
+    fn applyReceivedFramesForDestinationOrClose(
+        self: *Connection,
+        packet_number: u64,
+        frames: []const quic.Frame,
+        now_ns: ?u64,
+        ecn: quic.packet_space.EcnCodepoint,
+        packet_destination_connection_id: ?[]const u8,
+    ) Error!void {
+        self.applyReceivedFramesForDestination(packet_number, frames, now_ns, ecn, packet_destination_connection_id) catch |err| {
+            if (classifySemanticCloseError(frames, err)) |close| {
+                try self.closeTransportAt(@intFromEnum(close.code), close.frame_type, close.reason_phrase, nsToMs(now_ns), null);
+            }
+            return err;
+        };
     }
 
     fn applyReceivedFramesForDestination(
@@ -1477,6 +1493,19 @@ pub const Connection = struct {
                 else => {},
             }
         }
+    }
+
+    fn classifySemanticCloseError(frames: []const quic.Frame, err: anyerror) ?quic.FramePayloadCloseError {
+        return switch (err) {
+            error.UnknownPathResponse => for (frames) |frame| {
+                if (frame == .path_response) break quic.FramePayloadCloseError{
+                    .code = .protocol_violation,
+                    .frame_type = @intFromEnum(quic.FrameType.path_response),
+                    .reason_phrase = "path response",
+                };
+            } else null,
+            else => null,
+        };
     }
 
     fn validateStreamFramePrecondition(
@@ -2843,6 +2872,10 @@ test "QUIC 1-RTT connection preflights role and path control frames before recei
     try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), server.expected_packet_number);
     try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.path_response)), server.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("path response", server.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT receivePacketAt updates RTT from ACK" {
