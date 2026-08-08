@@ -1063,6 +1063,7 @@ pub const sdp = struct {
         port: u16,
         protocol: []const u8,
         formats: []const u8,
+        title: ?[]const u8 = null,
         connection: ?Connection = null,
         bandwidth: []Bandwidth = &.{},
         attributes: []Attribute,
@@ -1102,6 +1103,7 @@ pub const sdp = struct {
         version: []const u8 = "0",
         origin: []const u8 = "- 0 0 IN IP4 127.0.0.1",
         name: []const u8 = "-",
+        information: ?[]const u8 = null,
         connection: ?Connection = null,
         bandwidth: []Bandwidth = &.{},
         timing: []const u8 = "0 0",
@@ -1460,6 +1462,17 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub fn formatInformationLine(allocator: std.mem.Allocator, information: []const u8) Error![]u8 {
+        try validateSdpAttributeValue(information);
+        return std.fmt.allocPrint(allocator, "i={s}\r\n", .{information});
+    }
+
+    pub fn appendInformationLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, information: []const u8) Error!void {
+        const line = try formatInformationLine(allocator, information);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub fn formatRtcpAttribute(allocator: std.mem.Allocator, rtcp_address: RtcpAddress) Error![]u8 {
         if (rtcp_address.connection) |connection| {
             try validateSdpToken(connection.network_type);
@@ -1553,6 +1566,7 @@ pub const sdp = struct {
         try validateSdpToken(session.version);
         try validateSdpAttributeValue(session.origin);
         try validateSdpAttributeValue(session.name);
+        if (session.information) |information| try validateSdpAttributeValue(information);
         try validateSdpAttributeValue(session.timing);
         const version_line = try std.fmt.allocPrint(allocator, "v={s}\r\n", .{session.version});
         defer allocator.free(version_line);
@@ -1563,6 +1577,7 @@ pub const sdp = struct {
         const name_line = try std.fmt.allocPrint(allocator, "s={s}\r\n", .{session.name});
         defer allocator.free(name_line);
         try list.appendSlice(allocator, name_line);
+        if (session.information) |information| try appendInformationLine(list, allocator, information);
         // WebRTC implementations such as Pion serialize connection
         // information for every generated m-section (including rejected
         // tracks) because older SIPCC/Firefox SDP parsers require a c= line
@@ -1588,6 +1603,7 @@ pub const sdp = struct {
         for (session.attributes) |attr| try appendAttributeLine(list, allocator, attr);
         for (session.media) |media| {
             try appendMediaLine(list, allocator, media.kind, media.port, media.protocol, media.formats);
+            if (media.title) |title| try appendInformationLine(list, allocator, title);
             if (media.connection) |connection| try appendConnectionLine(list, allocator, connection.network_type, connection.address_type, connection.address);
             for (media.bandwidth) |bandwidth| try appendBandwidthLine(list, allocator, bandwidth);
             for (media.attributes) |attr| try appendAttributeLine(list, allocator, attr);
@@ -2116,10 +2132,12 @@ pub const sdp = struct {
         var current_bandwidth: std.ArrayList(Bandwidth) = .empty;
         defer current_bandwidth.deinit(allocator);
         var current_media: ?MediaHeader = null;
+        var current_title: ?[]const u8 = null;
         var current_connection: ?Connection = null;
         var version: []const u8 = "0";
         var origin: []const u8 = "- 0 0 IN IP4 127.0.0.1";
         var name: []const u8 = "-";
+        var session_information: ?[]const u8 = null;
         var session_connection: ?Connection = null;
         var session_bandwidth: std.ArrayList(Bandwidth) = .empty;
         errdefer session_bandwidth.deinit(allocator);
@@ -2135,6 +2153,14 @@ pub const sdp = struct {
                 'v' => version = value,
                 'o' => origin = value,
                 's' => name = value,
+                'i' => {
+                    try validateSdpAttributeValue(value);
+                    if (current_media != null) {
+                        current_title = value;
+                    } else {
+                        session_information = value;
+                    }
+                },
                 't' => timing = value,
                 'c' => {
                     const connection = try parseConnectionLine(value);
@@ -2167,12 +2193,14 @@ pub const sdp = struct {
                             .port = media_header.port,
                             .protocol = media_header.protocol,
                             .formats = media_header.formats,
+                            .title = current_title,
                             .connection = current_connection,
                             .bandwidth = try current_bandwidth.toOwnedSlice(allocator),
                             .attributes = try current_attrs.toOwnedSlice(allocator),
                         });
                         current_attrs = .empty;
                         current_bandwidth = .empty;
+                        current_title = null;
                         current_connection = null;
                     }
                     current_media = try parseMediaLine(value);
@@ -2186,6 +2214,7 @@ pub const sdp = struct {
                 .port = media_header.port,
                 .protocol = media_header.protocol,
                 .formats = media_header.formats,
+                .title = current_title,
                 .connection = current_connection,
                 .bandwidth = try current_bandwidth.toOwnedSlice(allocator),
                 .attributes = try current_attrs.toOwnedSlice(allocator),
@@ -2198,6 +2227,7 @@ pub const sdp = struct {
             .version = version,
             .origin = origin,
             .name = name,
+            .information = session_information,
             .connection = session_connection,
             .bandwidth = try session_bandwidth.toOwnedSlice(allocator),
             .timing = timing,
@@ -9170,12 +9200,14 @@ test "ICE candidate parser and SDP parser" {
         "v=0\r\n" ++
         "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
         "s=-\r\n" ++
+        "i=Session information\r\n" ++
         "c=IN IP4 198.51.100.1\r\n" ++
         "b=AS:1234\r\n" ++
         "b=X-YZ:128\r\n" ++
         "t=0 0\r\n" ++
         "a=group:BUNDLE 0\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "i=Data channel media\r\n" ++
         "c=IN IP4 0.0.0.0\r\n" ++
         "b=TIAS:64000\r\n" ++
         "a=rtcp:9 IN IP4 0.0.0.0\r\n" ++
@@ -9185,6 +9217,7 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("IN", session.connection.?.network_type);
     try std.testing.expectEqualStrings("IP4", session.connection.?.address_type);
     try std.testing.expectEqualStrings("198.51.100.1", session.connection.?.address);
+    try std.testing.expectEqualStrings("Session information", session.information.?);
     try std.testing.expectEqual(@as(usize, 2), session.bandwidth.len);
     try std.testing.expectEqualStrings("AS", session.bandwidth[0].typ);
     try std.testing.expectEqual(@as(u64, 1234), session.bandwidth[0].bandwidth);
@@ -9194,6 +9227,7 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expect(session.bandwidth[1].experimental);
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
+    try std.testing.expectEqualStrings("Data channel media", session.media[0].title.?);
     try std.testing.expectEqualStrings("0.0.0.0", session.media[0].connection.?.address);
     try std.testing.expectEqual(@as(usize, 1), session.media[0].bandwidth.len);
     try std.testing.expectEqualStrings("TIAS", session.media[0].bandwidth[0].typ);
@@ -9231,6 +9265,7 @@ test "ICE candidate parser and SDP parser" {
         "v=0\r\n" ++
             "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
             "s=-\r\n" ++
+            "i=Session information\r\n" ++
             "c=IN IP4 198.51.100.1\r\n" ++
             "b=AS:1234\r\n" ++
             "b=X-YZ:128\r\n" ++
@@ -9244,6 +9279,9 @@ test "ICE candidate parser and SDP parser" {
     var invalid_header_session = session;
     invalid_header_session.name = "bad\nname";
     try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
+    invalid_header_session = session;
+    invalid_header_session.information = "bad\ninfo";
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
     const media_line = try sdp.formatMediaLine(allocator, session.media[0].kind, session.media[0].port, session.media[0].protocol, session.media[0].formats);
     defer allocator.free(media_line);
     try std.testing.expectEqualStrings("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n", media_line);
@@ -9254,6 +9292,14 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectError(error.InvalidSdp, sdp.formatMediaLine(allocator, "", 9, "UDP/TLS/RTP/SAVPF", "96"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatMediaLine(allocator, "video", 9, "UDP TLS", "96"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatMediaLine(allocator, "video", 9, "UDP/TLS/RTP/SAVPF", ""));
+    const information_line = try sdp.formatInformationLine(allocator, "Media title");
+    defer allocator.free(information_line);
+    try std.testing.expectEqualStrings("i=Media title\r\n", information_line);
+    var information_lines: std.ArrayList(u8) = .empty;
+    defer information_lines.deinit(allocator);
+    try sdp.appendInformationLine(&information_lines, allocator, "Session info");
+    try std.testing.expectEqualStrings("i=Session info\r\n", information_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatInformationLine(allocator, "bad\ninfo"));
     const connection_line = try sdp.formatConnectionLine(allocator, "IN", "IP4", "0.0.0.0");
     defer allocator.free(connection_line);
     try std.testing.expectEqualStrings("c=IN IP4 0.0.0.0\r\n", connection_line);
