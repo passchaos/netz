@@ -166,6 +166,8 @@ pub const ReplayFilter = struct {
     allocator: std.mem.Allocator,
     max_entries: usize,
     fingerprints: std.ArrayList(Fingerprint) = .empty,
+    head: usize = 0,
+    len: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, max_entries: usize) ReplayFilter {
         return .{ .allocator = allocator, .max_entries = max_entries };
@@ -178,7 +180,10 @@ pub const ReplayFilter = struct {
 
     pub fn contains(self: ReplayFilter, token: []const u8) Error!bool {
         const fp = try fingerprint(token);
-        for (self.fingerprints.items) |existing| {
+        var checked: usize = 0;
+        while (checked < self.len) : (checked += 1) {
+            const index = (self.head + checked) % self.fingerprints.items.len;
+            const existing = self.fingerprints.items[index];
             if (std.crypto.timing_safe.eql(Fingerprint, existing, fp)) return true;
         }
         return false;
@@ -186,12 +191,32 @@ pub const ReplayFilter = struct {
 
     pub fn rememberValidated(self: *ReplayFilter, token: []const u8) Error!void {
         const fp = try fingerprint(token);
-        for (self.fingerprints.items) |existing| {
+        var checked: usize = 0;
+        while (checked < self.len) : (checked += 1) {
+            const index = (self.head + checked) % self.fingerprints.items.len;
+            const existing = self.fingerprints.items[index];
             if (std.crypto.timing_safe.eql(Fingerprint, existing, fp)) return error.TokenReplay;
         }
         if (self.max_entries == 0) return;
-        if (self.fingerprints.items.len >= self.max_entries) _ = self.fingerprints.orderedRemove(0);
-        try self.fingerprints.append(self.allocator, fp);
+
+        if (self.len < self.max_entries) {
+            const tail = if (self.fingerprints.items.len == 0) 0 else (self.head + self.len) % self.max_entries;
+            if (tail < self.fingerprints.items.len) {
+                self.fingerprints.items[tail] = fp;
+            } else {
+                try self.fingerprints.append(self.allocator, fp);
+            }
+            self.len += 1;
+            return;
+        }
+
+        // Keep the replay filter as a fixed-size FIFO ring.  `orderedRemove(0)`
+        // was correct but shifted every stored fingerprint on each eviction;
+        // Retry/NEW_TOKEN replay filters can sit on hot UDP paths, so advancing
+        // the head matches VecDeque-style reference implementations without
+        // changing the visible "oldest token is forgotten first" policy.
+        self.fingerprints.items[self.head] = fp;
+        self.head = (self.head + 1) % self.fingerprints.items.len;
     }
 };
 
@@ -351,4 +376,13 @@ test "QUIC address validation replay filter evicts oldest fingerprint" {
     try std.testing.expect(!try replay.contains(a));
     try std.testing.expect(try replay.contains(b));
     try std.testing.expect(try replay.contains(c));
+
+    const d = try encode(allocator, secret, .{ .kind = .new_token, .issued_ns = 4, .lifetime_ns = 100, .peer_address = "peer", .nonce = [_]u8{0x04} ** nonce_len });
+    defer allocator.free(d);
+    try replay.rememberValidated(d);
+    try std.testing.expect(!try replay.contains(b));
+    try std.testing.expect(try replay.contains(c));
+    try std.testing.expect(try replay.contains(d));
+    try std.testing.expectEqual(@as(usize, 2), replay.len);
+    try std.testing.expectEqual(@as(usize, 2), replay.fingerprints.items.len);
 }
