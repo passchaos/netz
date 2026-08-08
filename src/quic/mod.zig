@@ -1253,12 +1253,13 @@ pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool
             .streams_blocked_uni,
             .new_connection_id,
             .path_challenge,
+            .connection_close,
             .application_close,
             .datagram,
             => true,
-            // ACK, CRYPTO, transport CONNECTION_CLOSE (0x1c), HANDSHAKE_DONE, NEW_TOKEN,
-            // RETIRE_CONNECTION_ID, PATH_RESPONSE, and the ACK_FREQUENCY draft
-            // control frames are not 0-RTT frames.  NEW_CONNECTION_ID remains
+            // ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, RETIRE_CONNECTION_ID,
+            // PATH_RESPONSE, and the ACK_FREQUENCY draft control frames are
+            // not 0-RTT frames.  NEW_CONNECTION_ID and CONNECTION_CLOSE remain
             // allowed by RFC 9000 Table 3 and mature stacks such as tquic and
             // quicz, while RETIRE_CONNECTION_ID can be treated as a 0-RTT
             // protocol violation under RFC 9000 §12.5.
@@ -2250,7 +2251,7 @@ test "QUIC frame packet context rules follow RFC 9000" {
     try std.testing.expect(!frameAllowedInPacketType(.{ .retire_connection_id = .{ .sequence_number = 1 } }, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(app_close, .zero_rtt));
     try validateFrameForPacketType(app_close, .zero_rtt);
-    try std.testing.expect(!frameAllowedInPacketType(.{ .connection_close = .{ .error_code = 0, .frame_type = 0, .reason_phrase = "" } }, .zero_rtt));
+    try std.testing.expect(frameAllowedInPacketType(.{ .connection_close = .{ .error_code = 0, .frame_type = 0, .reason_phrase = "" } }, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .handshake_done = {} }, .one_rtt));
     try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(stream, .initial));
 }
