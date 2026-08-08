@@ -5349,6 +5349,11 @@ test "QUIC 1-RTT connection batches PATH_CHALLENGE and PATH_RESPONSE frames" {
     });
     defer server.deinit();
 
+    try std.testing.expectEqual(@as(usize, 0), try client.sendPendingPathChallengesAt(100, 50));
+    try std.testing.expectEqual(@as(usize, 0), try server.sendPendingPathResponses());
+    try std.testing.expectError(error.NoPendingPathChallenge, client.sendPendingPathChallengeAt(100, 50));
+    try std.testing.expectError(error.NoPendingPathResponse, server.sendPendingPathResponse());
+
     const first = [_]u8{ 1, 1, 2, 3, 5, 8, 13, 21 };
     const second = [_]u8{ 2, 3, 5, 8, 13, 21, 34, 55 };
     try client.queuePathChallenge(first);
