@@ -4085,8 +4085,12 @@ pub const rtp = struct {
         rtp_stream_id: u2,
         spatial_id: u2,
         target_bitrates_kbps: []const u32,
-        width: u16 = 0,
-        height: u16 = 0,
+        /// Width/height use the wire value plus one, so the maximum
+        /// representable resolution is 65_536 even though the encoded fields
+        /// are 16-bit.  Match Pion/rtp's int-backed API instead of truncating
+        /// the valid 0xffff -> 65_536 case.
+        width: u32 = 0,
+        height: u32 = 0,
         framerate: u8 = 0,
     };
 
@@ -4530,7 +4534,7 @@ pub const rtp = struct {
             if (indices[layer.rtp_stream_id][layer.spatial_id] != null) return error.InvalidRtpPacket;
             sl_bms[layer.rtp_stream_id] |= @as(u4, 1) << layer.spatial_id;
             indices[layer.rtp_stream_id][layer.spatial_id] = index;
-            if (vla.has_resolution_and_framerate and (layer.width == 0 or layer.height == 0)) return error.InvalidRtpPacket;
+            if (vla.has_resolution_and_framerate and !validVlaResolution(layer.width, layer.height)) return error.InvalidRtpPacket;
         }
 
         const common_sl_bm = commonSpatialLayerBitmask(sl_bms[0..vla.rtp_stream_count]);
@@ -4568,8 +4572,8 @@ pub const rtp = struct {
 
         if (vla.has_resolution_and_framerate) {
             for (vla.active_spatial_layers) |layer| {
-                try wire.appendInt(list, allocator, u16, layer.width - 1, .big);
-                try wire.appendInt(list, allocator, u16, layer.height - 1, .big);
+                try wire.appendInt(list, allocator, u16, @intCast(layer.width - 1), .big);
+                try wire.appendInt(list, allocator, u16, @intCast(layer.height - 1), .big);
                 try list.append(allocator, layer.framerate);
             }
         }
@@ -4590,7 +4594,7 @@ pub const rtp = struct {
             if (seen[layer.rtp_stream_id][layer.spatial_id]) return error.InvalidRtpPacket;
             seen[layer.rtp_stream_id][layer.spatial_id] = true;
             sl_bms[layer.rtp_stream_id] |= @as(u4, 1) << layer.spatial_id;
-            if (vla.has_resolution_and_framerate and (layer.width == 0 or layer.height == 0)) return error.InvalidRtpPacket;
+            if (vla.has_resolution_and_framerate and !validVlaResolution(layer.width, layer.height)) return error.InvalidRtpPacket;
             for (layer.target_bitrates_kbps) |kbps| bitrate_len += leb128Size(kbps);
         }
 
@@ -4671,8 +4675,8 @@ pub const rtp = struct {
             if (remaining < layers.len * 5) return error.InvalidRtpPacket;
             has_resolution = true;
             for (layers) |*layer| {
-                layer.width = std.mem.readInt(u16, payload[offset..][0..2], .big) + 1;
-                layer.height = std.mem.readInt(u16, payload[offset + 2 ..][0..2], .big) + 1;
+                layer.width = @as(u32, std.mem.readInt(u16, payload[offset..][0..2], .big)) + 1;
+                layer.height = @as(u32, std.mem.readInt(u16, payload[offset + 2 ..][0..2], .big)) + 1;
                 layer.framerate = payload[offset + 4];
                 offset += 5;
             }
@@ -4694,6 +4698,10 @@ pub const rtp = struct {
     pub fn freeVideoLayerAllocation(allocator: std.mem.Allocator, vla: VideoLayerAllocation) void {
         for (vla.active_spatial_layers) |layer| allocator.free(@constCast(layer.target_bitrates_kbps));
         allocator.free(@constCast(vla.active_spatial_layers));
+    }
+
+    fn validVlaResolution(width: u32, height: u32) bool {
+        return width > 0 and width <= 65_536 and height > 0 and height <= 65_536;
     }
 
     fn commonSpatialLayerBitmask(bitmasks: []const u4) u4 {
@@ -11995,16 +12003,38 @@ test "RTP packet extension padding and writer" {
     defer rtp.freeVideoLayerAllocation(allocator, parsed_vla_with_resolution);
     try std.testing.expect(parsed_vla_with_resolution.has_resolution_and_framerate);
     try std.testing.expectEqual(@as(u2, 2), parsed_vla_with_resolution.rtp_stream_id);
-    try std.testing.expectEqual(@as(u16, 1280), parsed_vla_with_resolution.active_spatial_layers[2].width);
-    try std.testing.expectEqual(@as(u16, 720), parsed_vla_with_resolution.active_spatial_layers[2].height);
+    try std.testing.expectEqual(@as(u32, 1280), parsed_vla_with_resolution.active_spatial_layers[2].width);
+    try std.testing.expectEqual(@as(u32, 720), parsed_vla_with_resolution.active_spatial_layers[2].height);
     try std.testing.expectEqual(@as(u8, 30), parsed_vla_with_resolution.active_spatial_layers[2].framerate);
+
+    vla_payload.clearRetainingCapacity();
+    const max_resolution_vla_layers = [_]rtp.SpatialLayer{
+        .{ .rtp_stream_id = 0, .spatial_id = 0, .target_bitrates_kbps = &.{1}, .width = 65_536, .height = 65_536, .framerate = 1 },
+    };
+    try rtp.writeVideoLayerAllocationPayload(&vla_payload, allocator, .{
+        .rtp_stream_id = 0,
+        .rtp_stream_count = 1,
+        .active_spatial_layers = &max_resolution_vla_layers,
+        .has_resolution_and_framerate = true,
+    });
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0x01 }, vla_payload.items);
+    const parsed_max_resolution_vla = try rtp.parseVideoLayerAllocationPayload(allocator, vla_payload.items);
+    defer rtp.freeVideoLayerAllocation(allocator, parsed_max_resolution_vla);
+    try std.testing.expectEqual(@as(u32, 65_536), parsed_max_resolution_vla.active_spatial_layers[0].width);
+    try std.testing.expectEqual(@as(u32, 65_536), parsed_max_resolution_vla.active_spatial_layers[0].height);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.writeVideoLayerAllocationPayload(&vla_payload, allocator, .{
+        .rtp_stream_id = 0,
+        .rtp_stream_count = 1,
+        .active_spatial_layers = &.{.{ .rtp_stream_id = 0, .spatial_id = 0, .target_bitrates_kbps = &.{1}, .width = 65_537, .height = 1 }},
+        .has_resolution_and_framerate = true,
+    }));
 
     try vla_payload.appendSlice(allocator, &.{ 0xaa, 0xbb });
     const parsed_vla_with_trailing = try rtp.parseVideoLayerAllocationPayload(allocator, vla_payload.items);
     defer rtp.freeVideoLayerAllocation(allocator, parsed_vla_with_trailing);
     try std.testing.expect(parsed_vla_with_trailing.has_resolution_and_framerate);
-    try std.testing.expectEqual(@as(usize, 3), parsed_vla_with_trailing.active_spatial_layers.len);
-    try std.testing.expectEqual(@as(u16, 1280), parsed_vla_with_trailing.active_spatial_layers[2].width);
+    try std.testing.expectEqual(@as(usize, 1), parsed_vla_with_trailing.active_spatial_layers.len);
+    try std.testing.expectEqual(@as(u32, 65_536), parsed_vla_with_trailing.active_spatial_layers[0].width);
 
     vla_payload.clearRetainingCapacity();
     try rtp.writeVideoLayerAllocationPayload(&vla_payload, allocator, .{
