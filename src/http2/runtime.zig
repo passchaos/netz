@@ -2249,18 +2249,19 @@ fn stripSuccessfulConnectContentLength(headers: *std.ArrayList(http2.Hpack.Heade
     const declared = try contentLength(headers.items) orelse return;
     if (declared != 0) return error.InvalidContentLength;
 
-    var index: usize = 0;
-    while (index < headers.items.len) {
-        if (std.ascii.eqlIgnoreCase(headers.items[index].name, "content-length")) {
+    var write_index: usize = 0;
+    for (headers.items) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
             // Hyper allows `content-length: 0` on successful CONNECT responses
             // for peer compatibility, but strips it before sending such a
             // response itself.  The stream is a tunnel after the 2xx HEADERS, so
             // retaining even a zero representation length is misleading metadata.
-            _ = headers.orderedRemove(index);
             continue;
         }
-        index += 1;
+        headers.items[write_index] = header;
+        write_index += 1;
     }
+    headers.shrinkRetainingCapacity(write_index);
 }
 
 fn stripConnectionHeaderAt(headers: []const http2.Hpack.HeaderField, index: usize, kind: HeaderBlockKind, connection_values: []const []const u8) bool {
@@ -6905,6 +6906,7 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     defer connect_headers.deinit(std.testing.allocator);
     try connect_headers.appendSlice(std.testing.allocator, &.{
         .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "0" },
         .{ .name = "content-length", .value = "0" },
         .{ .name = "x-ok", .value = "kept" },
     });
