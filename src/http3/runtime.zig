@@ -21,13 +21,20 @@ const server_qpack_decoder_stream_id: u62 = 11;
 
 pub const Limits = struct {
     quic: quic.runtime.Limits = .{},
+    /// Maximum bytes buffered while reassembling one HTTP/3 request/response
+    /// stream in the cleartext development runtime.  Protected/handshake
+    /// runtimes already expose this via their session options; keeping the
+    /// cleartext path explicit prevents large STREAM offsets from turning the
+    /// UDP frame endpoint into an unbounded message buffer.
+    max_stream_buffer: usize = 64 * 1024,
 };
 
 pub const Server = struct {
     quic_server: quic.runtime.Server,
+    limits: Limits = .{},
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
-        return .{ .quic_server = try .bind(allocator, io, bind_address, limits.quic) };
+        return .{ .quic_server = try .bind(allocator, io, bind_address, limits.quic), .limits = limits };
     }
 
     pub fn deinit(self: *Server) void {
@@ -40,7 +47,7 @@ pub const Server = struct {
     }
 
     pub fn receiveRequest(self: *Server) Error!OwnedRequest {
-        var assembled = try receiveRuntimeStreamBytes(&self.quic_server.endpoint, null);
+        var assembled = try receiveRuntimeStreamBytes(&self.quic_server.endpoint, null, self.limits.max_stream_buffer);
         errdefer assembled.deinit(self.quic_server.endpoint.allocator);
         var request = try http3.decodeRequest(self.quic_server.endpoint.allocator, assembled.bytes);
         errdefer request.deinit(self.quic_server.endpoint.allocator);
@@ -112,10 +119,11 @@ const RequestTask = struct {
 
 pub const Client = struct {
     quic_client: quic.runtime.Client,
+    limits: Limits = .{},
     next_stream_id: u62 = 0,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits) Error!Client {
-        return .{ .quic_client = try .connect(allocator, io, local_address, server, limits.quic) };
+        return .{ .quic_client = try .connect(allocator, io, local_address, server, limits.quic), .limits = limits };
     }
 
     pub fn deinit(self: *Client) void {
@@ -138,7 +146,7 @@ pub const Client = struct {
         const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = stream_id, .data = encoded.items, .fin = true } }};
         try self.quic_client.sendFrames(&frames);
 
-        var assembled = try receiveRuntimeStreamBytes(&self.quic_client.endpoint, stream_id);
+        var assembled = try receiveRuntimeStreamBytes(&self.quic_client.endpoint, stream_id, self.limits.max_stream_buffer);
         errdefer assembled.deinit(self.quic_client.endpoint.allocator);
         try http3.validateResponsePushPromises(.{}, assembled.bytes);
         var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, assembled.bytes);
@@ -183,7 +191,7 @@ const RuntimeAssembledStream = struct {
     }
 };
 
-fn receiveRuntimeStreamBytes(endpoint: *quic.runtime.Endpoint, expected_stream_id: ?u62) Error!RuntimeAssembledStream {
+fn receiveRuntimeStreamBytes(endpoint: *quic.runtime.Endpoint, expected_stream_id: ?u62, max_stream_buffer: usize) Error!RuntimeAssembledStream {
     var recv: ?quic.stream_state.RecvState = null;
     defer if (recv) |*state| state.deinit();
     var datagrams: std.ArrayList(quic.runtime.OwnedDatagram) = .empty;
@@ -216,7 +224,6 @@ fn receiveRuntimeStreamBytes(endpoint: *quic.runtime.Endpoint, expected_stream_i
             } else {
                 stream_id = incoming_id;
             }
-            const max_stream_buffer = std.math.mul(usize, endpoint.limits.max_datagram_size, 16) catch std.math.maxInt(usize);
             if (recv == null) recv = quic.stream_state.RecvState.init(endpoint.allocator, incoming_id, max_stream_buffer);
             if (recv) |*state| {
                 try state.insert(frame.stream);
@@ -1981,7 +1988,7 @@ test "HTTP/3 dev runtime assembles split STREAM request and response" {
     try client.quic_client.sendFrames(&first);
     try client.quic_client.sendFrames(&second);
 
-    var assembled = try receiveRuntimeStreamBytes(&client.quic_client.endpoint, 0);
+    var assembled = try receiveRuntimeStreamBytes(&client.quic_client.endpoint, 0, client.limits.max_stream_buffer);
     defer assembled.deinit(allocator);
     try std.testing.expect(assembled.datagrams.len > 1);
     var response = try http3.decodeResponse(allocator, assembled.bytes);
@@ -2062,6 +2069,33 @@ test "HTTP/3 dev client assembles split STREAM response" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/3 dev runtime enforces stream reassembly limit" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer receiver.deinit();
+    var sender = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, receiver.address(), .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer sender.deinit();
+
+    try sender.sendFrames(&.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 32,
+        .data = "too-far",
+        .fin = true,
+    } }});
+    try std.testing.expectError(error.StreamBufferTooLarge, receiveRuntimeStreamBytes(&receiver, 0, 16));
 }
 
 test "HTTP/3 dev runtime receives requests with std.Io async batch" {
