@@ -2058,6 +2058,8 @@ pub const sdp = struct {
         }
     };
 
+    pub const max_extmap_id: u16 = 246;
+
     pub const ExtMap = struct {
         id: u16,
         direction: ExtMapDirection = .sendrecv,
@@ -2065,7 +2067,7 @@ pub const sdp = struct {
         extension_attributes: []const u8 = &.{},
 
         pub fn rtpId(self: ExtMap) Error!u8 {
-            if (self.id == 0 or self.id > std.math.maxInt(u8)) return error.InvalidSdp;
+            if (self.id == 0 or self.id > max_extmap_id) return error.InvalidSdp;
             return @intCast(self.id);
         }
     };
@@ -2116,7 +2118,7 @@ pub const sdp = struct {
             break :blk id_and_direction[0..slash];
         } else id_and_direction;
         const id = std.fmt.parseInt(u16, id_part, 10) catch return error.InvalidSdp;
-        if (id == 0 or id > std.math.maxInt(u8)) return error.InvalidSdp;
+        if (id == 0 or id > max_extmap_id) return error.InvalidSdp;
 
         const uri_end = std.mem.indexOfAny(u8, rest, " \t") orelse rest.len;
         const uri = rest[0..uri_end];
@@ -9710,10 +9712,15 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     defer extmap_lines.deinit(allocator);
     try sdp.appendExtMapLine(&extmap_lines, allocator, .{ .id = 4, .uri = sdp.sdes_mid_uri });
     try std.testing.expectEqualStrings("a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n", extmap_lines.items);
+    const max_extmap_line = try sdp.formatExtMapLine(allocator, .{ .id = sdp.max_extmap_id, .uri = sdp.sdes_mid_uri });
+    defer allocator.free(max_extmap_line);
+    try std.testing.expectEqualStrings("a=extmap:246 urn:ietf:params:rtp-hdrext:sdes:mid\r\n", max_extmap_line);
     try std.testing.expectError(error.InvalidSdp, sdp.formatExtMapLine(allocator, .{ .id = 0, .uri = "urn:bad" }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatExtMapLine(allocator, .{ .id = sdp.max_extmap_id + 1, .uri = sdp.sdes_mid_uri }));
     try std.testing.expectError(error.InvalidSdp, sdp.formatExtMapLine(allocator, .{ .id = 1, .uri = "" }));
 
     try std.testing.expectError(error.InvalidSdp, sdp.parseExtMapAttribute("0 " ++ sdp.sdes_mid_uri));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseExtMapAttribute("247 " ++ sdp.sdes_mid_uri));
 
     const ice_options_attr = try sdp.formatIceOptionsAttribute(allocator, &.{ sdp.ice_option_trickle, "google-ice", "TrIcKlE" });
     defer allocator.free(ice_options_attr);
