@@ -3685,14 +3685,18 @@ pub const sdp = struct {
         index: u16,
     };
 
+    pub fn mediaByMid(session: Session, search_mid: []const u8) ?IndexedMedia {
+        for (session.media, 0..) |media, index| {
+            if (findAttr(media.attributes, "mid")) |mid| {
+                if (std.mem.eql(u8, mid, search_mid)) return .{ .media = media, .index = @intCast(index) };
+            }
+        }
+        return null;
+    }
+
     pub fn selectCandidateMedia(session: Session) ?IndexedMedia {
         if (bundleId(session)) |bundle_id| {
-            for (session.media, 0..) |media, index| {
-                if (findAttr(media.attributes, "mid")) |mid| {
-                    if (std.mem.eql(u8, mid, bundle_id)) return .{ .media = media, .index = @intCast(index) };
-                }
-            }
-            return null;
+            return mediaByMid(session, bundle_id);
         }
         return if (session.media.len > 0) .{ .media = session.media[0], .index = 0 } else null;
     }
@@ -10194,6 +10198,10 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(u16, 1), selected_media.index);
     try std.testing.expectEqualStrings("application", selected_media.media.kind);
     try std.testing.expectEqualStrings("1", sdp.findAttr(selected_media.media.attributes, "mid").?);
+    const media_mid_0 = sdp.mediaByMid(session, "0").?;
+    try std.testing.expectEqual(@as(u16, 0), media_mid_0.index);
+    try std.testing.expectEqualStrings("audio", media_mid_0.media.kind);
+    try std.testing.expect(sdp.mediaByMid(session, "missing") == null);
 
     const fingerprint = try sdp.extractFingerprint(session);
     try std.testing.expectEqualStrings("sha-256", fingerprint.algorithm);
