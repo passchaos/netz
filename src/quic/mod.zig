@@ -854,6 +854,41 @@ pub const FrameType = enum(u64) {
     ack_frequency = 0xaf,
     _,
 
+    pub fn known(value: u64) bool {
+        if (FrameType.isStream(value)) return true;
+        return switch (value) {
+            @intFromEnum(FrameType.padding),
+            @intFromEnum(FrameType.ping),
+            @intFromEnum(FrameType.ack),
+            @intFromEnum(FrameType.ack_ecn),
+            @intFromEnum(FrameType.reset_stream),
+            @intFromEnum(FrameType.stop_sending),
+            @intFromEnum(FrameType.crypto),
+            @intFromEnum(FrameType.new_token),
+            @intFromEnum(FrameType.max_data),
+            @intFromEnum(FrameType.max_stream_data),
+            @intFromEnum(FrameType.max_streams_bidi),
+            @intFromEnum(FrameType.max_streams_uni),
+            @intFromEnum(FrameType.data_blocked),
+            @intFromEnum(FrameType.stream_data_blocked),
+            @intFromEnum(FrameType.streams_blocked_bidi),
+            @intFromEnum(FrameType.streams_blocked_uni),
+            @intFromEnum(FrameType.new_connection_id),
+            @intFromEnum(FrameType.retire_connection_id),
+            @intFromEnum(FrameType.path_challenge),
+            @intFromEnum(FrameType.path_response),
+            @intFromEnum(FrameType.connection_close),
+            @intFromEnum(FrameType.connection_close_app),
+            @intFromEnum(FrameType.handshake_done),
+            @intFromEnum(FrameType.immediate_ack),
+            @intFromEnum(FrameType.datagram),
+            @intFromEnum(FrameType.datagram_len),
+            @intFromEnum(FrameType.ack_frequency),
+            => true,
+            else => false,
+        };
+    }
+
     pub fn isStream(value: u64) bool {
         return (value & 0xf8) == 0x08;
     }
@@ -1150,6 +1185,34 @@ pub const FramePacketType = enum {
     one_rtt,
 };
 
+pub const TransportErrorCode = enum(u64) {
+    no_error = 0x00,
+    internal_error = 0x01,
+    connection_refused = 0x02,
+    flow_control_error = 0x03,
+    stream_limit_error = 0x04,
+    stream_state_error = 0x05,
+    final_size_error = 0x06,
+    frame_encoding_error = 0x07,
+    transport_parameter_error = 0x08,
+    connection_id_limit_error = 0x09,
+    protocol_violation = 0x0a,
+    invalid_token = 0x0b,
+    application_error = 0x0c,
+    crypto_buffer_exceeded = 0x0d,
+    key_update_error = 0x0e,
+    aead_limit_reached = 0x0f,
+    no_viable_path = 0x10,
+    version_negotiation_error = 0x11,
+    _,
+};
+
+pub const FramePayloadCloseError = struct {
+    code: TransportErrorCode,
+    frame_type: u64,
+    reason_phrase: []const u8,
+};
+
 pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool {
     return switch (packet_type) {
         .initial, .handshake => switch (frame) {
@@ -1188,6 +1251,62 @@ pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool
 
 pub fn validateFrameForPacketType(frame: Frame, packet_type: FramePacketType) Error!void {
     if (!frameAllowedInPacketType(frame, packet_type)) return error.InvalidFrame;
+}
+
+pub fn classifyFramePayloadCloseError(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    packet_type: FramePacketType,
+) Error!?FramePayloadCloseError {
+    if (payload.len == 0) return .{
+        .code = .protocol_violation,
+        .frame_type = 0,
+        .reason_phrase = "empty payload",
+    };
+
+    var pos: usize = 0;
+    while (pos < payload.len) {
+        const frame_type = rawFrameTypeValue(payload[pos..]);
+        var parsed = parseFrameOwned(allocator, payload[pos..]) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .{
+                .code = frameDecodeTransportErrorCode(err) orelse return err,
+                .frame_type = frame_type,
+                .reason_phrase = "frame encoding",
+            },
+        };
+        defer parsed.deinitOwned(allocator);
+
+        if (!frameAllowedInPacketType(parsed.frame, packet_type)) return .{
+            .code = .protocol_violation,
+            .frame_type = frame_type,
+            .reason_phrase = "packet type",
+        };
+        pos += parsed.consumed;
+    }
+    return null;
+}
+
+pub fn rawFrameTypeValue(bytes: []const u8) u64 {
+    var cursor = wire.Cursor.init(bytes);
+    return varint.decode(&cursor) catch 0;
+}
+
+pub fn frameDecodeTransportErrorCode(err: anyerror) ?TransportErrorCode {
+    return switch (err) {
+        error.UnsupportedFrameType,
+        error.InvalidFrame,
+        error.InvalidFrameLength,
+        error.InvalidAckRange,
+        error.InvalidConnectionIdLength,
+        error.BufferTooShort,
+        error.IntegerOverflow,
+        error.VarIntTooLarge,
+        error.MalformedVarInt,
+        error.InvalidEncoding,
+        => .frame_encoding_error,
+        else => null,
+    };
 }
 
 pub const ParsedFrame = struct {
@@ -2082,6 +2201,33 @@ test "QUIC frame packet context rules follow RFC 9000" {
     try std.testing.expect(!frameAllowedInPacketType(.{ .connection_close = .{ .error_code = 0, .frame_type = 0, .reason_phrase = "" } }, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(.{ .handshake_done = {} }, .one_rtt));
     try std.testing.expectError(error.InvalidFrame, validateFrameForPacketType(stream, .initial));
+}
+
+test "QUIC frame payload close-error classification" {
+    const allocator = std.testing.allocator;
+
+    const empty = (try classifyFramePayloadCloseError(allocator, &.{}, .one_rtt)).?;
+    try std.testing.expectEqual(TransportErrorCode.protocol_violation, empty.code);
+    try std.testing.expectEqual(@as(u64, 0), empty.frame_type);
+    try std.testing.expectEqualStrings("empty payload", empty.reason_phrase);
+
+    const initial_stream_payload = [_]u8{ @intFromEnum(FrameType.stream) | 0x02, 0, 1, 'x' };
+    const packet_type = (try classifyFramePayloadCloseError(allocator, &initial_stream_payload, .initial)).?;
+    try std.testing.expectEqual(TransportErrorCode.protocol_violation, packet_type.code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(FrameType.stream) | 0x02), packet_type.frame_type);
+    try std.testing.expectEqualStrings("packet type", packet_type.reason_phrase);
+
+    const unknown = [_]u8{0x21};
+    const encoding = (try classifyFramePayloadCloseError(allocator, &unknown, .one_rtt)).?;
+    try std.testing.expectEqual(TransportErrorCode.frame_encoding_error, encoding.code);
+    try std.testing.expectEqual(@as(u64, 0x21), encoding.frame_type);
+    try std.testing.expectEqualStrings("frame encoding", encoding.reason_phrase);
+
+    try std.testing.expect((try classifyFramePayloadCloseError(allocator, &.{@intFromEnum(FrameType.ping)}, .one_rtt)) == null);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(FrameType.ack)), rawFrameTypeValue(&.{@intFromEnum(FrameType.ack)}));
+    try std.testing.expectEqual(@as(u64, 0), rawFrameTypeValue(&.{0xff}));
+    try std.testing.expectEqual(@as(?TransportErrorCode, TransportErrorCode.frame_encoding_error), frameDecodeTransportErrorCode(error.InvalidFrame));
+    try std.testing.expectEqual(@as(?TransportErrorCode, null), frameDecodeTransportErrorCode(error.OutOfMemory));
 }
 
 test "QUIC frame type uses shortest varint encoding" {
