@@ -55,8 +55,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   also expose two-phase GOAWAY initiation/completion and drain-completion
   tracking over queued and application-owned requests. Clients can send
   pre-request or live RFC 9218 PRIORITY_UPDATE frames on persistent control
-  streams, with received priority field values owned by connection state, plus
-  a `std.Io.async` request receive helper for the development runtime
+  streams, with received priority field values owned by connection state.
+  Protected clients also expose split `sendRequest`/`receiveResponse` APIs with
+  bounded per-stream response reassembly, preserving interleaved responses and
+  resets instead of discarding non-target streams, plus a `std.Io.async` request
+  receive helper for the development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed

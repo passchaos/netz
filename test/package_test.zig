@@ -119,6 +119,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendGoAway"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendPriorityUpdate"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendRequest"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "rejectRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "initiateShutdown"));
@@ -128,6 +130,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendGoAway"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendPriorityUpdate"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequest"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "rejectRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "initiateShutdown"));
