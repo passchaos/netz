@@ -2298,7 +2298,7 @@ fn validateUriPath(method: []const u8, path: []const u8) Error!void {
         if (!methodIsOptions(method)) return error.InvalidHeader;
         return;
     }
-    if (path[0] != '/' and path[0] != '?') return error.InvalidHeader;
+    if (path[0] != '/') return error.InvalidHeader;
     var saw_fragment = false;
     for (path) |byte| {
         if (byte <= 0x20 or byte == 0x7f) return error.InvalidHeader;
@@ -5398,6 +5398,20 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = ":scheme", .value = "https" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_path, .request));
+
+    const query_only_path = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "?q=1" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&query_only_path, .request));
+
+    const origin_form_with_query = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/?q=1" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try validateHeaderBlock(&origin_form_with_query, .request);
 
     const fragment_path = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "GET" },
