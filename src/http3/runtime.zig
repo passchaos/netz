@@ -1118,6 +1118,9 @@ pub const HandshakeServer = struct {
                 self.session_options.max_stream_buffer,
                 self.session_options.max_concurrent_request_streams,
             ),
+            .request_lifecycle = .init(
+                established.connection.endpoint.allocator,
+            ),
         };
     }
 };
@@ -1134,8 +1137,10 @@ pub const HandshakeServerSession = struct {
     qpack_decoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(server_qpack_decoder_stream_id),
     qpack_decoder_prefix_sent: bool = false,
     request_streams: RequestStreamSet,
+    request_lifecycle: ServerRequestLifecycle,
 
     pub fn deinit(self: *HandshakeServerSession) void {
+        self.request_lifecycle.deinit();
         self.request_streams.deinit();
         self.qpack_encode.deinit();
         self.qpack_decode.deinit();
@@ -1172,6 +1177,7 @@ pub const HandshakeServerSession = struct {
             assembled.stream_id,
             request.qpack_section_acknowledgments,
         );
+        try self.request_lifecycle.markReceived(assembled.stream_id);
         try self.sendQpackFeedback();
         return .{
             .from = assembled.from,
@@ -1213,6 +1219,7 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
         );
+        self.request_lifecycle.markFinished(stream_id);
     }
 
     pub fn sendGoAway(self: *HandshakeServerSession, stream_id: u64) Error!void {
@@ -1229,6 +1236,28 @@ pub const HandshakeServerSession = struct {
             server_control_stream_id,
         );
         try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
+    }
+
+    pub fn initiateShutdown(self: *HandshakeServerSession) Error!void {
+        if (self.request_lifecycle.shutdown_state != .active) return;
+        try self.sendGoAway(@as(u64, quic.varint.max_value) & ~@as(u64, 0x3));
+        self.request_lifecycle.shutdown_state = .initial_goaway;
+    }
+
+    pub fn completeShutdown(self: *HandshakeServerSession) Error!void {
+        if (self.request_lifecycle.shutdown_state != .initial_goaway) return;
+        if (self.request_streams.entries.items.len != 0) {
+            return error.RequestIncomplete;
+        }
+        try self.sendGoAway(try self.request_lifecycle.finalGoAwayId());
+        self.request_lifecycle.shutdown_state = .final_goaway;
+    }
+
+    pub fn drainComplete(self: HandshakeServerSession) bool {
+        return self.request_lifecycle.drainComplete(
+            self.request_streams,
+            self.control.local_goaway_id,
+        );
     }
 
     pub fn cancelRequest(
@@ -1251,6 +1280,7 @@ pub const HandshakeServerSession = struct {
             cancel_qpack,
         );
         self.qpack_encode.abandonStream(stream_id);
+        self.request_lifecycle.markFinished(stream_id);
     }
 
     pub fn rejectRequest(
@@ -1468,6 +1498,7 @@ pub const ProtectedServer = struct {
     qpack_decoder_prefix_sent: bool = false,
     protected_send: ProtectedSendState,
     request_streams: RequestStreamSet,
+    request_lifecycle: ServerRequestLifecycle,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
 
@@ -1493,10 +1524,12 @@ pub const ProtectedServer = struct {
                 config.max_stream_buffer,
                 limits.max_concurrent_request_streams,
             ),
+            .request_lifecycle = .init(allocator),
         };
     }
 
     pub fn deinit(self: *ProtectedServer) void {
+        self.request_lifecycle.deinit();
         self.request_streams.deinit();
         self.protected_send.deinit();
         self.qpack_encode.deinit();
@@ -1523,6 +1556,7 @@ pub const ProtectedServer = struct {
             assembled.stream_id,
             request.qpack_section_acknowledgments,
         );
+        try self.request_lifecycle.markReceived(assembled.stream_id);
         try self.sendQpackFeedback(assembled.from);
         return .{
             .from = assembled.from,
@@ -1599,6 +1633,7 @@ pub const ProtectedServer = struct {
             &self.protected_send,
         );
         response_sent = true;
+        self.request_lifecycle.markFinished(stream_id);
     }
 
     pub fn sendGoAway(self: *ProtectedServer, to: net.IpAddress, stream_id: u64) Error!void {
@@ -1618,6 +1653,40 @@ pub const ProtectedServer = struct {
             server_control_stream_id,
         );
         try sendProtectedControlFrame(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, &self.protected_send, .goaway, stream_id);
+    }
+
+    pub fn initiateShutdown(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+    ) Error!void {
+        if (self.request_lifecycle.shutdown_state != .active) return;
+        try self.sendGoAway(
+            to,
+            @as(u64, quic.varint.max_value) & ~@as(u64, 0x3),
+        );
+        self.request_lifecycle.shutdown_state = .initial_goaway;
+    }
+
+    pub fn completeShutdown(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+    ) Error!void {
+        if (self.request_lifecycle.shutdown_state != .initial_goaway) return;
+        if (self.request_streams.entries.items.len != 0) {
+            return error.RequestIncomplete;
+        }
+        try self.sendGoAway(
+            to,
+            try self.request_lifecycle.finalGoAwayId(),
+        );
+        self.request_lifecycle.shutdown_state = .final_goaway;
+    }
+
+    pub fn drainComplete(self: ProtectedServer) bool {
+        return self.request_lifecycle.drainComplete(
+            self.request_streams,
+            self.control.local_goaway_id,
+        );
     }
 
     pub fn cancelRequest(
@@ -1644,6 +1713,7 @@ pub const ProtectedServer = struct {
             cancel_qpack,
         );
         self.qpack_encode.abandonStream(stream_id);
+        self.request_lifecycle.markFinished(stream_id);
     }
 
     pub fn rejectRequest(
@@ -2193,6 +2263,71 @@ const RequestStreamSet = struct {
             return requires_qpack_cancellation;
         }
         return false;
+    }
+};
+
+pub const ShutdownState = enum {
+    active,
+    initial_goaway,
+    final_goaway,
+};
+
+const ServerRequestLifecycle = struct {
+    allocator: std.mem.Allocator,
+    active_streams: std.ArrayList(u62) = .empty,
+    highest_processed_stream_id: ?u62 = null,
+    shutdown_state: ShutdownState = .active,
+
+    fn init(allocator: std.mem.Allocator) ServerRequestLifecycle {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(self: *ServerRequestLifecycle) void {
+        self.active_streams.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn markReceived(
+        self: *ServerRequestLifecycle,
+        stream_id: u62,
+    ) Error!void {
+        for (self.active_streams.items) |existing| {
+            if (existing == stream_id) return error.UnexpectedStream;
+        }
+        try self.active_streams.append(self.allocator, stream_id);
+        self.highest_processed_stream_id = if (self.highest_processed_stream_id) |highest|
+            @max(highest, stream_id)
+        else
+            stream_id;
+    }
+
+    fn markFinished(self: *ServerRequestLifecycle, stream_id: u64) void {
+        for (self.active_streams.items, 0..) |existing, index| {
+            if (existing != stream_id) continue;
+            _ = self.active_streams.swapRemove(index);
+            return;
+        }
+    }
+
+    fn finalGoAwayId(self: ServerRequestLifecycle) Error!u64 {
+        const highest = self.highest_processed_stream_id orelse return 0;
+        return std.math.add(u64, highest, 4) catch error.InvalidFrame;
+    }
+
+    fn drainComplete(
+        self: ServerRequestLifecycle,
+        request_streams: RequestStreamSet,
+        local_goaway_id: ?u64,
+    ) bool {
+        if (self.shutdown_state != .final_goaway) return false;
+        const goaway_id = local_goaway_id orelse return false;
+        for (self.active_streams.items) |stream_id| {
+            if (stream_id < goaway_id) return false;
+        }
+        for (request_streams.entries.items) |entry| {
+            if (entry.receive.stream_id < goaway_id) return false;
+        }
+        return true;
     }
 };
 
@@ -4511,6 +4646,133 @@ test "HTTP/3 protected server surfaces request reset and clears reassembly" {
     try std.testing.expectEqual(@as(usize, 0), server.request_streams.entries.items.len);
 }
 
+test "HTTP/3 protected server performs two-phase graceful shutdown" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0x9d, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0x9e, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x9f} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa0} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(allocator);
+    try (http3.Request{
+        .method = "GET",
+        .path = "/drain",
+        .authority = "localhost",
+    }).write(&request_bytes, allocator);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    var request_send = quic.stream_state.SendState.init(0);
+    try request_send.appendFrames(
+        &frames,
+        allocator,
+        request_bytes.items,
+        request_bytes.items.len,
+        true,
+    );
+    try sendProtectedFrames(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config.send_keys,
+        client.config.peer_connection_id,
+        &client.next_packet_number,
+        frames.items,
+        client.config.max_frames_per_packet,
+        &client.protected_send,
+    );
+
+    var request = try server.receiveRequest();
+    defer request.deinit(allocator);
+    try server.initiateShutdown(request.from);
+    try std.testing.expectEqual(
+        ShutdownState.initial_goaway,
+        server.request_lifecycle.shutdown_state,
+    );
+    try std.testing.expect(!server.drainComplete());
+    try server.completeShutdown(request.from);
+    try std.testing.expectEqual(
+        ShutdownState.final_goaway,
+        server.request_lifecycle.shutdown_state,
+    );
+    try std.testing.expectEqual(@as(?u64, 4), server.control.local_goaway_id);
+    try std.testing.expect(!server.drainComplete());
+
+    try server.sendResponse(request.from, request.stream_id, .{
+        .status = 204,
+    });
+    try std.testing.expect(server.drainComplete());
+
+    // Process SETTINGS plus both GOAWAY frames before opening another stream.
+    while (client.control.peer_goaway_id == null or
+        client.control.peer_goaway_id.? != 4)
+    {
+        var packet = try quic.one_rtt.receive(
+            &client.quic_client.endpoint,
+            server_keys,
+            client_cid.len,
+            client.expected_packet_number,
+            8,
+        );
+        defer packet.deinit(allocator);
+        client.expected_packet_number = packet.packet.packet_number + 1;
+        for (packet.frames) |frame| {
+            if (frame != .stream) continue;
+            _ = try applyControlStreamFrameForRole(
+                &client.control,
+                allocator,
+                frame.stream,
+                .client,
+            );
+        }
+    }
+    client.next_stream_id = 4;
+    try std.testing.expectError(error.GoAwayReceived, client.request(.{
+        .method = "GET",
+        .path = "/after-drain",
+    }));
+}
+
 test "HTTP/3 protected runtime reuses acknowledged dynamic QPACK entries" {
     const allocator = std.testing.allocator;
 
@@ -5767,6 +6029,101 @@ test "HTTP/3 handshake client cancellation reaches server" {
     );
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/3 handshake server performs two-phase graceful shutdown" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80 };
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const server_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0x8b} ** 32,
+                .x25519_secret_key = [_]u8{0x8c} ** 32,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try session.initiateShutdown();
+            try session.completeShutdown();
+            try std.testing.expectEqual(
+                @as(?u64, 4),
+                session.control.local_goaway_id,
+            );
+            try std.testing.expect(!session.drainComplete());
+            try session.sendResponse(request.stream_id, .{ .status = 204 });
+            try std.testing.expect(session.drainComplete());
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x89} ** 32,
+                .x25519_secret_key = [_]u8{0x8a} ** 32,
+            },
+        },
+    );
+    defer client.deinit();
+
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/graceful",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 204), response.response.status);
+    try std.testing.expectEqual(@as(?u64, 4), client.control.peer_goaway_id);
+    try std.testing.expectError(error.GoAwayReceived, client.request(.{
+        .method = "GET",
+        .path = "/after-graceful",
+    }));
 }
 
 test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {

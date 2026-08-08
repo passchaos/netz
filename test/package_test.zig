@@ -120,11 +120,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "rejectRequest"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "initiateShutdown"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "completeShutdown"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "drainComplete"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendGoAway"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendGoAway"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "rejectRequest"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "initiateShutdown"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "completeShutdown"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "drainComplete"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "ShutdownState"));
     try std.testing.expect(@hasDecl(netz.http3, "SettingsState"));
     try std.testing.expectEqual(
         @as(u64, 0x10c),
