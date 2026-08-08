@@ -403,6 +403,7 @@ pub const Connection = struct {
     incoming_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
     outgoing_qos1: std.StaticBitSet(packet_identifier_slots) = .empty,
     outgoing_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
+    outgoing_qos2_pubrel: std.StaticBitSet(packet_identifier_slots) = .empty,
     incoming_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
     outgoing_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
 
@@ -538,6 +539,11 @@ pub const Connection = struct {
     }
 
     pub fn completePublishQoS2(self: *Connection, packet_id: u16) Error!void {
+        const id = try self.completePublishPubRec(packet_id);
+        try self.completePublishPubComp(id);
+    }
+
+    pub fn completePublishPubRec(self: *Connection, packet_id: u16) Error!u16 {
         if (packet_id != 0 and !self.outgoing_qos2.isSet(@as(usize, packet_id))) return error.UnexpectedPacket;
         var pubrec = try self.readPubRec();
         defer pubrec.deinit(self.allocator);
@@ -548,10 +554,17 @@ pub const Connection = struct {
             return error.PublishRefused;
         }
         try self.writePubRel(pubrec.ack.packet_id, 0);
+        self.outgoing_qos2.setValue(@as(usize, pubrec.ack.packet_id), false);
+        self.outgoing_qos2_pubrel.set(@as(usize, pubrec.ack.packet_id));
+        return pubrec.ack.packet_id;
+    }
+
+    pub fn completePublishPubComp(self: *Connection, packet_id: u16) Error!void {
+        if (!self.outgoing_qos2_pubrel.isSet(@as(usize, packet_id))) return error.UnexpectedPacket;
         var pubcomp = try self.readPubComp();
         defer pubcomp.deinit(self.allocator);
-        if (pubcomp.ack.packet_id != pubrec.ack.packet_id) return error.UnexpectedPacket;
-        self.releaseOutgoingPublish(pubrec.ack.packet_id, .exactly_once);
+        if (pubcomp.ack.packet_id != packet_id) return error.UnexpectedPacket;
+        self.releaseOutgoingPublish(packet_id, .exactly_once);
         if (!pubcomp.ack.accepted()) return error.PublishRefused;
     }
 
@@ -919,7 +932,7 @@ pub const Connection = struct {
         while (attempts < std.math.maxInt(u16)) : (attempts += 1) {
             const packet_id = self.nextPacketId();
             const index = @as(usize, packet_id);
-            if (self.outgoing_qos1.isSet(index) or self.outgoing_qos2.isSet(index)) continue;
+            if (self.outgoing_qos1.isSet(index) or self.outgoing_qos2.isSet(index) or self.outgoing_qos2_pubrel.isSet(index)) continue;
 
             switch (qos) {
                 .at_most_once => unreachable,
@@ -939,8 +952,11 @@ pub const Connection = struct {
             .at_least_once => &self.outgoing_qos1,
             .exactly_once => &self.outgoing_qos2,
         };
-        if (!set.isSet(index)) return;
-        set.setValue(index, false);
+        if (qos == .exactly_once and self.outgoing_qos2_pubrel.isSet(index)) {
+            self.outgoing_qos2_pubrel.setValue(index, false);
+        } else if (set.isSet(index)) {
+            set.setValue(index, false);
+        } else return;
         self.outgoing_inflight -= 1;
     }
 };
@@ -1613,15 +1629,17 @@ test "MQTT split publish API accepts out-of-order QoS2 PUBREC handshakes" {
             try std.testing.expectEqual(mqtt.QoS.exactly_once, second.publish.qos);
 
             try accepted.connection.writePubRec(second.publish.packet_id.?, 0);
+            try accepted.connection.writePubRec(first.publish.packet_id.?, 0);
+
             var second_rel = try accepted.connection.readPubRel();
             defer second_rel.deinit(server_ptr.allocator);
             try std.testing.expectEqual(second.publish.packet_id.?, second_rel.ack.packet_id);
-            try accepted.connection.writePubComp(second_rel.ack.packet_id, 0);
 
-            try accepted.connection.writePubRec(first.publish.packet_id.?, 0);
             var first_rel = try accepted.connection.readPubRel();
             defer first_rel.deinit(server_ptr.allocator);
             try std.testing.expectEqual(first.publish.packet_id.?, first_rel.ack.packet_id);
+
+            try accepted.connection.writePubComp(second_rel.ack.packet_id, 0);
             try accepted.connection.writePubComp(first_rel.ack.packet_id, 0);
 
             var disconnect = try accepted.connection.readDisconnect();
@@ -1644,12 +1662,21 @@ test "MQTT split publish API accepts out-of-order QoS2 PUBREC handshakes" {
     const second_id = (try client.writePublish("qos2/two", "two", .{ .qos = .exactly_once })).?;
     try std.testing.expectEqual(@as(u16, 2), client.outgoing_inflight);
 
-    try client.completePublishQoS2(0);
+    const second_rec = try client.completePublishPubRec(0);
+    try std.testing.expectEqual(second_id, second_rec);
     try std.testing.expect(!client.outgoing_qos2.isSet(@as(usize, second_id)));
+    try std.testing.expect(client.outgoing_qos2_pubrel.isSet(@as(usize, second_id)));
     try std.testing.expect(client.outgoing_qos2.isSet(@as(usize, first_id)));
-    try std.testing.expectEqual(@as(u16, 1), client.outgoing_inflight);
+    try std.testing.expectEqual(@as(u16, 2), client.outgoing_inflight);
 
-    try client.completePublishQoS2(0);
+    const first_rec = try client.completePublishPubRec(0);
+    try std.testing.expectEqual(first_id, first_rec);
+    try std.testing.expect(client.outgoing_qos2_pubrel.isSet(@as(usize, first_id)));
+    try std.testing.expectEqual(@as(u16, 2), client.outgoing_inflight);
+
+    try client.completePublishPubComp(second_id);
+    try std.testing.expectEqual(@as(u16, 1), client.outgoing_inflight);
+    try client.completePublishPubComp(first_id);
     try std.testing.expectEqual(@as(u16, 0), client.outgoing_inflight);
     try client.disconnect(0);
 
