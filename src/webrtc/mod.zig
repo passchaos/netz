@@ -7683,9 +7683,12 @@ pub const sctp = struct {
 
         pub fn parse(bytes: []const u8) Error!Header {
             var cursor = wire.Cursor.init(bytes);
+            const source_port = try cursor.readInt(u16, .big);
+            const destination_port = try cursor.readInt(u16, .big);
+            try validatePacketPorts(source_port, destination_port);
             return .{
-                .source_port = try cursor.readInt(u16, .big),
-                .destination_port = try cursor.readInt(u16, .big),
+                .source_port = source_port,
+                .destination_port = destination_port,
                 .verification_tag = try cursor.readInt(u32, .big),
                 .checksum = try cursor.readInt(u32, .little),
             };
@@ -9211,10 +9214,19 @@ pub const sctp = struct {
     }
 
     fn writePacketHeader(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions) Error!void {
+        try validatePacketPorts(options.source_port, options.destination_port);
         try wire.appendInt(list, allocator, u16, options.source_port, .big);
         try wire.appendInt(list, allocator, u16, options.destination_port, .big);
         try wire.appendInt(list, allocator, u32, options.verification_tag, .big);
         try wire.appendInt(list, allocator, u32, 0, .little);
+    }
+
+    fn validatePacketPorts(source_port: u16, destination_port: u16) Error!void {
+        // Pion/sctp rejects packets with either SCTP port set to zero before
+        // association dispatch.  Enforce the same invariant in the stateless
+        // codec so generated packets are routable and parsed packets cannot be
+        // mistaken for an application association.
+        if (source_port == 0 or destination_port == 0) return error.InvalidSctpPacket;
     }
 
     fn parseErrorCauses(allocator: std.mem.Allocator, bytes: []const u8) Error![]ErrorCause {
@@ -13095,6 +13107,27 @@ test "SCTP ABORT and ERROR causes" {
         .verification_tag = 0x01020304,
     }, true, &.{.{ .code = .user_initiated_abort, .value = cause_text }});
     try std.testing.expect(try sctp.validChecksum(encoded.items));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeAbortPacket(&encoded, allocator, .{
+        .source_port = 0,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, true, &.{}));
+    var zero_source_port = try encoded.clone(allocator);
+    defer zero_source_port.deinit(allocator);
+    zero_source_port.items[0] = 0;
+    zero_source_port.items[1] = 0;
+    std.mem.writeInt(u32, zero_source_port.items[8..12], 0, .little);
+    const zero_source_checksum = try sctp.checksum(zero_source_port.items);
+    std.mem.writeInt(u32, zero_source_port.items[8..12], zero_source_checksum, .little);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, zero_source_port.items, true));
+    var zero_destination_port = try encoded.clone(allocator);
+    defer zero_destination_port.deinit(allocator);
+    zero_destination_port.items[2] = 0;
+    zero_destination_port.items[3] = 0;
+    std.mem.writeInt(u32, zero_destination_port.items[8..12], 0, .little);
+    const zero_destination_checksum = try sctp.checksum(zero_destination_port.items);
+    std.mem.writeInt(u32, zero_destination_port.items[8..12], zero_destination_checksum, .little);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, zero_destination_port.items, true));
     var parsed = try sctp.parsePacket(allocator, encoded.items, true);
     defer parsed.deinit(allocator);
     var abort_chunk = try sctp.AbortChunk.parse(allocator, parsed.chunks[0]);
