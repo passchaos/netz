@@ -183,6 +183,7 @@ pub const Settings = struct {
     }
 
     pub fn writePayload(self: Settings, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        try self.validateLocal();
         if (self.qpack_max_table_capacity != 0) try writeSetting(list, allocator, .qpack_max_table_capacity, self.qpack_max_table_capacity);
         if (self.max_field_section_size != std.math.maxInt(u64)) try writeSetting(list, allocator, .max_field_section_size, self.max_field_section_size);
         if (self.qpack_blocked_streams != 0) try writeSetting(list, allocator, .qpack_blocked_streams, self.qpack_blocked_streams);
@@ -205,6 +206,17 @@ pub const Settings = struct {
         if (self.webtransport_initial_max_data != 0) try writeSetting(list, allocator, .webtransport_initial_max_data, self.webtransport_initial_max_data);
         if (self.webtransport_initial_max_streams_uni != 0) try writeSetting(list, allocator, .webtransport_initial_max_streams_uni, self.webtransport_initial_max_streams_uni);
         if (self.webtransport_initial_max_streams_bidi != 0) try writeSetting(list, allocator, .webtransport_initial_max_streams_bidi, self.webtransport_initial_max_streams_bidi);
+    }
+
+    pub fn validateLocal(self: Settings) Error!void {
+        // The current QPACK implementation is deliberately static-table-only:
+        // encoder/decoder streams reject non-empty instructions and header
+        // blocks with non-zero Required Insert Count/Base fail as unsupported.
+        // Advertising dynamic capacity or blocked streams would invite peers to
+        // send dynamic references that this endpoint cannot process.
+        if (self.qpack_max_table_capacity != 0 or self.qpack_blocked_streams != 0) {
+            return error.QpackDynamicTableUnsupported;
+        }
     }
 };
 
@@ -2043,6 +2055,12 @@ test "HTTP/3 typed settings state tracks negotiation" {
     defer default_payload.deinit(allocator);
     try defaults.writePayload(&default_payload, allocator);
     try std.testing.expectEqual(@as(usize, 0), default_payload.items.len);
+    try std.testing.expectError(error.QpackDynamicTableUnsupported, (Settings{
+        .qpack_max_table_capacity = 1,
+    }).writePayload(&default_payload, allocator));
+    try std.testing.expectError(error.QpackDynamicTableUnsupported, (Settings{
+        .qpack_blocked_streams = 1,
+    }).writePayload(&default_payload, allocator));
 
     const local = Settings{
         .max_field_section_size = 32 * 1024,
