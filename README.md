@@ -37,7 +37,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`,
   `http://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
-  SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, client-initiated push-stream rejection, and QPACK encoder/decoder critical stream registration with FIN/RESET_STREAM/STOP_SENDING closure rejection and explicit non-empty-instruction rejection while dynamic tables are unsupported, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
+  SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, client-initiated push-stream rejection, and QPACK encoder/decoder critical stream registration with FIN/RESET_STREAM/STOP_SENDING closure rejection, RFC 9204 dynamic-table FIFO/absolute-relative indexing/eviction state, Required Insert Count wrapping, and Huffman-capable Set-Capacity/Insert/Duplicate encoder-instruction codecs (while the live runtime keeps dynamic streams disabled until blocked-section acknowledgment is wired), GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
   CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs with malformed-payload rejection and advertised MAX_PUSH_ID enforcement for received PUSH_PROMISE frames,
   RFC 9218 Priority field parsing/serialization,
   request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, response-side PUSH_PROMISE tolerance, interim 1xx response skipping and runtime emission before final responses, and forbidden trailer-field rejection,
@@ -339,8 +339,9 @@ if (session.maxDatagramPayloadSize()) |limit| {
 - The HTTP/2 HPACK helper maintains per-connection dynamic table state and RFC
   7541 Huffman strings; the stateless literal convenience helpers accept legal
   leading table-size updates while keeping dynamic state scoped to one block.
-  HTTP/3 QPACK is still bootstrap/stateless and rejects dynamic-table
-  instructions until a full encoder/decoder stream state machine is added.
+  HTTP/3 QPACK now provides RFC 9204 dynamic-table and encoder-instruction
+  state primitives, but the socket runtime still rejects non-empty dynamic
+  streams until blocked field sections and decoder acknowledgments are wired.
 - WebRTC support covers signaling/transport wire primitives (STUN, ICE, SDP,
   DTLS/RTP/SCTP headers), forming a foundation for peer-connection state
   machines and SRTP/SCTP data-channel layers.

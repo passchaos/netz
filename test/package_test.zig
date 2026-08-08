@@ -208,6 +208,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "encryptedPacketsWithCurrentKeys"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "authenticationFailureCount"));
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
+    try std.testing.expect(@hasDecl(netz.http3.Qpack, "DynamicTable"));
+    try std.testing.expect(@hasDecl(netz.http3.Qpack, "EncoderInstruction"));
+    try std.testing.expect(@hasDecl(netz.http3.Qpack, "applyEncoderInstructions"));
+    try std.testing.expect(@hasDecl(netz.http3.Qpack, "decodeRequiredInsertCount"));
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.initial_exchange.min_initial_udp_datagram_size);
     try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "sendInitialCrypto"));

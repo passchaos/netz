@@ -29,6 +29,8 @@ pub const Error = wire.Error || error{
     ExcessiveLoad,
     ExtendedConnectDisabled,
     QpackDynamicTableUnsupported,
+    QpackEncoderStreamError,
+    QpackDecompressionFailed,
 } || std.mem.Allocator.Error;
 
 pub const max_settings_payload_size: usize = 256;
@@ -669,6 +671,344 @@ pub const Qpack = struct {
         name_storage: ?[]u8 = null,
         value_storage: ?[]u8 = null,
     };
+
+    pub const dynamic_entry_overhead: usize = 32;
+
+    pub const DynamicEntry = struct {
+        absolute_index: u64,
+        name: []u8,
+        value: []u8,
+
+        pub fn size(self: DynamicEntry) usize {
+            return self.name.len + self.value.len + dynamic_entry_overhead;
+        }
+
+        fn deinit(self: *DynamicEntry, allocator: std.mem.Allocator) void {
+            allocator.free(self.name);
+            allocator.free(self.value);
+            self.* = undefined;
+        }
+    };
+
+    /// RFC 9204 dynamic table, ordered oldest-to-newest.
+    ///
+    /// `head` avoids O(n) shifts on eviction. Compaction is deferred until the
+    /// consumed prefix is at least half the allocation, keeping inserts and
+    /// normal capacity pressure amortized O(1) while absolute indexes remain
+    /// explicit and independent of storage position.
+    pub const DynamicTable = struct {
+        allocator: std.mem.Allocator,
+        entries: std.ArrayList(DynamicEntry) = .empty,
+        head: usize = 0,
+        current_size: usize = 0,
+        capacity: usize = 0,
+        max_capacity: usize,
+        insert_count: u64 = 0,
+
+        pub fn init(allocator: std.mem.Allocator, max_capacity: usize) DynamicTable {
+            return .{ .allocator = allocator, .max_capacity = max_capacity };
+        }
+
+        pub fn deinit(self: *DynamicTable) void {
+            for (self.entries.items[self.head..]) |*entry| entry.deinit(self.allocator);
+            self.entries.deinit(self.allocator);
+            self.* = undefined;
+        }
+
+        pub fn entryCount(self: DynamicTable) usize {
+            return self.entries.items.len - self.head;
+        }
+
+        pub fn maxEntries(self: DynamicTable) u64 {
+            return @intCast(self.max_capacity / dynamic_entry_overhead);
+        }
+
+        pub fn setCapacity(self: *DynamicTable, new_capacity: usize) Error!void {
+            if (new_capacity > self.max_capacity) return error.QpackEncoderStreamError;
+            self.capacity = new_capacity;
+            self.evictToFit(0);
+        }
+
+        pub fn insert(self: *DynamicTable, name: []const u8, value: []const u8) Error!u64 {
+            const entry_size = dynamicEntrySize(name, value) catch return error.QpackEncoderStreamError;
+            if (entry_size > self.capacity) {
+                self.clearEntries();
+                return error.QpackEncoderStreamError;
+            }
+            const next_insert_count = std.math.add(u64, self.insert_count, 1) catch
+                return error.QpackEncoderStreamError;
+            // Name/value can borrow from an entry that this insertion evicts
+            // (Duplicate and dynamic-name-reference instructions both allow
+            // this). Stabilize them before changing table ownership.
+            self.compactIfNeeded();
+            try self.entries.ensureUnusedCapacity(self.allocator, 1);
+            const name_copy = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(name_copy);
+            const value_copy = try self.allocator.dupe(u8, value);
+            errdefer self.allocator.free(value_copy);
+            self.evictToFit(entry_size);
+
+            const absolute_index = self.insert_count;
+            self.entries.appendAssumeCapacity(.{
+                .absolute_index = absolute_index,
+                .name = name_copy,
+                .value = value_copy,
+            });
+            self.current_size += entry_size;
+            self.insert_count = next_insert_count;
+            return absolute_index;
+        }
+
+        pub fn duplicate(self: *DynamicTable, relative_index: u64) Error!u64 {
+            const entry = self.relative(relative_index) orelse return error.QpackEncoderStreamError;
+            return self.insert(entry.name, entry.value);
+        }
+
+        /// Encoder-stream relative indexes use the current insertion point:
+        /// zero identifies the most recently inserted entry.
+        pub fn relative(self: DynamicTable, relative_index: u64) ?DynamicEntry {
+            const count = self.entryCount();
+            const index = std.math.cast(usize, relative_index) orelse return null;
+            if (index >= count) return null;
+            return self.entries.items[self.entries.items.len - 1 - index];
+        }
+
+        pub fn absolute(self: DynamicTable, absolute_index: u64) ?DynamicEntry {
+            if (self.entryCount() == 0) return null;
+            const oldest = self.entries.items[self.head].absolute_index;
+            if (absolute_index < oldest or absolute_index >= self.insert_count) return null;
+            const offset = std.math.cast(usize, absolute_index - oldest) orelse return null;
+            const index = self.head + offset;
+            if (index >= self.entries.items.len) return null;
+            const entry = self.entries.items[index];
+            if (entry.absolute_index != absolute_index) return null;
+            return entry;
+        }
+
+        pub fn fieldRelativeToBase(self: DynamicTable, base: u64, relative_index: u64) ?DynamicEntry {
+            if (relative_index >= base) return null;
+            return self.absolute(base - relative_index - 1);
+        }
+
+        pub fn fieldPostBase(self: DynamicTable, base: u64, post_base_index: u64) ?DynamicEntry {
+            const absolute_index = std.math.add(u64, base, post_base_index) catch return null;
+            return self.absolute(absolute_index);
+        }
+
+        fn evictToFit(self: *DynamicTable, incoming_size: usize) void {
+            while (self.entryCount() != 0 and
+                (self.current_size > self.capacity or
+                    incoming_size > self.capacity - self.current_size))
+            {
+                var entry = &self.entries.items[self.head];
+                self.current_size -= entry.size();
+                entry.deinit(self.allocator);
+                self.head += 1;
+            }
+            self.compactIfNeeded();
+        }
+
+        fn clearEntries(self: *DynamicTable) void {
+            for (self.entries.items[self.head..]) |*entry| entry.deinit(self.allocator);
+            self.entries.clearRetainingCapacity();
+            self.head = 0;
+            self.current_size = 0;
+        }
+
+        fn compactIfNeeded(self: *DynamicTable) void {
+            if (self.head == 0) return;
+            if (self.head < self.entries.items.len / 2 and self.entryCount() != 0) return;
+            const remaining = self.entryCount();
+            @memmove(self.entries.items[0..remaining], self.entries.items[self.head..]);
+            self.entries.items.len = remaining;
+            self.head = 0;
+        }
+    };
+
+    pub const EncoderInstruction = union(enum) {
+        insert_name_reference: struct {
+            static: bool,
+            name_index: u64,
+            value: []const u8,
+        },
+        insert_literal: struct {
+            name: []const u8,
+            value: []const u8,
+        },
+        set_capacity: u64,
+        duplicate: u64,
+    };
+
+    pub const DecodedEncoderInstruction = struct {
+        instruction: EncoderInstruction,
+        consumed: usize,
+        name_storage: ?[]u8 = null,
+        value_storage: ?[]u8 = null,
+
+        pub fn deinit(self: *DecodedEncoderInstruction, allocator: std.mem.Allocator) void {
+            if (self.name_storage) |storage| allocator.free(storage);
+            if (self.value_storage) |storage| allocator.free(storage);
+            self.* = undefined;
+        }
+    };
+
+    pub fn writeEncoderInstruction(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        instruction: EncoderInstruction,
+    ) !void {
+        switch (instruction) {
+            .insert_name_reference => |reference| {
+                try encodePrefixedInteger(
+                    list,
+                    allocator,
+                    6,
+                    if (reference.static) 0xc0 else 0x80,
+                    reference.name_index,
+                );
+                try encodeString(list, allocator, reference.value);
+            },
+            .insert_literal => |literal| {
+                try encodePrefixedInteger(list, allocator, 5, 0x40, literal.name.len);
+                try list.appendSlice(allocator, literal.name);
+                try encodeString(list, allocator, literal.value);
+            },
+            .set_capacity => |capacity| try encodePrefixedInteger(list, allocator, 5, 0x20, capacity),
+            .duplicate => |index| try encodePrefixedInteger(list, allocator, 5, 0x00, index),
+        }
+    }
+
+    pub fn decodeEncoderInstruction(
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) !DecodedEncoderInstruction {
+        var cursor = wire.Cursor.init(bytes);
+        const first = try cursor.readByte();
+        if ((first & 0x80) != 0) {
+            const name_index = try decodePrefixedInteger(&cursor, 6, first);
+            var value = try decodeString(allocator, &cursor);
+            errdefer if (value.storage) |storage| allocator.free(storage);
+            const result: DecodedEncoderInstruction = .{
+                .instruction = .{ .insert_name_reference = .{
+                    .static = (first & 0x40) != 0,
+                    .name_index = name_index,
+                    .value = value.value,
+                } },
+                .consumed = cursor.pos,
+                .value_storage = value.storage,
+            };
+            value.storage = null;
+            return result;
+        }
+        if ((first & 0x40) != 0) {
+            const name_len = try decodePrefixedInteger(&cursor, 5, first);
+            var name = try decodeMaybeHuffman(
+                allocator,
+                try cursor.readSlice(name_len),
+                (first & 0x20) != 0,
+            );
+            errdefer if (name.storage) |storage| allocator.free(storage);
+            var value = try decodeString(allocator, &cursor);
+            errdefer if (value.storage) |storage| allocator.free(storage);
+            const result: DecodedEncoderInstruction = .{
+                .instruction = .{ .insert_literal = .{
+                    .name = name.value,
+                    .value = value.value,
+                } },
+                .consumed = cursor.pos,
+                .name_storage = name.storage,
+                .value_storage = value.storage,
+            };
+            name.storage = null;
+            value.storage = null;
+            return result;
+        }
+        if ((first & 0x20) != 0) {
+            return .{
+                .instruction = .{ .set_capacity = try decodePrefixedInteger(&cursor, 5, first) },
+                .consumed = cursor.pos,
+            };
+        }
+        return .{
+            .instruction = .{ .duplicate = try decodePrefixedInteger(&cursor, 5, first) },
+            .consumed = cursor.pos,
+        };
+    }
+
+    pub fn applyEncoderInstructions(
+        table: *DynamicTable,
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) Error!usize {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            var decoded = decodeEncoderInstruction(allocator, bytes[offset..]) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return error.QpackEncoderStreamError,
+            };
+            defer decoded.deinit(allocator);
+            switch (decoded.instruction) {
+                .set_capacity => |capacity| {
+                    const cast = std.math.cast(usize, capacity) orelse return error.QpackEncoderStreamError;
+                    try table.setCapacity(cast);
+                },
+                .duplicate => |index| _ = try table.duplicate(index),
+                .insert_literal => |literal| _ = try table.insert(literal.name, literal.value),
+                .insert_name_reference => |reference| {
+                    const name = if (reference.static) blk: {
+                        const entry = staticEntry(std.math.cast(usize, reference.name_index) orelse
+                            return error.QpackEncoderStreamError) orelse
+                            return error.QpackEncoderStreamError;
+                        break :blk entry.name;
+                    } else blk: {
+                        const entry = table.relative(reference.name_index) orelse
+                            return error.QpackEncoderStreamError;
+                        break :blk entry.name;
+                    };
+                    _ = try table.insert(name, reference.value);
+                },
+            }
+            offset += decoded.consumed;
+        }
+        return offset;
+    }
+
+    pub fn encodeRequiredInsertCount(required_insert_count: u64, max_entries: u64) Error!u64 {
+        if (required_insert_count == 0) return 0;
+        if (max_entries == 0) return error.QpackDecompressionFailed;
+        const full_range = std.math.mul(u64, 2, max_entries) catch return error.QpackDecompressionFailed;
+        return (required_insert_count % full_range) + 1;
+    }
+
+    pub fn decodeRequiredInsertCount(
+        encoded_insert_count: u64,
+        max_entries: u64,
+        total_number_of_inserts: u64,
+    ) Error!u64 {
+        if (encoded_insert_count == 0) return 0;
+        if (max_entries == 0) return error.QpackDecompressionFailed;
+        const full_range = std.math.mul(u64, 2, max_entries) catch return error.QpackDecompressionFailed;
+        if (encoded_insert_count > full_range) return error.QpackDecompressionFailed;
+        const max_value = std.math.add(u64, total_number_of_inserts, max_entries) catch
+            return error.QpackDecompressionFailed;
+        const max_wrapped = (max_value / full_range) * full_range;
+        var required_insert_count = std.math.add(
+            u64,
+            max_wrapped,
+            encoded_insert_count - 1,
+        ) catch return error.QpackDecompressionFailed;
+        if (required_insert_count > max_value) {
+            if (required_insert_count <= full_range) return error.QpackDecompressionFailed;
+            required_insert_count -= full_range;
+        }
+        if (required_insert_count == 0) return error.QpackDecompressionFailed;
+        return required_insert_count;
+    }
+
+    fn dynamicEntrySize(name: []const u8, value: []const u8) error{IntegerOverflow}!usize {
+        const strings = std.math.add(usize, name.len, value.len) catch return error.IntegerOverflow;
+        return std.math.add(usize, strings, dynamic_entry_overhead) catch error.IntegerOverflow;
+    }
 
     const StaticEntry = struct {
         name: []const u8,
@@ -1986,6 +2326,190 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     try std.testing.expectEqualStrings("200", lower_decoded[0].value);
     try std.testing.expectEqualStrings("x-proto", lower_decoded[1].name);
     try std.testing.expectEqualStrings("QUIC", lower_decoded[1].value);
+}
+
+test "HTTP/3 QPACK dynamic table applies RFC 9204 Appendix B encoder stream" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 220);
+    defer table.deinit();
+
+    const appendix_b2 = [_]u8{
+        0x3f, 0xbd, 0x01, // Set Dynamic Table Capacity = 220.
+        0xc0, 0x0f, // Insert static name index 0, value length 15.
+        'w',  'w',
+        'w',  '.',
+        'e',  'x',
+        'a',  'm',
+        'p',  'l',
+        'e',  '.',
+        'c',  'o',
+        'm',
+        0xc1, 0x0c, // Insert static name index 1, value length 12.
+        '/',  's',
+        'a',  'm',
+        'p',  'l',
+        'e',  '/',
+        'p',  'a',
+        't',  'h',
+    };
+    try std.testing.expectEqual(
+        appendix_b2.len,
+        try Qpack.applyEncoderInstructions(&table, allocator, &appendix_b2),
+    );
+    try std.testing.expectEqual(@as(usize, 220), table.capacity);
+    try std.testing.expectEqual(@as(usize, 106), table.current_size);
+    try std.testing.expectEqual(@as(u64, 2), table.insert_count);
+    try std.testing.expectEqual(@as(usize, 2), table.entryCount());
+    try std.testing.expectEqualStrings(":authority", table.absolute(0).?.name);
+    try std.testing.expectEqualStrings("www.example.com", table.absolute(0).?.value);
+    try std.testing.expectEqualStrings(":path", table.relative(0).?.name);
+    try std.testing.expectEqualStrings("/sample/path", table.relative(0).?.value);
+
+    const appendix_b3 = [_]u8{
+        0x4a, // Insert literal name, length 10.
+        'c',
+        'u',
+        's',
+        't',
+        'o',
+        'm',
+        '-',
+        'k',
+        'e',
+        'y',
+        0x0c, // Value length 12.
+        'c',
+        'u',
+        's',
+        't',
+        'o',
+        'm',
+        '-',
+        'v',
+        'a',
+        'l',
+        'u',
+        'e',
+    };
+    try std.testing.expectEqual(
+        appendix_b3.len,
+        try Qpack.applyEncoderInstructions(&table, allocator, &appendix_b3),
+    );
+    try std.testing.expectEqual(@as(u64, 3), table.insert_count);
+    try std.testing.expectEqual(@as(usize, 160), table.current_size);
+    try std.testing.expectEqualStrings("custom-key", table.relative(0).?.name);
+    try std.testing.expectEqualStrings("custom-value", table.relative(0).?.value);
+
+    // Duplicate index zero must stabilize the source before insertion because
+    // the insertion can evict an older entry.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try Qpack.applyEncoderInstructions(&table, allocator, &.{0x00}),
+    );
+    try std.testing.expectEqual(@as(u64, 4), table.insert_count);
+    try std.testing.expectEqual(@as(usize, 214), table.current_size);
+    try std.testing.expectEqualStrings("custom-key", table.absolute(3).?.name);
+}
+
+test "HTTP/3 QPACK dynamic table evicts by capacity and rejects invalid instructions" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 96);
+    defer table.deinit();
+    try table.setCapacity(96);
+
+    try std.testing.expectEqual(@as(u64, 0), try table.insert("a", "1"));
+    try std.testing.expectEqual(@as(u64, 1), try table.insert("b", "2"));
+    try std.testing.expectEqual(@as(u64, 2), try table.insert("c", "3"));
+    try std.testing.expectEqual(@as(usize, 2), table.entryCount());
+    try std.testing.expect(table.absolute(0) == null);
+    try std.testing.expectEqualStrings("b", table.absolute(1).?.name);
+    try std.testing.expectEqualStrings("c", table.relative(0).?.name);
+
+    try table.setCapacity(34);
+    try std.testing.expectEqual(@as(usize, 1), table.entryCount());
+    try std.testing.expectEqualStrings("c", table.relative(0).?.name);
+    try std.testing.expectError(error.QpackEncoderStreamError, table.setCapacity(97));
+
+    // An entry larger than the current capacity is a connection error and
+    // clears the decoder's table per RFC 9204 Section 3.2.2.
+    try std.testing.expectError(error.QpackEncoderStreamError, table.insert("too", "large"));
+    try std.testing.expectEqual(@as(usize, 0), table.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), table.current_size);
+    try std.testing.expectEqual(@as(u64, 3), table.insert_count);
+
+    try std.testing.expectError(
+        error.QpackEncoderStreamError,
+        Qpack.applyEncoderInstructions(&table, allocator, &.{0x80}),
+    );
+}
+
+test "HTTP/3 QPACK encoder instructions round trip Huffman strings" {
+    const allocator = std.testing.allocator;
+    const instructions = [_]Qpack.EncoderInstruction{
+        .{ .set_capacity = 4096 },
+        .{ .insert_name_reference = .{
+            .static = true,
+            .name_index = 95,
+            .value = "netz/1.0",
+        } },
+        .{ .insert_literal = .{
+            .name = "x-long-custom-header-name",
+            .value = "compressible compressible compressible",
+        } },
+        .{ .duplicate = 127 },
+    };
+
+    for (instructions) |instruction| {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try Qpack.writeEncoderInstruction(&encoded, allocator, instruction);
+        var decoded = try Qpack.decodeEncoderInstruction(allocator, encoded.items);
+        defer decoded.deinit(allocator);
+        try std.testing.expectEqual(encoded.items.len, decoded.consumed);
+
+        switch (instruction) {
+            .set_capacity => |expected| try std.testing.expectEqual(expected, decoded.instruction.set_capacity),
+            .duplicate => |expected| try std.testing.expectEqual(expected, decoded.instruction.duplicate),
+            .insert_name_reference => |expected| {
+                const actual = decoded.instruction.insert_name_reference;
+                try std.testing.expectEqual(expected.static, actual.static);
+                try std.testing.expectEqual(expected.name_index, actual.name_index);
+                try std.testing.expectEqualStrings(expected.value, actual.value);
+            },
+            .insert_literal => |expected| {
+                const actual = decoded.instruction.insert_literal;
+                try std.testing.expectEqualStrings(expected.name, actual.name);
+                try std.testing.expectEqualStrings(expected.value, actual.value);
+            },
+        }
+    }
+}
+
+test "HTTP/3 QPACK Required Insert Count wraps per RFC 9204" {
+    try std.testing.expectEqual(@as(u64, 0), try Qpack.encodeRequiredInsertCount(0, 3));
+    try std.testing.expectEqual(@as(u64, 3), try Qpack.encodeRequiredInsertCount(2, 6));
+    try std.testing.expectEqual(@as(u64, 9), try Qpack.decodeRequiredInsertCount(4, 3, 10));
+    try std.testing.expectEqual(@as(u64, 2), try Qpack.decodeRequiredInsertCount(3, 6, 2));
+    try std.testing.expectError(
+        error.QpackDecompressionFailed,
+        Qpack.encodeRequiredInsertCount(1, 0),
+    );
+    try std.testing.expectError(
+        error.QpackDecompressionFailed,
+        Qpack.decodeRequiredInsertCount(7, 3, 10),
+    );
+    try std.testing.expectError(
+        error.QpackDecompressionFailed,
+        Qpack.decodeRequiredInsertCount(1, 0, 0),
+    );
+    try std.testing.expectError(
+        error.QpackDecompressionFailed,
+        Qpack.decodeRequiredInsertCount(
+            1,
+            std.math.maxInt(u64),
+            std.math.maxInt(u64),
+        ),
+    );
 }
 
 test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
