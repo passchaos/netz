@@ -140,6 +140,25 @@ pub const State = struct {
         return .{ .path_challenge = .{ .data = challenge.data } };
     }
 
+    pub fn nextChallengeFramesAt(self: *State, out: []quic.Frame, now_ns: ?u64, timeout_ns: ?u64) Error!usize {
+        const count = @min(out.len, self.pendingChallengeCount());
+        if (count == 0) return 0;
+        try self.outstanding_challenges.ensureUnusedCapacity(self.allocator, count);
+
+        var written: usize = 0;
+        while (written < count) : (written += 1) {
+            var challenge = self.pending_challenges.popFront().?;
+            challenge.transmissions +|= 1;
+            challenge.sent_time_ns = now_ns;
+            if (now_ns) |now| {
+                if (timeout_ns) |timeout| challenge.deadline_ns = std.math.add(u64, now, timeout) catch std.math.maxInt(u64);
+            }
+            self.outstanding_challenges.appendAssumeCapacity(challenge);
+            out[written] = .{ .path_challenge = .{ .data = challenge.data } };
+        }
+        return written;
+    }
+
     pub fn receiveResponse(self: *State, data: [8]u8) Error!void {
         if (!self.receiveResponseValidated(data)) return error.UnknownPathResponse;
     }
@@ -281,6 +300,35 @@ test "QUIC path validation drains response frames into caller storage" {
     try std.testing.expectEqual(@as(usize, 1), second_count);
     try std.testing.expectEqualSlices(u8, &c, &second_batch[0].path_response.data);
     try std.testing.expectEqual(@as(usize, 0), state.nextResponseFrames(&second_batch));
+}
+
+test "QUIC path validation drains challenge frames into caller storage" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+
+    const a = [_]u8{ 0x1a, 0, 0, 0, 0, 0, 0, 1 };
+    const b = [_]u8{ 0x1b, 0, 0, 0, 0, 0, 0, 2 };
+    const c = [_]u8{ 0x1c, 0, 0, 0, 0, 0, 0, 3 };
+    try state.queueChallenge(a);
+    try state.queueChallenge(b);
+    try state.queueChallenge(c);
+
+    var first_batch: [2]quic.Frame = undefined;
+    const first_count = try state.nextChallengeFramesAt(&first_batch, 1_000, 250);
+    try std.testing.expectEqual(@as(usize, 2), first_count);
+    try std.testing.expectEqualSlices(u8, &a, &first_batch[0].path_challenge.data);
+    try std.testing.expectEqualSlices(u8, &b, &first_batch[1].path_challenge.data);
+    try std.testing.expectEqual(@as(usize, 1), state.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 2), state.outstandingChallengeCount());
+    try std.testing.expectEqual(@as(?u64, 1_250), state.earliestChallengeDeadline());
+
+    var second_batch: [4]quic.Frame = undefined;
+    const second_count = try state.nextChallengeFramesAt(&second_batch, 2_000, 500);
+    try std.testing.expectEqual(@as(usize, 1), second_count);
+    try std.testing.expectEqualSlices(u8, &c, &second_batch[0].path_challenge.data);
+    try std.testing.expectEqual(@as(usize, 0), try state.nextChallengeFramesAt(&second_batch, null, null));
+    try std.testing.expectEqual(@as(usize, 3), state.outstandingChallengeCount());
 }
 
 test "QUIC path validation retries and fails timed-out challenges" {
