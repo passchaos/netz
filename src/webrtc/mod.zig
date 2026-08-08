@@ -1382,6 +1382,16 @@ pub const sdp = struct {
         }
     }
 
+    fn validateSdpNetworkType(value: []const u8) Error!void {
+        try validateSdpToken(value);
+        if (!std.mem.eql(u8, value, "IN")) return error.InvalidSdp;
+    }
+
+    fn validateSdpAddressType(value: []const u8) Error!void {
+        try validateSdpToken(value);
+        if (!std.mem.eql(u8, value, "IP4") and !std.mem.eql(u8, value, "IP6")) return error.InvalidSdp;
+    }
+
     fn validateSdpAttributeValue(value: []const u8) Error!void {
         if (value.len == 0) return error.InvalidSdp;
         for (value) |byte| {
@@ -1502,8 +1512,8 @@ pub const sdp = struct {
     }
 
     pub fn formatConnectionLine(allocator: std.mem.Allocator, network_type: []const u8, address_type: []const u8, address: []const u8) Error![]u8 {
-        try validateSdpToken(network_type);
-        try validateSdpToken(address_type);
+        try validateSdpNetworkType(network_type);
+        try validateSdpAddressType(address_type);
         try validateSdpToken(address);
         return std.fmt.allocPrint(allocator, "c={s} {s} {s}\r\n", .{ network_type, address_type, address });
     }
@@ -1779,8 +1789,8 @@ pub const sdp = struct {
 
     pub fn formatRtcpAttribute(allocator: std.mem.Allocator, rtcp_address: RtcpAddress) Error![]u8 {
         if (rtcp_address.connection) |connection| {
-            try validateSdpToken(connection.network_type);
-            try validateSdpToken(connection.address_type);
+            try validateSdpNetworkType(connection.network_type);
+            try validateSdpAddressType(connection.address_type);
             try validateSdpToken(connection.address);
             return std.fmt.allocPrint(allocator, "{d} {s} {s} {s}", .{ rtcp_address.port, connection.network_type, connection.address_type, connection.address });
         }
@@ -1808,8 +1818,8 @@ pub const sdp = struct {
         const address_type = it.next() orelse return error.InvalidSdp;
         const address = it.next() orelse return error.InvalidSdp;
         if (it.next() != null) return error.InvalidSdp;
-        try validateSdpToken(network_type);
-        try validateSdpToken(address_type);
+        try validateSdpNetworkType(network_type);
+        try validateSdpAddressType(address_type);
         try validateSdpToken(address);
         return .{
             .port = port,
@@ -2613,8 +2623,8 @@ pub const sdp = struct {
         const address_type = it.next() orelse return error.InvalidSdp;
         const address = it.next() orelse return error.InvalidSdp;
         if (it.next() != null) return error.InvalidSdp;
-        try validateSdpToken(network_type);
-        try validateSdpToken(address_type);
+        try validateSdpNetworkType(network_type);
+        try validateSdpAddressType(address_type);
         try validateSdpToken(address);
         return .{
             .network_type = network_type,
@@ -9820,7 +9830,11 @@ test "ICE candidate parser and SDP parser" {
     try sdp.appendConnectionLine(&connection_lines, allocator, "IN", "IP6", "::");
     try std.testing.expectEqualStrings("c=IN IP6 ::\r\n", connection_lines.items);
     try std.testing.expectError(error.InvalidSdp, sdp.formatConnectionLine(allocator, "IN", "IP4", "bad address"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatConnectionLine(allocator, "in", "IP4", "0.0.0.0"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatConnectionLine(allocator, "IN", "ip4", "0.0.0.0"));
     try std.testing.expectError(error.InvalidSdp, sdp.parse(allocator, "v=0\r\nc=IN IP4\r\n"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parse(allocator, "v=0\r\nc=NET IP4 0.0.0.0\r\n"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parse(allocator, "v=0\r\nc=IN IP5 0.0.0.0\r\n"));
     const multicast_address = try sdp.formatConnectionAddress(allocator, .{ .address = "224.2.1.1", .ttl = 127, .range = 3 });
     defer allocator.free(multicast_address);
     try std.testing.expectEqualStrings("224.2.1.1/127/3", multicast_address);
@@ -9873,6 +9887,8 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectError(error.InvalidSdp, sdp.parseRtcpAttribute(""));
     try std.testing.expectError(error.InvalidSdp, sdp.parseRtcpAttribute("9 IN IP4"));
     try std.testing.expectError(error.InvalidSdp, sdp.parseRtcpAttribute("9 IN IP4 0.0.0.0 extra"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseRtcpAttribute("9 NET IP4 0.0.0.0"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseRtcpAttribute("9 IN IP5 0.0.0.0"));
     const mid_line = try sdp.formatMidLine(allocator, "0");
     defer allocator.free(mid_line);
     try std.testing.expectEqualStrings("a=mid:0\r\n", mid_line);
