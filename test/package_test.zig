@@ -169,7 +169,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http3.Settings, "enable_webtransport"));
     try std.testing.expect(@hasField(netz.http3.Settings, "webtransport_initial_max_data"));
     try std.testing.expectEqual(
-        @as(u64, 1),
+        @as(u64, 128),
         netz.http3.Settings.max_supported_qpack_blocked_streams,
     );
     try std.testing.expectEqual(@as(u64, 0x14e9cd29), @intFromEnum(netz.http3.SettingId.webtransport_max_sessions_v13));

@@ -143,10 +143,9 @@ pub const Setting = struct {
 };
 
 pub const Settings = struct {
-    /// This synchronous runtime can retain one complete request/response stream
-    /// while waiting for encoder-stream inserts. Larger values would advertise
-    /// concurrent blocked-stream scheduling that the API cannot service yet.
-    pub const max_supported_qpack_blocked_streams: u64 = 1;
+    /// Hard implementation cap; each runtime additionally bounds this by its
+    /// configured concurrent request-stream retention limit.
+    pub const max_supported_qpack_blocked_streams: u64 = 128;
 
     qpack_max_table_capacity: u64 = 0,
     /// RFC 9114 inherits the HTTP semantics that an omitted
@@ -3711,12 +3710,12 @@ test "HTTP/3 typed settings state tracks negotiation" {
     }).writePayload(&default_payload, allocator);
     default_payload.clearRetainingCapacity();
     try (Settings{
-        .qpack_blocked_streams = 1,
+        .qpack_blocked_streams = 128,
     }).writePayload(&default_payload, allocator);
     try std.testing.expect(default_payload.items.len != 0);
     default_payload.clearRetainingCapacity();
     try std.testing.expectError(error.QpackDynamicTableUnsupported, (Settings{
-        .qpack_blocked_streams = 2,
+        .qpack_blocked_streams = 129,
     }).writePayload(&default_payload, allocator));
 
     const local = Settings{

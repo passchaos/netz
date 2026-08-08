@@ -369,10 +369,10 @@ if (session.maxDatagramPayloadSize()) |limit| {
   sendmmsg while preserving packet-number progress on partial socket writes.
   Both runtimes keep outbound encoding non-blocking: newly inserted fields stay
   literal until acknowledged. On receive they can advertise
-  `SETTINGS_QPACK_BLOCKED_STREAMS=1`, retain one complete dependent message,
-  continue processing split/reordered encoder instructions, and resume once its
-  Required Insert Count is available; larger concurrent blocked-stream counts
-  remain intentionally unsupported by the synchronous API.
+  non-zero `SETTINGS_QPACK_BLOCKED_STREAMS` up to the bounded concurrent-stream
+  limit, retain multiple complete dependent request/response messages, continue
+  processing split/reordered encoder instructions, and resume each once its
+  Required Insert Count is available.
 - WebRTC support covers signaling/transport wire primitives (STUN, ICE, SDP,
   DTLS/RTP/SCTP headers), forming a foundation for peer-connection state
   machines and SRTP/SCTP data-channel layers.

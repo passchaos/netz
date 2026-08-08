@@ -1056,6 +1056,10 @@ pub const HandshakeServer = struct {
     transport_parameters: []u8,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits, options: HandshakeServerOptions) Error!HandshakeServer {
+        try validateBlockedStreamLimit(
+            options.session.local_settings,
+            options.session.max_concurrent_request_streams,
+        );
         var quic_server = try quic.runtime.Server.bind(allocator, io, bind_address, limits.quic);
         errdefer quic_server.deinit();
 
@@ -1323,6 +1327,10 @@ pub const HandshakeClient = struct {
     next_stream_id: u62 = 0,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, options: HandshakeClientOptions) Error!HandshakeClient {
+        try validateBlockedStreamLimit(
+            options.session.local_settings,
+            options.session.max_concurrent_request_streams,
+        );
         const endpoint = try allocator.create(quic.runtime.Endpoint);
         errdefer allocator.destroy(endpoint);
         endpoint.* = try quic.runtime.Endpoint.bind(allocator, io, local_address, limits.quic);
@@ -1559,6 +1567,10 @@ pub const ProtectedServer = struct {
     expected_packet_number: u64 = 0,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits, config: ProtectedConfig) Error!ProtectedServer {
+        try validateBlockedStreamLimit(
+            config.local_settings,
+            limits.max_concurrent_request_streams,
+        );
         var quic_server = try quic.runtime.Server.bind(allocator, io, bind_address, limits.quic);
         errdefer quic_server.deinit();
         const max_capacity = std.math.cast(usize, config.local_settings.qpack_max_table_capacity) orelse
@@ -1910,6 +1922,10 @@ pub const ProtectedClient = struct {
     expected_packet_number: u64 = 0,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, config: ProtectedConfig) Error!ProtectedClient {
+        try validateBlockedStreamLimit(
+            config.local_settings,
+            limits.max_concurrent_request_streams,
+        );
         var quic_client = try quic.runtime.Client.connect(allocator, io, local_address, server, limits.quic);
         errdefer quic_client.deinit();
         const max_capacity = std.math.cast(usize, config.local_settings.qpack_max_table_capacity) orelse
@@ -2115,7 +2131,7 @@ pub const ProtectedClient = struct {
         if (try self.response_streams.takeReady(
             expected_stream_id,
             self.qpack_decode.table,
-            self.config.local_settings.qpack_blocked_streams != 0,
+            self.config.local_settings.qpack_blocked_streams,
         )) |ready| return ready;
         while (true) {
             var packet = try quic.one_rtt.receive(
@@ -2191,7 +2207,7 @@ pub const ProtectedClient = struct {
             if (try self.response_streams.takeReady(
                 expected_stream_id,
                 self.qpack_decode.table,
-                self.config.local_settings.qpack_blocked_streams != 0,
+                self.config.local_settings.qpack_blocked_streams,
             )) |ready| {
                 return ready;
             }
@@ -2241,6 +2257,20 @@ const AssembledStream = struct {
     stream_id: u62,
     bytes: []u8,
 };
+
+fn validateBlockedStreamLimit(
+    settings: http3.Settings,
+    max_concurrent_streams: usize,
+) Error!void {
+    try settings.validateLocal();
+    const runtime_limit = std.math.cast(
+        u64,
+        max_concurrent_streams,
+    ) orelse std.math.maxInt(u64);
+    if (settings.qpack_blocked_streams > runtime_limit) {
+        return error.QpackDynamicTableUnsupported;
+    }
+}
 
 const RequestStreamSet = struct {
     const Entry = struct {
@@ -2443,23 +2473,36 @@ const ResponseStreamSet = struct {
         self: *ResponseStreamSet,
         stream_id: u62,
         table: http3.Qpack.DynamicTable,
-        allow_blocking: bool,
+        max_blocked_streams: u64,
     ) Error!?AssembledStream {
+        var target_index: ?usize = null;
+        var blocked_streams: u64 = 0;
         for (self.entries.items, 0..) |*entry, index| {
-            if (entry.receive.stream_id != stream_id) continue;
-            const final_size = entry.receive.final_size orelse return null;
-            if (entry.receive.contiguous_end < final_size) return null;
+            const final_size = entry.receive.final_size orelse continue;
+            if (entry.receive.contiguous_end < final_size) continue;
             const bytes = entry.receive.buffer.items[0..final_size];
-            if (allow_blocking and try messageBlockedByQpack(bytes, table)) {
-                return null;
+            if (max_blocked_streams != 0 and
+                try messageBlockedByQpack(bytes, table))
+            {
+                blocked_streams += 1;
+                if (blocked_streams > max_blocked_streams) {
+                    return error.QpackDecompressionFailed;
+                }
+                continue;
             }
-            const owned = try self.allocator.dupe(u8, bytes);
-            const from = entry.from;
-            var removed = self.entries.swapRemove(index);
-            removed.deinit();
-            return .{ .from = from, .stream_id = stream_id, .bytes = owned };
+            if (entry.receive.stream_id == stream_id) target_index = index;
         }
-        return null;
+        const index = target_index orelse return null;
+        const entry = &self.entries.items[index];
+        const final_size = entry.receive.final_size.?;
+        const owned = try self.allocator.dupe(
+            u8,
+            entry.receive.buffer.items[0..final_size],
+        );
+        const from = entry.from;
+        var removed = self.entries.swapRemove(index);
+        removed.deinit();
+        return .{ .from = from, .stream_id = stream_id, .bytes = owned };
     }
 
     fn remove(self: *ResponseStreamSet, stream_id: u62) void {
@@ -2908,7 +2951,7 @@ fn receiveConnectionResponseStreamBytes(
     if (try response_streams.takeReady(
         expected_stream_id,
         qpack_decode.table,
-        options.local_settings.qpack_blocked_streams != 0,
+        options.local_settings.qpack_blocked_streams,
     )) |ready| return ready;
 
     while (true) {
@@ -2972,7 +3015,7 @@ fn receiveConnectionResponseStreamBytes(
         if (try response_streams.takeReady(
             expected_stream_id,
             qpack_decode.table,
-            options.local_settings.qpack_blocked_streams != 0,
+            options.local_settings.qpack_blocked_streams,
         )) |ready| {
             return ready;
         }
@@ -4985,6 +5028,40 @@ test "HTTP/3 protected server bounds concurrent request streams" {
     try std.testing.expectEqual(@as(usize, 1), server.request_streams.entries.items.len);
 }
 
+test "HTTP/3 runtime rejects blocked-stream limit above retention bound" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xb5, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xb6, 0x10, 0x20, 0x30 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb7} ** quic.protection.secret_len,
+    );
+    try std.testing.expectError(
+        error.QpackDynamicTableUnsupported,
+        ProtectedClient.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .ip4 = .loopback(9) },
+            .{
+                .max_concurrent_request_streams = 1,
+            },
+            .{
+                .receive_keys = keys,
+                .send_keys = keys,
+                .local_connection_id = &client_cid,
+                .peer_connection_id = &server_cid,
+                .local_settings = .{
+                    .qpack_blocked_streams = 2,
+                },
+            },
+        ),
+    );
+}
+
 test "HTTP/3 protected server surfaces request reset and clears reassembly" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -5765,7 +5842,7 @@ test "HTTP/3 protected server decodes dynamic QPACK request and sends feedback" 
     );
 }
 
-test "HTTP/3 protected server resumes one blocked QPACK request" {
+test "HTTP/3 protected server resumes multiple blocked QPACK requests" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -5796,7 +5873,7 @@ test "HTTP/3 protected server resumes one blocked QPACK request" {
             .peer_connection_id = &client_cid,
             .local_settings = .{
                 .qpack_max_table_capacity = 256,
-                .qpack_blocked_streams = 1,
+                .qpack_blocked_streams = 2,
             },
             .max_stream_frame_data = 1024,
         },
@@ -5841,31 +5918,65 @@ test "HTTP/3 protected server resumes one blocked QPACK request" {
     defer encoder_table.deinit();
     try encoder_table.setCapacity(256);
     _ = try encoder_table.insert("x-blocked", "message-before-insert");
-    var field_section: std.ArrayList(u8) = .empty;
-    defer field_section.deinit(allocator);
-    try http3.Qpack.encodeDynamicBlock(&field_section, allocator, &.{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":path", .value = "/blocked-qpack" },
-        .{ .name = ":authority", .value = "localhost" },
-        .{ .name = "x-blocked", .value = "message-before-insert" },
-    }, encoder_table);
-    var message: std.ArrayList(u8) = .empty;
-    defer message.deinit(allocator);
+    var first_field_section: std.ArrayList(u8) = .empty;
+    defer first_field_section.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(
+        &first_field_section,
+        allocator,
+        &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":scheme", .value = "https" },
+            .{ .name = ":path", .value = "/blocked-one" },
+            .{ .name = ":authority", .value = "localhost" },
+            .{ .name = "x-blocked", .value = "message-before-insert" },
+        },
+        encoder_table,
+    );
+    var second_field_section: std.ArrayList(u8) = .empty;
+    defer second_field_section.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(
+        &second_field_section,
+        allocator,
+        &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":scheme", .value = "https" },
+            .{ .name = ":path", .value = "/blocked-two" },
+            .{ .name = ":authority", .value = "localhost" },
+            .{ .name = "x-blocked", .value = "message-before-insert" },
+        },
+        encoder_table,
+    );
+    var first_message: std.ArrayList(u8) = .empty;
+    defer first_message.deinit(allocator);
     try (http3.Frame{
         .frame_type = http3.FrameType.headers,
-        .payload = field_section.items,
+        .payload = first_field_section.items,
         .consumed = 0,
-    }).write(&message, allocator);
+    }).write(&first_message, allocator);
+    var second_message: std.ArrayList(u8) = .empty;
+    defer second_message.deinit(allocator);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = second_field_section.items,
+        .consumed = 0,
+    }).write(&second_message, allocator);
 
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(allocator);
-    var request_send = quic.stream_state.SendState.init(0);
-    try request_send.appendFrames(
+    var first_send = quic.stream_state.SendState.init(0);
+    try first_send.appendFrames(
         &frames,
         allocator,
-        message.items,
-        message.items.len,
+        first_message.items,
+        first_message.items.len,
+        true,
+    );
+    var second_send = quic.stream_state.SendState.init(4);
+    try second_send.appendFrames(
+        &frames,
+        allocator,
+        second_message.items,
+        second_message.items.len,
         true,
     );
     try sendProtectedFrames(
@@ -5919,11 +6030,18 @@ test "HTTP/3 protected server resumes one blocked QPACK request" {
         &client.protected_send,
     );
 
-    var received = try server.receiveRequest();
-    defer received.deinit(allocator);
-    try std.testing.expectEqualStrings("/blocked-qpack", received.request.path);
+    var first = try server.receiveRequest();
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("/blocked-one", first.request.path);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.request_streams.entries.items.len,
+    );
+    var second = try server.receiveRequest();
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("/blocked-two", second.request.path);
     var value: ?[]const u8 = null;
-    for (received.request.headers) |header| {
+    for (second.request.headers) |header| {
         if (std.mem.eql(u8, header.name, "x-blocked")) value = header.value;
     }
     try std.testing.expectEqualStrings(
@@ -5932,7 +6050,7 @@ test "HTTP/3 protected server resumes one blocked QPACK request" {
     );
     try std.testing.expectEqual(@as(u64, 1), server.qpack_decode.table.insert_count);
     try std.testing.expectEqual(
-        @as(u64, 1),
+        @as(u64, 2),
         server.config.local_settings.qpack_blocked_streams,
     );
 }
