@@ -636,7 +636,17 @@ pub const ice = struct {
     pub const Transport = enum {
         udp,
         tcp,
+
+        pub fn string(self: Transport) []const u8 {
+            return @tagName(self);
+        }
     };
+
+    pub fn transportFromString(value: []const u8) ?Transport {
+        if (std.ascii.eqlIgnoreCase(value, "udp")) return .udp;
+        if (std.ascii.eqlIgnoreCase(value, "tcp")) return .tcp;
+        return null;
+    }
 
     pub const TcpType = enum {
         active,
@@ -722,7 +732,7 @@ pub const ice = struct {
             var candidate: Candidate = .{
                 .foundation = foundation,
                 .component = std.fmt.parseInt(u16, component_s, 10) catch return error.InvalidIceCandidate,
-                .transport = if (std.ascii.eqlIgnoreCase(transport_s, "udp")) .udp else if (std.ascii.eqlIgnoreCase(transport_s, "tcp")) .tcp else return error.InvalidIceCandidate,
+                .transport = transportFromString(transport_s) orelse return error.InvalidIceCandidate,
                 .priority = std.fmt.parseInt(u32, priority_s, 10) catch return error.InvalidIceCandidate,
                 .address = address,
                 .port = std.fmt.parseInt(u16, port_s, 10) catch return error.InvalidIceCandidate,
@@ -9703,6 +9713,9 @@ test "ICE candidate parser and SDP parser" {
 
     const tcp = try ice.Candidate.parse("candidate:1052353102 1 tcp 2128609279 192.168.0.196 0 typ host tcptype active");
     try std.testing.expectEqual(ice.Transport.tcp, tcp.transport);
+    try std.testing.expectEqualStrings("tcp", tcp.transport.string());
+    try std.testing.expectEqual(ice.Transport.udp, ice.transportFromString("UDP").?);
+    try std.testing.expect(ice.transportFromString("sctp") == null);
     try std.testing.expectEqualStrings("active", tcp.tcp_type.?);
     try std.testing.expectEqual(ice.TcpType.active, (try tcp.parsedTcpType()).?);
     try std.testing.expectEqualStrings("active", (try tcp.parsedTcpType()).?.string());
