@@ -48,12 +48,14 @@ pub fn main() !void {
         netz.http2.Hpack.freeDecodedFields(allocator, decoded);
     }
     const stateless_ns = nowNs(io) -| stateless_start;
+    const speedup_x100 = ratioTimes100(stateless_ns, stateful_ns);
 
     std.debug.print(
         \\HTTP/2 HPACK benchmark
         \\  iterations: {d}
         \\  stateful total bytes: {d}, ns/op: {d}
         \\  stateless total bytes: {d}, ns/op: {d}
+        \\  stateful speedup: {d}.{d:0>2}x
         \\
     , .{
         iterations,
@@ -61,7 +63,14 @@ pub fn main() !void {
         stateful_ns / iterations,
         stateless_total,
         stateless_ns / iterations,
+        speedup_x100 / 100,
+        speedup_x100 % 100,
     });
+}
+
+fn ratioTimes100(numerator: u64, denominator: u64) u64 {
+    if (denominator == 0) return 0;
+    return (numerator *| 100) / denominator;
 }
 
 fn nowNs(io: std.Io) u64 {

@@ -53,6 +53,7 @@ pub fn main() !void {
         }
     }
     const linear_ns = nowNs(io) -| linear_start;
+    const speedup_x100 = ratioTimes100(linear_ns, router_ns);
 
     std.debug.print(
         \\MQTT router benchmark
@@ -60,6 +61,7 @@ pub fn main() !void {
         \\  iterations: {d}
         \\  router matches: {d}, ns/op: {d}
         \\  linear matches: {d}, ns/op: {d}
+        \\  router speedup: {d}.{d:0>2}x
         \\
     , .{
         filters.items.len,
@@ -68,7 +70,14 @@ pub fn main() !void {
         router_ns / iterations,
         linear_total,
         linear_ns / iterations,
+        speedup_x100 / 100,
+        speedup_x100 % 100,
     });
+}
+
+fn ratioTimes100(numerator: u64, denominator: u64) u64 {
+    if (denominator == 0) return 0;
+    return (numerator *| 100) / denominator;
 }
 
 fn nowNs(io: std.Io) u64 {

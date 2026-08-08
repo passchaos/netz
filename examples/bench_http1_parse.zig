@@ -41,12 +41,14 @@ pub fn main() !void {
         request.deinit(allocator);
     }
     const owned_ns = nowNs(io) -| owned_start;
+    const speedup_x100 = ratioTimes100(owned_ns, borrowed_ns);
 
     std.debug.print(
         \\HTTP/1 parse benchmark
         \\  iterations: {d}
         \\  borrowed total: {d}, ns/op: {d}
         \\  owned total: {d}, ns/op: {d}
+        \\  borrowed speedup: {d}.{d:0>2}x
         \\
     , .{
         iterations,
@@ -54,7 +56,14 @@ pub fn main() !void {
         borrowed_ns / iterations,
         owned_total,
         owned_ns / iterations,
+        speedup_x100 / 100,
+        speedup_x100 % 100,
     });
+}
+
+fn ratioTimes100(numerator: u64, denominator: u64) u64 {
+    if (denominator == 0) return 0;
+    return (numerator *| 100) / denominator;
 }
 
 fn nowNs(io: std.Io) u64 {
