@@ -847,8 +847,13 @@ pub const Connection = struct {
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
+        var content_length_buf: [32]u8 = undefined;
         try fields.append(self.allocator, .{ .name = ":status", .value = status });
         for (options.headers) |header| try fields.append(self.allocator, header);
+        if (responseShouldDefaultContentLength(options.status, semantics, fields.items, options.body.len)) {
+            const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{options.body.len}) catch unreachable;
+            try fields.append(self.allocator, .{ .name = "content-length", .value = content_length });
+        }
         try validateHeaderBlock(fields.items, .response);
         try validateHeaderBlock(options.trailers, .response_trailers);
         try self.writeHeaders(stream_id, fields.items, suppress_body or (options.body.len == 0 and options.trailers.len == 0));
@@ -2501,6 +2506,17 @@ fn validateDeclaredResponseLength(
         if (body_len != 0 and len != body_len) return error.InvalidContentLength;
         if (body_len == 0 and status != 304 and !semantics.head and len != 0) return error.InvalidContentLength;
     }
+}
+
+fn responseShouldDefaultContentLength(
+    status: u16,
+    semantics: ResponseBodySemantics,
+    headers: []const http2.Hpack.HeaderField,
+    body_len: usize,
+) bool {
+    if (body_len == 0) return false;
+    if (responseWriteSuppressesBodySemantics(status, semantics)) return false;
+    return (contentLength(headers) catch return false) == null;
 }
 
 fn informationalResponseToSkip(status: u16) bool {
@@ -5948,6 +5964,69 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 response writer defaults content-length for known body" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+        observed_content_length: ?[]u8 = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(shared.server.allocator);
+            try std.testing.expectEqualStrings("/default-response-length", request.path);
+            try connection.writeResponse(request.stream_id, .{
+                .body = "known-body",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/default-response-length",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("known-body", response.body);
+    try std.testing.expectEqualStrings("10", findHeader(response.headers, "content-length") orelse return error.MissingPseudoHeader);
 }
 
 test "HTTP/2 client rejects Content-Length on successful CONNECT tunnel" {
