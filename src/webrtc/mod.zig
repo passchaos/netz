@@ -3433,7 +3433,6 @@ pub const sdp = struct {
         if (std.ascii.eqlIgnoreCase(mime_type, "audio/opus")) return 48000;
         if (std.ascii.eqlIgnoreCase(mime_type, "audio/PCMU")) return 8000;
         if (std.ascii.eqlIgnoreCase(mime_type, "audio/PCMA")) return 8000;
-        if (std.ascii.eqlIgnoreCase(mime_type, "audio/G722")) return 8000;
         if (std.ascii.startsWithIgnoreCase(mime_type, "video/")) return 90000;
         // Pion's fmtp defaultClockRate falls back to 90 kHz for custom and
         // otherwise unknown codecs when one side omits the clock rate.  This
@@ -10475,6 +10474,14 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expect(!sdp.rtpCodecCompatible(
         .{ .payload_type = 111, .mime_type = "audio/opus", .codec_name = "opus", .clock_rate = 48000, .channels = 2 },
         .{ .payload_type = 111, .mime_type = "audio/opus", .codec_name = "opus", .clock_rate = 44100, .channels = 2 },
+    ));
+    try std.testing.expect(sdp.rtpCodecCompatible(
+        .{ .payload_type = 9, .mime_type = "audio/G722", .codec_name = "G722", .clock_rate = 0 },
+        .{ .payload_type = 9, .mime_type = "audio/G722", .codec_name = "G722", .clock_rate = 90000 },
+    ));
+    try std.testing.expect(!sdp.rtpCodecCompatible(
+        .{ .payload_type = 9, .mime_type = "audio/G722", .codec_name = "G722", .clock_rate = 0 },
+        .{ .payload_type = 9, .mime_type = "audio/G722", .codec_name = "G722", .clock_rate = 8000 },
     ));
     try std.testing.expect(sdp.rtpCodecCompatible(
         .{ .payload_type = 96, .mime_type = "video/H264", .codec_name = "H264", .clock_rate = 90000, .fmtp = "packetization-mode=1;profile-level-id=42e01f" },
