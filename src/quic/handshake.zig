@@ -630,7 +630,7 @@ fn clientTransportParameters(
 
     local_transport_parameters.initial_source_connection_id = options.local_connection_id;
     try validateClientTransportParameters(local_transport_parameters.*, options.local_connection_id, options.version, options.available_versions);
-    try quic.encodeTransportParameters(encoded, allocator, local_transport_parameters.*);
+    try quic.encodeTransportParametersForSource(encoded, allocator, local_transport_parameters.*, .client);
     try appendVersionInformationIfAbsent(encoded, allocator, local_transport_parameters.*, options.version, options.available_versions);
     return encoded.items;
 }
@@ -655,7 +655,7 @@ fn serverTransportParameters(
         local_transport_parameters.retry_source_connection_id = retry_source_connection_id;
     }
     try validateServerTransportParameters(local_transport_parameters.*, options.local_connection_id, original_destination_connection_id, retry_source_connection_id, options.version, options.available_versions, false);
-    try quic.encodeTransportParameters(encoded, allocator, local_transport_parameters.*);
+    try quic.encodeTransportParametersForSource(encoded, allocator, local_transport_parameters.*, .server);
     try appendVersionInformationIfAbsent(encoded, allocator, local_transport_parameters.*, options.version, options.available_versions);
     return encoded.items;
 }
@@ -1028,7 +1028,7 @@ test "QUIC integrated client rejects mismatched Version Information after VN" {
             };
             var encoded_tp: std.ArrayList(u8) = .empty;
             defer encoded_tp.deinit(shared.endpoint.allocator);
-            try quic.encodeTransportParameters(&encoded_tp, shared.endpoint.allocator, wrong_tp);
+            try quic.encodeTransportParametersForSource(&encoded_tp, shared.endpoint.allocator, wrong_tp, .server);
 
             var encrypted_extensions: std.ArrayList(u8) = .empty;
             defer encrypted_extensions.deinit(shared.endpoint.allocator);
@@ -1124,7 +1124,7 @@ test "QUIC client Initial carries address validation token" {
     params.initial_source_connection_id = &client_cid;
     var encoded_tp: std.ArrayList(u8) = .empty;
     defer encoded_tp.deinit(allocator);
-    try quic.encodeTransportParameters(&encoded_tp, allocator, params);
+    try quic.encodeTransportParametersForSource(&encoded_tp, allocator, params, .client);
 
     var client_hello: std.ArrayList(u8) = .empty;
     defer client_hello.deinit(allocator);
@@ -1190,7 +1190,7 @@ test "QUIC integrated handshake succeeds after validated Retry" {
     params.initial_source_connection_id = &client_cid;
     var encoded_tp: std.ArrayList(u8) = .empty;
     defer encoded_tp.deinit(allocator);
-    try quic.encodeTransportParameters(&encoded_tp, allocator, params);
+    try quic.encodeTransportParametersForSource(&encoded_tp, allocator, params, .client);
 
     var client_hello: std.ArrayList(u8) = .empty;
     defer client_hello.deinit(allocator);

@@ -463,12 +463,20 @@ pub const practical_transport_parameters = TransportParameters{
     .max_datagram_frame_size = 65_535,
 };
 
-pub fn encodeTransportParameters(
+/// Encodes QUIC transport parameters advertised by `source`.
+///
+/// RFC 9000 defines several parameters as server-only.  Production stacks such
+/// as tquic gate those parameters during encoding as well as decoding so a
+/// misconfigured client cannot emit an extension block the peer must reject.
+/// Validate the complete typed set before appending anything; callers can rely
+/// on `list` remaining untouched when directionality validation fails.
+pub fn encodeTransportParametersForSource(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     params: TransportParameters,
+    source: TransportParameterSource,
 ) Error!void {
-    try validateMinAckDelayBounds(params.max_ack_delay, params.min_ack_delay);
+    try validateTransportParameters(params, source);
     if (params.original_destination_connection_id) |cid| {
         try validateTransportConnectionId(cid, false);
         try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.original_destination_connection_id), cid);
@@ -504,6 +512,17 @@ pub fn encodeTransportParameters(
     }
     if (params.max_datagram_frame_size) |size| try encodeIntegerTransportParameter(list, allocator, .max_datagram_frame_size, size);
     if (params.min_ack_delay) |delay| try encodeIntegerTransportParameter(list, allocator, .min_ack_delay, delay);
+}
+
+/// Legacy source-agnostic encoder retained for callers that already assemble
+/// role-correct parameter sets.  Server semantics preserve compatibility with
+/// existing users that include server-only parameters such as preferred_address.
+pub fn encodeTransportParameters(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    params: TransportParameters,
+) Error!void {
+    try encodeTransportParametersForSource(list, allocator, params, .server);
 }
 
 pub fn validateTransportParameters(params: TransportParameters, source: TransportParameterSource) Error!void {
@@ -1940,7 +1959,7 @@ test "QUIC typed transport parameters roundtrip and validate" {
 
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(allocator);
-    try encodeTransportParameters(&bytes, allocator, params);
+    try encodeTransportParametersForSource(&bytes, allocator, params, .client);
     const decoded = try parseTransportParametersTyped(allocator, bytes.items, .client);
 
     try std.testing.expectEqual(@as(u64, 1400), decoded.max_udp_payload_size);
@@ -2023,6 +2042,47 @@ test "QUIC typed transport parameters roundtrip and validate" {
     const token = [_]u8{0xaa} ** 16;
     try encodeTransportParameter(&forbidden, allocator, @intFromEnum(TransportParameterId.stateless_reset_token), &token);
     try std.testing.expectError(error.TransportParameterForbidden, parseTransportParametersTyped(allocator, forbidden.items, .client));
+}
+
+test "QUIC source-aware transport parameter encoder rejects client server-only fields" {
+    const allocator = std.testing.allocator;
+    const original_dcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
+    const retry_cid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
+    const initial_cid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+    const preferred_cid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3 };
+    const token = [_]u8{0xe0} ** 16;
+    const params = TransportParameters{
+        .original_destination_connection_id = &original_dcid,
+        .stateless_reset_token = token,
+        .preferred_address = .{
+            .ipv4_address = .{ 127, 0, 0, 1 },
+            .ipv4_port = 4433,
+            .connection_id = &preferred_cid,
+            .stateless_reset_token = token,
+        },
+        .initial_source_connection_id = &initial_cid,
+        .retry_source_connection_id = &retry_cid,
+    };
+
+    var client_bytes: std.ArrayList(u8) = .empty;
+    defer client_bytes.deinit(allocator);
+    try std.testing.expectError(
+        error.TransportParameterForbidden,
+        encodeTransportParametersForSource(&client_bytes, allocator, params, .client),
+    );
+    // Directionality is checked before any bytes are emitted so callers cannot
+    // accidentally splice a partial, invalid TLS transport-parameter extension.
+    try std.testing.expectEqual(@as(usize, 0), client_bytes.items.len);
+
+    var server_bytes: std.ArrayList(u8) = .empty;
+    defer server_bytes.deinit(allocator);
+    try encodeTransportParametersForSource(&server_bytes, allocator, params, .server);
+    const decoded = try parseTransportParametersTyped(allocator, server_bytes.items, .server);
+    try std.testing.expectEqualSlices(u8, &original_dcid, decoded.original_destination_connection_id.?);
+    try std.testing.expectEqualSlices(u8, &token, &decoded.stateless_reset_token.?);
+    try std.testing.expectEqualSlices(u8, &preferred_cid, decoded.preferred_address.?.connection_id);
+    try std.testing.expectEqualSlices(u8, &initial_cid, decoded.initial_source_connection_id.?);
+    try std.testing.expectEqualSlices(u8, &retry_cid, decoded.retry_source_connection_id.?);
 }
 
 test "QUIC server transport parameters include preferred address" {
