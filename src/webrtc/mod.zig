@@ -1102,6 +1102,15 @@ pub const sdp = struct {
         experimental: bool = false,
     };
 
+    pub const Origin = struct {
+        username: []const u8,
+        session_id: u64,
+        session_version: u64,
+        network_type: []const u8,
+        address_type: []const u8,
+        unicast_address: []const u8,
+    };
+
     pub const Session = struct {
         version: []const u8 = "0",
         origin: []const u8 = "- 0 0 IN IP4 127.0.0.1",
@@ -1558,6 +1567,56 @@ pub const sdp = struct {
         const line = try formatTimeZonesLine(allocator, time_zones);
         defer allocator.free(line);
         try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatOriginAttribute(allocator: std.mem.Allocator, origin: Origin) Error![]u8 {
+        try validateSdpToken(origin.username);
+        try validateSdpToken(origin.network_type);
+        try validateSdpToken(origin.address_type);
+        try validateSdpToken(origin.unicast_address);
+        return std.fmt.allocPrint(allocator, "{s} {d} {d} {s} {s} {s}", .{
+            origin.username,
+            origin.session_id,
+            origin.session_version,
+            origin.network_type,
+            origin.address_type,
+            origin.unicast_address,
+        });
+    }
+
+    pub fn formatOriginLine(allocator: std.mem.Allocator, origin: Origin) Error![]u8 {
+        const attr = try formatOriginAttribute(allocator, origin);
+        defer allocator.free(attr);
+        return std.fmt.allocPrint(allocator, "o={s}\r\n", .{attr});
+    }
+
+    pub fn appendOriginLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, origin: Origin) Error!void {
+        const line = try formatOriginLine(allocator, origin);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn parseOriginAttribute(raw: []const u8) Error!Origin {
+        var parts = std.mem.tokenizeAny(u8, raw, " \t");
+        const username = parts.next() orelse return error.InvalidSdp;
+        const session_id_s = parts.next() orelse return error.InvalidSdp;
+        const session_version_s = parts.next() orelse return error.InvalidSdp;
+        const network_type = parts.next() orelse return error.InvalidSdp;
+        const address_type = parts.next() orelse return error.InvalidSdp;
+        const unicast_address = parts.next() orelse return error.InvalidSdp;
+        if (parts.next() != null) return error.InvalidSdp;
+        try validateSdpToken(username);
+        try validateSdpToken(network_type);
+        try validateSdpToken(address_type);
+        try validateSdpToken(unicast_address);
+        return .{
+            .username = username,
+            .session_id = std.fmt.parseInt(u64, session_id_s, 10) catch return error.InvalidSdp,
+            .session_version = std.fmt.parseInt(u64, session_version_s, 10) catch return error.InvalidSdp,
+            .network_type = network_type,
+            .address_type = address_type,
+            .unicast_address = unicast_address,
+        };
     }
 
     pub fn formatRtcpAttribute(allocator: std.mem.Allocator, rtcp_address: RtcpAddress) Error![]u8 {
@@ -9380,6 +9439,13 @@ test "ICE candidate parser and SDP parser" {
         "a=mid:0\r\n";
     var session = try sdp.parse(allocator, text);
     defer session.deinit(allocator);
+    const parsed_origin = try sdp.parseOriginAttribute(session.origin);
+    try std.testing.expectEqualStrings("-", parsed_origin.username);
+    try std.testing.expectEqual(@as(u64, 0), parsed_origin.session_id);
+    try std.testing.expectEqual(@as(u64, 0), parsed_origin.session_version);
+    try std.testing.expectEqualStrings("IN", parsed_origin.network_type);
+    try std.testing.expectEqualStrings("IP4", parsed_origin.address_type);
+    try std.testing.expectEqualStrings("127.0.0.1", parsed_origin.unicast_address);
     try std.testing.expectEqualStrings("IN", session.connection.?.network_type);
     try std.testing.expectEqualStrings("IP4", session.connection.?.address_type);
     try std.testing.expectEqualStrings("198.51.100.1", session.connection.?.address);
@@ -9458,6 +9524,26 @@ test "ICE candidate parser and SDP parser" {
     defer session_header_lines.deinit(allocator);
     try sdp.appendSessionHeaderLines(&session_header_lines, allocator, session);
     try std.testing.expectEqualStrings(session_header, session_header_lines.items);
+    const origin_attr = try sdp.formatOriginAttribute(allocator, parsed_origin);
+    defer allocator.free(origin_attr);
+    try std.testing.expectEqualStrings("- 0 0 IN IP4 127.0.0.1", origin_attr);
+    const origin_line = try sdp.formatOriginLine(allocator, parsed_origin);
+    defer allocator.free(origin_line);
+    try std.testing.expectEqualStrings("o=- 0 0 IN IP4 127.0.0.1\r\n", origin_line);
+    var origin_lines: std.ArrayList(u8) = .empty;
+    defer origin_lines.deinit(allocator);
+    try sdp.appendOriginLine(&origin_lines, allocator, parsed_origin);
+    try std.testing.expectEqualStrings("o=- 0 0 IN IP4 127.0.0.1\r\n", origin_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatOriginLine(allocator, .{
+        .username = "bad user",
+        .session_id = 0,
+        .session_version = 0,
+        .network_type = "IN",
+        .address_type = "IP4",
+        .unicast_address = "127.0.0.1",
+    }));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseOriginAttribute("- 0 0 IN IP4"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseOriginAttribute("- not-id 0 IN IP4 127.0.0.1"));
     var invalid_header_session = session;
     invalid_header_session.name = "bad\nname";
     try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
