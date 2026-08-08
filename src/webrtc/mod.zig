@@ -8767,6 +8767,7 @@ pub const sctp = struct {
         var chunks: std.ArrayList(Chunk) = .empty;
         errdefer chunks.deinit(allocator);
         var pos: usize = 12;
+        var has_init_chunk = false;
         while (pos < bytes.len) {
             if (bytes.len - pos < 4) return error.InvalidSctpPacket;
             const raw_chunk_type = bytes[pos];
@@ -8777,6 +8778,11 @@ pub const sctp = struct {
             const padded_len = align4(len);
             if (bytes.len - pos < padded_len) return error.InvalidSctpPacket;
             try validateZeroPadding(bytes[pos + len .. pos + padded_len]);
+            if (chunk_type == .init or chunk_type == .init_ack) {
+                if (pos != 12 or has_init_chunk or bytes.len != pos + padded_len) return error.InvalidSctpPacket;
+                if (chunk_type == .init and std.mem.readInt(u32, bytes[4..8], .big) != 0) return error.InvalidSctpPacket;
+                has_init_chunk = true;
+            }
             if (!supportedChunkType(chunk_type)) {
                 // RFC 4960 encodes unknown-chunk handling in the high two bits:
                 // 00/01 stop processing this packet, 10/11 skip and continue
@@ -8840,6 +8846,7 @@ pub const sctp = struct {
         is_ack: bool,
         init: InitChunk,
     ) Error!void {
+        if (!is_ack and options.verification_tag != 0) return error.InvalidSctpPacket;
         const start = list.items.len;
         try writePacketHeader(list, allocator, options);
         try writeInitChunk(list, allocator, if (is_ack) .init_ack else .init, init);
@@ -13458,6 +13465,27 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     try std.testing.expect(!(try sctp.zeroChecksumAcceptsDtls(non_dtls_zero_checksum)));
     const parsed_cookie = try allocator.dupe(u8, init_ack.stateCookie().?);
     defer allocator.free(parsed_cookie);
+    var bundled_init = try encoded.clone(allocator);
+    defer bundled_init.deinit(allocator);
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeInitPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, false, .{
+        .initiate_tag = 0x01020304,
+        .advertised_receiver_window_credit = 256 * 1024,
+        .outbound_streams = 16,
+        .inbound_streams = 16,
+        .initial_tsn = 0x10203040,
+    }));
+
+    try sctp.writeShutdownAckChunk(&bundled_init, allocator);
+    std.mem.writeInt(u32, bundled_init.items[8..12], 0, .little);
+    const bundled_checksum = try sctp.checksum(bundled_init.items);
+    std.mem.writeInt(u32, bundled_init.items[8..12], bundled_checksum, .little);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, bundled_init.items, true));
 
     var invalid_init: std.ArrayList(u8) = .empty;
     defer invalid_init.deinit(allocator);
