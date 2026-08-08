@@ -4167,10 +4167,22 @@ pub const rtp = struct {
         switch (headerExtensionFormat(profile) orelse return error.InvalidRtpPacket) {
             .one_byte => {
                 if (id == 0 or id >= 15 or data.len > 16) return error.InvalidRtpPacket;
+                for (elements.*) |element| {
+                    // Pion/rtp refuses to switch an existing extension set to
+                    // the one-byte profile unless every already-present
+                    // extension is encodable there.  Keep the mutation
+                    // all-or-nothing so callers cannot accidentally create a
+                    // header-extension list that writeOneByteHeaderExtensions
+                    // must later reject.
+                    if (element.id == 0 or element.id >= 15 or element.data.len > 16) return error.InvalidRtpPacket;
+                }
                 try setHeaderExtension(allocator, elements, id, data);
             },
             .two_byte => {
                 if (id == 0 or data.len > std.math.maxInt(u8)) return error.InvalidRtpPacket;
+                for (elements.*) |element| {
+                    if (element.id == 0 or element.data.len > std.math.maxInt(u8)) return error.InvalidRtpPacket;
+                }
                 try setHeaderExtension(allocator, elements, id, data);
             },
             .raw => {
@@ -11751,6 +11763,8 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectError(error.InvalidRtpPacket, rtp.setHeaderExtensionForProfile(allocator, &mutable_extensions, rtp.one_byte_header_extension_profile, 15, "bad"));
     try std.testing.expectError(error.InvalidRtpPacket, rtp.setHeaderExtensionForProfile(allocator, &mutable_extensions, rtp.one_byte_header_extension_profile, 2, "0123456789abcdefg"));
     try rtp.setHeaderExtensionForProfile(allocator, &mutable_extensions, rtp.two_byte_header_extension_profile, 200, "wide");
+    try std.testing.expectEqualStrings("wide", rtp.findHeaderExtension(mutable_extensions, 200).?);
+    try std.testing.expectError(error.InvalidRtpPacket, rtp.setHeaderExtensionForProfile(allocator, &mutable_extensions, rtp.one_byte_header_extension_profile, 13, "small"));
     try std.testing.expectEqualStrings("wide", rtp.findHeaderExtension(mutable_extensions, 200).?);
     const mutable_ids = try rtp.headerExtensionIds(allocator, mutable_extensions);
     defer allocator.free(mutable_ids);
