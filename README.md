@@ -105,7 +105,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route
   rejection, NEW_CONNECTION_ID receive/send active-limit, duplicate-CID/reset-token validation and RETIRE_CONNECTION_ID lifecycle/preflight state with NEW/RETIRE CID-error close mapping wired into
-  1-RTT, transport/application CONNECTION_CLOSE state including frame-payload, ACK, stream-limit/state/flow-control/final-size/data-conflict, server-only frame, and selected semantic error close emission, PATH_CHALLENGE/PATH_RESPONSE validation state with duplicate challenge suppression wired into 1-RTT,
+  1-RTT, transport/application CONNECTION_CLOSE state including frame-payload, ACK, DATAGRAM negotiation, stream-limit/state/flow-control/final-size/data-conflict, server-only frame, and selected semantic error close emission, PATH_CHALLENGE/PATH_RESPONSE validation state with duplicate challenge suppression wired into 1-RTT,
   peer-migration helpers that honor disable_active_migration, apply a server
   preferred_address by selecting its CID/reset token and peer IP/port, reset
   anti-amplification and PMTUD path state, queue PATH_CHALLENGE,

@@ -1507,6 +1507,7 @@ pub const Connection = struct {
             error.InvalidFrame => for (frames) |frame| {
                 if (self.config.local_endpoint == .server and frame == .new_token) break semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.new_token), "new token");
                 if (self.config.local_endpoint == .server and frame == .handshake_done) break semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.handshake_done), "handshake done");
+                if (frame == .datagram) break semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.datagram_len), "datagram");
             } else null,
             error.StreamLimitExceeded => firstFrameClose(frames, .stream_limit_error, "stream limit"),
             error.StreamStateError => firstFrameClose(frames, .stream_state_error, "stream state"),
@@ -5934,6 +5935,16 @@ test "QUIC 1-RTT DATAGRAM enforces negotiation and frame-size limits" {
     });
     defer no_dgram.deinit();
     try std.testing.expectError(error.DatagramsNotEnabled, no_dgram.sendDatagram("disabled"));
+    try sendFrames(&endpoint, endpoint.address(), keys, .{
+        .destination_connection_id = &cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .datagram = .{ .data = "disabled", .length_present = true } }},
+    });
+    try std.testing.expectError(error.InvalidFrame, no_dgram.receivePacket());
+    try std.testing.expect(no_dgram.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), no_dgram.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.datagram_len)), no_dgram.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("datagram", no_dgram.close_info.?.reason_phrase);
 
     var limited = try Connection.init(&endpoint, .{
         .peer = endpoint.address(),
