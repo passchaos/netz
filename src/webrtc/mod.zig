@@ -663,7 +663,19 @@ pub const ice = struct {
         tcp,
         dtls,
         tls,
+
+        pub fn string(self: RelayProtocol) []const u8 {
+            return @tagName(self);
+        }
     };
+
+    pub fn relayProtocolFromString(value: []const u8) ?RelayProtocol {
+        if (std.mem.eql(u8, value, "udp")) return .udp;
+        if (std.mem.eql(u8, value, "tcp")) return .tcp;
+        if (std.mem.eql(u8, value, "dtls")) return .dtls;
+        if (std.mem.eql(u8, value, "tls")) return .tls;
+        return null;
+    }
 
     pub const Component = enum(u8) {
         unknown = 0,
@@ -10308,6 +10320,9 @@ test "ICE candidate priority helpers mirror RFC and Pion defaults" {
     try std.testing.expectEqual(@as(u16, 65_535), ice.localPreference(.host, .{}));
     try std.testing.expectEqual(@as(u16, 3), ice.relayLocalPreference(.udp));
     try std.testing.expectEqual(@as(u16, 1), ice.relayLocalPreference(.tcp));
+    try std.testing.expectEqualStrings("tls", ice.RelayProtocol.tls.string());
+    try std.testing.expectEqual(ice.RelayProtocol.dtls, ice.relayProtocolFromString("dtls").?);
+    try std.testing.expect(ice.relayProtocolFromString("DTLS") == null);
     try std.testing.expectEqual(@as(u16, (6 << 13) + 8_191), ice.tcpLocalPreference(.host, .active, ice.max_tcp_other_preference));
     try std.testing.expectEqual(@as(u16, (6 << 13) + 8_191), ice.tcpLocalPreference(.prflx, .so, ice.max_tcp_other_preference));
     try std.testing.expectEqual(@as(u16, 1234), ice.localPreference(.srflx, .{ .local_preference = 1234 }));
