@@ -3093,6 +3093,17 @@ pub const sdp = struct {
         return false;
     }
 
+    pub fn applicationMedia(session: Session) ?Media {
+        for (session.media) |media| {
+            if (std.mem.eql(u8, media.kind, "application")) return media;
+        }
+        return null;
+    }
+
+    pub fn hasApplicationMedia(session: Session) bool {
+        return applicationMedia(session) != null;
+    }
+
     pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
         for (attrs) |attr| {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
@@ -9700,6 +9711,8 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expect(session.bandwidth[1].experimental);
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
+    try std.testing.expect(sdp.hasApplicationMedia(session));
+    try std.testing.expectEqualStrings("application", sdp.applicationMedia(session).?.kind);
     try std.testing.expectEqual(@as(u16, 9), session.media[0].port);
     try std.testing.expectEqual(@as(?u16, 2), session.media[0].port_range);
     try std.testing.expectEqualStrings("Data channel media", session.media[0].title.?);
@@ -10021,6 +10034,10 @@ test "ICE candidate parser and SDP parser" {
     });
     defer sdp.freeBundleMids(allocator, no_bundle_mids);
     try std.testing.expectEqual(@as(usize, 0), no_bundle_mids.len);
+    var audio_only = try sdp.parse(allocator, "v=0\r\ns=-\r\nt=0 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n");
+    defer audio_only.deinit(allocator);
+    try std.testing.expect(!sdp.hasApplicationMedia(audio_only));
+    try std.testing.expect(sdp.applicationMedia(audio_only) == null);
 }
 
 test "ICE candidate priority helpers mirror RFC and Pion defaults" {
