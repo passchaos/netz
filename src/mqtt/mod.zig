@@ -147,9 +147,13 @@ fn validateMqttUtf8String(value: []const u8) Error!void {
     var view = std.unicode.Utf8View.init(value) catch return error.InvalidUtf8;
     var it = view.iterator();
     while (it.nextCodepoint()) |codepoint| {
-        if (codepoint == 0 or (codepoint >= 0x01 and codepoint <= 0x1f) or (codepoint >= 0x7f and codepoint <= 0x9f)) {
-            return error.InvalidUtf8;
-        }
+        // MQTT UTF-8 Encoded Strings MUST NOT contain U+0000.  C0/C1 control
+        // characters are only "SHOULD NOT" in MQTT 5 and are accepted by
+        // mature codecs such as rumqtt once the byte sequence is valid UTF-8.
+        // Keep the wire codec interoperable by enforcing the MUST-level NUL
+        // prohibition while leaving policy-level control-character filtering to
+        // applications that need it.
+        if (codepoint == 0) return error.InvalidUtf8;
     }
 }
 
@@ -1743,7 +1747,7 @@ test "MQTT remaining length roundtrip" {
     try std.testing.expectError(error.MalformedRemainingLength, decodeRemainingLength(&.{ 0xff, 0x00 }));
 }
 
-test "MQTT UTF-8 strings reject NUL" {
+test "MQTT UTF-8 strings reject NUL but allow discouraged controls" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
     try std.testing.expectError(error.InvalidUtf8, writeUtf8(&out, std.testing.allocator, "bad\x00topic"));
@@ -1752,10 +1756,13 @@ test "MQTT UTF-8 strings reject NUL" {
     var cursor = wire.Cursor.init(&raw);
     try std.testing.expectError(error.InvalidUtf8, readUtf8(&cursor));
 
-    try std.testing.expectError(error.InvalidUtf8, writeUtf8(&out, std.testing.allocator, "bad\x1ftopic"));
+    try writeUtf8(&out, std.testing.allocator, "ok\x1ftopic");
+    try std.testing.expectEqualStrings("ok\x1ftopic", out.items[2..]);
+    out.clearRetainingCapacity();
+
     var del = [_]u8{ 0, 3, 'b', 0x7f, 'd' };
     cursor = wire.Cursor.init(&del);
-    try std.testing.expectError(error.InvalidUtf8, readUtf8(&cursor));
+    try std.testing.expectEqualStrings("b\x7fd", try readUtf8(&cursor));
 }
 
 test "MQTT ping packets reject trailing bytes" {
