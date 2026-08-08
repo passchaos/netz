@@ -698,12 +698,14 @@ fn validateOriginOrAbsoluteFormTarget(target: []const u8) Error!void {
 pub fn validateConnectTarget(target: []const u8) Error!void {
     try validateRequestTarget(target);
     if (target[0] == '/' or target[0] == '*' or std.mem.indexOf(u8, target, "://") != null) return error.MalformedStartLine;
+    try validateAuthorityForbiddenDelimiters(target, error.MalformedStartLine);
 
     const port: []const u8 = if (target[0] == '[') blk: {
         const end = std.mem.indexOfScalar(u8, target, ']') orelse return error.MalformedStartLine;
         if (end <= 1 or end + 2 > target.len or target[end + 1] != ':') return error.MalformedStartLine;
         break :blk target[end + 2 ..];
     } else blk: {
+        if (std.mem.indexOfScalar(u8, target, '[') != null or std.mem.indexOfScalar(u8, target, ']') != null) return error.MalformedStartLine;
         const colon = std.mem.lastIndexOfScalar(u8, target, ':') orelse return error.MalformedStartLine;
         if (colon == 0 or colon + 1 >= target.len) return error.MalformedStartLine;
         // Unbracketed IPv6 is ambiguous in authority-form; require RFC 3986
@@ -712,11 +714,7 @@ pub fn validateConnectTarget(target: []const u8) Error!void {
         break :blk target[colon + 1 ..];
     };
 
-    for (port) |byte| {
-        if (!std.ascii.isDigit(byte)) return error.MalformedStartLine;
-    }
-    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return error.MalformedStartLine;
-    if (parsed_port > std.math.maxInt(u16)) return error.MalformedStartLine;
+    try validateAuthorityPort(port, error.MalformedStartLine);
 }
 
 pub fn validateRequestHost(request: Request) Error!void {
@@ -763,13 +761,7 @@ pub fn validateHostValue(raw_host: []const u8) Error!void {
     const host = wire.trimOws(raw_host);
     if (host.len == 0) return error.InvalidHost;
     if (std.mem.indexOf(u8, host, "://") != null) return error.InvalidHost;
-    for (host) |byte| {
-        // Host is an authority component, not a free-form field value.  Reject
-        // whitespace, list/path/query/fragment separators, and userinfo so
-        // proxies/origin servers do not disagree about which authority was
-        // requested.
-        if (byte <= 0x20 or byte == 0x7f or byte == ',' or byte == '/' or byte == '\\' or byte == '?' or byte == '#' or byte == '@') return error.InvalidHost;
-    }
+    try validateAuthorityForbiddenDelimiters(host, error.InvalidHost);
 
     const port: ?[]const u8 = if (host[0] == '[') blk: {
         const end = std.mem.indexOfScalar(u8, host, ']') orelse return error.InvalidHost;
@@ -778,6 +770,7 @@ pub fn validateHostValue(raw_host: []const u8) Error!void {
         if (host[end + 1] != ':' or end + 2 >= host.len) return error.InvalidHost;
         break :blk host[end + 2 ..];
     } else blk: {
+        if (std.mem.indexOfScalar(u8, host, '[') != null or std.mem.indexOfScalar(u8, host, ']') != null) return error.InvalidHost;
         const colon = std.mem.lastIndexOfScalar(u8, host, ':') orelse break :blk null;
         if (colon == 0 or colon + 1 >= host.len) return error.InvalidHost;
         // IPv6 literals in URI/Host authority form must be bracketed.  Treat an
@@ -786,13 +779,26 @@ pub fn validateHostValue(raw_host: []const u8) Error!void {
         break :blk host[colon + 1 ..];
     };
 
-    if (port) |value| {
-        for (value) |byte| {
-            if (!std.ascii.isDigit(byte)) return error.InvalidHost;
-        }
-        const parsed_port = std.fmt.parseInt(u32, value, 10) catch return error.InvalidHost;
-        if (parsed_port > std.math.maxInt(u16)) return error.InvalidHost;
+    if (port) |value| try validateAuthorityPort(value, error.InvalidHost);
+}
+
+fn validateAuthorityForbiddenDelimiters(authority: []const u8, comptime err: Error) Error!void {
+    for (authority) |byte| {
+        // Authority-form is a host[:port] component, not a complete URI or a
+        // comma-list.  Hyper and Go's HTTP stacks keep this surface strict
+        // because userinfo/path/query/fragment/list delimiters are common
+        // sources of proxy/origin disagreement and CONNECT request smuggling.
+        if (byte <= 0x20 or byte == 0x7f or byte == ',' or byte == '/' or byte == '\\' or byte == '?' or byte == '#' or byte == '@') return err;
     }
+}
+
+fn validateAuthorityPort(port: []const u8, comptime err: Error) Error!void {
+    if (port.len == 0) return err;
+    for (port) |byte| {
+        if (!std.ascii.isDigit(byte)) return err;
+    }
+    const parsed_port = std.fmt.parseInt(u32, port, 10) catch return err;
+    if (parsed_port > std.math.maxInt(u16)) return err;
 }
 
 pub fn validateReasonPhrase(reason: []const u8) Error!void {
@@ -1042,6 +1048,12 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com:"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com:65536"));
     try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("https://example.com:443"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("user@example.com:443"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com:443/path"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com?port=443"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com:443, other.example:443"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("example.com[::1]:443"));
+    try std.testing.expectError(error.MalformedStartLine, validateConnectTarget("[2001:db8::1]:443/path"));
 
     const bad_reason = "HTTP/1.1 200 OK\x01\r\nContent-Length: 0\r\n\r\n";
     try std.testing.expectError(error.MalformedStartLine, parseResponse(allocator, bad_reason, .{}));
@@ -1081,6 +1093,7 @@ test "HTTP/1 validates Host authority rules" {
     try std.testing.expectError(error.InvalidHost, validateHostValue("example.com?query"));
     try std.testing.expectError(error.InvalidHost, validateHostValue("example.com#fragment"));
     try std.testing.expectError(error.InvalidHost, validateHostValue("2001:db8::1"));
+    try std.testing.expectError(error.InvalidHost, validateHostValue("example.com[::1]:443"));
     try validateHostValue("[2001:db8::1]:443");
 }
 
