@@ -1472,7 +1472,7 @@ fn validateRequestBodyForMethod(headers: []const Qpack.HeaderField, body: []cons
         if (std.mem.eql(u8, header.name, ":protocol")) has_protocol = true;
     }
     if (method) |value| {
-        if (std.ascii.eqlIgnoreCase(value, "CONNECT") and !has_protocol) {
+        if (std.mem.eql(u8, value, "CONNECT") and !has_protocol) {
             if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
             if ((try contentLength(headers)) != null) return error.InvalidContentLength;
         }
@@ -2618,6 +2618,21 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
         .authority = "proxy.example.com:443",
         .body = "tunnel bytes",
     }).write(&plain_connect, allocator));
+
+    var lowercase_connect = std.ArrayList(u8).empty;
+    defer lowercase_connect.deinit(allocator);
+    try (Request{
+        .method = "connect",
+        .path = "/ordinary-extension-method",
+        .scheme = "https",
+        .authority = "example.com",
+        .headers = &.{.{ .name = "content-length", .value = "4" }},
+        .body = "body",
+    }).write(&lowercase_connect, allocator);
+    var lowercase_decoded = try decodeRequest(allocator, lowercase_connect.items);
+    defer lowercase_decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("connect", lowercase_decoded.method);
+    try std.testing.expectEqualStrings("body", lowercase_decoded.body);
 
     var extended_connect_missing_target = std.ArrayList(u8).empty;
     defer extended_connect_missing_target.deinit(allocator);
