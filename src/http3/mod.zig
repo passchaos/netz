@@ -1923,6 +1923,7 @@ pub const DecodedRequest = struct {
     body: []const u8,
     body_storage: ?[]u8 = null,
     consumed: usize,
+    qpack_section_acknowledgments: usize = 0,
 
     /// Release arrays and body storage owned by `decodeRequest`. Header field
     /// names/values still borrow from the encoded stream bytes; callers must
@@ -1942,6 +1943,7 @@ pub const DecodedResponse = struct {
     body: []const u8,
     body_storage: ?[]u8 = null,
     consumed: usize,
+    qpack_section_acknowledgments: usize = 0,
 
     pub fn successful(self: DecodedResponse) bool {
         return self.status >= 200 and self.status < 300;
@@ -1963,11 +1965,20 @@ pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!Deco
     // not assume a SETTINGS exchange has happened. Negotiated runtime paths
     // call `decodeRequestWithSettings`, which enforces advertised features such
     // as RFC 9220 extended CONNECT.
-    return decodeRequestWithOptions(allocator, bytes, .{}, false);
+    return decodeRequestWithOptions(allocator, bytes, .{}, false, .literal);
 }
 
 pub fn decodeRequestWithSettings(allocator: std.mem.Allocator, bytes: []const u8, settings: Settings) Error!DecodedRequest {
-    return decodeRequestWithOptions(allocator, bytes, settings, true);
+    return decodeRequestWithOptions(allocator, bytes, settings, true, .literal);
+}
+
+pub fn decodeRequestWithDynamicTable(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    settings: Settings,
+    table: Qpack.DynamicTable,
+) Error!DecodedRequest {
+    return decodeRequestWithOptions(allocator, bytes, settings, true, .{ .dynamic = table });
 }
 
 fn decodeRequestWithOptions(
@@ -1975,8 +1986,15 @@ fn decodeRequestWithOptions(
     bytes: []const u8,
     settings: Settings,
     enforce_extended_connect_setting: bool,
+    field_decoder: FieldSectionDecoder,
 ) Error!DecodedRequest {
-    var message = try decodeMessage(allocator, bytes, .request, settings.max_field_section_size);
+    var message = try decodeMessage(
+        allocator,
+        bytes,
+        .request,
+        settings.max_field_section_size,
+        field_decoder,
+    );
     errdefer message.deinit(allocator);
 
     try validateHeaderBlock(message.headers, .request);
@@ -2018,6 +2036,7 @@ fn decodeRequestWithOptions(
         .body = message.body,
         .body_storage = message.body_storage,
         .consumed = message.consumed,
+        .qpack_section_acknowledgments = message.qpack_section_acknowledgments,
     };
 }
 
@@ -2026,7 +2045,35 @@ pub fn decodeResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!Dec
 }
 
 pub fn decodeResponseWithSettings(allocator: std.mem.Allocator, bytes: []const u8, settings: Settings) Error!DecodedResponse {
-    var message = try decodeResponseMessage(allocator, bytes, settings.max_field_section_size);
+    return decodeResponseWithFieldDecoder(allocator, bytes, settings, .literal);
+}
+
+pub fn decodeResponseWithDynamicTable(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    settings: Settings,
+    table: Qpack.DynamicTable,
+) Error!DecodedResponse {
+    return decodeResponseWithFieldDecoder(
+        allocator,
+        bytes,
+        settings,
+        .{ .dynamic = table },
+    );
+}
+
+fn decodeResponseWithFieldDecoder(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    settings: Settings,
+    field_decoder: FieldSectionDecoder,
+) Error!DecodedResponse {
+    var message = try decodeResponseMessage(
+        allocator,
+        bytes,
+        settings.max_field_section_size,
+        field_decoder,
+    );
     errdefer message.deinit(allocator);
 
     try validateHeaderBlock(message.headers, .response);
@@ -2043,6 +2090,7 @@ pub fn decodeResponseWithSettings(allocator: std.mem.Allocator, bytes: []const u
         .body = message.body,
         .body_storage = message.body_storage,
         .consumed = message.consumed,
+        .qpack_section_acknowledgments = message.qpack_section_acknowledgments,
     };
 }
 
@@ -2052,6 +2100,7 @@ const DecodedMessage = struct {
     body: []const u8,
     body_storage: ?[]u8 = null,
     consumed: usize,
+    qpack_section_acknowledgments: usize = 0,
 
     fn deinit(self: *DecodedMessage, allocator: std.mem.Allocator) void {
         Qpack.freeDecodedFields(allocator, self.headers);
@@ -2064,6 +2113,33 @@ const DecodedMessage = struct {
 const MessageStreamKind = enum {
     request,
     response,
+};
+
+const DecodedFieldSection = struct {
+    fields: []Qpack.HeaderField,
+    requires_acknowledgment: bool = false,
+};
+
+const FieldSectionDecoder = union(enum) {
+    literal,
+    dynamic: Qpack.DynamicTable,
+
+    fn decode(
+        self: FieldSectionDecoder,
+        allocator: std.mem.Allocator,
+        payload: []const u8,
+    ) Error!DecodedFieldSection {
+        return switch (self) {
+            .literal => .{ .fields = try Qpack.decodeLiteralBlock(allocator, payload) },
+            .dynamic => |table| blk: {
+                const decoded = try Qpack.decodeDynamicBlock(allocator, payload, table);
+                break :blk .{
+                    .fields = decoded.fields,
+                    .requires_acknowledgment = decoded.required_insert_count != 0,
+                };
+            },
+        };
+    }
 };
 
 fn writeHeadersFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const Qpack.HeaderField) Error!void {
@@ -2116,8 +2192,14 @@ fn responseStatus(headers: []const Qpack.HeaderField) Error!u16 {
     return error.MissingStatus;
 }
 
-fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8, max_field_section_size: u64) Error!DecodedMessage {
+fn decodeResponseMessage(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    max_field_section_size: u64,
+    field_decoder: FieldSectionDecoder,
+) Error!DecodedMessage {
     var offset: usize = 0;
+    var informational_acknowledgments: usize = 0;
     while (true) {
         const frame = try Frame.parse(bytes[offset..]);
         if (frame.frame_type != FrameType.headers) {
@@ -2127,22 +2209,42 @@ fn decodeResponseMessage(allocator: std.mem.Allocator, bytes: []const u8, max_fi
             if (offset >= bytes.len) return error.MissingStatus;
             continue;
         }
-        const headers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
-        defer Qpack.freeDecodedFields(allocator, headers);
-        try validateHeaderBlock(headers, .response);
-        try validateFieldSectionSize(headers, max_field_section_size);
-        const status = try responseStatus(headers);
+        const decoded = try field_decoder.decode(allocator, frame.payload);
+        var decoded_owned = true;
+        defer if (decoded_owned) Qpack.freeDecodedFields(allocator, decoded.fields);
+        try validateHeaderBlock(decoded.fields, .response);
+        try validateFieldSectionSize(decoded.fields, max_field_section_size);
+        const status = try responseStatus(decoded.fields);
         if (status < 200) {
+            informational_acknowledgments += @intFromBool(decoded.requires_acknowledgment);
+            Qpack.freeDecodedFields(allocator, decoded.fields);
+            decoded_owned = false;
             offset += frame.consumed;
             if (offset >= bytes.len) return error.MissingStatus;
             continue;
         }
-        break;
+        decoded_owned = false;
+        var message = try decodeMessageAfterHeaders(
+            allocator,
+            bytes,
+            .response,
+            max_field_section_size,
+            field_decoder,
+            decoded,
+            offset + frame.consumed,
+        );
+        message.qpack_section_acknowledgments += informational_acknowledgments;
+        return message;
     }
-    return decodeMessage(allocator, bytes[offset..], .response, max_field_section_size);
 }
 
-fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageStreamKind, max_field_section_size: u64) Error!DecodedMessage {
+fn decodeMessage(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    kind: MessageStreamKind,
+    max_field_section_size: u64,
+    field_decoder: FieldSectionDecoder,
+) Error!DecodedMessage {
     var offset: usize = 0;
     const headers_frame = while (true) {
         const frame = try Frame.parse(bytes[offset..]);
@@ -2161,16 +2263,40 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageS
         offset += frame.consumed;
         if (offset >= bytes.len) return error.ExpectedHeadersFrame;
     };
-    const headers = try Qpack.decodeLiteralBlock(allocator, headers_frame.payload);
-    errdefer Qpack.freeDecodedFields(allocator, headers);
-    try validateFieldSectionSize(headers, max_field_section_size);
+    const decoded_headers = try field_decoder.decode(allocator, headers_frame.payload);
+    var headers_owned = true;
+    errdefer if (headers_owned) Qpack.freeDecodedFields(allocator, decoded_headers.fields);
+    try validateFieldSectionSize(decoded_headers.fields, max_field_section_size);
+    headers_owned = false;
+    return decodeMessageAfterHeaders(
+        allocator,
+        bytes,
+        kind,
+        max_field_section_size,
+        field_decoder,
+        decoded_headers,
+        offset + headers_frame.consumed,
+    );
+}
 
-    var consumed = offset + headers_frame.consumed;
+fn decodeMessageAfterHeaders(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    kind: MessageStreamKind,
+    max_field_section_size: u64,
+    field_decoder: FieldSectionDecoder,
+    decoded_headers: DecodedFieldSection,
+    initial_consumed: usize,
+) Error!DecodedMessage {
+    errdefer Qpack.freeDecodedFields(allocator, decoded_headers.fields);
+    var consumed = initial_consumed;
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(allocator);
     var trailers: []Qpack.HeaderField = &.{};
     errdefer Qpack.freeDecodedFields(allocator, trailers);
     var saw_trailers = false;
+    var qpack_section_acknowledgments: usize =
+        @intFromBool(decoded_headers.requires_acknowledgment);
     while (consumed < bytes.len) {
         const frame = try Frame.parse(bytes[consumed..]);
         consumed += frame.consumed;
@@ -2181,10 +2307,12 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageS
             },
             FrameType.headers => {
                 if (saw_trailers) return error.UnexpectedFrame;
-                const decoded_trailers = try Qpack.decodeLiteralBlock(allocator, frame.payload);
-                errdefer Qpack.freeDecodedFields(allocator, decoded_trailers);
-                try validateFieldSectionSize(decoded_trailers, max_field_section_size);
-                trailers = decoded_trailers;
+                const decoded_trailers = try field_decoder.decode(allocator, frame.payload);
+                errdefer Qpack.freeDecodedFields(allocator, decoded_trailers.fields);
+                try validateFieldSectionSize(decoded_trailers.fields, max_field_section_size);
+                trailers = decoded_trailers.fields;
+                qpack_section_acknowledgments +=
+                    @intFromBool(decoded_trailers.requires_acknowledgment);
                 saw_trailers = true;
             },
             FrameType.push_promise => {
@@ -2201,11 +2329,12 @@ fn decodeMessage(allocator: std.mem.Allocator, bytes: []const u8, kind: MessageS
     } else try body.toOwnedSlice(allocator);
 
     return .{
-        .headers = headers,
+        .headers = decoded_headers.fields,
         .trailers = trailers,
         .body = if (body_storage) |storage| storage else &.{},
         .body_storage = body_storage,
         .consumed = consumed,
+        .qpack_section_acknowledgments = qpack_section_acknowledgments,
     };
 }
 
@@ -3380,6 +3509,172 @@ test "HTTP/3 request encode decode" {
     var get = try decodeRequest(allocator, encoded.items);
     defer get.deinit(allocator);
     try std.testing.expect(findHeader(get.headers, "content-length") == null);
+}
+
+test "HTTP/3 dynamic QPACK request decode preserves message semantics and acknowledgment count" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 512);
+    defer table.deinit();
+    try table.setCapacity(512);
+    _ = try table.insert("x-request-id", "request-20260809");
+    _ = try table.insert("x-trailer", "complete");
+
+    const headers = [_]Qpack.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/dynamic" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = "content-length", .value = "4" },
+        .{ .name = "x-request-id", .value = "request-20260809" },
+    };
+    const trailers = [_]Qpack.HeaderField{
+        .{ .name = "x-trailer", .value = "complete" },
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&block, allocator, &headers, table);
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&encoded, allocator);
+    try (Frame{
+        .frame_type = FrameType.data,
+        .payload = "body",
+        .consumed = 0,
+    }).write(&encoded, allocator);
+    block.clearRetainingCapacity();
+    try Qpack.encodeDynamicBlock(&block, allocator, &trailers, table);
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&encoded, allocator);
+
+    var decoded = try decodeRequestWithDynamicTable(
+        allocator,
+        encoded.items,
+        .{},
+        table,
+    );
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("POST", decoded.method);
+    try std.testing.expectEqualStrings("/dynamic", decoded.path);
+    try std.testing.expectEqualStrings("https", decoded.scheme);
+    try std.testing.expectEqualStrings("example.com", decoded.authority.?);
+    try std.testing.expectEqualStrings("body", decoded.body);
+    try std.testing.expectEqual(@as(usize, 1), decoded.trailers.len);
+    try std.testing.expectEqualStrings("complete", decoded.trailers[0].value);
+    try std.testing.expectEqual(@as(usize, 2), decoded.qpack_section_acknowledgments);
+}
+
+test "HTTP/3 dynamic QPACK response counts informational and final acknowledgments" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 512);
+    defer table.deinit();
+    try table.setCapacity(512);
+    _ = try table.insert("x-release", "netz-2026");
+
+    const informational = [_]Qpack.HeaderField{
+        .{ .name = ":status", .value = "103" },
+        .{ .name = "x-release", .value = "netz-2026" },
+    };
+    const final = [_]Qpack.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "2" },
+        .{ .name = "x-release", .value = "netz-2026" },
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&block, allocator, &informational, table);
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&encoded, allocator);
+    block.clearRetainingCapacity();
+    try Qpack.encodeDynamicBlock(&block, allocator, &final, table);
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&encoded, allocator);
+    try (Frame{
+        .frame_type = FrameType.data,
+        .payload = "ok",
+        .consumed = 0,
+    }).write(&encoded, allocator);
+
+    var decoded = try decodeResponseWithDynamicTable(
+        allocator,
+        encoded.items,
+        .{},
+        table,
+    );
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), decoded.status);
+    try std.testing.expectEqualStrings("ok", decoded.body);
+    try std.testing.expectEqual(@as(usize, 2), decoded.qpack_section_acknowledgments);
+}
+
+fn checkDynamicQpackMessageAllocationFailure(allocator: std.mem.Allocator) !void {
+    var table = Qpack.DynamicTable.init(allocator, 512);
+    defer table.deinit();
+    try table.setCapacity(512);
+    _ = try table.insert("x-transaction", "owned-dynamic-value");
+
+    const headers = [_]Qpack.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/oom" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = "content-length", .value = "4" },
+        .{ .name = "x-transaction", .value = "owned-dynamic-value" },
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&block, allocator, &headers, table);
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&encoded, allocator);
+    try (Frame{
+        .frame_type = FrameType.data,
+        .payload = "body",
+        .consumed = 0,
+    }).write(&encoded, allocator);
+    block.clearRetainingCapacity();
+    try Qpack.encodeDynamicBlock(&block, allocator, &.{
+        .{ .name = "x-transaction", .value = "owned-dynamic-value" },
+    }, table);
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&encoded, allocator);
+
+    var decoded = try decodeRequestWithDynamicTable(
+        allocator,
+        encoded.items,
+        .{},
+        table,
+    );
+    decoded.deinit(allocator);
+}
+
+test "HTTP/3 dynamic QPACK message decode is transactional under allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkDynamicQpackMessageAllocationFailure,
+        .{},
+    );
 }
 
 test "HTTP/3 message aggregates DATA frames and trailing HEADERS" {
