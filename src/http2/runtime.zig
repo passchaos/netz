@@ -2220,30 +2220,29 @@ fn requestShouldDefaultContentLength(method: []const u8, headers: []const http2.
 }
 
 fn stripConnectionHeaders(headers: *std.ArrayList(http2.Hpack.HeaderField), kind: HeaderBlockKind) void {
-    var index: usize = 0;
-    while (index < headers.items.len) {
-        const header = headers.items[index];
-        if (std.ascii.eqlIgnoreCase(header.name, "connection")) {
-            // Hyper strips outbound HTTP/1 hop-by-hop metadata before handing a
-            // header map to h2.  Do the same at the convenience writer boundary
-            // so callers that forward HTTP/1 headers do not have to pre-filter
-            // every field.  We still reject hop-by-hop fields on inbound blocks
-            // and low-level writeHeaders calls; this helper is only an outbound
-            // compatibility/safety shim for high-level request/response APIs.
-            _ = headers.orderedRemove(index);
-            removeConnectionNominatedHeaders(headers, header.value);
-            continue;
+    var connection_values: [256][]const u8 = undefined;
+    var connection_value_count: usize = 0;
+    for (headers.items) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "connection")) continue;
+        if (connection_value_count < connection_values.len) {
+            connection_values[connection_value_count] = header.value;
+            connection_value_count += 1;
         }
-        if (connectionSpecificHeaderName(header.name)) {
-            _ = headers.orderedRemove(index);
-            continue;
-        }
-        if (std.ascii.eqlIgnoreCase(header.name, "te") and (kind != .request or !std.ascii.eqlIgnoreCase(std.mem.trim(u8, header.value, " \t"), "trailers"))) {
-            _ = headers.orderedRemove(index);
-            continue;
-        }
-        index += 1;
     }
+
+    var write_index: usize = 0;
+    for (headers.items, 0..) |header, read_index| {
+        // Hyper strips outbound HTTP/1 hop-by-hop metadata before handing a
+        // header map to h2. Do the same at the convenience writer boundary so
+        // callers that forward HTTP/1 headers do not have to pre-filter every
+        // field.  This compacts in one pass instead of repeatedly shifting the
+        // tail with orderedRemove when forwarded header maps contain many
+        // hop-by-hop fields.
+        if (stripConnectionHeaderAt(headers.items, read_index, kind, connection_values[0..connection_value_count])) continue;
+        headers.items[write_index] = header;
+        write_index += 1;
+    }
+    headers.shrinkRetainingCapacity(write_index);
 }
 
 fn stripSuccessfulConnectContentLength(headers: *std.ArrayList(http2.Hpack.HeaderField)) Error!void {
@@ -2264,20 +2263,20 @@ fn stripSuccessfulConnectContentLength(headers: *std.ArrayList(http2.Hpack.Heade
     }
 }
 
-fn removeConnectionNominatedHeaders(headers: *std.ArrayList(http2.Hpack.HeaderField), value: []const u8) void {
-    var tokens = std.mem.splitScalar(u8, value, ',');
-    while (tokens.next()) |raw_token| {
-        const token = std.mem.trim(u8, raw_token, " \t");
-        if (token.len == 0) continue;
-        var index: usize = 0;
-        while (index < headers.items.len) {
-            if (std.ascii.eqlIgnoreCase(headers.items[index].name, token)) {
-                _ = headers.orderedRemove(index);
-                continue;
-            }
-            index += 1;
+fn stripConnectionHeaderAt(headers: []const http2.Hpack.HeaderField, index: usize, kind: HeaderBlockKind, connection_values: []const []const u8) bool {
+    const header = headers[index];
+    if (std.ascii.eqlIgnoreCase(header.name, "connection")) return true;
+    if (connectionSpecificHeaderName(header.name)) return true;
+    if (std.ascii.eqlIgnoreCase(header.name, "te") and (kind != .request or !std.ascii.eqlIgnoreCase(std.mem.trim(u8, header.value, " \t"), "trailers"))) return true;
+
+    for (connection_values) |value| {
+        var tokens = std.mem.splitScalar(u8, value, ',');
+        while (tokens.next()) |raw_token| {
+            const token = std.mem.trim(u8, raw_token, " \t");
+            if (token.len != 0 and std.ascii.eqlIgnoreCase(header.name, token)) return true;
         }
     }
+    return false;
 }
 
 fn validateHeaderListSize(headers: []const http2.Hpack.HeaderField, max_size: usize) Error!void {
@@ -5607,6 +5606,28 @@ test "HTTP/2 high-level writers strip outbound connection-specific headers" {
     try std.testing.expect(findHeader(response.headers, "upgrade") == null);
     try std.testing.expect(findHeader(response.headers, "te") == null);
     try std.testing.expectEqualStrings("kept", findHeader(response.headers, "x-response-end-to-end") orelse return error.MissingPseudoHeader);
+}
+
+test "HTTP/2 stripConnectionHeaders compacts nominated hop-by-hop fields" {
+    const allocator = std.testing.allocator;
+    var headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+    defer headers.deinit(allocator);
+    try headers.appendSlice(allocator, &.{
+        .{ .name = "x-keep-a", .value = "a" },
+        .{ .name = "Connection", .value = "x-hop-a, x-hop-b" },
+        .{ .name = "x-hop-a", .value = "remove" },
+        .{ .name = "te", .value = "trailers" },
+        .{ .name = "x-hop-b", .value = "remove" },
+        .{ .name = "Connection", .value = "x-hop-c" },
+        .{ .name = "x-hop-c", .value = "remove" },
+        .{ .name = "x-keep-b", .value = "b" },
+    });
+
+    stripConnectionHeaders(&headers, .request);
+    try std.testing.expectEqual(@as(usize, 3), headers.items.len);
+    try std.testing.expectEqualStrings("x-keep-a", headers.items[0].name);
+    try std.testing.expectEqualStrings("te", headers.items[1].name);
+    try std.testing.expectEqualStrings("x-keep-b", headers.items[2].name);
 }
 
 test "HTTP/2 high-level request writer preserves TE trailers" {
