@@ -1055,22 +1055,40 @@ pub const Connection = struct {
     }
 
     pub fn sendNewConnectionId(self: *Connection, connection_id: []const u8, stateless_reset_token: [16]u8) Error!void {
-        try self.validateLocalConnectionIdIssueLimit();
+        try self.validateLocalConnectionIdIssueLimit(0);
         const frame = try self.local_connection_ids.issue(connection_id, stateless_reset_token);
+        const frames = [_]quic.Frame{frame};
+        try self.send(&frames);
+    }
+
+    pub fn sendNewConnectionIdRetiringPriorTo(
+        self: *Connection,
+        connection_id: []const u8,
+        stateless_reset_token: [16]u8,
+        retire_prior_to: u64,
+    ) Error!void {
+        try self.validateLocalConnectionIdIssueLimit(retire_prior_to);
+        const frame = try self.local_connection_ids.issueWithRetirePriorTo(connection_id, stateless_reset_token, retire_prior_to);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
     }
 
     pub fn sendNewConnectionIdWithDerivedToken(self: *Connection, connection_id: []const u8) Error!void {
         const key = self.config.local_stateless_reset_key orelse return error.InvalidConnectionId;
-        try self.validateLocalConnectionIdIssueLimit();
+        try self.validateLocalConnectionIdIssueLimit(0);
         const frame = try self.local_connection_ids.issueWithStaticKey(connection_id, key);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
     }
 
-    fn validateLocalConnectionIdIssueLimit(self: Connection) Error!void {
-        if (self.local_connection_ids.count() >= self.config.peer_active_connection_id_limit) return error.ActiveConnectionIdLimit;
+    fn validateLocalConnectionIdIssueLimit(self: Connection, retire_prior_to: u64) Error!void {
+        // Retire Prior To lets a replacement NEW_CONNECTION_ID atomically ask
+        // the peer to drop lower-numbered local CIDs.  Count only IDs that
+        // remain active after that instruction, matching RFC 9000's active ID
+        // limit semantics and mature stacks such as quicz.
+        if (self.local_connection_ids.countAfterRetirePriorTo(retire_prior_to) >= self.config.peer_active_connection_id_limit) {
+            return error.ActiveConnectionIdLimit;
+        }
     }
 
     pub fn sendHandshakeDone(self: *Connection) Error!void {
@@ -4422,6 +4440,69 @@ test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     var retire_packet = try server.receiveRoutedDatagram(routed);
     defer retire_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.local_connection_ids.count());
+}
+
+test "QUIC 1-RTT replacement CID can retire prior IDs at peer active limit" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x72, 0x73, 0x74, 0x75 };
+    const server_cid = [_]u8{ 0x76, 0x77, 0x78, 0x79 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe4} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try server.sendNewConnectionId("server-first-cid", [_]u8{0xa1} ** 16);
+    var first = try client.receivePacket();
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
+
+    try std.testing.expectError(error.ActiveConnectionIdLimit, server.sendNewConnectionId("server-extra-cid", [_]u8{0xa2} ** 16));
+    try server.sendNewConnectionIdRetiringPriorTo("server-rotated-cid", [_]u8{0xa3} ** 16, 1);
+    var replacement = try client.receivePacket();
+    defer replacement.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), replacement.frames[0].new_connection_id.sequence_number);
+    try std.testing.expectEqual(@as(u64, 1), replacement.frames[0].new_connection_id.retire_prior_to);
+    try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRetireConnectionIdCount());
+
+    try std.testing.expect(client.switchToNextPeerConnectionId());
+    try std.testing.expectEqualStrings("server-rotated-cid", client.config.peer_connection_id);
+    try std.testing.expectEqual(@as(usize, 1), try client.sendPendingRetireConnectionIds());
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRetireConnectionIdCount());
+
+    var router = quic.connection_router.Router.init(allocator);
+    defer router.deinit();
+    try router.register("server-rotated-cid", .{ .connection_index = 0, .sequence_number = 2 });
+    var routed = try server_endpoint.receiveRoutedBytes(router);
+    defer routed.deinit(allocator);
+    var retire = try server.receiveRoutedDatagram(routed);
+    defer retire.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), server.local_connection_ids.count());
 }
 
 test "QUIC 1-RTT derives local CID stateless reset tokens from config key" {
