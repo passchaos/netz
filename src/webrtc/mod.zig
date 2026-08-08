@@ -665,6 +665,38 @@ pub const ice = struct {
         tls,
     };
 
+    pub const Component = enum(u8) {
+        unknown = 0,
+        rtp = 1,
+        rtcp = 2,
+
+        pub fn id(self: Component) u8 {
+            return @intFromEnum(self);
+        }
+
+        pub fn string(self: Component) []const u8 {
+            return switch (self) {
+                .rtp => "rtp",
+                .rtcp => "rtcp",
+                .unknown => "unknown",
+            };
+        }
+    };
+
+    pub fn componentFromString(value: []const u8) Component {
+        if (std.mem.eql(u8, value, "rtp")) return .rtp;
+        if (std.mem.eql(u8, value, "rtcp")) return .rtcp;
+        return .unknown;
+    }
+
+    pub fn componentFromId(id: u8) Component {
+        return switch (id) {
+            1 => .rtp,
+            2 => .rtcp,
+            else => .unknown,
+        };
+    }
+
     pub const default_local_preference: u16 = 65_535;
     pub const default_tcp_priority_offset: u8 = 27;
     pub const max_tcp_direction_preference: u3 = 7;
@@ -9704,6 +9736,11 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("host", candidate.candidate_type.string());
     try std.testing.expectEqual(ice.CandidateType.srflx, ice.candidateTypeFromString("srflx").?);
     try std.testing.expect(ice.candidateTypeFromString("SRFLX") == null);
+    try std.testing.expectEqual(ice.Component.rtp, ice.componentFromId(@intCast(candidate.component)));
+    try std.testing.expectEqual(@as(u8, 1), ice.Component.rtp.id());
+    try std.testing.expectEqualStrings("rtp", ice.Component.rtp.string());
+    try std.testing.expectEqual(ice.Component.rtcp, ice.componentFromString("rtcp"));
+    try std.testing.expectEqual(ice.Component.unknown, ice.componentFromString("RTCP"));
     try std.testing.expectEqual(@as(u16, 54400), candidate.port);
     try std.testing.expectEqual(@as(u8, 126), candidate.candidate_type.preference());
     try std.testing.expectEqual(@as(u32, 2_130_706_431), try candidate.computedPriority(.{}));
