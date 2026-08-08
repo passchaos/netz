@@ -69,7 +69,7 @@ pub const Server = struct {
         if (mqtt.maximumPacketSize(connect.connect.properties)) |maximum_packet_size| connection.peer_max_packet_size = maximum_packet_size;
         if (mqtt.topicAliasMaximum(connect.connect.properties)) |topic_alias_maximum| connection.peer_topic_alias_maximum = topic_alias_maximum;
         try connection.writeConnAck(.{
-            .session_present = false,
+            .session_present = options.session_present,
             .reason_code = options.reason_code,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .topic_alias_maximum = options.topic_alias_maximum,
@@ -164,6 +164,7 @@ fn ServeTask(comptime HandlerContext: type) type {
 
 pub const AcceptOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
+    session_present: bool = false,
     reason_code: u8 = 0,
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
@@ -188,6 +189,12 @@ pub const AcceptedClient = struct {
 
 pub const Client = struct {
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!Connection {
+        var result = try connectWithConnAck(allocator, io, address, options);
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectWithConnAck(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!ConnectResult {
         const stream = try address.connect(io, .{ .mode = .stream });
         errdefer stream.close(io);
 
@@ -235,7 +242,7 @@ pub const Client = struct {
         try writeAll(io, stream, encoded.items);
 
         var connack = try connection.readConnAck();
-        defer connack.deinit(allocator);
+        errdefer connack.deinit(allocator);
         if (connack.connack.reason_code != 0) return error.ConnectRefused;
         if (mqtt.receiveMaximum(connack.connack.properties)) |receive_maximum| {
             connection.max_outgoing_inflight = negotiatedOutgoingInflightLimit(connection.max_outgoing_inflight, receive_maximum);
@@ -249,7 +256,18 @@ pub const Client = struct {
         if (mqtt.subscriptionIdentifierAvailable(connack.connack.properties)) |available| connection.peer_subscription_identifier_available = available;
         if (mqtt.sharedSubscriptionAvailable(connack.connack.properties)) |available| connection.peer_shared_subscription_available = available;
 
-        return connection;
+        return .{ .connection = connection, .connack = connack };
+    }
+};
+
+pub const ConnectResult = struct {
+    connection: Connection,
+    connack: OwnedConnAck,
+
+    pub fn deinit(self: *ConnectResult, allocator: std.mem.Allocator) void {
+        self.connack.deinit(allocator);
+        self.connection.close();
+        self.* = undefined;
     }
 };
 
@@ -1210,6 +1228,55 @@ test "MQTT runtime client and server exchange over TCP" {
     try client.publish("", "second", .{ .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 1 } }} });
     try client.ping();
     try client.disconnect(0);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT runtime exposes CONNACK session present" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_packet_size = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var accepted = try server_ptr.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer accepted.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("resuming-client", accepted.connect.connect.client_id);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(server_ptr.allocator);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var result = try Client.connectWithConnAck(allocator, io, server.address(), .{
+        .protocol = .v5,
+        .client_id = "resuming-client",
+        .clean_start = false,
+        .limits = .{ .max_packet_size = 4096 },
+    });
+    defer result.deinit(allocator);
+    try std.testing.expect(result.connack.connack.session_present);
+    try result.connection.disconnect(0);
 
     thread.join();
     if (shared.err) |err| return err;
