@@ -138,15 +138,18 @@ pub const stun = struct {
         var attrs: std.ArrayList(Attribute) = .empty;
         errdefer attrs.deinit(allocator);
         var seen_integrity = false;
+        var seen_fingerprint = false;
         while (!attr_cursor.eof()) {
             const attr_type: AttributeType = @enumFromInt(try attr_cursor.readInt(u16, .big));
             const attr_len = try attr_cursor.readInt(u16, .big);
             const value = try attr_cursor.readSlice(attr_len);
             const padding = (@as(usize, 4) - (attr_len % 4)) % 4;
             try attr_cursor.skip(padding);
+            if (seen_fingerprint) return error.InvalidStunAttribute;
             if (seen_integrity and attr_type != .fingerprint) return error.InvalidStunAttribute;
             try attrs.append(allocator, .{ .attr_type = attr_type, .value = value });
             if (attr_type == .message_integrity) seen_integrity = true;
+            if (attr_type == .fingerprint) seen_fingerprint = true;
         }
         return .{
             .class = decoded_type.class,
@@ -9762,6 +9765,20 @@ test "STUN ICE binding request authenticates integrity and fingerprint" {
         .{ .attr_type = .fingerprint, .value = &([_]u8{0} ** stun.fingerprint_len) },
         .{ .attr_type = .software, .value = "after-fingerprint" },
     }));
+
+    var fingerprint_then_attribute: std.ArrayList(u8) = .empty;
+    defer fingerprint_then_attribute.deinit(allocator);
+    try wire.appendInt(&fingerprint_then_attribute, allocator, u16, stun.encodeType(.binding, .request), .big);
+    try wire.appendInt(&fingerprint_then_attribute, allocator, u16, 16, .big);
+    try wire.appendInt(&fingerprint_then_attribute, allocator, u32, stun.magic_cookie, .big);
+    try fingerprint_then_attribute.appendSlice(allocator, &tid);
+    try wire.appendInt(&fingerprint_then_attribute, allocator, u16, @intFromEnum(stun.AttributeType.fingerprint), .big);
+    try wire.appendInt(&fingerprint_then_attribute, allocator, u16, stun.fingerprint_len, .big);
+    try fingerprint_then_attribute.appendNTimes(allocator, 0, stun.fingerprint_len);
+    try wire.appendInt(&fingerprint_then_attribute, allocator, u16, @intFromEnum(stun.AttributeType.software), .big);
+    try wire.appendInt(&fingerprint_then_attribute, allocator, u16, 4, .big);
+    try fingerprint_then_attribute.appendSlice(allocator, "late");
+    try std.testing.expectError(error.InvalidStunAttribute, stun.parse(allocator, fingerprint_then_attribute.items));
 
     invalid_order.clearRetainingCapacity();
     try stun.write(&invalid_order, allocator, .request, .binding, tid, &.{
