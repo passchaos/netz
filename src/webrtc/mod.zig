@@ -3638,11 +3638,14 @@ pub const sdp = struct {
     }
 
     fn bundleId(session: Session) ?[]const u8 {
-        const group = findAttr(session.attributes, "group") orelse return null;
-        var parts = std.mem.tokenizeScalar(u8, group, ' ');
-        const semantic = parts.next() orelse return null;
-        if (!std.mem.eql(u8, semantic, "BUNDLE")) return null;
-        return parts.next();
+        for (session.attributes) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, "group")) continue;
+            var parts = std.mem.tokenizeAny(u8, attr.value, " \t");
+            const semantic = parts.next() orelse continue;
+            if (!std.mem.eql(u8, semantic, "BUNDLE")) continue;
+            return parts.next();
+        }
+        return null;
     }
 
     fn candidateMedia(session: Session) ?Media {
@@ -10123,6 +10126,7 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "s=-\r\n" ++
         "t=0 0\r\n" ++
         "a=ice-lite\r\n" ++
+        "a=group:LS 0\r\n" ++
         "a=group:BUNDLE 1 0\r\n" ++
         "a=extmap:9 " ++ sdp.audio_level_uri ++ "\r\n" ++
         "a=fingerprint:sha-256 11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:10:20:30:40:50:60:70:80:90:A0:B0:C0:D0:E0:F0:01\r\n" ++
