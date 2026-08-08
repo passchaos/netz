@@ -357,10 +357,12 @@ if (session.maxDatagramPayloadSize()) |limit| {
   a full QUIC handshake. The preconfigured 1-RTT runtime also reuses protected
   packet scratch and batches multi-packet STREAM sends through UDP GSO or
   sendmmsg while preserving packet-number progress on partial socket writes.
-  Both runtimes advertise and implement
-  `SETTINGS_QPACK_BLOCKED_STREAMS=0`: newly inserted fields stay literal until
-  acknowledged, while non-zero blocked-stream scheduling remains intentionally
-  unsupported.
+  Both runtimes keep outbound encoding non-blocking: newly inserted fields stay
+  literal until acknowledged. On receive they can advertise
+  `SETTINGS_QPACK_BLOCKED_STREAMS=1`, retain one complete dependent message,
+  continue processing split/reordered encoder instructions, and resume once its
+  Required Insert Count is available; larger concurrent blocked-stream counts
+  remain intentionally unsupported by the synchronous API.
 - WebRTC support covers signaling/transport wire primitives (STUN, ICE, SDP,
   DTLS/RTP/SCTP headers), forming a foundation for peer-connection state
   machines and SRTP/SCTP data-channel layers.

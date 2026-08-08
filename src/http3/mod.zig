@@ -135,6 +135,11 @@ pub const Setting = struct {
 };
 
 pub const Settings = struct {
+    /// This synchronous runtime can retain one complete request/response stream
+    /// while waiting for encoder-stream inserts. Larger values would advertise
+    /// concurrent blocked-stream scheduling that the API cannot service yet.
+    pub const max_supported_qpack_blocked_streams: u64 = 1;
+
     qpack_max_table_capacity: u64 = 0,
     /// RFC 9114 inherits the HTTP semantics that an omitted
     /// SETTINGS_MAX_FIELD_SECTION_SIZE means "no advertised limit".  Mature
@@ -213,11 +218,7 @@ pub const Settings = struct {
     }
 
     pub fn validateLocal(self: Settings) Error!void {
-        // Dynamic decoding is supported, but the live runtime does not retain
-        // and resume request streams whose Required Insert Count is ahead of
-        // the encoder stream. Advertising zero blocked streams tells a
-        // conformant peer to order inserts before dependent field sections.
-        if (self.qpack_blocked_streams != 0) {
+        if (self.qpack_blocked_streams > max_supported_qpack_blocked_streams) {
             return error.QpackDynamicTableUnsupported;
         }
         if (std.math.cast(usize, self.qpack_max_table_capacity) == null) {
@@ -1153,6 +1154,49 @@ pub const Qpack = struct {
         base: u64,
     };
 
+    pub const FieldSectionPrefix = struct {
+        required_insert_count: u64,
+        base: u64,
+        consumed: usize,
+    };
+
+    /// Decode only the QPACK field-section prefix without allocating fields.
+    ///
+    /// Runtimes use this to decide whether a complete HTTP message must wait
+    /// for encoder-stream inserts before attempting full semantic decoding.
+    pub fn decodeFieldSectionPrefix(
+        block: []const u8,
+        table: DynamicTable,
+    ) Error!FieldSectionPrefix {
+        var cursor = wire.Cursor.init(block);
+        const encoded_insert_count = try decodePrefixedInteger(
+            &cursor,
+            8,
+            try cursor.readByte(),
+        );
+        const required_insert_count = try decodeRequiredInsertCount(
+            encoded_insert_count,
+            table.maxEntries(),
+            table.insert_count,
+        );
+        const delta_first = try cursor.readByte();
+        const delta_base = try decodePrefixedInteger(&cursor, 7, delta_first);
+        const base = if ((delta_first & 0x80) == 0)
+            std.math.add(u64, required_insert_count, delta_base) catch
+                return error.QpackDecompressionFailed
+        else blk: {
+            if (required_insert_count <= delta_base) {
+                return error.QpackDecompressionFailed;
+            }
+            break :blk required_insert_count - delta_base - 1;
+        };
+        return .{
+            .required_insert_count = required_insert_count,
+            .base = base,
+            .consumed = cursor.pos,
+        };
+    }
+
     pub fn encodeDynamicBlock(
         list: *std.ArrayList(u8),
         allocator: std.mem.Allocator,
@@ -1339,22 +1383,11 @@ pub const Qpack = struct {
         block: []const u8,
         table: DynamicTable,
     ) !DynamicBlockDecode {
+        const prefix = try decodeFieldSectionPrefix(block, table);
         var cursor = wire.Cursor.init(block);
-        const encoded_insert_count = try decodePrefixedInteger(&cursor, 8, try cursor.readByte());
-        const required_insert_count = try decodeRequiredInsertCount(
-            encoded_insert_count,
-            table.maxEntries(),
-            table.insert_count,
-        );
-        const delta_first = try cursor.readByte();
-        const delta_base = try decodePrefixedInteger(&cursor, 7, delta_first);
-        const base = if ((delta_first & 0x80) == 0)
-            std.math.add(u64, required_insert_count, delta_base) catch
-                return error.QpackDecompressionFailed
-        else blk: {
-            if (required_insert_count <= delta_base) return error.QpackDecompressionFailed;
-            break :blk required_insert_count - delta_base - 1;
-        };
+        cursor.pos = prefix.consumed;
+        const required_insert_count = prefix.required_insert_count;
+        const base = prefix.base;
         if (required_insert_count > table.insert_count) return error.QpackBlocked;
 
         var fields: std.ArrayList(HeaderField) = .empty;
@@ -3363,6 +3396,34 @@ test "HTTP/3 QPACK Required Insert Count wraps per RFC 9204" {
     );
 }
 
+test "HTTP/3 QPACK field section prefix detects blocking without allocation" {
+    const allocator = std.testing.allocator;
+    var encoder_table = Qpack.DynamicTable.init(allocator, 256);
+    defer encoder_table.deinit();
+    try encoder_table.setCapacity(256);
+    _ = try encoder_table.insert("x-prefix", "blocked");
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&block, allocator, &.{
+        .{ .name = "x-prefix", .value = "blocked" },
+    }, encoder_table);
+
+    var decoder_table = Qpack.DynamicTable.init(allocator, 256);
+    defer decoder_table.deinit();
+    try decoder_table.setCapacity(256);
+    // The prefix parser intentionally accepts no allocator, keeping this
+    // receive-scheduling probe independent of heap availability.
+    const prefix = try Qpack.decodeFieldSectionPrefix(
+        block.items,
+        decoder_table,
+    );
+    try std.testing.expectEqual(@as(u64, 1), prefix.required_insert_count);
+    try std.testing.expect(prefix.required_insert_count > decoder_table.insert_count);
+    try std.testing.expectEqual(@as(u64, 1), prefix.base);
+    try std.testing.expect(prefix.consumed >= 2);
+}
+
 test "HTTP/3 QPACK dynamic block decodes RFC 9204 Appendix B post-base fields" {
     const allocator = std.testing.allocator;
     var table = Qpack.DynamicTable.init(allocator, 220);
@@ -3598,8 +3659,13 @@ test "HTTP/3 typed settings state tracks negotiation" {
         .qpack_max_table_capacity = 1,
     }).writePayload(&default_payload, allocator);
     default_payload.clearRetainingCapacity();
-    try std.testing.expectError(error.QpackDynamicTableUnsupported, (Settings{
+    try (Settings{
         .qpack_blocked_streams = 1,
+    }).writePayload(&default_payload, allocator);
+    try std.testing.expect(default_payload.items.len != 0);
+    default_payload.clearRetainingCapacity();
+    try std.testing.expectError(error.QpackDynamicTableUnsupported, (Settings{
+        .qpack_blocked_streams = 2,
     }).writePayload(&default_payload, allocator));
 
     const local = Settings{

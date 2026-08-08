@@ -139,6 +139,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http3.DecodedResponse, "body_storage"));
     try std.testing.expect(@hasField(netz.http3.Settings, "enable_webtransport"));
     try std.testing.expect(@hasField(netz.http3.Settings, "webtransport_initial_max_data"));
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        netz.http3.Settings.max_supported_qpack_blocked_streams,
+    );
     try std.testing.expectEqual(@as(u64, 0x14e9cd29), @intFromEnum(netz.http3.SettingId.webtransport_max_sessions_v13));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedConfig, "local_settings"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "control"));
@@ -218,6 +222,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "decodeRequiredInsertCount"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "encodeDynamicBlock"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "decodeDynamicBlock"));
+    try std.testing.expect(@hasDecl(netz.http3.Qpack, "decodeFieldSectionPrefix"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DecoderInstruction"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "QpackDecodeState"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "QpackEncodeState"));

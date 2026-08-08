@@ -1533,6 +1533,10 @@ pub const ProtectedServer = struct {
         defer if (recv) |*state| state.deinit();
         var from: ?net.IpAddress = null;
         var stream_id: ?u62 = expected_stream_id;
+        var blocked_bytes: ?[]u8 = null;
+        defer if (blocked_bytes) |bytes| {
+            self.quic_server.endpoint.allocator.free(bytes);
+        };
 
         while (true) {
             var packet = try quic.one_rtt.receive(
@@ -1573,6 +1577,19 @@ pub const ProtectedServer = struct {
                         &self.control,
                         frame.stream,
                     );
+                    if (blocked_bytes) |bytes| {
+                        if (!try messageBlockedByQpack(
+                            bytes,
+                            self.qpack_decode.table,
+                        )) {
+                            blocked_bytes = null;
+                            return .{
+                                .from = from.?,
+                                .stream_id = stream_id.?,
+                                .bytes = bytes,
+                            };
+                        }
+                    }
                     continue;
                 }
                 if (try applyControlStreamFrameForRole(
@@ -1598,10 +1615,28 @@ pub const ProtectedServer = struct {
                 }
                 if (recv == null) recv = quic.stream_state.RecvState.init(self.quic_server.endpoint.allocator, incoming_id, self.config.max_stream_buffer);
                 if (recv) |*state| {
+                    if (blocked_bytes != null) continue;
                     try state.insert(frame.stream);
                     if (state.final_size != null and state.contiguous_end >= state.final_size.?) {
                         const bytes = try self.quic_server.endpoint.allocator.dupe(u8, state.buffer.items[0..state.final_size.?]);
-                        return .{ .from = from.?, .stream_id = stream_id.?, .bytes = bytes };
+                        const blocked = if (self.config.local_settings.qpack_blocked_streams == 0)
+                            false
+                        else
+                            messageBlockedByQpack(
+                                bytes,
+                                self.qpack_decode.table,
+                            ) catch |err| {
+                                self.quic_server.endpoint.allocator.free(bytes);
+                                return err;
+                            };
+                        if (!blocked) {
+                            return .{
+                                .from = from.?,
+                                .stream_id = stream_id.?,
+                                .bytes = bytes,
+                            };
+                        }
+                        blocked_bytes = bytes;
                     }
                 }
             }
@@ -1760,6 +1795,10 @@ pub const ProtectedClient = struct {
         var recv = quic.stream_state.RecvState.init(self.quic_client.endpoint.allocator, expected_stream_id, self.config.max_stream_buffer);
         defer recv.deinit();
         var from: ?net.IpAddress = null;
+        var blocked_bytes: ?[]u8 = null;
+        defer if (blocked_bytes) |bytes| {
+            self.quic_client.endpoint.allocator.free(bytes);
+        };
         while (true) {
             var packet = try quic.one_rtt.receive(
                 &self.quic_client.endpoint,
@@ -1797,6 +1836,19 @@ pub const ProtectedClient = struct {
                         &self.control,
                         frame.stream,
                     );
+                    if (blocked_bytes) |bytes| {
+                        if (!try messageBlockedByQpack(
+                            bytes,
+                            self.qpack_decode.table,
+                        )) {
+                            blocked_bytes = null;
+                            return .{
+                                .from = from.?,
+                                .stream_id = expected_stream_id,
+                                .bytes = bytes,
+                            };
+                        }
+                    }
                     continue;
                 }
                 if (frame == .stream and try applyControlStreamFrameForRole(
@@ -1813,10 +1865,28 @@ pub const ProtectedClient = struct {
                 }
                 if (frame == .stream and (try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
                 if (frame != .stream or frame.stream.stream_id != expected_stream_id) continue;
+                if (blocked_bytes != null) continue;
                 try recv.insert(frame.stream);
                 if (recv.final_size != null and recv.contiguous_end >= recv.final_size.?) {
                     const bytes = try self.quic_client.endpoint.allocator.dupe(u8, recv.buffer.items[0..recv.final_size.?]);
-                    return .{ .from = from.?, .stream_id = expected_stream_id, .bytes = bytes };
+                    const blocked = if (self.config.local_settings.qpack_blocked_streams == 0)
+                        false
+                    else
+                        messageBlockedByQpack(
+                            bytes,
+                            self.qpack_decode.table,
+                        ) catch |err| {
+                            self.quic_client.endpoint.allocator.free(bytes);
+                            return err;
+                        };
+                    if (!blocked) {
+                        return .{
+                            .from = from.?,
+                            .stream_id = expected_stream_id,
+                            .bytes = bytes,
+                        };
+                    }
+                    blocked_bytes = bytes;
                 }
             }
         }
@@ -1865,6 +1935,24 @@ const AssembledStream = struct {
     stream_id: u62,
     bytes: []u8,
 };
+
+fn messageBlockedByQpack(
+    bytes: []const u8,
+    table: http3.Qpack.DynamicTable,
+) Error!bool {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const frame = try http3.Frame.parse(bytes[offset..]);
+        offset += frame.consumed;
+        if (frame.frame_type != http3.FrameType.headers) continue;
+        const prefix = try http3.Qpack.decodeFieldSectionPrefix(
+            frame.payload,
+            table,
+        );
+        if (prefix.required_insert_count > table.insert_count) return true;
+    }
+    return false;
+}
 
 fn sendConnectionMessage(
     connection: *quic.one_rtt.Connection,
@@ -1966,6 +2054,8 @@ fn receiveConnectionStreamBytes(
     defer if (recv) |*state| state.deinit();
     var from: ?net.IpAddress = null;
     var stream_id: ?u62 = expected_stream_id;
+    var blocked_bytes: ?[]u8 = null;
+    defer if (blocked_bytes) |bytes| connection.endpoint.allocator.free(bytes);
 
     while (true) {
         var packet = try connection.receivePacket();
@@ -1993,6 +2083,16 @@ fn receiveConnectionStreamBytes(
                 .qpack_encoder,
             )) {
                 try qpack_decode.applyEncoderStreamFrame(control, frame.stream);
+                if (blocked_bytes) |bytes| {
+                    if (!try messageBlockedByQpack(bytes, qpack_decode.table)) {
+                        blocked_bytes = null;
+                        return .{
+                            .from = from.?,
+                            .stream_id = stream_id.?,
+                            .bytes = bytes,
+                        };
+                    }
+                }
                 continue;
             }
             if (try applyControlStreamFrameForRole(
@@ -2018,10 +2118,28 @@ fn receiveConnectionStreamBytes(
             }
             if (recv == null) recv = quic.stream_state.RecvState.init(connection.endpoint.allocator, incoming_id, options.max_stream_buffer);
             if (recv) |*state| {
+                if (blocked_bytes != null) continue;
                 try state.insert(frame.stream);
                 if (state.final_size != null and state.contiguous_end >= state.final_size.?) {
                     const bytes = try connection.endpoint.allocator.dupe(u8, state.buffer.items[0..state.final_size.?]);
-                    return .{ .from = from.?, .stream_id = stream_id.?, .bytes = bytes };
+                    const blocked = if (options.local_settings.qpack_blocked_streams == 0)
+                        false
+                    else
+                        messageBlockedByQpack(
+                            bytes,
+                            qpack_decode.table,
+                        ) catch |err| {
+                            connection.endpoint.allocator.free(bytes);
+                            return err;
+                        };
+                    if (!blocked) {
+                        return .{
+                            .from = from.?,
+                            .stream_id = stream_id.?,
+                            .bytes = bytes,
+                        };
+                    }
+                    blocked_bytes = bytes;
                 }
             }
         }
@@ -4047,6 +4165,178 @@ test "HTTP/3 protected server decodes dynamic QPACK request and sends feedback" 
     );
 }
 
+test "HTTP/3 protected server resumes one blocked QPACK request" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xd5, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xd6, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd8} ** quic.protection.secret_len,
+    );
+
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .local_settings = .{
+                .qpack_max_table_capacity = 256,
+                .qpack_blocked_streams = 1,
+            },
+            .max_stream_frame_data = 1024,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .local_settings = .{ .qpack_max_table_capacity = 256 },
+            .max_stream_frame_data = 1024,
+        },
+    );
+    defer client.deinit();
+
+    try sendProtectedSettings(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config,
+        &client.control,
+        &client.control_send,
+        &client.qpack_encoder_send,
+        &client.qpack_encoder_prefix_sent,
+        &client.qpack_decoder_send,
+        &client.qpack_decoder_prefix_sent,
+        &client.next_packet_number,
+        &client.protected_send,
+        client_control_stream_id,
+    );
+
+    var encoder_table = http3.Qpack.DynamicTable.init(allocator, 256);
+    defer encoder_table.deinit();
+    try encoder_table.setCapacity(256);
+    _ = try encoder_table.insert("x-blocked", "message-before-insert");
+    var field_section: std.ArrayList(u8) = .empty;
+    defer field_section.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(&field_section, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/blocked-qpack" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "x-blocked", .value = "message-before-insert" },
+    }, encoder_table);
+    var message: std.ArrayList(u8) = .empty;
+    defer message.deinit(allocator);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = field_section.items,
+        .consumed = 0,
+    }).write(&message, allocator);
+
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    var request_send = quic.stream_state.SendState.init(0);
+    try request_send.appendFrames(
+        &frames,
+        allocator,
+        message.items,
+        message.items.len,
+        true,
+    );
+    try sendProtectedFrames(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config.send_keys,
+        client.config.peer_connection_id,
+        &client.next_packet_number,
+        frames.items,
+        client.config.max_frames_per_packet,
+        &client.protected_send,
+    );
+
+    // Send the encoder instructions only after the complete dependent request.
+    var encoder_bytes: std.ArrayList(u8) = .empty;
+    defer encoder_bytes.deinit(allocator);
+    try http3.Qpack.writeEncoderInstruction(
+        &encoder_bytes,
+        allocator,
+        .{ .set_capacity = 256 },
+    );
+    try http3.Qpack.writeEncoderInstruction(
+        &encoder_bytes,
+        allocator,
+        .{ .insert_literal = .{
+            .name = "x-blocked",
+            .value = "message-before-insert",
+        } },
+    );
+    frames.clearRetainingCapacity();
+    // SETTINGS already emitted the encoder-stream type at offset zero.
+    client.qpack_encoder_send.next_offset = @max(
+        client.qpack_encoder_send.next_offset,
+        1,
+    );
+    try client.qpack_encoder_send.appendFrames(
+        &frames,
+        allocator,
+        encoder_bytes.items,
+        encoder_bytes.items.len / 2,
+        false,
+    );
+    try sendProtectedFrames(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config.send_keys,
+        client.config.peer_connection_id,
+        &client.next_packet_number,
+        frames.items,
+        client.config.max_frames_per_packet,
+        &client.protected_send,
+    );
+
+    var received = try server.receiveRequest();
+    defer received.deinit(allocator);
+    try std.testing.expectEqualStrings("/blocked-qpack", received.request.path);
+    var value: ?[]const u8 = null;
+    for (received.request.headers) |header| {
+        if (std.mem.eql(u8, header.name, "x-blocked")) value = header.value;
+    }
+    try std.testing.expectEqualStrings(
+        "message-before-insert",
+        value orelse return error.TestUnexpectedResult,
+    );
+    try std.testing.expectEqual(@as(u64, 1), server.qpack_decode.table.insert_count);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        server.config.local_settings.qpack_blocked_streams,
+    );
+}
+
 test "HTTP/3 protected client decodes dynamic QPACK response and sends feedback" {
     const allocator = std.testing.allocator;
 
@@ -4750,7 +5040,10 @@ test "HTTP/3 handshake runtime decodes dynamic QPACK request and sends feedback"
             .x25519_secret_key = [_]u8{0x84} ** 32,
         },
         .session = .{
-            .local_settings = .{ .qpack_max_table_capacity = 256 },
+            .local_settings = .{
+                .qpack_max_table_capacity = 256,
+                .qpack_blocked_streams = 1,
+            },
             .max_stream_frame_data = 1024,
         },
     });
@@ -4799,6 +5092,10 @@ test "HTTP/3 handshake runtime decodes dynamic QPACK request and sends feedback"
             try std.testing.expectEqual(
                 @as(u64, 1),
                 session.qpack_decode.table.insert_count,
+            );
+            try std.testing.expectEqual(
+                @as(u64, 1),
+                session.options.local_settings.qpack_blocked_streams,
             );
         }
     };
@@ -4860,39 +5157,8 @@ test "HTTP/3 handshake runtime decodes dynamic QPACK request and sends feedback"
         client.options,
         client_control_stream_id,
     );
-    var encoder_bytes: std.ArrayList(u8) = .empty;
-    defer encoder_bytes.deinit(allocator);
-    try http3.Qpack.writeEncoderInstruction(
-        &encoder_bytes,
-        allocator,
-        .{ .set_capacity = 256 },
-    );
-    try http3.Qpack.writeEncoderInstruction(
-        &encoder_bytes,
-        allocator,
-        .{ .insert_literal = .{
-            .name = "x-handshake",
-            .value = "dynamic",
-        } },
-    );
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(allocator);
-    var encoder_send = quic.stream_state.SendState.init(
-        client_qpack_encoder_stream_id,
-    );
-    encoder_send.next_offset = 1; // sendConnectionSettings emitted the prefix.
-    try encoder_send.appendFrames(
-        &frames,
-        allocator,
-        encoder_bytes.items,
-        encoder_bytes.items.len / 2,
-        false,
-    );
-    try sendConnectionFrames(
-        &client.established.connection,
-        frames.items,
-        client.options.max_frames_per_packet,
-    );
 
     var encoder_table = http3.Qpack.DynamicTable.init(allocator, 256);
     defer encoder_table.deinit();
@@ -4922,6 +5188,37 @@ test "HTTP/3 handshake runtime decodes dynamic QPACK request and sends feedback"
         message.items,
         message.items.len,
         true,
+    );
+    try sendConnectionFrames(
+        &client.established.connection,
+        frames.items,
+        client.options.max_frames_per_packet,
+    );
+
+    // Deliver the dependent message first, then unblock it with split encoder
+    // instructions on the persistent stream.
+    var encoder_bytes: std.ArrayList(u8) = .empty;
+    defer encoder_bytes.deinit(allocator);
+    try http3.Qpack.writeEncoderInstruction(
+        &encoder_bytes,
+        allocator,
+        .{ .set_capacity = 256 },
+    );
+    try http3.Qpack.writeEncoderInstruction(
+        &encoder_bytes,
+        allocator,
+        .{ .insert_literal = .{
+            .name = "x-handshake",
+            .value = "dynamic",
+        } },
+    );
+    frames.clearRetainingCapacity();
+    try client.qpack_encoder_send.appendFrames(
+        &frames,
+        allocator,
+        encoder_bytes.items,
+        encoder_bytes.items.len / 2,
+        false,
     );
     try sendConnectionFrames(
         &client.established.connection,
