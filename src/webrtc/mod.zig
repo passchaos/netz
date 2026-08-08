@@ -1451,12 +1451,12 @@ pub const sdp = struct {
     };
 
     pub fn formatIceUfragLine(allocator: std.mem.Allocator, credentials: IceCredentials) Error![]u8 {
-        if (credentials.ufrag.len == 0) return error.InvalidSdp;
+        try validateIceCredentialToken(credentials.ufrag);
         return std.fmt.allocPrint(allocator, "a=ice-ufrag:{s}\r\n", .{credentials.ufrag});
     }
 
     pub fn formatIcePwdLine(allocator: std.mem.Allocator, credentials: IceCredentials) Error![]u8 {
-        if (credentials.password.len == 0) return error.InvalidSdp;
+        try validateIceCredentialToken(credentials.password);
         return std.fmt.allocPrint(allocator, "a=ice-pwd:{s}\r\n", .{credentials.password});
     }
 
@@ -2930,8 +2930,8 @@ pub const sdp = struct {
     }
 
     pub fn extractIceCredentials(session: Session) Error!IceCredentials {
-        const session_ufrag = findAttr(session.attributes, "ice-ufrag");
-        const session_password = findAttr(session.attributes, "ice-pwd");
+        const session_ufrag = try optionalIceCredential(session.attributes, "ice-ufrag");
+        const session_password = try optionalIceCredential(session.attributes, "ice-pwd");
         if (session_ufrag != null or session_password != null) {
             // Pion treats session-level ICE credentials as an atomic override.
             // Mixing a session ufrag with a media password (or vice versa)
@@ -2945,12 +2945,33 @@ pub const sdp = struct {
 
         if (candidateMedia(session)) |selected| {
             return .{
-                .ufrag = findAttr(selected.attributes, "ice-ufrag") orelse return error.MissingIceUfrag,
-                .password = findAttr(selected.attributes, "ice-pwd") orelse return error.MissingIcePwd,
+                .ufrag = try requiredIceCredential(selected.attributes, "ice-ufrag", error.MissingIceUfrag),
+                .password = try requiredIceCredential(selected.attributes, "ice-pwd", error.MissingIcePwd),
             };
         }
 
         return error.MissingIceUfrag;
+    }
+
+    fn optionalIceCredential(attrs: []const Attribute, name: []const u8) Error!?[]const u8 {
+        const value = findAttr(attrs, name) orelse return null;
+        try validateIceCredentialToken(value);
+        return value;
+    }
+
+    fn requiredIceCredential(attrs: []const Attribute, name: []const u8, missing: Error) Error![]const u8 {
+        const value = findAttr(attrs, name) orelse return missing;
+        try validateIceCredentialToken(value);
+        return value;
+    }
+
+    fn validateIceCredentialToken(value: []const u8) Error!void {
+        // ICE credentials are SDP attribute payloads, but semantically they are
+        // single tokens used to build STUN USERNAME/MESSAGE-INTEGRITY inputs.
+        // Reject whitespace/control characters at the SDP boundary so generated
+        // and parsed descriptions cannot inject extra lines or authenticate
+        // checks with credentials that browsers/Pion would not use verbatim.
+        try validateSdpToken(value);
     }
 
     pub fn extractIceCandidates(allocator: std.mem.Allocator, session: Session) Error![]IceCandidate {
@@ -11260,6 +11281,14 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
     defer missing_pwd.deinit(allocator);
     try std.testing.expectError(error.MissingIcePwd, sdp.extractIceCredentials(missing_pwd));
 
+    var invalid_ufrag_token = try sdp.parse(allocator, "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=ice-ufrag:bad ufrag\r\n" ++
+        "a=ice-pwd:pwd\r\n");
+    defer invalid_ufrag_token.deinit(allocator);
+    try std.testing.expectError(error.InvalidSdp, sdp.extractIceCredentials(invalid_ufrag_token));
+
     var session_ufrag_media_pwd = try sdp.parse(allocator, "v=0\r\n" ++
         "s=-\r\n" ++
         "t=0 0\r\n" ++
@@ -11370,6 +11399,7 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
     );
     try std.testing.expectError(error.InvalidSdp, sdp.formatIceUfragLine(allocator, .{ .ufrag = "", .password = "pwd" }));
     try std.testing.expectError(error.InvalidSdp, sdp.formatIcePwdLine(allocator, .{ .ufrag = "ufrag", .password = "" }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatIcePwdLine(allocator, .{ .ufrag = "ufrag", .password = "bad pwd" }));
     try std.testing.expectError(error.InvalidFingerprint, sdp.formatFingerprintLine(allocator, .{ .algorithm = "", .value = valid_fingerprint }));
     try std.testing.expectError(error.InvalidFingerprint, sdp.formatFingerprintLine(allocator, .{ .algorithm = "sha-256", .value = "AA:BB" }));
 }
