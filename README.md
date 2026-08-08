@@ -113,7 +113,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   retransmission of unacknowledged ack-eliciting frame payloads, exact frame
   wire-length prediction, allocation-free caller-storage multi-packet protection,
   single-allocation batch wrappers, and portable UDP batch submission that maps
-  to Linux `sendmmsg` through Zig `std.Io`,
+  to Linux `sendmmsg` through Zig `std.Io`, including paced two-probe PTO batch
+  submission and transactional partial-send recovery that never reuses an
+  already-emitted packet number,
   endpoint-level connection-ID routing with unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route

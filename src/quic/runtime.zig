@@ -17,6 +17,16 @@ pub const Limits = struct {
     max_frames_per_datagram: usize = 256,
 };
 
+pub const SendManyBytesResult = struct {
+    /// Number of datagrams successfully handed to the socket, always a prefix
+    /// of the caller's slice.
+    sent_count: usize,
+    /// A batch syscall can send a non-empty prefix before reporting the error
+    /// for the next datagram. Keeping that progress lets stateful transports
+    /// commit consumed packet numbers instead of accidentally reusing them.
+    send_error: ?net.Socket.SendError = null,
+};
+
 pub const Server = struct {
     endpoint: Endpoint,
 
@@ -134,7 +144,21 @@ pub const Endpoint = struct {
     /// per-message fallback. Validation happens before the first syscall so
     /// invalid input cannot produce a partially sent batch.
     pub fn sendManyBytes(self: *Endpoint, to: net.IpAddress, datagrams: []const []const u8) Error!void {
-        if (datagrams.len == 0) return;
+        const result = try self.sendManyBytesProgress(to, datagrams);
+        if (result.send_error) |err| return err;
+        std.debug.assert(result.sent_count == datagrams.len);
+    }
+
+    /// Send a batch while preserving progress if the socket accepts a prefix.
+    ///
+    /// Linux `sendmmsg` and the portable per-message fallback can both report
+    /// an error after earlier datagrams have already left the process. A plain
+    /// error union cannot carry that count, so stateful callers such as QUIC
+    /// recovery use this result to commit the sent prefix and roll back only
+    /// the unsent suffix. Validation and ECN setup still fail through the error
+    /// union because they happen before the first datagram can be emitted.
+    pub fn sendManyBytesProgress(self: *Endpoint, to: net.IpAddress, datagrams: []const []const u8) Error!SendManyBytesResult {
+        if (datagrams.len == 0) return .{ .sent_count = 0 };
         for (datagrams) |bytes| {
             if (bytes.len == 0) return error.EmptyDatagram;
             if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
@@ -157,12 +181,39 @@ pub const Endpoint = struct {
                     .data_len = bytes.len,
                 };
             }
-            try self.socket.sendMany(self.io, messages, .{});
-            for (messages, chunk) |message, bytes| {
-                if (message.data_len != bytes.len) return error.DatagramTooLarge;
+            const send_error, const sent_count = self.io.vtable.netSend(
+                self.io.userdata,
+                self.socket.handle,
+                messages,
+                .{},
+            );
+            if (sent_count > count) {
+                // The backend violated its ABI, so the exact count is
+                // unknowable. Conservatively consume the entire submitted
+                // chunk: reusing any of its QUIC packet numbers would be worse
+                // than treating an unsent datagram as lost.
+                return .{ .sent_count = offset + count, .send_error = error.Unexpected };
             }
-            offset += count;
+            for (messages[0..sent_count], chunk[0..sent_count]) |message, bytes| {
+                if (message.data_len != bytes.len) {
+                    return .{
+                        .sent_count = offset + sent_count,
+                        .send_error = error.MessageOversize,
+                    };
+                }
+            }
+            offset += sent_count;
+            if (send_error) |err| {
+                return .{ .sent_count = offset, .send_error = err };
+            }
+            // Socket.sendMany assumes the backend always supplies an error
+            // alongside a short count. Preserve that contract violation as an
+            // explicit result instead of spinning if a custom backend is bad.
+            if (sent_count != count) {
+                return .{ .sent_count = offset, .send_error = error.Unexpected };
+            }
         }
+        return .{ .sent_count = offset };
     }
 
     pub fn sendFrames(self: *Endpoint, to: net.IpAddress, frames: []const quic.Frame) Error!void {

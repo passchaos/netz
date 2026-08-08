@@ -947,6 +947,9 @@ pub const Connection = struct {
     pub fn retransmitPtoProbesAt(self: *Connection, now_ns: ?u64, max_probes: usize) Error!usize {
         if (max_probes == 0) return 0;
         const limit = @min(max_probes, self.recovery.pendingCount());
+        if (limit > 1) {
+            return try self.retransmitPtoProbeBatchesAt(now_ns, limit);
+        }
         var sent_count: usize = 0;
         while (sent_count < limit) : (sent_count += 1) {
             const candidate = self.recovery.ptoCandidateAt(sent_count) orelse break;
@@ -1034,6 +1037,183 @@ pub const Connection = struct {
             },
         }
         return deadline;
+    }
+
+    const PreparedPtoProbe = struct {
+        candidate: quic.recovery.Candidate,
+        packet_number: u64,
+        packet_number_len: u8,
+        packet_len: usize,
+    };
+
+    const PtoProbeBatchResult = struct {
+        sent_count: usize,
+        send_error: ?net.Socket.SendError = null,
+    };
+
+    fn retransmitPtoProbeBatchesAt(self: *Connection, now_ns: ?u64, limit: usize) Error!usize {
+        var sent_count: usize = 0;
+        while (sent_count < limit) {
+            const remaining = limit - sent_count;
+            const result = try self.retransmitPtoProbeBatchAt(sent_count, remaining, now_ns);
+            sent_count += result.sent_count;
+            if (result.send_error) |err| {
+                // A sendmmsg-style backend can emit a prefix before the next
+                // datagram fails. Those probes are real PTO transmissions even
+                // though the caller still needs the socket error.
+                if (sent_count != 0) self.incrementPtoCount();
+                return err;
+            }
+            if (result.sent_count == 0) break;
+            if (result.sent_count < @min(remaining, max_batch_packets)) break;
+        }
+        if (sent_count != 0) self.incrementPtoCount();
+        return sent_count;
+    }
+
+    fn retransmitPtoProbeBatchAt(self: *Connection, first_candidate_index: usize, remaining_limit: usize, sent_time_ns: ?u64) Error!PtoProbeBatchResult {
+        const batch_limit = @min(remaining_limit, max_batch_packets);
+        var probes: [max_batch_packets]PreparedPtoProbe = undefined;
+        var total_payload_len: usize = 0;
+        var total_packet_len: usize = 0;
+        var count: usize = 0;
+        var simulated_pacer = self.pacer;
+        var paced_blocked_until_ns: ?u64 = null;
+        const now_ns = sent_time_ns orelse self.monotonicNowNs();
+        while (count < batch_limit) : (count += 1) {
+            const candidate = self.recovery.ptoCandidateAt(first_candidate_index + count) orelse break;
+            const packet_number = std.math.add(u64, self.next_packet_number, count) catch return error.InvalidPacketNumber;
+            if (packet_number > quic.protection.max_packet_number) return error.InvalidPacketNumber;
+            const packet_number_len = quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), candidate.payload.len);
+            const packet_len = try quic.protection.shortPacketLen(.{
+                .destination_connection_id = self.config.peer_connection_id,
+                .packet_number = packet_number,
+                .packet_number_len = packet_number_len,
+                .payload = candidate.payload,
+            });
+            if (packet_len > self.endpoint.limits.max_datagram_size) return error.DatagramTooLarge;
+
+            if (self.antiAmplificationLimitRemaining()) |credit| {
+                const reserved = std.math.add(usize, total_payload_len, candidate.payload.len) catch return error.AntiAmplificationLimited;
+                if (reserved > credit) {
+                    if (count != 0) break;
+                    return error.AntiAmplificationLimited;
+                }
+            }
+
+            if (simulated_pacer.deadlineAt(
+                now_ns,
+                packet_len,
+                self.congestion.congestion_window,
+                self.rtt_stats.smoothedOrInitial(),
+            )) |deadline| {
+                paced_blocked_until_ns = deadline;
+                if (count != 0) break;
+                self.pacing_blocked_until_ns = deadline;
+                return error.PacingLimited;
+            }
+            simulated_pacer.onPacketSentAt(
+                now_ns,
+                packet_len,
+                self.congestion.congestion_window,
+                self.rtt_stats.smoothedOrInitial(),
+            );
+
+            probes[count] = .{
+                .candidate = candidate,
+                .packet_number = packet_number,
+                .packet_number_len = packet_number_len,
+                .packet_len = packet_len,
+            };
+            total_payload_len = std.math.add(usize, total_payload_len, candidate.payload.len) catch return error.InvalidPayloadLength;
+            total_packet_len = std.math.add(usize, total_packet_len, packet_len) catch return error.InvalidPayloadLength;
+        }
+        if (count == 0) return .{ .sent_count = 0 };
+
+        try self.reserveAntiAmplification(total_payload_len);
+        errdefer self.releaseAntiAmplification(total_payload_len);
+
+        var tracked_congestion: usize = 0;
+        errdefer if (tracked_congestion != 0) self.congestion.discard(tracked_congestion);
+        var recorded_recovery_count: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < recorded_recovery_count) : (i += 1) {
+                _ = self.recovery.forgetPacketNumber(probes[i].packet_number);
+            }
+        }
+        var tracked_sent_count: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < tracked_sent_count) : (i += 1) {
+                _ = self.sent.forget(probes[i].packet_number);
+            }
+        }
+
+        for (probes[0..count]) |probe| {
+            self.congestion.onPtoProbeSent(probe.candidate.payload.len);
+            tracked_congestion += probe.candidate.payload.len;
+            try self.recovery.recordRetransmission(probe.candidate.group_index, probe.packet_number);
+            recorded_recovery_count += 1;
+            try self.sent.sentAt(probe.packet_number, true, probe.candidate.payload.len, .not_ect, sent_time_ns);
+            tracked_sent_count += 1;
+        }
+
+        try self.send_packet_buffer.ensureTotalCapacity(self.endpoint.allocator, total_packet_len);
+        self.send_packet_buffer.items.len = self.send_packet_buffer.capacity;
+        defer self.send_packet_buffer.items.len = 0;
+
+        var datagrams: [max_batch_packets][]const u8 = undefined;
+        var packet_offset: usize = 0;
+        for (probes[0..count], 0..) |probe, i| {
+            const packet = try quic.protection.sealShortPacketInto(
+                self.send_packet_buffer.items[packet_offset..][0..probe.packet_len],
+                self.send_key_phase.currentKeys(),
+                .{
+                    .destination_connection_id = self.config.peer_connection_id,
+                    .packet_number = probe.packet_number,
+                    .packet_number_len = probe.packet_number_len,
+                    .spin_bit = self.nextSpinBit(),
+                    .key_phase = self.send_key_phase.currentKeyPhase(),
+                    .payload = probe.candidate.payload,
+                },
+            );
+            datagrams[i] = packet;
+            std.debug.assert(packet.len == probe.packet_len);
+            packet_offset += packet.len;
+        }
+
+        const send_result = try self.endpoint.sendManyBytesProgress(self.config.peer, datagrams[0..count]);
+        std.debug.assert(send_result.sent_count <= count);
+
+        // All recovery and congestion entries are reserved before the socket
+        // call so no allocation can fail after packets are visible on the
+        // network. If only a prefix was accepted, retain exactly that prefix
+        // and transactionally discard the unsent suffix.
+        var sent_payload_len: usize = 0;
+        for (probes[0..send_result.sent_count]) |probe| {
+            sent_payload_len += probe.candidate.payload.len;
+            self.pacer.onPacketSentAt(
+                now_ns,
+                probe.packet_len,
+                self.congestion.congestion_window,
+                self.rtt_stats.smoothedOrInitial(),
+            );
+            self.congestion.onPacketSent(probe.packet_number);
+        }
+        const unsent_payload_len = total_payload_len - sent_payload_len;
+        self.releaseAntiAmplification(unsent_payload_len);
+        self.congestion.discard(unsent_payload_len);
+        for (probes[send_result.sent_count..count]) |probe| {
+            _ = self.recovery.forgetPacketNumber(probe.packet_number);
+            _ = self.sent.forget(probe.packet_number);
+        }
+        self.pacing_blocked_until_ns = paced_blocked_until_ns;
+        self.next_packet_number += send_result.sent_count;
+        return .{
+            .sent_count = send_result.sent_count,
+            .send_error = send_result.send_error,
+        };
     }
 
     fn retransmitCandidate(self: *Connection, candidate: quic.recovery.Candidate, mode: RetransmitMode) Error!void {
@@ -6505,8 +6685,19 @@ test "QUIC 1-RTT PTO service sends up to two probes" {
     try client.sendAt(&ping, 10_000_000);
     try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
 
+    var observed_send = ObservedBatchSend{ .delegate = client.endpoint.io };
+    var observed_vtable = client.endpoint.io.vtable.*;
+    observed_vtable.netSend = ObservedBatchSend.netSend;
+    client.endpoint.io = .{
+        .userdata = &observed_send,
+        .vtable = &observed_vtable,
+    };
+    defer client.endpoint.io = observed_send.delegate;
+
     const serviced = (try client.serviceLossDetectionTimer(210_000_000)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(usize, 1), observed_send.calls);
+    try std.testing.expectEqual(@as(usize, 2), observed_send.last_message_count);
     try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
     try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
     try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[1].packetCount());
@@ -6523,6 +6714,190 @@ test "QUIC 1-RTT PTO service sends up to two probes" {
     try std.testing.expectEqual(@as(u64, 1), original1.packet.packet_number);
     try std.testing.expectEqual(@as(u64, 2), probe0.packet.packet_number);
     try std.testing.expectEqual(@as(u64, 3), probe1.packet.packet_number);
+}
+
+test "QUIC 1-RTT PTO batch sends pacing-limited prefix" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const server_cid = [_]u8{ 0xd5, 0xd6, 0xd7, 0xd8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xd9} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 10_000_000);
+    try client.sendAt(&ping, 10_000_000);
+    try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
+
+    const first_candidate = client.recovery.ptoCandidateAt(0) orelse return error.TestUnexpectedResult;
+    const first_probe_packet_number = client.next_packet_number;
+    const first_probe_packet_number_len = quic.protection.packetNumberLenForPayload(
+        first_probe_packet_number,
+        client.sent.largestAcknowledged(),
+        first_candidate.payload.len,
+    );
+    const first_probe_packet_len = try quic.protection.shortPacketLen(.{
+        .destination_connection_id = client.config.peer_connection_id,
+        .packet_number = first_probe_packet_number,
+        .packet_number_len = first_probe_packet_number_len,
+        .payload = first_candidate.payload,
+    });
+    client.pacer.budget = first_probe_packet_len;
+    client.pacer.last_sent_time_ns = 0;
+
+    try std.testing.expectEqual(@as(usize, 1), try client.retransmitPtoProbesAt(0, 2));
+    try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
+    try std.testing.expect(client.pacing_blocked_until_ns != null);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
+    try std.testing.expectEqual(@as(usize, 1), client.recovery.pending.items[1].packetCount());
+
+    var original0 = try server.receivePacket();
+    defer original0.deinit(allocator);
+    var original1 = try server.receivePacket();
+    defer original1.deinit(allocator);
+    var probe0 = try server.receivePacket();
+    defer probe0.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), original0.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 1), original1.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 2), probe0.packet.packet_number);
+}
+
+const ObservedBatchSend = struct {
+    delegate: std.Io,
+    fail_after_prefix: ?usize = null,
+    calls: usize = 0,
+    last_message_count: usize = 0,
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        socket_handle: net.Socket.Handle,
+        messages: []net.OutgoingMessage,
+        flags: net.SendFlags,
+    ) struct { ?net.Socket.SendError, usize } {
+        const self: *ObservedBatchSend = @ptrCast(@alignCast(userdata));
+        self.calls += 1;
+        self.last_message_count = messages.len;
+        const configured_prefix = self.fail_after_prefix orelse {
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        };
+        const prefix_len = @min(configured_prefix, messages.len);
+        if (prefix_len != 0) {
+            const send_error, const sent_count = self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages[0..prefix_len],
+                flags,
+            );
+            if (send_error != null or sent_count != prefix_len) {
+                return .{ send_error, sent_count };
+            }
+        }
+        return .{ error.NetworkDown, prefix_len };
+    }
+};
+
+test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const server_cid = [_]u8{ 0xe5, 0xe6, 0xe7, 0xe8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe9} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 10_000_000);
+    try client.sendAt(&ping, 10_000_000);
+    const bytes_in_flight_before = client.bytesInFlight();
+
+    // Replace only the client's send function after setup. The wrapper lets
+    // the real socket emit the first datagram, then reproduces the partial
+    // progress plus error result permitted by sendmmsg-style backends.
+    var partial_send = ObservedBatchSend{
+        .delegate = client.endpoint.io,
+        .fail_after_prefix = 1,
+    };
+    var partial_vtable = client.endpoint.io.vtable.*;
+    partial_vtable.netSend = ObservedBatchSend.netSend;
+    client.endpoint.io = .{
+        .userdata = &partial_send,
+        .vtable = &partial_vtable,
+    };
+    defer client.endpoint.io = partial_send.delegate;
+
+    try std.testing.expectError(error.NetworkDown, client.retransmitPtoProbesAt(20_000_000, 2));
+    try std.testing.expectEqual(@as(usize, 1), partial_send.calls);
+    try std.testing.expectEqual(@as(u64, 3), client.next_packet_number);
+    try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
+    try std.testing.expectEqual(bytes_in_flight_before + 1, client.bytesInFlight());
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
+    try std.testing.expectEqual(@as(usize, 1), client.recovery.pending.items[1].packetCount());
+
+    var original0 = try server.receivePacket();
+    defer original0.deinit(allocator);
+    var original1 = try server.receivePacket();
+    defer original1.deinit(allocator);
+    var probe0 = try server.receivePacket();
+    defer probe0.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), original0.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 1), original1.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 2), probe0.packet.packet_number);
 }
 
 test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
