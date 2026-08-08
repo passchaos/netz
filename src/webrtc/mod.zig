@@ -793,8 +793,13 @@ pub const ice = struct {
             const body = if (std.mem.startsWith(u8, line, "a=")) line[2..] else line;
             const candidate_body = if (std.mem.startsWith(u8, body, prefix)) body[prefix.len..] else body;
             var it = std.mem.splitScalar(u8, candidate_body, ' ');
-            const foundation = it.next() orelse return error.InvalidIceCandidate;
-            try validateIceFoundation(foundation);
+            const raw_foundation = it.next() orelse return error.InvalidIceCandidate;
+            // Pion/ice accepts an empty foundation seen in the wild and
+            // normalizes it to a single space internally.  This keeps the
+            // receive path interoperable while validateForWrite still refuses
+            // to emit that non-RFC token.
+            const foundation = if (raw_foundation.len == 0) " " else raw_foundation;
+            if (raw_foundation.len != 0) try validateIceFoundation(foundation);
             const component_s = it.next() orelse return error.InvalidIceCandidate;
             try validateDecimalToken(component_s, 5);
             const transport_s = it.next() orelse return error.InvalidIceCandidate;
@@ -10136,6 +10141,13 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("192.168.0.1", relay.related_address.?);
     try std.testing.expectEqual(@as(u16, 5001), relay.related_port.?);
     try std.testing.expectEqual(@as(u32, 1_023), try relay.computedPriority(.{}));
+
+    const empty_foundation = try ice.Candidate.parse("candidate: 1 udp 2122260223 192.0.2.10 54321 typ host");
+    try std.testing.expectEqualStrings(" ", empty_foundation.foundation);
+    try std.testing.expectEqual(ice.CandidateType.host, empty_foundation.candidate_type);
+    var empty_foundation_line: std.ArrayList(u8) = .empty;
+    defer empty_foundation_line.deinit(allocator);
+    try std.testing.expectError(error.InvalidIceCandidate, empty_foundation.write(&empty_foundation_line, allocator));
 
     var extended = try ice.Candidate.parseOwned(allocator, "candidate:4207374052 1 tcp 1685790463 192.0.2.15 50000 typ prflx raddr 10.0.0.1 rport 12345 generation 0 network-id 2 network-cost 10");
     defer extended.deinit(allocator);
