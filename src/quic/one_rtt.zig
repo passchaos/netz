@@ -1510,6 +1510,7 @@ pub const Connection = struct {
             } else null,
             error.StreamLimitExceeded => firstFrameClose(frames, .stream_limit_error, "stream limit"),
             error.StreamStateError => firstFrameClose(frames, .stream_state_error, "stream state"),
+            error.FlowControlViolation => firstFrameClose(frames, .flow_control_error, "flow control"),
             else => null,
         };
     }
@@ -5642,6 +5643,37 @@ test "QUIC 1-RTT connection handles stream-level flow control" {
     const max_stream = (try server.consumeStreamReceived(0, 4)).?;
     try std.testing.expectEqual(@as(u64, 0), max_stream.max_stream_data.stream_id);
     try std.testing.expectEqual(@as(u64, 10), max_stream.max_stream_data.maximum_stream_data);
+
+    var violating_server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer violating_server_endpoint.deinit();
+    var violating_client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer violating_client_endpoint.deinit();
+    const violating_client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const violating_server_cid = [_]u8{ 0x75, 0x76, 0x77, 0x78 };
+    var violating_server = try Connection.init(&violating_server_endpoint, .{
+        .peer = violating_client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &violating_server_cid,
+        .peer_connection_id = &violating_client_cid,
+        .initial_receive_max_stream_data = 3,
+        .stream_receive_window = 3,
+        .local_endpoint = .server,
+    });
+    defer violating_server.deinit();
+
+    try sendFrames(&violating_client_endpoint, violating_server_endpoint.address(), client_keys, .{
+        .destination_connection_id = &violating_server_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .stream = .{ .stream_id = 0, .data = "abcd", .fin = false } }},
+    });
+    try std.testing.expectError(error.FlowControlViolation, violating_server.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), violating_server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), violating_server.stream_recv_flows.items.len);
+    try std.testing.expect(violating_server.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.flow_control_error), violating_server.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.stream) | 0x02), violating_server.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("flow control", violating_server.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT connection enforces stream count limits and MAX_STREAMS" {
