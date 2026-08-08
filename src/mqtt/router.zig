@@ -18,6 +18,7 @@ const Entry = struct {
     subscription: mqtt.Subscription,
     effective_filter: []const u8,
     shared_group: ?[]const u8 = null,
+    shared_group_index: ?usize = null,
 
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
         allocator.free(self.subscription.topic_filter);
@@ -27,11 +28,13 @@ const Entry = struct {
 
 const SharedGroup = struct {
     name: []u8,
+    effective_filter: []u8,
     cursor: usize = 0,
     entry_indices: std.ArrayList(usize) = .empty,
 
     fn deinit(self: *SharedGroup, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
+        allocator.free(self.effective_filter);
         self.entry_indices.deinit(allocator);
         self.* = undefined;
     }
@@ -63,7 +66,10 @@ pub const Router = struct {
     allocator: std.mem.Allocator,
     nodes: std.ArrayList(Node) = .empty,
     entries: std.ArrayList(?Entry) = .empty,
-    shared_groups: std.ArrayList(SharedGroup) = .empty,
+    // Route representatives store `shared_group_index`, so group positions must
+    // remain stable across unsubscribe.  Empty groups become tombstones that a
+    // later group can reuse instead of compacting and invalidating indexes.
+    shared_groups: std.ArrayList(?SharedGroup) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Error!Router {
         var router = Router{ .allocator = allocator };
@@ -77,7 +83,9 @@ pub const Router = struct {
             if (maybe_entry.*) |*entry| entry.deinit(self.allocator);
         }
         self.entries.deinit(self.allocator);
-        for (self.shared_groups.items) |*group| group.deinit(self.allocator);
+        for (self.shared_groups.items) |*maybe_group| {
+            if (maybe_group.*) |*group| group.deinit(self.allocator);
+        }
         self.shared_groups.deinit(self.allocator);
         for (self.nodes.items) |*node| node.deinit(self.allocator);
         self.nodes.deinit(self.allocator);
@@ -130,23 +138,22 @@ pub const Router = struct {
             removed.?.deinit(self.allocator);
         }
 
-        const node_index, const multi_level = try self.insertFilterPath(parsed.effective_filter);
-        const node = &self.nodes.items[node_index];
-        if (multi_level) {
-            try node.multi_wildcard_entries.append(self.allocator, entry_index);
-            errdefer _ = node.multi_wildcard_entries.pop();
-        } else {
-            try node.terminal_entries.append(self.allocator, entry_index);
-            errdefer _ = node.terminal_entries.pop();
-        }
-
         if (parsed.group) |group| {
+            const node_index, const multi_level = try self.insertFilterPath(parsed.effective_filter);
             const group_index, const created = try self.getOrCreateSharedGroup(group, parsed.effective_filter);
-            errdefer if (created) {
-                var removed = self.shared_groups.orderedRemove(group_index);
-                removed.deinit(self.allocator);
-            };
-            try self.shared_groups.items[group_index].entry_indices.append(self.allocator, entry_index);
+            errdefer if (created) self.removeSharedGroupAt(group_index);
+            self.entries.items[entry_index].?.shared_group_index = group_index;
+            try self.shared_groups.items[group_index].?.entry_indices.append(self.allocator, entry_index);
+            errdefer removeIndexValue(&self.shared_groups.items[group_index].?.entry_indices, entry_index);
+
+            if (created) {
+                try self.appendRouteEntry(node_index, multi_level, entry_index);
+                errdefer self.removeRouteEntry(node_index, multi_level, entry_index);
+            }
+        } else {
+            const node_index, const multi_level = try self.insertFilterPath(parsed.effective_filter);
+            try self.appendRouteEntry(node_index, multi_level, entry_index);
+            errdefer self.removeRouteEntry(node_index, multi_level, entry_index);
         }
     }
 
@@ -155,23 +162,24 @@ pub const Router = struct {
         const entry = &self.entries.items[entry_index].?;
         const parsed = parseFilter(topic_filter) orelse return error.InvalidSubscription;
         const node_index, const multi_level = self.findFilterPath(parsed.effective_filter) orelse return error.SubscriptionNotFound;
-        if (multi_level) {
-            removeIndexValue(&self.nodes.items[node_index].multi_wildcard_entries, entry_index);
-        } else {
-            removeIndexValue(&self.nodes.items[node_index].terminal_entries, entry_index);
-        }
-
-        if (entry.shared_group) |group_name| {
-            if (self.findSharedGroup(group_name, entry.effective_filter)) |group_index| {
-                var group = &self.shared_groups.items[group_index];
+        if (entry.shared_group != null) {
+            const group_index = entry.shared_group_index orelse return error.SubscriptionNotFound;
+            if (group_index >= self.shared_groups.items.len) return error.SubscriptionNotFound;
+            if (self.shared_groups.items[group_index]) |*group| {
+                const was_representative = self.routeContainsEntry(node_index, multi_level, entry_index);
                 removeIndexValue(&group.entry_indices, entry_index);
                 if (group.entry_indices.items.len == 0) {
-                    var removed = self.shared_groups.orderedRemove(group_index);
-                    removed.deinit(self.allocator);
+                    if (was_representative) self.removeRouteEntry(node_index, multi_level, entry_index);
+                    self.removeSharedGroupAt(group_index);
                 } else {
                     group.cursor %= group.entry_indices.items.len;
+                    if (was_representative) {
+                        self.replaceRouteEntry(node_index, multi_level, entry_index, group.entry_indices.items[0]);
+                    }
                 }
-            }
+            } else return error.SubscriptionNotFound;
+        } else {
+            self.removeRouteEntry(node_index, multi_level, entry_index);
         }
         entry.deinit(self.allocator);
         self.entries.items[entry_index] = null;
@@ -192,28 +200,24 @@ pub const Router = struct {
         try mqtt.validateTopicName(topic);
         const normal_count = self.matchNormalTrie(topic, publisher_id, null) orelse
             self.matchNormalLinear(topic, publisher_id, null);
-        var shared_group_count: usize = 0;
-        for (self.shared_groups.items) |group| {
-            const entry = self.firstLiveGroupEntry(group) orelse continue;
-            if (mqtt.topicMatchesFilter(topic, entry.effective_filter)) shared_group_count += 1;
-        }
+        const shared_count_from_trie = self.matchSharedTrie(topic, null);
+        const shared_group_count = shared_count_from_trie orelse self.matchSharedLinear(topic, null);
         const required = std.math.add(usize, normal_count, shared_group_count) catch return error.MatchBufferTooSmall;
         if (out.len < required) return error.MatchBufferTooSmall;
 
         const normal_written = self.matchNormalTrie(topic, publisher_id, out[0..normal_count]) orelse
             self.matchNormalLinear(topic, publisher_id, out[0..normal_count]);
         std.debug.assert(normal_written == normal_count);
-        var written = normal_written;
-        for (self.shared_groups.items) |*group| {
-            if (group.entry_indices.items.len == 0) continue;
-            const representative = self.firstLiveGroupEntry(group.*) orelse continue;
-            if (!mqtt.topicMatchesFilter(topic, representative.effective_filter)) continue;
-            group.cursor %= group.entry_indices.items.len;
-            const entry = self.nextLiveGroupEntry(group) orelse continue;
-            out[written] = entryMatch(entry);
-            written += 1;
-        }
-        return out[0..written];
+        const shared_written = if (shared_count_from_trie != null)
+            // The active-node frontier is deterministic for a given topic and
+            // router snapshot.  A successful count pass therefore guarantees
+            // the emitting pass will not need the linear fallback after it has
+            // advanced shared-subscription cursors.
+            self.matchSharedTrie(topic, out[normal_written..required]) orelse unreachable
+        else
+            self.matchSharedLinear(topic, out[normal_written..required]);
+        std.debug.assert(shared_written == shared_group_count);
+        return out[0..required];
     }
 
     pub fn matchAlloc(self: *Router, allocator: std.mem.Allocator, topic: []const u8) Error![]Match {
@@ -315,6 +319,102 @@ pub const Router = struct {
         return written;
     }
 
+    /// Match shared subscriptions through the same topic-filter trie as normal
+    /// subscriptions.  Each shared group/filter contributes one representative
+    /// entry to the route; the representative is only a lookup key, while
+    /// `nextLiveGroupEntry` applies the group's round-robin cursor at emit
+    /// time.  This avoids the old O(total shared groups) scan for every
+    /// publish and keeps capacity preflight cursor-neutral by doing a count
+    /// pass before the emitting pass.
+    fn matchSharedTrie(
+        self: *Router,
+        topic: []const u8,
+        out: ?[]Match,
+    ) ?usize {
+        var current: [128]usize = undefined;
+        var next: [128]usize = undefined;
+        current[0] = 0;
+        var current_count: usize = 1;
+        var written: usize = 0;
+        var depth: usize = 0;
+        var it = std.mem.splitScalar(u8, topic, '/');
+        while (it.next()) |level| {
+            var next_count: usize = 0;
+            for (current[0..current_count]) |node_index| {
+                const node = &self.nodes.items[node_index];
+                if (!(depth == 0 and topic[0] == '$')) {
+                    written = self.emitSharedEntries(node.multi_wildcard_entries.items, out, written);
+                }
+                if (depth == 0 and std.mem.startsWith(u8, topic, "$")) {
+                    if (findLiteralChild(node.*, level)) |child| {
+                        if (!appendUniqueNode(&next, &next_count, child)) return null;
+                    }
+                    continue;
+                }
+                if (findLiteralChild(node.*, level)) |child| {
+                    if (!appendUniqueNode(&next, &next_count, child)) return null;
+                }
+                if (node.single_wildcard_child) |child| {
+                    if (!appendUniqueNode(&next, &next_count, child)) return null;
+                }
+            }
+            @memcpy(current[0..next_count], next[0..next_count]);
+            current_count = next_count;
+            if (current_count == 0) return written;
+            depth += 1;
+        }
+        for (current[0..current_count]) |node_index| {
+            const node = &self.nodes.items[node_index];
+            written = self.emitSharedEntries(node.terminal_entries.items, out, written);
+            written = self.emitSharedEntries(node.multi_wildcard_entries.items, out, written);
+        }
+        return written;
+    }
+
+    fn matchSharedLinear(
+        self: *Router,
+        topic: []const u8,
+        out: ?[]Match,
+    ) usize {
+        var written: usize = 0;
+        for (self.shared_groups.items) |*maybe_group| {
+            if (maybe_group.*) |*group| {
+                const representative = self.firstLiveGroupEntry(group.*) orelse continue;
+                if (!mqtt.topicMatchesFilter(topic, representative.effective_filter)) continue;
+                if (out) |storage| {
+                    group.cursor %= group.entry_indices.items.len;
+                    const entry = self.nextLiveGroupEntry(group) orelse continue;
+                    storage[written] = entryMatch(entry);
+                }
+                written += 1;
+            }
+        }
+        return written;
+    }
+
+    fn emitSharedEntries(
+        self: *Router,
+        entry_indices: []const usize,
+        out: ?[]Match,
+        start: usize,
+    ) usize {
+        var written = start;
+        for (entry_indices) |entry_index| {
+            const representative = self.entries.items[entry_index] orelse continue;
+            const group_index = representative.shared_group_index orelse continue;
+            if (group_index >= self.shared_groups.items.len) continue;
+            if (self.shared_groups.items[group_index]) |*group| {
+                if (out) |storage| {
+                    group.cursor %= group.entry_indices.items.len;
+                    const entry = self.nextLiveGroupEntry(group) orelse continue;
+                    storage[written] = entryMatch(entry);
+                }
+                written += 1;
+            }
+        }
+        return written;
+    }
+
     fn firstLiveGroupEntry(self: Router, group: SharedGroup) ?Entry {
         for (group.entry_indices.items) |entry_index| {
             if (self.entries.items[entry_index]) |entry| return entry;
@@ -391,20 +491,74 @@ pub const Router = struct {
 
     fn getOrCreateSharedGroup(self: *Router, name: []const u8, filter: []const u8) Error!struct { usize, bool } {
         if (self.findSharedGroup(name, filter)) |index| return .{ index, false };
-        const owned = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(owned);
-        try self.shared_groups.append(self.allocator, .{ .name = owned });
+        const owned_name = try self.allocator.dupe(u8, name);
+        var owns_name = true;
+        errdefer if (owns_name) self.allocator.free(owned_name);
+        const owned_filter = try self.allocator.dupe(u8, filter);
+        var owns_filter = true;
+        errdefer if (owns_filter) self.allocator.free(owned_filter);
+
+        for (self.shared_groups.items, 0..) |maybe_group, i| {
+            if (maybe_group != null) continue;
+            self.shared_groups.items[i] = .{ .name = owned_name, .effective_filter = owned_filter };
+            owns_name = false;
+            owns_filter = false;
+            return .{ i, true };
+        }
+
+        try self.shared_groups.append(self.allocator, .{ .name = owned_name, .effective_filter = owned_filter });
+        owns_name = false;
+        owns_filter = false;
         return .{ self.shared_groups.items.len - 1, true };
     }
 
     fn findSharedGroup(self: Router, name: []const u8, filter: []const u8) ?usize {
-        for (self.shared_groups.items, 0..) |group, i| {
+        for (self.shared_groups.items, 0..) |maybe_group, i| {
+            const group = maybe_group orelse continue;
             if (!std.mem.eql(u8, group.name, name)) continue;
-            if (group.entry_indices.items.len == 0) continue;
-            const entry = self.entries.items[group.entry_indices.items[0]] orelse continue;
-            if (std.mem.eql(u8, entry.effective_filter, filter)) return i;
+            if (std.mem.eql(u8, group.effective_filter, filter)) return i;
         }
         return null;
+    }
+
+    fn removeSharedGroupAt(self: *Router, group_index: usize) void {
+        if (group_index >= self.shared_groups.items.len) return;
+        if (self.shared_groups.items[group_index]) |*group| {
+            group.deinit(self.allocator);
+            self.shared_groups.items[group_index] = null;
+        }
+    }
+
+    fn appendRouteEntry(self: *Router, node_index: usize, multi_level: bool, entry_index: usize) Error!void {
+        if (multi_level) {
+            try self.nodes.items[node_index].multi_wildcard_entries.append(self.allocator, entry_index);
+        } else {
+            try self.nodes.items[node_index].terminal_entries.append(self.allocator, entry_index);
+        }
+    }
+
+    fn removeRouteEntry(self: *Router, node_index: usize, multi_level: bool, entry_index: usize) void {
+        if (multi_level) {
+            removeIndexValue(&self.nodes.items[node_index].multi_wildcard_entries, entry_index);
+        } else {
+            removeIndexValue(&self.nodes.items[node_index].terminal_entries, entry_index);
+        }
+    }
+
+    fn routeContainsEntry(self: Router, node_index: usize, multi_level: bool, entry_index: usize) bool {
+        const values = if (multi_level)
+            self.nodes.items[node_index].multi_wildcard_entries.items
+        else
+            self.nodes.items[node_index].terminal_entries.items;
+        return containsIndexValue(values, entry_index);
+    }
+
+    fn replaceRouteEntry(self: *Router, node_index: usize, multi_level: bool, old_index: usize, new_index: usize) void {
+        const values = if (multi_level)
+            self.nodes.items[node_index].multi_wildcard_entries.items
+        else
+            self.nodes.items[node_index].terminal_entries.items;
+        replaceIndexValue(values, old_index, new_index);
     }
 };
 
@@ -439,6 +593,22 @@ fn removeIndexValue(values: *std.ArrayList(usize), target: usize) void {
     for (values.items, 0..) |value, i| {
         if (value == target) {
             _ = values.orderedRemove(i);
+            return;
+        }
+    }
+}
+
+fn containsIndexValue(values: []const usize, target: usize) bool {
+    for (values) |value| {
+        if (value == target) return true;
+    }
+    return false;
+}
+
+fn replaceIndexValue(values: []usize, old_value: usize, new_value: usize) void {
+    for (values) |*value| {
+        if (value.* == old_value) {
+            value.* = new_value;
             return;
         }
     }
@@ -505,6 +675,59 @@ test "MQTT router shared subscriptions round robin per filter" {
         try std.testing.expectEqual(subscriber, matches[0].subscriber_id);
         try std.testing.expectEqual(@as(SubscriberId, 20), matches[1].subscriber_id);
     }
+}
+
+test "MQTT router indexes shared groups by trie representative" {
+    const allocator = std.testing.allocator;
+    var router = try Router.init(allocator);
+    defer router.deinit();
+
+    try router.subscribe(10, .{ .topic_filter = "$share/workers/jobs/+" });
+    try router.subscribe(11, .{ .topic_filter = "$share/workers/jobs/+" });
+
+    const jobs_node, const jobs_multi = router.findFilterPath("jobs/+").?;
+    try std.testing.expect(!jobs_multi);
+    try std.testing.expectEqual(@as(usize, 1), router.nodes.items[jobs_node].terminal_entries.items.len);
+    const jobs_group_index = router.findSharedGroup("workers", "jobs/+").?;
+
+    var storage: [2]Match = undefined;
+    const first = try router.matchInto("jobs/one", &storage);
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    try std.testing.expectEqual(@as(SubscriberId, 10), first[0].subscriber_id);
+
+    // The trie stores one representative per shared group. Removing that
+    // representative must swap in another live member so future matches stay
+    // indexed and do not fall back to a scan over every shared group.
+    try router.unsubscribe(10, "$share/workers/jobs/+");
+    try std.testing.expectEqual(@as(usize, 1), router.nodes.items[jobs_node].terminal_entries.items.len);
+    const second = try router.matchInto("jobs/two", &storage);
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expectEqual(@as(SubscriberId, 11), second[0].subscriber_id);
+
+    try router.subscribe(12, .{ .topic_filter = "$share/workers/jobs/+" });
+    try std.testing.expectEqual(@as(usize, 1), router.nodes.items[jobs_node].terminal_entries.items.len);
+    const third = try router.matchInto("jobs/three", &storage);
+    try std.testing.expectEqual(@as(SubscriberId, 11), third[0].subscriber_id);
+    const fourth = try router.matchInto("jobs/four", &storage);
+    try std.testing.expectEqual(@as(SubscriberId, 12), fourth[0].subscriber_id);
+
+    try router.unsubscribe(11, "$share/workers/jobs/+");
+    try router.unsubscribe(12, "$share/workers/jobs/+");
+    try std.testing.expectEqual(@as(usize, 0), router.nodes.items[jobs_node].terminal_entries.items.len);
+    try std.testing.expect(router.shared_groups.items[jobs_group_index] == null);
+
+    try router.subscribe(20, .{ .topic_filter = "$share/audit/alerts/#" });
+    try std.testing.expectEqual(jobs_group_index, router.findSharedGroup("audit", "alerts/#").?);
+
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const saved_allocator = router.allocator;
+    router.allocator = no_alloc.allocator();
+    defer router.allocator = saved_allocator;
+
+    const alert = try router.matchInto("alerts/security/high", &storage);
+    try std.testing.expectEqual(@as(usize, 1), alert.len);
+    try std.testing.expectEqual(@as(SubscriberId, 20), alert[0].subscriber_id);
+    try std.testing.expect(!no_alloc.has_induced_failure);
 }
 
 test "MQTT router unsubscribe preserves shared cursor safety" {
