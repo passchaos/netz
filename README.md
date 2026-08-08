@@ -210,6 +210,27 @@ zig build run-linux-io-uring-http1-server
 zig build run-linux-io-uring-websocket
 ```
 
+Native microbenchmarks are also wired into the build.  Prefer `ReleaseFast`
+when collecting performance evidence:
+
+```sh
+zig build bench -Doptimize=ReleaseFast
+zig build bench-http1-parse -Doptimize=ReleaseFast
+zig build bench-http2-hpack -Doptimize=ReleaseFast
+zig build bench-http3-dev -Doptimize=ReleaseFast
+zig build bench-mqtt-router -Doptimize=ReleaseFast
+zig build bench-quic-short-packet -Doptimize=ReleaseFast
+```
+
+The aggregate `bench` step runs the current protocol microbenchmarks:
+
+- HTTP/1 borrowed request-head parsing versus owned full request parsing,
+- HTTP/2 HPACK stateful dynamic-table encode/decode versus stateless helpers,
+- HTTP/3 cleartext development request/response round trips,
+- MQTT subscription-router trie matching versus a linear filter scan,
+- QUIC short-packet sealing with caller-provided storage versus the allocating
+  convenience wrapper.
+
 The build script pins the package to Zig `0.16.0`.
 
 ## Implementation order
