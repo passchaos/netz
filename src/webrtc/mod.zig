@@ -8325,6 +8325,11 @@ pub const sctp = struct {
         channel_type: DataChannelType = .reliable,
         priority: u16 = 0,
         reliability_parameter: u32 = 0,
+        /// Wire-level DCEP carries label/protocol as length-prefixed bytes.
+        /// The WebRTC API exposes strings, but Pion/datachannel preserves raw
+        /// bytes during marshal/unmarshal and leaves API-level UTF-8 policy to
+        /// higher layers.  Keeping the codec byte-exact improves interop with
+        /// captures and non-browser peers.
         label: []const u8,
         protocol: []const u8 = &.{},
 
@@ -9761,8 +9766,6 @@ pub const sctp = struct {
     pub fn writeDcepOpen(list: *std.ArrayList(u8), allocator: std.mem.Allocator, open: DataChannelOpen) Error!void {
         if (open.label.len > std.math.maxInt(u16) or open.protocol.len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
         try validateDataChannelType(open.channel_type);
-        try validateDcepString(open.label);
-        try validateDcepString(open.protocol);
         try list.append(allocator, 0x03); // DATA_CHANNEL_OPEN
         try list.append(allocator, @intFromEnum(open.channel_type));
         try wire.appendInt(list, allocator, u16, open.priority, .big);
@@ -9807,8 +9810,6 @@ pub const sctp = struct {
                 if (end != bytes.len) return error.InvalidSctpPacket;
                 const label = bytes[label_start..protocol_start];
                 const protocol = bytes[protocol_start..end];
-                try validateDcepString(label);
-                try validateDcepString(protocol);
                 break :blk .{ .open = .{
                     .channel_type = channel_type,
                     .priority = priority,
@@ -9819,10 +9820,6 @@ pub const sctp = struct {
             },
             else => error.InvalidSctpPacket,
         };
-    }
-
-    fn validateDcepString(value: []const u8) Error!void {
-        if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidSctpPacket;
     }
 
     fn validateDataChannelType(channel_type: DataChannelType) Error!void {
@@ -14745,9 +14742,11 @@ test "SCTP DATA packet and DCEP channel messages" {
 
     var invalid_dcep: std.ArrayList(u8) = .empty;
     defer invalid_dcep.deinit(allocator);
-    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeDcepOpen(&invalid_dcep, allocator, .{
+    try sctp.writeDcepOpen(&invalid_dcep, allocator, .{
         .label = "\xc0\x80",
-    }));
+    });
+    const raw_label_open = try sctp.parseDcepMessage(invalid_dcep.items);
+    try std.testing.expectEqualSlices(u8, "\xc0\x80", raw_label_open.open.label);
     try std.testing.expectError(error.InvalidSctpPacket, sctp.writeDcepOpen(&invalid_dcep, allocator, .{
         .channel_type = @enumFromInt(0x7f),
         .label = "bad-type",
@@ -14763,7 +14762,8 @@ test "SCTP DATA packet and DCEP channel messages" {
         0x00, 0x00, // protocol length
         0xc0, 0x80, // invalid UTF-8 label
     });
-    try std.testing.expectError(error.InvalidSctpPacket, sctp.parseDcepMessage(invalid_dcep.items));
+    const raw_parsed_open = try sctp.parseDcepMessage(invalid_dcep.items);
+    try std.testing.expectEqualSlices(u8, "\xc0\x80", raw_parsed_open.open.label);
 
     invalid_dcep.items[1] = 0x7f;
     invalid_dcep.items[12] = 'o';
