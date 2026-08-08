@@ -8583,6 +8583,10 @@ pub const sctp = struct {
         }
 
         fn tryReassemble(self: *Reassembler, target: DataChunk) Error!?ReassembledMessage {
+            if (!target.interleaved and target.unordered) {
+                return self.tryReassembleUnorderedNonInterleaved(target.stream_id);
+            }
+
             var begin_index: ?usize = null;
             var end_index: ?usize = null;
             for (self.fragments.items, 0..) |fragment, i| {
@@ -8649,9 +8653,68 @@ pub const sctp = struct {
             };
         }
 
+        fn tryReassembleUnorderedNonInterleaved(self: *Reassembler, stream_id: u16) Error!?ReassembledMessage {
+            for (self.fragments.items) |begin_fragment| {
+                const begin_chunk = begin_fragment.chunk;
+                if (begin_chunk.interleaved or !begin_chunk.unordered or begin_chunk.stream_id != stream_id or !begin_chunk.beginning) continue;
+
+                const ppid = begin_chunk.payload_protocol_identifier;
+                var total_len: usize = 0;
+                var current_tsn = begin_chunk.tsn;
+                var complete = false;
+                while (true) : (current_tsn +%= 1) {
+                    const index = self.findUnorderedNonInterleavedFragmentIndex(stream_id, current_tsn) orelse break;
+                    const fragment = self.fragments.items[index];
+                    // Unordered DATA chunks do not consume SSN, so the only
+                    // message boundary in non-interleaved SCTP is a contiguous
+                    // TSN range from a B fragment to an E fragment.  If another
+                    // beginning appears first, this candidate range is stale and
+                    // a later beginning may still form a complete message.
+                    if (current_tsn != begin_chunk.tsn and fragment.chunk.beginning) break;
+                    if (fragment.chunk.payload_protocol_identifier != ppid) return error.InvalidSctpPacket;
+                    total_len = std.math.add(usize, total_len, fragment.data.len) catch return error.InvalidSctpPacket;
+                    if (fragment.chunk.ending) {
+                        complete = true;
+                        break;
+                    }
+                }
+                if (!complete) continue;
+
+                var data = try self.allocator.alloc(u8, total_len);
+                errdefer self.allocator.free(data);
+                var out_pos: usize = 0;
+                current_tsn = begin_chunk.tsn;
+                while (true) : (current_tsn +%= 1) {
+                    const index = self.findUnorderedNonInterleavedFragmentIndex(stream_id, current_tsn).?;
+                    const fragment = self.fragments.items[index];
+                    @memcpy(data[out_pos .. out_pos + fragment.data.len], fragment.data);
+                    out_pos += fragment.data.len;
+                    if (fragment.chunk.ending) break;
+                }
+
+                self.removeUnorderedNonInterleavedFragments(stream_id, begin_chunk.tsn);
+                return .{
+                    .stream_id = begin_chunk.stream_id,
+                    .stream_sequence_number = begin_chunk.stream_sequence_number,
+                    .unordered = true,
+                    .payload_protocol_identifier = ppid,
+                    .data = data,
+                };
+            }
+            return null;
+        }
+
         fn findFragmentIndex(self: Reassembler, tsn: u32, target: DataChunk) ?usize {
             for (self.fragments.items, 0..) |fragment, i| {
                 if (fragment.chunk.tsn == tsn and sameMessage(fragment.chunk, target)) return i;
+            }
+            return null;
+        }
+
+        fn findUnorderedNonInterleavedFragmentIndex(self: Reassembler, stream_id: u16, tsn: u32) ?usize {
+            for (self.fragments.items, 0..) |fragment, i| {
+                const chunk = fragment.chunk;
+                if (!chunk.interleaved and chunk.unordered and chunk.stream_id == stream_id and chunk.tsn == tsn) return i;
             }
             return null;
         }
@@ -8671,6 +8734,16 @@ pub const sctp = struct {
                     continue;
                 }
                 i += 1;
+            }
+        }
+
+        fn removeUnorderedNonInterleavedFragments(self: *Reassembler, stream_id: u16, first_tsn: u32) void {
+            var current_tsn = first_tsn;
+            while (true) : (current_tsn +%= 1) {
+                const index = self.findUnorderedNonInterleavedFragmentIndex(stream_id, current_tsn) orelse return;
+                const ending = self.fragments.items[index].chunk.ending;
+                self.removeFragmentAt(index);
+                if (ending) return;
             }
         }
 
@@ -8737,6 +8810,7 @@ pub const sctp = struct {
                     if (fragment.chunk.ending) return true;
                 }
             } else {
+                if (begin_chunk.unordered) return self.tryReassembleUnorderedNonInterleavedReadable(begin_chunk);
                 const ppid = begin_chunk.payload_protocol_identifier;
                 var current_tsn = begin_chunk.tsn;
                 while (true) : (current_tsn +%= 1) {
@@ -8745,6 +8819,18 @@ pub const sctp = struct {
                     if (fragment.chunk.payload_protocol_identifier != ppid) return error.InvalidSctpPacket;
                     if (fragment.chunk.ending) return true;
                 }
+            }
+        }
+
+        fn tryReassembleUnorderedNonInterleavedReadable(self: Reassembler, begin_chunk: DataChunk) Error!bool {
+            const ppid = begin_chunk.payload_protocol_identifier;
+            var current_tsn = begin_chunk.tsn;
+            while (true) : (current_tsn +%= 1) {
+                const index = self.findUnorderedNonInterleavedFragmentIndex(begin_chunk.stream_id, current_tsn) orelse return false;
+                const fragment = self.fragments.items[index];
+                if (current_tsn != begin_chunk.tsn and fragment.chunk.beginning) return false;
+                if (fragment.chunk.payload_protocol_identifier != ppid) return error.InvalidSctpPacket;
+                if (fragment.chunk.ending) return true;
             }
         }
 
@@ -8759,6 +8845,8 @@ pub const sctp = struct {
             if (chunk.stream_id != target.stream_id or chunk.unordered != target.unordered) return false;
             return if (chunk.interleaved)
                 chunk.message_identifier == target.message_identifier
+            else if (chunk.unordered)
+                chunk.tsn == target.tsn
             else
                 chunk.stream_sequence_number == target.stream_sequence_number;
         }
@@ -13887,6 +13975,45 @@ test "SCTP DATA reassembler handles fragmented messages" {
     try std.testing.expectEqual(@as(u16, 7), message.stream_sequence_number);
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string, message.payload_protocol_identifier);
     try std.testing.expectEqualStrings("hello world", message.data);
+    try std.testing.expectEqual(@as(usize, 0), reassembler.buffered_bytes);
+
+    try std.testing.expect((try reassembler.push(.{
+        .tsn = 20,
+        .stream_id = 1,
+        .stream_sequence_number = 9,
+        .unordered = true,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = true,
+        .ending = false,
+        .user_data = "stale-",
+    })) == null);
+    try std.testing.expect((try reassembler.push(.{
+        .tsn = 21,
+        .stream_id = 1,
+        .stream_sequence_number = 9,
+        .unordered = true,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = true,
+        .ending = false,
+        .user_data = "fresh",
+    })) == null);
+    var unordered_message = (try reassembler.push(.{
+        .tsn = 22,
+        .stream_id = 1,
+        .stream_sequence_number = 9,
+        .unordered = true,
+        .payload_protocol_identifier = .webrtc_string,
+        .beginning = false,
+        .ending = true,
+        .user_data = "-done",
+    })).?;
+    defer unordered_message.deinit(allocator);
+    try std.testing.expect(unordered_message.unordered);
+    try std.testing.expectEqualStrings("fresh-done", unordered_message.data);
+    // The earlier unordered beginning has no contiguous ending and must remain
+    // buffered rather than being incorrectly spliced into the later message.
+    try std.testing.expectEqual(@as(usize, "stale-".len), reassembler.buffered_bytes);
+    reassembler.forwardTsn(.{ .new_cumulative_tsn = 20 });
     try std.testing.expectEqual(@as(usize, 0), reassembler.buffered_bytes);
 
     var single = (try reassembler.push(.{
