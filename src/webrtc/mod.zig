@@ -6533,7 +6533,7 @@ pub const rtcp = struct {
             else if (header.count_or_format == payload_feedback_fir)
                 .{ .full_intra_request = try parseFullIntraRequest(allocator, payload) }
             else if (header.count_or_format == payload_feedback_remb)
-                .{ .receiver_estimated_maximum_bitrate = try parseReceiverEstimatedMaximumBitrate(allocator, payload) }
+                .{ .receiver_estimated_maximum_bitrate = try parseReceiverEstimatedMaximumBitrate(allocator, header, payload) }
             else
                 .{ .unknown = .{ .header = header, .payload = payload, .raw = bytes[0..packet_len] } },
             .transport_feedback => if (header.count_or_format == transport_feedback_nack)
@@ -6837,7 +6837,12 @@ pub const rtcp = struct {
         return .{ .sender_ssrc = sender_ssrc, .media_ssrc = media_ssrc, .entries = entries };
     }
 
-    fn parseReceiverEstimatedMaximumBitrate(allocator: std.mem.Allocator, payload: []const u8) Error!ReceiverEstimatedMaximumBitrate {
+    fn parseReceiverEstimatedMaximumBitrate(allocator: std.mem.Allocator, header: Header, payload: []const u8) Error!ReceiverEstimatedMaximumBitrate {
+        // Pion/rtcp's REMB unmarshaller validates this packet directly instead
+        // of going through the generic padding stripper and explicitly rejects
+        // the RTCP padding bit.  Keep the same stricter rule for REMB while
+        // other packet types can still use generic RTCP padding handling.
+        if (header.padding) return error.InvalidRtcpPacket;
         if (payload.len < 16) return error.InvalidRtcpPacket;
         var cursor = wire.Cursor.init(payload);
         const sender_ssrc = try cursor.readInt(u32, .big);
@@ -12915,6 +12920,14 @@ test "RTCP receiver report and feedback packets" {
     try std.testing.expectEqual(@as(u64, 8_927_168), remb.packet.receiver_estimated_maximum_bitrate.bitrate);
     try std.testing.expectEqualSlices(u32, &[_]u32{1215622422}, remb.packet.receiver_estimated_maximum_bitrate.ssrcs);
     try std.testing.expectEqual(@as(usize, 24), remb.packet.receiver_estimated_maximum_bitrate.wireLen());
+
+    var padded_remb = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(padded_remb);
+    padded_remb[0] |= 0x20;
+    padded_remb[3] += 1;
+    padded_remb = try allocator.realloc(padded_remb, padded_remb.len + 4);
+    @memcpy(padded_remb[padded_remb.len - 4 ..], &[_]u8{ 4, 4, 4, 4 });
+    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, padded_remb));
 
     encoded.items[8] = 1; // REMB media SSRC must be zero.
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, encoded.items));
