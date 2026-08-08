@@ -1641,8 +1641,8 @@ pub const sdp = struct {
 
     pub fn formatOriginAttribute(allocator: std.mem.Allocator, origin: Origin) Error![]u8 {
         try validateSdpToken(origin.username);
-        try validateSdpToken(origin.network_type);
-        try validateSdpToken(origin.address_type);
+        try validateSdpNetworkType(origin.network_type);
+        try validateSdpAddressType(origin.address_type);
         try validateSdpToken(origin.unicast_address);
         return std.fmt.allocPrint(allocator, "{s} {d} {d} {s} {s} {s}", .{
             origin.username,
@@ -1672,12 +1672,12 @@ pub const sdp = struct {
         const session_id_s = parts.next() orelse return error.InvalidSdp;
         const session_version_s = parts.next() orelse return error.InvalidSdp;
         const network_type = parts.next() orelse return error.InvalidSdp;
-        const address_type = parts.next() orelse return error.InvalidSdp;
-        const unicast_address = parts.next() orelse return error.InvalidSdp;
+        const address_type = parts.next() orelse "IP4";
+        const unicast_address = parts.next() orelse if (std.mem.eql(u8, address_type, "IP6")) "::" else "0.0.0.0";
         if (parts.next() != null) return error.InvalidSdp;
         try validateSdpToken(username);
-        try validateSdpToken(network_type);
-        try validateSdpToken(address_type);
+        try validateSdpNetworkType(network_type);
+        try validateSdpAddressType(address_type);
         try validateSdpToken(unicast_address);
         return .{
             .username = username,
@@ -9713,8 +9713,32 @@ test "ICE candidate parser and SDP parser" {
         .address_type = "IP4",
         .unicast_address = "127.0.0.1",
     }));
-    try std.testing.expectError(error.InvalidSdp, sdp.parseOriginAttribute("- 0 0 IN IP4"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatOriginLine(allocator, .{
+        .username = "-",
+        .session_id = 0,
+        .session_version = 0,
+        .network_type = "NET",
+        .address_type = "IP4",
+        .unicast_address = "127.0.0.1",
+    }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatOriginLine(allocator, .{
+        .username = "-",
+        .session_id = 0,
+        .session_version = 0,
+        .network_type = "IN",
+        .address_type = "IP5",
+        .unicast_address = "127.0.0.1",
+    }));
+    const origin_default_ip4 = try sdp.parseOriginAttribute("- 0 0 IN IP4");
+    try std.testing.expectEqualStrings("0.0.0.0", origin_default_ip4.unicast_address);
+    const origin_default_ip6 = try sdp.parseOriginAttribute("- 0 0 IN IP6");
+    try std.testing.expectEqualStrings("::", origin_default_ip6.unicast_address);
+    const origin_default_address_type = try sdp.parseOriginAttribute("- 0 0 IN");
+    try std.testing.expectEqualStrings("IP4", origin_default_address_type.address_type);
+    try std.testing.expectEqualStrings("0.0.0.0", origin_default_address_type.unicast_address);
     try std.testing.expectError(error.InvalidSdp, sdp.parseOriginAttribute("- not-id 0 IN IP4 127.0.0.1"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseOriginAttribute("- 0 0 NET IP4 127.0.0.1"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseOriginAttribute("- 0 0 IN IP5 127.0.0.1"));
     const timing_attr = try sdp.formatTimingAttribute(allocator, parsed_timing);
     defer allocator.free(timing_attr);
     try std.testing.expectEqualStrings("0 0", timing_attr);
