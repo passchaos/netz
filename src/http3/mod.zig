@@ -30,7 +30,9 @@ pub const Error = wire.Error || error{
     ExtendedConnectDisabled,
     QpackDynamicTableUnsupported,
     QpackEncoderStreamError,
+    QpackDecoderStreamError,
     QpackDecompressionFailed,
+    QpackBlocked,
 } || std.mem.Allocator.Error;
 
 pub const max_settings_payload_size: usize = 256;
@@ -664,6 +666,7 @@ pub const Qpack = struct {
     pub const HeaderField = struct {
         name: []const u8,
         value: []const u8,
+        never_indexed: bool = false,
         /// Set when a decoded Huffman string had to be materialized.  Call
         /// `Qpack.freeDecodedFields` for decoder output so these allocations
         /// are released while non-Huffman strings can continue borrowing from
@@ -793,6 +796,28 @@ pub const Qpack = struct {
         pub fn fieldPostBase(self: DynamicTable, base: u64, post_base_index: u64) ?DynamicEntry {
             const absolute_index = std.math.add(u64, base, post_base_index) catch return null;
             return self.absolute(absolute_index);
+        }
+
+        pub fn findExact(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
+            var index = self.entries.items.len;
+            while (index > self.head) {
+                index -= 1;
+                const entry = self.entries.items[index];
+                if (std.mem.eql(u8, entry.name, name) and std.mem.eql(u8, entry.value, value)) {
+                    return entry.absolute_index;
+                }
+            }
+            return null;
+        }
+
+        pub fn findName(self: DynamicTable, name: []const u8) ?u64 {
+            var index = self.entries.items.len;
+            while (index > self.head) {
+                index -= 1;
+                const entry = self.entries.items[index];
+                if (std.mem.eql(u8, entry.name, name)) return entry.absolute_index;
+            }
+            return null;
         }
 
         fn evictToFit(self: *DynamicTable, incoming_size: usize) void {
@@ -1003,6 +1028,314 @@ pub const Qpack = struct {
         }
         if (required_insert_count == 0) return error.QpackDecompressionFailed;
         return required_insert_count;
+    }
+
+    pub const DecoderInstruction = union(enum) {
+        section_acknowledgment: u64,
+        stream_cancellation: u64,
+        insert_count_increment: u64,
+    };
+
+    pub const DecodedDecoderInstruction = struct {
+        instruction: DecoderInstruction,
+        consumed: usize,
+    };
+
+    pub fn writeDecoderInstruction(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        instruction: DecoderInstruction,
+    ) !void {
+        switch (instruction) {
+            .section_acknowledgment => |stream_id| try encodePrefixedInteger(
+                list,
+                allocator,
+                7,
+                0x80,
+                stream_id,
+            ),
+            .stream_cancellation => |stream_id| try encodePrefixedInteger(
+                list,
+                allocator,
+                6,
+                0x40,
+                stream_id,
+            ),
+            .insert_count_increment => |increment| {
+                if (increment == 0) return error.QpackDecoderStreamError;
+                try encodePrefixedInteger(list, allocator, 6, 0x00, increment);
+            },
+        }
+    }
+
+    pub fn decodeDecoderInstruction(bytes: []const u8) !DecodedDecoderInstruction {
+        var cursor = wire.Cursor.init(bytes);
+        const first = try cursor.readByte();
+        if ((first & 0x80) != 0) {
+            return .{
+                .instruction = .{ .section_acknowledgment = try decodePrefixedInteger(&cursor, 7, first) },
+                .consumed = cursor.pos,
+            };
+        }
+        if ((first & 0x40) != 0) {
+            return .{
+                .instruction = .{ .stream_cancellation = try decodePrefixedInteger(&cursor, 6, first) },
+                .consumed = cursor.pos,
+            };
+        }
+        const increment = try decodePrefixedInteger(&cursor, 6, first);
+        if (increment == 0) return error.QpackDecoderStreamError;
+        return .{
+            .instruction = .{ .insert_count_increment = increment },
+            .consumed = cursor.pos,
+        };
+    }
+
+    pub const DynamicBlockDecode = struct {
+        fields: []HeaderField,
+        required_insert_count: u64,
+        base: u64,
+    };
+
+    pub fn encodeDynamicBlock(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        fields: []const HeaderField,
+        table: DynamicTable,
+    ) !void {
+        const base = table.insert_count;
+        var required_insert_count: u64 = 0;
+        for (fields) |field| {
+            if (table.findExact(field.name, field.value)) |absolute_index| {
+                required_insert_count = @max(required_insert_count, absolute_index + 1);
+            } else if (table.findName(field.name)) |absolute_index| {
+                required_insert_count = @max(required_insert_count, absolute_index + 1);
+            }
+        }
+
+        const encoded_insert_count = try encodeRequiredInsertCount(
+            required_insert_count,
+            table.maxEntries(),
+        );
+        try encodePrefixedInteger(list, allocator, 8, 0x00, encoded_insert_count);
+        // Base is the insertion count at the start of this single-pass encode.
+        // Required Insert Count cannot exceed it because this helper does not
+        // mutate the table while encoding.
+        try encodePrefixedInteger(
+            list,
+            allocator,
+            7,
+            0x00,
+            base - required_insert_count,
+        );
+
+        for (fields) |field| {
+            if (!field.never_indexed) if (table.findExact(field.name, field.value)) |absolute_index| {
+                if (absolute_index < base) {
+                    try encodePrefixedInteger(
+                        list,
+                        allocator,
+                        6,
+                        0x80,
+                        base - absolute_index - 1,
+                    );
+                } else {
+                    try encodePrefixedInteger(
+                        list,
+                        allocator,
+                        4,
+                        0x10,
+                        absolute_index - base,
+                    );
+                }
+                continue;
+            };
+
+            if (findStaticMatch(field.name, field.value)) |match| {
+                if (match.full_match and !field.never_indexed) {
+                    try encodePrefixedInteger(list, allocator, 6, 0xc0, match.index);
+                } else {
+                    try encodePrefixedInteger(
+                        list,
+                        allocator,
+                        4,
+                        0x50 | if (field.never_indexed) @as(u8, 0x20) else 0,
+                        match.index,
+                    );
+                    try encodeString(list, allocator, field.value);
+                }
+                continue;
+            }
+
+            if (table.findName(field.name)) |absolute_index| {
+                if (absolute_index < base) {
+                    try encodePrefixedInteger(
+                        list,
+                        allocator,
+                        4,
+                        0x40 | if (field.never_indexed) @as(u8, 0x20) else 0,
+                        base - absolute_index - 1,
+                    );
+                } else {
+                    try encodePrefixedInteger(
+                        list,
+                        allocator,
+                        3,
+                        if (field.never_indexed) 0x08 else 0x00,
+                        absolute_index - base,
+                    );
+                }
+                try encodeString(list, allocator, field.value);
+                continue;
+            }
+
+            try encodePrefixedInteger(
+                list,
+                allocator,
+                3,
+                0x20 | if (field.never_indexed) @as(u8, 0x10) else 0,
+                field.name.len,
+            );
+            try list.appendSlice(allocator, field.name);
+            try encodeString(list, allocator, field.value);
+        }
+    }
+
+    pub fn decodeDynamicBlock(
+        allocator: std.mem.Allocator,
+        block: []const u8,
+        table: DynamicTable,
+    ) !DynamicBlockDecode {
+        var cursor = wire.Cursor.init(block);
+        const encoded_insert_count = try decodePrefixedInteger(&cursor, 8, try cursor.readByte());
+        const required_insert_count = try decodeRequiredInsertCount(
+            encoded_insert_count,
+            table.maxEntries(),
+            table.insert_count,
+        );
+        const delta_first = try cursor.readByte();
+        const delta_base = try decodePrefixedInteger(&cursor, 7, delta_first);
+        const base = if ((delta_first & 0x80) == 0)
+            std.math.add(u64, required_insert_count, delta_base) catch
+                return error.QpackDecompressionFailed
+        else blk: {
+            if (required_insert_count <= delta_base) return error.QpackDecompressionFailed;
+            break :blk required_insert_count - delta_base - 1;
+        };
+        if (required_insert_count > table.insert_count) return error.QpackBlocked;
+
+        var fields: std.ArrayList(HeaderField) = .empty;
+        errdefer {
+            freeFieldStorages(allocator, fields.items);
+            fields.deinit(allocator);
+        }
+        while (!cursor.eof()) {
+            const first = try cursor.readByte();
+            var field: HeaderField = undefined;
+            if ((first & 0x80) != 0) {
+                const static = (first & 0x40) != 0;
+                const index = try decodePrefixedInteger(&cursor, 6, first);
+                if (static) {
+                    field = staticEntry(index) orelse return error.QpackDecompressionFailed;
+                } else {
+                    const entry = table.fieldRelativeToBase(base, index) orelse
+                        return error.QpackDecompressionFailed;
+                    field = try ownedDynamicField(allocator, entry, entry.value, false);
+                }
+            } else if ((first & 0xf0) == 0x10) {
+                const index = try decodePrefixedInteger(&cursor, 4, first);
+                const entry = table.fieldPostBase(base, index) orelse
+                    return error.QpackDecompressionFailed;
+                field = try ownedDynamicField(allocator, entry, entry.value, false);
+            } else if ((first & 0xc0) == 0x40) {
+                const never_indexed = (first & 0x20) != 0;
+                const static = (first & 0x10) != 0;
+                const index = try decodePrefixedInteger(&cursor, 4, first);
+                var value = try decodeString(allocator, &cursor);
+                errdefer if (value.storage) |storage| allocator.free(storage);
+                if (static) {
+                    const entry = staticEntry(index) orelse return error.QpackDecompressionFailed;
+                    field = .{
+                        .name = entry.name,
+                        .value = value.value,
+                        .never_indexed = never_indexed,
+                        .value_storage = value.storage,
+                    };
+                    value.storage = null;
+                } else {
+                    const entry = table.fieldRelativeToBase(base, index) orelse
+                        return error.QpackDecompressionFailed;
+                    field = try ownedDynamicField(allocator, entry, value.value, never_indexed);
+                    if (value.storage) |storage| allocator.free(storage);
+                    value.storage = null;
+                }
+            } else if ((first & 0xf0) == 0x00) {
+                const never_indexed = (first & 0x08) != 0;
+                const index = try decodePrefixedInteger(&cursor, 3, first);
+                const entry = table.fieldPostBase(base, index) orelse
+                    return error.QpackDecompressionFailed;
+                const value = try decodeString(allocator, &cursor);
+                defer if (value.storage) |storage| allocator.free(storage);
+                field = try ownedDynamicField(allocator, entry, value.value, never_indexed);
+            } else if ((first & 0xe0) == 0x20) {
+                const never_indexed = (first & 0x10) != 0;
+                const name_len = try decodePrefixedInteger(&cursor, 3, first);
+                var name = try decodeMaybeHuffman(
+                    allocator,
+                    try cursor.readSlice(name_len),
+                    (first & 0x08) != 0,
+                );
+                errdefer if (name.storage) |storage| allocator.free(storage);
+                var value = try decodeString(allocator, &cursor);
+                errdefer if (value.storage) |storage| allocator.free(storage);
+                field = .{
+                    .name = name.value,
+                    .value = value.value,
+                    .never_indexed = never_indexed,
+                    .name_storage = name.storage,
+                    .value_storage = value.storage,
+                };
+                name.storage = null;
+                value.storage = null;
+            } else {
+                return error.QpackDecompressionFailed;
+            }
+            var appended = false;
+            defer if (!appended) {
+                if (field.name_storage) |storage| allocator.free(storage);
+                if (field.value_storage) |storage| allocator.free(storage);
+            };
+            try fields.append(allocator, field);
+            appended = true;
+        }
+        return .{
+            .fields = try fields.toOwnedSlice(allocator),
+            .required_insert_count = required_insert_count,
+            .base = base,
+        };
+    }
+
+    pub fn freeDynamicBlock(allocator: std.mem.Allocator, decoded: *DynamicBlockDecode) void {
+        freeDecodedFields(allocator, decoded.fields);
+        decoded.* = undefined;
+    }
+
+    fn ownedDynamicField(
+        allocator: std.mem.Allocator,
+        entry: DynamicEntry,
+        value: []const u8,
+        never_indexed: bool,
+    ) !HeaderField {
+        const name_copy = try allocator.dupe(u8, entry.name);
+        errdefer allocator.free(name_copy);
+        const value_copy = try allocator.dupe(u8, value);
+        return .{
+            .name = name_copy,
+            .value = value_copy,
+            .never_indexed = never_indexed,
+            .name_storage = name_copy,
+            .value_storage = value_copy,
+        };
     }
 
     fn dynamicEntrySize(name: []const u8, value: []const u8) error{IntegerOverflow}!usize {
@@ -2509,6 +2842,170 @@ test "HTTP/3 QPACK Required Insert Count wraps per RFC 9204" {
             std.math.maxInt(u64),
             std.math.maxInt(u64),
         ),
+    );
+}
+
+test "HTTP/3 QPACK dynamic block decodes RFC 9204 Appendix B post-base fields" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 220);
+    defer table.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 34),
+        try Qpack.applyEncoderInstructions(&table, allocator, &.{
+            0x3f, 0xbd, 0x01,
+            0xc0, 0x0f, 'w',
+            'w',  'w',  '.',
+            'e',  'x',  'a',
+            'm',  'p',  'l',
+            'e',  '.',  'c',
+            'o',  'm',  0xc1,
+            0x0c, '/',  's',
+            'a',  'm',  'p',
+            'l',  'e',  '/',
+            'p',  'a',  't',
+            'h',
+        }),
+    );
+
+    // RFC 9204 Appendix B.2, stream 4:
+    // Encoded RIC=3 => Required Insert Count=2, S=1/DeltaBase=1 => Base=0.
+    const appendix_b_field_section = [_]u8{ 0x03, 0x81, 0x10, 0x11 };
+    var decoded = try Qpack.decodeDynamicBlock(allocator, &appendix_b_field_section, table);
+    defer Qpack.freeDynamicBlock(allocator, &decoded);
+    try std.testing.expectEqual(@as(u64, 2), decoded.required_insert_count);
+    try std.testing.expectEqual(@as(u64, 0), decoded.base);
+    try std.testing.expectEqual(@as(usize, 2), decoded.fields.len);
+    try std.testing.expectEqualStrings(":authority", decoded.fields[0].name);
+    try std.testing.expectEqualStrings("www.example.com", decoded.fields[0].value);
+    try std.testing.expectEqualStrings(":path", decoded.fields[1].name);
+    try std.testing.expectEqualStrings("/sample/path", decoded.fields[1].value);
+}
+
+test "HTTP/3 QPACK dynamic block round trips and reduces wire size" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 512);
+    defer table.deinit();
+    try table.setCapacity(512);
+    _ = try table.insert("x-service-version", "2026.08.09-release-candidate");
+    _ = try table.insert("x-region", "cn-north-1");
+
+    const fields = [_]Qpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = "x-service-version", .value = "2026.08.09-release-candidate" },
+        .{ .name = "x-region", .value = "cn-north-2" },
+        .{ .name = "authorization", .value = "secret", .never_indexed = true },
+    };
+    var dynamic: std.ArrayList(u8) = .empty;
+    defer dynamic.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&dynamic, allocator, &fields, table);
+
+    var literal: std.ArrayList(u8) = .empty;
+    defer literal.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&literal, allocator, &fields);
+    try std.testing.expect(dynamic.items.len < literal.items.len);
+
+    var decoded = try Qpack.decodeDynamicBlock(allocator, dynamic.items, table);
+    defer Qpack.freeDynamicBlock(allocator, &decoded);
+    try std.testing.expectEqual(fields.len, decoded.fields.len);
+    for (fields, decoded.fields) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.name, actual.name);
+        try std.testing.expectEqualStrings(expected.value, actual.value);
+        try std.testing.expectEqual(expected.never_indexed, actual.never_indexed);
+    }
+}
+
+test "HTTP/3 QPACK dynamic block distinguishes blocked and evicted references" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 96);
+    defer table.deinit();
+    try table.setCapacity(96);
+    _ = try table.insert("a", "1");
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&encoded, allocator, &.{
+        .{ .name = "a", .value = "1" },
+    }, table);
+
+    var behind = Qpack.DynamicTable.init(allocator, 96);
+    defer behind.deinit();
+    try behind.setCapacity(96);
+    try std.testing.expectError(
+        error.QpackBlocked,
+        Qpack.decodeDynamicBlock(allocator, encoded.items, behind),
+    );
+
+    _ = try table.insert("b", "2");
+    _ = try table.insert("c", "3"); // Evicts absolute index zero.
+    try std.testing.expect(table.absolute(0) == null);
+    try std.testing.expectError(
+        error.QpackDecompressionFailed,
+        Qpack.decodeDynamicBlock(allocator, encoded.items, table),
+    );
+}
+
+test "HTTP/3 QPACK decoder instructions round trip and reject zero increment" {
+    const allocator = std.testing.allocator;
+    const instructions = [_]Qpack.DecoderInstruction{
+        .{ .section_acknowledgment = 1337 },
+        .{ .stream_cancellation = 1024 },
+        .{ .insert_count_increment = 65 },
+    };
+    for (instructions) |instruction| {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try Qpack.writeDecoderInstruction(&encoded, allocator, instruction);
+        const decoded = try Qpack.decodeDecoderInstruction(encoded.items);
+        try std.testing.expectEqual(encoded.items.len, decoded.consumed);
+        switch (instruction) {
+            .section_acknowledgment => |expected| try std.testing.expectEqual(
+                expected,
+                decoded.instruction.section_acknowledgment,
+            ),
+            .stream_cancellation => |expected| try std.testing.expectEqual(
+                expected,
+                decoded.instruction.stream_cancellation,
+            ),
+            .insert_count_increment => |expected| try std.testing.expectEqual(
+                expected,
+                decoded.instruction.insert_count_increment,
+            ),
+        }
+    }
+    try std.testing.expectError(
+        error.QpackDecoderStreamError,
+        Qpack.decodeDecoderInstruction(&.{0x00}),
+    );
+    var invalid: std.ArrayList(u8) = .empty;
+    defer invalid.deinit(allocator);
+    try std.testing.expectError(
+        error.QpackDecoderStreamError,
+        Qpack.writeDecoderInstruction(&invalid, allocator, .{ .insert_count_increment = 0 }),
+    );
+}
+
+fn checkQpackDynamicDecodeAllocationFailure(allocator: std.mem.Allocator) !void {
+    var table = Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-name", "x-value");
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try Qpack.encodeDynamicBlock(&encoded, allocator, &.{
+        .{ .name = "x-name", .value = "x-value" },
+        .{ .name = "x-name", .value = "different" },
+        .{ .name = "x-literal", .value = "materialized" },
+    }, table);
+    var decoded = try Qpack.decodeDynamicBlock(allocator, encoded.items, table);
+    Qpack.freeDynamicBlock(allocator, &decoded);
+}
+
+test "HTTP/3 QPACK dynamic decode is transactional under allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkQpackDynamicDecodeAllocationFailure,
+        .{},
     );
 }
 
