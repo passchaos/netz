@@ -45,6 +45,7 @@ pub const RecvFlow = struct {
 
     pub fn init(initial_limit: u64, window: u64) Error!RecvFlow {
         if (window == 0) return error.InvalidWindow;
+        if (initial_limit > quic.varint.max_value or window > quic.varint.max_value) return error.InvalidWindow;
         return .{ .limit = initial_limit, .window = window };
     }
 
@@ -108,6 +109,9 @@ test "QUIC receive flow emits MAX_DATA after consumption threshold" {
     try std.testing.expectEqual(@as(u64, 160), new_limit);
     const frame = flow.maxDataFrame();
     try std.testing.expectEqual(@as(u64, 160), frame.max_data.maximum_data);
+    const oversized_varint = @as(u64, quic.varint.max_value) + 1;
+    try std.testing.expectError(error.InvalidWindow, RecvFlow.init(oversized_varint, 1));
+    try std.testing.expectError(error.InvalidWindow, RecvFlow.init(0, oversized_varint));
 }
 
 test "QUIC receive flow consumes and expands near varint ceiling safely" {
