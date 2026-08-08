@@ -9772,8 +9772,12 @@ pub const sctp = struct {
         if (bytes.len == 0) return error.InvalidSctpPacket;
         return switch (bytes[0]) {
             0x02 => blk: {
-                if (bytes.len != 1 and bytes.len != 4) return error.InvalidSctpPacket;
-                if (bytes.len == 4 and !std.mem.eql(u8, bytes[1..4], &.{ 0, 0, 0 })) return error.InvalidSctpPacket;
+                // Pion/datachannel's channelAck.Unmarshal intentionally ignores
+                // the remainder after the already-validated message type.  ACK
+                // carries no semantic fields, and accepting peers that send the
+                // 4-byte common-header form with non-zero reserved bytes keeps
+                // this parser interoperable while writeDcepAck still emits the
+                // canonical zero-filled form.
                 break :blk .{ .ack = {} };
             },
             0x03 => blk: {
@@ -14490,7 +14494,8 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expectEqualSlices(u8, &.{ 0x02, 0, 0, 0 }, ack.items);
     try std.testing.expect(try sctp.parseDcepMessage(ack.items) == .ack);
     try std.testing.expect(try sctp.parseDcepMessage(&.{0x02}) == .ack);
-    try std.testing.expectError(error.InvalidSctpPacket, sctp.parseDcepMessage(&.{ 0x02, 0, 0, 1 }));
+    try std.testing.expect(try sctp.parseDcepMessage(&.{ 0x02, 0, 0, 1 }) == .ack);
+    try std.testing.expect(try sctp.parseDcepMessage(&.{ 0x02, 0xaa, 0xbb, 0xcc, 0xdd }) == .ack);
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_string_empty, sctp.dataChannelPayloadProtocol(true, 0));
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_binary, sctp.dataChannelPayloadProtocol(false, 4));
     try std.testing.expectEqual(sctp.DataChannelPayloadInfo{
