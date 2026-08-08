@@ -801,10 +801,20 @@ pub const Qpack = struct {
         }
 
         pub fn findExact(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
+            return self.findExactBefore(name, value, self.insert_count);
+        }
+
+        pub fn findExactBefore(
+            self: DynamicTable,
+            name: []const u8,
+            value: []const u8,
+            absolute_index_limit: u64,
+        ) ?u64 {
             var index = self.entries.items.len;
             while (index > self.head) {
                 index -= 1;
                 const entry = self.entries.items[index];
+                if (entry.absolute_index >= absolute_index_limit) continue;
                 if (std.mem.eql(u8, entry.name, name) and std.mem.eql(u8, entry.value, value)) {
                     return entry.absolute_index;
                 }
@@ -813,10 +823,19 @@ pub const Qpack = struct {
         }
 
         pub fn findName(self: DynamicTable, name: []const u8) ?u64 {
+            return self.findNameBefore(name, self.insert_count);
+        }
+
+        pub fn findNameBefore(
+            self: DynamicTable,
+            name: []const u8,
+            absolute_index_limit: u64,
+        ) ?u64 {
             var index = self.entries.items.len;
             while (index > self.head) {
                 index -= 1;
                 const entry = self.entries.items[index];
+                if (entry.absolute_index >= absolute_index_limit) continue;
                 if (std.mem.eql(u8, entry.name, name)) return entry.absolute_index;
             }
             return null;
@@ -1105,12 +1124,63 @@ pub const Qpack = struct {
         fields: []const HeaderField,
         table: DynamicTable,
     ) !void {
+        var ignored_references: std.ArrayList(u64) = .empty;
+        defer ignored_references.deinit(allocator);
+        try encodeDynamicBlockWithReferenceLimit(
+            list,
+            allocator,
+            fields,
+            table,
+            table.insert_count,
+            &ignored_references,
+        );
+    }
+
+    /// Encode a non-blocking field section using only entries the decoder has
+    /// acknowledged. Absolute indexes actually referenced by the section are
+    /// appended to `references` for the encoder's eviction bookkeeping.
+    pub fn encodeDynamicBlockKnownReceived(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        fields: []const HeaderField,
+        table: DynamicTable,
+        known_received_count: u64,
+        references: *std.ArrayList(u64),
+    ) !void {
+        if (known_received_count > table.insert_count) {
+            return error.QpackDecoderStreamError;
+        }
+        try encodeDynamicBlockWithReferenceLimit(
+            list,
+            allocator,
+            fields,
+            table,
+            known_received_count,
+            references,
+        );
+    }
+
+    fn encodeDynamicBlockWithReferenceLimit(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        fields: []const HeaderField,
+        table: DynamicTable,
+        reference_limit: u64,
+        references: *std.ArrayList(u64),
+    ) !void {
         const base = table.insert_count;
         var required_insert_count: u64 = 0;
         for (fields) |field| {
-            if (table.findExact(field.name, field.value)) |absolute_index| {
+            if (table.findExactBefore(
+                field.name,
+                field.value,
+                reference_limit,
+            )) |absolute_index| {
                 required_insert_count = @max(required_insert_count, absolute_index + 1);
-            } else if (table.findName(field.name)) |absolute_index| {
+            } else if (table.findNameBefore(
+                field.name,
+                reference_limit,
+            )) |absolute_index| {
                 required_insert_count = @max(required_insert_count, absolute_index + 1);
             }
         }
@@ -1132,7 +1202,12 @@ pub const Qpack = struct {
         );
 
         for (fields) |field| {
-            if (!field.never_indexed) if (table.findExact(field.name, field.value)) |absolute_index| {
+            if (!field.never_indexed) if (table.findExactBefore(
+                field.name,
+                field.value,
+                reference_limit,
+            )) |absolute_index| {
+                try appendReferenceUnique(references, allocator, absolute_index);
                 if (absolute_index < base) {
                     try encodePrefixedInteger(
                         list,
@@ -1169,7 +1244,11 @@ pub const Qpack = struct {
                 continue;
             }
 
-            if (table.findName(field.name)) |absolute_index| {
+            if (table.findNameBefore(
+                field.name,
+                reference_limit,
+            )) |absolute_index| {
+                try appendReferenceUnique(references, allocator, absolute_index);
                 if (absolute_index < base) {
                     try encodePrefixedInteger(
                         list,
@@ -1201,6 +1280,17 @@ pub const Qpack = struct {
             try list.appendSlice(allocator, field.name);
             try encodeString(list, allocator, field.value);
         }
+    }
+
+    fn appendReferenceUnique(
+        references: *std.ArrayList(u64),
+        allocator: std.mem.Allocator,
+        absolute_index: u64,
+    ) !void {
+        for (references.items) |existing| {
+            if (existing == absolute_index) return;
+        }
+        try references.append(allocator, absolute_index);
     }
 
     pub fn decodeDynamicBlock(

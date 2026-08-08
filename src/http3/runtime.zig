@@ -232,6 +232,320 @@ fn applyDecodedEncoderInstruction(
     }
 }
 
+pub const QpackEncodeState = struct {
+    const PendingSection = struct {
+        stream_id: u64,
+        required_insert_count: u64,
+        references: []u64,
+
+        fn deinit(self: *PendingSection, allocator: std.mem.Allocator) void {
+            allocator.free(self.references);
+            self.* = undefined;
+        }
+    };
+
+    allocator: std.mem.Allocator,
+    table: http3.Qpack.DynamicTable,
+    known_received_count: u64 = 0,
+    pending_sections: std.ArrayList(PendingSection) = .empty,
+    reference_counts: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    encoder_instructions: std.ArrayList(u8) = .empty,
+    decoder_stream: ?quic.stream_state.RecvState = null,
+    decoder_stream_type_received: bool = false,
+    max_stream_buffer: usize,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        peer_max_capacity: usize,
+        max_stream_buffer: usize,
+    ) QpackEncodeState {
+        return .{
+            .allocator = allocator,
+            .table = .init(allocator, peer_max_capacity),
+            .max_stream_buffer = max_stream_buffer,
+        };
+    }
+
+    pub fn deinit(self: *QpackEncodeState) void {
+        if (self.decoder_stream) |*stream| stream.deinit();
+        for (self.pending_sections.items) |*section| section.deinit(self.allocator);
+        self.pending_sections.deinit(self.allocator);
+        self.reference_counts.deinit(self.allocator);
+        self.encoder_instructions.deinit(self.allocator);
+        self.table.deinit();
+        self.* = undefined;
+    }
+
+    pub fn setCapacity(self: *QpackEncodeState, capacity: usize) Error!void {
+        try self.ensureEvictableForCapacity(capacity);
+        const original_len = self.encoder_instructions.items.len;
+        errdefer self.encoder_instructions.shrinkRetainingCapacity(original_len);
+        try http3.Qpack.writeEncoderInstruction(
+            &self.encoder_instructions,
+            self.allocator,
+            .{ .set_capacity = capacity },
+        );
+        try self.table.setCapacity(capacity);
+    }
+
+    pub fn insertField(
+        self: *QpackEncodeState,
+        name: []const u8,
+        value: []const u8,
+    ) Error!?u64 {
+        const entry_size = std.math.add(
+            usize,
+            std.math.add(usize, name.len, value.len) catch
+                return error.QpackEncoderStreamError,
+            http3.Qpack.dynamic_entry_overhead,
+        ) catch return error.QpackEncoderStreamError;
+        if (entry_size > self.table.capacity) return null;
+        if (!self.canEvictForInsert(entry_size)) return null;
+
+        var instruction: http3.Qpack.EncoderInstruction = undefined;
+        if (findQpackStaticName(name)) |index| {
+            instruction = .{ .insert_name_reference = .{
+                .static = true,
+                .name_index = index,
+                .value = value,
+            } };
+        } else if (self.table.findName(name)) |absolute_index| {
+            const relative = self.table.insert_count - absolute_index - 1;
+            instruction = .{ .insert_name_reference = .{
+                .static = false,
+                .name_index = relative,
+                .value = value,
+            } };
+        } else {
+            instruction = .{ .insert_literal = .{ .name = name, .value = value } };
+        }
+        const original_len = self.encoder_instructions.items.len;
+        errdefer self.encoder_instructions.shrinkRetainingCapacity(original_len);
+        try http3.Qpack.writeEncoderInstruction(
+            &self.encoder_instructions,
+            self.allocator,
+            instruction,
+        );
+        return try self.table.insert(name, value);
+    }
+
+    pub fn encodeFieldSection(
+        self: *QpackEncodeState,
+        list: *std.ArrayList(u8),
+        stream_id: u64,
+        fields: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.shrinkRetainingCapacity(original_len);
+        var references: std.ArrayList(u64) = .empty;
+        errdefer references.deinit(self.allocator);
+        try http3.Qpack.encodeDynamicBlockKnownReceived(
+            list,
+            self.allocator,
+            fields,
+            self.table,
+            self.known_received_count,
+            &references,
+        );
+        if (references.items.len == 0) {
+            references.deinit(self.allocator);
+            return;
+        }
+
+        const owned = try references.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(owned);
+        try self.pending_sections.ensureUnusedCapacity(self.allocator, 1);
+        var new_reference_count_entries: usize = 0;
+        for (owned) |absolute_index| {
+            if (!self.reference_counts.contains(absolute_index)) {
+                new_reference_count_entries += 1;
+            }
+        }
+        try self.reference_counts.ensureUnusedCapacity(
+            self.allocator,
+            std.math.cast(u32, new_reference_count_entries) orelse
+                return error.OutOfMemory,
+        );
+        for (owned) |absolute_index| {
+            const entry = self.reference_counts.getOrPutAssumeCapacity(
+                absolute_index,
+            );
+            if (!entry.found_existing) entry.value_ptr.* = 0;
+            entry.value_ptr.* += 1;
+        }
+        self.pending_sections.appendAssumeCapacity(.{
+            .stream_id = stream_id,
+            .required_insert_count = maxReferencedInsertCount(owned),
+            .references = owned,
+        });
+    }
+
+    pub fn applyDecoderStreamFrame(
+        self: *QpackEncodeState,
+        control: *http3.ControlState,
+        stream: quic.StreamFrame,
+    ) Error!void {
+        if (stream.fin) return error.ClosedCriticalStream;
+        if (self.decoder_stream == null) {
+            self.decoder_stream = quic.stream_state.RecvState.init(
+                self.allocator,
+                stream.stream_id,
+                self.max_stream_buffer,
+            );
+        }
+        const receive = &self.decoder_stream.?;
+        try receive.insert(stream);
+        if (!self.decoder_stream_type_received) {
+            const available = receive.available();
+            if (available.len == 0) return;
+            const prefix = quic.varint.decodeSlice(available) catch |err| switch (err) {
+                error.BufferTooShort => return,
+                else => return error.QpackDecoderStreamError,
+            };
+            if (@as(http3.StreamType, @enumFromInt(prefix.value)) != .qpack_decoder) {
+                return error.InvalidStreamType;
+            }
+            try control.registerQpackStream(.qpack_decoder, stream.stream_id);
+            try receive.consume(prefix.len);
+            self.decoder_stream_type_received = true;
+        }
+
+        while (receive.available().len != 0) {
+            const decoded = http3.Qpack.decodeDecoderInstruction(
+                receive.available(),
+            ) catch |err| switch (err) {
+                error.BufferTooShort => break,
+                else => return error.QpackDecoderStreamError,
+            };
+            try self.applyDecoderInstruction(decoded.instruction);
+            try receive.consume(decoded.consumed);
+        }
+    }
+
+    pub fn pendingEncoderInstructions(self: QpackEncodeState) []const u8 {
+        return self.encoder_instructions.items;
+    }
+
+    pub fn clearEncoderInstructions(self: *QpackEncodeState) void {
+        self.encoder_instructions.clearRetainingCapacity();
+    }
+
+    fn applyDecoderInstruction(
+        self: *QpackEncodeState,
+        instruction: http3.Qpack.DecoderInstruction,
+    ) Error!void {
+        switch (instruction) {
+            .insert_count_increment => |increment| {
+                const next = std.math.add(
+                    u64,
+                    self.known_received_count,
+                    increment,
+                ) catch return error.QpackDecoderStreamError;
+                if (next > self.table.insert_count) return error.QpackDecoderStreamError;
+                self.known_received_count = next;
+            },
+            .section_acknowledgment => |stream_id| {
+                const index = self.findPendingSection(stream_id) orelse
+                    return error.QpackDecoderStreamError;
+                const required_insert_count =
+                    self.pending_sections.items[index].required_insert_count;
+                self.releaseSection(index);
+                // Section Ack implicitly acknowledges all inserts up to RIC.
+                self.known_received_count = @max(
+                    self.known_received_count,
+                    required_insert_count,
+                );
+            },
+            .stream_cancellation => |stream_id| {
+                var index: usize = 0;
+                var found = false;
+                while (index < self.pending_sections.items.len) {
+                    if (self.pending_sections.items[index].stream_id != stream_id) {
+                        index += 1;
+                        continue;
+                    }
+                    self.releaseSection(index);
+                    found = true;
+                }
+                if (!found) return error.QpackDecoderStreamError;
+            },
+        }
+    }
+
+    fn findPendingSection(self: QpackEncodeState, stream_id: u64) ?usize {
+        for (self.pending_sections.items, 0..) |section, index| {
+            if (section.stream_id == stream_id) return index;
+        }
+        return null;
+    }
+
+    fn releaseSection(self: *QpackEncodeState, index: usize) void {
+        var section = self.pending_sections.orderedRemove(index);
+        for (section.references) |absolute_index| {
+            const count = self.reference_counts.getPtr(absolute_index).?;
+            count.* -= 1;
+            if (count.* == 0) _ = self.reference_counts.remove(absolute_index);
+        }
+        section.deinit(self.allocator);
+    }
+
+    fn canEvictForInsert(
+        self: QpackEncodeState,
+        incoming_size: usize,
+    ) bool {
+        var simulated_size = self.table.current_size;
+        var index = self.table.head;
+        while (simulated_size > self.table.capacity or
+            incoming_size > self.table.capacity - simulated_size)
+        {
+            if (index >= self.table.entries.items.len) return false;
+            const entry = self.table.entries.items[index];
+            if (!self.entryEvictable(entry.absolute_index)) return false;
+            simulated_size -= entry.size();
+            index += 1;
+        }
+        return true;
+    }
+
+    fn ensureEvictableForCapacity(
+        self: QpackEncodeState,
+        capacity: usize,
+    ) Error!void {
+        if (capacity > self.table.max_capacity) return error.QpackEncoderStreamError;
+        var simulated_size = self.table.current_size;
+        var index = self.table.head;
+        while (simulated_size > capacity) {
+            const entry = self.table.entries.items[index];
+            if (!self.entryEvictable(entry.absolute_index)) return error.QpackEncoderStreamError;
+            simulated_size -= entry.size();
+            index += 1;
+        }
+    }
+
+    fn entryEvictable(self: QpackEncodeState, absolute_index: u64) bool {
+        return absolute_index < self.known_received_count and
+            !self.reference_counts.contains(absolute_index);
+    }
+
+    fn maxReferencedInsertCount(references: []const u64) u64 {
+        var required_insert_count: u64 = 0;
+        for (references) |absolute_index| {
+            required_insert_count = @max(
+                required_insert_count,
+                absolute_index + 1,
+            );
+        }
+        return required_insert_count;
+    }
+};
+
+fn findQpackStaticName(name: []const u8) ?u64 {
+    for (http3.Qpack.static_table, 0..) |entry, index| {
+        if (std.mem.eql(u8, entry.name, name)) return @intCast(index);
+    }
+    return null;
+}
+
 pub const Server = struct {
     quic_server: quic.runtime.Server,
     limits: Limits = .{},
@@ -2122,6 +2436,222 @@ test "HTTP/3 QPACK decoder state rejects capacity overflow and critical stream F
             .fin = true,
         },
     ));
+}
+
+test "HTTP/3 QPACK encoder state waits for insert acknowledgment before dynamic reference" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.init(allocator, 256, 4096);
+    defer encoder.deinit();
+    try encoder.setCapacity(256);
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        try encoder.insertField("x-encode", "reused"),
+    );
+
+    const fields = [_]http3.Qpack.HeaderField{
+        .{ .name = "x-encode", .value = "reused" },
+    };
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try encoder.encodeFieldSection(&first, 0, &fields);
+    var first_decoded = try http3.Qpack.decodeDynamicBlock(
+        allocator,
+        first.items,
+        encoder.table,
+    );
+    defer http3.Qpack.freeDynamicBlock(allocator, &first_decoded);
+    try std.testing.expectEqual(@as(u64, 0), first_decoded.required_insert_count);
+    try std.testing.expectEqual(@as(usize, 0), encoder.pending_sections.items.len);
+
+    var decoder_bytes: std.ArrayList(u8) = .empty;
+    defer decoder_bytes.deinit(allocator);
+    try http3.writeQpackDecoderStreamPrefix(&decoder_bytes, allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &decoder_bytes,
+        allocator,
+        .{ .insert_count_increment = 1 },
+    );
+    var control = http3.ControlState{};
+    const split = decoder_bytes.items.len - 1;
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = split,
+        .data = decoder_bytes.items[split..],
+    });
+    try std.testing.expectEqual(@as(u64, 0), encoder.known_received_count);
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = 0,
+        .data = decoder_bytes.items[0..split],
+    });
+    try std.testing.expectEqual(@as(u64, 1), encoder.known_received_count);
+    try std.testing.expectEqual(
+        @as(?u64, client_qpack_decoder_stream_id),
+        control.peer_qpack_decoder_stream_id,
+    );
+
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try encoder.encodeFieldSection(&second, 4, &fields);
+    var second_decoded = try http3.Qpack.decodeDynamicBlock(
+        allocator,
+        second.items,
+        encoder.table,
+    );
+    defer http3.Qpack.freeDynamicBlock(allocator, &second_decoded);
+    try std.testing.expectEqual(@as(u64, 1), second_decoded.required_insert_count);
+    try std.testing.expectEqual(@as(usize, 1), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(0));
+
+    var acknowledgment: std.ArrayList(u8) = .empty;
+    defer acknowledgment.deinit(allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &acknowledgment,
+        allocator,
+        .{ .section_acknowledgment = 4 },
+    );
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = decoder_bytes.items.len,
+        .data = acknowledgment.items,
+    });
+    try std.testing.expectEqual(@as(usize, 0), encoder.pending_sections.items.len);
+    try std.testing.expect(!encoder.reference_counts.contains(0));
+
+    // Retransmitting the same decoder bytes cannot acknowledge twice.
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = 0,
+        .data = decoder_bytes.items,
+    });
+    try std.testing.expectEqual(@as(u64, 1), encoder.known_received_count);
+}
+
+test "HTTP/3 QPACK encoder state protects referenced entries from eviction" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.init(allocator, 34, 4096);
+    defer encoder.deinit();
+    try encoder.setCapacity(34);
+    _ = try encoder.insertField("a", "1");
+
+    var control = http3.ControlState{};
+    const decoder_stream = [_]u8{
+        @intFromEnum(http3.StreamType.qpack_decoder),
+        0x01, // Insert Count Increment = 1.
+    };
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = 0,
+        .data = &decoder_stream,
+    });
+
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeFieldSection(&block, 8, &.{
+        .{ .name = "a", .value = "1" },
+    });
+    try std.testing.expectEqual(@as(usize, 1), encoder.pending_sections.items.len);
+
+    // Inserting b would evict referenced a. The encoder must skip the insert,
+    // not violate QPACK's prohibited-eviction rule.
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        try encoder.insertField("b", "2"),
+    );
+    try std.testing.expectEqualStrings("a", encoder.table.relative(0).?.name);
+
+    var cancel_bytes: std.ArrayList(u8) = .empty;
+    defer cancel_bytes.deinit(allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &cancel_bytes,
+        allocator,
+        .{ .stream_cancellation = 8 },
+    );
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = decoder_stream.len,
+        .data = cancel_bytes.items,
+    });
+    try std.testing.expectEqual(@as(usize, 0), encoder.pending_sections.items.len);
+
+    // Once acknowledged and unreferenced, a becomes evictable.
+    try std.testing.expectEqual(
+        @as(?u64, 1),
+        try encoder.insertField("b", "2"),
+    );
+    try std.testing.expect(encoder.table.absolute(0) == null);
+    try std.testing.expectEqualStrings("b", encoder.table.relative(0).?.name);
+}
+
+test "HTTP/3 QPACK encoder state rejects invalid decoder feedback" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.init(allocator, 128, 4096);
+    defer encoder.deinit();
+    try encoder.setCapacity(128);
+    _ = try encoder.insertField("a", "1");
+    var control = http3.ControlState{};
+
+    const excessive_increment = [_]u8{
+        @intFromEnum(http3.StreamType.qpack_decoder),
+        0x02,
+    };
+    try std.testing.expectError(
+        error.QpackDecoderStreamError,
+        encoder.applyDecoderStreamFrame(&control, .{
+            .stream_id = client_qpack_decoder_stream_id,
+            .offset = 0,
+            .data = &excessive_increment,
+        }),
+    );
+
+    var ack_without_section = QpackEncodeState.init(allocator, 128, 4096);
+    defer ack_without_section.deinit();
+    var acknowledgment: std.ArrayList(u8) = .empty;
+    defer acknowledgment.deinit(allocator);
+    try http3.writeQpackDecoderStreamPrefix(&acknowledgment, allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &acknowledgment,
+        allocator,
+        .{ .section_acknowledgment = 0 },
+    );
+    var second_control = http3.ControlState{};
+    try std.testing.expectError(
+        error.QpackDecoderStreamError,
+        ack_without_section.applyDecoderStreamFrame(
+            &second_control,
+            .{
+                .stream_id = client_qpack_decoder_stream_id,
+                .offset = 0,
+                .data = acknowledgment.items,
+            },
+        ),
+    );
+}
+
+fn checkQpackEncoderStateAllocationFailure(allocator: std.mem.Allocator) !void {
+    var encoder = QpackEncodeState.init(allocator, 256, 4096);
+    defer encoder.deinit();
+    try encoder.setCapacity(256);
+    _ = try encoder.insertField("x-one", "value-one");
+    _ = try encoder.insertField("x-two", "value-two");
+
+    // Simulate a decoder that has processed both inserts, then exercise
+    // multi-container field-section reference tracking.
+    encoder.known_received_count = encoder.table.insert_count;
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeFieldSection(&block, 12, &.{
+        .{ .name = "x-one", .value = "value-one" },
+        .{ .name = "x-two", .value = "value-two" },
+    });
+}
+
+test "HTTP/3 QPACK encoder state is transactional under allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkQpackEncoderStateAllocationFailure,
+        .{},
+    );
 }
 
 test "HTTP/3 runtime rejects closed critical streams" {
