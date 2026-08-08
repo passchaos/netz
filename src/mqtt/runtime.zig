@@ -611,9 +611,7 @@ pub const Connection = struct {
 
         var unsuback = try self.readUnsubAck();
         errdefer unsuback.deinit(self.allocator);
-        if (unsuback.unsuback.packet_id != packet_id or unsuback.unsuback.reason_codes.len != topic_filters.len) {
-            return error.UnexpectedPacket;
-        }
+        try validateUnsubAckResponse(self.protocol, unsuback.unsuback, packet_id, topic_filters.len);
         return unsuback;
     }
 
@@ -843,6 +841,18 @@ pub const Connection = struct {
         return id;
     }
 };
+
+fn validateUnsubAckResponse(protocol: mqtt.ProtocolVersion, unsuback: mqtt.UnsubAck, packet_id: u16, topic_filter_count: usize) Error!void {
+    if (unsuback.packet_id != packet_id) return error.UnexpectedPacket;
+    switch (protocol) {
+        .v5 => if (unsuback.reason_codes.len != topic_filter_count) return error.UnexpectedPacket,
+        // MQTT 3.1.1 UNSUBACK acknowledges only the Packet Identifier.  Unlike
+        // MQTT 5, it has no per-topic reason-code vector, so a single v3
+        // UNSUBACK can validly confirm an UNSUBSCRIBE that contained multiple
+        // topic filters.  Keep this aligned with rumqtt's v4 UnsubAck model.
+        .v3_1_1 => {},
+    }
+}
 
 pub const PublishOptions = struct {
     qos: mqtt.QoS = .at_most_once,
@@ -1223,6 +1233,26 @@ test "MQTT Receive Maximum cannot raise local outgoing inflight cap" {
     try std.testing.expectEqual(@as(u16, 2), negotiatedOutgoingInflightLimit(2, 3));
     try std.testing.expectEqual(@as(u16, 2), negotiatedOutgoingInflightLimit(3, 2));
     try std.testing.expectEqual(@as(u16, 1), negotiatedOutgoingInflightLimit(1, 1));
+}
+
+test "MQTT v3 UNSUBACK validates packet id without per-filter reasons" {
+    var v3_reasons = [_]u8{0x00};
+    const v3_ack = mqtt.UnsubAck{
+        .packet_id = 12,
+        .properties = &.{},
+        .reason_codes = &v3_reasons,
+    };
+    try validateUnsubAckResponse(.v3_1_1, v3_ack, 12, 2);
+    try std.testing.expectError(error.UnexpectedPacket, validateUnsubAckResponse(.v3_1_1, v3_ack, 13, 2));
+
+    var v5_reasons = [_]u8{ 0x00, 0x11 };
+    const v5_ack = mqtt.UnsubAck{
+        .packet_id = 12,
+        .properties = &.{},
+        .reason_codes = &v5_reasons,
+    };
+    try validateUnsubAckResponse(.v5, v5_ack, 12, 2);
+    try std.testing.expectError(error.UnexpectedPacket, validateUnsubAckResponse(.v5, v5_ack, 12, 1));
 }
 
 test "MQTT connection enforces negotiated maximum packet size" {

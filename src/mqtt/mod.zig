@@ -1301,11 +1301,11 @@ pub const UnsubAck = struct {
         reason_codes: []const u8,
     ) Error!void {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
-        if (reason_codes.len == 0) return error.InvalidReasonCode;
         var variable: std.ArrayList(u8) = .empty;
         defer variable.deinit(allocator);
         try wire.appendInt(&variable, allocator, u16, packet_id, .big);
         if (protocol == .v5) {
+            if (reason_codes.len == 0) return error.InvalidReasonCode;
             try validatePropertiesFor(.ack, properties);
             try writeProperties(&variable, allocator, properties);
             for (reason_codes) |code| {
@@ -1314,7 +1314,8 @@ pub const UnsubAck = struct {
             }
         } else {
             if (properties.len != 0) return error.InvalidProperty;
-            if (reason_codes.len != 1 or reason_codes[0] != 0x00) return error.InvalidReasonCode;
+            if (reason_codes.len > 1) return error.InvalidReasonCode;
+            if (reason_codes.len == 1 and reason_codes[0] != 0x00) return error.InvalidReasonCode;
         }
         try (FixedHeader{ .packet_type = .unsuback, .flags = 0, .remaining_len = variable.items.len, .header_len = 0 }).write(list, allocator);
         try list.appendSlice(allocator, variable.items);
@@ -2406,6 +2407,18 @@ test "MQTT unsubscribe and unsuback controls" {
     try std.testing.expectEqual(@as(u16, 11), unsuback.packet_id);
     try std.testing.expectEqualSlices(u8, &reasons, unsuback.reason_codes);
 
+    unsuback_bytes.clearRetainingCapacity();
+    try UnsubAck.write(&unsuback_bytes, allocator, .v3_1_1, 12, &.{}, &.{});
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xb0, 0x02, 0x00, 0x0c }, unsuback_bytes.items);
+    unsuback.deinit(allocator);
+    unsuback = try UnsubAck.parse(allocator, .v3_1_1, unsuback_bytes.items);
+    try std.testing.expectEqual(@as(u16, 12), unsuback.packet_id);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x00}, unsuback.reason_codes);
+
+    unsuback_bytes.clearRetainingCapacity();
+    try UnsubAck.write(&unsuback_bytes, allocator, .v3_1_1, 13, &.{}, &.{0x00});
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xb0, 0x02, 0x00, 0x0d }, unsuback_bytes.items);
+
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);
     try std.testing.expectError(error.InvalidSubscription, Unsubscribe.write(&invalid, allocator, .v5, 1, &.{}, &[_][]const u8{}));
@@ -2417,6 +2430,8 @@ test "MQTT unsubscribe and unsuback controls" {
     try std.testing.expectError(error.InvalidProperty, UnsubAck.write(&invalid, allocator, .v3_1_1, 1, &.{
         .{ .utf8 = .{ .id = .reason_string, .value = "v3 has no properties" } },
     }, &[_]u8{0x00}));
+    try std.testing.expectError(error.InvalidReasonCode, UnsubAck.write(&invalid, allocator, .v3_1_1, 1, &.{}, &[_]u8{ 0x00, 0x00 }));
+    try std.testing.expectError(error.InvalidReasonCode, UnsubAck.write(&invalid, allocator, .v3_1_1, 1, &.{}, &[_]u8{0x11}));
 }
 
 test "MQTT disconnect control" {
