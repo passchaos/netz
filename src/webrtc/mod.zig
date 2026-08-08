@@ -8800,6 +8800,7 @@ pub const sctp = struct {
                 if (chunk_type == .init and std.mem.readInt(u32, bytes[4..8], .big) != 0) return error.InvalidSctpPacket;
                 has_init_chunk = true;
             }
+            if (chunk_type == .cookie_echo and pos != 12) return error.InvalidSctpPacket;
             if (!supportedChunkType(chunk_type)) {
                 // RFC 4960 encodes unknown-chunk handling in the high two bits:
                 // 00/01 stop processing this packet, 10/11 skip and continue
@@ -13736,6 +13737,15 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     defer zero_checksum_cookie.deinit(allocator);
     std.mem.writeInt(u32, zero_checksum_cookie.items[8..12], 0, .little);
     try std.testing.expectError(error.BadSctpChecksum, sctp.parsePacket(allocator, zero_checksum_cookie.items, false));
+    var misordered_cookie: std.ArrayList(u8) = .empty;
+    defer misordered_cookie.deinit(allocator);
+    try wire.appendInt(&misordered_cookie, allocator, u16, 5000, .big);
+    try wire.appendInt(&misordered_cookie, allocator, u16, 5000, .big);
+    try wire.appendInt(&misordered_cookie, allocator, u32, init_ack.initiate_tag, .big);
+    try wire.appendInt(&misordered_cookie, allocator, u32, 0, .little);
+    try sctp.writeHeartbeatChunk(&misordered_cookie, allocator, false, "probe-first");
+    try sctp.writeCookieEchoChunk(&misordered_cookie, allocator, parsed_cookie);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, misordered_cookie.items, false));
 
     encoded.clearRetainingCapacity();
     try sctp.writeDataPacket(&encoded, allocator, .{
