@@ -117,7 +117,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   submission and transactional partial-send recovery that never reuses an
   already-emitted packet number, plus zero-copy Linux `UDP_SEGMENT` offload for
   contiguous equal-sized packet batches with one-shot capability fallback and
-  Linux `UDP_GRO` receive coalescing with shared zero-copy segment ownership,
+  opt-in Linux `UDP_GRO` receive coalescing with shared zero-copy segment
+  ownership, in-place current-key 1-RTT decryption, reusable frame scratch,
+  and strict wire-order low-peak batch servicing,
   endpoint-level connection-ID routing with unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route

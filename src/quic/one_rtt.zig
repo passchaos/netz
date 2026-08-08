@@ -369,6 +369,10 @@ pub const Connection = struct {
     /// Reused protected-datagram storage. Packet protection writes directly
     /// into this buffer, avoiding one heap allocation/free pair per 1-RTT send.
     send_packet_buffer: std.ArrayList(u8) = .empty,
+    /// Borrowed frame views used only by `servicePacketBatch`. They never
+    /// outlive the current decrypted GRO segment and therefore avoid one frame
+    /// slice allocation per packet on the event-loop fast path.
+    receive_frame_buffer: std.ArrayList(quic.Frame) = .empty,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         const send_buffer_capacity = std.math.add(usize, config.max_datagram_size, max_short_packet_overhead) catch return error.OutOfMemory;
@@ -419,6 +423,7 @@ pub const Connection = struct {
         self.datagram_recv_queue.deinit(self.endpoint.allocator);
         self.send_frame_buffer.deinit(self.endpoint.allocator);
         self.send_packet_buffer.deinit(self.endpoint.allocator);
+        self.receive_frame_buffer.deinit(self.endpoint.allocator);
         self.* = undefined;
     }
 
@@ -1814,15 +1819,110 @@ pub const Connection = struct {
 
         var completed: usize = 0;
         while (completed < datagrams.segment_count) : (completed += 1) {
+            const bytes = datagrams.datagramAtMutable(completed) orelse return error.InvalidPacket;
+            const keys = self.receive_key_phase.keyUpdateKeys();
+            const key_phase = try quic.protection.peekShortPacketKeyPhase(
+                keys.current.hp,
+                bytes,
+                self.config.local_connection_id.len,
+            );
+            if (key_phase == keys.current_key_phase) {
+                try self.processReceivedBytesInPlaceAt(
+                    datagrams.from,
+                    bytes,
+                    datagrams.ecn,
+                    now_ns,
+                    keys.current,
+                );
+                continue;
+            }
+
+            // The current-key phase is overwhelmingly common. Keep key-update
+            // fallback on the owning path because a failed in-place AEAD trial
+            // intentionally destroys its output and cannot safely retry
+            // current/next/previous generations against the same ciphertext.
             var packet = try self.processReceivedBytesAt(
                 datagrams.from,
-                datagrams.datagramAt(completed) orelse return error.InvalidPacket,
+                bytes,
                 datagrams.ecn,
                 now_ns,
             );
             packet.deinit(self.endpoint.allocator);
         }
         return completed;
+    }
+
+    fn processReceivedBytesInPlaceAt(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []u8,
+        ecn: quic.packet_space.EcnCodepoint,
+        now_ns: ?u64,
+        keys: quic.protection.PacketProtectionKeys,
+    ) Error!void {
+        _ = from;
+        const packet = try quic.protection.openShortPacketInPlace(
+            keys,
+            bytes,
+            self.config.local_connection_id.len,
+            self.expected_packet_number,
+        );
+
+        const frames = try self.parseServicePacketFramesOrClose(packet.payload, now_ns);
+        defer {
+            quic.deinitOwnedFrameSlice(self.receive_frame_buffer.items, self.endpoint.allocator);
+            self.receive_frame_buffer.clearRetainingCapacity();
+        }
+        try self.applyReceivedFramesForDestinationOrClose(
+            packet.packet_number,
+            frames,
+            now_ns,
+            ecn,
+            packet.destination_connection_id,
+        );
+        self.updateSpinBitAfterReceive(packet.spin_bit);
+    }
+
+    fn parseServicePacketFramesOrClose(self: *Connection, payload: []const u8, now_ns: ?u64) Error![]quic.Frame {
+        std.debug.assert(self.receive_frame_buffer.items.len == 0);
+        errdefer {
+            quic.deinitOwnedFrameSlice(self.receive_frame_buffer.items, self.endpoint.allocator);
+            self.receive_frame_buffer.clearRetainingCapacity();
+        }
+        if (payload.len == 0) {
+            try self.closeTransportAt(
+                @intFromEnum(quic.TransportErrorCode.protocol_violation),
+                0,
+                "empty payload",
+                nsToMs(now_ns),
+                null,
+            );
+            return error.InvalidFrame;
+        }
+
+        var pos: usize = 0;
+        while (pos < payload.len) {
+            if (self.receive_frame_buffer.items.len >= self.config.max_frames_per_packet) return error.MissingFrame;
+            const frame_type = quic.rawFrameTypeValue(payload[pos..]);
+            var parsed = quic.parseFrameOwned(self.endpoint.allocator, payload[pos..]) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                const code = quic.frameDecodeTransportErrorCode(err) orelse return err;
+                try self.closeTransportAt(
+                    @intFromEnum(code),
+                    frame_type,
+                    "frame encoding",
+                    nsToMs(now_ns),
+                    null,
+                );
+                return error.InvalidFrame;
+            };
+            var appended = false;
+            defer if (!appended) parsed.deinitOwned(self.endpoint.allocator);
+            try self.receive_frame_buffer.append(self.endpoint.allocator, parsed.frame);
+            appended = true;
+            pos += parsed.consumed;
+        }
+        return self.receive_frame_buffer.items;
     }
 
     fn processReceivedBytesAt(

@@ -916,6 +916,11 @@ pub const OwnedBytesBatch = struct {
         return self.datagramAtUnchecked(index);
     }
 
+    pub fn datagramAtMutable(self: *OwnedBytesBatch, index: usize) ?[]u8 {
+        if (index >= self.segment_count) return null;
+        return self.datagramAtUnchecked(index);
+    }
+
     fn datagramAtUnchecked(self: OwnedBytesBatch, index: usize) []u8 {
         const start = index * self.segment_size;
         const end = @min(start + self.segment_size, self.storage.len);

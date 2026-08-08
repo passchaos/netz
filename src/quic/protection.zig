@@ -212,6 +212,14 @@ pub const OpenedShortPacketWithKeyUpdate = struct {
     }
 };
 
+pub const OpenedShortPacketView = struct {
+    destination_connection_id: []const u8,
+    packet_number: u64,
+    spin_bit: bool,
+    key_phase: bool,
+    payload: []u8,
+};
+
 pub const ShortPacketKeyUpdateKeys = struct {
     current: PacketProtectionKeys,
     next: PacketProtectionKeys,
@@ -916,6 +924,56 @@ pub fn openShortPacket(
     };
 }
 
+/// Remove short-header protection and decrypt the payload in caller-owned
+/// packet storage.
+///
+/// This primitive deliberately accepts one key generation. Callers that need
+/// key-update fallback must determine the key phase before invoking it, because
+/// AEAD authentication failure makes the plaintext output undefined and cannot
+/// safely retry another key against the same in-place ciphertext.
+pub fn openShortPacketInPlace(
+    keys: PacketProtectionKeys,
+    packet: []u8,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+) Error!OpenedShortPacketView {
+    if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
+    if (packet.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
+        (packet[0] & 0x80) != 0 or
+        (packet[0] & 0x40) == 0)
+    {
+        return error.InvalidInitialPacket;
+    }
+    const pn_offset = 1 + destination_connection_id_len;
+    try removeHeaderProtection(keys.hp, .short, packet, pn_offset);
+    if ((packet[0] & 0x80) != 0 or (packet[0] & 0x40) == 0) return error.InvalidInitialPacket;
+    try validateShortHeaderReservedBits(packet[0]);
+    const spin_bit = (packet[0] & 0x20) != 0;
+    const key_phase = (packet[0] & 0x04) != 0;
+    const pn_len = @as(usize, (packet[0] & 0x03) + 1);
+    const payload_offset = pn_offset + pn_len;
+    if (packet.len < payload_offset + aead_tag_len) return error.InvalidInitialPacket;
+    const packet_number = try reconstructPacketNumber(expected_packet_number, packet[pn_offset..payload_offset]);
+    const payload_end = packet.len - aead_tag_len;
+    const ciphertext = packet[payload_offset..payload_end];
+    const tag = packet[payload_end..][0..aead_tag_len].*;
+    try openAes128Payload(
+        keys,
+        packet_number,
+        packet[0..payload_offset],
+        ciphertext,
+        tag,
+        ciphertext,
+    );
+    return .{
+        .destination_connection_id = packet[1..pn_offset],
+        .packet_number = packet_number,
+        .spin_bit = spin_bit,
+        .key_phase = key_phase,
+        .payload = ciphertext,
+    };
+}
+
 pub fn openShortPacketWithKeyUpdate(
     allocator: std.mem.Allocator,
     keys: ShortPacketKeyUpdateKeys,
@@ -923,7 +981,7 @@ pub fn openShortPacketWithKeyUpdate(
     destination_connection_id_len: usize,
     expected_packet_number: u64,
 ) Error!OpenedShortPacketWithKeyUpdate {
-    const key_phase = try peekShortPacketKeyPhase(allocator, keys.current.hp, packet, destination_connection_id_len);
+    const key_phase = try peekShortPacketKeyPhase(keys.current.hp, packet, destination_connection_id_len);
     if (key_phase == keys.current_key_phase) {
         return .{
             .packet = try openShortPacket(allocator, keys.current, packet, destination_connection_id_len, expected_packet_number),
@@ -987,23 +1045,28 @@ pub fn removeHeaderProtection(
     }
 }
 
-fn peekShortPacketKeyPhase(
-    allocator: std.mem.Allocator,
+pub fn peekShortPacketKeyPhase(
     hp_key: [hp_key_len]u8,
     packet: []const u8,
     destination_connection_id_len: usize,
 ) Error!bool {
     if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
-    const bytes = try allocator.dupe(u8, packet);
-    defer allocator.free(bytes);
-    if (bytes.len < 1 + destination_connection_id_len + 1 + aead_tag_len or (bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) {
+    if (packet.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
+        (packet[0] & 0x80) != 0 or
+        (packet[0] & 0x40) == 0)
+    {
         return error.InvalidInitialPacket;
     }
     const pn_offset = 1 + destination_connection_id_len;
-    try removeHeaderProtection(hp_key, .short, bytes, pn_offset);
-    if ((bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) return error.InvalidInitialPacket;
-    try validateShortHeaderReservedBits(bytes[0]);
-    return (bytes[0] & 0x04) != 0;
+    if (pn_offset + 4 + header_protection_sample_len > packet.len) {
+        return error.InvalidHeaderProtectionSample;
+    }
+    const sample = packet[pn_offset + 4 ..][0..header_protection_sample_len].*;
+    const mask = aes128HeaderProtectionMask(hp_key, sample);
+    const first = packet[0] ^ (mask[0] & 0x1f);
+    if ((first & 0x80) != 0 or (first & 0x40) == 0) return error.InvalidInitialPacket;
+    try validateShortHeaderReservedBits(first);
+    return (first & 0x04) != 0;
 }
 
 fn protectionProfile(version: u32) VersionError!ProtectionProfile {
@@ -1507,6 +1570,71 @@ test "QUIC short packet in-place sealing matches allocating wrapper" {
     try std.testing.expectEqual(try shortPacketLen(options), in_place.len);
     try std.testing.expectEqualSlices(u8, allocated, in_place);
     try std.testing.expectError(error.BufferTooShort, sealShortPacketInto(storage[0 .. in_place.len - 1], keys, options));
+}
+
+test "QUIC short packet in-place open matches owning open" {
+    const allocator = std.testing.allocator;
+    const keys = deriveAes128Keys([_]u8{0x9d} ** secret_len);
+    const options: ShortPacketOptions = .{
+        .destination_connection_id = "in-place",
+        .packet_number = 0x12_3456,
+        .packet_number_len = 3,
+        .spin_bit = true,
+        .key_phase = false,
+        .payload = "authenticated payload decrypted in caller storage",
+    };
+    const sealed = try sealShortPacket(allocator, keys, options);
+    defer allocator.free(sealed);
+
+    var owning = try openShortPacket(
+        allocator,
+        keys,
+        sealed,
+        options.destination_connection_id.len,
+        options.packet_number,
+    );
+    defer owning.deinit(allocator);
+
+    const in_place_storage = try allocator.dupe(u8, sealed);
+    defer allocator.free(in_place_storage);
+    const in_place = try openShortPacketInPlace(
+        keys,
+        in_place_storage,
+        options.destination_connection_id.len,
+        options.packet_number,
+    );
+    try std.testing.expectEqual(owning.packet_number, in_place.packet_number);
+    try std.testing.expectEqual(owning.spin_bit, in_place.spin_bit);
+    try std.testing.expectEqual(owning.key_phase, in_place.key_phase);
+    try std.testing.expectEqualSlices(u8, owning.destination_connection_id, in_place.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, owning.payload, in_place.payload);
+    try std.testing.expect(
+        @intFromPtr(in_place.payload.ptr) >= @intFromPtr(in_place_storage.ptr) and
+            @intFromPtr(in_place.payload.ptr) < @intFromPtr(in_place_storage.ptr) + in_place_storage.len,
+    );
+}
+
+test "QUIC short packet key phase peek does not mutate ciphertext" {
+    const allocator = std.testing.allocator;
+    const keys = deriveAes128Keys([_]u8{0x9e} ** secret_len);
+    const options: ShortPacketOptions = .{
+        .destination_connection_id = "peek",
+        .packet_number = 17,
+        .packet_number_len = 2,
+        .key_phase = true,
+        .payload = "phase",
+    };
+    const sealed = try sealShortPacket(allocator, keys, options);
+    defer allocator.free(sealed);
+    const before = try allocator.dupe(u8, sealed);
+    defer allocator.free(before);
+
+    try std.testing.expect(try peekShortPacketKeyPhase(
+        keys.hp,
+        sealed,
+        options.destination_connection_id.len,
+    ));
+    try std.testing.expectEqualSlices(u8, before, sealed);
 }
 
 test "QUIC short packet in-place sealing reuses caller storage" {
