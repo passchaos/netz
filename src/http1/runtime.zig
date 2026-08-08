@@ -1339,9 +1339,6 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
 fn writeRequestToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: RequestOptions) Error!void {
     try http1.validateRequestTargetForMethod(options.method, options.target);
     const target_authority = if (options.method == .CONNECT) options.target else http1.absoluteFormAuthority(options.target);
-    if (options.method != .CONNECT and std.mem.indexOf(u8, options.target, "://") != null and target_authority == null) {
-        return error.InvalidHost;
-    }
     const synthesized_host = options.host orelse target_authority;
     var request_headers: std.ArrayList(http1.Header) = .empty;
     defer request_headers.deinit(allocator);
@@ -3948,6 +3945,15 @@ test "HTTP/1 request writer omits zero Content-Length for bodyless safe methods"
             defer second.deinit(shared.allocator);
             try std.testing.expectEqual(http1.Method.POST, second.request.method);
             try std.testing.expectEqualStrings("0", second.request.header("content-length").?);
+
+            var third = try readRequestFromStream(shared.allocator, shared.io, stream, .{
+                .max_head_bytes = 4096,
+                .max_body_bytes = 4096,
+            }, .{});
+            defer third.deinit(shared.allocator);
+            try std.testing.expectEqual(http1.Method.GET, third.request.method);
+            try std.testing.expectEqualStrings("/cache/http://example.com/object", third.request.target);
+            try std.testing.expectEqualStrings("proxy.local", third.request.header("host").?);
         }
     };
 
@@ -3965,6 +3971,11 @@ test "HTTP/1 request writer omits zero Content-Length for bodyless safe methods"
         .method = .POST,
         .target = "/entity",
         .headers = &.{.{ .name = "Host", .value = "example" }},
+    });
+    try writeRequestToStream(allocator, io, stream, .{
+        .method = .GET,
+        .target = "/cache/http://example.com/object",
+        .headers = &.{.{ .name = "Host", .value = "proxy.local" }},
     });
 
     thread.join();
@@ -3985,13 +3996,18 @@ test "HTTP/1 runtime validates outbound request and response framing before writ
         .target = "http://example.com/absolute",
         .headers = &.{.{ .name = "Host", .value = "other.example" }},
     }));
-    try std.testing.expectError(error.InvalidHost, writeRequestToStream(allocator, io, stream, .{
+    try std.testing.expectError(error.MalformedStartLine, writeRequestToStream(allocator, io, stream, .{
         .method = .GET,
         .target = "http:///absolute",
     }));
-    try std.testing.expectError(error.InvalidHost, writeRequestToStream(allocator, io, stream, .{
+    try std.testing.expectError(error.MalformedStartLine, writeRequestToStream(allocator, io, stream, .{
         .method = .GET,
         .target = "http://?q=1",
+    }));
+    try std.testing.expectError(error.MalformedStartLine, writeRequestToStream(allocator, io, stream, .{
+        .method = .GET,
+        .target = "1http://example.com/absolute",
+        .headers = &.{.{ .name = "Host", .value = "example.com" }},
     }));
     try std.testing.expectError(error.InvalidHost, writeRequestToStream(allocator, io, stream, .{
         .method = .CONNECT,

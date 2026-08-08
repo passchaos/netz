@@ -922,7 +922,7 @@ pub fn validateRequestTargetForMethod(method: Method, target: []const u8) Error!
 
 fn validateOriginOrAbsoluteFormTarget(target: []const u8) Error!void {
     if (target[0] == '/') return;
-    if (std.mem.indexOf(u8, target, "://") != null) return;
+    if (absoluteFormAuthority(target) != null) return;
     return error.MalformedStartLine;
 }
 
@@ -954,8 +954,7 @@ pub fn validateRequestHost(request: Request) Error!void {
 
 fn validateRequestHostParts(version: Version, target: []const u8, headers: []const Header) Error!void {
     const host = try validateHostHeaderBlockValue(version, headers);
-    if (std.mem.indexOf(u8, target, "://") != null) {
-        const authority = absoluteFormAuthority(target) orelse return error.InvalidHost;
+    if (absoluteFormAuthority(target)) |authority| {
         try validateHostValue(authority);
         if (host) |host_value| {
             if (!std.ascii.eqlIgnoreCase(wire.trimOws(host_value), authority)) return error.InvalidHost;
@@ -981,7 +980,7 @@ fn validateHostHeaderBlockValue(version: Version, headers: []const Header) Error
 
 pub fn absoluteFormAuthority(target: []const u8) ?[]const u8 {
     const scheme_end = std.mem.indexOf(u8, target, "://") orelse return null;
-    if (scheme_end == 0) return null;
+    if (!validUriScheme(target[0..scheme_end])) return null;
     const authority_start = scheme_end + 3;
     if (authority_start >= target.len) return null;
     const rest = target[authority_start..];
@@ -990,6 +989,14 @@ pub fn absoluteFormAuthority(target: []const u8) ?[]const u8 {
     const authority = rest[0..authority_end];
     if (std.mem.indexOfScalar(u8, authority, '@') != null) return null;
     return authority;
+}
+
+fn validUriScheme(scheme: []const u8) bool {
+    if (scheme.len == 0 or !std.ascii.isAlphabetic(scheme[0])) return false;
+    for (scheme[1..]) |byte| {
+        if (!(std.ascii.isAlphanumeric(byte) or byte == '+' or byte == '-' or byte == '.')) return false;
+    }
+    return true;
 }
 
 pub fn validateHostValue(raw_host: []const u8) Error!void {
@@ -1495,19 +1502,22 @@ test "HTTP/1 validates absolute-form authority against Host" {
     try std.testing.expectError(error.InvalidHost, validateRequestHost(bad));
 
     const invalid_authority = "GET http://user@example.com/proxy HTTP/1.1\r\nHost: user@example.com\r\n\r\n";
-    var invalid = try parseRequest(allocator, invalid_authority, .{});
-    defer invalid.deinit(allocator);
-    try std.testing.expectError(error.InvalidHost, validateRequestHost(invalid));
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, invalid_authority, .{}));
 
     const missing_authority = "GET http:///proxy HTTP/1.1\r\nHost: example.com\r\n\r\n";
-    var missing_authority_req = try parseRequest(allocator, missing_authority, .{});
-    defer missing_authority_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHost, validateRequestHost(missing_authority_req));
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, missing_authority, .{}));
 
     const empty_authority = "GET http://?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n";
-    var empty_authority_req = try parseRequest(allocator, empty_authority, .{});
-    defer empty_authority_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHost, validateRequestHost(empty_authority_req));
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, empty_authority, .{}));
+
+    const origin_with_colon_slashes = "GET /cache/http://example.com/object HTTP/1.1\r\nHost: proxy.local\r\n\r\n";
+    var origin_req = try parseRequest(allocator, origin_with_colon_slashes, .{});
+    defer origin_req.deinit(allocator);
+    try validateRequestHost(origin_req);
+    try std.testing.expect(absoluteFormAuthority(origin_req.target) == null);
+
+    const scheme_must_start_alpha = "GET 1http://example.com/proxy HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, scheme_must_start_alpha, .{}));
 }
 
 test "HTTP/1 writers reject forbidden response bodies" {
