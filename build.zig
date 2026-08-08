@@ -79,6 +79,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark HTTP/1 borrowed head parsing against owned parsing",
         },
         .{
+            .exe_name = "netz-bench-http2-hpack",
+            .path = "examples/bench_http2_hpack.zig",
+            .run_step = "bench-http2-hpack",
+            .description = "Benchmark HTTP/2 HPACK stateful compression against stateless helpers",
+        },
+        .{
             .exe_name = "netz-bench-quic-short-packet",
             .path = "examples/bench_quic_short_packet.zig",
             .run_step = "bench-quic-short-packet",
