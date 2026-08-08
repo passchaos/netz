@@ -3149,6 +3149,19 @@ pub const sdp = struct {
         return null;
     }
 
+    pub fn collectAttrValues(allocator: std.mem.Allocator, attrs: []const Attribute, name: []const u8) Error![]const []const u8 {
+        var values: std.ArrayList([]const u8) = .empty;
+        errdefer values.deinit(allocator);
+        for (attrs) |attr| {
+            if (std.ascii.eqlIgnoreCase(attr.name, name)) try values.append(allocator, attr.value);
+        }
+        return values.toOwnedSlice(allocator);
+    }
+
+    pub fn freeAttrValues(allocator: std.mem.Allocator, values: []const []const u8) void {
+        allocator.free(values);
+    }
+
     fn iceOptionsHasToken(value: []const u8, token: []const u8) bool {
         var parts = std.mem.tokenizeAny(u8, value, " \t");
         while (parts.next()) |part| {
@@ -10153,6 +10166,12 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=extmap:4 " ++ sdp.sdes_mid_uri ++ "\r\n";
     var session = try sdp.parse(allocator, text);
     defer session.deinit(allocator);
+
+    const group_values = try sdp.collectAttrValues(allocator, session.attributes, "group");
+    defer sdp.freeAttrValues(allocator, group_values);
+    try std.testing.expectEqual(@as(usize, 2), group_values.len);
+    try std.testing.expectEqualStrings("LS 0", group_values[0]);
+    try std.testing.expectEqualStrings("BUNDLE 1 0", group_values[1]);
 
     const selected_media = sdp.selectCandidateMedia(session).?;
     try std.testing.expectEqual(@as(u16, 1), selected_media.index);
