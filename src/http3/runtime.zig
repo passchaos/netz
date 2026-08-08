@@ -40,15 +40,17 @@ pub const Server = struct {
     }
 
     pub fn receiveRequest(self: *Server) Error!OwnedRequest {
-        var datagram = try self.quic_server.receive();
-        errdefer datagram.deinit(self.quic_server.endpoint.allocator);
-        const stream = try findMessageStreamFrame(datagram.frames) orelse return error.MissingStreamFrame;
-        var request = try http3.decodeRequest(self.quic_server.endpoint.allocator, stream.data);
+        var assembled = try receiveRuntimeStreamBytes(&self.quic_server.endpoint, null);
+        errdefer assembled.deinit(self.quic_server.endpoint.allocator);
+        var request = try http3.decodeRequest(self.quic_server.endpoint.allocator, assembled.bytes);
         errdefer request.deinit(self.quic_server.endpoint.allocator);
+        const owned_parts = try assembled.intoOwnedParts(self.quic_server.endpoint.allocator);
         return .{
-            .from = datagram.from,
-            .stream_id = @intCast(stream.stream_id),
-            .datagram = datagram,
+            .from = assembled.from,
+            .stream_id = assembled.stream_id,
+            .datagram = owned_parts.datagram,
+            .extra_datagrams = owned_parts.extra_datagrams,
+            .bytes = owned_parts.bytes,
             .request = request,
         };
     }
@@ -136,31 +138,128 @@ pub const Client = struct {
         const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = stream_id, .data = encoded.items, .fin = true } }};
         try self.quic_client.sendFrames(&frames);
 
-        while (true) {
-            var datagram = try self.quic_client.receive();
-            errdefer datagram.deinit(self.quic_client.endpoint.allocator);
-            const stream = (try findMessageStreamFrame(datagram.frames)) orelse {
-                datagram.deinit(self.quic_client.endpoint.allocator);
-                continue;
-            };
-            if (stream.stream_id != stream_id) return error.UnexpectedStream;
-            try http3.validateResponsePushPromises(.{}, stream.data);
-            var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, stream.data);
-            errdefer response.deinit(self.quic_client.endpoint.allocator);
-            return .{ .datagram = datagram, .response = response };
-        }
+        var assembled = try receiveRuntimeStreamBytes(&self.quic_client.endpoint, stream_id);
+        errdefer assembled.deinit(self.quic_client.endpoint.allocator);
+        try http3.validateResponsePushPromises(.{}, assembled.bytes);
+        var response = try http3.decodeResponse(self.quic_client.endpoint.allocator, assembled.bytes);
+        errdefer response.deinit(self.quic_client.endpoint.allocator);
+        const owned_parts = try assembled.intoOwnedParts(self.quic_client.endpoint.allocator);
+        return .{
+            .datagram = owned_parts.datagram,
+            .extra_datagrams = owned_parts.extra_datagrams,
+            .bytes = owned_parts.bytes,
+            .response = response,
+        };
     }
 };
+
+const RuntimeAssembledStream = struct {
+    from: net.IpAddress,
+    stream_id: u62,
+    bytes: []u8,
+    datagrams: []quic.runtime.OwnedDatagram,
+
+    fn deinit(self: *RuntimeAssembledStream, allocator: std.mem.Allocator) void {
+        for (self.datagrams) |*datagram| datagram.deinit(allocator);
+        allocator.free(self.datagrams);
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+
+    fn intoOwnedParts(self: *RuntimeAssembledStream, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct {
+        datagram: quic.runtime.OwnedDatagram,
+        extra_datagrams: []quic.runtime.OwnedDatagram,
+        bytes: []u8,
+    } {
+        std.debug.assert(self.datagrams.len != 0);
+        const extra_datagrams = try allocator.alloc(quic.runtime.OwnedDatagram, self.datagrams.len - 1);
+        @memcpy(extra_datagrams, self.datagrams[1..]);
+        const datagram = self.datagrams[0];
+        allocator.free(self.datagrams);
+        self.datagrams = &.{};
+        const bytes = self.bytes;
+        self.bytes = &.{};
+        return .{ .datagram = datagram, .extra_datagrams = extra_datagrams, .bytes = bytes };
+    }
+};
+
+fn receiveRuntimeStreamBytes(endpoint: *quic.runtime.Endpoint, expected_stream_id: ?u62) Error!RuntimeAssembledStream {
+    var recv: ?quic.stream_state.RecvState = null;
+    defer if (recv) |*state| state.deinit();
+    var datagrams: std.ArrayList(quic.runtime.OwnedDatagram) = .empty;
+    errdefer {
+        for (datagrams.items) |*datagram| datagram.deinit(endpoint.allocator);
+        datagrams.deinit(endpoint.allocator);
+    }
+    var from: ?net.IpAddress = null;
+    var stream_id: ?u62 = expected_stream_id;
+
+    while (true) {
+        var datagram = try endpoint.receive();
+        var datagram_owned = true;
+        errdefer if (datagram_owned) datagram.deinit(endpoint.allocator);
+        if (from == null) from = datagram.from;
+
+        var consumed = false;
+        for (datagram.frames) |frame| {
+            if (frame != .stream) continue;
+            switch (try messageStreamDisposition(frame.stream.stream_id)) {
+                .ignore => continue,
+                .request_response => {},
+            }
+            const incoming_id: u62 = @intCast(frame.stream.stream_id);
+            if (stream_id) |id| {
+                if (incoming_id != id) {
+                    if (expected_stream_id != null) return error.UnexpectedStream;
+                    continue;
+                }
+            } else {
+                stream_id = incoming_id;
+            }
+            const max_stream_buffer = std.math.mul(usize, endpoint.limits.max_datagram_size, 16) catch std.math.maxInt(usize);
+            if (recv == null) recv = quic.stream_state.RecvState.init(endpoint.allocator, incoming_id, max_stream_buffer);
+            if (recv) |*state| {
+                try state.insert(frame.stream);
+                consumed = true;
+                if (state.final_size != null and state.contiguous_end >= state.final_size.?) {
+                    const bytes = try endpoint.allocator.dupe(u8, state.buffer.items[0..state.final_size.?]);
+                    errdefer endpoint.allocator.free(bytes);
+                    try datagrams.append(endpoint.allocator, datagram);
+                    datagram_owned = false;
+                    return .{
+                        .from = from.?,
+                        .stream_id = stream_id.?,
+                        .bytes = bytes,
+                        .datagrams = try datagrams.toOwnedSlice(endpoint.allocator),
+                    };
+                }
+            }
+        }
+
+        if (consumed) {
+            try datagrams.append(endpoint.allocator, datagram);
+            datagram_owned = false;
+        } else {
+            datagram.deinit(endpoint.allocator);
+            datagram_owned = false;
+        }
+    }
+}
 
 pub const OwnedRequest = struct {
     from: net.IpAddress,
     stream_id: u62,
     datagram: quic.runtime.OwnedDatagram,
+    extra_datagrams: []quic.runtime.OwnedDatagram = &.{},
+    bytes: []u8 = &.{},
     request: http3.DecodedRequest,
 
     pub fn deinit(self: *OwnedRequest, allocator: std.mem.Allocator) void {
         self.request.deinit(allocator);
         self.datagram.deinit(allocator);
+        for (self.extra_datagrams) |*datagram| datagram.deinit(allocator);
+        allocator.free(self.extra_datagrams);
+        allocator.free(self.bytes);
         self.* = undefined;
     }
 };
@@ -197,11 +296,16 @@ pub const OwnedRequestBatch = struct {
 
 pub const OwnedResponse = struct {
     datagram: quic.runtime.OwnedDatagram,
+    extra_datagrams: []quic.runtime.OwnedDatagram = &.{},
+    bytes: []u8 = &.{},
     response: http3.DecodedResponse,
 
     pub fn deinit(self: *OwnedResponse, allocator: std.mem.Allocator) void {
         self.response.deinit(allocator);
         self.datagram.deinit(allocator);
+        for (self.extra_datagrams) |*datagram| datagram.deinit(allocator);
+        allocator.free(self.extra_datagrams);
+        allocator.free(self.bytes);
         self.* = undefined;
     }
 };
@@ -1786,6 +1890,178 @@ test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint
 
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expectEqualStrings("pong", response.response.body);
+}
+
+test "HTTP/3 dev runtime assembles split STREAM request and response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var request = try server_ptr.receiveRequest();
+            defer request.deinit(server_ptr.quic_server.endpoint.allocator);
+            try std.testing.expectEqualStrings("POST", request.request.method);
+            try std.testing.expectEqualStrings("/split", request.request.path);
+            try std.testing.expectEqualStrings("split request body", request.request.body);
+            try std.testing.expectEqual(@as(u62, 0), request.stream_id);
+            try std.testing.expect(request.extra_datagrams.len != 0);
+
+            var encoded: std.ArrayList(u8) = .empty;
+            defer encoded.deinit(server_ptr.quic_server.endpoint.allocator);
+            try (http3.Response{
+                .status = 200,
+                .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+                .body = "split response body",
+            }).write(&encoded, server_ptr.quic_server.endpoint.allocator);
+
+            const mid = encoded.items.len / 2;
+            const first = [_]quic.Frame{.{ .stream = .{
+                .stream_id = request.stream_id,
+                .offset = 0,
+                .data = encoded.items[0..mid],
+                .fin = false,
+            } }};
+            const second = [_]quic.Frame{.{ .stream = .{
+                .stream_id = request.stream_id,
+                .offset = mid,
+                .data = encoded.items[mid..],
+                .fin = true,
+            } }};
+            try server_ptr.quic_server.sendFrames(request.from, &first);
+            try server_ptr.quic_server.sendFrames(request.from, &second);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    });
+    defer client.deinit();
+
+    var encoded_request: std.ArrayList(u8) = .empty;
+    defer encoded_request.deinit(allocator);
+    try (http3.Request{
+        .method = "POST",
+        .path = "/split",
+        .authority = "localhost",
+        .body = "split request body",
+    }).write(&encoded_request, allocator);
+    const split = encoded_request.items.len / 2;
+    const first = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .data = encoded_request.items[0..split],
+        .fin = false,
+    } }};
+    const second = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .offset = split,
+        .data = encoded_request.items[split..],
+        .fin = true,
+    } }};
+    try client.quic_client.sendFrames(&first);
+    try client.quic_client.sendFrames(&second);
+
+    var assembled = try receiveRuntimeStreamBytes(&client.quic_client.endpoint, 0);
+    defer assembled.deinit(allocator);
+    try std.testing.expect(assembled.datagrams.len > 1);
+    var response = try http3.decodeResponse(allocator, assembled.bytes);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("split response body", response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 dev client assembles split STREAM response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var request = try server_ptr.receiveRequest();
+            defer request.deinit(server_ptr.quic_server.endpoint.allocator);
+            try std.testing.expectEqualStrings("/split-response", request.request.path);
+
+            var encoded: std.ArrayList(u8) = .empty;
+            defer encoded.deinit(server_ptr.quic_server.endpoint.allocator);
+            try (http3.Response{
+                .status = 200,
+                .body = "client public API assembled this split response",
+            }).write(&encoded, server_ptr.quic_server.endpoint.allocator);
+
+            const mid = encoded.items.len / 2;
+            try server_ptr.quic_server.sendFrames(request.from, &.{.{ .stream = .{
+                .stream_id = request.stream_id,
+                .offset = 0,
+                .data = encoded.items[0..mid],
+                .fin = false,
+            } }});
+            try server_ptr.quic_server.sendFrames(request.from, &.{.{ .stream = .{
+                .stream_id = request.stream_id,
+                .offset = mid,
+                .data = encoded.items[mid..],
+                .fin = true,
+            } }});
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    });
+    defer client.deinit();
+
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/split-response",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+    try std.testing.expect(response.extra_datagrams.len != 0);
+    try std.testing.expectEqualStrings("client public API assembled this split response", response.response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/3 dev runtime receives requests with std.Io async batch" {
