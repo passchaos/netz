@@ -111,6 +111,43 @@ pub const Endpoint = struct {
         try self.socket.send(self.io, &to, bytes);
     }
 
+    /// Send multiple UDP datagrams through the backend's batch primitive.
+    ///
+    /// Zig's Threaded backend maps this to Linux `sendmmsg` in chunks of 64
+    /// messages; other backends retain identical semantics with a safe
+    /// per-message fallback. Validation happens before the first syscall so
+    /// invalid input cannot produce a partially sent batch.
+    pub fn sendManyBytes(self: *Endpoint, to: net.IpAddress, datagrams: []const []const u8) Error!void {
+        if (datagrams.len == 0) return;
+        for (datagrams) |bytes| {
+            if (bytes.len == 0) return error.EmptyDatagram;
+            if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
+        }
+
+        // Match the Threaded backend's Linux sendmmsg chunk size. Keeping the
+        // descriptors on the stack makes steady-state batch submission
+        // allocation-free on every backend.
+        var message_storage: [64]net.OutgoingMessage = undefined;
+        var offset: usize = 0;
+        while (offset < datagrams.len) {
+            const count = @min(message_storage.len, datagrams.len - offset);
+            const messages = message_storage[0..count];
+            const chunk = datagrams[offset..][0..count];
+            for (messages, chunk) |*message, bytes| {
+                message.* = .{
+                    .address = &to,
+                    .data_ptr = bytes.ptr,
+                    .data_len = bytes.len,
+                };
+            }
+            try self.socket.sendMany(self.io, messages, .{});
+            for (messages, chunk) |message, bytes| {
+                if (message.data_len != bytes.len) return error.DatagramTooLarge;
+            }
+            offset += count;
+        }
+    }
+
     pub fn sendFrames(self: *Endpoint, to: net.IpAddress, frames: []const quic.Frame) Error!void {
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(self.allocator);
@@ -739,6 +776,33 @@ test "QUIC UDP endpoint receives many datagrams with std.Io async" {
     }
     try std.testing.expect(saw_a);
     try std.testing.expect(saw_b);
+}
+
+test "QUIC UDP endpoint sends many datagrams in one batch" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    defer sender.deinit();
+
+    const datagrams = [_][]const u8{ "first", "second", "third" };
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    sender.allocator = no_alloc.allocator();
+    try sender.sendManyBytes(receiver.address(), &datagrams);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    for (datagrams) |expected| {
+        var received = try receiver.receiveBytes();
+        defer received.deinit(allocator);
+        try std.testing.expectEqualStrings(expected, received.bytes);
+    }
+
+    const invalid = [_][]const u8{ "valid-but-must-not-send", "" };
+    try std.testing.expectError(error.EmptyDatagram, sender.sendManyBytes(receiver.address(), &invalid));
 }
 
 test "QUIC UDP endpoint routes protected short datagrams by DCID" {
