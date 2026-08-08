@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const quic = @import("mod.zig");
 
 const net = std.Io.net;
@@ -8,6 +9,7 @@ pub const Error = quic.Error || error{
     DatagramTooLarge,
     TrailingBytes,
     NoConnectionRoute,
+    EcnUnavailable,
 } || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError || std.Io.Cancelable;
 
 pub const Limits = struct {
@@ -86,14 +88,19 @@ pub const Endpoint = struct {
     allocator: std.mem.Allocator,
     socket: net.Socket,
     limits: Limits = .{},
+    receive_ecn_enabled: bool = false,
+    send_ecn_mark: quic.packet_space.EcnCodepoint = .not_ect,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Endpoint {
-        return .{
+        var endpoint = Endpoint{
             .io = io,
             .allocator = allocator,
             .socket = try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp }),
             .limits = limits,
         };
+        errdefer endpoint.deinit();
+        endpoint.enableEcnReceive();
+        return endpoint;
     }
 
     pub fn deinit(self: *Endpoint) void {
@@ -106,8 +113,17 @@ pub const Endpoint = struct {
     }
 
     pub fn sendBytes(self: *Endpoint, to: net.IpAddress, bytes: []const u8) Error!void {
+        try self.sendBytesWithEcn(to, bytes, .not_ect);
+    }
+
+    /// Send one UDP datagram with the requested ECN codepoint on platforms
+    /// where the socket API exposes TOS/TCLASS marking.  Unsupported platforms
+    /// reject non-Not-ECT marks instead of silently pretending ECN validation
+    /// can run.
+    pub fn sendBytesWithEcn(self: *Endpoint, to: net.IpAddress, bytes: []const u8, ecn: quic.packet_space.EcnCodepoint) Error!void {
         if (bytes.len == 0) return error.EmptyDatagram;
         if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
+        try self.applyOutgoingEcnMark(ecn);
         try self.socket.send(self.io, &to, bytes);
     }
 
@@ -123,6 +139,7 @@ pub const Endpoint = struct {
             if (bytes.len == 0) return error.EmptyDatagram;
             if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
         }
+        try self.applyOutgoingEcnMark(.not_ect);
 
         // Match the Threaded backend's Linux sendmmsg chunk size. Keeping the
         // descriptors on the stack makes steady-state batch submission
@@ -221,17 +238,69 @@ pub const Endpoint = struct {
         }
 
         const owned_frames = try frames.toOwnedSlice(self.allocator);
-        return .{ .from = raw.from, .bytes = raw.bytes, .frames = owned_frames };
+        return .{ .from = raw.from, .bytes = raw.bytes, .ecn = raw.ecn, .frames = owned_frames };
     }
 
     pub fn receiveBytes(self: *Endpoint) Error!OwnedBytes {
+        return self.receiveBytesWithEcn();
+    }
+
+    /// Receive one UDP datagram and preserve the kernel-reported ECN codepoint.
+    /// If ancillary ECN reception was unavailable when the socket was bound,
+    /// callers get `.not_ect`, matching the conservative QUIC fallback.
+    pub fn receiveBytesWithEcn(self: *Endpoint) Error!OwnedBytes {
         const buffer = try self.allocator.alloc(u8, self.limits.max_datagram_size);
         defer self.allocator.free(buffer);
-        const incoming = try self.socket.receive(self.io, buffer);
+        var control_buffer: [ecn_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        @memset(&control_buffer, 0);
+        var incoming: net.IncomingMessage = .init;
+        incoming.control = &control_buffer;
+        const maybe_err, const count = (try self.io.operate(.{ .net_receive = .{
+            .socket_handle = self.socket.handle,
+            .message_buffer = (&incoming)[0..1],
+            .data_buffer = buffer,
+            .flags = .{},
+        } })).net_receive;
+        if (maybe_err) |err| return err;
+        std.debug.assert(count == 1);
         if (incoming.data.len == 0) return error.EmptyDatagram;
 
         const bytes = try self.allocator.dupe(u8, incoming.data);
-        return .{ .from = incoming.from, .bytes = bytes };
+        return .{
+            .from = incoming.from,
+            .bytes = bytes,
+            .ecn = if (self.receive_ecn_enabled) ecnFromControl(incoming.control) else .not_ect,
+        };
+    }
+
+    fn enableEcnReceive(self: *Endpoint) void {
+        if (!socketEcnSupported()) return;
+        const enabled: u32 = 1;
+        const enabled_bytes = std.mem.asBytes(&enabled);
+        // UDP sockets are address-family-specific on some backends and
+        // dual-stack on others. Try both receive options and remember whether
+        // the kernel accepted at least one so parsing ancillary data is gated
+        // by actual socket support rather than by compile-time platform alone.
+        const ipv4 = rawSetSockOpt(self.socket.handle, ipproto_ip, ip_recvtos, enabled_bytes);
+        const ipv6 = rawSetSockOpt(self.socket.handle, ipproto_ipv6, ipv6_recvtclass, enabled_bytes);
+        self.receive_ecn_enabled = ipv4 or ipv6;
+    }
+
+    fn applyOutgoingEcnMark(self: *Endpoint, ecn: quic.packet_space.EcnCodepoint) Error!void {
+        if (ecn == self.send_ecn_mark) return;
+        if (!socketEcnSupported()) {
+            if (ecn == .not_ect) {
+                self.send_ecn_mark = .not_ect;
+                return;
+            }
+            return error.EcnUnavailable;
+        }
+        const mark: u32 = ecnCodepointBits(ecn);
+        const mark_bytes = std.mem.asBytes(&mark);
+        const ipv4 = rawSetSockOpt(self.socket.handle, ipproto_ip, ip_tos, mark_bytes);
+        const ipv6 = rawSetSockOpt(self.socket.handle, ipproto_ipv6, ipv6_tclass, mark_bytes);
+        if (!ipv4 and !ipv6) return error.EcnUnavailable;
+        self.send_ecn_mark = ecn;
     }
 
     /// Receive the next non-Version-Negotiation-triggering datagram.
@@ -293,6 +362,100 @@ pub const Endpoint = struct {
         return .{ .allocator = self.allocator, .datagrams = datagrams, .errors = errors };
     }
 };
+
+const EcnCmsgHdr = switch (builtin.os.tag) {
+    .linux, .macos => std.c.cmsghdr,
+    else => extern struct {
+        len: usize,
+        level: i32,
+        type: i32,
+    },
+};
+
+const ecn_control_buffer_len = cmsgSpace(@sizeOf(u32)) * 2;
+
+const ipproto_ip: i32 = 0;
+const ip_tos: u32 = switch (builtin.os.tag) {
+    .linux => 1,
+    .macos => 3,
+    else => 0,
+};
+const ip_recvtos: u32 = switch (builtin.os.tag) {
+    .linux => 13,
+    .macos => 27,
+    else => 0,
+};
+const ip_tos_cmsg_type: i32 = switch (builtin.os.tag) {
+    .linux => 1,
+    .macos => 27,
+    else => 0,
+};
+const ipproto_ipv6: i32 = switch (builtin.os.tag) {
+    .linux, .macos => std.posix.IPPROTO.IPV6,
+    else => 0,
+};
+const ipv6_tclass: u32 = switch (builtin.os.tag) {
+    .linux => 67,
+    .macos => 36,
+    else => 0,
+};
+const ipv6_recvtclass: u32 = switch (builtin.os.tag) {
+    .linux => 66,
+    .macos => 35,
+    else => 0,
+};
+
+pub fn socketEcnSupported() bool {
+    return switch (builtin.os.tag) {
+        .linux, .macos => true,
+        else => false,
+    };
+}
+
+fn rawSetSockOpt(fd: std.posix.socket_t, level: i32, optname: u32, opt: []const u8) bool {
+    std.posix.setsockopt(fd, level, optname, opt) catch return false;
+    return true;
+}
+
+fn ecnCodepointBits(ecn: quic.packet_space.EcnCodepoint) u32 {
+    return switch (ecn) {
+        .not_ect => 0b00,
+        .ect0 => 0b10,
+        .ect1 => 0b01,
+        .ce => 0b11,
+    };
+}
+
+fn ecnFromBits(bits: u2) quic.packet_space.EcnCodepoint {
+    return switch (bits) {
+        0b00 => .not_ect,
+        0b10 => .ect0,
+        0b01 => .ect1,
+        0b11 => .ce,
+    };
+}
+
+fn cmsgSpace(data_len: usize) usize {
+    return std.mem.alignForward(usize, @sizeOf(EcnCmsgHdr) + data_len, @alignOf(EcnCmsgHdr));
+}
+
+fn ecnFromControl(control: []const u8) quic.packet_space.EcnCodepoint {
+    if (!socketEcnSupported()) return .not_ect;
+    var offset: usize = 0;
+    while (offset + @sizeOf(EcnCmsgHdr) <= control.len) {
+        const header: *const EcnCmsgHdr = @ptrCast(@alignCast(control[offset..].ptr));
+        const cmsg_len: usize = @intCast(header.len);
+        if (cmsg_len < @sizeOf(EcnCmsgHdr) or offset + cmsg_len > control.len) break;
+        const data = control[offset + @sizeOf(EcnCmsgHdr) .. offset + cmsg_len];
+        const ipv4_tos = header.level == ipproto_ip and header.type == ip_tos_cmsg_type;
+        const ipv6_tclass_cmsg = header.level == ipproto_ipv6 and header.type == @as(i32, @intCast(ipv6_tclass));
+        if ((ipv4_tos or ipv6_tclass_cmsg) and data.len != 0) {
+            return ecnFromBits(@truncate(data[0] & 0x03));
+        }
+        offset += cmsgSpace(cmsg_len - @sizeOf(EcnCmsgHdr));
+    }
+    return .not_ect;
+}
 
 const LongHeaderConnectionIds = struct {
     version: u32,
@@ -377,6 +540,7 @@ const ReceiveTask = struct {
 pub const OwnedBytes = struct {
     from: net.IpAddress,
     bytes: []u8,
+    ecn: quic.packet_space.EcnCodepoint = .not_ect,
 
     pub fn deinit(self: *OwnedBytes, allocator: std.mem.Allocator) void {
         allocator.free(self.bytes);
@@ -398,6 +562,7 @@ pub const RoutedBytes = struct {
 pub const OwnedDatagram = struct {
     from: net.IpAddress,
     bytes: []u8,
+    ecn: quic.packet_space.EcnCodepoint = .not_ect,
     frames: []quic.Frame,
 
     pub fn deinit(self: *OwnedDatagram, allocator: std.mem.Allocator) void {
@@ -479,6 +644,58 @@ test "QUIC UDP endpoint sends and receives frame datagrams" {
     try std.testing.expect(client_received.from.eql(&server.address()));
     try std.testing.expectEqual(@as(usize, 1), client_received.frames.len);
     try std.testing.expectEqualStrings("world", client_received.frames[0].stream.data);
+}
+
+test "QUIC UDP endpoint round-trips ECN marks" {
+    if (!socketEcnSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer server.deinit();
+
+    var client = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    });
+    defer client.deinit();
+    if (!server.endpoint.receive_ecn_enabled) return error.SkipZigTest;
+
+    client.endpoint.sendBytesWithEcn(server.address(), "ect0", .ect0) catch |err| switch (err) {
+        error.EcnUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    var ect0 = try server.endpoint.receiveBytesWithEcn();
+    defer ect0.deinit(allocator);
+    try std.testing.expectEqual(quic.packet_space.EcnCodepoint.ect0, ect0.ecn);
+    try std.testing.expectEqualSlices(u8, "ect0", ect0.bytes);
+
+    try client.endpoint.sendBytesWithEcn(server.address(), "ect1", .ect1);
+    var ect1 = try server.endpoint.receiveBytesWithEcn();
+    defer ect1.deinit(allocator);
+    try std.testing.expectEqual(quic.packet_space.EcnCodepoint.ect1, ect1.ecn);
+    try std.testing.expectEqualSlices(u8, "ect1", ect1.bytes);
+
+    try client.endpoint.sendBytesWithEcn(server.address(), "ce", .ce);
+    var ce = try server.endpoint.receiveBytesWithEcn();
+    defer ce.deinit(allocator);
+    try std.testing.expectEqual(quic.packet_space.EcnCodepoint.ce, ce.ecn);
+    try std.testing.expectEqualSlices(u8, "ce", ce.bytes);
+
+    // A normal send after ECT traffic must clear the cached TOS/TCLASS mark so
+    // callers that are not probing ECN do not accidentally keep marking packets.
+    try client.endpoint.sendBytes(server.address(), "plain");
+    var plain = try server.endpoint.receiveBytesWithEcn();
+    defer plain.deinit(allocator);
+    try std.testing.expectEqual(quic.packet_space.EcnCodepoint.not_ect, plain.ecn);
+    try std.testing.expectEqualSlices(u8, "plain", plain.bytes);
 }
 
 test "QUIC UDP endpoint builds Version Negotiation for unsupported versions" {

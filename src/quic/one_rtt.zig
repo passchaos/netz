@@ -760,6 +760,7 @@ pub const Connection = struct {
             packet_number,
             payload,
             prepared.packet_number_len,
+            ecn,
             sent_time_ns,
             prepared.is_in_flight,
         );
@@ -823,7 +824,7 @@ pub const Connection = struct {
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
         try self.sent.sentAtWithPmtu(packet_number, true, payload.items.len, .not_ect, sent_time_ns, probe_size);
         errdefer _ = self.sent.forget(packet_number);
-        try self.sendPayloadPacketWithPacketNumberLenAt(packet_number, payload.items, packet_number_len, sent_time_ns, true);
+        try self.sendPayloadPacketWithPacketNumberLenAt(packet_number, payload.items, packet_number_len, .not_ect, sent_time_ns, true);
         self.next_packet_number += 1;
         self.pmtud.onProbeSent(probe_size);
         return probe_size;
@@ -876,6 +877,7 @@ pub const Connection = struct {
             packet_number,
             payload,
             quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload.len),
+            .not_ect,
             sent_time_ns,
             pace_packet,
         );
@@ -886,6 +888,7 @@ pub const Connection = struct {
         packet_number: u64,
         payload: []const u8,
         packet_number_len: u8,
+        ecn: quic.packet_space.EcnCodepoint,
         sent_time_ns: ?u64,
         pace_packet: bool,
     ) Error!void {
@@ -920,7 +923,7 @@ pub const Connection = struct {
                 return error.PacingLimited;
             }
         }
-        try self.endpoint.sendBytes(self.config.peer, packet);
+        try self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn);
         if (pace_packet) {
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -1578,7 +1581,7 @@ pub const Connection = struct {
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
+        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, datagram.ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -1622,7 +1625,7 @@ pub const Connection = struct {
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, .not_ect, packet.packet.destination_connection_id);
+        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, routed.datagram.ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -4436,6 +4439,60 @@ test "QUIC 1-RTT connection sends ACK_ECN for received ECN-marked packets" {
     try std.testing.expectEqual(@as(u64, 1), counts.ect0_count);
     try std.testing.expectEqual(@as(u64, 1), counts.ect1_count);
     try std.testing.expectEqual(@as(u64, 1), counts.ecn_ce_count);
+}
+
+test "QUIC 1-RTT receivePacket records socket ECN marks" {
+    if (!quic.runtime.socketEcnSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+    if (!server_endpoint.receive_ecn_enabled) return error.SkipZigTest;
+
+    const client_cid = [_]u8{ 0x7a, 0x7b, 0x7c, 0x7d };
+    const server_cid = [_]u8{ 0x7e, 0x7f, 0x80, 0x81 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x87} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x88} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    client.sendWithEcn(&ping, .ect0) catch |err| switch (err) {
+        error.EcnUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var packet = try server.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), packet.packet.packet_number);
+
+    const counts = server.received.latestEcnCounts() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 1), counts.ect0_count);
+    try std.testing.expectEqual(@as(u64, 0), counts.ect1_count);
+    try std.testing.expectEqual(@as(u64, 0), counts.ecn_ce_count);
 }
 
 test "QUIC 1-RTT connection validates ACK_ECN counters" {
