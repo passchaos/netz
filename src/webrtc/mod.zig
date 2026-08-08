@@ -8016,6 +8016,8 @@ pub const sctp = struct {
             const initial_tsn = try cursor.readInt(u32, .big);
             try validateInitFixedFields(initiate_tag, rwnd, outbound, inbound);
             const parameters = try parseInitParameters(allocator, chunk.value[cursor.pos..]);
+            errdefer allocator.free(parameters);
+            if (chunk.chunk_type == .init_ack and stateCookieFromParameters(parameters) == null) return error.InvalidSctpPacket;
             return .{
                 .initiate_tag = initiate_tag,
                 .advertised_receiver_window_credit = rwnd,
@@ -8027,10 +8029,7 @@ pub const sctp = struct {
         }
 
         pub fn stateCookie(self: InitChunk) ?[]const u8 {
-            for (self.parameters) |parameter| {
-                if (parameter.param_type == .state_cookie) return parameter.value;
-            }
-            return null;
+            return stateCookieFromParameters(self.parameters);
         }
     };
 
@@ -8875,6 +8874,7 @@ pub const sctp = struct {
     pub fn writeInitChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunk_type: ChunkType, init: InitChunk) Error!void {
         if (chunk_type != .init and chunk_type != .init_ack) return error.InvalidSctpPacket;
         try validateInitFixedFields(init.initiate_tag, init.advertised_receiver_window_credit, init.outbound_streams, init.inbound_streams);
+        if (chunk_type == .init_ack and init.stateCookie() == null) return error.InvalidSctpPacket;
         var value: std.ArrayList(u8) = .empty;
         defer value.deinit(allocator);
         try wire.appendInt(&value, allocator, u32, init.initiate_tag, .big);
@@ -9369,6 +9369,13 @@ pub const sctp = struct {
             => true,
             _ => false,
         };
+    }
+
+    fn stateCookieFromParameters(parameters: []const InitParameter) ?[]const u8 {
+        for (parameters) |parameter| {
+            if (parameter.param_type == .state_cookie) return parameter.value;
+        }
+        return null;
     }
 
     fn writeInitParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameter: InitParameter) Error!usize {
@@ -13605,6 +13612,30 @@ test "SCTP INIT cookie echo and cookie ack packets" {
         .outbound_streams = 16,
         .inbound_streams = 16,
         .initial_tsn = 0x10203040,
+    }));
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeInitPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0,
+    }, true, .{
+        .initiate_tag = 0x01020304,
+        .advertised_receiver_window_credit = 256 * 1024,
+        .outbound_streams = 16,
+        .inbound_streams = 16,
+        .initial_tsn = 0x10203040,
+    }));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.InitChunk.parse(allocator, .{
+        .chunk_type = .init_ack,
+        .flags = 0,
+        .value = &.{
+            0x01, 0x02, 0x03, 0x04, // Initiate Tag
+            0x00, 0x04, 0x00, 0x00, // a_rwnd = 256 KiB
+            0x00, 0x10, // Outbound streams
+            0x00, 0x10, // Inbound streams
+            0x10, 0x20, 0x30, 0x40, // Initial TSN
+        },
+        .consumed = 20,
     }));
 
     try sctp.writeShutdownAckChunk(&bundled_init, allocator);
