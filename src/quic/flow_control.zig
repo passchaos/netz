@@ -12,7 +12,7 @@ pub const SendFlow = struct {
     used: u64 = 0,
 
     pub fn init(limit: u64) SendFlow {
-        return .{ .limit = limit };
+        return .{ .limit = @min(limit, quic.varint.max_value) };
     }
 
     pub fn available(self: SendFlow) u64 {
@@ -25,7 +25,7 @@ pub const SendFlow = struct {
     }
 
     pub fn updateLimit(self: *SendFlow, new_limit: u64) void {
-        self.limit = @max(self.limit, new_limit);
+        self.limit = @max(self.limit, @min(new_limit, quic.varint.max_value));
     }
 
     pub fn dataBlockedFrame(self: SendFlow) quic.Frame {
@@ -98,6 +98,12 @@ test "QUIC send flow reserves bytes and reports blocked" {
     flow.updateLimit(20);
     try flow.reserve(4);
     try std.testing.expectEqual(@as(u64, 9), flow.available());
+
+    const oversized_varint = @as(u64, quic.varint.max_value) + 1;
+    var capped = SendFlow.init(oversized_varint);
+    try std.testing.expectEqual(quic.varint.max_value, capped.limit);
+    capped.updateLimit(std.math.maxInt(u64));
+    try std.testing.expectEqual(quic.varint.max_value, capped.limit);
 }
 
 test "QUIC receive flow emits MAX_DATA after consumption threshold" {
