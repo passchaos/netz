@@ -1090,7 +1090,7 @@ pub fn readRequestFromStreamBuffered(
     options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
 ) Error!OwnedRequest {
-    const bytes = try readRequestMessageBytesBuffered(allocator, io, stream, limits, inbuf);
+    const bytes = try readRequestMessageBytesBuffered(allocator, io, stream, limits, options, inbuf);
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
@@ -1105,7 +1105,7 @@ fn readRequestFromTransportBuffered(
     options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
 ) Error!OwnedRequest {
-    const bytes = try readMessageBytesBufferedWithContext(allocator, transport, limits, inbuf, null, true, false);
+    const bytes = try readMessageBytesBufferedWithContext(allocator, transport, limits, options, inbuf, null, true, false);
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
@@ -1167,7 +1167,7 @@ pub fn readResponseFromStreamBuffered(
     inbuf: *std.ArrayList(u8),
 ) Error!OwnedResponse {
     while (true) {
-        const bytes = try readMessageBytesBuffered(allocator, io, stream, limits, inbuf);
+        const bytes = try readMessageBytesBuffered(allocator, io, stream, limits, options, inbuf);
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, null);
         errdefer response.deinit(allocator);
@@ -1191,7 +1191,7 @@ pub fn readResponseFromStreamBufferedForRequest(
     request_method: http1.Method,
 ) Error!OwnedResponse {
     while (true) {
-        const bytes = try readMessageBytesBufferedForResponse(allocator, io, stream, limits, inbuf, request_method);
+        const bytes = try readMessageBytesBufferedForResponse(allocator, io, stream, limits, options, inbuf, request_method);
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
@@ -1826,9 +1826,10 @@ fn readMessageBytesBuffered(
     io: std.Io,
     stream: net.Stream,
     limits: Limits,
+    options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, inbuf, null, false, true);
+    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, null, false, true);
 }
 
 fn readMessageBytesBufferedForResponse(
@@ -1836,10 +1837,11 @@ fn readMessageBytesBufferedForResponse(
     io: std.Io,
     stream: net.Stream,
     limits: Limits,
+    options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
     request_method: http1.Method,
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, inbuf, request_method, false, true);
+    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, request_method, false, true);
 }
 
 fn readRequestMessageBytesBuffered(
@@ -1847,9 +1849,10 @@ fn readRequestMessageBytesBuffered(
     io: std.Io,
     stream: net.Stream,
     limits: Limits,
+    options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
 ) Error![]u8 {
-    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, inbuf, null, true, false);
+    return readMessageBytesBufferedWithContext(allocator, .{ .tcp = .{ .io = io, .stream = stream } }, limits, options, inbuf, null, true, false);
 }
 
 fn readResponseFromTransportBufferedForRequest(
@@ -1861,7 +1864,7 @@ fn readResponseFromTransportBufferedForRequest(
     request_method: http1.Method,
 ) Error!OwnedResponse {
     while (true) {
-        const bytes = try readMessageBytesBufferedWithContext(allocator, transport, limits, inbuf, request_method, false, true);
+        const bytes = try readMessageBytesBufferedWithContext(allocator, transport, limits, options, inbuf, request_method, false, true);
         errdefer allocator.free(bytes);
         var response = try parseResponseForRuntime(allocator, bytes, options, request_method);
         errdefer response.deinit(allocator);
@@ -1879,6 +1882,7 @@ fn readMessageBytesBufferedWithContext(
     allocator: std.mem.Allocator,
     transport: RuntimeTransport,
     limits: Limits,
+    options: http1.ParseOptions,
     inbuf: *std.ArrayList(u8),
     request_method: ?http1.Method,
     auto_continue: bool,
@@ -1895,6 +1899,26 @@ fn readMessageBytesBufferedWithContext(
     }
     try maybeWriteContinue(transport, inbuf.items[0..head_end.?], inbuf.items.len - (head_end.? + 4), auto_continue);
 
+    var borrowed_headers_stack: [128]http1.Header = undefined;
+    const borrowed_headers = if (options.max_headers <= borrowed_headers_stack.len)
+        borrowed_headers_stack[0..options.max_headers]
+    else
+        try allocator.alloc(http1.Header, options.max_headers);
+    defer if (borrowed_headers.ptr != borrowed_headers_stack[0..].ptr) allocator.free(borrowed_headers);
+
+    const known_target_len: ?usize = if (auto_continue) request: {
+        const request_head = try http1.parseRequestHead(inbuf.items, borrowed_headers, options);
+        break :request try request_head.messageLength();
+    } else response: {
+        const response_head = try http1.parseResponseHead(
+            inbuf.items,
+            borrowed_headers,
+            options,
+            .{ .request_method = request_method },
+        );
+        break :response try response_head.messageLength();
+    };
+
     if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(inbuf.items[0..head_end.?], request_method)) {
         const body_start = head_end.? + 4;
         while (true) {
@@ -1908,7 +1932,10 @@ fn readMessageBytesBufferedWithContext(
         return bytes;
     }
 
-    const target_len = while (true) {
+    const target_len = if (known_target_len) |len| blk: {
+        if (len - (head_end.? + 4) > limits.max_body_bytes) return error.BodyTooLarge;
+        break :blk len;
+    } else while (true) {
         const len = messageTargetLength(inbuf.items, head_end.?, limits.max_body_bytes, request_method) catch |err| switch (err) {
             error.BufferTooShort => {
                 const n = try transport.read(&scratch);

@@ -255,7 +255,7 @@ pub fn parseRequestHead(
     try validateRequestTargetForMethod(method, target);
     const version = try Version.parse(version_s);
     try validateTransferEncodingForVersion(version, parsed.headers);
-    try validateHostHeaderBlock(version, parsed.headers);
+    try validateRequestHostParts(version, target, parsed.headers);
     const framing = try bodyFraming(parsed.headers);
     return .{
         .method = method,
@@ -284,17 +284,21 @@ pub fn parseResponseHead(
     try validateReasonPhrase(reason);
     try validateTransferEncodingForVersion(version, parsed.headers);
     const declared_content_length = try contentLength(parsed.headers);
-    if (statusCodeForbidsBody(status)) {
-        try validateResponseBodyForStatus(status, parsed.headers, &.{}, &.{});
-    }
 
     const forbidden = responseForbidsBody(status, context.request_method);
-    const framing: BodyFraming = if (forbidden) .none else bodyFraming(parsed.headers) catch |err| switch (err) {
+    const framing: BodyFraming = if (forbidden) .none else switch (bodyFraming(parsed.headers) catch |err| switch (err) {
         error.InvalidTransferEncoding => if (responseTransferEncodingIsCloseDelimited(parsed.headers))
             .close_delimited
         else
             return error.InvalidTransferEncoding,
         else => |e| return e,
+    }) {
+        // Response messages without an explicit body delimiter are bounded by
+        // connection close.  Reporting this as `none` would let pipeline-aware
+        // callers treat the head as a complete response and misclassify the
+        // body bytes as the next message.
+        .none => .close_delimited,
+        else => |value| value,
     };
     return .{
         .version = version,
@@ -945,9 +949,13 @@ pub fn validateConnectTarget(target: []const u8) Error!void {
 }
 
 pub fn validateRequestHost(request: Request) Error!void {
-    const host = try validateHostHeaderBlockValue(request.version, request.headers);
-    if (std.mem.indexOf(u8, request.target, "://") != null) {
-        const authority = absoluteFormAuthority(request.target) orelse return error.InvalidHost;
+    try validateRequestHostParts(request.version, request.target, request.headers);
+}
+
+fn validateRequestHostParts(version: Version, target: []const u8, headers: []const Header) Error!void {
+    const host = try validateHostHeaderBlockValue(version, headers);
+    if (std.mem.indexOf(u8, target, "://") != null) {
+        const authority = absoluteFormAuthority(target) orelse return error.InvalidHost;
         try validateHostValue(authority);
         if (host) |host_value| {
             if (!std.ascii.eqlIgnoreCase(wire.trimOws(host_value), authority)) return error.InvalidHost;
@@ -1293,15 +1301,14 @@ test "HTTP/1 borrowed response heads honor method context" {
     try std.testing.expectEqual(BodyFraming.none, tunnel.body_framing);
     try std.testing.expectEqualStrings("Connection Established", tunnel.reason);
 
-    try std.testing.expectError(
-        error.InvalidContentLength,
-        parseResponseHead(
-            "HTTP/1.1 204 No Content\r\nContent-Length: 1\r\n\r\n",
-            &headers,
-            .{},
-            .{},
-        ),
+    const invalid_length_204 = try parseResponseHead(
+        "HTTP/1.1 204 No Content\r\nContent-Length: 1\r\n\r\n",
+        &headers,
+        .{},
+        .{},
     );
+    try std.testing.expectEqual(BodyFraming.none, invalid_length_204.body_framing);
+    try std.testing.expectEqual(invalid_length_204.head_len, (try invalid_length_204.messageLength()).?);
 }
 
 test "HTTP/1 borrowed heads expose unknown chunked and close-delimited lengths" {
