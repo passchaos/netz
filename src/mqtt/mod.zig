@@ -750,7 +750,7 @@ pub const Connect = struct {
         const level = try cursor.readByte();
         const protocol = std.enums.fromInt(ProtocolVersion, level) orelse return error.InvalidProtocolLevel;
         const connect_flags = try cursor.readByte();
-        try validateConnectFlags(connect_flags);
+        try validateConnectFlags(protocol, connect_flags);
         const keep_alive = try cursor.readInt(u16, .big);
         const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
@@ -815,13 +815,21 @@ pub const ConnectPacketOptions = struct {
     password: ?[]const u8 = null,
 };
 
-fn validateConnectFlags(flags: u8) Error!void {
+fn validateConnectFlags(protocol: ProtocolVersion, flags: u8) Error!void {
     if ((flags & 0x01) != 0) return error.InvalidFlags;
 
     const will_flag = (flags & 0x04) != 0;
     const will_qos = (flags >> 3) & 0x03;
     if (!will_flag and (flags & 0x38) != 0) return error.InvalidFlags;
     if (will_qos == 0x03) return error.InvalidQoS;
+
+    if (protocol == .v3_1_1 and (flags & 0xc0) == 0x40) {
+        // MQTT 3.1.1 couples the login flags: a password can only appear after
+        // a username.  MQTT 5 relaxed this for enhanced-authentication use
+        // cases, so keep the stricter check version-scoped instead of rejecting
+        // valid v5 password-only CONNECT packets.
+        return error.InvalidFlags;
+    }
 }
 
 pub const ConnAck = struct {
@@ -2101,6 +2109,40 @@ test "MQTT CONNECT validates flags and will topic" {
     try wire.appendInt(&invalid_flags, allocator, u16, 30, .big);
     try writeUtf8(&invalid_flags, allocator, "");
     try std.testing.expectError(error.InvalidFlags, Connect.parse(allocator, invalid_flags.items));
+
+    var password_without_username_v3: std.ArrayList(u8) = .empty;
+    defer password_without_username_v3.deinit(allocator);
+    var password_v3_variable: std.ArrayList(u8) = .empty;
+    defer password_v3_variable.deinit(allocator);
+    try writeUtf8(&password_v3_variable, allocator, "MQTT");
+    try password_v3_variable.append(allocator, ProtocolVersion.v3_1_1.byte());
+    try password_v3_variable.append(allocator, 0x42); // Password + Clean Session, but no User Name.
+    try wire.appendInt(&password_v3_variable, allocator, u16, 30, .big);
+    try writeUtf8(&password_v3_variable, allocator, "client");
+    try writeBinary(&password_v3_variable, allocator, "password");
+    try (FixedHeader{
+        .packet_type = .connect,
+        .flags = 0,
+        .remaining_len = password_v3_variable.items.len,
+        .header_len = 0,
+    }).write(&password_without_username_v3, allocator);
+    try password_without_username_v3.appendSlice(allocator, password_v3_variable.items);
+    try std.testing.expectError(error.InvalidFlags, Connect.parse(allocator, password_without_username_v3.items));
+
+    // MQTT 5 keeps the Username and Password payload flags independent for
+    // enhanced-authentication deployments, so the v3.1.1 guard above must not
+    // reject the same flag combination for protocol level 5.
+    var password_without_username_v5: std.ArrayList(u8) = .empty;
+    defer password_without_username_v5.deinit(allocator);
+    try writeConnectPacket(&password_without_username_v5, allocator, .v5, .{
+        .client_id = "client-5",
+        .password = "password",
+    });
+    var parsed_password_only_v5 = try Connect.parse(allocator, password_without_username_v5.items);
+    defer parsed_password_only_v5.deinit(allocator);
+    try std.testing.expectEqual(ProtocolVersion.v5, parsed_password_only_v5.protocol);
+    try std.testing.expect(parsed_password_only_v5.username == null);
+    try std.testing.expectEqualStrings("password", parsed_password_only_v5.password.?);
 
     var invalid_will: std.ArrayList(u8) = .empty;
     defer invalid_will.deinit(allocator);

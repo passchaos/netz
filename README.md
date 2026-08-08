@@ -126,8 +126,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   WebSocket-over-HTTP/2 adapters that negotiate `:protocol = websocket`,
   subprotocols, permessage-deflate, reject duplicate/legacy critical handshake
   fields, and use transport-derived `:scheme` over an h2 DATA tunnel
-- MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
-  username/password payload support, PUBLISH,
+- MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will,
+  version-scoped username/password flag validation and payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
   UNSUBSCRIBE/UNSUBACK, PING,
   DISCONNECT with MQTT v5 minimal reason-only encoding, AUTH enhanced-authentication exchanges, properties, exact packet bounds, minimal remaining length, MQTT UTF-8 string validation, response-topic/topic-name/filter validation, clean-session empty-client-id checks, version-specific MQTT 3.1.1/v5 property and SUBSCRIBE option validation, payload-format UTF-8 validation, and
