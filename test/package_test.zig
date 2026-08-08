@@ -266,7 +266,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.QpackEncodeState, "configurePeerCapacity"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.QpackEncodeState, "abandonStream"));
     try std.testing.expect(@hasDecl(netz.http3.Request, "writeDynamic"));
+    try std.testing.expect(@hasDecl(netz.http3.Request, "writeStreamingHeadDynamic"));
     try std.testing.expect(@hasDecl(netz.http3.Response, "writeDynamic"));
+    try std.testing.expect(@hasDecl(netz.http3.Response, "writeStreamingHeadDynamic"));
     try std.testing.expect(@hasDecl(netz.http3, "decodeRequestWithDynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3, "decodeResponseWithDynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequest"));

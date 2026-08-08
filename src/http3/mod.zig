@@ -2037,6 +2037,72 @@ pub const Request = struct {
         try queueIndexableFields(encoder, fields);
         try queueIndexableFields(encoder, self.trailers);
     }
+
+    /// Encode only the initial HEADERS section for an incrementally-sent body.
+    ///
+    /// `body_length` adds (or verifies) Content-Length. Null permits an
+    /// unknown-length body delimited by stream FIN. The returned value is the
+    /// effective length to enforce while streaming; plain CONNECT returns zero
+    /// because RFC 9114 forbids request DATA on that form.
+    pub fn writeStreamingHeadDynamic(
+        self: Request,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        stream_id: u64,
+        body_length: ?usize,
+        encoder: anytype,
+    ) Error!?usize {
+        if (self.body.len != 0 or self.trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var fields = try self.headerFields(&fields_buf);
+        var content_length_buf: [32]u8 = undefined;
+        const plain_connect = std.mem.eql(u8, self.method, "CONNECT") and
+            !requestHasProtocolPseudo(self.headers);
+        if (plain_connect) {
+            if (body_length) |length| {
+                if (length != 0) return error.InvalidContentLength;
+            }
+            try validateHeaderBlock(fields, .request);
+            try validateFieldSectionSize(
+                fields,
+                peer_settings.max_field_section_size,
+            );
+            try validateRequestBodyForMethod(fields, &.{}, &.{});
+            try writeHeadersFrameDynamic(
+                list,
+                allocator,
+                fields,
+                stream_id,
+                encoder,
+            );
+            try queueIndexableFields(encoder, fields);
+            return 0;
+        }
+        const effective_length = try applyStreamingContentLength(
+            &fields_buf,
+            &fields,
+            body_length,
+            &content_length_buf,
+        );
+        try validateHeaderBlock(fields, .request);
+        try validateFieldSectionSize(
+            fields,
+            peer_settings.max_field_section_size,
+        );
+        try validateRequestBodyForMethod(fields, &.{}, &.{});
+        try writeHeadersFrameDynamic(
+            list,
+            allocator,
+            fields,
+            stream_id,
+            encoder,
+        );
+        try queueIndexableFields(encoder, fields);
+        return effective_length;
+    }
 };
 
 fn requestHasProtocolPseudo(headers: []const Qpack.HeaderField) bool {
@@ -2158,7 +2224,105 @@ pub const Response = struct {
         try queueIndexableFields(encoder, fields);
         try queueIndexableFields(encoder, self.trailers);
     }
+
+    /// Encode only final response HEADERS for incremental DATA transmission.
+    pub fn writeStreamingHeadDynamic(
+        self: Response,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        stream_id: u64,
+        body_length: ?usize,
+        encoder: anytype,
+    ) Error!?usize {
+        if (self.body.len != 0 or self.trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var status_buf: [3]u8 = undefined;
+        var fields = try self.headerFields(&fields_buf, &status_buf);
+        const body_forbidden = self.status == 204 or self.status == 304;
+        if (body_forbidden) {
+            if (self.status == 204 and findHeader(
+                self.headers,
+                "content-length",
+            ) != null) {
+                return error.InvalidContentLength;
+            }
+            if (body_length) |length| {
+                if (length != 0) return error.InvalidContentLength;
+            }
+            try validateHeaderBlock(fields, .response);
+            try validateFieldSectionSize(
+                fields,
+                peer_settings.max_field_section_size,
+            );
+            try validateResponseBodyForStatus(
+                self.status,
+                fields,
+                &.{},
+                &.{},
+            );
+            try writeHeadersFrameDynamic(
+                list,
+                allocator,
+                fields,
+                stream_id,
+                encoder,
+            );
+            try queueIndexableFields(encoder, fields);
+            return 0;
+        }
+        var content_length_buf: [32]u8 = undefined;
+        const effective_length = try applyStreamingContentLength(
+            &fields_buf,
+            &fields,
+            body_length,
+            &content_length_buf,
+        );
+        try validateHeaderBlock(fields, .response);
+        try validateFieldSectionSize(
+            fields,
+            peer_settings.max_field_section_size,
+        );
+        try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
+        try writeHeadersFrameDynamic(
+            list,
+            allocator,
+            fields,
+            stream_id,
+            encoder,
+        );
+        try queueIndexableFields(encoder, fields);
+        return effective_length;
+    }
 };
+
+fn applyStreamingContentLength(
+    fields_buf: *[64]Qpack.HeaderField,
+    fields: *[]Qpack.HeaderField,
+    requested: ?usize,
+    content_length_buf: *[32]u8,
+) Error!?usize {
+    const declared = try contentLength(fields.*);
+    const expected = requested orelse return declared;
+    if (declared) |value| {
+        if (value != expected) return error.InvalidContentLength;
+        return expected;
+    }
+    const rendered = std.fmt.bufPrint(
+        content_length_buf,
+        "{}",
+        .{expected},
+    ) catch unreachable;
+    var field_count = fields.*.len;
+    try appendHeaderField(fields_buf, &field_count, .{
+        .name = "content-length",
+        .value = rendered,
+    });
+    fields.* = fields_buf[0..field_count];
+    return expected;
+}
 
 fn responseShouldDefaultContentLength(status: u16, headers: []const Qpack.HeaderField, body_len: usize) bool {
     if (body_len == 0) return false;

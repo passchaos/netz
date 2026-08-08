@@ -4891,6 +4891,140 @@ test "HTTP/3 dynamic response writer tracks informational final and trailer sect
     try std.testing.expectEqual(@as(usize, 0), encoder.reference_counts.count());
 }
 
+test "HTTP/3 streaming request head adds and validates content length" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.init(allocator, 512, 4096);
+    defer encoder.deinit();
+    try encoder.setCapacity(512);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const expected = try (http3.Request{
+        .method = "POST",
+        .path = "/streaming",
+        .authority = "example.test",
+    }).writeStreamingHeadDynamic(
+        &encoded,
+        allocator,
+        .{},
+        0,
+        11,
+        &encoder,
+    );
+    try std.testing.expectEqual(@as(?usize, 11), expected);
+    const frame = try http3.Frame.parse(encoded.items);
+    try std.testing.expectEqual(http3.FrameType.headers, frame.frame_type);
+    try std.testing.expectEqual(frame.consumed, encoded.items.len);
+    var decoded = try http3.Qpack.decodeDynamicBlock(
+        allocator,
+        frame.payload,
+        encoder.table,
+    );
+    defer http3.Qpack.freeDynamicBlock(allocator, &decoded);
+    var content_length_value: ?[]const u8 = null;
+    for (decoded.fields) |field| {
+        if (std.mem.eql(u8, field.name, "content-length")) {
+            content_length_value = field.value;
+        }
+    }
+    try std.testing.expectEqualStrings(
+        "11",
+        content_length_value orelse return error.TestUnexpectedResult,
+    );
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        (http3.Request{
+            .method = "POST",
+            .path = "/streaming",
+            .headers = &.{.{
+                .name = "content-length",
+                .value = "12",
+            }},
+        }).writeStreamingHeadDynamic(
+            &encoded,
+            allocator,
+            .{},
+            4,
+            11,
+            &encoder,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        (http3.Request{
+            .method = "CONNECT",
+            .path = "",
+            .authority = "example.test:443",
+        }).writeStreamingHeadDynamic(
+            &encoded,
+            allocator,
+            .{},
+            8,
+            1,
+            &encoder,
+        ),
+    );
+}
+
+test "HTTP/3 streaming response head enforces bodyless status" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.init(allocator, 512, 4096);
+    defer encoder.deinit();
+    try encoder.setCapacity(512);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    const expected = try (http3.Response{
+        .status = 200,
+    }).writeStreamingHeadDynamic(
+        &encoded,
+        allocator,
+        .{},
+        0,
+        null,
+        &encoder,
+    );
+    try std.testing.expectEqual(@as(?usize, null), expected);
+    try std.testing.expectEqual(
+        http3.FrameType.headers,
+        (try http3.Frame.parse(encoded.items)).frame_type,
+    );
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        (http3.Response{
+            .status = 204,
+        }).writeStreamingHeadDynamic(
+            &encoded,
+            allocator,
+            .{},
+            4,
+            1,
+            &encoder,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        (http3.Response{
+            .status = 204,
+            .headers = &.{.{
+                .name = "content-length",
+                .value = "0",
+            }},
+        }).writeStreamingHeadDynamic(
+            &encoded,
+            allocator,
+            .{},
+            8,
+            null,
+            &encoder,
+        ),
+    );
+}
+
 fn checkDynamicQpackWriterAllocationFailure(allocator: std.mem.Allocator) !void {
     var encoder = QpackEncodeState.init(allocator, 512, 4096);
     defer encoder.deinit();
