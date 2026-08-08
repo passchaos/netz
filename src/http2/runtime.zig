@@ -614,6 +614,7 @@ pub const Connection = struct {
         }
         if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
         for (request_options.headers) |header| try fields.append(self.allocator, header);
+        stripConnectionHeaders(&fields, .request);
         var content_length_buf: [32]u8 = undefined;
         if (requestShouldDefaultContentLength(request_options.method, fields.items, request_options.body.len)) {
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{request_options.body.len}) catch unreachable;
@@ -649,6 +650,7 @@ pub const Connection = struct {
         try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
         if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
         for (request_options.headers) |header| try fields.append(self.allocator, header);
+        stripConnectionHeaders(&fields, .request);
         try validateHeaderBlock(fields.items, .request);
 
         const stream_id = try self.reserveNextClientStreamId();
@@ -673,6 +675,7 @@ pub const Connection = struct {
         try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
         try fields.append(self.allocator, .{ .name = ":authority", .value = request_options.authority.? });
         for (request_options.headers) |header| try fields.append(self.allocator, header);
+        stripConnectionHeaders(&fields, .request);
         try validateHeaderBlock(fields.items, .request);
 
         const stream_id = try self.reserveNextClientStreamId();
@@ -843,10 +846,7 @@ pub const Connection = struct {
         var status_buf: [3]u8 = undefined;
         if (options.status < 100 or options.status > 999) return error.InvalidStatus;
         if (statusIsInformational(options.status)) return error.InvalidStatus;
-        try validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
         const semantics = self.responseSemanticsFor(stream_id, options);
-        try validateResponseBodyForRequestSemantics(options.status, semantics, options.headers, options.body, options.trailers);
-        try validateDeclaredResponseLength(options.status, semantics, options.headers, options.body.len);
         const suppress_body = responseWriteSuppressesBodySemantics(options.status, semantics);
         const status = std.fmt.bufPrint(&status_buf, "{}", .{options.status}) catch return error.InvalidStatus;
 
@@ -855,6 +855,10 @@ pub const Connection = struct {
         var content_length_buf: [32]u8 = undefined;
         try fields.append(self.allocator, .{ .name = ":status", .value = status });
         for (options.headers) |header| try fields.append(self.allocator, header);
+        stripConnectionHeaders(&fields, .response);
+        try validateResponseBodyForStatus(options.status, fields.items, options.body, options.trailers);
+        try validateResponseBodyForRequestSemantics(options.status, semantics, fields.items, options.body, options.trailers);
+        try validateDeclaredResponseLength(options.status, semantics, fields.items, options.body.len);
         if (responseShouldDefaultContentLength(options.status, semantics, fields.items, options.body.len)) {
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{options.body.len}) catch unreachable;
             try fields.append(self.allocator, .{ .name = "content-length", .value = content_length });
@@ -904,13 +908,14 @@ pub const Connection = struct {
     pub fn writeInformationalResponse(self: *Connection, stream_id: u31, status_code: u16, headers: []const http2.Hpack.HeaderField) Error!void {
         if (self.role != .server) return error.UnexpectedFrame;
         if (!statusIsInformational(status_code)) return error.InvalidStatus;
-        try validateResponseBodyForStatus(status_code, headers, &.{}, &.{});
         var status_buf: [3]u8 = undefined;
         const status = std.fmt.bufPrint(&status_buf, "{}", .{status_code}) catch return error.InvalidStatus;
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
         try fields.append(self.allocator, .{ .name = ":status", .value = status });
         for (headers) |header| try fields.append(self.allocator, header);
+        stripConnectionHeaders(&fields, .response);
+        try validateResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
         try validateHeaderBlock(fields.items, .response);
         // HTTP/2 informational responses never end the stream; the final
         // response HEADERS still owns END_STREAM/body/trailer semantics.  This
@@ -1406,14 +1411,15 @@ pub const Connection = struct {
     ) Error!void {
         var status_buf: [3]u8 = undefined;
         if (status_code < 100 or status_code > 999) return error.InvalidStatus;
-        if (status_code >= 200 and status_code < 300 and (try contentLength(response_headers)) != null) {
-            return error.InvalidContentLength;
-        }
         const status = std.fmt.bufPrint(&status_buf, "{}", .{status_code}) catch return error.InvalidStatus;
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
         try fields.append(self.allocator, .{ .name = ":status", .value = status });
         for (response_headers) |header| try fields.append(self.allocator, header);
+        stripConnectionHeaders(&fields, .response);
+        if (status_code >= 200 and status_code < 300 and (try contentLength(fields.items)) != null) {
+            return error.InvalidContentLength;
+        }
         try validateHeaderBlock(fields.items, .response);
         try self.writeHeaders(stream_id, fields.items, end_stream);
     }
@@ -2132,6 +2138,49 @@ fn requestShouldDefaultContentLength(method: []const u8, headers: []const http2.
     // materially different from a method that normally carries no payload.
     if (body_len == 0 and !methodHasDefinedPayloadSemantics(method)) return false;
     return (contentLength(headers) catch return false) == null;
+}
+
+fn stripConnectionHeaders(headers: *std.ArrayList(http2.Hpack.HeaderField), kind: HeaderBlockKind) void {
+    var index: usize = 0;
+    while (index < headers.items.len) {
+        const header = headers.items[index];
+        if (std.ascii.eqlIgnoreCase(header.name, "connection")) {
+            // Hyper strips outbound HTTP/1 hop-by-hop metadata before handing a
+            // header map to h2.  Do the same at the convenience writer boundary
+            // so callers that forward HTTP/1 headers do not have to pre-filter
+            // every field.  We still reject hop-by-hop fields on inbound blocks
+            // and low-level writeHeaders calls; this helper is only an outbound
+            // compatibility/safety shim for high-level request/response APIs.
+            _ = headers.orderedRemove(index);
+            removeConnectionNominatedHeaders(headers, header.value);
+            continue;
+        }
+        if (connectionSpecificHeaderName(header.name)) {
+            _ = headers.orderedRemove(index);
+            continue;
+        }
+        if (std.ascii.eqlIgnoreCase(header.name, "te") and (kind != .request or !std.ascii.eqlIgnoreCase(std.mem.trim(u8, header.value, " \t"), "trailers"))) {
+            _ = headers.orderedRemove(index);
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn removeConnectionNominatedHeaders(headers: *std.ArrayList(http2.Hpack.HeaderField), value: []const u8) void {
+    var tokens = std.mem.splitScalar(u8, value, ',');
+    while (tokens.next()) |raw_token| {
+        const token = std.mem.trim(u8, raw_token, " \t");
+        if (token.len == 0) continue;
+        var index: usize = 0;
+        while (index < headers.items.len) {
+            if (std.ascii.eqlIgnoreCase(headers.items[index].name, token)) {
+                _ = headers.orderedRemove(index);
+                continue;
+            }
+            index += 1;
+        }
+    }
 }
 
 fn validateHeaderListSize(headers: []const http2.Hpack.HeaderField, max_size: usize) Error!void {
@@ -5228,7 +5277,7 @@ test "HTTP/2 runtime exchanges request and response trailers" {
     try std.testing.expectEqualStrings("0", response.trailers[0].value);
 }
 
-test "HTTP/2 runtime validates connection-specific headers" {
+test "HTTP/2 runtime rejects inbound connection-specific headers" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -5290,45 +5339,208 @@ test "HTTP/2 runtime validates connection-specific headers" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expect(shared.saw_expected);
+}
 
-    try std.testing.expectError(error.InvalidHeader, client.request(.{
+test "HTTP/2 high-level writers strip outbound connection-specific headers" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/strip-hop-by-hop", request.path);
+            try std.testing.expect(findHeader(request.headers, "connection") == null);
+            try std.testing.expect(findHeader(request.headers, "x-hop") == null);
+            try std.testing.expect(findHeader(request.headers, "keep-alive") == null);
+            try std.testing.expect(findHeader(request.headers, "proxy-connection") == null);
+            try std.testing.expect(findHeader(request.headers, "transfer-encoding") == null);
+            try std.testing.expect(findHeader(request.headers, "upgrade") == null);
+            try std.testing.expect(findHeader(request.headers, "te") == null);
+            try std.testing.expectEqualStrings("kept", findHeader(request.headers, "x-end-to-end") orelse return error.MissingPseudoHeader);
+
+            try connection.writeResponse(request.stream_id, .{
+                .headers = &.{
+                    .{ .name = "connection", .value = "x-response-hop" },
+                    .{ .name = "x-response-hop", .value = "secret" },
+                    .{ .name = "keep-alive", .value = "timeout=5" },
+                    .{ .name = "proxy-connection", .value = "keep-alive" },
+                    .{ .name = "transfer-encoding", .value = "chunked" },
+                    .{ .name = "upgrade", .value = "websocket" },
+                    .{ .name = "te", .value = "gzip" },
+                    .{ .name = "x-response-end-to-end", .value = "kept" },
+                },
+                .body = "ok",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.request(.{
         .method = "GET",
-        .path = "/bad-te",
+        .path = "/strip-hop-by-hop",
         .authority = "localhost",
-        .headers = &.{.{ .name = "te", .value = "gzip" }},
-    }));
-    try std.testing.expectError(error.InvalidHeader, client.request(.{
+        .headers = &.{
+            .{ .name = "connection", .value = "x-hop" },
+            .{ .name = "x-hop", .value = "secret" },
+            .{ .name = "keep-alive", .value = "timeout=5" },
+            .{ .name = "proxy-connection", .value = "keep-alive" },
+            .{ .name = "transfer-encoding", .value = "chunked" },
+            .{ .name = "upgrade", .value = "websocket" },
+            .{ .name = "te", .value = "gzip" },
+            .{ .name = "x-end-to-end", .value = "kept" },
+        },
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+    try std.testing.expect(findHeader(response.headers, "connection") == null);
+    try std.testing.expect(findHeader(response.headers, "x-response-hop") == null);
+    try std.testing.expect(findHeader(response.headers, "keep-alive") == null);
+    try std.testing.expect(findHeader(response.headers, "proxy-connection") == null);
+    try std.testing.expect(findHeader(response.headers, "transfer-encoding") == null);
+    try std.testing.expect(findHeader(response.headers, "upgrade") == null);
+    try std.testing.expect(findHeader(response.headers, "te") == null);
+    try std.testing.expectEqualStrings("kept", findHeader(response.headers, "x-response-end-to-end") orelse return error.MissingPseudoHeader);
+}
+
+test "HTTP/2 high-level request writer preserves TE trailers" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("trailers", findHeader(request.headers, "te") orelse return error.MissingPseudoHeader);
+            try connection.writeResponse(request.stream_id, .{ .body = "ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.request(.{
         .method = "GET",
-        .path = "/bad-transfer-encoding",
+        .path = "/te-trailers",
         .authority = "localhost",
-        .headers = &.{.{ .name = "transfer-encoding", .value = "chunked" }},
-    }));
-    try std.testing.expectError(error.InvalidHeader, client.request(.{
-        .method = "GET",
-        .path = "/bad-trailer-te",
-        .authority = "localhost",
-        .trailers = &.{.{ .name = "te", .value = "trailers" }},
-    }));
-    try std.testing.expectError(error.InvalidHeader, client.request(.{
-        .method = "POST",
-        .path = "/bad-trailer-content-length",
-        .authority = "localhost",
-        .body = "hello",
-        .trailers = &.{.{ .name = "content-length", .value = "5" }},
-    }));
-    try std.testing.expectError(error.InvalidHeader, client.request(.{
-        .method = "GET",
-        .path = "/bad-value",
-        .authority = "localhost",
-        .headers = &.{.{ .name = "x-bad", .value = "ok\r\ninjected: yes" }},
-    }));
-    try std.testing.expectError(error.InvalidContentLength, client.request(.{
-        .method = "POST",
-        .path = "/bad-request-length",
-        .authority = "localhost",
-        .headers = &.{.{ .name = "content-length", .value = "5" }},
-        .body = "pong",
-    }));
+        .headers = &.{.{ .name = "te", .value = "trailers" }},
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HTTP/2 header validation rejects connection-specific headers" {
+    const bad_te_request = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/bad-te" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "te", .value = "gzip" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&bad_te_request, .request));
+
+    const bad_transfer_encoding_request = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/bad-transfer-encoding" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "transfer-encoding", .value = "chunked" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&bad_transfer_encoding_request, .request));
+
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
+        .{ .name = "te", .value = "trailers" },
+    }, .request_trailers));
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
+        .{ .name = "content-length", .value = "5" },
+    }, .request_trailers));
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "te", .value = "trailers" },
+    }, .response));
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "connection", .value = "x-hop" },
+    }, .response));
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/bad-value" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "x-bad", .value = "ok\r\ninjected: yes" },
+    }, .request));
+
+    try std.testing.expectError(error.InvalidContentLength, validateDeclaredRequestLength(&.{
+        .{ .name = "content-length", .value = "5" },
+    }, "pong".len));
 }
 
 test "HTTP/2 runtime validates pseudo headers and lowercase names" {
