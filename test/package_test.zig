@@ -108,6 +108,10 @@ test "public modules are reachable" {
     try std.testing.expect(goaway_error == error.ConnectionGoAway);
     try std.testing.expectEqual(@as(u64, 0x01), netz.http3.FrameType.headers);
     try std.testing.expectEqual(@as(usize, 65_535), (netz.http3.runtime.Limits{}).quic.max_datagram_size);
+    try std.testing.expectEqual(
+        @as(usize, 128),
+        (netz.http3.runtime.Limits{}).max_concurrent_request_streams,
+    );
     try std.testing.expect(@hasDecl(netz.http3.runtime.Server, "receiveRequestsConcurrent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ProtectedClient"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "HandshakeClient"));
@@ -145,6 +149,10 @@ test "public modules are reachable" {
     );
     try std.testing.expectEqual(@as(u64, 0x14e9cd29), @intFromEnum(netz.http3.SettingId.webtransport_max_sessions_v13));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedConfig, "local_settings"));
+    try std.testing.expectEqual(
+        @as(usize, 128),
+        (netz.http3.runtime.HandshakeSessionOptions{}).max_concurrent_request_streams,
+    );
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "control"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "qpack_encode"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedServer, "qpack_encode"));
