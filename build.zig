@@ -85,6 +85,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark HTTP/2 HPACK stateful compression against stateless helpers",
         },
         .{
+            .exe_name = "netz-bench-http3-dev",
+            .path = "examples/bench_http3_dev.zig",
+            .run_step = "bench-http3-dev",
+            .description = "Benchmark HTTP/3 cleartext development request/response round trips",
+        },
+        .{
             .exe_name = "netz-bench-quic-short-packet",
             .path = "examples/bench_quic_short_packet.zig",
             .run_step = "bench-quic-short-packet",
