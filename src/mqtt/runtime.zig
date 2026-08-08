@@ -1428,6 +1428,18 @@ test "MQTT client connectAttempt exposes refused CONNACK reason" {
 
     thread.join();
     if (shared.err) |err| return err;
+
+    var second_server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_packet_size = 4096 });
+    defer second_server.deinit();
+    var second_shared = Shared{ .server = &second_server };
+    const second_thread = try std.Thread.spawn(.{}, Shared.run, .{&second_shared});
+    try std.testing.expectError(error.ConnectRefused, Client.connectWithConnAck(allocator, io, second_server.address(), .{
+        .protocol = .v5,
+        .client_id = "refused-client",
+        .limits = .{ .max_packet_size = 4096 },
+    }));
+    second_thread.join();
+    if (second_shared.err) |err| return err;
 }
 
 test "MQTT connection enforces outgoing inflight limit before writing" {
