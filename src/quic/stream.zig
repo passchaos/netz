@@ -128,7 +128,6 @@ pub const RecvState = struct {
             if (end > final_size) return error.FinalSizeMismatch;
             if (frame.fin and end != final_size) return error.FinalSizeMismatch;
         }
-        if (frame.fin) self.final_size = end;
 
         var newly_received: u64 = 0;
         for (frame.data, 0..) |byte, i| {
@@ -152,6 +151,7 @@ pub const RecvState = struct {
         while (self.contiguous_end < self.received.items.len and self.received.items[self.contiguous_end]) {
             self.contiguous_end += 1;
         }
+        if (frame.fin) self.final_size = end;
         return newly_received;
     }
 
@@ -244,4 +244,23 @@ test "QUIC receive stream rejects conflicting duplicate bytes" {
         .fin = false,
     }));
     try std.testing.expectEqualStrings("abcdef", recv.available());
+}
+
+test "QUIC receive stream keeps final size transactional on conflict" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 1024);
+    defer recv.deinit();
+
+    try recv.insert(.{ .stream_id = 0, .offset = 0, .data = "abc", .fin = false });
+    try std.testing.expect(recv.final_size == null);
+    try std.testing.expectError(error.ConflictingStreamData, recv.insert(.{
+        .stream_id = 0,
+        .offset = 1,
+        .data = "Z",
+        .fin = true,
+    }));
+    try std.testing.expect(recv.final_size == null);
+
+    try recv.insert(.{ .stream_id = 0, .offset = 3, .data = &.{}, .fin = true });
+    try std.testing.expectEqual(@as(?usize, 3), recv.final_size);
 }
