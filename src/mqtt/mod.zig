@@ -612,6 +612,27 @@ fn validatePropertiesFor(context: PropertyContext, properties: []const Property)
         if (!propertyAllowedInContext(context, id)) return error.InvalidProperty;
         try validatePropertyNotDuplicateForContext(context, property, properties[0..index]);
     }
+    try validateAuthenticationPropertiesForContext(context, properties);
+}
+
+fn validateAuthenticationPropertiesForContext(context: PropertyContext, properties: []const Property) Error!void {
+    switch (context) {
+        .connect, .connack, .auth => {},
+        else => return,
+    }
+    var has_authentication_method = false;
+    var has_authentication_data = false;
+    for (properties) |property| {
+        const id = propertyId(property);
+        if (id == .authentication_method) has_authentication_method = true;
+        if (id == .authentication_data) has_authentication_data = true;
+    }
+    // MQTT 5 binds Authentication Data to the selected Authentication Method:
+    // opaque data is meaningful only after peers agree on the method name.
+    // Rejecting orphan data keeps CONNECT/CONNACK/AUTH packets unambiguous at
+    // the same context-validation boundary that enforces packet-specific
+    // property allow-lists.
+    if (has_authentication_data and !has_authentication_method) return error.InvalidProperty;
 }
 
 fn validatePropertyNotDuplicateForContext(context: PropertyContext, property: Property, previous: []const Property) Error!void {
@@ -2026,6 +2047,20 @@ test "MQTT v5 packet-specific properties are validated" {
     try std.testing.expectError(error.InvalidProperty, AckPacket.write(&encoded, allocator, .v5, .puback, 1, 0, &.{
         .{ .varint = .{ .id = .subscription_identifier, .value = 1 } },
     }));
+    try std.testing.expectError(error.InvalidProperty, writeConnectPacket(&encoded, allocator, .v5, .{
+        .client_id = "client",
+        .properties = &.{.{ .binary = .{ .id = .authentication_data, .value = "opaque" } }},
+    }));
+    try std.testing.expectError(error.InvalidProperty, ConnAck.write(&encoded, allocator, .v5, false, 0, &.{
+        .{ .binary = .{ .id = .authentication_data, .value = "opaque" } },
+    }));
+    try std.testing.expectError(error.InvalidProperty, Auth.write(&encoded, allocator, .v5, 0x18, &.{
+        .{ .binary = .{ .id = .authentication_data, .value = "opaque" } },
+    }));
+    try Auth.write(&encoded, allocator, .v5, 0x18, &.{
+        .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },
+        .{ .binary = .{ .id = .authentication_data, .value = "opaque" } },
+    });
 
     var invalid_connect: std.ArrayList(u8) = .empty;
     defer invalid_connect.deinit(allocator);
