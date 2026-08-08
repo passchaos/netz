@@ -1517,6 +1517,7 @@ pub const Connection = struct {
             error.DuplicateConnectionId => connectionIdFrameClose(frames, .protocol_violation, "connection id reuse"),
             error.DuplicateResetToken => connectionIdFrameClose(frames, .protocol_violation, "reset token reuse"),
             error.ActiveConnectionIdLimit => connectionIdFrameClose(frames, .connection_id_limit_error, "connection id limit"),
+            error.InvalidConnectionId, error.UnknownConnectionId => retireConnectionIdFrameClose(frames),
             else => null,
         };
     }
@@ -1536,6 +1537,13 @@ pub const Connection = struct {
     fn connectionIdFrameClose(frames: []const quic.Frame, code: quic.TransportErrorCode, reason: []const u8) ?quic.FramePayloadCloseError {
         for (frames) |frame| {
             if (frame == .new_connection_id) return semanticClose(code, @intFromEnum(quic.FrameType.new_connection_id), reason);
+        }
+        return null;
+    }
+
+    fn retireConnectionIdFrameClose(frames: []const quic.Frame) ?quic.FramePayloadCloseError {
+        for (frames) |frame| {
+            if (frame == .retire_connection_id) return semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.retire_connection_id), "retire connection id");
         }
         return null;
     }
@@ -4396,6 +4404,10 @@ test "QUIC 1-RTT preflights RETIRE_CONNECTION_ID for packet destination CID" {
     try std.testing.expectEqual(@as(usize, 2), server.local_connection_ids.count());
     try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
     try std.testing.expect(server.findRecvStreamEntry(0) == null);
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.retire_connection_id)), server.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("retire connection id", server.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT queues RETIRE_CONNECTION_ID for retired peer IDs" {
