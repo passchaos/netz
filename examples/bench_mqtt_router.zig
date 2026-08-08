@@ -55,6 +55,14 @@ pub fn main() !void {
     const linear_ns = nowNs(io) -| linear_start;
     const speedup_x100 = ratioTimes100(linear_ns, router_ns);
 
+    const unsubscribe_start = nowNs(io);
+    var removed: usize = 0;
+    for (filters.items[0..filter_count], 0..) |filter, i| {
+        try router.unsubscribe(@intCast(i), filter);
+        removed += 1;
+    }
+    const unsubscribe_ns = nowNs(io) -| unsubscribe_start;
+
     std.debug.print(
         \\MQTT router benchmark
         \\  filters: {d}
@@ -62,6 +70,7 @@ pub fn main() !void {
         \\  router matches: {d}, ns/op: {d}
         \\  linear matches: {d}, ns/op: {d}
         \\  router speedup: {d}.{d:0>2}x
+        \\  unsubscribed exact filters: {d}, ns/op: {d}
         \\
     , .{
         filters.items.len,
@@ -72,6 +81,8 @@ pub fn main() !void {
         linear_ns / iterations,
         speedup_x100 / 100,
         speedup_x100 % 100,
+        removed,
+        unsubscribe_ns / removed,
     });
 }
 
