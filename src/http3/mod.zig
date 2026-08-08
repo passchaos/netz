@@ -1634,7 +1634,7 @@ fn validateUriScheme(scheme: []const u8) Error!void {
 fn validateUriPath(method: []const u8, path: []const u8) Error!void {
     if (path.len == 0) return error.InvalidHeader;
     if (std.mem.eql(u8, path, "*")) {
-        if (!std.ascii.eqlIgnoreCase(method, "OPTIONS")) return error.InvalidHeader;
+        if (!std.mem.eql(u8, method, "OPTIONS")) return error.InvalidHeader;
         return;
     }
     if (path[0] != '/' and path[0] != '?') return error.InvalidHeader;
@@ -2561,6 +2561,29 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
         .{ .name = ":authority", .value = "example.com" },
     });
     try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, invalid_path.items));
+
+    var options_asterisk = std.ArrayList(u8).empty;
+    defer options_asterisk.deinit(allocator);
+    try Helper.writeRequestBlock(&options_asterisk, allocator, &.{
+        .{ .name = ":method", .value = "OPTIONS" },
+        .{ .name = ":path", .value = "*" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+    });
+    var options_decoded = try decodeRequest(allocator, options_asterisk.items);
+    defer options_decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("OPTIONS", options_decoded.method);
+    try std.testing.expectEqualStrings("*", options_decoded.path);
+
+    var lowercase_options_asterisk = std.ArrayList(u8).empty;
+    defer lowercase_options_asterisk.deinit(allocator);
+    try Helper.writeRequestBlock(&lowercase_options_asterisk, allocator, &.{
+        .{ .name = ":method", .value = "options" },
+        .{ .name = ":path", .value = "*" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, lowercase_options_asterisk.items));
 
     var invalid_authority = std.ArrayList(u8).empty;
     defer invalid_authority.deinit(allocator);
