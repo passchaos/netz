@@ -7753,22 +7753,28 @@ pub const sctp = struct {
                 .user_data = &.{},
             };
             return switch (chunk.chunk_type) {
-                .data => .{
-                    .immediate_sack = base.immediate_sack,
-                    .unordered = base.unordered,
-                    .beginning = base.beginning,
-                    .ending = base.ending,
-                    .tsn = base.tsn,
-                    .stream_id = base.stream_id,
-                    .stream_sequence_number = base.stream_sequence_number,
-                    .payload_protocol_identifier = @enumFromInt(std.mem.readInt(u32, chunk.value[8..12], .big)),
-                    .user_data = chunk.value[12..],
+                .data => blk: {
+                    const ppid: PayloadProtocolIdentifier = @enumFromInt(std.mem.readInt(u32, chunk.value[8..12], .big));
+                    if (ppid == .webrtc_dcep and base.unordered) return error.InvalidSctpPacket;
+                    break :blk .{
+                        .immediate_sack = base.immediate_sack,
+                        .unordered = base.unordered,
+                        .beginning = base.beginning,
+                        .ending = base.ending,
+                        .tsn = base.tsn,
+                        .stream_id = base.stream_id,
+                        .stream_sequence_number = base.stream_sequence_number,
+                        .payload_protocol_identifier = ppid,
+                        .user_data = chunk.value[12..],
+                    };
                 },
                 .i_data => blk: {
                     if (chunk.value.len < 16) return error.InvalidSctpPacket;
                     const mid = std.mem.readInt(u32, chunk.value[8..12], .big);
                     const ppid_or_fsn = std.mem.readInt(u32, chunk.value[12..16], .big);
                     if (!base.beginning and ppid_or_fsn == 0) return error.InvalidSctpPacket;
+                    const ppid: PayloadProtocolIdentifier = if (base.beginning) @enumFromInt(ppid_or_fsn) else @enumFromInt(@as(u32, 0));
+                    if (ppid == .webrtc_dcep and base.unordered) return error.InvalidSctpPacket;
                     break :blk .{
                         .immediate_sack = base.immediate_sack,
                         .unordered = base.unordered,
@@ -7780,7 +7786,7 @@ pub const sctp = struct {
                         .stream_sequence_number = @truncate(mid),
                         .message_identifier = mid,
                         .fragment_sequence_number = if (base.beginning) 0 else ppid_or_fsn,
-                        .payload_protocol_identifier = if (base.beginning) @enumFromInt(ppid_or_fsn) else @enumFromInt(@as(u32, 0)),
+                        .payload_protocol_identifier = ppid,
                         .user_data = chunk.value[16..],
                     };
                 },
@@ -9205,6 +9211,12 @@ pub const sctp = struct {
         const chunk_len = 4 + value_len;
         if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
         if (chunk.interleaved and !chunk.beginning and chunk.fragment_sequence_number == 0) return error.InvalidSctpPacket;
+        // DCEP OPEN/ACK traffic is the control plane for WebRTC data channels.
+        // Pion/datachannel always emits it ordered and reliable, regardless of
+        // the negotiated user-data channel reliability.  The DATA chunk only
+        // carries the unordered bit, so prevent the codec from generating the
+        // one visible DCEP reliability violation here.
+        if (chunk.payload_protocol_identifier == .webrtc_dcep and chunk.unordered) return error.InvalidSctpPacket;
         try list.append(allocator, @intFromEnum(if (chunk.interleaved) ChunkType.i_data else ChunkType.data));
         try list.append(allocator, chunk.flags());
         try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
@@ -14125,7 +14137,6 @@ test "SCTP DATA packet and DCEP channel messages" {
         .destination_port = 5000,
         .verification_tag = 0x01020304,
     }, &.{.{
-        .unordered = true,
         .tsn = 10,
         .stream_id = 2,
         .stream_sequence_number = 0,
@@ -14141,7 +14152,7 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expectEqual(@as(usize, 1), parsed.chunks.len);
 
     const data = try sctp.DataChunk.parse(parsed.chunks[0]);
-    try std.testing.expect(data.unordered);
+    try std.testing.expect(!data.unordered);
     try std.testing.expect(data.beginning);
     try std.testing.expect(data.ending);
     try std.testing.expectEqual(sctp.PayloadProtocolIdentifier.webrtc_dcep, data.payload_protocol_identifier);
@@ -14154,6 +14165,24 @@ test "SCTP DATA packet and DCEP channel messages" {
     try std.testing.expect(dcep_reliability.unordered);
     try std.testing.expectEqual(sctp.DataChannelReliabilityMode.retransmit, dcep_reliability.mode);
     try std.testing.expectEqual(@as(u32, 3), dcep_reliability.parameter);
+    var invalid_dcep_data: std.ArrayList(u8) = .empty;
+    defer invalid_dcep_data.deinit(allocator);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeDataChunk(&invalid_dcep_data, allocator, .{
+        .unordered = true,
+        .tsn = 10,
+        .stream_id = 2,
+        .stream_sequence_number = 0,
+        .payload_protocol_identifier = .webrtc_dcep,
+        .user_data = dcep_open.items,
+    }));
+    var unordered_dcep_value = [_]u8{0} ** 12;
+    std.mem.writeInt(u32, unordered_dcep_value[8..12], @intFromEnum(sctp.PayloadProtocolIdentifier.webrtc_dcep), .big);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.DataChunk.parse(.{
+        .chunk_type = .data,
+        .flags = 0x07,
+        .value = &unordered_dcep_value,
+        .consumed = 16,
+    }));
 
     try std.testing.expectEqual(sctp.DataChannelReliability{
         .unordered = false,
