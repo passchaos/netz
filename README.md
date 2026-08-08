@@ -49,8 +49,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   negotiation, and automatic non-blocking dynamic request/response compression
   after decoder feedback, and a handshake-backed protected client/server
   runtime; both server paths retain bounded per-request-stream reassembly state
-  so interleaved streams are not dropped, plus a `std.Io.async` request receive
-  helper for the development runtime
+  so interleaved streams are not dropped, surface RESET_STREAM request
+  cancellation, and expose client/server cancel helpers that send
+  RESET_STREAM+STOP_SENDING with conditional QPACK stream cancellation, plus a
+  `std.Io.async` request receive helper for the development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed

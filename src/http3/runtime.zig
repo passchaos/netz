@@ -298,6 +298,17 @@ pub const QpackDecodeState = struct {
         }
     }
 
+    pub fn recordStreamCancellation(
+        self: *QpackDecodeState,
+        stream_id: u64,
+    ) Error!void {
+        try http3.Qpack.writeDecoderInstruction(
+            &self.decoder_instructions,
+            self.allocator,
+            .{ .stream_cancellation = stream_id },
+        );
+    }
+
     fn recordInsertCount(self: *QpackDecodeState, inserted: u64) Error!void {
         const next = std.math.add(u64, self.acknowledged_insert_count, inserted) catch
             return error.QpackDecoderStreamError;
@@ -582,6 +593,10 @@ pub const QpackEncodeState = struct {
             }
             self.releaseSection(index);
         }
+    }
+
+    pub fn hasPendingSections(self: QpackEncodeState, stream_id: u64) bool {
+        return self.findPendingSection(stream_id) != null;
     }
 
     fn applyDecoderInstruction(
@@ -1129,7 +1144,7 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn receiveRequest(self: *HandshakeServerSession) Error!OwnedHandshakeRequest {
-        const assembled = try receiveConnectionStreamBytes(
+        const assembled = receiveConnectionStreamBytes(
             &self.established.connection,
             null,
             self.options,
@@ -1138,7 +1153,13 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encode,
             &self.request_streams,
             .server,
-        );
+        ) catch |err| switch (err) {
+            error.RequestCancelled, error.RequestRejected => {
+                try self.sendQpackFeedback();
+                return err;
+            },
+            else => return err,
+        };
         errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
         var request = try http3.decodeRequestWithDynamicTable(
             self.established.connection.endpoint.allocator,
@@ -1208,6 +1229,38 @@ pub const HandshakeServerSession = struct {
             server_control_stream_id,
         );
         try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
+    }
+
+    pub fn cancelRequest(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
+        const cancel_qpack = try self.request_streams.cancel(
+            stream_id,
+            self.qpack_decode.table,
+        );
+        try cancelConnectionRequest(
+            &self.established.connection,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            stream_id,
+            application_error_code,
+            cancel_qpack,
+        );
+        self.qpack_encode.abandonStream(stream_id);
+    }
+
+    pub fn rejectRequest(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!void {
+        try self.cancelRequest(
+            stream_id,
+            http3.ApplicationErrorCode.request_rejected,
+        );
     }
 
     fn sendQpackFeedback(self: *HandshakeServerSession) Error!void {
@@ -1347,6 +1400,24 @@ pub const HandshakeClient = struct {
             client_control_stream_id,
         );
         try sendConnectionControlFrame(&self.established.connection, &self.control, &self.control_send, self.options, .goaway, stream_id);
+    }
+
+    pub fn cancelRequest(
+        self: *HandshakeClient,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
+        try cancelConnectionRequest(
+            &self.established.connection,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            stream_id,
+            application_error_code,
+            false,
+        );
+        self.qpack_encode.abandonStream(stream_id);
     }
 
     fn sendQpackFeedback(self: *HandshakeClient) Error!void {
@@ -1549,6 +1620,44 @@ pub const ProtectedServer = struct {
         try sendProtectedControlFrame(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, &self.protected_send, .goaway, stream_id);
     }
 
+    pub fn cancelRequest(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
+        const cancel_qpack = try self.request_streams.cancel(
+            stream_id,
+            self.qpack_decode.table,
+        );
+        try sendProtectedRequestCancellation(
+            &self.quic_server.endpoint,
+            to,
+            self.config,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            &self.next_packet_number,
+            &self.protected_send,
+            stream_id,
+            application_error_code,
+            cancel_qpack,
+        );
+        self.qpack_encode.abandonStream(stream_id);
+    }
+
+    pub fn rejectRequest(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+    ) Error!void {
+        try self.cancelRequest(
+            to,
+            stream_id,
+            http3.ApplicationErrorCode.request_rejected,
+        );
+    }
+
     fn receiveStreamBytes(self: *ProtectedServer, expected_stream_id: ?u62) Error!AssembledStream {
         std.debug.assert(expected_stream_id == null);
         if (try self.request_streams.takeReady(
@@ -1569,6 +1678,26 @@ pub const ProtectedServer = struct {
 
             for (packet.frames) |frame| {
                 try rejectCriticalStreamClosureFrame(self.control, frame, .server);
+                if (frame == .reset_stream and
+                    (try messageStreamDisposition(
+                        frame.reset_stream.stream_id,
+                    )) == .request_response)
+                {
+                    if (try self.request_streams.cancel(
+                        frame.reset_stream.stream_id,
+                        self.qpack_decode.table,
+                    )) {
+                        try self.qpack_decode.recordStreamCancellation(
+                            frame.reset_stream.stream_id,
+                        );
+                    }
+                    try self.sendQpackFeedback(packet.from);
+                    return if (frame.reset_stream.application_error_code ==
+                        http3.ApplicationErrorCode.request_rejected)
+                        error.RequestRejected
+                    else
+                        error.RequestCancelled;
+                }
                 if (frame != .stream) continue;
                 if (isPeerQpackStreamFrame(
                     self.control,
@@ -1768,6 +1897,27 @@ pub const ProtectedClient = struct {
             client_control_stream_id,
         );
         try sendProtectedControlFrame(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, &self.protected_send, .goaway, stream_id);
+    }
+
+    pub fn cancelRequest(
+        self: *ProtectedClient,
+        stream_id: u62,
+        application_error_code: u64,
+    ) Error!void {
+        try sendProtectedRequestCancellation(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.qpack_decode,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            &self.next_packet_number,
+            &self.protected_send,
+            stream_id,
+            application_error_code,
+            false,
+        );
+        self.qpack_encode.abandonStream(stream_id);
     }
 
     fn receiveStreamBytes(self: *ProtectedClient, expected_stream_id: u62) Error!AssembledStream {
@@ -2022,6 +2172,28 @@ const RequestStreamSet = struct {
         });
         return &self.entries.items[self.entries.items.len - 1];
     }
+
+    fn cancel(
+        self: *RequestStreamSet,
+        stream_id: u64,
+        table: http3.Qpack.DynamicTable,
+    ) Error!bool {
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.receive.stream_id != stream_id) continue;
+            const requires_qpack_cancellation = if (entry.receive.final_size) |final_size|
+                entry.receive.contiguous_end >= final_size and
+                    try messageUsesDynamicQpack(
+                        entry.receive.buffer.items[0..final_size],
+                        table,
+                    )
+            else
+                false;
+            var removed = self.entries.swapRemove(index);
+            removed.deinit();
+            return requires_qpack_cancellation;
+        }
+        return false;
+    }
 };
 
 fn messageBlockedByQpack(
@@ -2038,6 +2210,24 @@ fn messageBlockedByQpack(
             table,
         );
         if (prefix.required_insert_count > table.insert_count) return true;
+    }
+    return false;
+}
+
+fn messageUsesDynamicQpack(
+    bytes: []const u8,
+    table: http3.Qpack.DynamicTable,
+) Error!bool {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const frame = try http3.Frame.parse(bytes[offset..]);
+        offset += frame.consumed;
+        if (frame.frame_type != http3.FrameType.headers) continue;
+        const prefix = try http3.Qpack.decodeFieldSectionPrefix(
+            frame.payload,
+            table,
+        );
+        if (prefix.required_insert_count != 0) return true;
     }
     return false;
 }
@@ -2267,6 +2457,25 @@ fn receiveConnectionRequestStreamBytes(
         defer packet.deinit(connection.endpoint.allocator);
         for (packet.frames) |frame| {
             try rejectCriticalStreamClosureFrame(control.*, frame, .server);
+            if (frame == .reset_stream and
+                (try messageStreamDisposition(
+                    frame.reset_stream.stream_id,
+                )) == .request_response)
+            {
+                if (try request_streams.cancel(
+                    frame.reset_stream.stream_id,
+                    qpack_decode.table,
+                )) {
+                    try qpack_decode.recordStreamCancellation(
+                        frame.reset_stream.stream_id,
+                    );
+                }
+                return if (frame.reset_stream.application_error_code ==
+                    http3.ApplicationErrorCode.request_rejected)
+                    error.RequestRejected
+                else
+                    error.RequestCancelled;
+            }
             if (frame != .stream) continue;
             if (isPeerQpackStreamFrame(
                 control.*,
@@ -2555,6 +2764,30 @@ fn sendConnectionQpackFeedback(
     qpack.clearDecoderInstructions();
 }
 
+fn cancelConnectionRequest(
+    connection: *quic.one_rtt.Connection,
+    qpack: *QpackDecodeState,
+    qpack_decoder_send: *quic.stream_state.SendState,
+    qpack_decoder_prefix_sent: *bool,
+    options: HandshakeSessionOptions,
+    stream_id: u62,
+    application_error_code: u64,
+    cancel_qpack: bool,
+) Error!void {
+    try connection.resetStream(stream_id, application_error_code);
+    try connection.sendStopSending(stream_id, application_error_code);
+    if (cancel_qpack) {
+        try qpack.recordStreamCancellation(stream_id);
+        try sendConnectionQpackFeedback(
+            connection,
+            qpack,
+            qpack_decoder_send,
+            qpack_decoder_prefix_sent,
+            options,
+        );
+    }
+}
+
 fn sendProtectedSettings(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -2738,6 +2971,55 @@ fn sendProtectedQpackFeedback(
     prefix_sent.* = true;
     _ = instruction_offset;
     qpack.clearDecoderInstructions();
+}
+
+fn sendProtectedRequestCancellation(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    qpack: *QpackDecodeState,
+    qpack_decoder_send: *quic.stream_state.SendState,
+    qpack_decoder_prefix_sent: *bool,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    stream_id: u62,
+    application_error_code: u64,
+    cancel_qpack: bool,
+) Error!void {
+    const frames = [_]quic.Frame{
+        .{ .reset_stream = .{
+            .stream_id = stream_id,
+            .application_error_code = application_error_code,
+            .final_size = 0,
+        } },
+        .{ .stop_sending = .{
+            .stream_id = stream_id,
+            .application_error_code = application_error_code,
+        } },
+    };
+    try sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        &frames,
+        config.max_frames_per_packet,
+        protected_send,
+    );
+    if (cancel_qpack) {
+        try qpack.recordStreamCancellation(stream_id);
+        try sendProtectedQpackFeedback(
+            endpoint,
+            to,
+            config,
+            qpack,
+            qpack_decoder_send,
+            qpack_decoder_prefix_sent,
+            next_packet_number,
+            protected_send,
+        );
+    }
 }
 
 const ControlStreamRole = enum {
@@ -4156,6 +4438,79 @@ test "HTTP/3 protected server bounds concurrent request streams" {
     try std.testing.expectEqual(@as(usize, 1), server.request_streams.entries.items.len);
 }
 
+test "HTTP/3 protected server surfaces request reset and clears reassembly" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0x99, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0x9a, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x9b} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x9c} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    const frames = [_]quic.Frame{
+        .{ .stream = .{
+            .stream_id = 0,
+            .data = "partial request",
+        } },
+        .{ .reset_stream = .{
+            .stream_id = 0,
+            .application_error_code = http3.ApplicationErrorCode.request_cancelled,
+            .final_size = "partial request".len,
+        } },
+    };
+    try sendProtectedFrames(
+        &client.quic_client.endpoint,
+        client.quic_client.peer,
+        client.config.send_keys,
+        client.config.peer_connection_id,
+        &client.next_packet_number,
+        &frames,
+        frames.len,
+        &client.protected_send,
+    );
+    try std.testing.expectError(error.RequestCancelled, server.receiveRequest());
+    try std.testing.expectEqual(@as(usize, 0), server.request_streams.entries.items.len);
+}
+
 test "HTTP/3 protected runtime reuses acknowledged dynamic QPACK entries" {
     const allocator = std.testing.allocator;
 
@@ -5322,6 +5677,94 @@ test "HTTP/3 handshake server retains interleaved request streams" {
     };
     try client.established.connection.send(&frames);
 
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/3 handshake client cancellation reaches server" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c };
+    const client_cid = [_]u8{ 0x6d, 0x6e, 0x6f, 0x70 };
+    const server_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0x77} ** 32,
+                .x25519_secret_key = [_]u8{0x78} ** 32,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            try std.testing.expectError(
+                error.RequestCancelled,
+                session.receiveRequest(),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                session.request_streams.entries.items.len,
+            );
+            const reset = session.established.connection.streamResetReceived(0) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(
+                @as(u64, http3.ApplicationErrorCode.request_cancelled),
+                reset.application_error_code,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x75} ** 32,
+                .x25519_secret_key = [_]u8{0x76} ** 32,
+            },
+        },
+    );
+    defer client.deinit();
+
+    try client.cancelRequest(
+        0,
+        http3.ApplicationErrorCode.request_cancelled,
+    );
     thread.join();
     if (shared.err) |err| return err;
 }

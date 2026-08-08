@@ -24,6 +24,8 @@ pub const Error = wire.Error || error{
     InvalidHeader,
     InvalidPriorityUpdate,
     StreamCreationError,
+    RequestCancelled,
+    RequestIncomplete,
     InvalidContentLength,
     IntegerOverflow,
     ExcessiveLoad,
@@ -36,6 +38,12 @@ pub const Error = wire.Error || error{
 } || std.mem.Allocator.Error;
 
 pub const max_settings_payload_size: usize = 256;
+
+pub const ApplicationErrorCode = struct {
+    pub const request_rejected: u64 = 0x10b;
+    pub const request_cancelled: u64 = 0x10c;
+    pub const request_incomplete: u64 = 0x10d;
+};
 
 pub const FrameType = struct {
     pub const data: u64 = 0x00;
