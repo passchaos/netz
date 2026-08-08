@@ -215,6 +215,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "encodeDynamicBlock"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "decodeDynamicBlock"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DecoderInstruction"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "QpackDecodeState"));
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.initial_exchange.min_initial_udp_datagram_size);
     try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "sendInitialCrypto"));

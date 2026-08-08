@@ -35,6 +35,177 @@ pub const Limits = struct {
     max_stream_frame_data: usize = 1200,
 };
 
+/// Connection-scoped receive side of QPACK.
+///
+/// Encoder-stream bytes are QUIC stream data, so instructions can be split,
+/// duplicated, or delivered out of order. This state reassembles that stream,
+/// applies only complete instructions, and coalesces decoder feedback without
+/// losing the trailing partial instruction.
+pub const QpackDecodeState = struct {
+    allocator: std.mem.Allocator,
+    table: http3.Qpack.DynamicTable,
+    encoder_stream: ?quic.stream_state.RecvState = null,
+    encoder_stream_type_received: bool = false,
+    decoder_instructions: std.ArrayList(u8) = .empty,
+    acknowledged_insert_count: u64 = 0,
+    max_stream_buffer: usize,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        max_table_capacity: usize,
+        max_stream_buffer: usize,
+    ) QpackDecodeState {
+        return .{
+            .allocator = allocator,
+            .table = .init(allocator, max_table_capacity),
+            .max_stream_buffer = max_stream_buffer,
+        };
+    }
+
+    pub fn deinit(self: *QpackDecodeState) void {
+        if (self.encoder_stream) |*stream| stream.deinit();
+        self.table.deinit();
+        self.decoder_instructions.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn applyEncoderStreamFrame(
+        self: *QpackDecodeState,
+        control: *http3.ControlState,
+        stream: quic.StreamFrame,
+    ) Error!void {
+        if (stream.fin) return error.ClosedCriticalStream;
+        if (self.encoder_stream == null) {
+            self.encoder_stream = quic.stream_state.RecvState.init(
+                self.allocator,
+                stream.stream_id,
+                self.max_stream_buffer,
+            );
+        }
+        const receive = &self.encoder_stream.?;
+        try receive.insert(stream);
+
+        // Consume and validate the stream type independently from instruction
+        // framing. It can itself be split across retransmitted STREAM frames.
+        if (!self.encoder_stream_type_received) {
+            const available = receive.available();
+            if (available.len == 0) return;
+            const prefix = quic.varint.decodeSlice(available) catch |err| switch (err) {
+                error.BufferTooShort => return,
+                else => return error.QpackEncoderStreamError,
+            };
+            if (@as(http3.StreamType, @enumFromInt(prefix.value)) != .qpack_encoder) {
+                return error.InvalidStreamType;
+            }
+            try control.registerQpackStream(.qpack_encoder, stream.stream_id);
+            try receive.consume(prefix.len);
+            self.encoder_stream_type_received = true;
+        }
+
+        // One Insert Count Increment encoded with a 6-bit prefix needs at
+        // most 11 bytes for a u64. Reserve before mutating the dynamic table so
+        // allocation failure leaves both stream consumption and table state
+        // retryable.
+        try self.decoder_instructions.ensureUnusedCapacity(self.allocator, 11);
+        var inserted_total: u64 = 0;
+        while (receive.available().len != 0) {
+            const available = receive.available();
+            var decoded = http3.Qpack.decodeEncoderInstruction(
+                self.allocator,
+                available,
+            ) catch |err| switch (err) {
+                error.BufferTooShort => break,
+                error.OutOfMemory => return err,
+                else => return error.QpackEncoderStreamError,
+            };
+            defer decoded.deinit(self.allocator);
+            const before = self.table.insert_count;
+            applyDecodedEncoderInstruction(&self.table, decoded.instruction) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => return error.QpackEncoderStreamError,
+            };
+            try receive.consume(decoded.consumed);
+            inserted_total = std.math.add(
+                u64,
+                inserted_total,
+                self.table.insert_count - before,
+            ) catch return error.QpackDecoderStreamError;
+        }
+        if (inserted_total != 0) try self.recordInsertCount(inserted_total);
+    }
+
+    pub fn decodeFieldSection(
+        self: *QpackDecodeState,
+        allocator: std.mem.Allocator,
+        stream_id: u64,
+        block: []const u8,
+    ) Error!http3.Qpack.DynamicBlockDecode {
+        // Section Acknowledgment uses a 7-bit prefix and has the same 11-byte
+        // worst case. Reserve before allocating/decoding the field section so
+        // an OOM cannot strand a successfully decoded result without feedback.
+        try self.decoder_instructions.ensureUnusedCapacity(self.allocator, 11);
+        const decoded = try http3.Qpack.decodeDynamicBlock(
+            allocator,
+            block,
+            self.table,
+        );
+        if (decoded.required_insert_count != 0) {
+            try http3.Qpack.writeDecoderInstruction(
+                &self.decoder_instructions,
+                self.allocator,
+                .{ .section_acknowledgment = stream_id },
+            );
+        }
+        return decoded;
+    }
+
+    /// Transfer pending decoder instructions to the caller. Ownership is
+    /// explicit because returning a borrowed slice and then clearing the
+    /// ArrayList would let later appends overwrite bytes before the transport
+    /// sends them.
+    pub fn takeDecoderInstructions(self: *QpackDecodeState) std.mem.Allocator.Error![]u8 {
+        return self.decoder_instructions.toOwnedSlice(self.allocator);
+    }
+
+    fn recordInsertCount(self: *QpackDecodeState, inserted: u64) Error!void {
+        const next = std.math.add(u64, self.acknowledged_insert_count, inserted) catch
+            return error.QpackDecoderStreamError;
+        try http3.Qpack.writeDecoderInstruction(
+            &self.decoder_instructions,
+            self.allocator,
+            .{ .insert_count_increment = inserted },
+        );
+        self.acknowledged_insert_count = next;
+    }
+};
+
+fn applyDecodedEncoderInstruction(
+    table: *http3.Qpack.DynamicTable,
+    instruction: http3.Qpack.EncoderInstruction,
+) Error!void {
+    switch (instruction) {
+        .set_capacity => |capacity| try table.setCapacity(
+            std.math.cast(usize, capacity) orelse return error.QpackEncoderStreamError,
+        ),
+        .duplicate => |index| _ = try table.duplicate(index),
+        .insert_literal => |literal| _ = try table.insert(literal.name, literal.value),
+        .insert_name_reference => |reference| {
+            const name = if (reference.static) blk: {
+                const entry = http3.Qpack.staticEntry(
+                    std.math.cast(usize, reference.name_index) orelse
+                        return error.QpackEncoderStreamError,
+                ) orelse return error.QpackEncoderStreamError;
+                break :blk entry.name;
+            } else blk: {
+                const entry = table.relative(reference.name_index) orelse
+                    return error.QpackEncoderStreamError;
+                break :blk entry.name;
+            };
+            _ = try table.insert(name, reference.value);
+        },
+    }
+}
+
 pub const Server = struct {
     quic_server: quic.runtime.Server,
     limits: Limits = .{},
@@ -1388,6 +1559,163 @@ test "HTTP/3 runtime rejects non-empty QPACK critical streams" {
         .data = payload.items,
     }));
     try std.testing.expectEqual(@as(?u64, client_qpack_encoder_stream_id), control.peer_qpack_encoder_stream_id);
+}
+
+test "HTTP/3 QPACK decoder state reassembles split and reordered encoder instructions" {
+    const allocator = std.testing.allocator;
+    var state = QpackDecodeState.init(allocator, 256, 4096);
+    defer state.deinit();
+    var control = http3.ControlState{};
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try http3.writeQpackEncoderStreamPrefix(&bytes, allocator);
+    try http3.Qpack.writeEncoderInstruction(&bytes, allocator, .{ .set_capacity = 256 });
+    try http3.Qpack.writeEncoderInstruction(&bytes, allocator, .{ .insert_literal = .{
+        .name = "x-runtime",
+        .value = "split-across-stream-frames",
+    } });
+    try http3.Qpack.writeEncoderInstruction(&bytes, allocator, .{ .insert_name_reference = .{
+        .static = true,
+        .name_index = 1,
+        .value = "/dynamic",
+    } });
+    const split = bytes.items.len / 2;
+
+    // Deliver the suffix first. Nothing is contiguous from offset zero, so no
+    // stream registration, table mutation, or decoder feedback is possible.
+    try state.applyEncoderStreamFrame(&control, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .offset = split,
+        .data = bytes.items[split..],
+    });
+    try std.testing.expect(control.peer_qpack_encoder_stream_id == null);
+    try std.testing.expectEqual(@as(usize, 0), state.table.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), state.decoder_instructions.items.len);
+
+    try state.applyEncoderStreamFrame(&control, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .offset = 0,
+        .data = bytes.items[0..split],
+    });
+    try std.testing.expectEqual(
+        @as(?u64, client_qpack_encoder_stream_id),
+        control.peer_qpack_encoder_stream_id,
+    );
+    try std.testing.expectEqual(@as(usize, 256), state.table.capacity);
+    try std.testing.expectEqual(@as(u64, 2), state.table.insert_count);
+    try std.testing.expectEqualStrings("x-runtime", state.table.absolute(0).?.name);
+    try std.testing.expectEqualStrings(":path", state.table.absolute(1).?.name);
+    try std.testing.expectEqualStrings("/dynamic", state.table.absolute(1).?.value);
+
+    const feedback = try state.takeDecoderInstructions();
+    defer allocator.free(feedback);
+    const increment = try http3.Qpack.decodeDecoderInstruction(feedback);
+    try std.testing.expectEqual(@as(usize, feedback.len), increment.consumed);
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        increment.instruction.insert_count_increment,
+    );
+    try std.testing.expectEqual(@as(u64, 2), state.acknowledged_insert_count);
+
+    // An identical retransmission is accepted by RecvState and cannot apply
+    // instructions or acknowledgments a second time.
+    try state.applyEncoderStreamFrame(&control, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .offset = 0,
+        .data = bytes.items,
+    });
+    try std.testing.expectEqual(@as(u64, 2), state.table.insert_count);
+    try std.testing.expectEqual(@as(usize, 0), state.decoder_instructions.items.len);
+}
+
+test "HTTP/3 QPACK decoder state retains a partial instruction and acknowledges field section" {
+    const allocator = std.testing.allocator;
+    var state = QpackDecodeState.init(allocator, 256, 4096);
+    defer state.deinit();
+    var control = http3.ControlState{};
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try http3.writeQpackEncoderStreamPrefix(&bytes, allocator);
+    try http3.Qpack.writeEncoderInstruction(&bytes, allocator, .{ .set_capacity = 256 });
+    try http3.Qpack.writeEncoderInstruction(&bytes, allocator, .{ .insert_literal = .{
+        .name = "x-partial",
+        .value = "value-that-needs-the-second-frame",
+    } });
+    const split = bytes.items.len - 3;
+    try state.applyEncoderStreamFrame(&control, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .offset = 0,
+        .data = bytes.items[0..split],
+    });
+    try std.testing.expectEqual(@as(u64, 0), state.table.insert_count);
+    try std.testing.expect(state.encoder_stream.?.available().len != 0);
+
+    try state.applyEncoderStreamFrame(&control, .{
+        .stream_id = client_qpack_encoder_stream_id,
+        .offset = split,
+        .data = bytes.items[split..],
+    });
+    try std.testing.expectEqual(@as(u64, 1), state.table.insert_count);
+    try std.testing.expectEqual(@as(usize, 0), state.encoder_stream.?.available().len);
+
+    var field_section: std.ArrayList(u8) = .empty;
+    defer field_section.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(&field_section, allocator, &.{
+        .{ .name = "x-partial", .value = "value-that-needs-the-second-frame" },
+    }, state.table);
+    var decoded = try state.decodeFieldSection(allocator, 12, field_section.items);
+    defer http3.Qpack.freeDynamicBlock(allocator, &decoded);
+    try std.testing.expectEqual(@as(usize, 1), decoded.fields.len);
+    try std.testing.expectEqualStrings("x-partial", decoded.fields[0].name);
+
+    const feedback = try state.takeDecoderInstructions();
+    defer allocator.free(feedback);
+    const increment = try http3.Qpack.decodeDecoderInstruction(feedback);
+    const acknowledgment = try http3.Qpack.decodeDecoderInstruction(
+        feedback[increment.consumed..],
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        increment.instruction.insert_count_increment,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 12),
+        acknowledgment.instruction.section_acknowledgment,
+    );
+}
+
+test "HTTP/3 QPACK decoder state rejects capacity overflow and critical stream FIN" {
+    const allocator = std.testing.allocator;
+    var state = QpackDecodeState.init(allocator, 64, 4096);
+    defer state.deinit();
+    var control = http3.ControlState{};
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try http3.writeQpackEncoderStreamPrefix(&bytes, allocator);
+    try http3.Qpack.writeEncoderInstruction(&bytes, allocator, .{ .set_capacity = 65 });
+    try std.testing.expectError(error.QpackEncoderStreamError, state.applyEncoderStreamFrame(
+        &control,
+        .{
+            .stream_id = client_qpack_encoder_stream_id,
+            .offset = 0,
+            .data = bytes.items,
+        },
+    ));
+
+    var fin_state = QpackDecodeState.init(allocator, 64, 4096);
+    defer fin_state.deinit();
+    try std.testing.expectError(error.ClosedCriticalStream, fin_state.applyEncoderStreamFrame(
+        &control,
+        .{
+            .stream_id = client_qpack_encoder_stream_id,
+            .offset = 0,
+            .data = &.{@intFromEnum(http3.StreamType.qpack_encoder)},
+            .fin = true,
+        },
+    ));
 }
 
 test "HTTP/3 runtime rejects closed critical streams" {
