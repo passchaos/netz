@@ -1111,12 +1111,15 @@ pub const sdp = struct {
         connection: ?Connection = null,
         bandwidth: []Bandwidth = &.{},
         timing: []const u8 = "0 0",
+        repeat_times: []const []const u8 = &.{},
+        time_zones: ?[]const u8 = null,
         encryption_key: ?[]const u8 = null,
         attributes: []Attribute,
         media: []Media,
 
         pub fn deinit(self: *Session, allocator: std.mem.Allocator) void {
             allocator.free(self.bandwidth);
+            allocator.free(self.repeat_times);
             allocator.free(self.attributes);
             for (self.media) |media| {
                 allocator.free(media.bandwidth);
@@ -1522,6 +1525,28 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub fn formatRepeatTimeLine(allocator: std.mem.Allocator, repeat_time: []const u8) Error![]u8 {
+        try validateSdpAttributeValue(repeat_time);
+        return std.fmt.allocPrint(allocator, "r={s}\r\n", .{repeat_time});
+    }
+
+    pub fn appendRepeatTimeLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, repeat_time: []const u8) Error!void {
+        const line = try formatRepeatTimeLine(allocator, repeat_time);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatTimeZonesLine(allocator: std.mem.Allocator, time_zones: []const u8) Error![]u8 {
+        try validateSdpAttributeValue(time_zones);
+        return std.fmt.allocPrint(allocator, "z={s}\r\n", .{time_zones});
+    }
+
+    pub fn appendTimeZonesLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, time_zones: []const u8) Error!void {
+        const line = try formatTimeZonesLine(allocator, time_zones);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub fn formatRtcpAttribute(allocator: std.mem.Allocator, rtcp_address: RtcpAddress) Error![]u8 {
         if (rtcp_address.connection) |connection| {
             try validateSdpToken(connection.network_type);
@@ -1620,6 +1645,8 @@ pub const sdp = struct {
         if (session.email) |email| try validateSdpAttributeValue(email);
         if (session.phone) |phone| try validateSdpAttributeValue(phone);
         if (session.encryption_key) |encryption_key| try validateSdpAttributeValue(encryption_key);
+        for (session.repeat_times) |repeat_time| try validateSdpAttributeValue(repeat_time);
+        if (session.time_zones) |time_zones| try validateSdpAttributeValue(time_zones);
         try validateSdpAttributeValue(session.timing);
         const version_line = try std.fmt.allocPrint(allocator, "v={s}\r\n", .{session.version});
         defer allocator.free(version_line);
@@ -1645,6 +1672,8 @@ pub const sdp = struct {
         const timing_line = try std.fmt.allocPrint(allocator, "t={s}\r\n", .{session.timing});
         defer allocator.free(timing_line);
         try list.appendSlice(allocator, timing_line);
+        for (session.repeat_times) |repeat_time| try appendRepeatTimeLine(list, allocator, repeat_time);
+        if (session.time_zones) |time_zones| try appendTimeZonesLine(list, allocator, time_zones);
         if (session.encryption_key) |encryption_key| try appendEncryptionKeyLine(list, allocator, encryption_key);
     }
 
@@ -2204,6 +2233,9 @@ pub const sdp = struct {
         var session_bandwidth: std.ArrayList(Bandwidth) = .empty;
         errdefer session_bandwidth.deinit(allocator);
         var timing: []const u8 = "0 0";
+        var session_repeat_times: std.ArrayList([]const u8) = .empty;
+        errdefer session_repeat_times.deinit(allocator);
+        var session_time_zones: ?[]const u8 = null;
         var session_encryption_key: ?[]const u8 = null;
 
         var lines = std.mem.splitSequence(u8, text, "\n");
@@ -2237,6 +2269,14 @@ pub const sdp = struct {
                     session_phone = value;
                 },
                 't' => timing = value,
+                'r' => {
+                    try validateSdpAttributeValue(value);
+                    try session_repeat_times.append(allocator, value);
+                },
+                'z' => {
+                    try validateSdpAttributeValue(value);
+                    session_time_zones = value;
+                },
                 'c' => {
                     const connection = try parseConnectionLine(value);
                     if (current_media != null) {
@@ -2320,6 +2360,8 @@ pub const sdp = struct {
             .connection = session_connection,
             .bandwidth = try session_bandwidth.toOwnedSlice(allocator),
             .timing = timing,
+            .repeat_times = try session_repeat_times.toOwnedSlice(allocator),
+            .time_zones = session_time_zones,
             .encryption_key = session_encryption_key,
             .attributes = try session_attrs.toOwnedSlice(allocator),
             .media = try media_items.toOwnedSlice(allocator),
@@ -9298,6 +9340,8 @@ test "ICE candidate parser and SDP parser" {
         "b=AS:1234\r\n" ++
         "b=X-YZ:128\r\n" ++
         "t=0 0\r\n" ++
+        "r=604800 3600 0 90000\r\n" ++
+        "z=2882844526 -1h 2898848070 0\r\n" ++
         "k=prompt\r\n" ++
         "a=group:BUNDLE 0\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
@@ -9317,6 +9361,9 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("j.doe@example.com (Jane Doe)", session.email.?);
     try std.testing.expectEqualStrings("+1 617 555-6011", session.phone.?);
     try std.testing.expectEqualStrings("prompt", session.encryption_key.?);
+    try std.testing.expectEqual(@as(usize, 1), session.repeat_times.len);
+    try std.testing.expectEqualStrings("604800 3600 0 90000", session.repeat_times[0]);
+    try std.testing.expectEqualStrings("2882844526 -1h 2898848070 0", session.time_zones.?);
     try std.testing.expectEqual(@as(usize, 2), session.bandwidth.len);
     try std.testing.expectEqualStrings("AS", session.bandwidth[0].typ);
     try std.testing.expectEqual(@as(u64, 1234), session.bandwidth[0].bandwidth);
@@ -9373,6 +9420,8 @@ test "ICE candidate parser and SDP parser" {
             "b=AS:1234\r\n" ++
             "b=X-YZ:128\r\n" ++
             "t=0 0\r\n" ++
+            "r=604800 3600 0 90000\r\n" ++
+            "z=2882844526 -1h 2898848070 0\r\n" ++
             "k=prompt\r\n",
         session_header,
     );
@@ -9398,6 +9447,12 @@ test "ICE candidate parser and SDP parser" {
     invalid_header_session = session;
     invalid_header_session.encryption_key = "bad\nkey";
     try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
+    invalid_header_session = session;
+    invalid_header_session.repeat_times = &.{"bad\nrepeat"};
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
+    invalid_header_session = session;
+    invalid_header_session.time_zones = "bad\nzone";
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
     const media_line = try sdp.formatMediaLine(allocator, session.media[0].kind, session.media[0].port, session.media[0].protocol, session.media[0].formats);
     defer allocator.free(media_line);
     try std.testing.expectEqualStrings("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n", media_line);
@@ -9417,12 +9472,16 @@ test "ICE candidate parser and SDP parser" {
     try sdp.appendUriLine(&information_lines, allocator, "https://example.com/sdp");
     try sdp.appendEmailLine(&information_lines, allocator, "j.doe@example.com");
     try sdp.appendPhoneLine(&information_lines, allocator, "+1 617 555-6011");
+    try sdp.appendRepeatTimeLine(&information_lines, allocator, "604800 3600 0 90000");
+    try sdp.appendTimeZonesLine(&information_lines, allocator, "2882844526 -1h 2898848070 0");
     try sdp.appendEncryptionKeyLine(&information_lines, allocator, "prompt");
     try std.testing.expectEqualStrings(
         "i=Session info\r\n" ++
             "u=https://example.com/sdp\r\n" ++
             "e=j.doe@example.com\r\n" ++
             "p=+1 617 555-6011\r\n" ++
+            "r=604800 3600 0 90000\r\n" ++
+            "z=2882844526 -1h 2898848070 0\r\n" ++
             "k=prompt\r\n",
         information_lines.items,
     );
@@ -9431,6 +9490,8 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectError(error.InvalidSdp, sdp.formatEmailLine(allocator, "bad\nemail"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatPhoneLine(allocator, "bad\nphone"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatEncryptionKeyLine(allocator, "bad\nkey"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatRepeatTimeLine(allocator, "bad\nrepeat"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatTimeZonesLine(allocator, "bad\nzone"));
     const connection_line = try sdp.formatConnectionLine(allocator, "IN", "IP4", "0.0.0.0");
     defer allocator.free(connection_line);
     try std.testing.expectEqualStrings("c=IN IP4 0.0.0.0\r\n", connection_line);
