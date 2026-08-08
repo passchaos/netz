@@ -1008,6 +1008,7 @@ pub const H2Client = struct {
                 .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
             });
         }
+        try validateH2ClientExtraHeaders(options.extra_headers);
         try request_headers.appendSlice(allocator, options.extra_headers);
 
         var response = try connection.openExtendedConnect(.{
@@ -1049,6 +1050,7 @@ pub const H2Server = struct {
         errdefer request.deinit(allocator);
         const version = try requiredH2SingletonHeader(request.headers, "sec-websocket-version");
         if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
+        try rejectH2ExtendedConnectLegacyHeaders(request.headers);
 
         const selected_protocol = try selectH2Subprotocol(allocator, request.headers, options.protocols);
         errdefer if (selected_protocol) |protocol| allocator.free(protocol);
@@ -1059,6 +1061,7 @@ pub const H2Server = struct {
         defer response_headers.deinit(allocator);
         if (selected_protocol) |protocol| try response_headers.append(allocator, .{ .name = "sec-websocket-protocol", .value = protocol });
         if (selected_extension) |extension| try response_headers.append(allocator, .{ .name = "sec-websocket-extensions", .value = extension });
+        try validateH2ServerExtraHeaders(options.extra_headers);
         try response_headers.appendSlice(allocator, options.extra_headers);
 
         const tunnel = try connection.acceptExtendedConnect(request, response_headers.items);
@@ -1298,6 +1301,8 @@ fn validateH2ServerHandshake(
     headers: []const http2.Hpack.HeaderField,
     offered_protocols: []const []const u8,
 ) Error!?[]u8 {
+    try rejectH2ExtendedConnectLegacyHeaders(headers);
+    if (try optionalH2SingletonHeader(headers, "sec-websocket-version")) |_| return error.InvalidHandshake;
     if (try optionalH2SingletonHeader(headers, "sec-websocket-protocol")) |selected| {
         const protocol = wire.trimOws(selected);
         if (!websocket.validSubprotocolToken(protocol)) return error.InvalidSubprotocol;
@@ -1322,6 +1327,44 @@ fn optionalH2SingletonHeader(headers: []const http2.Hpack.HeaderField, name: []c
         found = header.value;
     }
     return found;
+}
+
+fn validateH2ClientExtraHeaders(headers: []const http2.Hpack.HeaderField) Error!void {
+    for (headers) |header| {
+        // RFC 8441 replaces the HTTP/1 key/accept challenge with HTTP/2
+        // extended CONNECT.  Keep runtime-owned fields out of caller-provided
+        // extras so a request cannot carry duplicate or legacy handshake state.
+        if (h2ClientOwnedWebSocketHeader(header.name) or h2LegacyHandshakeHeader(header.name)) return error.InvalidHandshake;
+    }
+}
+
+fn validateH2ServerExtraHeaders(headers: []const http2.Hpack.HeaderField) Error!void {
+    for (headers) |header| {
+        // The server helper derives protocol/extension response fields from the
+        // validated request and local options.  Reject caller-supplied copies for
+        // the same reason tungstenite rejects duplicate critical HTTP/1 headers.
+        if (std.ascii.eqlIgnoreCase(header.name, "sec-websocket-protocol") or
+            std.ascii.eqlIgnoreCase(header.name, "sec-websocket-extensions") or
+            std.ascii.eqlIgnoreCase(header.name, "sec-websocket-version") or
+            h2LegacyHandshakeHeader(header.name)) return error.InvalidHandshake;
+    }
+}
+
+fn rejectH2ExtendedConnectLegacyHeaders(headers: []const http2.Hpack.HeaderField) Error!void {
+    for (headers) |header| {
+        if (h2LegacyHandshakeHeader(header.name)) return error.InvalidHandshake;
+    }
+}
+
+fn h2ClientOwnedWebSocketHeader(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "sec-websocket-version") or
+        std.ascii.eqlIgnoreCase(name, "sec-websocket-protocol") or
+        std.ascii.eqlIgnoreCase(name, "sec-websocket-extensions");
+}
+
+fn h2LegacyHandshakeHeader(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "sec-websocket-key") or
+        std.ascii.eqlIgnoreCase(name, "sec-websocket-accept");
 }
 
 fn acceptH2Extensions(
@@ -1511,11 +1554,31 @@ test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
     };
     try std.testing.expectError(error.InvalidHandshake, requiredH2SingletonHeader(&duplicate_request_version, "sec-websocket-version"));
 
+    try std.testing.expectError(error.InvalidHandshake, validateH2ClientExtraHeaders(&.{
+        .{ .name = "sec-websocket-version", .value = "13" },
+    }));
+    try std.testing.expectError(error.InvalidHandshake, validateH2ClientExtraHeaders(&.{
+        .{ .name = "sec-websocket-key", .value = "dGhlIHNhbXBsZSBub25jZQ==" },
+    }));
+
     const duplicate_response_protocol = [_]http2.Hpack.HeaderField{
         .{ .name = "sec-websocket-protocol", .value = "chat.v1" },
         .{ .name = "sec-websocket-protocol", .value = "chat.v1" },
     };
     try std.testing.expectError(error.InvalidHandshake, validateH2ServerHandshake(std.testing.allocator, &duplicate_response_protocol, &.{"chat.v1"}));
+    try std.testing.expectError(error.InvalidHandshake, validateH2ServerExtraHeaders(&.{
+        .{ .name = "sec-websocket-protocol", .value = "chat.v1" },
+    }));
+
+    const legacy_accept_response = [_]http2.Hpack.HeaderField{
+        .{ .name = "sec-websocket-accept", .value = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" },
+    };
+    try std.testing.expectError(error.InvalidHandshake, validateH2ServerHandshake(allocator, &legacy_accept_response, &.{}));
+
+    const legacy_key_request = [_]http2.Hpack.HeaderField{
+        .{ .name = "sec-websocket-key", .value = "dGhlIHNhbXBsZSBub25jZQ==" },
+    };
+    try std.testing.expectError(error.InvalidHandshake, rejectH2ExtendedConnectLegacyHeaders(&legacy_key_request));
 
     const duplicate_extensions = [_]http2.Hpack.HeaderField{
         .{ .name = "sec-websocket-extensions", .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover" },

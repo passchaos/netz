@@ -124,7 +124,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
   Host/port synthesis, TLS client transport shared with HTTP/1, and RFC 8441
   WebSocket-over-HTTP/2 adapters that negotiate `:protocol = websocket`,
-  subprotocols, permessage-deflate, and transport-derived `:scheme` over an h2 DATA tunnel
+  subprotocols, permessage-deflate, reject duplicate/legacy critical handshake
+  fields, and use transport-derived `:scheme` over an h2 DATA tunnel
 - MQTT 3.1.1/5 fixed headers, CONNECT/CONNACK with Last Will and
   username/password payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
