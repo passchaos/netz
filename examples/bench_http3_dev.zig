@@ -60,6 +60,10 @@ pub fn main() !void {
         status_total += response.response.status;
     }
     const elapsed = nowNs(io) -| start;
+    const requests_per_second = if (elapsed == 0)
+        0
+    else
+        (@as(u64, iterations) *| std.time.ns_per_s) / elapsed;
 
     thread.join();
     if (shared.err) |err| return err;
@@ -69,11 +73,13 @@ pub fn main() !void {
         \\  iterations: {d}
         \\  status total: {d}
         \\  ns/op: {d}
+        \\  requests/s: {d}
         \\
     , .{
         iterations,
         status_total,
         elapsed / iterations,
+        requests_per_second,
     });
 }
 

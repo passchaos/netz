@@ -38,6 +38,7 @@ pub fn main() !void {
         allocator.free(packet);
     }
     const allocating_ns = nowNs(io) -| allocating_start;
+    const in_place_ratio_x100 = ratioTimes100(allocating_ns, in_place_ns);
 
     std.debug.print(
         \\QUIC short packet benchmark
@@ -45,6 +46,7 @@ pub fn main() !void {
         \\  packet len: {d}
         \\  in-place total: {d}, ns/op: {d}
         \\  allocating total: {d}, ns/op: {d}
+        \\  in-place relative throughput: {d}.{d:0>2}x
         \\
     , .{
         iterations,
@@ -53,7 +55,14 @@ pub fn main() !void {
         in_place_ns / iterations,
         allocating_total,
         allocating_ns / iterations,
+        in_place_ratio_x100 / 100,
+        in_place_ratio_x100 % 100,
     });
+}
+
+fn ratioTimes100(numerator: u64, denominator: u64) u64 {
+    if (denominator == 0) return 0;
+    return (numerator *| 100) / denominator;
 }
 
 fn nowNs(io: std.Io) u64 {
