@@ -1872,6 +1872,49 @@ pub const Request = struct {
         try validateContentLength(fields, self.body.len);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
+
+    pub fn writeDynamic(
+        self: Request,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        stream_id: u64,
+        encoder: anytype,
+    ) Error!void {
+        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var fields = try self.headerFields(&fields_buf);
+        var content_length_buf: [32]u8 = undefined;
+        if (requestShouldDefaultContentLength(self.method, fields, self.body.len)) {
+            var field_count = fields.len;
+            const content_length = std.fmt.bufPrint(
+                &content_length_buf,
+                "{}",
+                .{self.body.len},
+            ) catch unreachable;
+            try appendHeaderField(&fields_buf, &field_count, .{
+                .name = "content-length",
+                .value = content_length,
+            });
+            fields = fields_buf[0..field_count];
+        }
+        try validateHeaderBlock(fields, .request);
+        try validateHeaderBlock(self.trailers, .trailers);
+        try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
+        try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
+        try validateRequestBodyForMethod(fields, self.body, self.trailers);
+        try validateContentLength(fields, self.body.len);
+        try writeHeadersAndDataDynamic(
+            list,
+            allocator,
+            fields,
+            self.body,
+            self.trailers,
+            stream_id,
+            encoder,
+        );
+        try queueIndexableFields(encoder, fields);
+        try queueIndexableFields(encoder, self.trailers);
+    }
 };
 
 fn requestHasProtocolPseudo(headers: []const Qpack.HeaderField) bool {
@@ -1949,6 +1992,50 @@ pub const Response = struct {
         try validateContentLengthForStatus(self.status, fields, self.body.len);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
+
+    pub fn writeDynamic(
+        self: Response,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        stream_id: u64,
+        encoder: anytype,
+    ) Error!void {
+        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var status_buf: [3]u8 = undefined;
+        var fields = try self.headerFields(&fields_buf, &status_buf);
+        var content_length_buf: [32]u8 = undefined;
+        if (responseShouldDefaultContentLength(self.status, fields, self.body.len)) {
+            var field_count = fields.len;
+            const content_length = std.fmt.bufPrint(
+                &content_length_buf,
+                "{}",
+                .{self.body.len},
+            ) catch unreachable;
+            try appendHeaderField(&fields_buf, &field_count, .{
+                .name = "content-length",
+                .value = content_length,
+            });
+            fields = fields_buf[0..field_count];
+        }
+        try validateHeaderBlock(fields, .response);
+        try validateHeaderBlock(self.trailers, .trailers);
+        try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
+        try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
+        try validateResponseBodyForStatus(self.status, fields, self.body, self.trailers);
+        try validateContentLengthForStatus(self.status, fields, self.body.len);
+        try writeHeadersAndDataDynamic(
+            list,
+            allocator,
+            fields,
+            self.body,
+            self.trailers,
+            stream_id,
+            encoder,
+        );
+        try queueIndexableFields(encoder, fields);
+        try queueIndexableFields(encoder, self.trailers);
+    }
 };
 
 fn responseShouldDefaultContentLength(status: u16, headers: []const Qpack.HeaderField, body_len: usize) bool {
@@ -1983,6 +2070,30 @@ pub const InformationalResponse = struct {
         try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
         try writeHeadersFrame(list, allocator, fields);
     }
+
+    pub fn writeDynamic(
+        self: InformationalResponse,
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        peer_settings: Settings,
+        stream_id: u64,
+        encoder: anytype,
+    ) Error!void {
+        var fields_buf: [64]Qpack.HeaderField = undefined;
+        var status_buf: [3]u8 = undefined;
+        const fields = try self.headerFields(&fields_buf, &status_buf);
+        try validateHeaderBlock(fields, .response);
+        try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
+        try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
+        try writeHeadersFrameDynamic(
+            list,
+            allocator,
+            fields,
+            stream_id,
+            encoder,
+        );
+        try queueIndexableFields(encoder, fields);
+    }
 };
 
 pub fn writeResponseSequence(
@@ -2003,6 +2114,33 @@ pub fn writeResponseSequenceWithSettings(
 ) Error!void {
     for (informational) |info| try info.writeWithSettings(list, allocator, peer_settings);
     try response.writeWithSettings(list, allocator, peer_settings);
+}
+
+pub fn writeResponseSequenceDynamic(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    informational: []const InformationalResponse,
+    response: Response,
+    peer_settings: Settings,
+    stream_id: u64,
+    encoder: anytype,
+) Error!void {
+    for (informational) |info| {
+        try info.writeDynamic(
+            list,
+            allocator,
+            peer_settings,
+            stream_id,
+            encoder,
+        );
+    }
+    try response.writeDynamic(
+        list,
+        allocator,
+        peer_settings,
+        stream_id,
+        encoder,
+    );
 }
 
 pub const DecodedRequest = struct {
@@ -2241,6 +2379,23 @@ fn writeHeadersFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fie
     try (Frame{ .frame_type = FrameType.headers, .payload = block.items, .consumed = 0 }).write(list, allocator);
 }
 
+fn writeHeadersFrameDynamic(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    fields: []const Qpack.HeaderField,
+    stream_id: u64,
+    encoder: anytype,
+) Error!void {
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeFieldSection(&block, stream_id, fields);
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(list, allocator);
+}
+
 fn writeHeadersAndData(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -2255,6 +2410,55 @@ fn writeHeadersAndData(
     if (trailers.len > 0) {
         try writeHeadersFrame(list, allocator, trailers);
     }
+}
+
+fn writeHeadersAndDataDynamic(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    fields: []const Qpack.HeaderField,
+    body: []const u8,
+    trailers: []const Qpack.HeaderField,
+    stream_id: u64,
+    encoder: anytype,
+) Error!void {
+    try writeHeadersFrameDynamic(list, allocator, fields, stream_id, encoder);
+    if (body.len > 0) {
+        try (Frame{
+            .frame_type = FrameType.data,
+            .payload = body,
+            .consumed = 0,
+        }).write(list, allocator);
+    }
+    if (trailers.len > 0) {
+        try writeHeadersFrameDynamic(
+            list,
+            allocator,
+            trailers,
+            stream_id,
+            encoder,
+        );
+    }
+}
+
+fn queueIndexableFields(encoder: anytype, fields: []const Qpack.HeaderField) !void {
+    for (fields) |field| {
+        if (!qpackShouldIndex(field)) continue;
+        if (encoder.table.findExact(field.name, field.value) != null) continue;
+        _ = try encoder.insertField(field.name, field.value);
+    }
+}
+
+fn qpackShouldIndex(field: Qpack.HeaderField) bool {
+    if (field.never_indexed) return false;
+    if (field.name.len + field.value.len < 8) return false;
+    if (std.mem.eql(u8, field.name, "authorization") or
+        std.mem.eql(u8, field.name, "proxy-authorization") or
+        std.mem.eql(u8, field.name, "cookie") or
+        std.mem.eql(u8, field.name, "set-cookie"))
+    {
+        return false;
+    }
+    return true;
 }
 
 fn requestStreamForbiddenFrame(frame_type: u64) bool {

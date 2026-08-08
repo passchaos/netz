@@ -217,6 +217,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DecoderInstruction"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "QpackDecodeState"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "QpackEncodeState"));
+    try std.testing.expect(@hasDecl(netz.http3.Request, "writeDynamic"));
+    try std.testing.expect(@hasDecl(netz.http3.Response, "writeDynamic"));
     try std.testing.expect(@hasDecl(netz.http3, "decodeRequestWithDynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3, "decodeResponseWithDynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequest"));
