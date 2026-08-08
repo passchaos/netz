@@ -781,10 +781,12 @@ pub const Hpack = struct {
 
     /// Decode a self-contained HPACK field block.  For long-lived HTTP/2
     /// connections use `Hpack.Decoder` so incremental-indexing state survives
-    /// across HEADERS/CONTINUATION blocks.  Decoder-owned string storage (for
-    /// Huffman literals) is released with `freeDecodedFields`.
+    /// across HEADERS/CONTINUATION blocks.  Legal leading dynamic table-size
+    /// updates are still honored here because encoders may emit them before the
+    /// first literal even when the block later references only static entries.
+    /// Decoder-owned string storage (for Huffman literals) is released with
+    /// `freeDecodedFields`.
     pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
-        if (block.len != 0 and (block[0] & 0xe0) == 0x20) return error.HpackDynamicTableUnsupported;
         var dynamic_table = DynamicTable{};
         defer dynamic_table.deinit(allocator);
         return decodeBlockWithDynamicTable(allocator, block, &dynamic_table, default_dynamic_table_size);
@@ -1392,10 +1394,20 @@ test "HTTP/2 HPACK encoder emits table size updates and avoids low-value indexin
     try std.testing.expect(encoder.dynamic_table.findNameIndex("content-length") == null);
 }
 
-test "HTTP/2 HPACK rejects unsupported or invalid dynamic table use" {
+test "HTTP/2 HPACK accepts legal size updates and rejects bad dynamic use" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.HpackDynamicTableUnsupported, Hpack.decodeLiteralBlock(allocator, &.{0xfe}));
-    try std.testing.expectError(error.HpackDynamicTableUnsupported, Hpack.decodeLiteralBlock(allocator, &.{ 0x20, 0x00 }));
+
+    // A dynamic table-size update is legal only at the beginning of a header
+    // block.  Go's x/net/http2 and Rust h2 both accept such updates before the
+    // first representation; keep the stateless helper compatible with peers
+    // that emit a size update followed only by static-indexed fields.
+    const sized_static = try Hpack.decodeLiteralBlock(allocator, &.{ 0x20, 0x82 });
+    defer Hpack.freeDecodedFields(allocator, sized_static);
+    try std.testing.expectEqual(@as(usize, 1), sized_static.len);
+    try std.testing.expectEqualStrings(":method", sized_static[0].name);
+    try std.testing.expectEqualStrings("GET", sized_static[0].value);
+    try std.testing.expectError(error.InvalidEncoding, Hpack.decodeLiteralBlock(allocator, &.{ 0x82, 0x20 }));
 
     var decoder = Hpack.Decoder{};
     defer decoder.deinit(allocator);
