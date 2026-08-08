@@ -116,6 +116,15 @@ pub const State = struct {
         return .{ .path_response = .{ .data = data } };
     }
 
+    pub fn nextResponseFrames(self: *State, out: []quic.Frame) usize {
+        var written: usize = 0;
+        while (written < out.len) : (written += 1) {
+            const data = self.pending_responses.popFront() orelse break;
+            out[written] = .{ .path_response = .{ .data = data } };
+        }
+        return written;
+    }
+
     pub fn nextChallengeFrame(self: *State) Error!quic.Frame {
         return try self.nextChallengeFrameAt(null, null);
     }
@@ -246,6 +255,32 @@ test "QUIC path validation pending queues pop FIFO without shifting" {
     try std.testing.expectEqual(@as(usize, 2), cloned.pendingChallengeCount());
     try std.testing.expectEqualSlices(u8, &b, &(try cloned.nextChallengeFrame()).path_challenge.data);
     try std.testing.expectEqualSlices(u8, &c, &(try cloned.nextChallengeFrame()).path_challenge.data);
+}
+
+test "QUIC path validation drains response frames into caller storage" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+
+    const a = [_]u8{ 0xaa, 0, 0, 0, 0, 0, 0, 1 };
+    const b = [_]u8{ 0xbb, 0, 0, 0, 0, 0, 0, 2 };
+    const c = [_]u8{ 0xcc, 0, 0, 0, 0, 0, 0, 3 };
+    try state.receiveChallenge(a);
+    try state.receiveChallenge(b);
+    try state.receiveChallenge(c);
+
+    var first_batch: [2]quic.Frame = undefined;
+    const first_count = state.nextResponseFrames(&first_batch);
+    try std.testing.expectEqual(@as(usize, 2), first_count);
+    try std.testing.expectEqualSlices(u8, &a, &first_batch[0].path_response.data);
+    try std.testing.expectEqualSlices(u8, &b, &first_batch[1].path_response.data);
+    try std.testing.expectEqual(@as(usize, 1), state.pendingResponseCount());
+
+    var second_batch: [4]quic.Frame = undefined;
+    const second_count = state.nextResponseFrames(&second_batch);
+    try std.testing.expectEqual(@as(usize, 1), second_count);
+    try std.testing.expectEqualSlices(u8, &c, &second_batch[0].path_response.data);
+    try std.testing.expectEqual(@as(usize, 0), state.nextResponseFrames(&second_batch));
 }
 
 test "QUIC path validation retries and fails timed-out challenges" {
