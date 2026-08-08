@@ -1140,6 +1140,7 @@ pub const HandshakeServerSession = struct {
     request_lifecycle: ServerRequestLifecycle,
 
     pub fn deinit(self: *HandshakeServerSession) void {
+        self.control.deinit(self.established.connection.endpoint.allocator);
         self.request_lifecycle.deinit();
         self.request_streams.deinit();
         self.qpack_encode.deinit();
@@ -1351,6 +1352,7 @@ pub const HandshakeClient = struct {
     }
 
     pub fn deinit(self: *HandshakeClient) void {
+        self.control.deinit(self.allocator);
         self.qpack_encode.deinit();
         self.qpack_decode.deinit();
         self.established.deinit();
@@ -1450,6 +1452,35 @@ pub const HandshakeClient = struct {
         self.qpack_encode.abandonStream(stream_id);
     }
 
+    pub fn sendPriorityUpdate(
+        self: *HandshakeClient,
+        stream_id: u62,
+        priority: http3.Priority,
+    ) Error!void {
+        // PRIORITY_UPDATE can precede the request itself, which is essential
+        // for this synchronous request API: `next_stream_id` is the one request
+        // stream that may be prioritized before request() opens it.
+        if (stream_id > self.next_stream_id) return error.UnexpectedFrame;
+        try sendConnectionSettings(
+            &self.established.connection,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            client_control_stream_id,
+        );
+        try sendConnectionPriorityUpdate(
+            &self.established.connection,
+            &self.control_send,
+            self.options,
+            stream_id,
+            priority,
+        );
+    }
+
     fn sendQpackFeedback(self: *HandshakeClient) Error!void {
         try sendConnectionQpackFeedback(
             &self.established.connection,
@@ -1529,6 +1560,7 @@ pub const ProtectedServer = struct {
     }
 
     pub fn deinit(self: *ProtectedServer) void {
+        self.control.deinit(self.quic_server.endpoint.allocator);
         self.request_lifecycle.deinit();
         self.request_streams.deinit();
         self.protected_send.deinit();
@@ -1869,6 +1901,7 @@ pub const ProtectedClient = struct {
     }
 
     pub fn deinit(self: *ProtectedClient) void {
+        self.control.deinit(self.quic_client.endpoint.allocator);
         self.protected_send.deinit();
         self.qpack_encode.deinit();
         self.qpack_decode.deinit();
@@ -1988,6 +2021,38 @@ pub const ProtectedClient = struct {
             false,
         );
         self.qpack_encode.abandonStream(stream_id);
+    }
+
+    pub fn sendPriorityUpdate(
+        self: *ProtectedClient,
+        stream_id: u62,
+        priority: http3.Priority,
+    ) Error!void {
+        if (stream_id > self.next_stream_id) return error.UnexpectedFrame;
+        try sendProtectedSettings(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            &self.next_packet_number,
+            &self.protected_send,
+            client_control_stream_id,
+        );
+        try sendProtectedPriorityUpdate(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.control_send,
+            &self.next_packet_number,
+            &self.protected_send,
+            stream_id,
+            priority,
+        );
     }
 
     fn receiveStreamBytes(self: *ProtectedClient, expected_stream_id: u62) Error!AssembledStream {
@@ -2718,6 +2783,39 @@ fn sendConnectionControlFrame(
     try sendConnectionFrames(connection, frames.items, options.max_frames_per_packet);
 }
 
+fn sendConnectionPriorityUpdate(
+    connection: *quic.one_rtt.Connection,
+    control_send: *quic.stream_state.SendState,
+    options: HandshakeSessionOptions,
+    stream_id: u62,
+    priority: http3.Priority,
+) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(connection.endpoint.allocator);
+    try http3.writePriorityUpdateFrame(
+        &payload,
+        connection.endpoint.allocator,
+        stream_id,
+        priority,
+    );
+    const previous_send = control_send.*;
+    errdefer control_send.* = previous_send;
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(connection.endpoint.allocator);
+    try control_send.appendFrames(
+        &frames,
+        connection.endpoint.allocator,
+        payload.items,
+        payload.items.len,
+        false,
+    );
+    try sendConnectionFrames(
+        connection,
+        frames.items,
+        options.max_frames_per_packet,
+    );
+}
+
 fn sendProtectedControlFrame(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,
@@ -2736,6 +2834,47 @@ fn sendProtectedControlFrame(
     defer frames.deinit(endpoint.allocator);
     try control_send.appendFrames(&frames, endpoint.allocator, payload.items, payload.items.len, false);
     try sendProtectedFrames(endpoint, to, config.send_keys, config.peer_connection_id, next_packet_number, frames.items, config.max_frames_per_packet, protected_send);
+}
+
+fn sendProtectedPriorityUpdate(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    control_send: *quic.stream_state.SendState,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    stream_id: u62,
+    priority: http3.Priority,
+) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(endpoint.allocator);
+    try http3.writePriorityUpdateFrame(
+        &payload,
+        endpoint.allocator,
+        stream_id,
+        priority,
+    );
+    const previous_send = control_send.*;
+    errdefer control_send.* = previous_send;
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(endpoint.allocator);
+    try control_send.appendFrames(
+        &frames,
+        endpoint.allocator,
+        payload.items,
+        payload.items.len,
+        false,
+    );
+    try sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        frames.items,
+        config.max_frames_per_packet,
+        protected_send,
+    );
 }
 
 fn sendConnectionSettings(
@@ -3220,13 +3359,22 @@ fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.m
     if (role == .server and (stream.stream_id & 0x02) != 0 and stream.offset == 0) {
         if (peekUniStreamType(stream) == .push) return error.StreamCreationError;
     }
-    const previous = control.*;
+    var previous = try control.clone(allocator);
+    var previous_owned = true;
+    defer if (previous_owned) previous.deinit(allocator);
     const previous_priority_present = previous.latest_priority_update != null;
-    const handled = try applyControlStreamFrame(control, allocator, stream);
+    const handled = applyControlStreamFrame(control, allocator, stream) catch |err| {
+        control.deinit(allocator);
+        control.* = previous;
+        previous_owned = false;
+        return err;
+    };
     if (handled and role == .client) {
         if (control.peer_goaway_id != previous.peer_goaway_id) {
             validateServerGoAwayStreamId(control.peer_goaway_id.?) catch |err| {
+                control.deinit(allocator);
                 control.* = previous;
+                previous_owned = false;
                 return err;
             };
         }
@@ -3234,13 +3382,17 @@ fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.m
         // A client receiving them from a server must treat the frame as
         // unexpected; restore state so callers can recover or close cleanly.
         if (control.peer_max_push_id != previous.peer_max_push_id or (control.latest_priority_update != null) != previous_priority_present) {
+            control.deinit(allocator);
             control.* = previous;
+            previous_owned = false;
             return error.UnexpectedFrame;
         }
     }
     if (handled and role == .server and control.peer_goaway_id != previous.peer_goaway_id) {
         validateClientGoAwayPushId(control.peer_goaway_id.?) catch |err| {
+            control.deinit(allocator);
             control.* = previous;
+            previous_owned = false;
             return err;
         };
     }
@@ -3414,6 +3566,7 @@ test "HTTP/3 client rejects server-only control frames" {
     try (http3.Frame{ .frame_type = http3.FrameType.goaway, .payload = goaway_payload.items, .consumed = 0 }).write(&stream_bytes, allocator);
 
     var client_control = http3.ControlState{};
+    defer client_control.deinit(allocator);
     try std.testing.expectError(error.InvalidFrame, applyControlStreamFrameForRole(&client_control, allocator, .{
         .stream_id = 3,
         .offset = 0,
@@ -3427,6 +3580,7 @@ test "HTTP/3 client rejects server-only control frames" {
     try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
     try http3.writeMaxPushIdFrame(&stream_bytes, allocator, 4);
 
+    client_control.deinit(allocator);
     client_control = .{};
     try std.testing.expectError(error.UnexpectedFrame, applyControlStreamFrameForRole(&client_control, allocator, .{
         .stream_id = 3,
@@ -3440,6 +3594,7 @@ test "HTTP/3 client rejects server-only control frames" {
     try http3.writeControlStreamPrefix(&stream_bytes, allocator);
     try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
     try http3.writePriorityUpdateFrame(&stream_bytes, allocator, 0, .{ .urgency = 1 });
+    client_control.deinit(allocator);
     client_control = .{};
     try std.testing.expectError(error.UnexpectedFrame, applyControlStreamFrameForRole(&client_control, allocator, .{
         .stream_id = 3,
@@ -3457,6 +3612,7 @@ test "HTTP/3 client rejects server-only control frames" {
     try (http3.Frame{ .frame_type = http3.FrameType.goaway, .payload = goaway_payload.items, .consumed = 0 }).write(&stream_bytes, allocator);
 
     var server_control = http3.ControlState{};
+    defer server_control.deinit(allocator);
     try std.testing.expectError(error.InvalidFrame, applyControlStreamFrameForRole(&server_control, allocator, .{
         .stream_id = 2,
         .offset = 0,
@@ -3484,6 +3640,7 @@ test "HTTP/3 client rejects server-only control frames" {
     try http3.writeSettingsFrame(&stream_bytes, allocator, .{});
     try http3.writePriorityUpdateFrame(&stream_bytes, allocator, 0, .{ .urgency = 1 });
 
+    server_control.deinit(allocator);
     server_control = .{};
     try std.testing.expect(try applyControlStreamFrameForRole(&server_control, allocator, .{
         .stream_id = 2,
@@ -3495,6 +3652,7 @@ test "HTTP/3 client rejects server-only control frames" {
 
     stream_bytes.clearRetainingCapacity();
     try quic.varint.encode(&stream_bytes, allocator, @intFromEnum(http3.StreamType.push));
+    server_control.deinit(allocator);
     server_control = .{};
     try std.testing.expectError(error.StreamCreationError, applyControlStreamFrameForRole(&server_control, allocator, .{
         .stream_id = 2,
@@ -4771,6 +4929,93 @@ test "HTTP/3 protected server performs two-phase graceful shutdown" {
         .method = "GET",
         .path = "/after-drain",
     }));
+}
+
+test "HTTP/3 protected client sends persistent priority updates" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xa1, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xa2, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa3} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa4} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    try client.sendPriorityUpdate(0, .{ .urgency = 1 });
+    try client.sendPriorityUpdate(0, .{
+        .urgency = 6,
+        .incremental = true,
+    });
+    try std.testing.expectError(
+        error.UnexpectedFrame,
+        client.sendPriorityUpdate(4, .{}),
+    );
+
+    while (server.control.latest_priority_update == null or
+        server.control.latest_priority_update.?.priority().urgency != 6)
+    {
+        var packet = try quic.one_rtt.receive(
+            &server.quic_server.endpoint,
+            client_keys,
+            server_cid.len,
+            server.expected_packet_number,
+            8,
+        );
+        defer packet.deinit(allocator);
+        server.expected_packet_number = packet.packet.packet_number + 1;
+        for (packet.frames) |frame| {
+            if (frame != .stream) continue;
+            _ = try applyControlStreamFrameForRole(
+                &server.control,
+                allocator,
+                frame.stream,
+                .server,
+            );
+        }
+    }
+    const update = server.control.latest_priority_update.?;
+    try std.testing.expectEqual(@as(u64, 0), update.prioritized_element_id);
+    try std.testing.expectEqual(@as(u3, 6), update.priority().urgency);
+    try std.testing.expect(update.priority().incremental);
+    try std.testing.expect(client.control_send.next_offset > 1);
 }
 
 test "HTTP/3 protected runtime reuses acknowledged dynamic QPACK entries" {
@@ -6124,6 +6369,103 @@ test "HTTP/3 handshake server performs two-phase graceful shutdown" {
         .method = "GET",
         .path = "/after-graceful",
     }));
+}
+
+test "HTTP/3 handshake client sends priority update before request" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94 };
+    const client_cid = [_]u8{ 0x95, 0x96, 0x97, 0x98 };
+    const server_cid = [_]u8{ 0x99, 0x9a, 0x9b, 0x9c };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0x9f} ** 32,
+                .x25519_secret_key = [_]u8{0xa0} ** 32,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            const update = session.control.latest_priority_update orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(
+                request.stream_id,
+                update.prioritized_element_id,
+            );
+            try std.testing.expectEqual(
+                @as(u3, 2),
+                update.priority().urgency,
+            );
+            try std.testing.expect(update.priority().incremental);
+            try session.sendResponse(request.stream_id, .{ .status = 204 });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x9d} ** 32,
+                .x25519_secret_key = [_]u8{0x9e} ** 32,
+            },
+        },
+    );
+    defer client.deinit();
+
+    try client.sendPriorityUpdate(0, .{
+        .urgency = 2,
+        .incremental = true,
+    });
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/prioritized",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 204), response.response.status);
 }
 
 test "HTTP/3 handshake runtime reuses acknowledged dynamic QPACK entries" {

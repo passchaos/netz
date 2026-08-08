@@ -269,8 +269,32 @@ pub const ControlState = struct {
     local_max_push_id: ?u64 = null,
     peer_control_stream_id: ?u64 = null,
     latest_priority_update: ?PriorityUpdatePayload = null,
+    priority_update_storage: ?[]u8 = null,
     peer_qpack_encoder_stream_id: ?u64 = null,
     peer_qpack_decoder_stream_id: ?u64 = null,
+
+    pub fn deinit(self: *ControlState, allocator: std.mem.Allocator) void {
+        if (self.priority_update_storage) |storage| allocator.free(storage);
+        self.* = undefined;
+    }
+
+    pub fn clone(
+        self: ControlState,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!ControlState {
+        var copy = self;
+        copy.latest_priority_update = null;
+        copy.priority_update_storage = null;
+        if (self.latest_priority_update) |update| {
+            const owned = try allocator.dupe(u8, update.field_value);
+            copy.priority_update_storage = owned;
+            copy.latest_priority_update = .{
+                .prioritized_element_id = update.prioritized_element_id,
+                .field_value = owned,
+            };
+        }
+        return copy;
+    }
 
     pub fn writeSettingsStream(self: *ControlState, list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
         try writeControlStreamPrefix(list, allocator);
@@ -365,10 +389,13 @@ pub const ControlState = struct {
             FrameType.priority_update_request => {
                 const priority_update = try parsePriorityUpdatePayload(frame.payload);
                 try validateRequestStreamId(priority_update.prioritized_element_id);
-                self.latest_priority_update = priority_update;
+                try self.storePriorityUpdate(allocator, priority_update);
             },
             FrameType.priority_update_push => {
-                self.latest_priority_update = try parsePriorityUpdatePayload(frame.payload);
+                try self.storePriorityUpdate(
+                    allocator,
+                    try parsePriorityUpdatePayload(frame.payload),
+                );
             },
             FrameType.data, FrameType.headers, FrameType.push_promise => return error.UnexpectedFrame,
             else => {}, // Unknown extension frames on the control stream are ignored.
@@ -383,6 +410,20 @@ pub const ControlState = struct {
     pub fn acceptsLocalRequestStream(self: ControlState, stream_id: u64) bool {
         const goaway_id = self.local_goaway_id orelse return true;
         return stream_id < goaway_id;
+    }
+
+    fn storePriorityUpdate(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        update: PriorityUpdatePayload,
+    ) std.mem.Allocator.Error!void {
+        const owned = try allocator.dupe(u8, update.field_value);
+        if (self.priority_update_storage) |storage| allocator.free(storage);
+        self.priority_update_storage = owned;
+        self.latest_priority_update = .{
+            .prioritized_element_id = update.prioritized_element_id,
+            .field_value = owned,
+        };
     }
 };
 
@@ -3616,6 +3657,7 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
     try std.testing.expect(payload.priority().incremental);
 
     var control = ControlState{};
+    defer control.deinit(allocator);
     var settings_payload: std.ArrayList(u8) = .empty;
     defer settings_payload.deinit(allocator);
     try writeControlStreamPrefix(&settings_payload, allocator);
@@ -3635,6 +3677,7 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
 test "HTTP/3 control stream rejects request frames" {
     const allocator = std.testing.allocator;
     var control = ControlState{};
+    defer control.deinit(allocator);
     var stream: std.ArrayList(u8) = .empty;
     defer stream.deinit(allocator);
     try writeControlStreamPrefix(&stream, allocator);
