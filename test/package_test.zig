@@ -194,6 +194,9 @@ test "public modules are reachable" {
     try std.testing.expect(!(netz.quic.runtime.Limits{}).enable_gro_receive);
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveBytesBatch"));
     try std.testing.expect(@hasDecl(netz.quic.runtime, "OwnedBytesBatch"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receivePacketBatch"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "servicePacketBatch"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "ReceivedPacketBatch"));
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.initial_exchange.min_initial_udp_datagram_size);

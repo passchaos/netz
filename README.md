@@ -225,6 +225,7 @@ zig build bench-http3-dev -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
+zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 ```
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
@@ -236,7 +237,9 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - QUIC short-packet sealing with caller-provided storage versus the allocating
   convenience wrapper,
 - QUIC Linux `UDP_SEGMENT` batching versus `sendmmsg`, plus `UDP_GRO`
-  coalesced receive versus plain per-datagram receive.
+  coalesced receive versus plain per-datagram receive,
+- end-to-end QUIC 1-RTT UDP_GRO batch receive versus per-packet receive,
+  including decryption, frame parsing, state application, and cleanup.
 
 The build script pins the package to Zig `0.16.0`.
 

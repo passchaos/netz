@@ -74,6 +74,17 @@ pub const ReceivedPacket = struct {
     }
 };
 
+pub const ReceivedPacketBatch = struct {
+    allocator: std.mem.Allocator,
+    packets: []ReceivedPacket,
+
+    pub fn deinit(self: *ReceivedPacketBatch) void {
+        for (self.packets) |*packet| packet.deinit(self.allocator);
+        self.allocator.free(self.packets);
+        self.* = undefined;
+    }
+};
+
 pub const ZeroRttSendOptions = struct {
     version: u32 = quic.Version.version_1.wireValue(),
     destination_connection_id: []const u8,
@@ -1754,14 +1765,81 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         var datagram = try self.endpoint.receiveBytes();
         defer datagram.deinit(self.endpoint.allocator);
+        return try self.processReceivedBytesAt(datagram.from, datagram.bytes, datagram.ecn, now_ns);
+    }
+
+    /// Receive and process every 1-RTT packet represented by one kernel
+    /// datagram. With UDP_GRO enabled this amortizes recvmsg and allocation
+    /// overhead across the whole coalesced segment batch.
+    pub fn receivePacketBatch(self: *Connection) Error!ReceivedPacketBatch {
+        return self.receivePacketBatchAt(self.monotonicNowNs());
+    }
+
+    pub fn receivePacketBatchAt(self: *Connection, now_ns: ?u64) Error!ReceivedPacketBatch {
+        if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
+        var datagrams = try self.endpoint.receiveBytesBatch();
+        defer datagrams.deinit(self.endpoint.allocator);
+
+        const packets = try self.endpoint.allocator.alloc(ReceivedPacket, datagrams.segment_count);
+        var completed: usize = 0;
+        errdefer {
+            for (packets[0..completed]) |*packet| packet.deinit(self.endpoint.allocator);
+            self.endpoint.allocator.free(packets);
+        }
+        for (packets, 0..) |*packet, index| {
+            packet.* = try self.processReceivedBytesAt(
+                datagrams.from,
+                datagrams.datagramAt(index) orelse return error.InvalidPacket,
+                datagrams.ecn,
+                now_ns,
+            );
+            completed += 1;
+        }
+        return .{ .allocator = self.endpoint.allocator, .packets = packets };
+    }
+
+    /// Process a kernel/GRO batch and release each decoded packet immediately.
+    ///
+    /// Event loops that consume connection state rather than retaining packet
+    /// diagnostics should prefer this path: it preserves strict wire-order
+    /// application while bounding live decrypt/frame allocations to one packet.
+    pub fn servicePacketBatch(self: *Connection) Error!usize {
+        return self.servicePacketBatchAt(self.monotonicNowNs());
+    }
+
+    pub fn servicePacketBatchAt(self: *Connection, now_ns: ?u64) Error!usize {
+        if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
+        var datagrams = try self.endpoint.receiveBytesBatch();
+        defer datagrams.deinit(self.endpoint.allocator);
+
+        var completed: usize = 0;
+        while (completed < datagrams.segment_count) : (completed += 1) {
+            var packet = try self.processReceivedBytesAt(
+                datagrams.from,
+                datagrams.datagramAt(completed) orelse return error.InvalidPacket,
+                datagrams.ecn,
+                now_ns,
+            );
+            packet.deinit(self.endpoint.allocator);
+        }
+        return completed;
+    }
+
+    fn processReceivedBytesAt(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []const u8,
+        ecn: quic.packet_space.EcnCodepoint,
+        now_ns: ?u64,
+    ) Error!ReceivedPacket {
         var packet = try self.openReceivedBytesWithFrameClose(
-            datagram.from,
-            datagram.bytes,
+            from,
+            bytes,
             self.config.local_connection_id.len,
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
-        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, datagram.ecn, packet.packet.destination_connection_id);
+        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
@@ -3398,6 +3476,83 @@ test "QUIC 1-RTT spin bit remains disabled by default" {
     defer packet.deinit(allocator);
     try std.testing.expect(packet.packet.spin_bit);
     try std.testing.expect(!server.nextSpinBit());
+}
+
+test "QUIC 1-RTT connection receives a UDP GRO packet batch" {
+    if (!quic.runtime.udpGroSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 4096,
+            .enable_gro_receive = true,
+        },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    if (!server_endpoint.groReceiveEnabled() or !client_endpoint.gsoSendEnabled()) {
+        return error.SkipZigTest;
+    }
+
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const server_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x89} ** quic.protection.secret_len);
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    const packet_frames = [_][]const quic.Frame{ &ping, &ping };
+    try sendFramesBatch(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .first_packet_number = 0,
+        .packet_number_len = 4,
+        .packets = &packet_frames,
+    });
+
+    var received = try server.receivePacketBatchAt(10_000_000);
+    defer received.deinit();
+    try std.testing.expectEqual(@as(usize, 2), received.packets.len);
+    try std.testing.expectEqual(@as(u64, 0), received.packets[0].packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 1), received.packets[1].packet.packet_number);
+    try std.testing.expect(received.packets[0].frames[0] == .ping);
+    try std.testing.expect(received.packets[1].frames[0] == .ping);
+
+    const ack = try server.received.ackFrame(allocator, 0);
+    defer allocator.free(ack.ranges);
+    try std.testing.expectEqual(@as(u64, 1), ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 1), ack.first_ack_range);
+
+    try sendFramesBatch(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .first_packet_number = 2,
+        .packet_number_len = 4,
+        .packets = &packet_frames,
+    });
+    try std.testing.expectEqual(@as(usize, 2), try server.servicePacketBatchAt(20_000_000));
+    const second_ack = try server.received.ackFrame(allocator, 0);
+    defer allocator.free(second_ack.ranges);
+    try std.testing.expectEqual(@as(u64, 3), second_ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 3), second_ack.first_ack_range);
 }
 
 test "QUIC 0-RTT long-header frame exchange enforces packet context" {

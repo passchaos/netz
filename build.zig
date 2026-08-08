@@ -102,6 +102,12 @@ pub fn build(b: *std.Build) void {
             .run_step = "bench-quic-udp-batch",
             .description = "Benchmark QUIC UDP_SEGMENT batches against sendmmsg",
         },
+        .{
+            .exe_name = "netz-bench-quic-one-rtt-receive",
+            .path = "examples/bench_quic_one_rtt_receive.zig",
+            .run_step = "bench-quic-one-rtt-receive",
+            .description = "Benchmark QUIC 1-RTT UDP_GRO batch receive",
+        },
     };
     const linux_example_specs = [_]struct {
         exe_name: []const u8,
