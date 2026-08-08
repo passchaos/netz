@@ -252,6 +252,7 @@ pub const QpackEncodeState = struct {
     encoder_instructions: std.ArrayList(u8) = .empty,
     decoder_stream: ?quic.stream_state.RecvState = null,
     decoder_stream_type_received: bool = false,
+    peer_max_capacity: ?usize = null,
     max_stream_buffer: usize,
 
     pub fn init(
@@ -262,6 +263,22 @@ pub const QpackEncodeState = struct {
         return .{
             .allocator = allocator,
             .table = .init(allocator, peer_max_capacity),
+            .peer_max_capacity = peer_max_capacity,
+            .max_stream_buffer = max_stream_buffer,
+        };
+    }
+
+    /// Create an encoder before the peer's SETTINGS frame is available.
+    ///
+    /// The zero-capacity table cannot queue inserts until
+    /// `configurePeerCapacity` binds it to the immutable advertised limit.
+    pub fn initAwaitingPeerSettings(
+        allocator: std.mem.Allocator,
+        max_stream_buffer: usize,
+    ) QpackEncodeState {
+        return .{
+            .allocator = allocator,
+            .table = .init(allocator, 0),
             .max_stream_buffer = max_stream_buffer,
         };
     }
@@ -289,6 +306,24 @@ pub const QpackEncodeState = struct {
             .{ .set_capacity = capacity },
         );
         try self.table.setCapacity(capacity);
+    }
+
+    pub fn configurePeerCapacity(
+        self: *QpackEncodeState,
+        capacity: usize,
+    ) http3.Error!void {
+        if (self.peer_max_capacity) |configured| {
+            if (configured != capacity) return error.QpackEncoderStreamError;
+            return;
+        }
+        if (self.table.insert_count != 0 or self.table.entryCount() != 0) {
+            return error.QpackEncoderStreamError;
+        }
+        const previous_max_capacity = self.table.max_capacity;
+        errdefer self.table.max_capacity = previous_max_capacity;
+        self.table.max_capacity = capacity;
+        if (capacity != 0) try self.setCapacity(capacity);
+        self.peer_max_capacity = capacity;
     }
 
     pub fn insertField(
@@ -431,6 +466,17 @@ pub const QpackEncodeState = struct {
 
     pub fn clearEncoderInstructions(self: *QpackEncodeState) void {
         self.encoder_instructions.clearRetainingCapacity();
+    }
+
+    pub fn abandonStream(self: *QpackEncodeState, stream_id: u64) void {
+        var index: usize = 0;
+        while (index < self.pending_sections.items.len) {
+            if (self.pending_sections.items[index].stream_id != stream_id) {
+                index += 1;
+                continue;
+            }
+            self.releaseSection(index);
+        }
     }
 
     fn applyDecoderInstruction(
@@ -1184,6 +1230,9 @@ pub const ProtectedServer = struct {
     control: http3.ControlState = .{},
     control_send: quic.stream_state.SendState = quic.stream_state.SendState.init(server_control_stream_id),
     qpack_decode: QpackDecodeState,
+    qpack_encode: QpackEncodeState,
+    qpack_encoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(server_qpack_encoder_stream_id),
+    qpack_encoder_prefix_sent: bool = false,
     qpack_decoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(server_qpack_decoder_stream_id),
     qpack_decoder_prefix_sent: bool = false,
     next_packet_number: u64 = 0,
@@ -1198,10 +1247,18 @@ pub const ProtectedServer = struct {
             .quic_server = quic_server,
             .config = config,
             .qpack_decode = .init(allocator, max_capacity, config.max_stream_buffer),
+            // The peer's encoder capacity is not known until its SETTINGS
+            // frame arrives. Starting at zero prevents speculative inserts
+            // from exceeding an as-yet-unadvertised limit.
+            .qpack_encode = .initAwaitingPeerSettings(
+                allocator,
+                config.max_stream_buffer,
+            ),
         };
     }
 
     pub fn deinit(self: *ProtectedServer) void {
+        self.qpack_encode.deinit();
         self.qpack_decode.deinit();
         self.quic_server.deinit();
         self.* = undefined;
@@ -1251,6 +1308,8 @@ pub const ProtectedServer = struct {
             self.config,
             &self.control,
             &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
@@ -1258,7 +1317,30 @@ pub const ProtectedServer = struct {
         );
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
-        try http3.writeResponseSequenceWithSettings(&encoded, self.quic_server.endpoint.allocator, informational, response, self.control.settings.peer);
+        // A field section can acquire dynamic-table references before any
+        // network I/O. Release those references if either the encoder stream
+        // or response stream cannot be sent; speculative inserts remain useful
+        // for a later response and are safe because they are not referenced.
+        var response_sent = false;
+        errdefer if (!response_sent) self.qpack_encode.abandonStream(stream_id);
+        try http3.writeResponseSequenceDynamic(
+            &encoded,
+            self.quic_server.endpoint.allocator,
+            informational,
+            response,
+            self.control.settings.peer,
+            stream_id,
+            &self.qpack_encode,
+        );
+        try sendProtectedQpackEncoderInstructions(
+            &self.quic_server.endpoint,
+            to,
+            self.config,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.next_packet_number,
+        );
         var send_state = quic.stream_state.SendState.init(stream_id);
         var frames: std.ArrayList(quic.Frame) = .empty;
         defer frames.deinit(self.quic_server.endpoint.allocator);
@@ -1272,6 +1354,7 @@ pub const ProtectedServer = struct {
             frames.items,
             self.config.max_frames_per_packet,
         );
+        response_sent = true;
     }
 
     pub fn sendGoAway(self: *ProtectedServer, to: net.IpAddress, stream_id: u64) Error!void {
@@ -1282,6 +1365,8 @@ pub const ProtectedServer = struct {
             self.config,
             &self.control,
             &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
@@ -1311,21 +1396,44 @@ pub const ProtectedServer = struct {
             for (packet.frames) |frame| {
                 try rejectCriticalStreamClosureFrame(self.control, frame, .server);
                 if (frame != .stream) continue;
-                if ((frame.stream.stream_id & 0x02) != 0 and
-                    ((self.qpack_decode.encoder_stream != null and
-                        self.qpack_decode.encoder_stream.?.stream_id ==
-                            frame.stream.stream_id) or
-                        frame.stream.stream_id == client_qpack_encoder_stream_id or
-                        (frame.stream.offset == 0 and
-                            peekUniStreamType(frame.stream) == .qpack_encoder)))
-                {
+                if (isPeerQpackStreamFrame(
+                    self.control,
+                    self.qpack_encode.decoder_stream,
+                    frame.stream,
+                    .server,
+                    .qpack_decoder,
+                )) {
+                    try self.qpack_encode.applyDecoderStreamFrame(
+                        &self.control,
+                        frame.stream,
+                    );
+                    continue;
+                }
+                if (isPeerQpackStreamFrame(
+                    self.control,
+                    self.qpack_decode.encoder_stream,
+                    frame.stream,
+                    .server,
+                    .qpack_encoder,
+                )) {
                     try self.qpack_decode.applyEncoderStreamFrame(
                         &self.control,
                         frame.stream,
                     );
                     continue;
                 }
-                if (try applyControlStreamFrameForRole(&self.control, self.quic_server.endpoint.allocator, frame.stream, .server)) continue;
+                if (try applyControlStreamFrameForRole(
+                    &self.control,
+                    self.quic_server.endpoint.allocator,
+                    frame.stream,
+                    .server,
+                )) {
+                    try configureQpackEncoderFromPeerSettings(
+                        self.control,
+                        &self.qpack_encode,
+                    );
+                    continue;
+                }
                 if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
                 const incoming_id: u62 = @intCast(frame.stream.stream_id);
                 if (!self.control.acceptsLocalRequestStream(incoming_id)) return error.RequestRejected;
@@ -1366,6 +1474,9 @@ pub const ProtectedClient = struct {
     control: http3.ControlState = .{},
     control_send: quic.stream_state.SendState = quic.stream_state.SendState.init(client_control_stream_id),
     qpack_decode: QpackDecodeState,
+    qpack_encode: QpackEncodeState,
+    qpack_encoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(client_qpack_encoder_stream_id),
+    qpack_encoder_prefix_sent: bool = false,
     qpack_decoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(client_qpack_decoder_stream_id),
     qpack_decoder_prefix_sent: bool = false,
     next_stream_id: u62 = 0,
@@ -1381,10 +1492,15 @@ pub const ProtectedClient = struct {
             .quic_client = quic_client,
             .config = config,
             .qpack_decode = .init(allocator, max_capacity, config.max_stream_buffer),
+            .qpack_encode = .initAwaitingPeerSettings(
+                allocator,
+                config.max_stream_buffer,
+            ),
         };
     }
 
     pub fn deinit(self: *ProtectedClient) void {
+        self.qpack_encode.deinit();
         self.qpack_decode.deinit();
         self.quic_client.deinit();
         self.* = undefined;
@@ -1401,6 +1517,8 @@ pub const ProtectedClient = struct {
             self.config,
             &self.control,
             &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
@@ -1408,7 +1526,24 @@ pub const ProtectedClient = struct {
         );
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_client.endpoint.allocator);
-        try request_options.writeWithSettings(&encoded, self.quic_client.endpoint.allocator, self.control.settings.peer);
+        var request_sent = false;
+        errdefer if (!request_sent) self.qpack_encode.abandonStream(stream_id);
+        try request_options.writeDynamic(
+            &encoded,
+            self.quic_client.endpoint.allocator,
+            self.control.settings.peer,
+            stream_id,
+            &self.qpack_encode,
+        );
+        try sendProtectedQpackEncoderInstructions(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.next_packet_number,
+        );
         var send_state = quic.stream_state.SendState.init(stream_id);
         var frames: std.ArrayList(quic.Frame) = .empty;
         defer frames.deinit(self.quic_client.endpoint.allocator);
@@ -1422,6 +1557,7 @@ pub const ProtectedClient = struct {
             frames.items,
             self.config.max_frames_per_packet,
         );
+        request_sent = true;
 
         const assembled = try self.receiveStreamBytes(stream_id);
         errdefer self.quic_client.endpoint.allocator.free(assembled.bytes);
@@ -1449,6 +1585,8 @@ pub const ProtectedClient = struct {
             self.config,
             &self.control,
             &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
@@ -1474,22 +1612,44 @@ pub const ProtectedClient = struct {
             if (from == null) from = packet.from;
             for (packet.frames) |frame| {
                 try rejectCriticalStreamClosureFrame(self.control, frame, .client);
-                if (frame == .stream and
-                    (frame.stream.stream_id & 0x02) != 0 and
-                    ((self.qpack_decode.encoder_stream != null and
-                        self.qpack_decode.encoder_stream.?.stream_id ==
-                            frame.stream.stream_id) or
-                        frame.stream.stream_id == server_qpack_encoder_stream_id or
-                        (frame.stream.offset == 0 and
-                            peekUniStreamType(frame.stream) == .qpack_encoder)))
-                {
+                if (frame == .stream and isPeerQpackStreamFrame(
+                    self.control,
+                    self.qpack_encode.decoder_stream,
+                    frame.stream,
+                    .client,
+                    .qpack_decoder,
+                )) {
+                    try self.qpack_encode.applyDecoderStreamFrame(
+                        &self.control,
+                        frame.stream,
+                    );
+                    continue;
+                }
+                if (frame == .stream and isPeerQpackStreamFrame(
+                    self.control,
+                    self.qpack_decode.encoder_stream,
+                    frame.stream,
+                    .client,
+                    .qpack_encoder,
+                )) {
                     try self.qpack_decode.applyEncoderStreamFrame(
                         &self.control,
                         frame.stream,
                     );
                     continue;
                 }
-                if (frame == .stream and try applyControlStreamFrameForRole(&self.control, self.quic_client.endpoint.allocator, frame.stream, .client)) continue;
+                if (frame == .stream and try applyControlStreamFrameForRole(
+                    &self.control,
+                    self.quic_client.endpoint.allocator,
+                    frame.stream,
+                    .client,
+                )) {
+                    try configureQpackEncoderFromPeerSettings(
+                        self.control,
+                        &self.qpack_encode,
+                    );
+                    continue;
+                }
                 if (frame == .stream and (try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
                 if (frame != .stream or frame.stream.stream_id != expected_stream_id) continue;
                 try recv.insert(frame.stream);
@@ -1811,6 +1971,8 @@ fn sendProtectedSettings(
     config: ProtectedConfig,
     control: *http3.ControlState,
     control_send: *quic.stream_state.SendState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
     qpack_decoder_send: *quic.stream_state.SendState,
     qpack_decoder_prefix_sent: *bool,
     next_packet_number: *u64,
@@ -1821,7 +1983,16 @@ fn sendProtectedSettings(
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(endpoint.allocator);
     const previous_settings = control.settings;
+    const previous_control_send = control_send.*;
+    const previous_encoder_send = qpack_encoder_send.*;
+    const previous_decoder_send = qpack_decoder_send.*;
     errdefer control.settings = previous_settings;
+    // appendFrames advances offsets before the UDP send. Restoring all three
+    // streams makes a retry emit identical bytes at identical offsets after an
+    // allocation or socket failure (including a partially sent frame batch).
+    errdefer control_send.* = previous_control_send;
+    errdefer qpack_encoder_send.* = previous_encoder_send;
+    errdefer qpack_decoder_send.* = previous_decoder_send;
     try control.writeSettingsStream(&payload, endpoint.allocator, config.local_settings);
 
     var frames: std.ArrayList(quic.Frame) = .empty;
@@ -1834,12 +2005,26 @@ fn sendProtectedSettings(
     var qpack_decoder: std.ArrayList(u8) = .empty;
     defer qpack_decoder.deinit(endpoint.allocator);
     const is_client = stream_id == client_control_stream_id;
-    try http3.writeQpackEncoderStreamPrefix(&qpack_encoder, endpoint.allocator);
+    if (!qpack_encoder_prefix_sent.*) {
+        try http3.writeQpackEncoderStreamPrefix(&qpack_encoder, endpoint.allocator);
+    }
     if (!qpack_decoder_prefix_sent.*) {
         try http3.writeQpackDecoderStreamPrefix(&qpack_decoder, endpoint.allocator);
     }
-    var encoder_state = quic.stream_state.SendState.init(if (is_client) client_qpack_encoder_stream_id else server_qpack_encoder_stream_id);
-    try encoder_state.appendFrames(&frames, endpoint.allocator, qpack_encoder.items, qpack_encoder.items.len, false);
+    const encoder_stream_id =
+        if (is_client) client_qpack_encoder_stream_id else server_qpack_encoder_stream_id;
+    if (qpack_encoder_send.stream_id != encoder_stream_id) {
+        qpack_encoder_send.* = quic.stream_state.SendState.init(encoder_stream_id);
+    }
+    if (qpack_encoder.items.len != 0) {
+        try qpack_encoder_send.appendFrames(
+            &frames,
+            endpoint.allocator,
+            qpack_encoder.items,
+            qpack_encoder.items.len,
+            false,
+        );
+    }
     if (qpack_decoder_send.stream_id != (if (is_client) client_qpack_decoder_stream_id else server_qpack_decoder_stream_id)) {
         qpack_decoder_send.* = quic.stream_state.SendState.init(
             if (is_client) client_qpack_decoder_stream_id else server_qpack_decoder_stream_id,
@@ -1863,7 +2048,54 @@ fn sendProtectedSettings(
         frames.items,
         config.max_frames_per_packet,
     );
+    if (qpack_encoder.items.len != 0) qpack_encoder_prefix_sent.* = true;
     if (qpack_decoder.items.len != 0) qpack_decoder_prefix_sent.* = true;
+}
+
+fn sendProtectedQpackEncoderInstructions(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    qpack: *QpackEncodeState,
+    send_state: *quic.stream_state.SendState,
+    prefix_sent: *bool,
+    next_packet_number: *u64,
+) Error!void {
+    const pending = qpack.pendingEncoderInstructions();
+    if (pending.len == 0) return;
+
+    const previous_send = send_state.*;
+    errdefer send_state.* = previous_send;
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(endpoint.allocator);
+    if (!prefix_sent.*) {
+        try http3.writeQpackEncoderStreamPrefix(&payload, endpoint.allocator);
+    }
+    try payload.appendSlice(endpoint.allocator, pending);
+
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(endpoint.allocator);
+    try send_state.appendFrames(
+        &frames,
+        endpoint.allocator,
+        payload.items,
+        config.max_stream_frame_data,
+        false,
+    );
+    // Encoder-stream bytes must be visible before any request/response field
+    // section that could depend on them. A separate send also preserves this
+    // ordering when max_frames_per_packet would otherwise split one frame list.
+    try sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        frames.items,
+        config.max_frames_per_packet,
+    );
+    prefix_sent.* = true;
+    qpack.clearEncoderInstructions();
 }
 
 fn sendProtectedQpackFeedback(
@@ -1878,6 +2110,8 @@ fn sendProtectedQpackFeedback(
     const pending = qpack.pendingDecoderInstructions();
     if (pending.len == 0) return;
 
+    const previous_send = send_state.*;
+    errdefer send_state.* = previous_send;
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(endpoint.allocator);
     if (!prefix_sent.*) try http3.writeQpackDecoderStreamPrefix(
@@ -1914,6 +2148,60 @@ const ControlStreamRole = enum {
     client,
     server,
 };
+
+fn configureQpackEncoderFromPeerSettings(
+    control: http3.ControlState,
+    qpack: *QpackEncodeState,
+) Error!void {
+    if (!control.settings.received) return;
+    const capacity = std.math.cast(
+        usize,
+        control.settings.peer.qpack_max_table_capacity,
+    ) orelse return error.InvalidSetting;
+    try qpack.configurePeerCapacity(capacity);
+}
+
+fn isPeerQpackStreamFrame(
+    control: http3.ControlState,
+    receive: ?quic.stream_state.RecvState,
+    stream: quic.StreamFrame,
+    role: ControlStreamRole,
+    stream_type: http3.StreamType,
+) bool {
+    if ((stream.stream_id & 0x02) == 0) return false;
+    if (receive) |state| {
+        return state.stream_id == stream.stream_id;
+    }
+
+    const registered = switch (stream_type) {
+        .qpack_encoder => control.peer_qpack_encoder_stream_id,
+        .qpack_decoder => control.peer_qpack_decoder_stream_id,
+        else => return false,
+    };
+    if (registered) |stream_id| {
+        return stream_id == stream.stream_id;
+    }
+
+    // The fixed IDs are the first legal unidirectional streams allocated by
+    // this compact runtime and let reordered nonzero-offset frames be routed
+    // before their prefix arrives. At offset zero, always trust the explicit
+    // stream type instead so peers can allocate critical streams in another
+    // order without a fixed-ID false positive.
+    const expected_stream_id: u62 = switch (role) {
+        .client => switch (stream_type) {
+            .qpack_encoder => server_qpack_encoder_stream_id,
+            .qpack_decoder => server_qpack_decoder_stream_id,
+            else => unreachable,
+        },
+        .server => switch (stream_type) {
+            .qpack_encoder => client_qpack_encoder_stream_id,
+            .qpack_decoder => client_qpack_decoder_stream_id,
+            else => unreachable,
+        },
+    };
+    if (stream.offset == 0) return peekUniStreamType(stream) == stream_type;
+    return stream.stream_id == expected_stream_id;
+}
 
 fn applyControlStreamFrameForRole(control: *http3.ControlState, allocator: std.mem.Allocator, stream: quic.StreamFrame, role: ControlStreamRole) Error!bool {
     if (role == .server and (stream.stream_id & 0x02) != 0 and stream.offset == 0) {
@@ -2530,6 +2818,33 @@ test "HTTP/3 QPACK encoder state waits for insert acknowledgment before dynamic 
     try std.testing.expectEqual(@as(u64, 1), encoder.known_received_count);
 }
 
+test "HTTP/3 QPACK encoder binds once to peer SETTINGS capacity" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.initAwaitingPeerSettings(allocator, 4096);
+    defer encoder.deinit();
+
+    try std.testing.expect(encoder.peer_max_capacity == null);
+    try std.testing.expectEqual(@as(usize, 0), encoder.table.capacity);
+    try encoder.configurePeerCapacity(256);
+    try std.testing.expectEqual(@as(?usize, 256), encoder.peer_max_capacity);
+    try std.testing.expectEqual(@as(usize, 256), encoder.table.max_capacity);
+    try std.testing.expectEqual(@as(usize, 256), encoder.table.capacity);
+    const instruction_len = encoder.pendingEncoderInstructions().len;
+    try std.testing.expect(instruction_len != 0);
+
+    // Reprocessing retransmitted control bytes is idempotent, while a changed
+    // value would violate HTTP/3's one-SETTINGS-frame connection contract.
+    try encoder.configurePeerCapacity(256);
+    try std.testing.expectEqual(
+        instruction_len,
+        encoder.pendingEncoderInstructions().len,
+    );
+    try std.testing.expectError(
+        error.QpackEncoderStreamError,
+        encoder.configurePeerCapacity(128),
+    );
+}
+
 test "HTTP/3 QPACK encoder state protects referenced entries from eviction" {
     const allocator = std.testing.allocator;
     var encoder = QpackEncodeState.init(allocator, 34, 4096);
@@ -2632,9 +2947,9 @@ test "HTTP/3 QPACK encoder state rejects invalid decoder feedback" {
 }
 
 fn checkQpackEncoderStateAllocationFailure(allocator: std.mem.Allocator) !void {
-    var encoder = QpackEncodeState.init(allocator, 256, 4096);
+    var encoder = QpackEncodeState.initAwaitingPeerSettings(allocator, 4096);
     defer encoder.deinit();
-    try encoder.setCapacity(256);
+    try encoder.configurePeerCapacity(256);
     _ = try encoder.insertField("x-one", "value-one");
     _ = try encoder.insertField("x-two", "value-two");
 
@@ -2759,6 +3074,9 @@ test "HTTP/3 dynamic response writer tracks informational final and trailer sect
         dynamic_sections += @intFromBool(decoded.required_insert_count != 0);
     }
     try std.testing.expectEqual(@as(usize, 3), dynamic_sections);
+    encoder.abandonStream(8);
+    try std.testing.expectEqual(@as(usize, 0), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(usize, 0), encoder.reference_counts.count());
 }
 
 fn checkDynamicQpackWriterAllocationFailure(allocator: std.mem.Allocator) !void {
@@ -2991,6 +3309,180 @@ test "HTTP/3 protected runtime exchanges request and response over QUIC 1-RTT" {
     }));
 }
 
+test "HTTP/3 protected runtime reuses acknowledged dynamic QPACK entries" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xc1, 0x11, 0x22, 0x33 };
+    const server_cid = [_]u8{ 0xc2, 0x11, 0x22, 0x33 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc3} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc4} ** quic.protection.secret_len,
+    );
+
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .local_settings = .{ .qpack_max_table_capacity = 512 },
+            // Exercise instruction fragmentation and the persistent encoder
+            // stream offset rather than relying on one-frame instructions.
+            .max_stream_frame_data = 5,
+            .max_frames_per_packet = 2,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *ProtectedServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *ProtectedServer) !void {
+            for (0..3) |exchange| {
+                var request = try server_ptr.receiveRequest();
+                defer request.deinit(
+                    server_ptr.quic_server.endpoint.allocator,
+                );
+                try std.testing.expectEqualStrings(
+                    "/protected-dynamic",
+                    request.request.path,
+                );
+                var repeated_value: ?[]const u8 = null;
+                for (request.request.headers) |header| {
+                    if (std.mem.eql(u8, header.name, "x-runtime-request")) {
+                        repeated_value = header.value;
+                    }
+                }
+                try std.testing.expectEqualStrings(
+                    "repeated-request-value",
+                    repeated_value orelse return error.TestUnexpectedResult,
+                );
+
+                if (exchange == 1) {
+                    // Request two carries inserts but remains literal because
+                    // SETTINGS_QPACK_BLOCKED_STREAMS is zero. Its feedback
+                    // enables request three to use those entries.
+                    try std.testing.expectEqual(
+                        @as(usize, 0),
+                        request.request.qpack_section_acknowledgments,
+                    );
+                    try std.testing.expect(
+                        server_ptr.qpack_decode.table.insert_count != 0,
+                    );
+                    // Feedback for response one is consumed while waiting for
+                    // request two, so response two can already be dynamic.
+                    try std.testing.expect(
+                        server_ptr.qpack_encode.known_received_count != 0,
+                    );
+                } else if (exchange == 2) {
+                    try std.testing.expect(
+                        request.request.qpack_section_acknowledgments != 0,
+                    );
+                }
+
+                try server_ptr.sendResponse(
+                    request.from,
+                    request.stream_id,
+                    .{
+                        .status = 200,
+                        .headers = &.{.{
+                            .name = "x-runtime-response",
+                            .value = "repeated-response-value",
+                        }},
+                        .body = "ok",
+                    },
+                );
+                if (exchange != 0) {
+                    try std.testing.expect(
+                        server_ptr.qpack_encode.pending_sections.items.len != 0,
+                    );
+                }
+            }
+            try std.testing.expect(
+                server_ptr.qpack_encoder_send.next_offset > 1,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .local_settings = .{ .qpack_max_table_capacity = 512 },
+            .max_stream_frame_data = 5,
+            .max_frames_per_packet = 2,
+        },
+    );
+    defer client.deinit();
+
+    for (0..3) |_| {
+        var response = try client.request(.{
+            .method = "GET",
+            .path = "/protected-dynamic",
+            .authority = "example.test",
+            .headers = &.{.{
+                .name = "x-runtime-request",
+                .value = "repeated-request-value",
+            }},
+        });
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(@as(u16, 200), response.response.status);
+        var repeated_value: ?[]const u8 = null;
+        for (response.response.headers) |header| {
+            if (std.mem.eql(u8, header.name, "x-runtime-response")) {
+                repeated_value = header.value;
+            }
+        }
+        try std.testing.expectEqualStrings(
+            "repeated-response-value",
+            repeated_value orelse return error.TestUnexpectedResult,
+        );
+    }
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(client.qpack_encode.known_received_count != 0);
+    try std.testing.expect(client.qpack_decode.table.insert_count != 0);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.qpack_encode.pending_sections.items.len,
+    );
+    try std.testing.expect(client.qpack_encoder_send.next_offset > 1);
+}
+
 test "HTTP/3 protected server decodes dynamic QPACK request and sends feedback" {
     const allocator = std.testing.allocator;
 
@@ -3033,6 +3525,8 @@ test "HTTP/3 protected server decodes dynamic QPACK request and sends feedback" 
         client.config,
         &client.control,
         &client.control_send,
+        &client.qpack_encoder_send,
+        &client.qpack_encoder_prefix_sent,
         &client.qpack_decoder_send,
         &client.qpack_decoder_prefix_sent,
         &client.next_packet_number,
@@ -3489,6 +3983,8 @@ test "HTTP/3 protected server rejects requests beyond local GOAWAY" {
         client.config,
         &client.control,
         &client.control_send,
+        &client.qpack_encoder_send,
+        &client.qpack_encoder_prefix_sent,
         &client.qpack_decoder_send,
         &client.qpack_decoder_prefix_sent,
         &client.next_packet_number,

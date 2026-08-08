@@ -44,9 +44,12 @@ starts with deterministic parsers, serializers, and state helpers for:
   HTTP/3 pseudo-header/lowercase field-name, `:method` token validation with case-sensitive CONNECT/OPTIONS semantics, SETTINGS-gated `:protocol` token, URI scheme/origin-form path/authority, Host/`:authority`, traditional CONNECT body rules, and connection-specific header validation,
   DATA-frame aggregation, pure-digit content-length, three-digit `:status`, and status-forbidden response-body validation, stateless QPACK helpers with RFC 9204 static-table references, Huffman string literals, and literal fallback, a cleartext development runtime over the QUIC
   UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with STREAM frame
-  splitting/reassembly and SETTINGS exchange, and a handshake-backed protected
-  client/server runtime, plus a `std.Io.async` request receive helper for the
-  development runtime
+  splitting/reassembly, SETTINGS exchange, persistent QPACK encoder/decoder
+  instruction streams in both connection directions, peer-capacity
+  negotiation, and automatic non-blocking dynamic request/response compression
+  after decoder feedback, and a handshake-backed protected client/server
+  runtime, plus a `std.Io.async` request receive helper for the development
+  runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed
@@ -342,8 +345,12 @@ if (session.maxDatagramPayloadSize()) |limit| {
   HTTP/3 QPACK now provides RFC 9204 dynamic-table state, dynamic field
   sections, both instruction stream codecs, and Protected plus handshake-backed
   client/server decode-side live encoder-stream processing with decoder
-  feedback. Dynamic encoding and non-zero blocked-stream scheduling remain
-  intentionally disabled.
+  feedback. The Protected runtime also persists its encoder/decoder streams and
+  automatically uses peer-capacity-bounded, reference-safe dynamic compression
+  for repeated request and response fields. It advertises and implements
+  `SETTINGS_QPACK_BLOCKED_STREAMS=0`: newly inserted fields stay literal until
+  acknowledged, while non-zero blocked-stream scheduling remains intentionally
+  unsupported.
 - WebRTC support covers signaling/transport wire primitives (STUN, ICE, SDP,
   DTLS/RTP/SCTP headers), forming a foundation for peer-connection state
   machines and SRTP/SCTP data-channel layers.

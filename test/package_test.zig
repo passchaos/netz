@@ -142,6 +142,8 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(u64, 0x14e9cd29), @intFromEnum(netz.http3.SettingId.webtransport_max_sessions_v13));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedConfig, "local_settings"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "control"));
+    try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "qpack_encode"));
+    try std.testing.expect(@hasField(netz.http3.runtime.ProtectedServer, "qpack_encode"));
     try std.testing.expect(@hasField(netz.http3.runtime.HandshakeClient, "control"));
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());
     try std.testing.expect(@hasDecl(netz.mqtt, "validTopicName"));
@@ -217,6 +219,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DecoderInstruction"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "QpackDecodeState"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "QpackEncodeState"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.QpackEncodeState, "configurePeerCapacity"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.QpackEncodeState, "abandonStream"));
     try std.testing.expect(@hasDecl(netz.http3.Request, "writeDynamic"));
     try std.testing.expect(@hasDecl(netz.http3.Response, "writeDynamic"));
     try std.testing.expect(@hasDecl(netz.http3, "decodeRequestWithDynamicTable"));
