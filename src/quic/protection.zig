@@ -26,6 +26,9 @@ pub const aead_tag_len = Aes128Gcm.tag_length;
 pub const header_protection_sample_len = 16;
 pub const header_protection_mask_len = 5;
 pub const max_packet_number: u64 = varint.max_value;
+/// RFC 9001 Section 6.6 / Appendix B.1 limits for AEAD_AES_128_GCM.
+pub const aes_128_gcm_confidentiality_limit: u64 = @as(u64, 1) << 23;
+pub const aes_128_gcm_integrity_limit: u64 = @as(u64, 1) << 52;
 
 pub const VersionError = error{
     UnsupportedVersion,

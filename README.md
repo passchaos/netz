@@ -90,7 +90,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   peer-address validation hooks with RFC 9000 3x anti-amplification send
   budget enforcement for unvalidated server paths,
   1-RTT key-update derivation and key-phase state with ACK gating and retained
-  previous receive/send generations for reordered short-header packets,
+  previous receive/send generations for reordered short-header packets, peer-triggered
+  send-key synchronization before ACK, and RFC 9001 AES-128-GCM `2^23`
+  per-generation confidentiality plus `2^52` lifetime authentication-failure
+  integrity limits with proactive key rotation and terminal limit handling,
   configurable RFC 9438 CUBIC (default) and NewReno congestion-window control with
   bytes-in-flight send admission wired into 1-RTT sending and ACK/ACK_ECN processing,
   deterministic timestamp injection plus automatic monotonic runtime timing,

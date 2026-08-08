@@ -18,6 +18,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     DatagramBufferTooSmall,
     AckFrequencyDisabled,
     PacingLimited,
+    AeadLimitReached,
 };
 
 pub const SendOptions = struct {
@@ -164,6 +165,14 @@ pub const ConnectionConfig = struct {
     peer_min_ack_delay: ?u64 = null,
     local_stateless_reset_key: ?[quic.stateless_reset.static_key_len]u8 = null,
     peer_active_connection_id_limit: usize = quic.default_active_connection_id_limit,
+    /// Per-generation AEAD encryption cap. Values above the RFC 9001
+    /// AES-128-GCM limit are clamped; lower values support conservative policy
+    /// and deterministic boundary tests.
+    aead_confidentiality_limit: u64 = quic.protection.aes_128_gcm_confidentiality_limit,
+    /// Lifetime count of packets that fail 1-RTT authentication before the
+    /// connection is closed with AEAD_LIMIT_REACHED. Also clamped to the RFC
+    /// AES-128-GCM integrity limit.
+    aead_integrity_limit: u64 = quic.protection.aes_128_gcm_integrity_limit,
 };
 
 const StreamFlowEntry = struct {
@@ -336,6 +345,8 @@ pub const Connection = struct {
     send_key_phase: quic.protection.Aes128KeyPhaseState,
     receive_key_phase: quic.protection.Aes128KeyPhaseState,
     pending_key_update_ack_threshold: ?u64 = null,
+    send_key_generation_encrypted_packets: u64 = 0,
+    receive_authentication_failures: u64 = 0,
     stored_new_tokens: std.ArrayList([]u8) = .empty,
     handshake_confirmed: bool = false,
     peer_max_streams_bidi: u64,
@@ -908,6 +919,7 @@ pub const Connection = struct {
         sent_time_ns: ?u64,
         pace_packet: bool,
     ) Error!void {
+        try self.prepareAeadForEncryption(packet_number);
         try self.reserveAntiAmplification(payload.len);
         errdefer self.releaseAntiAmplification(payload.len);
         const packet_options: quic.protection.ShortPacketOptions = .{
@@ -927,6 +939,7 @@ pub const Connection = struct {
             self.send_key_phase.currentKeys(),
             packet_options,
         );
+        self.recordPacketEncrypted();
         const now_ns = sent_time_ns orelse self.monotonicNowNs();
         if (pace_packet) {
             if (self.pacer.deadlineAt(
@@ -950,6 +963,80 @@ pub const Connection = struct {
             self.congestion.onPacketSent(packet_number);
         }
         self.pacing_blocked_until_ns = null;
+    }
+
+    fn aeadConfidentialityLimit(self: Connection) u64 {
+        return @min(
+            self.config.aead_confidentiality_limit,
+            quic.protection.aes_128_gcm_confidentiality_limit,
+        );
+    }
+
+    fn aeadIntegrityLimit(self: Connection) u64 {
+        return @min(
+            self.config.aead_integrity_limit,
+            quic.protection.aes_128_gcm_integrity_limit,
+        );
+    }
+
+    fn prepareAeadForEncryption(self: *Connection, packet_number: u64) Error!void {
+        const limit = self.aeadConfidentialityLimit();
+        if (self.send_key_generation_encrypted_packets < limit) return;
+        if (limit == 0 or self.pending_key_update_ack_threshold != null) {
+            try self.enterAeadLimitReached("confidentiality limit", null, false);
+            return error.AeadLimitReached;
+        }
+        self.advanceSendKeyPhase(packet_number);
+    }
+
+    fn recordPacketEncrypted(self: *Connection) void {
+        self.send_key_generation_encrypted_packets +|= 1;
+    }
+
+    fn advanceSendKeyPhase(self: *Connection, first_packet_number: u64) void {
+        self.send_key_phase.initiateKeyUpdate();
+        self.pending_key_update_ack_threshold = first_packet_number;
+        self.send_key_generation_encrypted_packets = 0;
+    }
+
+    fn recordAuthenticationFailureAt(self: *Connection, now_ns: ?u64) Error!void {
+        self.receive_authentication_failures +|= 1;
+        if (self.receive_authentication_failures < self.aeadIntegrityLimit()) return;
+        try self.enterAeadLimitReached("integrity limit", nsToMs(now_ns), true);
+        return error.AeadLimitReached;
+    }
+
+    fn enterAeadLimitReached(
+        self: *Connection,
+        reason_phrase: []const u8,
+        now_ms: ?u64,
+        send_close: bool,
+    ) Error!void {
+        const code = @intFromEnum(quic.TransportErrorCode.aead_limit_reached);
+        if (send_close and self.close_info == null) {
+            // Integrity exhaustion counts failed decryptions and does not
+            // consume outgoing confidentiality budget, so RFC 9001 permits a
+            // final protected CONNECTION_CLOSE. Socket/allocation failure must
+            // not prevent the mandatory local terminal transition.
+            const frames = [_]quic.Frame{.{ .connection_close = .{
+                .error_code = code,
+                .frame_type = 0,
+                .reason_phrase = reason_phrase,
+            } }};
+            self.sendTrackedFrames(&frames) catch {};
+        }
+        // Once outgoing confidentiality keys are exhausted, even a close
+        // packet would exceed their AEAD limit. In both cases record terminal
+        // state locally so no further packet can be processed or emitted.
+        try self.setCloseInfo(.{
+            .application = false,
+            .error_code = code,
+            .frame_type = 0,
+            .reason_phrase = reason_phrase,
+            .state = .closing,
+            .now_ms = now_ms,
+            .pto_ms = null,
+        });
     }
 
     pub fn retransmitPto(self: *Connection) Error!bool {
@@ -1182,6 +1269,7 @@ pub const Connection = struct {
         var datagrams: [max_batch_packets][]const u8 = undefined;
         var packet_offset: usize = 0;
         for (probes[0..count], 0..) |probe, i| {
+            try self.prepareAeadForEncryption(probe.packet_number);
             const packet = try quic.protection.sealShortPacketInto(
                 self.send_packet_buffer.items[packet_offset..][0..probe.packet_len],
                 self.send_key_phase.currentKeys(),
@@ -1194,6 +1282,7 @@ pub const Connection = struct {
                     .payload = probe.candidate.payload,
                 },
             );
+            self.recordPacketEncrypted();
             datagrams[i] = packet;
             std.debug.assert(packet.len == probe.packet_len);
             packet_offset += packet.len;
@@ -1730,8 +1819,15 @@ pub const Connection = struct {
     pub fn initiateKeyUpdate(self: *Connection) Error!void {
         if (self.close_info != null) return error.ConnectionClosed;
         if (self.pending_key_update_ack_threshold != null) return error.InvalidPacket;
-        self.send_key_phase.initiateKeyUpdate();
-        self.pending_key_update_ack_threshold = self.next_packet_number;
+        self.advanceSendKeyPhase(self.next_packet_number);
+    }
+
+    pub fn encryptedPacketsWithCurrentKeys(self: Connection) u64 {
+        return self.send_key_generation_encrypted_packets;
+    }
+
+    pub fn authenticationFailureCount(self: Connection) u64 {
+        return self.receive_authentication_failures;
     }
 
     pub fn schedulePreviousOneRttKeyDiscard(self: *Connection, deadline_nanos: i64) void {
@@ -1821,19 +1917,25 @@ pub const Connection = struct {
         while (completed < datagrams.segment_count) : (completed += 1) {
             const bytes = datagrams.datagramAtMutable(completed) orelse return error.InvalidPacket;
             const keys = self.receive_key_phase.keyUpdateKeys();
-            const key_phase = try quic.protection.peekShortPacketKeyPhase(
+            const key_phase = quic.protection.peekShortPacketKeyPhase(
                 keys.current.hp,
                 bytes,
                 self.config.local_connection_id.len,
-            );
+            ) catch |err| {
+                if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
+                return err;
+            };
             if (key_phase == keys.current_key_phase) {
-                try self.processReceivedBytesInPlaceAt(
+                self.processReceivedBytesInPlaceAt(
                     datagrams.from,
                     bytes,
                     datagrams.ecn,
                     now_ns,
                     keys.current,
-                );
+                ) catch |err| {
+                    if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
+                    return err;
+                };
                 continue;
             }
 
@@ -1932,19 +2034,32 @@ pub const Connection = struct {
         ecn: quic.packet_space.EcnCodepoint,
         now_ns: ?u64,
     ) Error!ReceivedPacket {
-        var packet = try self.openReceivedBytesWithFrameClose(
+        var packet = self.openReceivedBytesWithFrameClose(
             from,
             bytes,
             self.config.local_connection_id.len,
             now_ns,
-        );
+        ) catch |err| {
+            if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
+            return err;
+        };
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
-            _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
+            try self.acceptPeerKeyUpdate(packet.packet.key_phase);
         }
         return packet;
+    }
+
+    fn acceptPeerKeyUpdate(self: *Connection, peer_key_phase: bool) Error!void {
+        if (!self.receive_key_phase.updateAfterReceiving(peer_key_phase)) return;
+        // RFC 9001 §6.2 requires sending keys to reach the corresponding phase
+        // before acknowledging a peer's updated-key packet.
+        if (self.send_key_phase.currentKeyPhase() != peer_key_phase) {
+            if (self.pending_key_update_ack_threshold != null) return error.KeyUpdateError;
+            self.advanceSendKeyPhase(self.next_packet_number);
+        }
     }
 
     pub fn receiveRoutedDatagram(self: *Connection, routed: quic.runtime.RoutedBytes) Error!ReceivedPacket {
@@ -1976,34 +2091,40 @@ pub const Connection = struct {
 
     pub fn receiveRoutedDatagramAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        var packet = try self.openReceivedBytesWithFrameClose(
+        var packet = self.openReceivedBytesWithFrameClose(
             routed.datagram.from,
             routed.datagram.bytes,
             routed.destination_connection_id.len,
             now_ns,
-        );
+        ) catch |err| {
+            if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
+            return err;
+        };
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, routed.datagram.ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
-            _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
+            try self.acceptPeerKeyUpdate(packet.packet.key_phase);
         }
         return packet;
     }
 
     pub fn receiveRoutedDatagramWithEcnAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!ReceivedPacket {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
-        var packet = try self.openReceivedBytesWithFrameClose(
+        var packet = self.openReceivedBytesWithFrameClose(
             routed.datagram.from,
             routed.datagram.bytes,
             routed.destination_connection_id.len,
             now_ns,
-        );
+        ) catch |err| {
+            if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
+            return err;
+        };
         errdefer packet.deinit(self.endpoint.allocator);
         try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
-            _ = self.receive_key_phase.updateAfterReceiving(packet.packet.key_phase);
+            try self.acceptPeerKeyUpdate(packet.packet.key_phase);
         }
         return packet;
     }
@@ -5154,6 +5275,9 @@ test "QUIC 1-RTT connection performs key update and clears ACK gate" {
     try std.testing.expect(updated.packet.key_phase);
     try std.testing.expect(server.peerOneRttKeyPhase());
     try std.testing.expectEqual(@as(u64, 1), server.peerOneRttKeyUpdateCount());
+    try std.testing.expect(server.localOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 1), server.localOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingOneRttKeyUpdateAckThreshold());
     try std.testing.expectEqualStrings("updated", updated.frames[0].stream.data);
 
     try server.sendAck(0);
@@ -5165,6 +5289,132 @@ test "QUIC 1-RTT connection performs key update and clears ACK gate" {
     try client.initiateKeyUpdate();
     try std.testing.expect(!client.localOneRttKeyPhase());
     try std.testing.expectEqual(@as(u64, 2), client.localOneRttKeyUpdateCount());
+}
+
+test "QUIC 1-RTT automatically updates before the AEAD confidentiality limit" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const server_cid = [_]u8{ 0x65, 0x66, 0x67, 0x68 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x69} ** quic.protection.secret_len);
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .aead_confidentiality_limit = 2,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .aead_confidentiality_limit = 2,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.send(&ping);
+    try client.send(&ping);
+    try std.testing.expectEqual(@as(u64, 2), client.encryptedPacketsWithCurrentKeys());
+    try std.testing.expect(!client.localOneRttKeyPhase());
+
+    // The next encryption advances first, so generation zero is never used
+    // beyond its configured (and RFC-clamped) confidentiality limit.
+    try client.send(&ping);
+    try std.testing.expect(client.localOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 1), client.localOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(u64, 1), client.encryptedPacketsWithCurrentKeys());
+    try std.testing.expectEqual(@as(?u64, 2), client.pendingOneRttKeyUpdateAckThreshold());
+
+    var packet0 = try server.receivePacket();
+    defer packet0.deinit(allocator);
+    var packet1 = try server.receivePacket();
+    defer packet1.deinit(allocator);
+    var packet2 = try server.receivePacket();
+    defer packet2.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), packet0.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 1), packet1.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 2), packet2.packet.packet_number);
+    try std.testing.expect(packet2.peer_initiated_key_update);
+
+    // One more packet fills generation one. Without an ACK for packet 2 the
+    // sender cannot safely initiate another update, so the following send
+    // terminates locally rather than exceeding the AEAD limit.
+    try client.send(&ping);
+    try std.testing.expectError(error.AeadLimitReached, client.send(&ping));
+    try std.testing.expect(client.closing());
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.TransportErrorCode.aead_limit_reached)),
+        client.close_info.?.error_code,
+    );
+    try std.testing.expectEqual(@as(u64, 4), client.next_packet_number);
+}
+
+test "QUIC 1-RTT closes at the AEAD integrity limit" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+    const local_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const peer_cid = [_]u8{ 0x75, 0x76, 0x77, 0x78 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x79} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .local_endpoint = .server,
+        .aead_integrity_limit = 2,
+    });
+    defer connection.deinit();
+
+    const sealed = try quic.protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = &local_cid,
+        .packet_number = 0,
+        .packet_number_len = 4,
+        .payload = &.{@intFromEnum(quic.FrameType.ping)},
+    });
+    defer allocator.free(sealed);
+    sealed[sealed.len - 1] ^= 0x80; // Preserve header protection; corrupt only the AEAD tag.
+
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        connection.processReceivedBytesAt(endpoint.address(), sealed, .not_ect, 1_000_000),
+    );
+    try std.testing.expectEqual(@as(u64, 1), connection.authenticationFailureCount());
+    try std.testing.expect(!connection.closing());
+
+    try std.testing.expectError(
+        error.AeadLimitReached,
+        connection.processReceivedBytesAt(endpoint.address(), sealed, .not_ect, 2_000_000),
+    );
+    try std.testing.expectEqual(@as(u64, 2), connection.authenticationFailureCount());
+    try std.testing.expect(connection.closing());
+    try std.testing.expectEqual(
+        @as(u64, @intFromEnum(quic.TransportErrorCode.aead_limit_reached)),
+        connection.close_info.?.error_code,
+    );
+    try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
+    try std.testing.expectError(error.ConnectionClosed, connection.send(&.{.{ .ping = {} }}));
 }
 
 test "QUIC 1-RTT connection accepts delayed previous-key packets until discard" {

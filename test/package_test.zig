@@ -197,6 +197,16 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receivePacketBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "servicePacketBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "ReceivedPacketBatch"));
+    try std.testing.expectEqual(
+        @as(u64, 1) << 23,
+        netz.quic.protection.aes_128_gcm_confidentiality_limit,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1) << 52,
+        netz.quic.protection.aes_128_gcm_integrity_limit,
+    );
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "encryptedPacketsWithCurrentKeys"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "authenticationFailureCount"));
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.initial_exchange.min_initial_udp_datagram_size);
