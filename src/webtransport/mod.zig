@@ -48,6 +48,17 @@ pub const SessionId = struct {
     }
 };
 
+fn validateSessionId(session_id: SessionId) Error!void {
+    if (!session_id.isClientInitiatedBidirectional()) return error.InvalidSessionId;
+}
+
+fn sessionIdFromWire(value: u64) Error!SessionId {
+    const id: u62 = std.math.cast(u62, value) orelse return error.InvalidSessionId;
+    const session_id = SessionId.init(id);
+    try validateSessionId(session_id);
+    return session_id;
+}
+
 pub const SessionState = struct {
     session_id: ?SessionId = null,
     established: bool = false,
@@ -58,7 +69,7 @@ pub const SessionState = struct {
     datagrams_received: u64 = 0,
 
     pub fn establish(self: *SessionState, session_id: SessionId) Error!void {
-        if (!session_id.isClientInitiatedBidirectional()) return error.InvalidSessionId;
+        try validateSessionId(session_id);
         self.session_id = session_id;
         self.established = true;
         self.draining = false;
@@ -158,11 +169,12 @@ pub const UnidirectionalStreamHeader = struct {
     pub fn parse(bytes: []const u8) Error!UnidirectionalStreamHeader {
         var cursor = wire.Cursor.init(bytes);
         const stream_type: http3.StreamType = @enumFromInt(try quic.varint.decode(&cursor));
-        const session_id = if (stream_type == .webtransport_unidirectional) SessionId.init(@intCast(try quic.varint.decode(&cursor))) else null;
+        const session_id = if (stream_type == .webtransport_unidirectional) try sessionIdFromWire(try quic.varint.decode(&cursor)) else null;
         return .{ .stream_type = stream_type, .session_id = session_id, .consumed = cursor.pos };
     }
 
     pub fn writeWebTransport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, session_id: SessionId) !void {
+        try validateSessionId(session_id);
         try quic.varint.encode(list, allocator, @intFromEnum(http3.StreamType.webtransport_unidirectional));
         try quic.varint.encode(list, allocator, session_id.value);
     }
@@ -175,14 +187,20 @@ pub const Datagram = struct {
     pub fn parse(bytes: []const u8) Error!Datagram {
         var cursor = wire.Cursor.init(bytes);
         const quarter_stream_id = try quic.varint.decode(&cursor);
+        if (quarter_stream_id > maxQuarterStreamId()) return error.InvalidSessionId;
         return .{ .session_id = SessionId.init(@intCast(quarter_stream_id << 2)), .payload = bytes[cursor.pos..] };
     }
 
     pub fn write(self: Datagram, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+        try validateSessionId(self.session_id);
         try quic.varint.encode(list, allocator, self.session_id.quarterStreamId());
         try list.appendSlice(allocator, self.payload);
     }
 };
+
+fn maxQuarterStreamId() u64 {
+    return @as(u64, std.math.maxInt(u62)) >> 2;
+}
 
 pub fn enabled(settings: http3.Settings) bool {
     return settings.enable_webtransport or settings.webtransport_max_sessions != 0;
@@ -246,6 +264,12 @@ test "WebTransport capsule and stream headers" {
     const header = try UnidirectionalStreamHeader.parse(stream.items);
     try std.testing.expectEqual(http3.StreamType.webtransport_unidirectional, header.stream_type);
     try std.testing.expect(header.session_id.?.isClientInitiatedBidirectional());
+
+    stream.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidSessionId, UnidirectionalStreamHeader.writeWebTransport(&stream, allocator, SessionId.init(1)));
+    try quic.varint.encode(&stream, allocator, @intFromEnum(http3.StreamType.webtransport_unidirectional));
+    try quic.varint.encode(&stream, allocator, 1);
+    try std.testing.expectError(error.InvalidSessionId, UnidirectionalStreamHeader.parse(stream.items));
 }
 
 test "WebTransport datagram maps quarter stream id" {
@@ -256,6 +280,12 @@ test "WebTransport datagram maps quarter stream id" {
     const parsed = try Datagram.parse(encoded.items);
     try std.testing.expectEqual(@as(u62, 8), parsed.session_id.value);
     try std.testing.expectEqualStrings("dgram", parsed.payload);
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidSessionId, (Datagram{ .session_id = .init(1), .payload = "bad" }).write(&encoded, allocator));
+    try quic.varint.encode(&encoded, allocator, maxQuarterStreamId() + 1);
+    try encoded.appendSlice(allocator, "overflow");
+    try std.testing.expectError(error.InvalidSessionId, Datagram.parse(encoded.items));
 }
 
 test "WebTransport session state tracks lifecycle and datagram counters" {
