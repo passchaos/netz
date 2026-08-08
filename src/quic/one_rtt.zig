@@ -1514,6 +1514,9 @@ pub const Connection = struct {
             error.FinalSizeMismatch => firstFrameClose(frames, .final_size_error, "final size"),
             error.ConflictingStreamData => firstFrameClose(frames, .protocol_violation, "stream data"),
             error.InvalidAckFrame => ackFrameClose(frames),
+            error.DuplicateConnectionId => connectionIdFrameClose(frames, .protocol_violation, "connection id reuse"),
+            error.DuplicateResetToken => connectionIdFrameClose(frames, .protocol_violation, "reset token reuse"),
+            error.ActiveConnectionIdLimit => connectionIdFrameClose(frames, .connection_id_limit_error, "connection id limit"),
             else => null,
         };
     }
@@ -1526,6 +1529,13 @@ pub const Connection = struct {
     fn ackFrameClose(frames: []const quic.Frame) ?quic.FramePayloadCloseError {
         for (frames) |frame| {
             if (frame == .ack) return semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.ack), "ack");
+        }
+        return null;
+    }
+
+    fn connectionIdFrameClose(frames: []const quic.Frame, code: quic.TransportErrorCode, reason: []const u8) ?quic.FramePayloadCloseError {
+        for (frames) |frame| {
+            if (frame == .new_connection_id) return semanticClose(code, @intFromEnum(quic.FrameType.new_connection_id), reason);
         }
         return null;
     }
@@ -4622,10 +4632,28 @@ test "QUIC 1-RTT rejects invalid NEW_CONNECTION_ID lifecycle updates" {
     });
     try std.testing.expectError(error.DuplicateResetToken, client.receivePacket());
     try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
+    try std.testing.expect(client.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), client.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.new_connection_id)), client.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("reset token reuse", client.close_info.?.reason_phrase);
 
-    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
-        .destination_connection_id = &client_cid,
-        .packet_number = 2,
+    var client2_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client2_endpoint.deinit();
+    const client2_cid = [_]u8{ 0x89, 0x8a, 0x8b, 0x8c };
+    var client2 = try Connection.init(&client2_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client2_cid,
+        .peer_connection_id = &server_cid,
+        .active_connection_id_limit = 2,
+    });
+    defer client2.deinit();
+    try client2.peer_connection_ids.add(1, "cid-1", [_]u8{0x11} ** 16);
+
+    try sendFrames(&server_endpoint, client2_endpoint.address(), keys, .{
+        .destination_connection_id = &client2_cid,
+        .packet_number = 0,
         .frames = &[_]quic.Frame{.{ .new_connection_id = .{
             .sequence_number = 2,
             .retire_prior_to = 0,
@@ -4633,8 +4661,12 @@ test "QUIC 1-RTT rejects invalid NEW_CONNECTION_ID lifecycle updates" {
             .stateless_reset_token = [_]u8{0x33} ** 16,
         } }},
     });
-    try std.testing.expectError(error.ActiveConnectionIdLimit, client.receivePacket());
-    try std.testing.expectEqual(@as(usize, 2), client.peer_connection_ids.count());
+    try std.testing.expectError(error.ActiveConnectionIdLimit, client2.receivePacket());
+    try std.testing.expectEqual(@as(usize, 2), client2.peer_connection_ids.count());
+    try std.testing.expect(client2.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.connection_id_limit_error), client2.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.new_connection_id)), client2.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("connection id limit", client2.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT handles server-only NEW_TOKEN and HANDSHAKE_DONE roles" {
