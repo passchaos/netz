@@ -5970,6 +5970,30 @@ test "QUIC 1-RTT DATAGRAM enforces negotiation and frame-size limits" {
     try std.testing.expectError(error.InvalidFrame, limited.validateDatagramFrame(.{ .data = "1234567", .length_present = true }));
     try limited.validateDatagramFrame(.{ .data = "1234567", .length_present = false });
     try std.testing.expectError(error.InvalidFrame, limited.validateDatagramFrame(.{ .data = "12345678", .length_present = false }));
+
+    var limited_rx_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer limited_rx_endpoint.deinit();
+    const limited_rx_cid = [_]u8{ 0xe5, 0xe6, 0xe7, 0xe8 };
+    var limited_rx = try Connection.init(&limited_rx_endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &limited_rx_cid,
+        .peer_connection_id = &cid,
+        .local_max_datagram_frame_size = 8,
+        .peer_max_datagram_frame_size = 8,
+    });
+    defer limited_rx.deinit();
+    try sendFrames(&endpoint, limited_rx_endpoint.address(), keys, .{
+        .destination_connection_id = &limited_rx_cid,
+        .packet_number = 0,
+        .frames = &[_]quic.Frame{.{ .datagram = .{ .data = "1234567", .length_present = true } }},
+    });
+    try std.testing.expectError(error.InvalidFrame, limited_rx.receivePacket());
+    try std.testing.expect(limited_rx.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), limited_rx.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.datagram_len)), limited_rx.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("datagram", limited_rx.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
