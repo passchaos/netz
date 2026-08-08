@@ -6770,7 +6770,11 @@ pub const rtcp = struct {
     }
 
     fn parsePictureLossIndication(payload: []const u8) Error!PictureLossIndication {
-        if (payload.len != 8) return error.InvalidRtcpPacket;
+        // Pion/rtcp's PLI parser reads the mandatory sender/media SSRC pair and
+        // ignores any trailing bytes in the packet body.  Keep the same tolerant
+        // receive behavior for interoperability with peers that accidentally
+        // append FCI data, while the writer still emits the canonical 12-byte PLI.
+        if (payload.len < 8) return error.InvalidRtcpPacket;
         return .{
             .sender_ssrc = std.mem.readInt(u32, payload[0..4], .big),
             .media_ssrc = std.mem.readInt(u32, payload[4..8], .big),
@@ -12513,6 +12517,17 @@ test "RTCP receiver report and feedback packets" {
     const pli_destinations = try pli.packet.destinationSsrcs(allocator);
     defer allocator.free(pli_destinations);
     try std.testing.expectEqualSlices(u32, &.{0x22222222}, pli_destinations);
+
+    const pli_with_trailing_fci = [_]u8{
+        0x81, @intFromEnum(rtcp.PacketType.payload_feedback), 0x00, 0x03,
+        0x11, 0x11, 0x11, 0x11,
+        0x22, 0x22, 0x22, 0x22,
+        0xde, 0xad, 0xbe, 0xef,
+    };
+    var tolerant_pli = try rtcp.parsePacket(allocator, &pli_with_trailing_fci);
+    defer tolerant_pli.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x11111111), tolerant_pli.packet.picture_loss_indication.sender_ssrc);
+    try std.testing.expectEqual(@as(u32, 0x22222222), tolerant_pli.packet.picture_loss_indication.media_ssrc);
 
     encoded.clearRetainingCapacity();
     var sli_entries = [_]rtcp.SliEntry{.{
