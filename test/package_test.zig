@@ -227,6 +227,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "retry_source_connection_id"));
     try std.testing.expect(@hasField(netz.quic.handshake.ServerOptions, "version"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "congestion_algorithm"));
+    try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "enable_pacing"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
@@ -247,6 +248,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_datagram_queue_items"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_ack_frequency"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "congestion_algorithm"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_pacing"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "pacing_max_burst_packets"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_min_ack_delay"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_min_ack_delay"));
     try std.testing.expect(@hasField(netz.quic.TransportParameters, "min_ack_delay"));
@@ -343,6 +346,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "congestionWindow"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "congestionAvailable"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "bytesInFlight"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "pacingEnabled"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "pacingBudgetAt"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "pacingDeadlineAt"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "nextPacketPacingDeadlineAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "decodedPeerAckDelayNanos"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "processStatelessResetDatagram"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ackRttSample"));
@@ -390,6 +397,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.congestion.Controller, "onAckedWithContext"));
     try std.testing.expect(@hasDecl(netz.quic.congestion.Controller, "onExplicitCongestion"));
     try std.testing.expect(@hasDecl(netz.quic.congestion.Controller, "onPersistentCongestion"));
+    try std.testing.expect(@hasDecl(netz.quic, "pacing"));
+    try std.testing.expect(@hasDecl(netz.quic.pacing, "Pacer"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation, "State"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "pendingChallengeCount"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "receiveResponseValidated"));

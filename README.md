@@ -98,7 +98,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   encode/decode and adjustment, packet/time-threshold loss detection, earliest loss/PTO timer
   deadlines, capped exponential PTO backoff, two-probe PTO service, and persistent
   congestion detection that collapses the congestion window and resets the RTT
-  measurement epoch after long contiguous lost periods, allocation-free short-packet
+  measurement epoch after long contiguous lost periods, default RFC 9002 token-bucket
+  send pacing with configurable burst/disable controls, exact retry deadlines,
+  ACK bypass, transactional rejection, and path-reset handling, allocation-free short-packet
   sealing into caller storage and connection-level plaintext/protected send-buffer
   reuse (while retaining stable recovery payload ownership), PMTUD/DPLPMTUD path MTU
   probe sizing state with IPv4/IPv6 ceilings, loss-driven search backoff, and

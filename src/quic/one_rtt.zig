@@ -17,6 +17,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     DatagramQueueFull,
     DatagramBufferTooSmall,
     AckFrequencyDisabled,
+    PacingLimited,
 };
 
 pub const SendOptions = struct {
@@ -40,6 +41,11 @@ const PayloadSendOptions = struct {
 const RetransmitMode = enum {
     congestion_controlled,
     pto_probe,
+};
+
+const StreamDirection = enum {
+    bidirectional,
+    unidirectional,
 };
 
 pub const ReceivedPacket = struct {
@@ -112,6 +118,8 @@ pub const ConnectionConfig = struct {
     /// CUBIC is the high-throughput default; NewReno remains selectable for
     /// compatibility-sensitive deployments.
     congestion_algorithm: quic.congestion.Algorithm = .cubic,
+    enable_pacing: bool = true,
+    pacing_max_burst_packets: usize = quic.pacing.Pacer.default_max_burst_packets,
     max_stored_new_tokens: usize = 4,
     enable_spin_bit: bool = false,
     active_connection_id_limit: usize = quic.default_active_connection_id_limit,
@@ -227,6 +235,7 @@ pub const Connection = struct {
     sent: quic.packet_space.SentPacketTracker,
     recovery: quic.recovery.Queue,
     congestion: quic.congestion.Controller,
+    pacer: quic.pacing.Pacer,
     rtt_stats: quic.rtt.Stats,
     path_validation: quic.path_validation.State,
     peer_connection_ids: quic.connection_id.PeerPool = .{},
@@ -265,6 +274,7 @@ pub const Connection = struct {
     requested_max_ack_delay: u64 = 0,
     ack_reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
     immediate_ack_requested: bool = false,
+    pacing_blocked_until_ns: ?u64 = null,
     /// Reused plaintext frame storage. ACK-eliciting payloads are copied only
     /// when recovery needs stable ownership; transient encoding itself is
     /// allocation-free after connection initialization.
@@ -274,6 +284,7 @@ pub const Connection = struct {
     send_packet_buffer: std.ArrayList(u8) = .empty,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
+        const send_buffer_capacity = std.math.add(usize, config.max_datagram_size, max_short_packet_overhead) catch return error.OutOfMemory;
         var connection = Connection{
             .endpoint = endpoint,
             .config = config,
@@ -281,6 +292,7 @@ pub const Connection = struct {
             .sent = .init(endpoint.allocator),
             .recovery = .init(endpoint.allocator),
             .congestion = .initWithAlgorithm(config.max_datagram_size, config.congestion_algorithm),
+            .pacer = .init(config.enable_pacing, send_buffer_capacity, config.pacing_max_burst_packets),
             .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
             .pmtud = .init(.{ .enabled = config.enable_pmtud, .max_probe_size = config.pmtud_max_probe_size }),
             .path_validation = .init(endpoint.allocator),
@@ -295,7 +307,6 @@ pub const Connection = struct {
         };
         errdefer connection.deinit();
         try connection.send_frame_buffer.ensureTotalCapacity(endpoint.allocator, config.max_datagram_size);
-        const send_buffer_capacity = std.math.add(usize, config.max_datagram_size, max_short_packet_overhead) catch return error.OutOfMemory;
         try connection.send_packet_buffer.ensureTotalCapacity(endpoint.allocator, send_buffer_capacity);
         if (config.local_stateless_reset_key) |key| {
             try connection.local_connection_ids.registerInitialWithStaticKey(config.local_connection_id, key);
@@ -330,7 +341,17 @@ pub const Connection = struct {
     }
 
     pub fn sendWithEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
-        try self.sendWithEcnAt(frames, ecn, self.monotonicNowNs());
+        while (true) {
+            const now_ns = self.monotonicNowNs();
+            self.sendWithEcnAt(frames, ecn, now_ns) catch |err| switch (err) {
+                error.PacingLimited => {
+                    try self.waitForPacing(now_ns);
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
     }
 
     pub fn sendAt(self: *Connection, frames: []const quic.Frame, sent_time_ns: u64) Error!void {
@@ -338,6 +359,7 @@ pub const Connection = struct {
     }
 
     pub fn sendWithEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
+        self.pacing_blocked_until_ns = null;
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         if (ecn != .not_ect and self.sent.ecnDisabled()) return error.EcnDisabled;
         try self.validateNextPacketNumber();
@@ -345,8 +367,36 @@ pub const Connection = struct {
         const stream_bytes = countStreamBytes(frames);
         for (frames) |frame| {
             if (frame != .stream) continue;
-            const entry = try self.sendStreamEntry(frame.stream.stream_id);
-            if (entry.stopped != null or entry.reset_sent != null) return error.StreamStopped;
+            try self.validateStreamFrameForSend(frame.stream);
+        }
+        const prepared = try self.prepareFramesForSend(frames, sent_time_ns);
+        defer self.send_frame_buffer.items.len = 0;
+
+        // Pacing preflight above is deliberately mutation-free. Once it
+        // succeeds, materialize any new stream entries before flow-control
+        // checks so MAX_STREAM_DATA can subsequently refer to a stream whose
+        // first attempted write was flow-control blocked.
+        for (frames) |frame| {
+            if (frame != .stream) continue;
+            _ = try self.sendStreamEntry(frame.stream.stream_id);
+        }
+
+        if (stream_bytes > self.send_flow.available()) {
+            self.send_frame_buffer.items.len = 0;
+            try self.sendDataBlocked();
+            return error.FlowControlBlocked;
+        }
+        for (frames) |frame| {
+            if (frame != .stream or frame.stream.data.len == 0) continue;
+            const available = if (self.findSendStreamEntry(frame.stream.stream_id)) |entry|
+                entry.flow.available()
+            else
+                self.initialSendStreamDataLimit(frame.stream.stream_id);
+            if (frame.stream.data.len > available) {
+                self.send_frame_buffer.items.len = 0;
+                try self.sendStreamDataBlocked(frame.stream.stream_id, available);
+                return error.FlowControlBlocked;
+            }
         }
 
         var reserved_connection: u64 = 0;
@@ -362,10 +412,7 @@ pub const Connection = struct {
         }
 
         if (stream_bytes > 0) {
-            self.send_flow.reserve(stream_bytes) catch |err| {
-                try self.sendDataBlocked();
-                return err;
-            };
+            try self.send_flow.reserve(stream_bytes);
             reserved_connection = stream_bytes;
         }
         for (frames) |frame| {
@@ -379,13 +426,10 @@ pub const Connection = struct {
                 .bytes = 0,
             });
             const reserved_index = reserved_streams.items.len - 1;
-            entry.flow.reserve(frame.stream.data.len) catch |err| {
-                try self.sendStreamDataBlocked(frame.stream.stream_id, entry.flow.limit);
-                return err;
-            };
+            try entry.flow.reserve(frame.stream.data.len);
             reserved_streams.items[reserved_index].bytes = frame.stream.data.len;
         }
-        try self.sendTrackedFramesEcnAtUnchecked(frames, ecn, sent_time_ns);
+        try self.sendPreparedFramesEcnAtUnchecked(prepared, ecn, sent_time_ns);
         self.noteSentStreams(frames);
     }
 
@@ -455,6 +499,39 @@ pub const Connection = struct {
         return self.congestion.bytes_in_flight;
     }
 
+    pub fn pacingEnabled(self: Connection) bool {
+        return self.pacer.enabled;
+    }
+
+    pub fn pacingBudgetAt(self: Connection, now_ns: u64) usize {
+        return self.pacer.budgetAt(now_ns, self.congestion.congestion_window, self.rtt_stats.smoothedOrInitial());
+    }
+
+    pub fn pacingDeadlineAt(self: Connection, now_ns: u64, packet_size: usize) ?u64 {
+        return self.pacer.deadlineAt(
+            now_ns,
+            packet_size,
+            self.congestion.congestion_window,
+            self.rtt_stats.smoothedOrInitial(),
+        );
+    }
+
+    pub fn nextPacketPacingDeadlineAt(self: Connection, now_ns: u64, payload_len: usize) Error!?u64 {
+        const packet_number_len = quic.protection.packetNumberLenForPayload(
+            self.next_packet_number,
+            self.sent.largestAcknowledged(),
+            payload_len,
+        );
+        const packet_len = try quic.protection.shortPacketLen(.{
+            .destination_connection_id = self.config.peer_connection_id,
+            .packet_number = self.next_packet_number,
+            .packet_number_len = packet_number_len,
+            .payload = &.{},
+        });
+        const full_packet_len = std.math.add(usize, packet_len, payload_len) catch return error.InvalidPayloadLength;
+        return self.pacingDeadlineAt(now_ns, full_packet_len);
+    }
+
     pub fn sendAckFrequency(self: *Connection, ack_eliciting_threshold: u64, request_max_ack_delay: u64, reordering_threshold: u64) Error!u64 {
         if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
         try self.validateNextPacketNumber();
@@ -506,7 +583,17 @@ pub const Connection = struct {
     }
 
     fn sendTrackedFramesEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
-        try self.sendTrackedFramesEcnAt(frames, ecn, self.monotonicNowNs());
+        while (true) {
+            const now_ns = self.monotonicNowNs();
+            self.sendTrackedFramesEcnAt(frames, ecn, now_ns) catch |err| switch (err) {
+                error.PacingLimited => {
+                    try self.waitForPacing(now_ns);
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
     }
 
     fn sendTrackedFramesEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
@@ -516,16 +603,61 @@ pub const Connection = struct {
 
     fn sendTrackedFramesEcnAtUnchecked(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         try self.validateNextPacketNumber();
-        const packet_number = self.next_packet_number;
-        std.debug.assert(self.send_frame_buffer.items.len == 0);
+        const prepared = try self.prepareFramesForSend(frames, sent_time_ns);
         defer self.send_frame_buffer.items.len = 0;
+        try self.sendPreparedFramesEcnAtUnchecked(prepared, ecn, sent_time_ns);
+    }
+
+    const PreparedFrames = struct {
+        payload: []const u8,
+        packet_number_len: u8,
+        is_ack_eliciting: bool,
+        is_in_flight: bool,
+    };
+
+    fn prepareFramesForSend(self: *Connection, frames: []const quic.Frame, sent_time_ns: ?u64) Error!PreparedFrames {
+        std.debug.assert(self.send_frame_buffer.items.len == 0);
+        errdefer self.send_frame_buffer.items.len = 0;
         for (frames) |frame| try frame.write(&self.send_frame_buffer, self.endpoint.allocator);
         const payload = self.send_frame_buffer.items;
-
         const is_ack_eliciting = ackEliciting(frames);
         const is_in_flight = packetInFlight(frames);
+        const packet_number_len = quic.protection.packetNumberLenForPayload(
+            self.next_packet_number,
+            self.sent.largestAcknowledged(),
+            payload.len,
+        );
+        const packet_len = try quic.protection.shortPacketLen(.{
+            .destination_connection_id = self.config.peer_connection_id,
+            .packet_number = self.next_packet_number,
+            .packet_number_len = packet_number_len,
+            .payload = payload,
+        });
+        if (is_in_flight) if (sent_time_ns) |now_ns| {
+            if (self.pacingDeadlineAt(now_ns, packet_len)) |deadline| {
+                self.pacing_blocked_until_ns = deadline;
+                return error.PacingLimited;
+            }
+        };
+
+        return .{
+            .payload = payload,
+            .packet_number_len = packet_number_len,
+            .is_ack_eliciting = is_ack_eliciting,
+            .is_in_flight = is_in_flight,
+        };
+    }
+
+    fn sendPreparedFramesEcnAtUnchecked(
+        self: *Connection,
+        prepared: PreparedFrames,
+        ecn: quic.packet_space.EcnCodepoint,
+        sent_time_ns: ?u64,
+    ) Error!void {
+        const packet_number = self.next_packet_number;
+        const payload = prepared.payload;
         var tracked_congestion = false;
-        if (is_in_flight) {
+        if (prepared.is_in_flight) {
             try self.congestion.reserve(payload.len);
             tracked_congestion = true;
         }
@@ -533,16 +665,22 @@ pub const Connection = struct {
             if (tracked_congestion) self.congestion.discard(payload.len);
         }
         var tracked_recovery = false;
-        if (is_ack_eliciting) {
+        if (prepared.is_ack_eliciting) {
             try self.recovery.trackSent(packet_number, payload);
             tracked_recovery = true;
         }
         errdefer {
             if (tracked_recovery) _ = self.recovery.forgetPacketNumber(packet_number);
         }
-        try self.sent.sentInFlightAt(packet_number, is_ack_eliciting, is_in_flight, payload.len, ecn, sent_time_ns);
+        try self.sent.sentInFlightAt(packet_number, prepared.is_ack_eliciting, prepared.is_in_flight, payload.len, ecn, sent_time_ns);
         errdefer _ = self.sent.forget(packet_number);
-        try self.sendPayloadPacket(packet_number, payload);
+        try self.sendPayloadPacketWithPacketNumberLenAt(
+            packet_number,
+            payload,
+            prepared.packet_number_len,
+            sent_time_ns,
+            prepared.is_in_flight,
+        );
         self.next_packet_number += 1;
     }
 
@@ -603,7 +741,7 @@ pub const Connection = struct {
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
         try self.sent.sentAtWithPmtu(packet_number, true, payload.items.len, .not_ect, sent_time_ns, probe_size);
         errdefer _ = self.sent.forget(packet_number);
-        try self.sendPayloadPacketWithPacketNumberLen(packet_number, payload.items, packet_number_len);
+        try self.sendPayloadPacketWithPacketNumberLenAt(packet_number, payload.items, packet_number_len, sent_time_ns, true);
         self.next_packet_number += 1;
         self.pmtud.onProbeSent(probe_size);
         return probe_size;
@@ -651,15 +789,24 @@ pub const Connection = struct {
         self.peer_address_bytes_sent -|= bytes;
     }
 
-    fn sendPayloadPacket(self: *Connection, packet_number: u64, payload: []const u8) Error!void {
-        try self.sendPayloadPacketWithPacketNumberLen(
+    fn sendPayloadPacketAt(self: *Connection, packet_number: u64, payload: []const u8, sent_time_ns: ?u64, pace_packet: bool) Error!void {
+        try self.sendPayloadPacketWithPacketNumberLenAt(
             packet_number,
             payload,
             quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload.len),
+            sent_time_ns,
+            pace_packet,
         );
     }
 
-    fn sendPayloadPacketWithPacketNumberLen(self: *Connection, packet_number: u64, payload: []const u8, packet_number_len: u8) Error!void {
+    fn sendPayloadPacketWithPacketNumberLenAt(
+        self: *Connection,
+        packet_number: u64,
+        payload: []const u8,
+        packet_number_len: u8,
+        sent_time_ns: ?u64,
+        pace_packet: bool,
+    ) Error!void {
         try self.reserveAntiAmplification(payload.len);
         errdefer self.releaseAntiAmplification(payload.len);
         const packet_options: quic.protection.ShortPacketOptions = .{
@@ -679,7 +826,28 @@ pub const Connection = struct {
             self.send_key_phase.currentKeys(),
             packet_options,
         );
+        const now_ns = sent_time_ns orelse self.monotonicNowNs();
+        if (pace_packet) {
+            if (self.pacer.deadlineAt(
+                now_ns,
+                packet.len,
+                self.congestion.congestion_window,
+                self.rtt_stats.smoothedOrInitial(),
+            )) |deadline| {
+                self.pacing_blocked_until_ns = deadline;
+                return error.PacingLimited;
+            }
+        }
         try self.endpoint.sendBytes(self.config.peer, packet);
+        if (pace_packet) {
+            self.pacer.onPacketSentAt(
+                now_ns,
+                packet.len,
+                self.congestion.congestion_window,
+                self.rtt_stats.smoothedOrInitial(),
+            );
+        }
+        self.pacing_blocked_until_ns = null;
     }
 
     pub fn retransmitPto(self: *Connection) Error!bool {
@@ -799,7 +967,7 @@ pub const Connection = struct {
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
         try self.sent.sentAt(packet_number, true, candidate.payload.len, .not_ect, sent_time_ns);
         errdefer _ = self.sent.forget(packet_number);
-        try self.sendPayloadPacket(packet_number, candidate.payload);
+        try self.sendPayloadPacketAt(packet_number, candidate.payload, sent_time_ns, true);
         self.next_packet_number += 1;
     }
 
@@ -934,6 +1102,7 @@ pub const Connection = struct {
         self.peer_address_bytes_received = 0;
         self.peer_address_bytes_sent = 0;
         self.pmtud.resetForPath();
+        self.pacer.reset();
         try self.queuePathChallenge(challenge);
     }
 
@@ -1788,7 +1957,7 @@ pub const Connection = struct {
         if (final) recv_stream.final_size = final_size;
     }
 
-    fn receiveMaxStreams(self: *Connection, maximum_streams: u64, direction: enum { bidirectional, unidirectional }) Error!void {
+    fn receiveMaxStreams(self: *Connection, maximum_streams: u64, direction: StreamDirection) Error!void {
         if (maximum_streams > quic.max_stream_count) return error.InvalidFrame;
         switch (direction) {
             .bidirectional => self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, maximum_streams),
@@ -1812,7 +1981,7 @@ pub const Connection = struct {
         };
     }
 
-    fn receiveStreamsBlocked(self: *Connection, maximum_streams: u64, direction: enum { bidirectional, unidirectional }) Error!void {
+    fn receiveStreamsBlocked(self: *Connection, maximum_streams: u64, direction: StreamDirection) Error!void {
         if (maximum_streams > quic.max_stream_count) return error.InvalidFrame;
         const current_limit = switch (direction) {
             .bidirectional => self.recv_max_streams_bidi,
@@ -2013,6 +2182,7 @@ pub const Connection = struct {
     fn applyPersistentCongestionIfDetected(self: *Connection) bool {
         const period = self.persistentCongestionPeriod() orelse return false;
         self.congestion.onPersistentCongestion();
+        self.pacer.reset();
         self.rtt_stats.onPersistentCongestion();
         self.last_persistent_congestion_packet_number = period.end_packet_number;
         return true;
@@ -2025,6 +2195,14 @@ pub const Connection = struct {
         const timestamp = std.Io.Clock.awake.now(self.endpoint.io).nanoseconds;
         if (timestamp <= 0) return 0;
         return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
+    }
+
+    fn waitForPacing(self: Connection, now_ns: u64) Error!void {
+        const deadline = self.pacing_blocked_until_ns orelse return error.PacingLimited;
+        if (deadline <= now_ns) return;
+        const delay_ns = deadline - now_ns;
+        const signed_delay = std.math.cast(i64, delay_ns) orelse std.math.maxInt(i64);
+        try std.Io.sleep(self.endpoint.io, .fromNanoseconds(signed_delay), .awake);
     }
 
     fn applyAckWithEcnFailure(self: *Connection, ack: quic.AckFrame) Error!quic.packet_space.SentPacketTracker.AckResult {
@@ -2064,6 +2242,25 @@ pub const Connection = struct {
         return &self.stream_send_flows.items[self.stream_send_flows.items.len - 1];
     }
 
+    fn validateStreamFrameForSend(self: *Connection, stream: quic.StreamFrame) Error!void {
+        if (self.findSendStreamEntry(stream.stream_id)) |entry| {
+            if (entry.stopped != null or entry.reset_sent != null) return error.StreamStopped;
+            return;
+        }
+        if (!streamHasSendSide(self.config.local_endpoint, stream.stream_id)) return error.StreamStateError;
+        if (!streamInitiatedByLocal(self.config.local_endpoint, stream.stream_id)) return;
+
+        const count = streamCountForId(stream.stream_id);
+        const direction = streamDirection(stream.stream_id);
+        const limit = switch (direction) {
+            .bidirectional => self.peer_max_streams_bidi,
+            .unidirectional => self.peer_max_streams_uni,
+        };
+        if (count <= limit) return;
+        try self.sendStreamsBlocked(direction);
+        return error.StreamLimitExceeded;
+    }
+
     fn validateLocalStreamCount(self: *Connection, stream_id: u64) Error!void {
         const count = streamCountForId(stream_id);
         if (streamDirection(stream_id) == .bidirectional) {
@@ -2076,7 +2273,7 @@ pub const Connection = struct {
         return error.StreamLimitExceeded;
     }
 
-    fn sendStreamsBlocked(self: *Connection, direction: enum { bidirectional, unidirectional }) Error!void {
+    fn sendStreamsBlocked(self: *Connection, direction: StreamDirection) Error!void {
         const frame = switch (direction) {
             .bidirectional => quic.Frame{ .streams_blocked_bidi = .{ .maximum_streams = self.peer_max_streams_bidi } },
             .unidirectional => quic.Frame{ .streams_blocked_uni = .{ .maximum_streams = self.peer_max_streams_uni } },
@@ -2185,7 +2382,7 @@ fn streamHasReceiveSide(local_endpoint: ConnectionConfig.EndpointRole, stream_id
     return streamDirection(stream_id) == .bidirectional or !streamInitiatedByLocal(local_endpoint, stream_id);
 }
 
-fn streamDirection(stream_id: u64) enum { bidirectional, unidirectional } {
+fn streamDirection(stream_id: u64) StreamDirection {
     return if ((stream_id & 0x02) == 0) .bidirectional else .unidirectional;
 }
 
@@ -3555,6 +3752,92 @@ test "QUIC 1-RTT connection reuses protected send storage" {
     try std.testing.expectEqual(@as(usize, 0), connection.send_packet_buffer.items.len);
 }
 
+test "QUIC 1-RTT pacing gates in-flight packets transactionally" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer peer_endpoint.deinit();
+    var local_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer local_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x7b} ** quic.protection.secret_len);
+    var connection = try Connection.init(&local_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .max_datagram_size = 1200,
+        .pacing_max_burst_packets = 1,
+    });
+    defer connection.deinit();
+
+    const frames = [_]quic.Frame{.{ .padding = .{ .len = 1160 } }};
+    try std.testing.expect(connection.pacingEnabled());
+    try connection.sendAt(&frames, 1_000_000);
+    const packet_len = connection.sent.packets.items[0].bytes + 1 + "peer".len + 1 + quic.protection.aead_tag_len;
+    try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
+    try std.testing.expect(connection.pacingBudgetAt(1_000_000) < packet_len);
+
+    const deadline = connection.pacingDeadlineAt(1_000_000, packet_len) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline > 1_000_000);
+    const sent_count = connection.sent.packets.items.len;
+    const in_flight = connection.bytesInFlight();
+    const blocked_data = [_]u8{0xa5} ** 128;
+    const blocked_stream = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = &blocked_data,
+        .fin = false,
+    } }};
+    try std.testing.expectError(error.PacingLimited, connection.sendAt(&blocked_stream, 1_000_000));
+    try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
+    try std.testing.expectEqual(sent_count, connection.sent.packets.items.len);
+    try std.testing.expectEqual(in_flight, connection.bytesInFlight());
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 0), connection.stream_send_flows.items.len);
+    try std.testing.expectEqual(@as(u64, 0), connection.send_flow.used);
+
+    try connection.sendAt(&frames, deadline);
+    try std.testing.expectEqual(@as(u64, 2), connection.next_packet_number);
+
+    // Pure ACK packets are not in flight and must bypass pacing so a data burst
+    // cannot delay feedback needed by the peer's recovery loop.
+    const ack = [_]quic.Frame{.{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }};
+    try connection.sendAt(&ack, deadline);
+    try std.testing.expectEqual(@as(u64, 3), connection.next_packet_number);
+}
+
+test "QUIC 1-RTT can disable pacing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x7c} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try std.testing.expect(!connection.pacingEnabled());
+    try std.testing.expectEqual(@as(?u64, null), try connection.nextPacketPacingDeadlineAt(0, std.math.maxInt(u32)));
+}
+
 test "QUIC 1-RTT send paths reject packet number exhaustion before mutation" {
     const allocator = std.testing.allocator;
 
@@ -4478,7 +4761,9 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     defer connection.deinit();
     connection.setPeerAddressValidated(true);
     connection.pmtud.onProbeAcked(1300, 1300);
+    connection.pacer.onPacketSentAt(100, connection.pacer.maxBurstSize(), connection.congestionWindow(), connection.rtt_stats.smoothedOrInitial());
     try std.testing.expectEqual(@as(usize, 1300), connection.pmtudCurrentSize());
+    try std.testing.expectEqual(@as(usize, 0), connection.pacer.budget);
 
     const challenge = [_]u8{ 0xc0, 1, 2, 3, 4, 5, 6, 7 };
     try connection.beginPeerMigration(migrated_endpoint.address(), challenge);
@@ -4487,6 +4772,8 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     try std.testing.expectEqual(@as(?usize, 0), connection.antiAmplificationLimitRemaining());
     try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, connection.pmtudCurrentSize());
     try std.testing.expect(connection.pmtudShouldProbe());
+    try std.testing.expectEqual(connection.pacer.maxBurstSize(), connection.pacer.budget);
+    try std.testing.expectEqual(@as(?u64, null), connection.pacer.last_sent_time_ns);
     try std.testing.expectEqual(@as(usize, 1), connection.path_validation.pendingChallengeCount());
 
     var challenge_frame = try connection.path_validation.nextChallengeFrame();
@@ -6066,10 +6353,14 @@ test "QUIC 1-RTT connection applies persistent congestion response" {
 
     client.congestion.congestion_window = 24_000;
     client.congestion.slow_start_threshold = 24_000;
+    client.pacer.budget = 0;
+    client.pacer.last_sent_time_ns = 1_300_000_000;
     try server.sendAck(0);
 
     var ack = try client.receivePacketAt(1_400_000_000);
     defer ack.deinit(allocator);
+    try std.testing.expectEqual(client.pacer.maxBurstSize(), client.pacer.budget);
+    try std.testing.expectEqual(@as(?u64, null), client.pacer.last_sent_time_ns);
     try std.testing.expect(try client.retransmitTimeThresholdLoss(1_400_000_000, client.rtt_stats.lossDelay()));
 
     try std.testing.expect(client.sent.packets.items[1].lost);

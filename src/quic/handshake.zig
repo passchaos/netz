@@ -88,6 +88,8 @@ pub const OneRttConfig = struct {
     stream_receive_window: u64 = 64 * 1024,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
     congestion_algorithm: quic.congestion.Algorithm = .cubic,
+    enable_pacing: bool = true,
+    pacing_max_burst_packets: usize = quic.pacing.Pacer.default_max_burst_packets,
 
     fn apply(
         self: OneRttConfig,
@@ -130,6 +132,8 @@ pub const OneRttConfig = struct {
                 std.math.cast(usize, peer_transport_parameters.max_udp_payload_size) orelse std.math.maxInt(usize),
             ),
             .congestion_algorithm = self.congestion_algorithm,
+            .enable_pacing = self.enable_pacing,
+            .pacing_max_burst_packets = self.pacing_max_burst_packets,
             .active_connection_id_limit = std.math.cast(usize, local_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .peer_active_connection_id_limit = std.math.cast(usize, peer_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .local_max_idle_timeout_ms = local_transport_parameters.max_idle_timeout,
@@ -1411,6 +1415,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
                 .local_connection_id = cid,
                 .local_transport_parameters = params,
                 .version = .version_2,
+                .initial_one_rtt_config = .{ .enable_pacing = false },
                 .random = [_]u8{0x72} ** 32,
                 .x25519_secret_key = [_]u8{0x74} ** 32,
             });
@@ -1431,6 +1436,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
             try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.local_min_ack_delay);
             try std.testing.expectEqual(@as(?u64, 1_000), established.connection.config.peer_min_ack_delay);
             try std.testing.expectEqual(quic.congestion.Algorithm.cubic, established.connection.congestionAlgorithm());
+            try std.testing.expect(!established.connection.pacingEnabled());
         }
     };
 
@@ -1443,6 +1449,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
         .server_name = "localhost",
         .local_transport_parameters = client_tp,
         .version = .version_2,
+        .initial_one_rtt_config = .{ .enable_pacing = false },
         .random = [_]u8{0x71} ** 32,
         .x25519_secret_key = [_]u8{0x73} ** 32,
     });
@@ -1464,6 +1471,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.peer_min_ack_delay);
     try std.testing.expectEqual(@as(usize, 1200), established.connection.congestion.max_datagram_size);
     try std.testing.expectEqual(quic.congestion.Algorithm.cubic, established.connection.congestionAlgorithm());
+    try std.testing.expect(!established.connection.pacingEnabled());
     try std.testing.expectError(error.FlowControlBlocked, established.connection.send(&[_]quic.Frame{.{ .stream = .{
         .stream_id = 0,
         .data = "this exceeds server's stream credit",
