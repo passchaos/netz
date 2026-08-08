@@ -1085,6 +1085,12 @@ pub const sdp = struct {
         address: []const u8,
     };
 
+    pub const ConnectionAddress = struct {
+        address: []const u8,
+        ttl: ?u16 = null,
+        range: ?u16 = null,
+    };
+
     pub const unspecified_ipv4_connection: Connection = .{
         .network_type = "IN",
         .address_type = "IP4",
@@ -1506,6 +1512,44 @@ pub const sdp = struct {
         const line = try formatConnectionLine(allocator, network_type, address_type, address);
         defer allocator.free(line);
         try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatConnectionAddress(allocator: std.mem.Allocator, connection_address: ConnectionAddress) Error![]u8 {
+        try validateSdpToken(connection_address.address);
+        if (connection_address.ttl) |ttl| {
+            if (connection_address.range) |range| {
+                return std.fmt.allocPrint(allocator, "{s}/{d}/{d}", .{ connection_address.address, ttl, range });
+            }
+            return std.fmt.allocPrint(allocator, "{s}/{d}", .{ connection_address.address, ttl });
+        }
+        if (connection_address.range != null) return error.InvalidSdp;
+        return allocator.dupe(u8, connection_address.address);
+    }
+
+    pub fn formatStructuredConnectionLine(allocator: std.mem.Allocator, network_type: []const u8, address_type: []const u8, connection_address: ConnectionAddress) Error![]u8 {
+        const address = try formatConnectionAddress(allocator, connection_address);
+        defer allocator.free(address);
+        return formatConnectionLine(allocator, network_type, address_type, address);
+    }
+
+    pub fn appendStructuredConnectionLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, network_type: []const u8, address_type: []const u8, connection_address: ConnectionAddress) Error!void {
+        const line = try formatStructuredConnectionLine(allocator, network_type, address_type, connection_address);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn parseConnectionAddress(value: []const u8) Error!ConnectionAddress {
+        var parts = std.mem.splitScalar(u8, value, '/');
+        const address = parts.next() orelse return error.InvalidSdp;
+        try validateSdpToken(address);
+        const ttl_s = parts.next();
+        const range_s = parts.next();
+        if (parts.next() != null) return error.InvalidSdp;
+        return .{
+            .address = address,
+            .ttl = if (ttl_s) |ttl| std.fmt.parseInt(u16, ttl, 10) catch return error.InvalidSdp else null,
+            .range = if (range_s) |range| std.fmt.parseInt(u16, range, 10) catch return error.InvalidSdp else null,
+        };
     }
 
     pub fn formatInformationLine(allocator: std.mem.Allocator, information: []const u8) Error![]u8 {
@@ -9777,6 +9821,23 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("c=IN IP6 ::\r\n", connection_lines.items);
     try std.testing.expectError(error.InvalidSdp, sdp.formatConnectionLine(allocator, "IN", "IP4", "bad address"));
     try std.testing.expectError(error.InvalidSdp, sdp.parse(allocator, "v=0\r\nc=IN IP4\r\n"));
+    const multicast_address = try sdp.formatConnectionAddress(allocator, .{ .address = "224.2.1.1", .ttl = 127, .range = 3 });
+    defer allocator.free(multicast_address);
+    try std.testing.expectEqualStrings("224.2.1.1/127/3", multicast_address);
+    const parsed_multicast_address = try sdp.parseConnectionAddress(multicast_address);
+    try std.testing.expectEqualStrings("224.2.1.1", parsed_multicast_address.address);
+    try std.testing.expectEqual(@as(?u16, 127), parsed_multicast_address.ttl);
+    try std.testing.expectEqual(@as(?u16, 3), parsed_multicast_address.range);
+    const structured_connection_line = try sdp.formatStructuredConnectionLine(allocator, "IN", "IP4", parsed_multicast_address);
+    defer allocator.free(structured_connection_line);
+    try std.testing.expectEqualStrings("c=IN IP4 224.2.1.1/127/3\r\n", structured_connection_line);
+    var structured_connection_lines: std.ArrayList(u8) = .empty;
+    defer structured_connection_lines.deinit(allocator);
+    try sdp.appendStructuredConnectionLine(&structured_connection_lines, allocator, "IN", "IP4", .{ .address = "224.2.1.1", .ttl = 127 });
+    try std.testing.expectEqualStrings("c=IN IP4 224.2.1.1/127\r\n", structured_connection_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatConnectionAddress(allocator, .{ .address = "224.2.1.1", .range = 3 }));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseConnectionAddress("224.2.1.1/not-a-ttl"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseConnectionAddress("224.2.1.1/1/2/3"));
     const bandwidth_attr = try sdp.formatBandwidthAttribute(allocator, .{ .typ = "AS", .bandwidth = 1234 });
     defer allocator.free(bandwidth_attr);
     try std.testing.expectEqualStrings("AS:1234", bandwidth_attr);
