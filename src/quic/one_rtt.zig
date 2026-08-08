@@ -5571,7 +5571,7 @@ test "QUIC 1-RTT connection applies sparse ACK ranges from peer" {
     try std.testing.expect(!client.sent.packets.items[1].acknowledged);
     try std.testing.expect(client.sent.packets.items[2].acknowledged);
     try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
-    try std.testing.expectEqual(@as(u64, 1), client.recovery.pending.items[0].packet_numbers.items[0]);
+    try std.testing.expectEqual(@as(u64, 1), client.recovery.pending.items[0].packetNumberAt(0).?);
 }
 
 test "QUIC 1-RTT connection retransmits PTO payload and clears recovery on ACK" {
@@ -5622,7 +5622,7 @@ test "QUIC 1-RTT connection retransmits PTO payload and clears recovery on ACK" 
 
     try std.testing.expect(try client.retransmitPto());
     try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
-    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
 
     var retransmitted = try server.receivePacket();
     defer retransmitted.deinit(allocator);
@@ -5683,8 +5683,8 @@ test "QUIC 1-RTT PTO service sends up to two probes" {
     const serviced = (try client.serviceLossDetectionTimer(210_000_000)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
     try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
-    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
-    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[1].packet_numbers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[1].packetCount());
 
     var original0 = try server.receivePacket();
     defer original0.deinit(allocator);
@@ -5859,9 +5859,9 @@ test "QUIC 1-RTT connection retransmits time-threshold losses" {
     var retransmitted = try server.receivePacket();
     defer retransmitted.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 2), retransmitted.packet.packet_number);
-    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
     try std.testing.expect(!(try client.retransmitTimeThresholdLoss(1_000, 150)));
-    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
 }
 
 test "QUIC 1-RTT ACK processing detects time-threshold losses" {
@@ -5988,13 +5988,13 @@ test "QUIC 1-RTT connection retransmits packet-threshold losses" {
     var first_retransmit = try server.receivePacket();
     defer first_retransmit.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 5), first_retransmit.packet.packet_number);
-    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packet_numbers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
 
     try std.testing.expect(try client.retransmitPacketThresholdLoss());
     var second_retransmit = try server.receivePacket();
     defer second_retransmit.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 6), second_retransmit.packet.packet_number);
-    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[1].packet_numbers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[1].packetCount());
     try std.testing.expect(!(try client.retransmitPacketThresholdLoss()));
 
     try server.sendAck(0);
@@ -6003,7 +6003,7 @@ test "QUIC 1-RTT connection retransmits packet-threshold losses" {
     try std.testing.expectEqual(@as(u64, 6), second_ack.frames[0].ack.largest_acknowledged);
     try std.testing.expectEqual(@as(u64, 2), second_ack.frames[0].ack.first_ack_range);
     try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
-    try std.testing.expectEqual(@as(u64, 2), client.recovery.pending.items[0].packet_numbers.items[0]);
+    try std.testing.expectEqual(@as(u64, 2), client.recovery.pending.items[0].packetNumberAt(0).?);
 }
 
 test "QUIC 1-RTT connection applies persistent congestion response" {

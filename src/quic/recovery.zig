@@ -27,41 +27,63 @@ pub const Candidate = struct {
 };
 
 const PendingDatagram = struct {
-    packet_numbers: std.ArrayList(u64) = .empty,
+    /// Almost every payload is acknowledged without retransmission. Keep its
+    /// original packet number inline so the common case does not allocate a
+    /// one-element ArrayList; only actual retransmissions grow dynamic storage.
+    original_packet_number: ?u64,
+    retransmission_packet_numbers: std.ArrayList(u64) = .empty,
     payload: []u8,
-    retransmission_count: usize = 0,
 
     fn init(allocator: std.mem.Allocator, packet_number: u64, payload: []const u8) Error!PendingDatagram {
         if (payload.len == 0) return error.EmptyPayload;
 
         const payload_copy = try allocator.dupe(u8, payload);
-        errdefer allocator.free(payload_copy);
-
-        var packet_numbers: std.ArrayList(u64) = .empty;
-        errdefer packet_numbers.deinit(allocator);
-        try packet_numbers.append(allocator, packet_number);
-
         return .{
-            .packet_numbers = packet_numbers,
+            .original_packet_number = packet_number,
             .payload = payload_copy,
         };
     }
 
     fn deinit(self: *PendingDatagram, allocator: std.mem.Allocator) void {
-        self.packet_numbers.deinit(allocator);
+        self.retransmission_packet_numbers.deinit(allocator);
         allocator.free(self.payload);
         self.* = undefined;
     }
 
     fn newestPacketNumber(self: PendingDatagram) u64 {
-        return self.packet_numbers.items[self.packet_numbers.items.len - 1];
+        if (self.retransmission_packet_numbers.items.len != 0) {
+            return self.retransmission_packet_numbers.items[self.retransmission_packet_numbers.items.len - 1];
+        }
+        return self.original_packet_number.?;
     }
 
     fn containsRange(self: PendingDatagram, start: u64, end: u64) bool {
-        for (self.packet_numbers.items) |packet_number| {
+        if (self.original_packet_number) |packet_number| {
+            if (packet_number >= start and packet_number <= end) return true;
+        }
+        for (self.retransmission_packet_numbers.items) |packet_number| {
             if (packet_number >= start and packet_number <= end) return true;
         }
         return false;
+    }
+
+    pub fn packetCount(self: PendingDatagram) usize {
+        return @intFromBool(self.original_packet_number != null) + self.retransmission_packet_numbers.items.len;
+    }
+
+    pub fn packetNumberAt(self: PendingDatagram, index: usize) ?u64 {
+        if (self.original_packet_number) |packet_number| {
+            if (index == 0) return packet_number;
+            const retransmission_index = index - 1;
+            if (retransmission_index < self.retransmission_packet_numbers.items.len) {
+                return self.retransmission_packet_numbers.items[retransmission_index];
+            }
+            return null;
+        }
+        if (index < self.retransmission_packet_numbers.items.len) {
+            return self.retransmission_packet_numbers.items[index];
+        }
+        return null;
     }
 };
 
@@ -100,7 +122,7 @@ pub const Queue = struct {
             .group_index = group_index,
             .packet_number = entry.newestPacketNumber(),
             .payload = entry.payload,
-            .retransmission_count = entry.retransmission_count,
+            .retransmission_count = entry.retransmission_packet_numbers.items.len,
         };
     }
 
@@ -119,7 +141,7 @@ pub const Queue = struct {
                 .group_index = group_index,
                 .packet_number = entry.newestPacketNumber(),
                 .payload = entry.payload,
-                .retransmission_count = entry.retransmission_count,
+                .retransmission_count = entry.retransmission_packet_numbers.items.len,
             };
         }
         return null;
@@ -127,13 +149,14 @@ pub const Queue = struct {
 
     pub fn packetNumberCandidate(self: *const Queue, packet_number: u64) ?Candidate {
         for (self.pending.items, 0..) |entry, group_index| {
-            for (entry.packet_numbers.items) |candidate| {
+            var packet_index: usize = 0;
+            while (entry.packetNumberAt(packet_index)) |candidate| : (packet_index += 1) {
                 if (candidate != packet_number) continue;
                 return .{
                     .group_index = group_index,
                     .packet_number = entry.newestPacketNumber(),
                     .payload = entry.payload,
-                    .retransmission_count = entry.retransmission_count,
+                    .retransmission_count = entry.retransmission_packet_numbers.items.len,
                 };
             }
         }
@@ -143,8 +166,7 @@ pub const Queue = struct {
     pub fn recordRetransmission(self: *Queue, group_index: usize, packet_number: u64) Error!void {
         if (group_index >= self.pending.items.len) return error.InvalidRetransmission;
         const entry = &self.pending.items[group_index];
-        try entry.packet_numbers.append(self.allocator, packet_number);
-        entry.retransmission_count += 1;
+        try entry.retransmission_packet_numbers.append(self.allocator, packet_number);
     }
 
     pub fn acknowledgePacketNumber(self: *Queue, packet_number: u64) bool {
@@ -164,14 +186,19 @@ pub const Queue = struct {
         var i: usize = 0;
         while (i < self.pending.items.len) : (i += 1) {
             var entry = &self.pending.items[i];
-            for (entry.packet_numbers.items, 0..) |candidate, packet_index| {
+            if (entry.original_packet_number == packet_number) {
+                entry.original_packet_number = null;
+                if (entry.packetCount() == 0) {
+                    var removed = self.pending.orderedRemove(i);
+                    removed.deinit(self.allocator);
+                }
+                return true;
+            }
+            for (entry.retransmission_packet_numbers.items, 0..) |candidate, packet_index| {
                 if (candidate != packet_number) continue;
 
-                _ = entry.packet_numbers.orderedRemove(packet_index);
-                if (packet_index != 0 and entry.retransmission_count > 0) {
-                    entry.retransmission_count -= 1;
-                }
-                if (entry.packet_numbers.items.len == 0) {
+                _ = entry.retransmission_packet_numbers.orderedRemove(packet_index);
+                if (entry.packetCount() == 0) {
                     var removed = self.pending.orderedRemove(i);
                     removed.deinit(self.allocator);
                 }
@@ -229,7 +256,7 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
 
     try queue.recordRetransmission(candidate.group_index, 4);
     try std.testing.expectEqual(@as(usize, 1), queue.pendingCount());
-    try std.testing.expectEqual(@as(usize, 2), queue.pending.items[0].packet_numbers.items.len);
+    try std.testing.expectEqual(@as(usize, 2), queue.pending.items[0].packetCount());
 
     const ack = quic.AckFrame{
         .largest_acknowledged = 4,
@@ -238,6 +265,28 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
     };
     try std.testing.expectEqual(@as(usize, 1), try queue.applyAck(ack));
     try std.testing.expectEqual(@as(usize, 0), queue.pendingCount());
+}
+
+test "QUIC recovery queue keeps initial packet number allocation-free" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = counting.allocator();
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    // Remove queue growth from the measurement. Tracking a new payload then
+    // needs exactly one allocation for bytes that must survive caller reuse;
+    // the overwhelmingly common original packet number stays inline.
+    try queue.pending.ensureTotalCapacity(allocator, 1);
+    const allocations_before = counting.allocations;
+    try queue.trackSent(42, "owned recovery payload");
+    try std.testing.expectEqual(@as(usize, 1), counting.allocations - allocations_before);
+    try std.testing.expectEqual(@as(?u64, 42), queue.pending.items[0].original_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), queue.pending.items[0].retransmission_packet_numbers.capacity);
+
+    // Dynamic packet-number storage is deferred until a retransmission exists.
+    try queue.recordRetransmission(0, 43);
+    try std.testing.expectEqual(@as(usize, 2), queue.pending.items[0].packetCount());
+    try std.testing.expect(queue.pending.items[0].retransmission_packet_numbers.capacity > 0);
 }
 
 test "QUIC recovery queue selects PTO candidates by pending group" {
