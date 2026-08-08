@@ -2151,7 +2151,11 @@ fn sendPayload(
 fn ackEliciting(frames: []const quic.Frame) bool {
     for (frames) |frame| {
         switch (frame) {
-            .ack, .padding => {},
+            // RFC 9000 §13.2.1: ACK, PADDING, and both CONNECTION_CLOSE
+            // variants are non-ack-eliciting.  tquic/quicz rely on the same
+            // classification so close packets do not enter recovery or consume
+            // congestion credit while the endpoint is already shutting down.
+            .ack, .padding, .connection_close, .application_close => {},
             else => return true,
         }
     }
@@ -3308,9 +3312,9 @@ test "QUIC 1-RTT connection rejects ACK for unsent packet numbers" {
     try std.testing.expectError(error.InvalidAckFrame, client.receivePacket());
     try std.testing.expectEqual(@as(usize, 2), client.sent.packets.items.len);
     try std.testing.expect(!client.sent.packets.items[0].acknowledged);
-    try std.testing.expect(client.sent.packets.items[1].ack_eliciting);
-    try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
-    try std.testing.expect(client.congestion.bytes_in_flight > in_flight);
+    try std.testing.expect(!client.sent.packets.items[1].ack_eliciting);
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+    try std.testing.expectEqual(in_flight, client.congestion.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, null), client.sent.largestAcknowledged());
     try std.testing.expect(client.closing());
     try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), client.close_info.?.error_code);
@@ -4823,6 +4827,10 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
     defer server.deinit();
 
     try client.closeTransport(0x100, @intFromEnum(quic.FrameType.stream), "done");
+    try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
+    try std.testing.expect(!client.sent.packets.items[0].ack_eliciting);
+    try std.testing.expectEqual(@as(usize, 0), client.recovery.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
     var close_packet = try server.receivePacket();
     defer close_packet.deinit(allocator);
     try std.testing.expect(server.draining());
@@ -4856,6 +4864,10 @@ test "QUIC 1-RTT connection closes with transport and application close frames" 
     defer server2.deinit();
 
     try server2.closeApplication(42, "app done");
+    try std.testing.expectEqual(@as(usize, 1), server2.sent.packets.items.len);
+    try std.testing.expect(!server2.sent.packets.items[0].ack_eliciting);
+    try std.testing.expectEqual(@as(usize, 0), server2.recovery.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), server2.congestion.bytes_in_flight);
     var app_close = try client2.receivePacket();
     defer app_close.deinit(allocator);
     try std.testing.expect(client2.draining());
