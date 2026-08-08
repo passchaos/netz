@@ -571,6 +571,7 @@ pub const Connection = struct {
     last_peer_client_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
     local_goaway_last_stream_id: ?u31 = null,
+    pending_requests: std.ArrayList(OwnedRequest) = .empty,
     default_authority: ?[]u8 = null,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
     /// runtime constructors set this to "http"; a future ALPN/TLS constructor
@@ -584,6 +585,8 @@ pub const Connection = struct {
         self.active_local_streams.deinit(self.allocator);
         self.active_peer_streams.deinit(self.allocator);
         self.response_semantics.deinit(self.allocator);
+        for (self.pending_requests.items) |*pending| pending.deinit(self.allocator);
+        self.pending_requests.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.stream.close(self.io);
@@ -764,6 +767,7 @@ pub const Connection = struct {
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
         if (self.role != .server) return error.UnexpectedFrame;
+        if (self.pending_requests.items.len != 0) return self.pending_requests.orderedRemove(0);
         while (true) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
@@ -799,7 +803,10 @@ pub const Connection = struct {
                             var data_frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
                             defer data_frame.deinit(self.allocator);
                             if (try self.handleConnectionFrame(data_frame.frame)) continue;
-                            if (data_frame.frame.header.stream_id != stream_id) return error.UnexpectedFrame;
+                            if (data_frame.frame.header.stream_id != stream_id) {
+                                if (try self.queueCompletePeerRequestFrame(data_frame.frame)) continue;
+                                return error.UnexpectedFrame;
+                            }
                             switch (data_frame.frame.header.frame_type) {
                                 .data => {
                                     const data = try self.receiveDataPayload(stream_id, data_frame.frame);
@@ -839,6 +846,61 @@ pub const Connection = struct {
                 else => return error.UnexpectedFrame,
             }
         }
+    }
+
+    fn queueCompletePeerRequestFrame(self: *Connection, frame: http2.Frame) Error!bool {
+        if (frame.header.frame_type != .headers) return false;
+        if ((frame.header.flags & flag_end_stream) == 0) return false;
+        const stream_id = frame.header.stream_id;
+        if (!clientInitiatedStreamId(stream_id)) return error.InvalidFrame;
+        if (stream_id <= self.last_peer_client_stream_id) return error.InvalidFrame;
+        try self.reservePeerStream(stream_id);
+        errdefer self.releasePeerStream(stream_id);
+        self.last_peer_client_stream_id = stream_id;
+
+        const headers = try self.readHeaderBlock(frame);
+        errdefer freeHeaders(self.allocator, headers);
+        try validateHeaderBlock(headers, .request);
+        const empty_body = try self.allocator.alloc(u8, 0);
+        var body_owned_by_request = false;
+        errdefer if (!body_owned_by_request) self.allocator.free(empty_body);
+        const queued_request = try self.requestFromHeadersAndBody(stream_id, headers, empty_body, &.{});
+        body_owned_by_request = true;
+        errdefer {
+            var owned = queued_request;
+            owned.deinit(self.allocator);
+        }
+        try self.pending_requests.append(self.allocator, queued_request);
+        return true;
+    }
+
+    fn requestFromHeadersAndBody(
+        self: *Connection,
+        stream_id: u31,
+        headers: []http2.Hpack.HeaderField,
+        body: []u8,
+        trailers: []http2.Hpack.HeaderField,
+    ) Error!OwnedRequest {
+        const method = findHeader(headers, ":method") orelse return error.MissingPseudoHeader;
+        const protocol = findHeader(headers, ":protocol");
+        if (protocol != null and !self.limits.enable_connect_protocol) return error.ExtendedConnectDisabled;
+        const expected_request_len = try contentLength(headers);
+        const is_connect = methodIsConnect(method);
+        const is_extended_connect = is_connect and protocol != null;
+        if (is_connect and !is_extended_connect and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
+        try validateContentLength(headers, body.len);
+        try self.rememberResponseSemantics(stream_id, method, protocol);
+        return .{
+            .stream_id = stream_id,
+            .headers = headers,
+            .method = method,
+            .path = findHeader(headers, ":path") orelse "",
+            .scheme = findHeader(headers, ":scheme") orelse "",
+            .authority = requestAuthority(headers),
+            .protocol = protocol,
+            .body = body,
+            .trailers = trailers,
+        };
     }
 
     pub fn writeResponse(self: *Connection, stream_id: u31, options: ResponseOptions) Error!void {
@@ -5298,6 +5360,77 @@ test "HTTP/2 runtime exchanges request and response trailers" {
     try std.testing.expectEqual(@as(usize, 1), response.trailers.len);
     try std.testing.expectEqualStrings("grpc-status", response.trailers[0].name);
     try std.testing.expectEqualStrings("0", response.trailers[0].value);
+}
+
+test "HTTP/2 readRequest queues complete interleaved peer request" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var first = try connection.readRequest();
+            defer first.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+            try std.testing.expectEqualStrings("/first-interleaved", first.path);
+            try std.testing.expectEqualStrings("first-body", first.body);
+
+            var second = try connection.readRequest();
+            defer second.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(@as(u31, 3), second.stream_id);
+            try std.testing.expectEqualStrings("/second-interleaved", second.path);
+            try std.testing.expectEqualStrings("", second.body);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try client.writeHeaders(1, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/first-interleaved" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+        .{ .name = "content-length", .value = "10" },
+    }, false);
+    try client.writeHeaders(3, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/second-interleaved" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "localhost" },
+    }, true);
+    try client.writeData(1, "first-body", true);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 runtime rejects inbound connection-specific headers" {
