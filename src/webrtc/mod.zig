@@ -2784,7 +2784,7 @@ pub const sdp = struct {
     }
 
     pub fn extractIceCandidates(allocator: std.mem.Allocator, session: Session) Error![]IceCandidate {
-        const media = candidateMediaWithIndex(session) orelse return allocator.alloc(IceCandidate, 0);
+        const media = selectCandidateMedia(session) orelse return allocator.alloc(IceCandidate, 0);
         var candidates: std.ArrayList(IceCandidate) = .empty;
         errdefer {
             for (candidates.items) |*candidate| candidate.deinit(allocator);
@@ -3649,16 +3649,16 @@ pub const sdp = struct {
     }
 
     fn candidateMedia(session: Session) ?Media {
-        if (candidateMediaWithIndex(session)) |indexed| return indexed.media;
+        if (selectCandidateMedia(session)) |indexed| return indexed.media;
         return null;
     }
 
-    const IndexedMedia = struct {
+    pub const IndexedMedia = struct {
         media: Media,
         index: u16,
     };
 
-    fn candidateMediaWithIndex(session: Session) ?IndexedMedia {
+    pub fn selectCandidateMedia(session: Session) ?IndexedMedia {
         if (bundleId(session)) |bundle_id| {
             for (session.media, 0..) |media, index| {
                 if (findAttr(media.attributes, "mid")) |mid| {
@@ -10153,6 +10153,11 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "a=extmap:4 " ++ sdp.sdes_mid_uri ++ "\r\n";
     var session = try sdp.parse(allocator, text);
     defer session.deinit(allocator);
+
+    const selected_media = sdp.selectCandidateMedia(session).?;
+    try std.testing.expectEqual(@as(u16, 1), selected_media.index);
+    try std.testing.expectEqualStrings("application", selected_media.media.kind);
+    try std.testing.expectEqualStrings("1", sdp.findAttr(selected_media.media.attributes, "mid").?);
 
     const fingerprint = try sdp.extractFingerprint(session);
     try std.testing.expectEqualStrings("sha-256", fingerprint.algorithm);
