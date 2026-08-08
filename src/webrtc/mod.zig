@@ -1392,6 +1392,16 @@ pub const sdp = struct {
         if (!std.mem.eql(u8, value, "IP4") and !std.mem.eql(u8, value, "IP6")) return error.InvalidSdp;
     }
 
+    fn validateBandwidthType(value: []const u8) Error!void {
+        try validateSdpToken(value);
+        if (std.mem.eql(u8, value, "CT") or
+            std.mem.eql(u8, value, "AS") or
+            std.mem.eql(u8, value, "TIAS") or
+            std.mem.eql(u8, value, "RS") or
+            std.mem.eql(u8, value, "RR")) return;
+        return error.InvalidSdp;
+    }
+
     fn validateSdpAttributeValue(value: []const u8) Error!void {
         if (value.len == 0) return error.InvalidSdp;
         for (value) |byte| {
@@ -1837,10 +1847,11 @@ pub const sdp = struct {
     }
 
     pub fn formatBandwidthAttribute(allocator: std.mem.Allocator, bandwidth: Bandwidth) Error![]u8 {
-        try validateSdpToken(bandwidth.typ);
         if (bandwidth.experimental) {
+            try validateSdpToken(bandwidth.typ);
             return std.fmt.allocPrint(allocator, "X-{s}:{d}", .{ bandwidth.typ, bandwidth.bandwidth });
         }
+        try validateBandwidthType(bandwidth.typ);
         return std.fmt.allocPrint(allocator, "{s}:{d}", .{ bandwidth.typ, bandwidth.bandwidth });
     }
 
@@ -1866,7 +1877,11 @@ pub const sdp = struct {
             typ = typ["X-".len..];
             if (typ.len == 0) return error.InvalidSdp;
         }
-        try validateSdpToken(typ);
+        if (experimental) {
+            try validateSdpToken(typ);
+        } else {
+            try validateBandwidthType(typ);
+        }
         const raw_bandwidth = value[colon + 1 ..];
         if (raw_bandwidth.len == 0) return error.InvalidSdp;
         return .{
@@ -9888,9 +9903,11 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("b=TIAS:64000\r\n", bandwidth_lines.items);
     try std.testing.expectError(error.InvalidSdp, sdp.formatBandwidthLine(allocator, .{ .typ = "", .bandwidth = 1 }));
     try std.testing.expectError(error.InvalidSdp, sdp.formatBandwidthLine(allocator, .{ .typ = "bad type", .bandwidth = 1 }));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatBandwidthLine(allocator, .{ .typ = "FOO", .bandwidth = 1 }));
     try std.testing.expectError(error.InvalidSdp, sdp.parseBandwidthLine("AS"));
     try std.testing.expectError(error.InvalidSdp, sdp.parseBandwidthLine("AS:"));
     try std.testing.expectError(error.InvalidSdp, sdp.parseBandwidthLine("X-:1"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseBandwidthLine("FOO:1"));
     try std.testing.expectError(error.InvalidSdp, sdp.parseBandwidthLine("AS:not-a-number"));
     const rtcp_attr = try sdp.formatRtcpAttribute(allocator, .{ .port = 9, .connection = sdp.unspecified_ipv4_connection });
     defer allocator.free(rtcp_attr);
