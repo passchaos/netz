@@ -142,7 +142,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
   UNSUBSCRIBE/UNSUBACK, PING,
   DISCONNECT with MQTT v5 minimal reason-only encoding, AUTH enhanced-authentication exchanges, properties, exact packet bounds, minimal remaining length, MQTT UTF-8 string validation, response-topic/topic-name/filter validation, clean-session empty-client-id checks, version-specific MQTT 3.1.1/v5 property and SUBSCRIBE option validation, payload-format UTF-8 validation, and
-  wildcard and shared-subscription matching with MQTT 5 No Local/shared-subscription combination rejection, plus a blocking TCP client/server runtime with a
+  wildcard and shared-subscription matching with MQTT 5 No Local/shared-subscription combination rejection,
+  a broker-grade topic-level subscription trie with hashed literal edges,
+  allocation-free caller-buffer matching, exact linear overflow fallback,
+  subscription-option replacement, publisher-aware No Local filtering, and
+  per-group/filter shared-subscription round robin, plus a blocking TCP client/server runtime with a
   `std.Io.async` concurrent server helper, MQTT v5 Server Keep Alive, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation, and

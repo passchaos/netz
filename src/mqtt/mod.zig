@@ -2,6 +2,7 @@ const std = @import("std");
 const wire = @import("../internal/wire.zig");
 
 pub const runtime = @import("runtime.zig");
+pub const router = @import("router.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
@@ -2554,4 +2555,5 @@ test "MQTT v5 AUTH control" {
 
 test {
     _ = runtime;
+    _ = router;
 }
