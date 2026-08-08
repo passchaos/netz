@@ -539,9 +539,9 @@ pub const Router = struct {
 
     fn removeRouteEntry(self: *Router, node_index: usize, multi_level: bool, entry_index: usize) void {
         if (multi_level) {
-            removeIndexValue(&self.nodes.items[node_index].multi_wildcard_entries, entry_index);
+            removeIndexValueUnordered(&self.nodes.items[node_index].multi_wildcard_entries, entry_index);
         } else {
-            removeIndexValue(&self.nodes.items[node_index].terminal_entries, entry_index);
+            removeIndexValueUnordered(&self.nodes.items[node_index].terminal_entries, entry_index);
         }
     }
 
@@ -593,6 +593,16 @@ fn removeIndexValue(values: *std.ArrayList(usize), target: usize) void {
     for (values.items, 0..) |value, i| {
         if (value == target) {
             _ = values.orderedRemove(i);
+            return;
+        }
+    }
+}
+
+fn removeIndexValueUnordered(values: *std.ArrayList(usize), target: usize) void {
+    for (values.items, 0..) |value, i| {
+        if (value == target) {
+            values.items[i] = values.items[values.items.len - 1];
+            _ = values.pop();
             return;
         }
     }
