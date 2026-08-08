@@ -503,19 +503,20 @@ pub const Connection = struct {
     }
 
     pub fn completePublishQoS2(self: *Connection, packet_id: u16) Error!void {
-        if (!self.outgoing_qos2.isSet(@as(usize, packet_id))) return error.UnexpectedPacket;
+        if (packet_id != 0 and !self.outgoing_qos2.isSet(@as(usize, packet_id))) return error.UnexpectedPacket;
         var pubrec = try self.readPubRec();
         defer pubrec.deinit(self.allocator);
-        if (pubrec.ack.packet_id != packet_id) return error.UnexpectedPacket;
+        if (packet_id != 0 and pubrec.ack.packet_id != packet_id) return error.UnexpectedPacket;
+        if (!self.outgoing_qos2.isSet(@as(usize, pubrec.ack.packet_id))) return error.UnexpectedPacket;
         if (!pubrec.ack.accepted()) {
-            self.releaseOutgoingPublish(packet_id, .exactly_once);
+            self.releaseOutgoingPublish(pubrec.ack.packet_id, .exactly_once);
             return error.PublishRefused;
         }
-        try self.writePubRel(packet_id, 0);
+        try self.writePubRel(pubrec.ack.packet_id, 0);
         var pubcomp = try self.readPubComp();
         defer pubcomp.deinit(self.allocator);
-        if (pubcomp.ack.packet_id != packet_id) return error.UnexpectedPacket;
-        self.releaseOutgoingPublish(packet_id, .exactly_once);
+        if (pubcomp.ack.packet_id != pubrec.ack.packet_id) return error.UnexpectedPacket;
+        self.releaseOutgoingPublish(pubrec.ack.packet_id, .exactly_once);
         if (!pubcomp.ack.accepted()) return error.PublishRefused;
     }
 
@@ -1488,6 +1489,85 @@ test "MQTT split publish API accepts out-of-order QoS1 PUBACKs" {
     try std.testing.expect(client.outgoing_qos1.isSet(@as(usize, first_id)));
     try std.testing.expectEqual(@as(u16, 1), client.outgoing_inflight);
     try client.completePublishPubAck(0);
+    try std.testing.expectEqual(@as(u16, 0), client.outgoing_inflight);
+    try client.disconnect(0);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT split publish API accepts out-of-order QoS2 PUBREC handshakes" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_packet_size = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var accepted = try server_ptr.accept(.{
+                .protocol = .v5,
+                .max_outgoing_inflight = 2,
+            });
+            defer accepted.deinit(server_ptr.allocator);
+
+            var first = try accepted.connection.readPublish();
+            defer first.deinit(server_ptr.allocator);
+            var second = try accepted.connection.readPublish();
+            defer second.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(mqtt.QoS.exactly_once, first.publish.qos);
+            try std.testing.expectEqual(mqtt.QoS.exactly_once, second.publish.qos);
+
+            try accepted.connection.writePubRec(second.publish.packet_id.?, 0);
+            var second_rel = try accepted.connection.readPubRel();
+            defer second_rel.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(second.publish.packet_id.?, second_rel.ack.packet_id);
+            try accepted.connection.writePubComp(second_rel.ack.packet_id, 0);
+
+            try accepted.connection.writePubRec(first.publish.packet_id.?, 0);
+            var first_rel = try accepted.connection.readPubRel();
+            defer first_rel.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(first.publish.packet_id.?, first_rel.ack.packet_id);
+            try accepted.connection.writePubComp(first_rel.ack.packet_id, 0);
+
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(server_ptr.allocator);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .protocol = .v5,
+        .client_id = "out-of-order-pubrec",
+        .limits = .{ .max_packet_size = 4096 },
+        .max_outgoing_inflight = 2,
+    });
+    defer client.close();
+
+    const first_id = (try client.writePublish("qos2/one", "one", .{ .qos = .exactly_once })).?;
+    const second_id = (try client.writePublish("qos2/two", "two", .{ .qos = .exactly_once })).?;
+    try std.testing.expectEqual(@as(u16, 2), client.outgoing_inflight);
+
+    try client.completePublishQoS2(0);
+    try std.testing.expect(!client.outgoing_qos2.isSet(@as(usize, second_id)));
+    try std.testing.expect(client.outgoing_qos2.isSet(@as(usize, first_id)));
+    try std.testing.expectEqual(@as(u16, 1), client.outgoing_inflight);
+
+    try client.completePublishQoS2(0);
     try std.testing.expectEqual(@as(u16, 0), client.outgoing_inflight);
     try client.disconnect(0);
 
