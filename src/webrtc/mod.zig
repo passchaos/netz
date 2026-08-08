@@ -8761,7 +8761,7 @@ pub const sctp = struct {
 
     pub fn parsePacket(allocator: std.mem.Allocator, bytes: []const u8, verify_checksum: bool) Error!ParsedPacket {
         if (bytes.len < 12) return error.BufferTooShort;
-        if (verify_checksum and !try validChecksum(bytes)) return error.BadSctpChecksum;
+        if ((verify_checksum or packetRequiresChecksum(bytes)) and !try validChecksum(bytes)) return error.BadSctpChecksum;
         const header = try Header.parse(bytes[0..12]);
 
         var chunks: std.ArrayList(Chunk) = .empty;
@@ -8801,6 +8801,12 @@ pub const sctp = struct {
             pos += padded_len;
         }
         return .{ .header = header, .chunks = try chunks.toOwnedSlice(allocator) };
+    }
+
+    pub fn packetRequiresChecksum(bytes: []const u8) bool {
+        if (bytes.len < 16) return false;
+        const first_chunk_type: ChunkType = @enumFromInt(bytes[12]);
+        return first_chunk_type == .init or first_chunk_type == .cookie_echo;
     }
 
     fn supportedChunkType(chunk_type: ChunkType) bool {
@@ -13546,6 +13552,27 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     defer cookie_packet.deinit(allocator);
     try std.testing.expectEqual(sctp.ChunkType.cookie_echo, cookie_packet.chunks[0].chunk_type);
     try std.testing.expectEqualStrings(cookie, try sctp.cookieEchoValue(cookie_packet.chunks[0]));
+    try std.testing.expect(sctp.packetRequiresChecksum(encoded.items));
+    var zero_checksum_cookie = try encoded.clone(allocator);
+    defer zero_checksum_cookie.deinit(allocator);
+    std.mem.writeInt(u32, zero_checksum_cookie.items[8..12], 0, .little);
+    try std.testing.expectError(error.BadSctpChecksum, sctp.parsePacket(allocator, zero_checksum_cookie.items, false));
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeDataPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = init_ack.initiate_tag,
+    }, &.{.{
+        .tsn = 1,
+        .stream_id = 1,
+        .payload_protocol_identifier = .webrtc_binary,
+        .user_data = "zero-checksum-ok",
+    }});
+    try std.testing.expect(!sctp.packetRequiresChecksum(encoded.items));
+    std.mem.writeInt(u32, encoded.items[8..12], 0, .little);
+    var zero_checksum_data = try sctp.parsePacket(allocator, encoded.items, false);
+    zero_checksum_data.deinit(allocator);
 
     encoded.clearRetainingCapacity();
     try sctp.writeCookieAckPacket(&encoded, allocator, .{
