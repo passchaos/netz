@@ -127,6 +127,7 @@ pub const Capsule = union(enum) {
             CapsuleType.close_webtransport_session => blk: {
                 if (payload.len < 4) return error.InvalidCapsule;
                 const code = std.mem.readInt(u32, payload[0..4], .big);
+                if (!std.unicode.utf8ValidateSlice(payload[4..])) return error.InvalidCapsule;
                 break :blk .{ .close_session = .{ .code = code, .reason = payload[4..] } };
             },
             CapsuleType.drain_webtransport_session => .{ .drain_session = {} },
@@ -143,6 +144,7 @@ pub const Capsule = union(enum) {
                 try list.appendSlice(allocator, payload);
             },
             .close_session => |close| {
+                if (!std.unicode.utf8ValidateSlice(close.reason)) return error.InvalidCapsule;
                 try quic.varint.encode(list, allocator, CapsuleType.close_webtransport_session);
                 try quic.varint.encode(list, allocator, 4 + close.reason.len);
                 try wire.appendInt(list, allocator, u32, close.code, .big);
@@ -257,6 +259,14 @@ test "WebTransport capsule and stream headers" {
     const parsed = try Capsule.parse(encoded.items);
     try std.testing.expectEqual(@as(u32, 42), parsed.capsule.close_session.code);
     try std.testing.expectEqualStrings("done", parsed.capsule.close_session.reason);
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(error.InvalidCapsule, (Capsule{ .close_session = .{ .code = 1, .reason = "\xff" } }).write(&encoded, allocator));
+    try quic.varint.encode(&encoded, allocator, CapsuleType.close_webtransport_session);
+    try quic.varint.encode(&encoded, allocator, 5);
+    try wire.appendInt(&encoded, allocator, u32, 1, .big);
+    try encoded.append(allocator, 0xff);
+    try std.testing.expectError(error.InvalidCapsule, Capsule.parse(encoded.items));
 
     var stream: std.ArrayList(u8) = .empty;
     defer stream.deinit(allocator);
