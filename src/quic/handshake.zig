@@ -87,6 +87,7 @@ pub const OneRttConfig = struct {
     initial_receive_max_stream_data: u64 = std.math.maxInt(u62),
     stream_receive_window: u64 = 64 * 1024,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
+    congestion_algorithm: quic.congestion.Algorithm = .cubic,
 
     fn apply(
         self: OneRttConfig,
@@ -128,6 +129,7 @@ pub const OneRttConfig = struct {
                 self.max_datagram_size,
                 std.math.cast(usize, peer_transport_parameters.max_udp_payload_size) orelse std.math.maxInt(usize),
             ),
+            .congestion_algorithm = self.congestion_algorithm,
             .active_connection_id_limit = std.math.cast(usize, local_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .peer_active_connection_id_limit = std.math.cast(usize, peer_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .local_max_idle_timeout_ms = local_transport_parameters.max_idle_timeout,
@@ -1428,6 +1430,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
             try std.testing.expect(established.connection.config.enable_ack_frequency);
             try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.local_min_ack_delay);
             try std.testing.expectEqual(@as(?u64, 1_000), established.connection.config.peer_min_ack_delay);
+            try std.testing.expectEqual(quic.congestion.Algorithm.cubic, established.connection.congestionAlgorithm());
         }
     };
 
@@ -1460,6 +1463,7 @@ test "QUIC integrated handshake applies negotiated transport parameters over QUI
     try std.testing.expectEqual(@as(?u64, 1_000), established.connection.config.local_min_ack_delay);
     try std.testing.expectEqual(@as(?u64, 2_000), established.connection.config.peer_min_ack_delay);
     try std.testing.expectEqual(@as(usize, 1200), established.connection.congestion.max_datagram_size);
+    try std.testing.expectEqual(quic.congestion.Algorithm.cubic, established.connection.congestionAlgorithm());
     try std.testing.expectError(error.FlowControlBlocked, established.connection.send(&[_]quic.Frame{.{ .stream = .{
         .stream_id = 0,
         .data = "this exceeds server's stream credit",

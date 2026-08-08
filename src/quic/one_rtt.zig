@@ -109,6 +109,9 @@ pub const ConnectionConfig = struct {
     initial_receive_max_streams_uni: u64 = std.math.maxInt(u60),
     stream_receive_window: u64 = 64 * 1024,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
+    /// CUBIC is the high-throughput default; NewReno remains selectable for
+    /// compatibility-sensitive deployments.
+    congestion_algorithm: quic.congestion.Algorithm = .cubic,
     max_stored_new_tokens: usize = 4,
     enable_spin_bit: bool = false,
     active_connection_id_limit: usize = quic.default_active_connection_id_limit,
@@ -269,7 +272,7 @@ pub const Connection = struct {
             .received = .init(endpoint.allocator, config.max_ack_ranges),
             .sent = .init(endpoint.allocator),
             .recovery = .init(endpoint.allocator),
-            .congestion = .init(config.max_datagram_size),
+            .congestion = .initWithAlgorithm(config.max_datagram_size, config.congestion_algorithm),
             .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
             .pmtud = .init(.{ .enabled = config.enable_pmtud, .max_probe_size = config.pmtud_max_probe_size }),
             .path_validation = .init(endpoint.allocator),
@@ -313,7 +316,7 @@ pub const Connection = struct {
     }
 
     pub fn sendWithEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
-        try self.sendWithEcnAt(frames, ecn, null);
+        try self.sendWithEcnAt(frames, ecn, self.monotonicNowNs());
     }
 
     pub fn sendAt(self: *Connection, frames: []const quic.Frame, sent_time_ns: u64) Error!void {
@@ -422,6 +425,22 @@ pub const Connection = struct {
         return self.datagrams_dropped_incoming_count;
     }
 
+    pub fn congestionAlgorithm(self: Connection) quic.congestion.Algorithm {
+        return self.congestion.algorithm;
+    }
+
+    pub fn congestionWindow(self: Connection) usize {
+        return self.congestion.congestion_window;
+    }
+
+    pub fn congestionAvailable(self: Connection) usize {
+        return self.congestion.available();
+    }
+
+    pub fn bytesInFlight(self: Connection) usize {
+        return self.congestion.bytes_in_flight;
+    }
+
     pub fn sendAckFrequency(self: *Connection, ack_eliciting_threshold: u64, request_max_ack_delay: u64, reordering_threshold: u64) Error!u64 {
         if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
         try self.validateNextPacketNumber();
@@ -473,7 +492,7 @@ pub const Connection = struct {
     }
 
     fn sendTrackedFramesEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
-        try self.sendTrackedFramesEcnAt(frames, ecn, null);
+        try self.sendTrackedFramesEcnAt(frames, ecn, self.monotonicNowNs());
     }
 
     fn sendTrackedFramesEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
@@ -638,7 +657,7 @@ pub const Connection = struct {
     }
 
     pub fn retransmitPto(self: *Connection) Error!bool {
-        return self.retransmitPtoAt(null);
+        return self.retransmitPtoAt(self.monotonicNowNs());
     }
 
     pub fn retransmitPtoAt(self: *Connection, now_ns: ?u64) Error!bool {
@@ -738,7 +757,7 @@ pub const Connection = struct {
     }
 
     fn retransmitCandidate(self: *Connection, candidate: quic.recovery.Candidate, mode: RetransmitMode) Error!void {
-        try self.retransmitCandidateAt(candidate, mode, null);
+        try self.retransmitCandidateAt(candidate, mode, self.monotonicNowNs());
     }
 
     fn retransmitCandidateAt(self: *Connection, candidate: quic.recovery.Candidate, mode: RetransmitMode, sent_time_ns: ?u64) Error!void {
@@ -1239,11 +1258,11 @@ pub const Connection = struct {
     }
 
     pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
-        return self.receivePacketAt(null);
+        return self.receivePacketAt(self.monotonicNowNs());
     }
 
     pub fn receivePacketOrDropAfterClose(self: *Connection) Error!?ReceivedPacket {
-        return self.receivePacketOrDropAfterCloseAt(null);
+        return self.receivePacketOrDropAfterCloseAt(self.monotonicNowNs());
     }
 
     pub fn receivePacketOrDropAfterCloseAt(self: *Connection, now_ns: ?u64) Error!?ReceivedPacket {
@@ -1271,11 +1290,11 @@ pub const Connection = struct {
     }
 
     pub fn receiveRoutedDatagram(self: *Connection, routed: quic.runtime.RoutedBytes) Error!ReceivedPacket {
-        return self.receiveRoutedDatagramAt(routed, null);
+        return self.receiveRoutedDatagramAt(routed, self.monotonicNowNs());
     }
 
     pub fn receiveRoutedDatagramOrDropAfterClose(self: *Connection, routed: quic.runtime.RoutedBytes) Error!?ReceivedPacket {
-        return self.receiveRoutedDatagramOrDropAfterCloseAt(routed, null);
+        return self.receiveRoutedDatagramOrDropAfterCloseAt(routed, self.monotonicNowNs());
     }
 
     pub fn receiveRoutedDatagramOrDropAfterCloseAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64) Error!?ReceivedPacket {
@@ -1294,7 +1313,7 @@ pub const Connection = struct {
         if (self.processStatelessResetDatagram(routed.datagram.bytes, now_ms, pto_ms)) |sequence_number| {
             return .{ .stateless_reset = sequence_number };
         }
-        return .{ .packet = try self.receiveRoutedDatagramAt(routed, null) };
+        return .{ .packet = try self.receiveRoutedDatagramAt(routed, self.monotonicNowNs()) };
     }
 
     pub fn receiveRoutedDatagramAt(self: *Connection, routed: quic.runtime.RoutedBytes, now_ns: ?u64) Error!ReceivedPacket {
@@ -1414,7 +1433,12 @@ pub const Connection = struct {
                     if (acked.ecn_ce_delta > 0) {
                         self.congestion.onExplicitCongestion(now_ns);
                     }
-                    self.congestion.onAckedAt(acked.bytes, acked.largest_sent_time_ns);
+                    self.congestion.onAckedWithContext(
+                        acked.bytes,
+                        acked.largest_sent_time_ns,
+                        now_ns,
+                        self.rtt_stats.smoothedOrInitial(),
+                    );
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
                     if (lost.bytes > 0) {
                         self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
@@ -1896,7 +1920,7 @@ pub const Connection = struct {
 
     fn sendTrackedFramesAllowClosing(self: *Connection, frames: []const quic.Frame) Error!void {
         if (self.idle_timed_out or self.closed() or self.draining()) return error.ConnectionClosed;
-        try self.sendTrackedFramesEcnAt(frames, .not_ect, null);
+        try self.sendTrackedFramesEcnAt(frames, .not_ect, self.monotonicNowNs());
     }
 
     fn noteSentStreams(self: *Connection, frames: []const quic.Frame) void {
@@ -1966,6 +1990,15 @@ pub const Connection = struct {
         self.rtt_stats.onPersistentCongestion();
         self.last_persistent_congestion_packet_number = period.end_packet_number;
         return true;
+    }
+
+    fn monotonicNowNs(self: Connection) u64 {
+        // `awake` is monotonic and excludes suspend time where the platform can
+        // distinguish it. Saturating at the u64 range keeps the existing
+        // timestamp API stable even though std.Io uses signed i96 timestamps.
+        const timestamp = std.Io.Clock.awake.now(self.endpoint.io).nanoseconds;
+        if (timestamp <= 0) return 0;
+        return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
     }
 
     fn applyAckWithEcnFailure(self: *Connection, ack: quic.AckFrame) Error!quic.packet_space.SentPacketTracker.AckResult {
@@ -3411,6 +3444,51 @@ test "QUIC 1-RTT connection models idle timeout deadlines" {
     try std.testing.expect(connection.checkIdleTimeout(110));
     try std.testing.expect(connection.closed());
     try std.testing.expectError(error.ConnectionClosed, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
+}
+
+test "QUIC 1-RTT connection selects and exposes CUBIC congestion control" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x79} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(quic.congestion.Algorithm.cubic, connection.congestionAlgorithm());
+    try std.testing.expectEqual(quic.congestion.initialWindow(1200), connection.congestionWindow());
+    try std.testing.expectEqual(connection.congestionWindow(), connection.congestionAvailable());
+    try std.testing.expectEqual(@as(usize, 0), connection.bytesInFlight());
+
+    // The convenience send path must attach monotonic time automatically;
+    // otherwise CUBIC and RFC 9002 loss detection silently degrade unless every
+    // caller uses the lower-level sendAt API.
+    try connection.send(&[_]quic.Frame{.{ .ping = {} }});
+    try std.testing.expect(connection.bytesInFlight() > 0);
+    try std.testing.expect(connection.congestionAvailable() < connection.congestionWindow());
+    try std.testing.expect(connection.sent.packets.items[0].sent_time_ns != null);
+
+    var reno = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local-reno",
+        .peer_connection_id = "peer-reno",
+        .congestion_algorithm = .new_reno,
+    });
+    defer reno.deinit();
+    try std.testing.expectEqual(quic.congestion.Algorithm.new_reno, reno.congestionAlgorithm());
 }
 
 test "QUIC 1-RTT send paths reject packet number exhaustion before mutation" {
