@@ -3054,6 +3054,16 @@ pub const sdp = struct {
         return false;
     }
 
+    pub fn sessionPossiblyPlanB(session: Session) bool {
+        for (session.media) |media| {
+            const mid = findAttr(media.attributes, "mid") orelse continue;
+            if (std.ascii.eqlIgnoreCase(mid, "audio") or
+                std.ascii.eqlIgnoreCase(mid, "video") or
+                std.ascii.eqlIgnoreCase(mid, "data")) return true;
+        }
+        return false;
+    }
+
     pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
         for (attrs) |attr| {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
@@ -10602,6 +10612,23 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(usize, 2), plan_b_tracks.len);
     try std.testing.expect(sdp.tracksContainRepeatedMid(plan_b_tracks));
     try std.testing.expectEqualStrings("track-a", sdp.trackDetailsForMid(plan_b_tracks, "plan-b").?.track_id);
+
+    const possible_plan_b_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n" ++
+        "a=mid:video\r\n" ++
+        "a=sendrecv\r\n" ++
+        "a=ssrc:3333 msid:stream track\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:0\r\n" ++
+        "a=sendrecv\r\n" ++
+        "a=ssrc:4444 msid:stream audio\r\n";
+    var possible_plan_b_session = try sdp.parse(allocator, possible_plan_b_text);
+    defer possible_plan_b_session.deinit(allocator);
+    try std.testing.expect(sdp.sessionPossiblyPlanB(possible_plan_b_session));
+    try std.testing.expect(!sdp.sessionPossiblyPlanB(duplicate_ssrc_session));
 
     const media_only =
         "v=0\r\n" ++
