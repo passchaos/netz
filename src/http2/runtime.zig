@@ -616,6 +616,7 @@ pub const Connection = struct {
         for (request_options.headers) |header| try fields.append(self.allocator, header);
         try validateHeaderBlock(fields.items, .request);
         try validateHeaderBlock(request_options.trailers, .request_trailers);
+        try validateDeclaredRequestLength(fields.items, request_options.body.len);
 
         const stream_id = try self.reserveNextClientStreamId();
         errdefer self.releaseLocalStream(stream_id);
@@ -2102,6 +2103,12 @@ fn contentLength(headers: []const http2.Hpack.HeaderField) Error!?usize {
 fn validateContentLength(headers: []const http2.Hpack.HeaderField, actual: usize) Error!void {
     if (try contentLength(headers)) |expected| {
         if (expected != actual) return error.InvalidContentLength;
+    }
+}
+
+fn validateDeclaredRequestLength(headers: []const http2.Hpack.HeaderField, body_len: usize) Error!void {
+    if (try contentLength(headers)) |expected| {
+        if (expected != body_len) return error.InvalidContentLength;
     }
 }
 
@@ -5155,6 +5162,13 @@ test "HTTP/2 runtime validates connection-specific headers" {
         .path = "/bad-value",
         .authority = "localhost",
         .headers = &.{.{ .name = "x-bad", .value = "ok\r\ninjected: yes" }},
+    }));
+    try std.testing.expectError(error.InvalidContentLength, client.request(.{
+        .method = "POST",
+        .path = "/bad-request-length",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "content-length", .value = "5" }},
+        .body = "pong",
     }));
 }
 
