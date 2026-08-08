@@ -884,7 +884,8 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
             extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
             if (extension_bytes > max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
         }
-        const size = try parseChunkSize(line[0..semi]);
+        const size_part = try chunkSizePart(line[0..semi]);
+        const size = try parseChunkSize(size_part);
         const data_end = std.math.add(usize, pos, size) catch return error.ChunkSizeOverflow;
         const required_end = std.math.add(usize, data_end, 2) catch return error.ChunkSizeOverflow;
         if (bytes.len < required_end) return error.BufferTooShort;
@@ -928,16 +929,35 @@ pub fn validateTrailers(trailers: []const Header) Error!void {
     }
 }
 
+fn chunkSizePart(raw_size: []const u8) Error![]const u8 {
+    if (raw_size.len == 0) return error.InvalidChunk;
+
+    var end: usize = 0;
+    while (end < raw_size.len and std.ascii.isHex(raw_size[end])) : (end += 1) {}
+    if (end == 0) return error.InvalidChunk;
+
+    for (raw_size[end..]) |byte| {
+        switch (byte) {
+            ' ', 0x09 => {},
+            else => return error.InvalidChunk,
+        }
+    }
+    // Hyper's decoder permits LWS only after at least one chunk-size digit and
+    // never allows more digits afterward.  Splitting this before parseInt keeps
+    // the public size parser on the exact RFC `1*HEXDIG` grammar while still
+    // accepting the same post-size tolerance as mature HTTP/1 parsers.
+    return raw_size[0..end];
+}
+
 pub fn parseChunkSize(raw_size: []const u8) Error!usize {
-    const part = wire.trimOws(raw_size);
-    if (part.len == 0) return error.InvalidChunk;
-    for (part) |byte| {
+    if (raw_size.len == 0) return error.InvalidChunk;
+    for (raw_size) |byte| {
         // RFC 9112 chunk-size is 1*HEXDIG.  std.fmt.parseInt would accept
         // leading '+', but wire parsers must not because peers and
         // intermediaries disagreeing here is a request-smuggling primitive.
         if (!std.ascii.isHex(byte)) return error.InvalidChunk;
     }
-    return std.fmt.parseInt(usize, part, 16) catch |err| switch (err) {
+    return std.fmt.parseInt(usize, raw_size, 16) catch |err| switch (err) {
         error.InvalidCharacter => error.InvalidChunk,
         error.Overflow => error.ChunkSizeOverflow,
     };
@@ -1192,8 +1212,15 @@ test "HTTP/1 chunked extensions are bounded" {
 
     try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "\r\n0\r\n\r\n", .{}));
     try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "+1\r\nx\r\n0\r\n\r\n", .{}));
+    try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, " 1\r\nx\r\n0\r\n\r\n", .{}));
+    try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "1 1\r\nxxxxxxxxxxx\r\n0\r\n\r\n", .{}));
+    var post_size_lws = try decodeChunked(allocator, "1 \t;ignored\r\nx\r\n0\r\n\r\n", .{});
+    defer post_size_lws.deinit(allocator);
+    try std.testing.expectEqualStrings("x", post_size_lws.body);
     try std.testing.expectError(error.InvalidChunk, parseChunkSize("+a"));
-    try std.testing.expectEqual(@as(usize, 0x1a), try parseChunkSize(" 1A "));
+    try std.testing.expectError(error.InvalidChunk, parseChunkSize(" 1A "));
+    try std.testing.expectError(error.InvalidChunk, parseChunkSize("1A "));
+    try std.testing.expectEqual(@as(usize, 0x1a), try parseChunkSize("1A"));
 }
 
 test "HTTP/1 parser decodes chunked transfer bodies" {
