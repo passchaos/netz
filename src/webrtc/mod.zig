@@ -7110,9 +7110,10 @@ pub const rtcp = struct {
             const consumed = cursor.pos - chunk_start;
             const padding = (4 - (consumed % 4)) % 4;
             if (cursor.remaining() < padding) return error.InvalidRtcpPacket;
-            for (cursor.buf[cursor.pos .. cursor.pos + padding]) |byte| {
-                if (byte != 0) return error.InvalidRtcpPacket;
-            }
+            // Pion/rtcp stops decoding a chunk at the END item and advances by
+            // the computed aligned chunk length without inspecting the padding
+            // octets.  Keep writes canonical zero-filled, but accept captures
+            // from peers that leave non-zero bytes in this ignored region.
             try cursor.skip(padding);
             chunk.* = .{ .ssrc = ssrc, .items = try items.toOwnedSlice(allocator) };
             initialized_chunks += 1;
@@ -12197,7 +12198,9 @@ test "RTCP SDES and compound packets" {
     var short_cname_chunks = [_]rtcp.SdesChunk{.{ .ssrc = 0x01020304, .items = &short_cname_items }};
     try rtcp.writePacket(&encoded, allocator, .{ .source_description = .{ .chunks = &short_cname_chunks } });
     encoded.items[encoded.items.len - 1] = 0xff;
-    try std.testing.expectError(error.InvalidRtcpPacket, rtcp.parsePacket(allocator, encoded.items));
+    var sdes_with_nonzero_padding = try rtcp.parsePacket(allocator, encoded.items);
+    defer sdes_with_nonzero_padding.deinit(allocator);
+    try std.testing.expectEqualStrings("AB", sdes_with_nonzero_padding.packet.source_description.cname(0x01020304).?);
 
     encoded.clearRetainingCapacity();
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writeCompound(&encoded, allocator, &.{}));
