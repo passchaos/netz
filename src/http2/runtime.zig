@@ -572,6 +572,7 @@ pub const Connection = struct {
     peer_goaway_last_stream_id: ?u31 = null,
     local_goaway_last_stream_id: ?u31 = null,
     pending_requests: std.ArrayList(OwnedRequest) = .empty,
+    pending_request_head: usize = 0,
     default_authority: ?[]u8 = null,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
     /// runtime constructors set this to "http"; a future ALPN/TLS constructor
@@ -585,7 +586,7 @@ pub const Connection = struct {
         self.active_local_streams.deinit(self.allocator);
         self.active_peer_streams.deinit(self.allocator);
         self.response_semantics.deinit(self.allocator);
-        for (self.pending_requests.items) |*pending| pending.deinit(self.allocator);
+        for (self.pending_requests.items[self.pending_request_head..]) |*pending| pending.deinit(self.allocator);
         self.pending_requests.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
@@ -767,7 +768,7 @@ pub const Connection = struct {
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
         if (self.role != .server) return error.UnexpectedFrame;
-        if (self.pending_requests.items.len != 0) return self.pending_requests.orderedRemove(0);
+        if (self.popPendingRequest()) |pending| return pending;
         while (true) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
@@ -846,6 +847,17 @@ pub const Connection = struct {
                 else => return error.UnexpectedFrame,
             }
         }
+    }
+
+    fn popPendingRequest(self: *Connection) ?OwnedRequest {
+        if (self.pending_request_head >= self.pending_requests.items.len) return null;
+        const pending = self.pending_requests.items[self.pending_request_head];
+        self.pending_request_head += 1;
+        if (self.pending_request_head == self.pending_requests.items.len) {
+            self.pending_requests.clearRetainingCapacity();
+            self.pending_request_head = 0;
+        }
+        return pending;
     }
 
     fn queueCompletePeerRequestFrame(self: *Connection, frame: http2.Frame) Error!bool {
@@ -5402,6 +5414,8 @@ test "HTTP/2 readRequest queues complete interleaved peer request" {
             try std.testing.expectEqual(@as(u31, 3), second.stream_id);
             try std.testing.expectEqualStrings("/second-interleaved", second.path);
             try std.testing.expectEqualStrings("", second.body);
+            try std.testing.expectEqual(@as(usize, 0), connection.pending_requests.items.len);
+            try std.testing.expectEqual(@as(usize, 0), connection.pending_request_head);
         }
     };
 
