@@ -323,6 +323,7 @@ pub const Connection = struct {
     pub fn sendWithEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         if (ecn != .not_ect and self.sent.ecnDisabled()) return error.EcnDisabled;
+        try self.validateOutboundFrames(frames);
         const stream_bytes = countStreamBytes(frames);
         for (frames) |frame| {
             if (frame != .stream) continue;
@@ -366,7 +367,7 @@ pub const Connection = struct {
             };
             reserved_streams.items[reserved_index].bytes = frame.stream.data.len;
         }
-        try self.sendTrackedFramesEcnAt(frames, ecn, sent_time_ns);
+        try self.sendTrackedFramesEcnAtUnchecked(frames, ecn, sent_time_ns);
         self.noteSentStreams(frames);
     }
 
@@ -474,6 +475,11 @@ pub const Connection = struct {
     }
 
     fn sendTrackedFramesEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
+        try self.validateOutboundFrames(frames);
+        try self.sendTrackedFramesEcnAtUnchecked(frames, ecn, sent_time_ns);
+    }
+
+    fn sendTrackedFramesEcnAtUnchecked(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         const packet_number = self.next_packet_number;
         const payload = try encodeFrames(self.endpoint.allocator, frames);
         defer self.endpoint.allocator.free(payload);
@@ -500,6 +506,33 @@ pub const Connection = struct {
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacket(packet_number, payload);
         self.next_packet_number += 1;
+    }
+
+    fn validateOutboundFrames(self: Connection, frames: []const quic.Frame) Error!void {
+        if (frames.len == 0) return error.MissingFrame;
+        for (frames) |frame| {
+            try quic.validateFrameForPacketType(frame, .one_rtt);
+            switch (frame) {
+                .new_token => |new_token| {
+                    // RFC 9000 server-only frames should be blocked before the
+                    // packet is encoded.  s2n-quic/tquic gate HANDSHAKE_DONE
+                    // and NEW_TOKEN at transmission time; doing so here keeps
+                    // generic send() from bypassing the dedicated helpers.
+                    if (self.config.local_endpoint != .server) return error.InvalidFrame;
+                    if (new_token.token.len == 0) return error.InvalidFrame;
+                },
+                .handshake_done => {
+                    if (self.config.local_endpoint != .server) return error.InvalidFrame;
+                },
+                .datagram => |datagram| {
+                    const frame_limit = self.config.peer_max_datagram_frame_size orelse return error.DatagramsNotEnabled;
+                    const frame_size = datagramFrameWireSize(datagram) orelse return error.InvalidFrameLength;
+                    if (frame_size > frame_limit) return error.DatagramTooLarge;
+                },
+                .ack_frequency, .immediate_ack => if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled,
+                else => {},
+            }
+        }
     }
 
     pub fn pmtudCurrentSize(self: Connection) usize {
@@ -4863,6 +4896,68 @@ test "QUIC 1-RTT handles server-only NEW_TOKEN and HANDSHAKE_DONE roles" {
     try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server2.close_info.?.error_code);
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.new_token)), server2.close_info.?.frame_type);
     try std.testing.expectEqualStrings("new token", server2.close_info.?.reason_phrase);
+}
+
+test "QUIC 1-RTT generic send validates role and extension-gated frames" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const local_cid = [_]u8{ 0x72, 0x6f, 0x6c, 0x65 };
+    const peer_cid = [_]u8{ 0x70, 0x65, 0x65, 0x72 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x72} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .local_endpoint = .client,
+    });
+    defer client.deinit();
+
+    try std.testing.expectError(error.MissingFrame, client.send(&.{}));
+    try std.testing.expectError(error.InvalidFrame, client.send(&.{.{ .handshake_done = {} }}));
+    try std.testing.expectError(error.InvalidFrame, client.send(&.{.{ .new_token = .{ .token = "client-token" } }}));
+    try std.testing.expectError(error.DatagramsNotEnabled, client.send(&.{.{ .datagram = .{ .data = "disabled", .length_present = true } }}));
+    try std.testing.expectError(error.AckFrequencyDisabled, client.send(&.{.{ .immediate_ack = {} }}));
+    try std.testing.expectError(error.AckFrequencyDisabled, client.send(&.{.{ .ack_frequency = .{
+        .sequence_number = 0,
+        .ack_eliciting_threshold = 2,
+        .request_max_ack_delay = 10,
+        .reordering_threshold = 2,
+    } }}));
+
+    var limited = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .peer_max_datagram_frame_size = 8,
+    });
+    defer limited.deinit();
+    try std.testing.expectError(error.DatagramTooLarge, limited.send(&.{.{ .datagram = .{ .data = "1234567", .length_present = true } }}));
+    try limited.send(&.{.{ .datagram = .{ .data = "1234567", .length_present = false } }});
+    var datagram_packet = try endpoint.receiveBytes();
+    defer datagram_packet.deinit(allocator);
+
+    var server = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &local_cid,
+        .peer_connection_id = &peer_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+    try std.testing.expectError(error.InvalidFrame, server.send(&.{.{ .new_token = .{ .token = "" } }}));
 }
 
 test "QUIC 1-RTT connection closes with transport and application close frames" {
