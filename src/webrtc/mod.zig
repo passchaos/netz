@@ -3160,6 +3160,13 @@ pub const sdp = struct {
         return rtxAssociatedCodec(codecs, rtx) != null;
     }
 
+    pub fn fecPayloadType(codecs: []const RtpCodec) ?u8 {
+        for (codecs) |codec| {
+            if (std.ascii.indexOfIgnoreCase(codec.mime_type, "flexfec") != null) return codec.payload_type;
+        }
+        return null;
+    }
+
     pub fn extractRids(allocator: std.mem.Allocator, media: Media) Error![]Rid {
         var rids: std.ArrayList(Rid) = .empty;
         errdefer rids.deinit(allocator);
@@ -3437,6 +3444,8 @@ pub const sdp = struct {
             if (std.ascii.eqlIgnoreCase(codec_name, "H264")) return "video/H264";
             if (std.ascii.eqlIgnoreCase(codec_name, "H265")) return "video/H265";
             if (std.ascii.eqlIgnoreCase(codec_name, "rtx")) return "video/rtx";
+            if (std.ascii.eqlIgnoreCase(codec_name, "flexfec")) return "video/flexfec";
+            if (std.ascii.eqlIgnoreCase(codec_name, "flexfec-03")) return "video/flexfec-03";
         }
         return codec_name;
     }
@@ -10743,6 +10752,21 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(?u8, null), sdp.rtxPayloadTypeForPrimary(rtx_codecs, 42));
     try std.testing.expect(sdp.rtxPrimaryPayloadExists(rtx_codecs, rtx_codecs[1]));
     try std.testing.expect(sdp.findCodecByPayloadType(rtx_codecs, 42) == null);
+
+    const flexfec_codec_text =
+        "v=0\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96 120\r\n" ++
+        "a=rtpmap:96 VP8/90000\r\n" ++
+        "a=rtpmap:120 flexfec-03/90000\r\n";
+    var flexfec_codec_session = try sdp.parse(allocator, flexfec_codec_text);
+    defer flexfec_codec_session.deinit(allocator);
+    const flexfec_codecs = try sdp.extractRtpCodecs(allocator, flexfec_codec_session.media[0]);
+    defer sdp.freeRtpCodecs(allocator, flexfec_codecs);
+    try std.testing.expectEqualStrings("video/flexfec-03", flexfec_codecs[1].mime_type);
+    try std.testing.expectEqual(@as(?u8, 120), sdp.fecPayloadType(flexfec_codecs));
+    try std.testing.expectEqual(@as(?u8, null), sdp.fecPayloadType(rtx_codecs));
 
     const invalid_payload_text =
         "v=0\r\n" ++
