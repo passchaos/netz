@@ -58,7 +58,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   streams, with received priority field values owned by connection state.
   Protected clients also expose split `sendRequest`/`receiveResponse` APIs with
   bounded per-stream response reassembly, preserving interleaved responses and
-  resets instead of discarding non-target streams, plus a `std.Io.async` request
+  resets instead of discarding non-target streams. `receiveNextResponse`
+  provides an event-style response/reset queue with explicit stream IDs, while
+  outstanding request tracking rejects unknown or duplicate completion and
+  enforces the configured concurrency bound, plus a `std.Io.async` request
   receive helper for the development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and

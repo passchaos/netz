@@ -1324,6 +1324,7 @@ pub const HandshakeClient = struct {
     qpack_decoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(client_qpack_decoder_stream_id),
     qpack_decoder_prefix_sent: bool = false,
     response_streams: ResponseStreamSet,
+    request_lifecycle: ClientRequestLifecycle,
     next_stream_id: u62 = 0,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, options: HandshakeClientOptions) Error!HandshakeClient {
@@ -1362,10 +1363,15 @@ pub const HandshakeClient = struct {
                 options.session.max_stream_buffer,
                 options.session.max_concurrent_request_streams,
             ),
+            .request_lifecycle = .init(
+                allocator,
+                options.session.max_concurrent_request_streams,
+            ),
         };
     }
 
     pub fn deinit(self: *HandshakeClient) void {
+        self.request_lifecycle.deinit();
         self.response_streams.deinit();
         self.control.deinit(self.allocator);
         self.qpack_encode.deinit();
@@ -1391,6 +1397,8 @@ pub const HandshakeClient = struct {
     ) Error!u62 {
         const stream_id = self.next_stream_id;
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
+        try self.request_lifecycle.open(stream_id);
+        errdefer _ = self.request_lifecycle.finish(stream_id);
         self.next_stream_id += 4;
 
         try sendConnectionSettings(
@@ -1421,10 +1429,10 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         stream_id: u62,
     ) Error!OwnedHandshakeResponse {
-        if (stream_id >= self.next_stream_id or (stream_id & 0x3) != 0) {
+        if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
-        const assembled = try receiveConnectionResponseStreamBytes(
+        const assembled = receiveConnectionResponseStreamBytes(
             &self.established.connection,
             stream_id,
             self.options,
@@ -1432,7 +1440,15 @@ pub const HandshakeClient = struct {
             &self.qpack_decode,
             &self.qpack_encode,
             &self.response_streams,
-        );
+            &self.request_lifecycle,
+        ) catch |err| switch (err) {
+            error.RequestCancelled, error.RequestRejected => {
+                _ = self.request_lifecycle.finish(stream_id);
+                self.qpack_encode.abandonStream(stream_id);
+                return err;
+            },
+            else => return err,
+        };
         errdefer self.established.connection.endpoint.allocator.free(assembled.bytes);
         try http3.validateResponsePushPromises(self.control, assembled.bytes);
         var response = try http3.decodeResponseWithDynamicTable(
@@ -1447,7 +1463,49 @@ pub const HandshakeClient = struct {
             response.qpack_section_acknowledgments,
         );
         try self.sendQpackFeedback();
+        _ = self.request_lifecycle.finish(stream_id);
         return .{ .stream_bytes = assembled.bytes, .response = response };
+    }
+
+    pub fn receiveNextResponse(
+        self: *HandshakeClient,
+    ) Error!OwnedHandshakeResponseEvent {
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
+        while (true) {
+            if (self.response_streams.firstReset()) |reset| {
+                if (self.request_lifecycle.contains(reset.stream_id)) {
+                    _ = self.response_streams.takeReset(reset.stream_id);
+                    _ = self.request_lifecycle.finish(reset.stream_id);
+                    self.qpack_encode.abandonStream(reset.stream_id);
+                    return .{ .reset = .{
+                        .stream_id = reset.stream_id,
+                        .application_error_code = reset.application_error_code,
+                    } };
+                }
+            }
+            if (try self.response_streams.firstReadyStream(
+                self.qpack_decode.table,
+                self.options.local_settings.qpack_blocked_streams,
+            )) |stream_id| {
+                if (!self.request_lifecycle.contains(stream_id)) {
+                    return error.UnexpectedStream;
+                }
+                return .{ .response = .{
+                    .stream_id = stream_id,
+                    .value = try self.receiveResponse(stream_id),
+                } };
+            }
+            try receiveConnectionResponsePacket(
+                &self.established.connection,
+                &self.control,
+                &self.qpack_decode,
+                &self.qpack_encode,
+                &self.response_streams,
+                &self.request_lifecycle,
+            );
+        }
     }
 
     pub fn sendGoAway(self: *HandshakeClient, stream_id: u64) Error!void {
@@ -1483,6 +1541,7 @@ pub const HandshakeClient = struct {
         );
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
+        _ = self.request_lifecycle.finish(stream_id);
     }
 
     pub fn sendPriorityUpdate(
@@ -1545,6 +1604,28 @@ pub const OwnedHandshakeResponse = struct {
     pub fn deinit(self: *OwnedHandshakeResponse, allocator: std.mem.Allocator) void {
         self.response.deinit(allocator);
         allocator.free(self.stream_bytes);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedHandshakeResponseEvent = union(enum) {
+    response: struct {
+        stream_id: u62,
+        value: OwnedHandshakeResponse,
+    },
+    reset: struct {
+        stream_id: u62,
+        application_error_code: u64,
+    },
+
+    pub fn deinit(
+        self: *OwnedHandshakeResponseEvent,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .response => |*response| response.value.deinit(allocator),
+            .reset => {},
+        }
         self.* = undefined;
     }
 };
@@ -1917,6 +1998,7 @@ pub const ProtectedClient = struct {
     qpack_decoder_prefix_sent: bool = false,
     protected_send: ProtectedSendState,
     response_streams: ResponseStreamSet,
+    request_lifecycle: ClientRequestLifecycle,
     next_stream_id: u62 = 0,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
@@ -1944,10 +2026,15 @@ pub const ProtectedClient = struct {
                 config.max_stream_buffer,
                 limits.max_concurrent_request_streams,
             ),
+            .request_lifecycle = .init(
+                allocator,
+                limits.max_concurrent_request_streams,
+            ),
         };
     }
 
     pub fn deinit(self: *ProtectedClient) void {
+        self.request_lifecycle.deinit();
         self.response_streams.deinit();
         self.control.deinit(self.quic_client.endpoint.allocator);
         self.protected_send.deinit();
@@ -1968,6 +2055,8 @@ pub const ProtectedClient = struct {
     ) Error!u62 {
         const stream_id = self.next_stream_id;
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
+        try self.request_lifecycle.open(stream_id);
+        errdefer _ = self.request_lifecycle.finish(stream_id);
         self.next_stream_id += 4;
 
         try sendProtectedSettings(
@@ -2027,10 +2116,17 @@ pub const ProtectedClient = struct {
         self: *ProtectedClient,
         stream_id: u62,
     ) Error!OwnedProtectedResponse {
-        if (stream_id >= self.next_stream_id or (stream_id & 0x3) != 0) {
+        if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
-        const assembled = try self.receiveStreamBytes(stream_id);
+        const assembled = self.receiveStreamBytes(stream_id) catch |err| switch (err) {
+            error.RequestCancelled, error.RequestRejected => {
+                _ = self.request_lifecycle.finish(stream_id);
+                self.qpack_encode.abandonStream(stream_id);
+                return err;
+            },
+            else => return err,
+        };
         errdefer self.quic_client.endpoint.allocator.free(assembled.bytes);
         try http3.validateResponsePushPromises(self.control, assembled.bytes);
         var response = try http3.decodeResponseWithDynamicTable(
@@ -2045,7 +2141,42 @@ pub const ProtectedClient = struct {
             response.qpack_section_acknowledgments,
         );
         try self.sendQpackFeedback();
+        _ = self.request_lifecycle.finish(stream_id);
         return .{ .stream_bytes = assembled.bytes, .response = response };
+    }
+
+    pub fn receiveNextResponse(
+        self: *ProtectedClient,
+    ) Error!OwnedProtectedResponseEvent {
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
+        while (true) {
+            if (self.response_streams.firstReset()) |reset| {
+                if (self.request_lifecycle.contains(reset.stream_id)) {
+                    _ = self.response_streams.takeReset(reset.stream_id);
+                    _ = self.request_lifecycle.finish(reset.stream_id);
+                    self.qpack_encode.abandonStream(reset.stream_id);
+                    return .{ .reset = .{
+                        .stream_id = reset.stream_id,
+                        .application_error_code = reset.application_error_code,
+                    } };
+                }
+            }
+            if (try self.response_streams.firstReadyStream(
+                self.qpack_decode.table,
+                self.config.local_settings.qpack_blocked_streams,
+            )) |stream_id| {
+                if (!self.request_lifecycle.contains(stream_id)) {
+                    return error.UnexpectedStream;
+                }
+                return .{ .response = .{
+                    .stream_id = stream_id,
+                    .value = try self.receiveResponse(stream_id),
+                } };
+            }
+            try self.receiveResponsePacket();
+        }
     }
 
     pub fn sendGoAway(self: *ProtectedClient, stream_id: u64) Error!void {
@@ -2087,6 +2218,7 @@ pub const ProtectedClient = struct {
         );
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
+        _ = self.request_lifecycle.finish(stream_id);
     }
 
     pub fn sendPriorityUpdate(
@@ -2134,70 +2266,7 @@ pub const ProtectedClient = struct {
             self.config.local_settings.qpack_blocked_streams,
         )) |ready| return ready;
         while (true) {
-            var packet = try quic.one_rtt.receive(
-                &self.quic_client.endpoint,
-                self.config.receive_keys,
-                self.config.local_connection_id.len,
-                self.expected_packet_number,
-                self.config.max_frames_per_packet,
-            );
-            defer packet.deinit(self.quic_client.endpoint.allocator);
-            self.expected_packet_number = packet.packet.packet_number + 1;
-            for (packet.frames) |frame| {
-                try rejectCriticalStreamClosureFrame(self.control, frame, .client);
-                if (frame == .reset_stream and
-                    (try messageStreamDisposition(
-                        frame.reset_stream.stream_id,
-                    )) == .request_response)
-                {
-                    try self.response_streams.recordReset(
-                        @intCast(frame.reset_stream.stream_id),
-                        frame.reset_stream.application_error_code,
-                    );
-                    continue;
-                }
-                if (frame == .stream and isPeerQpackStreamFrame(
-                    self.control,
-                    self.qpack_encode.decoder_stream,
-                    frame.stream,
-                    .client,
-                    .qpack_decoder,
-                )) {
-                    try self.qpack_encode.applyDecoderStreamFrame(
-                        &self.control,
-                        frame.stream,
-                    );
-                    continue;
-                }
-                if (frame == .stream and isPeerQpackStreamFrame(
-                    self.control,
-                    self.qpack_decode.encoder_stream,
-                    frame.stream,
-                    .client,
-                    .qpack_encoder,
-                )) {
-                    try self.qpack_decode.applyEncoderStreamFrame(
-                        &self.control,
-                        frame.stream,
-                    );
-                    continue;
-                }
-                if (frame == .stream and try applyControlStreamFrameForRole(
-                    &self.control,
-                    self.quic_client.endpoint.allocator,
-                    frame.stream,
-                    .client,
-                )) {
-                    try configureQpackEncoderFromPeerSettings(
-                        self.control,
-                        &self.qpack_encode,
-                    );
-                    continue;
-                }
-                if (frame == .stream and (try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
-                if (frame != .stream) continue;
-                try self.response_streams.insert(packet.from, frame.stream);
-            }
+            try self.receiveResponsePacket();
             if (self.response_streams.takeReset(expected_stream_id)) |code| {
                 return if (code == http3.ApplicationErrorCode.request_rejected)
                     error.RequestRejected
@@ -2211,6 +2280,81 @@ pub const ProtectedClient = struct {
             )) |ready| {
                 return ready;
             }
+        }
+    }
+
+    fn receiveResponsePacket(self: *ProtectedClient) Error!void {
+        var packet = try quic.one_rtt.receive(
+            &self.quic_client.endpoint,
+            self.config.receive_keys,
+            self.config.local_connection_id.len,
+            self.expected_packet_number,
+            self.config.max_frames_per_packet,
+        );
+        defer packet.deinit(self.quic_client.endpoint.allocator);
+        self.expected_packet_number = packet.packet.packet_number + 1;
+        for (packet.frames) |frame| {
+            try rejectCriticalStreamClosureFrame(self.control, frame, .client);
+            if (frame == .reset_stream and
+                (try messageStreamDisposition(
+                    frame.reset_stream.stream_id,
+                )) == .request_response)
+            {
+                const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
+                if (!self.request_lifecycle.contains(stream_id)) {
+                    return error.UnexpectedStream;
+                }
+                try self.response_streams.recordReset(
+                    stream_id,
+                    frame.reset_stream.application_error_code,
+                );
+                continue;
+            }
+            if (frame != .stream) continue;
+            if (isPeerQpackStreamFrame(
+                self.control,
+                self.qpack_encode.decoder_stream,
+                frame.stream,
+                .client,
+                .qpack_decoder,
+            )) {
+                try self.qpack_encode.applyDecoderStreamFrame(
+                    &self.control,
+                    frame.stream,
+                );
+                continue;
+            }
+            if (isPeerQpackStreamFrame(
+                self.control,
+                self.qpack_decode.encoder_stream,
+                frame.stream,
+                .client,
+                .qpack_encoder,
+            )) {
+                try self.qpack_decode.applyEncoderStreamFrame(
+                    &self.control,
+                    frame.stream,
+                );
+                continue;
+            }
+            if (try applyControlStreamFrameForRole(
+                &self.control,
+                self.quic_client.endpoint.allocator,
+                frame.stream,
+                .client,
+            )) {
+                try configureQpackEncoderFromPeerSettings(
+                    self.control,
+                    &self.qpack_encode,
+                );
+                continue;
+            }
+            if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
+            const stream_id: u62 = @intCast(frame.stream.stream_id);
+            if (!self.request_lifecycle.contains(stream_id)) {
+                return error.UnexpectedStream;
+            }
+            try self.response_streams.insert(packet.from, frame.stream);
         }
     }
 
@@ -2248,6 +2392,28 @@ pub const OwnedProtectedResponse = struct {
     pub fn deinit(self: *OwnedProtectedResponse, allocator: std.mem.Allocator) void {
         self.response.deinit(allocator);
         allocator.free(self.stream_bytes);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedProtectedResponseEvent = union(enum) {
+    response: struct {
+        stream_id: u62,
+        value: OwnedProtectedResponse,
+    },
+    reset: struct {
+        stream_id: u62,
+        application_error_code: u64,
+    },
+
+    pub fn deinit(
+        self: *OwnedProtectedResponseEvent,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .response => |*response| response.value.deinit(allocator),
+            .reset => {},
+        }
         self.* = undefined;
     }
 };
@@ -2469,6 +2635,45 @@ const ResponseStreamSet = struct {
         return code;
     }
 
+    fn firstReadyStream(
+        self: *ResponseStreamSet,
+        table: http3.Qpack.DynamicTable,
+        max_blocked_streams: u64,
+    ) Error!?u62 {
+        var ready_stream_id: ?u62 = null;
+        var blocked_streams: u64 = 0;
+        for (self.entries.items) |*entry| {
+            const final_size = entry.receive.final_size orelse continue;
+            if (entry.receive.contiguous_end < final_size) continue;
+            const bytes = entry.receive.buffer.items[0..final_size];
+            if (max_blocked_streams != 0 and
+                try messageBlockedByQpack(bytes, table))
+            {
+                blocked_streams += 1;
+                if (blocked_streams > max_blocked_streams) {
+                    return error.QpackDecompressionFailed;
+                }
+                continue;
+            }
+            if (ready_stream_id == null) {
+                ready_stream_id = @intCast(entry.receive.stream_id);
+            }
+        }
+        return ready_stream_id;
+    }
+
+    fn firstReset(self: ResponseStreamSet) ?struct {
+        stream_id: u62,
+        application_error_code: u64,
+    } {
+        var iterator = self.resets.iterator();
+        const entry = iterator.next() orelse return null;
+        return .{
+            .stream_id = entry.key_ptr.*,
+            .application_error_code = entry.value_ptr.*,
+        };
+    }
+
     fn takeReady(
         self: *ResponseStreamSet,
         stream_id: u62,
@@ -2536,6 +2741,48 @@ const ResponseStreamSet = struct {
             .from = from,
         });
         return &self.entries.items[self.entries.items.len - 1];
+    }
+};
+
+const ClientRequestLifecycle = struct {
+    allocator: std.mem.Allocator,
+    outstanding: std.ArrayList(u62) = .empty,
+    max_streams: usize,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        max_streams: usize,
+    ) ClientRequestLifecycle {
+        return .{ .allocator = allocator, .max_streams = max_streams };
+    }
+
+    fn deinit(self: *ClientRequestLifecycle) void {
+        self.outstanding.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn open(self: *ClientRequestLifecycle, stream_id: u62) Error!void {
+        if (self.outstanding.items.len >= self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        if (self.contains(stream_id)) return error.UnexpectedStream;
+        try self.outstanding.append(self.allocator, stream_id);
+    }
+
+    fn contains(self: ClientRequestLifecycle, stream_id: u62) bool {
+        for (self.outstanding.items) |existing| {
+            if (existing == stream_id) return true;
+        }
+        return false;
+    }
+
+    fn finish(self: *ClientRequestLifecycle, stream_id: u62) bool {
+        for (self.outstanding.items, 0..) |existing, index| {
+            if (existing != stream_id) continue;
+            _ = self.outstanding.swapRemove(index);
+            return true;
+        }
+        return false;
     }
 };
 
@@ -2941,6 +3188,7 @@ fn receiveConnectionResponseStreamBytes(
     qpack_decode: *QpackDecodeState,
     qpack_encode: *QpackEncodeState,
     response_streams: *ResponseStreamSet,
+    request_lifecycle: *const ClientRequestLifecycle,
 ) Error!AssembledStream {
     if (response_streams.takeReset(expected_stream_id)) |code| {
         return if (code == http3.ApplicationErrorCode.request_rejected)
@@ -2955,57 +3203,14 @@ fn receiveConnectionResponseStreamBytes(
     )) |ready| return ready;
 
     while (true) {
-        var packet = try connection.receivePacket();
-        defer packet.deinit(connection.endpoint.allocator);
-        for (packet.frames) |frame| {
-            try rejectCriticalStreamClosureFrame(control.*, frame, .client);
-            if (frame == .reset_stream and
-                (try messageStreamDisposition(
-                    frame.reset_stream.stream_id,
-                )) == .request_response)
-            {
-                try response_streams.recordReset(
-                    @intCast(frame.reset_stream.stream_id),
-                    frame.reset_stream.application_error_code,
-                );
-                continue;
-            }
-            if (frame != .stream) continue;
-            if (isPeerQpackStreamFrame(
-                control.*,
-                qpack_encode.decoder_stream,
-                frame.stream,
-                .client,
-                .qpack_decoder,
-            )) {
-                try qpack_encode.applyDecoderStreamFrame(control, frame.stream);
-                continue;
-            }
-            if (isPeerQpackStreamFrame(
-                control.*,
-                qpack_decode.encoder_stream,
-                frame.stream,
-                .client,
-                .qpack_encoder,
-            )) {
-                try qpack_decode.applyEncoderStreamFrame(control, frame.stream);
-                continue;
-            }
-            if (try applyControlStreamFrameForRole(
-                control,
-                connection.endpoint.allocator,
-                frame.stream,
-                .client,
-            )) {
-                try configureQpackEncoderFromPeerSettings(
-                    control.*,
-                    qpack_encode,
-                );
-                continue;
-            }
-            if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
-            try response_streams.insert(packet.from, frame.stream);
-        }
+        try receiveConnectionResponsePacket(
+            connection,
+            control,
+            qpack_decode,
+            qpack_encode,
+            response_streams,
+            request_lifecycle,
+        );
         if (response_streams.takeReset(expected_stream_id)) |code| {
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
@@ -3019,6 +3224,77 @@ fn receiveConnectionResponseStreamBytes(
         )) |ready| {
             return ready;
         }
+    }
+}
+
+fn receiveConnectionResponsePacket(
+    connection: *quic.one_rtt.Connection,
+    control: *http3.ControlState,
+    qpack_decode: *QpackDecodeState,
+    qpack_encode: *QpackEncodeState,
+    response_streams: *ResponseStreamSet,
+    request_lifecycle: ?*const ClientRequestLifecycle,
+) Error!void {
+    var packet = try connection.receivePacket();
+    defer packet.deinit(connection.endpoint.allocator);
+    for (packet.frames) |frame| {
+        try rejectCriticalStreamClosureFrame(control.*, frame, .client);
+        if (frame == .reset_stream and
+            (try messageStreamDisposition(
+                frame.reset_stream.stream_id,
+            )) == .request_response)
+        {
+            const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
+            if (request_lifecycle) |lifecycle| {
+                if (!lifecycle.contains(stream_id)) {
+                    return error.UnexpectedStream;
+                }
+            }
+            try response_streams.recordReset(
+                stream_id,
+                frame.reset_stream.application_error_code,
+            );
+            continue;
+        }
+        if (frame != .stream) continue;
+        if (isPeerQpackStreamFrame(
+            control.*,
+            qpack_encode.decoder_stream,
+            frame.stream,
+            .client,
+            .qpack_decoder,
+        )) {
+            try qpack_encode.applyDecoderStreamFrame(control, frame.stream);
+            continue;
+        }
+        if (isPeerQpackStreamFrame(
+            control.*,
+            qpack_decode.encoder_stream,
+            frame.stream,
+            .client,
+            .qpack_encoder,
+        )) {
+            try qpack_decode.applyEncoderStreamFrame(control, frame.stream);
+            continue;
+        }
+        if (try applyControlStreamFrameForRole(
+            control,
+            connection.endpoint.allocator,
+            frame.stream,
+            .client,
+        )) {
+            try configureQpackEncoderFromPeerSettings(
+                control.*,
+                qpack_encode,
+            );
+            continue;
+        }
+        if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
+        const stream_id: u62 = @intCast(frame.stream.stream_id);
+        if (request_lifecycle) |lifecycle| {
+            if (!lifecycle.contains(stream_id)) return error.UnexpectedStream;
+        }
+        try response_streams.insert(packet.from, frame.stream);
     }
 }
 
@@ -5453,30 +5729,125 @@ test "HTTP/3 protected client retains interleaved responses" {
         server.config.send_keys,
         server.config.peer_connection_id,
         &server.next_packet_number,
-        &frames,
-        frames.len,
+        frames[0..2],
+        2,
+        &server.protected_send,
+    );
+    try sendProtectedFrames(
+        &server.quic_server.endpoint,
+        client.quic_client.address(),
+        server.config.send_keys,
+        server.config.peer_connection_id,
+        &server.next_packet_number,
+        frames[2..],
+        1,
         &server.protected_send,
     );
 
-    var first_response = try client.receiveResponse(first_id);
-    defer first_response.deinit(allocator);
+    var first_event = try client.receiveNextResponse();
+    defer first_event.deinit(allocator);
+    try std.testing.expect(first_event == .response);
+    try std.testing.expectEqual(
+        second_id,
+        first_event.response.stream_id,
+    );
     try std.testing.expectEqualStrings(
-        "first-response",
-        first_response.response.body,
+        "second-response",
+        first_event.response.value.response.body,
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        client.response_streams.entries.items.len,
+        client.request_lifecycle.outstanding.items.len,
     );
-    var second_response = try client.receiveResponse(second_id);
-    defer second_response.deinit(allocator);
+    var second_event = try client.receiveNextResponse();
+    defer second_event.deinit(allocator);
+    try std.testing.expect(second_event == .response);
+    try std.testing.expectEqual(
+        first_id,
+        second_event.response.stream_id,
+    );
     try std.testing.expectEqualStrings(
-        "second-response",
-        second_response.response.body,
+        "first-response",
+        second_event.response.value.response.body,
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        client.response_streams.entries.items.len,
+        client.request_lifecycle.outstanding.items.len,
+    );
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        client.receiveResponse(first_id),
+    );
+}
+
+test "HTTP/3 protected client reports next response reset with stream id" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xa9, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xaa, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xab} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xac} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/reset",
+        .authority = "localhost",
+    });
+    var request = try server.receiveRequest();
+    defer request.deinit(allocator);
+    try server.rejectRequest(request.from, stream_id);
+
+    var event = try client.receiveNextResponse();
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .reset);
+    try std.testing.expectEqual(stream_id, event.reset.stream_id);
+    try std.testing.expectEqual(
+        @as(u64, http3.ApplicationErrorCode.request_rejected),
+        event.reset.application_error_code,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.request_lifecycle.outstanding.items.len,
     );
 }
 
@@ -7063,27 +7434,37 @@ test "HTTP/3 handshake client retains interleaved responses" {
         .path = "/second",
         .authority = "localhost",
     });
-    var first_response = try client.receiveResponse(first_id);
-    defer first_response.deinit(allocator);
+    var first_event = try client.receiveNextResponse();
+    defer first_event.deinit(allocator);
+    try std.testing.expect(first_event == .response);
+    try std.testing.expectEqual(
+        second_id,
+        first_event.response.stream_id,
+    );
     try std.testing.expectEqualStrings(
-        "first-response",
-        first_response.response.body,
+        "second-response",
+        first_event.response.value.response.body,
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        client.response_streams.entries.items.len,
+        client.request_lifecycle.outstanding.items.len,
     );
-    var second_response = try client.receiveResponse(second_id);
-    defer second_response.deinit(allocator);
+    var second_event = try client.receiveNextResponse();
+    defer second_event.deinit(allocator);
     thread.join();
     if (shared.err) |err| return err;
+    try std.testing.expect(second_event == .response);
+    try std.testing.expectEqual(
+        first_id,
+        second_event.response.stream_id,
+    );
     try std.testing.expectEqualStrings(
-        "second-response",
-        second_response.response.body,
+        "first-response",
+        second_event.response.value.response.body,
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        client.response_streams.entries.items.len,
+        client.request_lifecycle.outstanding.items.len,
     );
 }
 
