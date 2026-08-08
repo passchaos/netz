@@ -25,7 +25,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   SETTINGS_INITIAL_WINDOW_SIZE updates and configurable advertisement, configurable SETTINGS_HEADER_TABLE_SIZE/SETTINGS_MAX_CONCURRENT_STREAMS/SETTINGS_MAX_FRAME_SIZE advertisement, bidirectional SETTINGS_MAX_CONCURRENT_STREAMS enforcement, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation with inbound advertised-frame-size enforcement,
   outbound frame splitting plus h2-style CONTINUATION chain flood, stream-id overflow, wrong-direction HEADERS, and idle-stream DATA/WINDOW_UPDATE send limits, with DATA sends that wait for WINDOW_UPDATE capacity
   and inbound DATA consumers that account for full padded frame payloads and restore connection/stream receive capacity,
-  frame-envelope and stream-id direction/monotonicity validation, request/response trailers with forbidden-field rejection, pre-HEADERS frame ordering checks, interim 1xx response skipping and explicit server-side informational response sending, content-length
+  frame-envelope validation including fixed-size RST_STREAM and SETTINGS payload-multiple checks, stream-id direction/monotonicity validation, request/response trailers with forbidden-field rejection, pre-HEADERS frame ordering checks, interim 1xx response skipping and explicit server-side informational response sending, content-length
   validation with pure-digit Content-Length enforcement, HTTP/2 pseudo-header/lowercase field-name/value and control-character validation, `:method` and `:protocol` token validation,
   URI-like `:scheme`/`:path`/`:authority` validation with Host fallback and Host/`:authority` mismatch rejection,
   connection-specific header rejection including `TE` rules,
