@@ -323,6 +323,7 @@ pub const Connection = struct {
     pub fn sendWithEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         if (ecn != .not_ect and self.sent.ecnDisabled()) return error.EcnDisabled;
+        try self.validateNextPacketNumber();
         try self.validateOutboundFrames(frames);
         const stream_bytes = countStreamBytes(frames);
         for (frames) |frame| {
@@ -423,6 +424,7 @@ pub const Connection = struct {
 
     pub fn sendAckFrequency(self: *Connection, ack_eliciting_threshold: u64, request_max_ack_delay: u64, reordering_threshold: u64) Error!u64 {
         if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
+        try self.validateNextPacketNumber();
         const sequence_number = self.ack_frequency_send_next_sequence;
         self.ack_frequency_send_next_sequence +|= 1;
         const frames = [_]quic.Frame{.{ .ack_frequency = .{
@@ -480,6 +482,7 @@ pub const Connection = struct {
     }
 
     fn sendTrackedFramesEcnAtUnchecked(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
+        try self.validateNextPacketNumber();
         const packet_number = self.next_packet_number;
         const payload = try encodeFrames(self.endpoint.allocator, frames);
         defer self.endpoint.allocator.free(payload);
@@ -544,6 +547,7 @@ pub const Connection = struct {
     }
 
     pub fn sendPmtuProbeAt(self: *Connection, peer_max_udp_payload: usize, sent_time_ns: ?u64) Error!?usize {
+        try self.validateNextPacketNumber();
         const probe_size = self.pmtud.probeSize(peer_max_udp_payload) orelse return null;
         if (probe_size > self.config.max_datagram_size) return error.DatagramTooLarge;
 
@@ -738,6 +742,7 @@ pub const Connection = struct {
     }
 
     fn retransmitCandidateAt(self: *Connection, candidate: quic.recovery.Candidate, mode: RetransmitMode, sent_time_ns: ?u64) Error!void {
+        try self.validateNextPacketNumber();
         const packet_number = self.next_packet_number;
         switch (mode) {
             .congestion_controlled => try self.congestion.reserve(candidate.payload.len),
@@ -802,11 +807,13 @@ pub const Connection = struct {
     }
 
     pub fn resetStream(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
+        try self.validateNextPacketNumber();
         const entry = try self.sendStreamEntry(stream_id);
         try self.sendResetStream(stream_id, application_error_code, entry.highest_sent_end);
     }
 
     pub fn sendStopSending(self: *Connection, stream_id: u64, application_error_code: u64) Error!void {
+        try self.validateNextPacketNumber();
         var recv_stream = try self.recvStreamFlow(stream_id);
         const info: StopSendingInfo = .{ .application_error_code = application_error_code };
         if (recv_stream.stop_sending_sent) |existing| {
@@ -890,6 +897,7 @@ pub const Connection = struct {
     }
 
     pub fn sendPendingPathChallengeAt(self: *Connection, now_ns: ?u64, timeout_ns: ?u64) Error!void {
+        try self.validateNextPacketNumber();
         const frame = try self.path_validation.nextChallengeFrameAt(now_ns, timeout_ns);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
@@ -904,6 +912,7 @@ pub const Connection = struct {
     }
 
     pub fn sendPendingPathResponse(self: *Connection) Error!void {
+        try self.validateNextPacketNumber();
         const frame = try self.path_validation.nextResponseFrame();
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
@@ -1056,6 +1065,7 @@ pub const Connection = struct {
 
     pub fn sendNewConnectionId(self: *Connection, connection_id: []const u8, stateless_reset_token: [16]u8) Error!void {
         try self.validateLocalConnectionIdIssueLimit(0);
+        try self.validateNextPacketNumber();
         const frame = try self.local_connection_ids.issue(connection_id, stateless_reset_token);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
@@ -1068,6 +1078,7 @@ pub const Connection = struct {
         retire_prior_to: u64,
     ) Error!void {
         try self.validateLocalConnectionIdIssueLimit(retire_prior_to);
+        try self.validateNextPacketNumber();
         const frame = try self.local_connection_ids.issueWithRetirePriorTo(connection_id, stateless_reset_token, retire_prior_to);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
@@ -1076,6 +1087,7 @@ pub const Connection = struct {
     pub fn sendNewConnectionIdWithDerivedToken(self: *Connection, connection_id: []const u8) Error!void {
         const key = self.config.local_stateless_reset_key orelse return error.InvalidConnectionId;
         try self.validateLocalConnectionIdIssueLimit(0);
+        try self.validateNextPacketNumber();
         const frame = try self.local_connection_ids.issueWithStaticKey(connection_id, key);
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
@@ -1089,6 +1101,14 @@ pub const Connection = struct {
         if (self.local_connection_ids.countAfterRetirePriorTo(retire_prior_to) >= self.config.peer_active_connection_id_limit) {
             return error.ActiveConnectionIdLimit;
         }
+    }
+
+    fn validateNextPacketNumber(self: Connection) Error!void {
+        // QUIC packet numbers are limited to the varint range even though short
+        // headers carry only a truncated encoding.  Check before any helper
+        // allocates stream/CID/path-validation state so exhaustion is
+        // transactional, matching mature stacks such as quicz.
+        if (self.next_packet_number > quic.protection.max_packet_number) return error.InvalidPacketNumber;
     }
 
     pub fn sendHandshakeDone(self: *Connection) Error!void {
@@ -1831,6 +1851,7 @@ pub const Connection = struct {
     }
 
     fn receiveStopSending(self: *Connection, stop: quic.StopSendingFrame) Error!void {
+        try self.validateNextPacketNumber();
         const entry = try self.sendStreamEntry(stop.stream_id);
         entry.stopped = .{ .application_error_code = stop.application_error_code };
         if (entry.reset_sent == null) {
@@ -3390,6 +3411,66 @@ test "QUIC 1-RTT connection models idle timeout deadlines" {
     try std.testing.expect(connection.checkIdleTimeout(110));
     try std.testing.expect(connection.closed());
     try std.testing.expectError(error.ConnectionClosed, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
+}
+
+test "QUIC 1-RTT send paths reject packet number exhaustion before mutation" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x78} ** quic.protection.secret_len);
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .enable_ack_frequency = true,
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+        .max_datagram_size = 1400,
+    });
+    defer connection.deinit();
+
+    const exhausted_packet_number = quic.protection.max_packet_number + 1;
+    connection.next_packet_number = exhausted_packet_number;
+
+    try std.testing.expectError(error.InvalidPacketNumber, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
+    try std.testing.expectEqual(exhausted_packet_number, connection.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), connection.sent.packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 0), connection.congestion.bytes_in_flight);
+
+    try std.testing.expectError(error.InvalidPacketNumber, connection.send(&[_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "must-not-open",
+        .fin = false,
+    } }}));
+    try std.testing.expectEqual(@as(usize, 0), connection.stream_send_flows.items.len);
+    try std.testing.expectEqual(@as(u64, 0), connection.send_flow.used);
+
+    try std.testing.expectError(error.InvalidPacketNumber, connection.sendAckFrequency(4, 12_000, 5));
+    try std.testing.expectEqual(@as(u64, 0), connection.ack_frequency_send_next_sequence);
+
+    try std.testing.expectError(error.InvalidPacketNumber, connection.sendNewConnectionId("new-cid", [_]u8{0x71} ** 16));
+    try std.testing.expectEqual(@as(usize, 1), connection.local_connection_ids.count());
+    try std.testing.expectEqual(@as(u64, 1), connection.local_connection_ids.next_sequence_number);
+
+    try std.testing.expect(connection.pmtudShouldProbe());
+    try std.testing.expectError(error.InvalidPacketNumber, connection.sendPmtuProbeAt(1300, 100));
+    try std.testing.expect(connection.pmtudShouldProbe());
+    try std.testing.expectEqual(@as(?usize, null), connection.pmtud.probe_size);
+
+    const challenge = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    try connection.queuePathChallenge(challenge);
+    try std.testing.expectError(error.InvalidPacketNumber, connection.sendPendingPathChallengeAt(200, 50));
+    try std.testing.expectEqual(@as(usize, 1), connection.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), connection.path_validation.outstandingChallengeCount());
 }
 
 test "QUIC 1-RTT connection rejects ACK for unsent packet numbers" {
