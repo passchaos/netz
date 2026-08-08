@@ -1206,6 +1206,32 @@ pub const sdp = struct {
         rtcp_rsize: bool = false,
     };
 
+    pub const SdpType = enum {
+        unknown,
+        offer,
+        pranswer,
+        answer,
+        rollback,
+
+        pub fn string(self: SdpType) []const u8 {
+            return switch (self) {
+                .offer => "offer",
+                .pranswer => "pranswer",
+                .answer => "answer",
+                .rollback => "rollback",
+                .unknown => "unknown",
+            };
+        }
+    };
+
+    pub fn parseSdpType(raw: []const u8) SdpType {
+        if (std.mem.eql(u8, raw, "offer")) return .offer;
+        if (std.mem.eql(u8, raw, "pranswer")) return .pranswer;
+        if (std.mem.eql(u8, raw, "answer")) return .answer;
+        if (std.mem.eql(u8, raw, "rollback")) return .rollback;
+        return .unknown;
+    }
+
     pub const RtpCodecType = enum {
         unknown,
         audio,
@@ -9636,6 +9662,13 @@ test "STUN ICE binding request authenticates integrity and fingerprint" {
 
 test "ICE candidate parser and SDP parser" {
     const allocator = std.testing.allocator;
+    try std.testing.expectEqual(sdp.SdpType.offer, sdp.parseSdpType("offer"));
+    try std.testing.expectEqual(sdp.SdpType.pranswer, sdp.parseSdpType("pranswer"));
+    try std.testing.expectEqual(sdp.SdpType.answer, sdp.parseSdpType("answer"));
+    try std.testing.expectEqual(sdp.SdpType.rollback, sdp.parseSdpType("rollback"));
+    try std.testing.expectEqual(sdp.SdpType.unknown, sdp.parseSdpType("OFFER"));
+    try std.testing.expectEqualStrings("offer", sdp.SdpType.offer.string());
+    try std.testing.expectEqualStrings("unknown", sdp.SdpType.unknown.string());
     const line = "candidate:1 1 UDP 2130706431 192.0.2.1 54400 typ host";
     const candidate = try ice.Candidate.parse(line);
     try std.testing.expectEqual(ice.CandidateType.host, candidate.candidate_type);
