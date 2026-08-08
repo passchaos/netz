@@ -92,7 +92,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   configurable RFC 9438 CUBIC (default) and NewReno congestion-window control with
   bytes-in-flight send admission wired into 1-RTT sending and ACK/ACK_ECN processing,
   deterministic timestamp injection plus automatic monotonic runtime timing,
-  public window/in-flight observability, high-BDP CUBIC performance regression coverage, and receive-side ECN counter
+  default configurable RFC 9406 HyStart++ slow-start overshoot prevention with
+  packet-number RTT rounds, Conservative Slow Start, jitter recovery, and public
+  window/in-flight observability, high-BDP CUBIC performance regression coverage, and receive-side ECN counter
   reporting, sent ECN counter validation, ACK_ECN CE congestion response,
   reordered-ACK_ECN tolerance, and plain-ACK ECN fallback disablement, RFC 9002-style RTT/PTO estimation with negotiated ACK-delay
   encode/decode and adjustment, packet/time-threshold loss detection, earliest loss/PTO timer

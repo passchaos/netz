@@ -118,6 +118,7 @@ pub const ConnectionConfig = struct {
     /// CUBIC is the high-throughput default; NewReno remains selectable for
     /// compatibility-sensitive deployments.
     congestion_algorithm: quic.congestion.Algorithm = .cubic,
+    enable_hystart: bool = true,
     enable_pacing: bool = true,
     pacing_max_burst_packets: usize = quic.pacing.Pacer.default_max_burst_packets,
     max_stored_new_tokens: usize = 4,
@@ -291,7 +292,7 @@ pub const Connection = struct {
             .received = .init(endpoint.allocator, config.max_ack_ranges),
             .sent = .init(endpoint.allocator),
             .recovery = .init(endpoint.allocator),
-            .congestion = .initWithAlgorithm(config.max_datagram_size, config.congestion_algorithm),
+            .congestion = .initWithOptions(config.max_datagram_size, config.congestion_algorithm, config.enable_hystart),
             .pacer = .init(config.enable_pacing, send_buffer_capacity, config.pacing_max_burst_packets),
             .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
             .pmtud = .init(.{ .enabled = config.enable_pmtud, .max_probe_size = config.pmtud_max_probe_size }),
@@ -497,6 +498,14 @@ pub const Connection = struct {
 
     pub fn bytesInFlight(self: Connection) usize {
         return self.congestion.bytes_in_flight;
+    }
+
+    pub fn hystartEnabled(self: Connection) bool {
+        return self.congestion.hystart.enabled;
+    }
+
+    pub fn hystartPhase(self: Connection) quic.hystart.Phase {
+        return self.congestion.hystart.phase;
     }
 
     pub fn pacingEnabled(self: Connection) bool {
@@ -846,6 +855,7 @@ pub const Connection = struct {
                 self.congestion.congestion_window,
                 self.rtt_stats.smoothedOrInitial(),
             );
+            self.congestion.onPacketSent(packet_number);
         }
         self.pacing_blocked_until_ns = null;
     }
@@ -1236,6 +1246,7 @@ pub const Connection = struct {
     pub fn updateRttFromAck(self: *Connection, ack: quic.AckFrame, now_ns: u64) Error!bool {
         const sample = try self.ackRttSample(ack, now_ns) orelse return false;
         self.rtt_stats.updateAt(sample.latest_rtt_ns, sample.ack_delay_ns, self.handshake_confirmed, now_ns);
+        self.congestion.onRttSample(sample.largest_acknowledged, sample.latest_rtt_ns);
         return true;
     }
 
@@ -1634,6 +1645,7 @@ pub const Connection = struct {
                         now_ns,
                         self.rtt_stats.smoothedOrInitial(),
                     );
+                    self.congestion.endAck();
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
                     if (lost.bytes > 0) {
                         self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);

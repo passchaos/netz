@@ -1,4 +1,5 @@
 const std = @import("std");
+const hystart_mod = @import("hystart.zig");
 
 pub const Error = error{
     CongestionLimited,
@@ -63,16 +64,22 @@ pub const Controller = struct {
     /// grow cwnd when later ACKed.
     congestion_recovery_start_time_ns: ?u64 = null,
     cubic: CubicState = .{},
+    hystart: hystart_mod.State,
 
     pub fn init(max_datagram_size: usize) Controller {
         return initWithAlgorithm(max_datagram_size, .new_reno);
     }
 
     pub fn initWithAlgorithm(max_datagram_size: usize, algorithm: Algorithm) Controller {
+        return initWithOptions(max_datagram_size, algorithm, algorithm == .cubic);
+    }
+
+    pub fn initWithOptions(max_datagram_size: usize, algorithm: Algorithm, enable_hystart: bool) Controller {
         return .{
             .algorithm = algorithm,
             .max_datagram_size = max_datagram_size,
             .congestion_window = initialWindow(max_datagram_size),
+            .hystart = .init(algorithm == .cubic and enable_hystart),
         };
     }
 
@@ -123,7 +130,11 @@ pub const Controller = struct {
         }
 
         if (self.inSlowStart()) {
-            self.congestion_window +|= bytes;
+            const increment = self.hystart.congestionWindowIncrement(bytes, self.max_datagram_size);
+            self.congestion_window +|= increment;
+            if (self.hystart.hasExited()) {
+                self.slow_start_threshold = self.congestion_window;
+            }
             return;
         }
 
@@ -253,6 +264,7 @@ pub const Controller = struct {
         // a recovery epoch. Keep the epoch absent rather than inventing time
         // zero, which would suppress every subsequent untimed ACK forever.
         self.congestion_recovery_start_time_ns = event_time_ns;
+        self.hystart.onCongestionEvent();
 
         if (self.algorithm == .cubic) {
             self.cubic.epoch_start_time_ns = event_time_ns;
@@ -274,11 +286,13 @@ pub const Controller = struct {
     }
 
     pub fn onPersistentCongestion(self: *Controller) void {
+        const hystart_enabled = self.hystart.enabled;
         self.congestion_window = minimumWindow(self.max_datagram_size);
         self.slow_start_threshold = self.congestion_window;
         self.congestion_avoidance_bytes_acked = 0;
         self.congestion_recovery_start_time_ns = null;
         self.cubic.reset();
+        self.hystart = .init(hystart_enabled);
     }
 
     pub fn onPtoProbeSent(self: *Controller, bytes: usize) void {
@@ -287,6 +301,23 @@ pub const Controller = struct {
 
     pub fn discard(self: *Controller, bytes: usize) void {
         self.bytes_in_flight -|= bytes;
+    }
+
+    pub fn onPacketSent(self: *Controller, packet_number: u64) void {
+        self.hystart.onPacketSent(packet_number);
+    }
+
+    pub fn onRttSample(self: *Controller, packet_number: u64, latest_rtt_ns: u64) void {
+        if (!self.inSlowStart()) return;
+        self.hystart.onAck(packet_number, latest_rtt_ns);
+    }
+
+    pub fn endAck(self: *Controller) void {
+        if (!self.inSlowStart()) return;
+        self.hystart.endAck();
+        if (self.hystart.hasExited()) {
+            self.slow_start_threshold = self.congestion_window;
+        }
     }
 };
 
@@ -459,4 +490,55 @@ test "QUIC untimed NewReno loss keeps untimed ACK progress" {
     try std.testing.expectEqual(@as(?u64, null), cc.congestion_recovery_start_time_ns);
     cc.onAcked(cc.congestion_window);
     try std.testing.expectEqual(@as(usize, 9_600), cc.congestion_window);
+}
+
+test "QUIC CUBIC HyStart++ reduces CSS growth and exits slow start" {
+    var cc = Controller.initWithOptions(1200, .cubic, true);
+    cc.congestion_window = 24_000;
+
+    // Establish a 30ms baseline round.
+    for (0..hystart_mod.State.rtt_samples_per_round) |packet_number| {
+        cc.onPacketSent(@intCast(packet_number));
+        cc.onRttSample(@intCast(packet_number), 30_000_000);
+    }
+    cc.endAck();
+
+    // A sustained 38ms round exceeds max(30/8, 4ms) and enters CSS.
+    for (0..hystart_mod.State.rtt_samples_per_round) |i| {
+        const packet_number: u64 = @intCast(hystart_mod.State.rtt_samples_per_round + i);
+        cc.onPacketSent(packet_number);
+        cc.onRttSample(packet_number, 38_000_000);
+    }
+    try std.testing.expect(cc.hystart.inConservativeSlowStart());
+    const before_css_ack = cc.congestion_window;
+    cc.onAckedWithContext(4800, 1, 2, 38_000_000);
+    try std.testing.expectEqual(before_css_ack + 1200, cc.congestion_window);
+    cc.endAck();
+
+    var round: u64 = 1;
+    while (!cc.hystart.hasExited() and round <= hystart_mod.State.css_rounds) : (round += 1) {
+        const packet_number = 100 + round;
+        cc.onPacketSent(packet_number);
+        cc.onRttSample(packet_number, 39_000_000);
+        cc.endAck();
+    }
+    try std.testing.expect(cc.hystart.hasExited());
+    try std.testing.expectEqual(cc.congestion_window, cc.slow_start_threshold);
+    try std.testing.expect(!cc.inSlowStart());
+}
+
+test "QUIC CUBIC can disable HyStart++" {
+    var cc = Controller.initWithOptions(1200, .cubic, false);
+    cc.congestion_window = 24_000;
+    for (0..32) |packet_number| {
+        cc.onPacketSent(@intCast(packet_number));
+        cc.onRttSample(@intCast(packet_number), if (packet_number < 8) 10_000_000 else 100_000_000);
+        cc.endAck();
+    }
+    try std.testing.expect(!cc.hystart.enabled);
+    try std.testing.expect(cc.inSlowStart());
+    cc.onAcked(4800);
+    try std.testing.expectEqual(@as(usize, 28_800), cc.congestion_window);
+    cc.onPersistentCongestion();
+    try std.testing.expect(!cc.hystart.enabled);
 }

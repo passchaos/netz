@@ -18,6 +18,7 @@ pub const connection_id = @import("connection_id.zig");
 pub const stateless_reset = @import("stateless_reset.zig");
 pub const congestion = @import("congestion.zig");
 pub const pacing = @import("pacing.zig");
+pub const hystart = @import("hystart.zig");
 pub const path_validation = @import("path_validation.zig");
 pub const rtt = @import("rtt.zig");
 pub const pmtu = @import("pmtu.zig");
@@ -1691,6 +1692,7 @@ test {
     _ = stateless_reset;
     _ = congestion;
     _ = pacing;
+    _ = hystart;
     _ = path_validation;
     _ = rtt;
     _ = pmtu;
