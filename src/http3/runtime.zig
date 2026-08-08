@@ -27,6 +27,12 @@ pub const Limits = struct {
     /// cleartext path explicit prevents large STREAM offsets from turning the
     /// UDP frame endpoint into an unbounded message buffer.
     max_stream_buffer: usize = 64 * 1024,
+    /// Maximum payload bytes per QUIC STREAM frame emitted by the cleartext
+    /// development runtime.  Keeping this separate from UDP datagram size lets
+    /// tests and callers exercise normal HTTP/3 body fragmentation like tquic's
+    /// `send_body` path instead of requiring one whole message to fit in a
+    /// single UDP frame datagram.
+    max_stream_frame_data: usize = 1200,
 };
 
 pub const Server = struct {
@@ -98,8 +104,7 @@ pub const Server = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.quic_server.endpoint.allocator);
         try http3.writeResponseSequence(&encoded, self.quic_server.endpoint.allocator, informational, response);
-        const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = stream_id, .data = encoded.items, .fin = true } }};
-        try self.quic_server.sendFrames(to, &frames);
+        try sendRuntimeStreamMessage(&self.quic_server.endpoint, to, stream_id, encoded.items, self.limits.max_stream_frame_data);
     }
 };
 
@@ -143,8 +148,7 @@ pub const Client = struct {
         defer encoded.deinit(self.quic_client.endpoint.allocator);
         try request_options.write(&encoded, self.quic_client.endpoint.allocator);
 
-        const frames = [_]quic.Frame{.{ .stream = .{ .stream_id = stream_id, .data = encoded.items, .fin = true } }};
-        try self.quic_client.sendFrames(&frames);
+        try sendRuntimeStreamMessage(&self.quic_client.endpoint, self.quic_client.peer, stream_id, encoded.items, self.limits.max_stream_frame_data);
 
         var assembled = try receiveRuntimeStreamBytes(&self.quic_client.endpoint, stream_id, self.limits.max_stream_buffer);
         errdefer assembled.deinit(self.quic_client.endpoint.allocator);
@@ -190,6 +194,22 @@ const RuntimeAssembledStream = struct {
         return .{ .datagram = datagram, .extra_datagrams = extra_datagrams, .bytes = bytes };
     }
 };
+
+fn sendRuntimeStreamMessage(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    stream_id: u62,
+    bytes: []const u8,
+    max_stream_frame_data: usize,
+) Error!void {
+    var send_state = quic.stream_state.SendState.init(stream_id);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(endpoint.allocator);
+    try send_state.appendFrames(&frames, endpoint.allocator, bytes, max_stream_frame_data, true);
+    for (frames.items) |frame| {
+        try endpoint.sendFrames(to, &.{frame});
+    }
+}
 
 fn receiveRuntimeStreamBytes(endpoint: *quic.runtime.Endpoint, expected_stream_id: ?u62, max_stream_buffer: usize) Error!RuntimeAssembledStream {
     var recv: ?quic.stream_state.RecvState = null;
@@ -1848,6 +1868,7 @@ test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint
 
     var server = try Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
         .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+        .max_stream_frame_data = 7,
     });
     defer server.deinit();
 
@@ -1866,11 +1887,12 @@ test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint
             defer request.deinit(server_ptr.quic_server.endpoint.allocator);
             try std.testing.expectEqualStrings("POST", request.request.method);
             try std.testing.expectEqualStrings("/h3", request.request.path);
-            try std.testing.expectEqualStrings("ping", request.request.body);
+            try std.testing.expectEqualStrings("ping split by dev sender", request.request.body);
+            try std.testing.expect(request.extra_datagrams.len != 0);
             try server_ptr.sendResponse(request.from, request.stream_id, .{
                 .status = 200,
                 .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-                .body = "pong",
+                .body = "pong split by dev sender",
             });
         }
     };
@@ -1880,6 +1902,7 @@ test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint
 
     var client = try Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
         .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+        .max_stream_frame_data = 7,
     });
     defer client.deinit();
 
@@ -1888,7 +1911,7 @@ test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint
         .path = "/h3",
         .authority = "localhost",
         .headers = &.{.{ .name = "content-type", .value = "text/plain" }},
-        .body = "ping",
+        .body = "ping split by dev sender",
     });
     defer response.deinit(allocator);
 
@@ -1896,7 +1919,8 @@ test "HTTP/3 runtime exchanges request and response over QUIC UDP frame endpoint
     if (shared.err) |err| return err;
 
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
-    try std.testing.expectEqualStrings("pong", response.response.body);
+    try std.testing.expect(response.extra_datagrams.len != 0);
+    try std.testing.expectEqualStrings("pong split by dev sender", response.response.body);
 }
 
 test "HTTP/3 dev runtime assembles split STREAM request and response" {
