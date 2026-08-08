@@ -7967,8 +7967,14 @@ pub const sctp = struct {
         info: []const u8,
 
         pub fn parse(chunk: Chunk) Error!HeartbeatChunk {
-            if ((chunk.chunk_type != .heartbeat and chunk.chunk_type != .heartbeat_ack) or chunk.flags != 0 or chunk.value.len == 0) return error.InvalidSctpPacket;
-            return .{ .info = chunk.value };
+            if ((chunk.chunk_type != .heartbeat and chunk.chunk_type != .heartbeat_ack) or chunk.flags != 0) return error.InvalidSctpPacket;
+            if (chunk.value.len == 0) return .{ .info = &.{} };
+            if (chunk.value.len < 4) return error.InvalidSctpPacket;
+            const param_type: InitParameterType = @enumFromInt(std.mem.readInt(u16, chunk.value[0..2], .big));
+            const len = std.mem.readInt(u16, chunk.value[2..4], .big);
+            if (param_type != .heartbeat_info or len < 4 or len > chunk.value.len) return error.InvalidSctpPacket;
+            try validateZeroPadding(chunk.value[len..]);
+            return .{ .info = chunk.value[4..len] };
         }
     };
 
@@ -8923,12 +8929,17 @@ pub const sctp = struct {
     }
 
     pub fn writeHeartbeatChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: bool, info: []const u8) Error!void {
-        if (info.len == 0) return error.InvalidSctpPacket;
-        const chunk_len = 4 + info.len;
+        const param_len = 4 + info.len;
+        const chunk_len = 4 + param_len;
         if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
         try list.append(allocator, @intFromEnum(if (ack) ChunkType.heartbeat_ack else ChunkType.heartbeat));
         try list.append(allocator, 0);
         try wire.appendInt(list, allocator, u16, @intCast(chunk_len), .big);
+        // HEARTBEAT and HEARTBEAT-ACK bodies contain exactly one Heartbeat
+        // Info variable parameter.  Keep the API focused on the opaque info
+        // bytes, but serialize the TLV that RFC 9260 and Pion/sctp expect.
+        try wire.appendInt(list, allocator, u16, @intFromEnum(InitParameterType.heartbeat_info), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(param_len), .big);
         try list.appendSlice(allocator, info);
         try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
     }
@@ -13225,7 +13236,15 @@ test "SCTP HEARTBEAT and SHUTDOWN lifecycle packets" {
     try sctp.validateEmptyControlChunk(shutdown_complete_packet.chunks[0], .shutdown_complete);
     try std.testing.expectEqual(@as(u8, 1), shutdown_complete_packet.chunks[0].flags);
 
-    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeHeartbeatChunk(&encoded, allocator, false, ""));
+    encoded.clearRetainingCapacity();
+    try sctp.writeHeartbeatChunk(&encoded, allocator, false, "");
+    const empty_heartbeat = try sctp.HeartbeatChunk.parse(.{
+        .chunk_type = .heartbeat,
+        .flags = 0,
+        .value = encoded.items[4..],
+        .consumed = encoded.items.len,
+    });
+    try std.testing.expectEqual(@as(usize, 0), empty_heartbeat.info.len);
 }
 
 test "SCTP FORWARD-TSN packet roundtrip" {
@@ -13923,7 +13942,8 @@ test "SCTP SACK packet roundtrip" {
     var parsed_padded = try sctp.parsePacket(allocator, padded.items, true);
     defer parsed_padded.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), parsed_padded.chunks.len);
-    try std.testing.expectEqual(@as(usize, 3), parsed_padded.chunks[0].value.len);
+    const padded_heartbeat = try sctp.HeartbeatChunk.parse(parsed_padded.chunks[0]);
+    try std.testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb, 0xcc }, padded_heartbeat.info);
 
     padded.items[padded.items.len - 1] = 0xff;
     std.mem.writeInt(u32, padded.items[8..12], 0, .little);
