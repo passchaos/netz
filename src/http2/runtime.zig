@@ -614,6 +614,11 @@ pub const Connection = struct {
         }
         if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
         for (request_options.headers) |header| try fields.append(self.allocator, header);
+        var content_length_buf: [32]u8 = undefined;
+        if (requestShouldDefaultContentLength(request_options.method, fields.items, request_options.body.len)) {
+            const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{request_options.body.len}) catch unreachable;
+            try fields.append(self.allocator, .{ .name = "content-length", .value = content_length });
+        }
         try validateHeaderBlock(fields.items, .request);
         try validateHeaderBlock(request_options.trailers, .request_trailers);
         try validateDeclaredRequestLength(fields.items, request_options.body.len);
@@ -2116,6 +2121,12 @@ fn validateDeclaredRequestLength(headers: []const http2.Hpack.HeaderField, body_
     if (try contentLength(headers)) |expected| {
         if (expected != body_len) return error.InvalidContentLength;
     }
+}
+
+fn requestShouldDefaultContentLength(method: []const u8, headers: []const http2.Hpack.HeaderField, body_len: usize) bool {
+    if (body_len == 0) return false;
+    if (methodIsConnect(method)) return false;
+    return (contentLength(headers) catch return false) == null;
 }
 
 fn validateHeaderListSize(headers: []const http2.Hpack.HeaderField, max_size: usize) Error!void {
@@ -5773,6 +5784,67 @@ test "HTTP/2 runtime validates request content-length" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expect(shared.saw_expected);
+}
+
+test "HTTP/2 request writer defaults content-length for known body" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/default-request-length", request.path);
+            try std.testing.expectEqualStrings("ping", request.body);
+            try std.testing.expectEqualStrings("4", findHeader(request.headers, "content-length") orelse return error.MissingPseudoHeader);
+            try connection.writeResponse(request.stream_id, .{ .body = "ok" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.request(.{
+        .method = "POST",
+        .path = "/default-request-length",
+        .authority = "localhost",
+        .body = "ping",
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
 }
 
 test "HTTP/2 runtime validates request content-length before accepting trailers" {
