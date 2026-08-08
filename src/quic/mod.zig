@@ -361,6 +361,14 @@ pub const TransportParameterId = enum(u64) {
     _,
 };
 
+pub fn isReservedTransportParameterId(id: u64) bool {
+    // RFC 9000 reserves identifiers of the form 31*N+27 for transport-parameter
+    // greasing.  Mature stacks such as quicz expose an explicit encoder for
+    // these values so endpoints can verify peers ignore unknown parameters
+    // without accidentally greasing with a real extension identifier.
+    return id <= varint.max_value and id % 31 == 27;
+}
+
 pub const TransportParameter = struct {
     id: u64,
     value: []const u8,
@@ -637,6 +645,11 @@ pub fn encodeTransportParameter(list: *std.ArrayList(u8), allocator: std.mem.All
     try varint.encode(list, allocator, id);
     try varint.encode(list, allocator, value.len);
     try list.appendSlice(allocator, value);
+}
+
+pub fn encodeReservedTransportParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: u64, value: []const u8) !void {
+    if (!isReservedTransportParameterId(id)) return error.InvalidTransportParameter;
+    try encodeTransportParameter(list, allocator, id, value);
 }
 
 pub fn encodeVersionInformationFromVersions(
@@ -2034,6 +2047,33 @@ test "QUIC typed transport parameters roundtrip and validate" {
     const token = [_]u8{0xaa} ** 16;
     try encodeTransportParameter(&forbidden, allocator, @intFromEnum(TransportParameterId.stateless_reset_token), &token);
     try std.testing.expectError(error.TransportParameterForbidden, parseTransportParametersTyped(allocator, forbidden.items, .client));
+}
+
+test "QUIC reserved transport parameters grease unknown handling" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(isReservedTransportParameterId(27));
+    try std.testing.expect(isReservedTransportParameterId(58));
+    try std.testing.expect(isReservedTransportParameterId(89));
+    try std.testing.expect(!isReservedTransportParameterId(@intFromEnum(TransportParameterId.version_information)));
+    try std.testing.expect(!isReservedTransportParameterId(@intFromEnum(TransportParameterId.max_datagram_frame_size)));
+    try std.testing.expect(!isReservedTransportParameterId(varint.max_value));
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encodeReservedTransportParameter(&encoded, allocator, 27, &.{ 0xaa, 0xbb });
+    try encodeIntegerTransportParameter(&encoded, allocator, .initial_max_data, 1234);
+
+    const decoded = try parseTransportParametersTyped(allocator, encoded.items, .client);
+    try std.testing.expectEqual(@as(u64, 1234), decoded.initial_max_data);
+
+    try std.testing.expectError(error.InvalidTransportParameter, encodeReservedTransportParameter(&encoded, allocator, @intFromEnum(TransportParameterId.max_idle_timeout), &.{}));
+    try std.testing.expectError(error.InvalidTransportParameter, encodeReservedTransportParameter(&encoded, allocator, varint.max_value, &.{}));
+
+    var duplicate_reserved: std.ArrayList(u8) = .empty;
+    defer duplicate_reserved.deinit(allocator);
+    try encodeReservedTransportParameter(&duplicate_reserved, allocator, 27, &.{0x01});
+    try encodeReservedTransportParameter(&duplicate_reserved, allocator, 27, &.{0x02});
+    try std.testing.expectError(error.DuplicateTransportParameter, parseTransportParametersTyped(allocator, duplicate_reserved.items, .client));
 }
 
 test "QUIC source-aware transport parameter encoder rejects client server-only fields" {
