@@ -1637,7 +1637,7 @@ fn validateUriPath(method: []const u8, path: []const u8) Error!void {
         if (!std.mem.eql(u8, method, "OPTIONS")) return error.InvalidHeader;
         return;
     }
-    if (path[0] != '/' and path[0] != '?') return error.InvalidHeader;
+    if (path[0] != '/') return error.InvalidHeader;
     var saw_fragment = false;
     for (path) |byte| {
         if (byte <= 0x20 or byte == 0x7f or byte == '\\') return error.InvalidHeader;
@@ -2561,6 +2561,16 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
         .{ .name = ":authority", .value = "example.com" },
     });
     try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, invalid_path.items));
+
+    var query_only_path = std.ArrayList(u8).empty;
+    defer query_only_path.deinit(allocator);
+    try Helper.writeRequestBlock(&query_only_path, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "?only=query" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+    });
+    try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, query_only_path.items));
 
     var options_asterisk = std.ArrayList(u8).empty;
     defer options_asterisk.deinit(allocator);
