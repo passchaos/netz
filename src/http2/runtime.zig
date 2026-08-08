@@ -856,6 +856,9 @@ pub const Connection = struct {
         try fields.append(self.allocator, .{ .name = ":status", .value = status });
         for (options.headers) |header| try fields.append(self.allocator, header);
         stripConnectionHeaders(&fields, .response);
+        if (semantics.traditional_connect and options.status >= 200 and options.status < 300) {
+            try stripSuccessfulConnectContentLength(&fields);
+        }
         try validateResponseBodyForStatus(options.status, fields.items, options.body, options.trailers);
         try validateResponseBodyForRequestSemantics(options.status, semantics, fields.items, options.body, options.trailers);
         try validateDeclaredResponseLength(options.status, semantics, fields.items, options.body.len);
@@ -1245,7 +1248,7 @@ pub const Connection = struct {
                         if (responseForbidsBody(status, request_method, extended_connect)) {
                             const response_content_length = try contentLength(headers.?);
                             const traditional_connect = methodIsConnect(request_method) and !extended_connect;
-                            if (traditional_connect and response_content_length != null) return error.InvalidContentLength;
+                            if (traditional_connect and (response_content_length orelse 0) != 0) return error.InvalidContentLength;
                             if ((statusIsInformational(status) or status == 204) and response_content_length != null) return error.InvalidContentLength;
                             if (!traditional_connect and (frame.frame.header.flags & flag_end_stream) == 0) {
                                 try self.consumeForbiddenResponseBody(stream_id);
@@ -1310,7 +1313,7 @@ pub const Connection = struct {
                         continue;
                     }
                     if (status < 200 or status > 299) return error.InvalidStatus;
-                    if ((try contentLength(headers)) != null) return error.InvalidContentLength;
+                    if ((try contentLength(headers)) orelse 0 != 0) return error.InvalidContentLength;
                     if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
                     return .{
                         .status = status,
@@ -1419,8 +1422,8 @@ pub const Connection = struct {
         for (response_headers) |header| try fields.append(self.allocator, header);
         stripConnectionHeaders(&fields, .response);
         try validateResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
-        if (status_code >= 200 and status_code < 300 and (try contentLength(fields.items)) != null) {
-            return error.InvalidContentLength;
+        if (status_code >= 200 and status_code < 300) {
+            try stripSuccessfulConnectContentLength(&fields);
         }
         try validateHeaderBlock(fields.items, .response);
         try self.writeHeaders(stream_id, fields.items, end_stream);
@@ -2169,6 +2172,24 @@ fn stripConnectionHeaders(headers: *std.ArrayList(http2.Hpack.HeaderField), kind
     }
 }
 
+fn stripSuccessfulConnectContentLength(headers: *std.ArrayList(http2.Hpack.HeaderField)) Error!void {
+    const declared = try contentLength(headers.items) orelse return;
+    if (declared != 0) return error.InvalidContentLength;
+
+    var index: usize = 0;
+    while (index < headers.items.len) {
+        if (std.ascii.eqlIgnoreCase(headers.items[index].name, "content-length")) {
+            // Hyper allows `content-length: 0` on successful CONNECT responses
+            // for peer compatibility, but strips it before sending such a
+            // response itself.  The stream is a tunnel after the 2xx HEADERS, so
+            // retaining even a zero representation length is misleading metadata.
+            _ = headers.orderedRemove(index);
+            continue;
+        }
+        index += 1;
+    }
+}
+
 fn removeConnectionNominatedHeaders(headers: *std.ArrayList(http2.Hpack.HeaderField), value: []const u8) void {
     var tokens = std.mem.splitScalar(u8, value, ',');
     while (tokens.next()) |raw_token| {
@@ -2560,7 +2581,7 @@ fn validateResponseBodyForRequestSemantics(
         // the peer. Reject them at the server writer boundary rather than
         // silently framing an ambiguous response.
         if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
-        if ((try contentLength(headers)) != null) return error.InvalidContentLength;
+        if (((try contentLength(headers)) orelse 0) != 0) return error.InvalidContentLength;
     }
 }
 
@@ -6403,7 +6424,7 @@ test "HTTP/2 response writer defaults content-length for known body" {
     try std.testing.expectEqualStrings("10", findHeader(response.headers, "content-length") orelse return error.MissingPseudoHeader);
 }
 
-test "HTTP/2 client rejects Content-Length on successful CONNECT tunnel" {
+test "HTTP/2 client accepts zero Content-Length on successful CONNECT tunnel" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -6436,10 +6457,9 @@ test "HTTP/2 client rejects Content-Length on successful CONNECT tunnel" {
             defer request.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("CONNECT", request.method);
 
-            // Simulate a non-netz peer that violates RFC 9113/hyper behavior by
-            // putting Content-Length on a successful CONNECT response.  The
-            // bytes after a 2xx CONNECT are tunnel bytes, so representation
-            // framing headers are ambiguous and must be rejected.
+            // Hyper accepts a zero Content-Length from peers on a successful
+            // CONNECT response even though the stream switches to tunnel mode
+            // after the 2xx HEADERS.  Non-zero lengths remain rejected below.
             try connection.writeHeaders(request.stream_id, &.{
                 .{ .name = ":status", .value = "200" },
                 .{ .name = "content-length", .value = "0" },
@@ -6456,13 +6476,16 @@ test "HTTP/2 client rejects Content-Length on successful CONNECT tunnel" {
     });
     defer client.close();
 
-    try std.testing.expectError(error.InvalidContentLength, client.openConnectTunnel(.{
+    var response = try client.openConnectTunnel(.{
         .method = "CONNECT",
         .authority = "example.com:443",
-    }));
+    });
+    defer response.deinit(allocator);
 
     thread.join();
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("0", findHeader(response.headers, "content-length") orelse return error.MissingPseudoHeader);
 }
 
 test "HTTP/2 CONNECT tunnel skips valid informational responses" {
@@ -6619,7 +6642,9 @@ test "HTTP/2 runtime accepts traditional CONNECT DATA tunnel" {
             try std.testing.expectEqualStrings("CONNECT", request.method);
             try std.testing.expectEqualStrings("example.com:443", request.authority orelse "");
 
-            var tunnel = try connection.acceptConnectTunnel(request, &.{});
+            var tunnel = try connection.acceptConnectTunnel(request, &.{
+                .{ .name = "content-length", .value = "0" },
+            });
             var inbound = try tunnel.read();
             defer inbound.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings("client tunnel bytes", inbound.data);
@@ -6645,6 +6670,7 @@ test "HTTP/2 runtime accepts traditional CONNECT DATA tunnel" {
     });
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expect(findHeader(response.headers, "content-length") == null);
 
     var tunnel = response.tunnel;
     try tunnel.write("client tunnel bytes", false);
@@ -6704,8 +6730,19 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
         .{ .name = "content-length", .value = "0" },
     }, false));
     try std.testing.expectError(error.InvalidContentLength, connection.writeExtendedConnectResponse(1, 200, &.{
-        .{ .name = "content-length", .value = "0" },
+        .{ .name = "content-length", .value = "1" },
     }, false));
+
+    var connect_headers: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+    defer connect_headers.deinit(std.testing.allocator);
+    try connect_headers.appendSlice(std.testing.allocator, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "0" },
+        .{ .name = "x-ok", .value = "kept" },
+    });
+    try stripSuccessfulConnectContentLength(&connect_headers);
+    try std.testing.expect(findHeader(connect_headers.items, "content-length") == null);
+    try std.testing.expectEqualStrings("kept", findHeader(connect_headers.items, "x-ok") orelse return error.MissingPseudoHeader);
 }
 
 test "HTTP/2 runtime supports RFC 8441 extended CONNECT" {
