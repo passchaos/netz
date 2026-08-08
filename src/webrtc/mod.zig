@@ -7943,6 +7943,23 @@ pub const sctp = struct {
         value: []const u8,
     };
 
+    pub const dtls_error_detection_method: u32 = 1;
+
+    pub fn parseZeroChecksumAcceptable(parameter: InitParameter) Error!u32 {
+        if (parameter.param_type != .zero_checksum_acceptable or parameter.value.len != 4) return error.InvalidSctpPacket;
+        return std.mem.readInt(u32, parameter.value[0..4], .big);
+    }
+
+    pub fn zeroChecksumAcceptsDtls(parameter: InitParameter) Error!bool {
+        return (try parseZeroChecksumAcceptable(parameter)) == dtls_error_detection_method;
+    }
+
+    pub fn writeZeroChecksumAcceptableParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, edmid: u32) Error!void {
+        var value: [4]u8 = undefined;
+        std.mem.writeInt(u32, &value, edmid, .big);
+        try writeInitParameter(list, allocator, .{ .param_type = .zero_checksum_acceptable, .value = &value });
+    }
+
     pub const HeartbeatChunk = struct {
         info: []const u8,
 
@@ -9254,6 +9271,7 @@ pub const sctp = struct {
             if (len < 4 or cursor.remaining() < len - 4) return error.InvalidSctpPacket;
             const value = try cursor.readSlice(len - 4);
             if (knownInitParameter(param_type)) {
+                if (param_type == .zero_checksum_acceptable and value.len != 4) return error.InvalidSctpPacket;
                 try params.append(allocator, .{ .param_type = param_type, .value = value });
             } else {
                 switch (raw_type & 0xc000) {
@@ -13357,9 +13375,13 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     const allocator = std.testing.allocator;
     const cookie = "state-cookie";
     const extensions = [_]u8{ @intFromEnum(sctp.ChunkType.reconfig), @intFromEnum(sctp.ChunkType.forward_tsn) };
+    var zero_checksum_param: std.ArrayList(u8) = .empty;
+    defer zero_checksum_param.deinit(allocator);
+    try sctp.writeZeroChecksumAcceptableParameter(&zero_checksum_param, allocator, sctp.dtls_error_detection_method);
     var params = [_]sctp.InitParameter{
         .{ .param_type = .state_cookie, .value = cookie },
         .{ .param_type = .supported_extensions, .value = &extensions },
+        .{ .param_type = .zero_checksum_acceptable, .value = zero_checksum_param.items[4..] },
     };
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -13387,6 +13409,14 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     try std.testing.expectEqual(@as(u32, 0x10203040), init_ack.initial_tsn);
     try std.testing.expectEqualStrings(cookie, init_ack.stateCookie().?);
     try std.testing.expectEqual(sctp.InitParameterType.supported_extensions, init_ack.parameters[1].param_type);
+    try std.testing.expectEqual(sctp.InitParameterType.zero_checksum_acceptable, init_ack.parameters[2].param_type);
+    try std.testing.expectEqual(@as(u32, sctp.dtls_error_detection_method), try sctp.parseZeroChecksumAcceptable(init_ack.parameters[2]));
+    try std.testing.expect(try sctp.zeroChecksumAcceptsDtls(init_ack.parameters[2]));
+    zero_checksum_param.clearRetainingCapacity();
+    try sctp.writeZeroChecksumAcceptableParameter(&zero_checksum_param, allocator, 2);
+    const non_dtls_zero_checksum = sctp.InitParameter{ .param_type = .zero_checksum_acceptable, .value = zero_checksum_param.items[4..] };
+    try std.testing.expectEqual(@as(u32, 2), try sctp.parseZeroChecksumAcceptable(non_dtls_zero_checksum));
+    try std.testing.expect(!(try sctp.zeroChecksumAcceptsDtls(non_dtls_zero_checksum)));
     const parsed_cookie = try allocator.dupe(u8, init_ack.stateCookie().?);
     defer allocator.free(parsed_cookie);
 
@@ -13413,6 +13443,22 @@ test "SCTP INIT cookie echo and cookie ack packets" {
         .consumed = 20,
     };
     try std.testing.expectError(error.InvalidSctpPacket, sctp.InitChunk.parse(allocator, invalid_init_chunk));
+
+    invalid_init.clearRetainingCapacity();
+    try wire.appendInt(&invalid_init, allocator, u32, 0x01020304, .big);
+    try wire.appendInt(&invalid_init, allocator, u32, 256 * 1024, .big);
+    try wire.appendInt(&invalid_init, allocator, u16, 16, .big);
+    try wire.appendInt(&invalid_init, allocator, u16, 16, .big);
+    try wire.appendInt(&invalid_init, allocator, u32, 0x10203040, .big);
+    try wire.appendInt(&invalid_init, allocator, u16, @intFromEnum(sctp.InitParameterType.zero_checksum_acceptable), .big);
+    try wire.appendInt(&invalid_init, allocator, u16, 6, .big);
+    try invalid_init.appendSlice(allocator, &.{ 0, 1, 0, 0 });
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.InitChunk.parse(allocator, .{
+        .chunk_type = .init,
+        .flags = 0,
+        .value = invalid_init.items,
+        .consumed = 0,
+    }));
 
     var skip_unknown_value: std.ArrayList(u8) = .empty;
     defer skip_unknown_value.deinit(allocator);
