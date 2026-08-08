@@ -118,7 +118,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   message-size limits, automatic active-state PING→PONG and close echo/completed-close short-circuit handling plus tungstenite-style data-send/read suppression after receiving Close,
   outbound text/close/control-frame validation plus codec-level invalid-frame write rejection,
   subprotocol token validation with strict client response selection, split-header subprotocol and extension-offer negotiation, optional permessage-deflate negotiation with
-  no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus rejection of
+  no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus quoted window-bit parsing and rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus

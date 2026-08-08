@@ -711,7 +711,30 @@ fn parseWindowBitsParam(param: []const u8, name: []const u8) ?u8 {
     if (std.ascii.eqlIgnoreCase(param, name)) return 15;
     if (param.len <= name.len or param[name.len] != '=') return null;
     if (!std.ascii.eqlIgnoreCase(param[0..name.len], name)) return null;
-    return std.fmt.parseInt(u8, param[name.len + 1 ..], 10) catch 0;
+    return parseWindowBitsValue(param[name.len + 1 ..]);
+}
+
+fn parseWindowBitsValue(raw_value: []const u8) u8 {
+    // Sec-WebSocket-Extensions uses the generic extension-param grammar from
+    // RFC 6455: parameter values may be either tokens or quoted-strings.  The
+    // permessage-deflate window-bit value itself is still a decimal integer, so
+    // accept a quoted integer like server_max_window_bits=\"15\" but reject
+    // escapes/empty strings instead of silently normalizing ambiguous values.
+    const value = if (raw_value.len >= 2 and raw_value[0] == '"') blk: {
+        if (raw_value[raw_value.len - 1] != '"') return 0;
+        const inner = raw_value[1 .. raw_value.len - 1];
+        if (std.mem.indexOfScalar(u8, inner, '\\') != null or std.mem.indexOfScalar(u8, inner, '"') != null) return 0;
+        break :blk inner;
+    } else raw_value;
+
+    if (value.len == 0) return 0;
+    var parsed: u16 = 0;
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte)) return 0;
+        parsed = parsed * 10 + byte - '0';
+        if (parsed > std.math.maxInt(u8)) return 0;
+    }
+    return @intCast(parsed);
 }
 
 test "WebSocket accept key matches RFC example" {
@@ -891,7 +914,7 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
 
     const accepted = try ExtensionNegotiation.accept(
         allocator,
-        "permessage-deflate; client_no_context_takeover; server_max_window_bits=15",
+        "permessage-deflate; client_no_context_takeover; server_max_window_bits=\"15\"",
         true,
     );
     defer if (accepted) |value| allocator.free(value);
@@ -918,8 +941,15 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     );
     try std.testing.expect(unsupported_window == null);
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse("permessage-deflate"));
+    const quoted_window_response = try ExtensionNegotiation.validateResponse(
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=\"15\"",
+    );
+    try std.testing.expectEqual(@as(?u8, 15), quoted_window_response.client_max_window_bits);
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
-        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=12",
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=\"12\"",
+    ));
+    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=\"1\\5\"",
     ));
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
         "permessage-deflate; server_no_context_takeover; client_no_context_takeover, x-unknown",
