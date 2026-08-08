@@ -1492,7 +1492,8 @@ pub const sdp = struct {
     }
 
     pub fn formatFingerprintLine(allocator: std.mem.Allocator, fingerprint: Fingerprint) Error![]u8 {
-        if (fingerprint.algorithm.len == 0 or fingerprint.value.len == 0) return error.InvalidSdp;
+        const digest_len = fingerprintDigestLen(fingerprint.algorithm) orelse return error.InvalidFingerprint;
+        try validateColonHexFingerprint(fingerprint.value, digest_len);
         return std.fmt.allocPrint(allocator, "a=fingerprint:{s} {s}\r\n", .{ fingerprint.algorithm, fingerprint.value });
     }
 
@@ -11316,9 +11317,10 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
     const setup_line = try sdp.formatDtlsSetupLine(allocator, .client);
     defer allocator.free(setup_line);
     try std.testing.expectEqualStrings("a=setup:active\r\n", setup_line);
-    const fingerprint_line = try sdp.formatFingerprintLine(allocator, .{ .algorithm = "sha-256", .value = "AA:BB" });
+    const valid_fingerprint = "75:74:5A:A6:A4:E5:52:F4:A7:67:4C:01:C7:EE:91:3F:21:3D:A2:E3:53:7B:6F:30:86:F2:30:AA:65:FB:04:24";
+    const fingerprint_line = try sdp.formatFingerprintLine(allocator, .{ .algorithm = "sha-256", .value = valid_fingerprint });
     defer allocator.free(fingerprint_line);
-    try std.testing.expectEqualStrings("a=fingerprint:sha-256 AA:BB\r\n", fingerprint_line);
+    try std.testing.expectEqualStrings("a=fingerprint:sha-256 " ++ valid_fingerprint ++ "\r\n", fingerprint_line);
     const creds_line = sdp.IceCredentials{ .ufrag = "ufrag", .password = "pwd" };
     const ufrag_line = try sdp.formatIceUfragLine(allocator, creds_line);
     defer allocator.free(ufrag_line);
@@ -11333,7 +11335,7 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
     defer transport_lines.deinit(allocator);
     try sdp.appendTransportAttributeLines(&transport_lines, allocator, .{
         .ice_credentials = creds_line,
-        .fingerprint = .{ .algorithm = "sha-256", .value = "AA:BB" },
+        .fingerprint = .{ .algorithm = "sha-256", .value = valid_fingerprint },
         .dtls_role = .client,
         .transport_attributes = .{ .ice_lite = true, .rtcp_mux = true, .rtcp_rsize = true },
         .extmap_allow_mixed = true,
@@ -11341,7 +11343,7 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
     try std.testing.expectEqualStrings(
         "a=ice-lite\r\n" ++
             "a=setup:active\r\n" ++
-            "a=fingerprint:sha-256 AA:BB\r\n" ++
+            "a=fingerprint:sha-256 " ++ valid_fingerprint ++ "\r\n" ++
             "a=ice-ufrag:ufrag\r\n" ++
             "a=ice-pwd:pwd\r\n" ++
             "a=rtcp-mux\r\n" ++
@@ -11351,7 +11353,8 @@ test "SDP rejects missing or malformed DTLS/ICE details" {
     );
     try std.testing.expectError(error.InvalidSdp, sdp.formatIceUfragLine(allocator, .{ .ufrag = "", .password = "pwd" }));
     try std.testing.expectError(error.InvalidSdp, sdp.formatIcePwdLine(allocator, .{ .ufrag = "ufrag", .password = "" }));
-    try std.testing.expectError(error.InvalidSdp, sdp.formatFingerprintLine(allocator, .{ .algorithm = "", .value = "AA:BB" }));
+    try std.testing.expectError(error.InvalidFingerprint, sdp.formatFingerprintLine(allocator, .{ .algorithm = "", .value = valid_fingerprint }));
+    try std.testing.expectError(error.InvalidFingerprint, sdp.formatFingerprintLine(allocator, .{ .algorithm = "sha-256", .value = "AA:BB" }));
 }
 
 test "RTP and DTLS record parsers" {
