@@ -1061,6 +1061,7 @@ pub const sdp = struct {
     pub const Media = struct {
         kind: []const u8,
         port: u16,
+        port_range: ?u16 = null,
         protocol: []const u8,
         formats: []const u8,
         title: ?[]const u8 = null,
@@ -1073,6 +1074,7 @@ pub const sdp = struct {
     const MediaHeader = struct {
         kind: []const u8,
         port: u16,
+        port_range: ?u16 = null,
         protocol: []const u8,
         formats: []const u8,
     };
@@ -1444,17 +1446,28 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
-    pub fn formatMediaLine(allocator: std.mem.Allocator, kind: []const u8, port: u16, protocol: []const u8, formats: []const u8) Error![]u8 {
+    pub fn formatRangedMediaLine(allocator: std.mem.Allocator, kind: []const u8, port: u16, port_range: ?u16, protocol: []const u8, formats: []const u8) Error![]u8 {
         try validateSdpToken(kind);
         try validateSdpToken(protocol);
         try validateSdpAttributeValue(formats);
+        if (port_range) |range| {
+            return std.fmt.allocPrint(allocator, "m={s} {d}/{d} {s} {s}\r\n", .{ kind, port, range, protocol, formats });
+        }
         return std.fmt.allocPrint(allocator, "m={s} {d} {s} {s}\r\n", .{ kind, port, protocol, formats });
     }
 
-    pub fn appendMediaLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, kind: []const u8, port: u16, protocol: []const u8, formats: []const u8) Error!void {
-        const line = try formatMediaLine(allocator, kind, port, protocol, formats);
+    pub fn formatMediaLine(allocator: std.mem.Allocator, kind: []const u8, port: u16, protocol: []const u8, formats: []const u8) Error![]u8 {
+        return formatRangedMediaLine(allocator, kind, port, null, protocol, formats);
+    }
+
+    pub fn appendRangedMediaLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, kind: []const u8, port: u16, port_range: ?u16, protocol: []const u8, formats: []const u8) Error!void {
+        const line = try formatRangedMediaLine(allocator, kind, port, port_range, protocol, formats);
         defer allocator.free(line);
         try list.appendSlice(allocator, line);
+    }
+
+    pub fn appendMediaLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, kind: []const u8, port: u16, protocol: []const u8, formats: []const u8) Error!void {
+        try appendRangedMediaLine(list, allocator, kind, port, null, protocol, formats);
     }
 
     pub fn formatConnectionLine(allocator: std.mem.Allocator, network_type: []const u8, address_type: []const u8, address: []const u8) Error![]u8 {
@@ -1688,7 +1701,7 @@ pub const sdp = struct {
         try appendSessionHeaderLines(list, allocator, session);
         for (session.attributes) |attr| try appendAttributeLine(list, allocator, attr);
         for (session.media) |media| {
-            try appendMediaLine(list, allocator, media.kind, media.port, media.protocol, media.formats);
+            try appendRangedMediaLine(list, allocator, media.kind, media.port, media.port_range, media.protocol, media.formats);
             if (media.title) |title| try appendInformationLine(list, allocator, title);
             if (media.connection) |connection| try appendConnectionLine(list, allocator, connection.network_type, connection.address_type, connection.address);
             for (media.bandwidth) |bandwidth| try appendBandwidthLine(list, allocator, bandwidth);
@@ -2314,6 +2327,7 @@ pub const sdp = struct {
                         try media_items.append(allocator, .{
                             .kind = media_header.kind,
                             .port = media_header.port,
+                            .port_range = media_header.port_range,
                             .protocol = media_header.protocol,
                             .formats = media_header.formats,
                             .title = current_title,
@@ -2337,6 +2351,7 @@ pub const sdp = struct {
             try media_items.append(allocator, .{
                 .kind = media_header.kind,
                 .port = media_header.port,
+                .port_range = media_header.port_range,
                 .protocol = media_header.protocol,
                 .formats = media_header.formats,
                 .title = current_title,
@@ -2389,13 +2404,23 @@ pub const sdp = struct {
         };
     }
 
+    fn parseMediaPort(value: []const u8) Error!struct { u16, ?u16 } {
+        if (std.mem.indexOfScalar(u8, value, '/')) |slash| {
+            const port = std.fmt.parseInt(u16, value[0..slash], 10) catch return error.InvalidSdp;
+            const range = std.fmt.parseInt(u16, value[slash + 1 ..], 10) catch return error.InvalidSdp;
+            return .{ port, range };
+        }
+        return .{ std.fmt.parseInt(u16, value, 10) catch return error.InvalidSdp, null };
+    }
+
     fn parseMediaLine(value: []const u8) Error!MediaHeader {
         var it = std.mem.splitScalar(u8, value, ' ');
         const kind = it.next() orelse return error.InvalidSdp;
         const port_s = it.next() orelse return error.InvalidSdp;
         const protocol = it.next() orelse return error.InvalidSdp;
         const formats = it.rest();
-        return .{ .kind = kind, .port = std.fmt.parseInt(u16, port_s, 10) catch return error.InvalidSdp, .protocol = protocol, .formats = formats };
+        const parsed_port = try parseMediaPort(port_s);
+        return .{ .kind = kind, .port = parsed_port[0], .port_range = parsed_port[1], .protocol = protocol, .formats = formats };
     }
 
     pub fn extractFingerprint(session: Session) Error!Fingerprint {
@@ -9344,7 +9369,7 @@ test "ICE candidate parser and SDP parser" {
         "z=2882844526 -1h 2898848070 0\r\n" ++
         "k=prompt\r\n" ++
         "a=group:BUNDLE 0\r\n" ++
-        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "m=application 9/2 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
         "i=Data channel media\r\n" ++
         "c=IN IP4 0.0.0.0\r\n" ++
         "b=TIAS:64000\r\n" ++
@@ -9373,6 +9398,8 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expect(session.bandwidth[1].experimental);
     try std.testing.expectEqualStrings("BUNDLE 0", session.attributes[0].value);
     try std.testing.expectEqualStrings("application", session.media[0].kind);
+    try std.testing.expectEqual(@as(u16, 9), session.media[0].port);
+    try std.testing.expectEqual(@as(?u16, 2), session.media[0].port_range);
     try std.testing.expectEqualStrings("Data channel media", session.media[0].title.?);
     try std.testing.expectEqualStrings("0.0.0.0", session.media[0].connection.?.address);
     try std.testing.expectEqual(@as(usize, 1), session.media[0].bandwidth.len);
@@ -9456,13 +9483,22 @@ test "ICE candidate parser and SDP parser" {
     const media_line = try sdp.formatMediaLine(allocator, session.media[0].kind, session.media[0].port, session.media[0].protocol, session.media[0].formats);
     defer allocator.free(media_line);
     try std.testing.expectEqualStrings("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n", media_line);
+    const ranged_media_line = try sdp.formatRangedMediaLine(allocator, session.media[0].kind, session.media[0].port, session.media[0].port_range, session.media[0].protocol, session.media[0].formats);
+    defer allocator.free(ranged_media_line);
+    try std.testing.expectEqualStrings("m=application 9/2 UDP/DTLS/SCTP webrtc-datachannel\r\n", ranged_media_line);
     var media_lines: std.ArrayList(u8) = .empty;
     defer media_lines.deinit(allocator);
     try sdp.appendMediaLine(&media_lines, allocator, "video", 0, "UDP/TLS/RTP/SAVPF", "96 97");
-    try std.testing.expectEqualStrings("m=video 0 UDP/TLS/RTP/SAVPF 96 97\r\n", media_lines.items);
+    try sdp.appendRangedMediaLine(&media_lines, allocator, "audio", 5004, 2, "RTP/AVP", "0");
+    try std.testing.expectEqualStrings(
+        "m=video 0 UDP/TLS/RTP/SAVPF 96 97\r\n" ++
+            "m=audio 5004/2 RTP/AVP 0\r\n",
+        media_lines.items,
+    );
     try std.testing.expectError(error.InvalidSdp, sdp.formatMediaLine(allocator, "", 9, "UDP/TLS/RTP/SAVPF", "96"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatMediaLine(allocator, "video", 9, "UDP TLS", "96"));
     try std.testing.expectError(error.InvalidSdp, sdp.formatMediaLine(allocator, "video", 9, "UDP/TLS/RTP/SAVPF", ""));
+    try std.testing.expectError(error.InvalidSdp, sdp.parse(allocator, "v=0\r\nm=audio 5004/not-a-range RTP/AVP 0\r\n"));
     const information_line = try sdp.formatInformationLine(allocator, "Media title");
     defer allocator.free(information_line);
     try std.testing.expectEqualStrings("i=Media title\r\n", information_line);
