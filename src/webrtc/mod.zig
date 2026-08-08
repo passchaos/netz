@@ -7484,7 +7484,7 @@ pub const rtcp = struct {
     }
 
     fn writeTransportLayerNack(list: *std.ArrayList(u8), allocator: std.mem.Allocator, nack: TransportLayerNack) Error!void {
-        if (nack.pairs.len == 0 or nack.pairs.len > (max_rtcp_payload_len - 8) / 4) return error.InvalidRtcpPacket;
+        if (nack.pairs.len == 0 or nack.pairs.len > maxTransportLayerNackPairs()) return error.InvalidRtcpPacket;
         try writeHeader(list, allocator, transport_feedback_nack, .transport_feedback, 8 + nack.pairs.len * 4);
         try wire.appendInt(list, allocator, u32, nack.sender_ssrc, .big);
         try wire.appendInt(list, allocator, u32, nack.media_ssrc, .big);
@@ -7492,6 +7492,15 @@ pub const rtcp = struct {
             try wire.appendInt(list, allocator, u16, pair.packet_id, .big);
             try wire.appendInt(list, allocator, u16, pair.lost_packet_bitmask, .big);
         }
+    }
+
+    fn maxTransportLayerNackPairs() usize {
+        // RTCP length counts the packet body in 32-bit words minus one.  A TLN
+        // packet has two SSRC words before FCI, so the largest representable
+        // packet carries 0xffff - 2 Generic NACK entries.  This matches
+        // Pion/rtcp's tlnLength guard and avoids rejecting the legal maximum by
+        // accidentally treating the common header as part of the payload budget.
+        return std.math.maxInt(u16) - 2;
     }
 
     fn writeTransportWideCc(list: *std.ArrayList(u8), allocator: std.mem.Allocator, twcc: TransportWideCc) Error!void {
@@ -12807,7 +12816,19 @@ test "RTCP receiver report and feedback packets" {
     const nack_destinations = try nack.packet.destinationSsrcs(allocator);
     defer allocator.free(nack_destinations);
     try std.testing.expectEqualSlices(u32, &.{0x44444444}, nack_destinations);
-    const too_many_nacks = try allocator.alloc(rtcp.NackPair, (((@as(usize, std.math.maxInt(u16)) * 4) - 8) / 4) + 1);
+
+    encoded.clearRetainingCapacity();
+    const max_nacks = try allocator.alloc(rtcp.NackPair, rtcp.maxTransportLayerNackPairs());
+    defer allocator.free(max_nacks);
+    @memset(max_nacks, .{ .packet_id = 1, .lost_packet_bitmask = 0 });
+    try rtcp.writePacket(&encoded, allocator, .{ .transport_layer_nack = .{
+        .sender_ssrc = 1,
+        .media_ssrc = 2,
+        .pairs = max_nacks,
+    } });
+    try std.testing.expectEqual((@as(usize, std.math.maxInt(u16)) + 1) * 4, encoded.items.len);
+
+    const too_many_nacks = try allocator.alloc(rtcp.NackPair, rtcp.maxTransportLayerNackPairs() + 1);
     defer allocator.free(too_many_nacks);
     try std.testing.expectError(error.InvalidRtcpPacket, rtcp.writePacket(&encoded, allocator, .{ .transport_layer_nack = .{
         .sender_ssrc = 1,
