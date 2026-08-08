@@ -8800,7 +8800,9 @@ pub const sctp = struct {
                 if (chunk_type == .init_ack and std.mem.readInt(u32, bytes[4..8], .big) == 0) return error.InvalidSctpPacket;
                 has_init_chunk = true;
             }
-            if (chunk_type == .cookie_echo and pos != 12) return error.InvalidSctpPacket;
+            if (chunk_type == .cookie_echo) {
+                if (pos != 12 or std.mem.readInt(u32, bytes[4..8], .big) == 0) return error.InvalidSctpPacket;
+            }
             if (!supportedChunkType(chunk_type)) {
                 // RFC 4960 encodes unknown-chunk handling in the high two bits:
                 // 00/01 stop processing this packet, 10/11 skip and continue
@@ -9010,6 +9012,7 @@ pub const sctp = struct {
     }
 
     pub fn writeCookieEchoPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: PacketOptions, cookie: []const u8) Error!void {
+        if (options.verification_tag == 0) return error.InvalidSctpPacket;
         const start = list.items.len;
         try writePacketHeader(list, allocator, options);
         try writeCookieEchoChunk(list, allocator, cookie);
@@ -13790,6 +13793,18 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     defer zero_checksum_cookie.deinit(allocator);
     std.mem.writeInt(u32, zero_checksum_cookie.items[8..12], 0, .little);
     try std.testing.expectError(error.BadSctpChecksum, sctp.parsePacket(allocator, zero_checksum_cookie.items, false));
+    var zero_vtag_cookie = try encoded.clone(allocator);
+    defer zero_vtag_cookie.deinit(allocator);
+    std.mem.writeInt(u32, zero_vtag_cookie.items[4..8], 0, .big);
+    std.mem.writeInt(u32, zero_vtag_cookie.items[8..12], 0, .little);
+    const zero_vtag_cookie_checksum = try sctp.checksum(zero_vtag_cookie.items);
+    std.mem.writeInt(u32, zero_vtag_cookie.items[8..12], zero_vtag_cookie_checksum, .little);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, zero_vtag_cookie.items, true));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeCookieEchoPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0,
+    }, parsed_cookie));
     var misordered_cookie: std.ArrayList(u8) = .empty;
     defer misordered_cookie.deinit(allocator);
     try wire.appendInt(&misordered_cookie, allocator, u16, 5000, .big);
