@@ -213,13 +213,15 @@ pub const Settings = struct {
     }
 
     pub fn validateLocal(self: Settings) Error!void {
-        // The current QPACK implementation is deliberately static-table-only:
-        // encoder/decoder streams reject non-empty instructions and header
-        // blocks with non-zero Required Insert Count/Base fail as unsupported.
-        // Advertising dynamic capacity or blocked streams would invite peers to
-        // send dynamic references that this endpoint cannot process.
-        if (self.qpack_max_table_capacity != 0 or self.qpack_blocked_streams != 0) {
+        // Dynamic decoding is supported, but the live runtime does not retain
+        // and resume request streams whose Required Insert Count is ahead of
+        // the encoder stream. Advertising zero blocked streams tells a
+        // conformant peer to order inserts before dependent field sections.
+        if (self.qpack_blocked_streams != 0) {
             return error.QpackDynamicTableUnsupported;
+        }
+        if (std.math.cast(usize, self.qpack_max_table_capacity) == null) {
+            return error.InvalidSetting;
         }
     }
 };
@@ -3205,9 +3207,10 @@ test "HTTP/3 typed settings state tracks negotiation" {
     defer default_payload.deinit(allocator);
     try defaults.writePayload(&default_payload, allocator);
     try std.testing.expectEqual(@as(usize, 0), default_payload.items.len);
-    try std.testing.expectError(error.QpackDynamicTableUnsupported, (Settings{
+    try (Settings{
         .qpack_max_table_capacity = 1,
-    }).writePayload(&default_payload, allocator));
+    }).writePayload(&default_payload, allocator);
+    default_payload.clearRetainingCapacity();
     try std.testing.expectError(error.QpackDynamicTableUnsupported, (Settings{
         .qpack_blocked_streams = 1,
     }).writePayload(&default_payload, allocator));

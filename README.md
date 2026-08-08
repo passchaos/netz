@@ -340,8 +340,9 @@ if (session.maxDatagramPayloadSize()) |limit| {
   7541 Huffman strings; the stateless literal convenience helpers accept legal
   leading table-size updates while keeping dynamic state scoped to one block.
   HTTP/3 QPACK now provides RFC 9204 dynamic-table state, dynamic field
-  sections, and both instruction stream codecs, but the socket runtime still
-  rejects non-empty dynamic streams until blocked-section scheduling is wired.
+  sections, both instruction stream codecs, and Protected client/server
+  decode-side live encoder-stream processing with decoder feedback. Dynamic
+  encoding and non-zero blocked-stream scheduling remain intentionally disabled.
 - WebRTC support covers signaling/transport wire primitives (STUN, ICE, SDP,
   DTLS/RTP/SCTP headers), forming a foundation for peer-connection state
   machines and SRTP/SCTP data-channel layers.
