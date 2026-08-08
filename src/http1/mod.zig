@@ -88,6 +88,62 @@ pub const ResponseContext = struct {
     request_method: ?Method = null,
 };
 
+/// Borrowed HTTP/1 request head parsed without allocation.
+pub const RequestHead = struct {
+    method: Method,
+    target: []const u8,
+    version: Version,
+    headers: []Header,
+    body_framing: BodyFraming,
+    content_length: ?usize,
+    head_len: usize,
+
+    pub fn header(self: RequestHead, name: []const u8) ?[]const u8 {
+        return wire.findHeader(self.headers, name);
+    }
+
+    pub fn keepAlive(self: RequestHead) bool {
+        if (self.header("connection")) |connection| {
+            if (wire.containsToken(connection, "close")) return false;
+            if (wire.containsToken(connection, "keep-alive")) return true;
+        }
+        return self.version == .http_1_1;
+    }
+
+    /// Total bytes for a pipelined message when its body boundary is known from
+    /// the head. Chunked bodies require parsing chunks and return null.
+    pub fn messageLength(self: RequestHead) Error!?usize {
+        return switch (self.body_framing) {
+            .none => self.head_len,
+            .content_length => std.math.add(usize, self.head_len, self.content_length.?) catch error.ContentLengthOverflow,
+            .chunked, .close_delimited => null,
+        };
+    }
+};
+
+/// Borrowed HTTP/1 response head parsed without allocation.
+pub const ResponseHead = struct {
+    version: Version,
+    status: u16,
+    reason: []const u8,
+    headers: []Header,
+    body_framing: BodyFraming,
+    content_length: ?usize,
+    head_len: usize,
+
+    pub fn header(self: ResponseHead, name: []const u8) ?[]const u8 {
+        return wire.findHeader(self.headers, name);
+    }
+
+    pub fn messageLength(self: ResponseHead) Error!?usize {
+        return switch (self.body_framing) {
+            .none => self.head_len,
+            .content_length => std.math.add(usize, self.head_len, self.content_length.?) catch error.ContentLengthOverflow,
+            .chunked, .close_delimited => null,
+        };
+    }
+};
+
 pub const max_chunk_extension_bytes: usize = 16 * 1024;
 
 pub const BodyFraming = enum {
@@ -178,6 +234,124 @@ pub const Response = struct {
         return self.version == .http_1_1;
     }
 };
+
+/// Parse a strict request head into caller-provided header storage.
+///
+/// Returned strings borrow `bytes`; `header_storage` is only used for the
+/// lightweight name/value descriptors. Obsolete folding is intentionally
+/// rejected because unfolding requires owned value storage.
+pub fn parseRequestHead(
+    bytes: []const u8,
+    header_storage: []Header,
+    options: ParseOptions,
+) Error!RequestHead {
+    const parsed = try parseHeadLines(bytes, header_storage, options);
+    var parts = std.mem.splitScalar(u8, parsed.start_line, ' ');
+    const method_s = parts.next() orelse return error.MalformedStartLine;
+    const target = parts.next() orelse return error.MalformedStartLine;
+    const version_s = parts.next() orelse return error.MalformedStartLine;
+    if (parts.next() != null or target.len == 0) return error.MalformedStartLine;
+    const method = try Method.parse(method_s);
+    try validateRequestTargetForMethod(method, target);
+    const version = try Version.parse(version_s);
+    try validateTransferEncodingForVersion(version, parsed.headers);
+    try validateHostHeaderBlock(version, parsed.headers);
+    const framing = try bodyFraming(parsed.headers);
+    return .{
+        .method = method,
+        .target = target,
+        .version = version,
+        .headers = parsed.headers,
+        .body_framing = framing,
+        .content_length = if (framing == .content_length) try contentLength(parsed.headers) else null,
+        .head_len = parsed.head_len,
+    };
+}
+
+pub fn parseResponseHead(
+    bytes: []const u8,
+    header_storage: []Header,
+    options: ParseOptions,
+    context: ResponseContext,
+) Error!ResponseHead {
+    const parsed = try parseHeadLines(bytes, header_storage, options);
+    var parts = std.mem.splitScalar(u8, parsed.start_line, ' ');
+    const version_s = parts.next() orelse return error.MalformedStartLine;
+    const status_s = parts.next() orelse return error.MalformedStartLine;
+    const reason = parts.rest();
+    const version = try Version.parse(version_s);
+    const status = try parseStatusCode(status_s);
+    try validateReasonPhrase(reason);
+    try validateTransferEncodingForVersion(version, parsed.headers);
+    const declared_content_length = try contentLength(parsed.headers);
+    if (statusCodeForbidsBody(status)) {
+        try validateResponseBodyForStatus(status, parsed.headers, &.{}, &.{});
+    }
+
+    const forbidden = responseForbidsBody(status, context.request_method);
+    const framing: BodyFraming = if (forbidden) .none else bodyFraming(parsed.headers) catch |err| switch (err) {
+        error.InvalidTransferEncoding => if (responseTransferEncodingIsCloseDelimited(parsed.headers))
+            .close_delimited
+        else
+            return error.InvalidTransferEncoding,
+        else => |e| return e,
+    };
+    return .{
+        .version = version,
+        .status = status,
+        .reason = reason,
+        .headers = parsed.headers,
+        .body_framing = framing,
+        .content_length = declared_content_length,
+        .head_len = parsed.head_len,
+    };
+}
+
+const BorrowedHead = struct {
+    start_line: []const u8,
+    headers: []Header,
+    head_len: usize,
+};
+
+fn parseHeadLines(bytes: []const u8, header_storage: []Header, options: ParseOptions) Error!BorrowedHead {
+    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
+    const head = bytes[0..head_end];
+    // Headerless messages place the first CRLF at the beginning of the
+    // terminator, so it is excluded from `head` and the start line spans all
+    // remaining bytes.
+    const first_line_end = std.mem.indexOf(u8, head, "\r\n") orelse head.len;
+    const start_line = head[0..first_line_end];
+
+    var count: usize = 0;
+    var pos = if (first_line_end == head.len) head.len else first_line_end + 2;
+    while (pos < head.len) {
+        const line_end_rel = std.mem.indexOf(u8, head[pos..], "\r\n") orelse head.len - pos;
+        const line = head[pos .. pos + line_end_rel];
+        if (line.len == 0) return error.MalformedHeader;
+        if (line[0] == ' ' or line[0] == '\t') {
+            // Even when allocating parse allows obs-fold, this borrowed API
+            // cannot expose a contiguous unfolded value without copying.
+            _ = options.allow_obs_fold;
+            return error.MalformedHeader;
+        }
+        if (count >= options.max_headers or count >= header_storage.len) return error.TooManyHeaders;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MalformedHeader;
+        if (colon == 0) return error.MalformedHeader;
+        const name = line[0..colon];
+        const value = wire.trimOws(line[colon + 1 ..]);
+        try validateHeaderName(name);
+        try validateHeaderValue(value);
+        header_storage[count] = .{ .name = name, .value = value };
+        count += 1;
+        pos += line_end_rel;
+        if (pos < head.len) pos += 2;
+    }
+    return .{
+        .start_line = start_line,
+        .headers = header_storage[0..count],
+        .head_len = head_end + 4,
+    };
+}
 
 pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!Request {
     const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
@@ -1058,6 +1232,124 @@ test "HTTP/1 request parse and serialize" {
     defer out.deinit(allocator);
     try writeRequest(&out, allocator, req.method, req.target, req.version, req.headers, req.body);
     try std.testing.expectEqualStrings(raw, out.items);
+}
+
+test "HTTP/1 borrowed request heads parse pipelines without allocation" {
+    const pipeline =
+        "POST /one HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Content-Length: 5\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "\r\n" ++
+        "hello" ++
+        "GET /two HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "\r\n";
+
+    var headers: [8]Header = undefined;
+    const first = try parseRequestHead(pipeline, &headers, .{});
+    try std.testing.expectEqual(Method.POST, first.method);
+    try std.testing.expectEqualStrings("/one", first.target);
+    try std.testing.expectEqualStrings("example.com", first.header("host").?);
+    try std.testing.expect(first.keepAlive());
+    try std.testing.expectEqual(BodyFraming.content_length, first.body_framing);
+    const first_len = (try first.messageLength()).?;
+    try std.testing.expectEqualStrings("hello", pipeline[first.head_len..first_len]);
+
+    var second_headers: [4]Header = undefined;
+    const second = try parseRequestHead(pipeline[first_len..], &second_headers, .{});
+    try std.testing.expectEqual(Method.GET, second.method);
+    try std.testing.expectEqualStrings("/two", second.target);
+    try std.testing.expectEqual(BodyFraming.none, second.body_framing);
+    try std.testing.expectEqual(second.head_len, (try second.messageLength()).?);
+
+    // There is no allocator parameter and caller-provided storage contains all
+    // descriptors, so the same parse remains valid under a no-allocation policy.
+    var no_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    _ = no_alloc.allocator();
+    _ = try parseRequestHead(pipeline, &headers, .{});
+    try std.testing.expect(!no_alloc.has_induced_failure);
+}
+
+test "HTTP/1 borrowed response heads honor method context" {
+    const head_response =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Content-Length: 123\r\n" ++
+        "\r\n" ++
+        "HTTP/1.1 204 No Content\r\n\r\n";
+    var headers: [4]Header = undefined;
+    const head = try parseResponseHead(head_response, &headers, .{}, .{ .request_method = .HEAD });
+    try std.testing.expectEqual(BodyFraming.none, head.body_framing);
+    try std.testing.expectEqual(@as(?usize, 123), head.content_length);
+    try std.testing.expectEqual(head.head_len, (try head.messageLength()).?);
+
+    var second_headers: [1]Header = undefined;
+    const no_content = try parseResponseHead(head_response[head.head_len..], &second_headers, .{}, .{});
+    try std.testing.expectEqual(@as(u16, 204), no_content.status);
+    try std.testing.expectEqual(no_content.head_len, (try no_content.messageLength()).?);
+
+    const connect = "HTTP/1.1 200 Connection Established\r\n\r\ntunnel";
+    const tunnel = try parseResponseHead(connect, &second_headers, .{}, .{ .request_method = .CONNECT });
+    try std.testing.expectEqual(BodyFraming.none, tunnel.body_framing);
+    try std.testing.expectEqualStrings("Connection Established", tunnel.reason);
+
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        parseResponseHead(
+            "HTTP/1.1 204 No Content\r\nContent-Length: 1\r\n\r\n",
+            &headers,
+            .{},
+            .{},
+        ),
+    );
+}
+
+test "HTTP/1 borrowed heads expose unknown chunked and close-delimited lengths" {
+    var headers: [4]Header = undefined;
+    const chunked =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n" ++
+        "1\r\nx\r\n0\r\n\r\n";
+    const chunked_head = try parseResponseHead(chunked, &headers, .{}, .{});
+    try std.testing.expectEqual(BodyFraming.chunked, chunked_head.body_framing);
+    try std.testing.expectEqual(@as(?usize, null), try chunked_head.messageLength());
+
+    const close_delimited =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Transfer-Encoding: gzip\r\n\r\npayload";
+    const close_head = try parseResponseHead(close_delimited, &headers, .{}, .{});
+    try std.testing.expectEqual(BodyFraming.close_delimited, close_head.body_framing);
+    try std.testing.expectEqual(@as(?usize, null), try close_head.messageLength());
+}
+
+test "HTTP/1 borrowed heads validate storage host and folding" {
+    var no_headers: [0]Header = .{};
+    try std.testing.expectError(
+        error.TooManyHeaders,
+        parseRequestHead("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n", &no_headers, .{}),
+    );
+
+    var headers: [4]Header = undefined;
+    try std.testing.expectError(
+        error.InvalidHost,
+        parseRequestHead("GET / HTTP/1.1\r\n\r\n", &headers, .{}),
+    );
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseRequestHead(
+            "GET / HTTP/1.1\r\nHost: example.com\r\nFold: one\r\n two\r\n\r\n",
+            &headers,
+            .{ .allow_obs_fold = true },
+        ),
+    );
+    try std.testing.expectError(
+        error.ConflictingContentLength,
+        parseRequestHead(
+            "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+            &headers,
+            .{},
+        ),
+    );
 }
 
 test "HTTP/1 validates header field syntax" {

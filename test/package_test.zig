@@ -8,6 +8,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readResponseFromStreamBuffered"));
     try std.testing.expect(@hasDecl(netz.http1, "ResponseContext"));
     try std.testing.expect(@hasDecl(netz.http1, "parseResponseForRequest"));
+    try std.testing.expect(@hasDecl(netz.http1, "RequestHead"));
+    try std.testing.expect(@hasDecl(netz.http1, "ResponseHead"));
+    try std.testing.expect(@hasDecl(netz.http1, "parseRequestHead"));
+    try std.testing.expect(@hasDecl(netz.http1, "parseResponseHead"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readResponseFromStreamBufferedForRequest"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readRequestFromStreamBuffered"));
     try std.testing.expect(@hasDecl(netz.http1.runtime, "readResponseFromStreamForRequest"));
