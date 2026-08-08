@@ -1511,6 +1511,7 @@ pub const Connection = struct {
             error.StreamLimitExceeded => firstFrameClose(frames, .stream_limit_error, "stream limit"),
             error.StreamStateError => firstFrameClose(frames, .stream_state_error, "stream state"),
             error.FlowControlViolation => firstFrameClose(frames, .flow_control_error, "flow control"),
+            error.FinalSizeMismatch => firstFrameClose(frames, .final_size_error, "final size"),
             else => null,
         };
     }
@@ -4881,6 +4882,10 @@ test "QUIC 1-RTT connection handles RESET_STREAM final size" {
         } }},
     });
     try std.testing.expectError(error.FinalSizeMismatch, server.receivePacket());
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.final_size_error), server.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.reset_stream)), server.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("final size", server.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT connection answers STOP_SENDING with RESET_STREAM" {
