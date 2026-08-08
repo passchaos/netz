@@ -195,6 +195,16 @@ pub const Client = struct {
     }
 
     pub fn connectWithConnAck(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!ConnectResult {
+        var attempt = try connectAttempt(allocator, io, address, options);
+        errdefer attempt.deinit(allocator);
+        const connection = attempt.connection orelse return error.ConnectRefused;
+        return .{
+            .connection = connection,
+            .connack = attempt.takeConnAck(),
+        };
+    }
+
+    pub fn connectAttempt(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!ConnectAttempt {
         const stream = try address.connect(io, .{ .mode = .stream });
         errdefer stream.close(io);
 
@@ -243,7 +253,10 @@ pub const Client = struct {
 
         var connack = try connection.readConnAck();
         errdefer connack.deinit(allocator);
-        if (connack.connack.reason_code != 0) return error.ConnectRefused;
+        if (connack.connack.reason_code != 0) {
+            connection.close();
+            return .{ .connection = null, .connack = connack };
+        }
         if (mqtt.receiveMaximum(connack.connack.properties)) |receive_maximum| {
             connection.max_outgoing_inflight = negotiatedOutgoingInflightLimit(connection.max_outgoing_inflight, receive_maximum);
         }
@@ -257,6 +270,28 @@ pub const Client = struct {
         if (mqtt.sharedSubscriptionAvailable(connack.connack.properties)) |available| connection.peer_shared_subscription_available = available;
 
         return .{ .connection = connection, .connack = connack };
+    }
+};
+
+pub const ConnectAttempt = struct {
+    connection: ?Connection,
+    connack: OwnedConnAck,
+
+    pub fn accepted(self: ConnectAttempt) bool {
+        return self.connection != null and self.connack.connack.reason_code == 0;
+    }
+
+    pub fn deinit(self: *ConnectAttempt, allocator: std.mem.Allocator) void {
+        self.connack.deinit(allocator);
+        if (self.connection) |*connection| connection.close();
+        self.* = undefined;
+    }
+
+    fn takeConnAck(self: *ConnectAttempt) OwnedConnAck {
+        const connack = self.connack;
+        self.connack = undefined;
+        self.connection = null;
+        return connack;
     }
 };
 
@@ -1327,6 +1362,53 @@ test "MQTT runtime exposes CONNACK session present" {
     defer result.deinit(allocator);
     try std.testing.expect(result.connack.connack.session_present);
     try result.connection.disconnect(0);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT client connectAttempt exposes refused CONNACK reason" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_packet_size = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var accepted = try server_ptr.accept(.{
+                .protocol = .v5,
+                .reason_code = 0x87, // Not authorized.
+            });
+            defer accepted.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("refused-client", accepted.connect.connect.client_id);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var attempt = try Client.connectAttempt(allocator, io, server.address(), .{
+        .protocol = .v5,
+        .client_id = "refused-client",
+        .limits = .{ .max_packet_size = 4096 },
+    });
+    defer attempt.deinit(allocator);
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expect(attempt.connection == null);
+    try std.testing.expectEqual(@as(u8, 0x87), attempt.connack.connack.reason_code);
 
     thread.join();
     if (shared.err) |err| return err;
