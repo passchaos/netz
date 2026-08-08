@@ -1505,18 +1505,31 @@ pub const Connection = struct {
                 };
             } else null,
             error.InvalidFrame => for (frames) |frame| {
-                if (self.config.local_endpoint == .server and frame == .new_token) break quic.FramePayloadCloseError{
-                    .code = .protocol_violation,
-                    .frame_type = @intFromEnum(quic.FrameType.new_token),
-                    .reason_phrase = "new token",
-                };
-                if (self.config.local_endpoint == .server and frame == .handshake_done) break quic.FramePayloadCloseError{
-                    .code = .protocol_violation,
-                    .frame_type = @intFromEnum(quic.FrameType.handshake_done),
-                    .reason_phrase = "handshake done",
-                };
+                if (self.config.local_endpoint == .server and frame == .new_token) break semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.new_token), "new token");
+                if (self.config.local_endpoint == .server and frame == .handshake_done) break semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.handshake_done), "handshake done");
             } else null,
+            error.StreamLimitExceeded => firstFrameClose(frames, .stream_limit_error, "stream limit"),
             else => null,
+        };
+    }
+
+    fn firstFrameClose(frames: []const quic.Frame, code: quic.TransportErrorCode, reason: []const u8) ?quic.FramePayloadCloseError {
+        if (frames.len == 0) return null;
+        return semanticClose(code, frameTypeForSemanticClose(frames[frames.len - 1]), reason);
+    }
+
+    fn semanticClose(code: quic.TransportErrorCode, frame_type: u64, reason: []const u8) quic.FramePayloadCloseError {
+        return .{ .code = code, .frame_type = frame_type, .reason_phrase = reason };
+    }
+
+    fn frameTypeForSemanticClose(frame: quic.Frame) u64 {
+        return switch (frame) {
+            .stream => @intFromEnum(quic.FrameType.stream) | 0x02,
+            .reset_stream => @intFromEnum(quic.FrameType.reset_stream),
+            .stream_data_blocked => @intFromEnum(quic.FrameType.stream_data_blocked),
+            .max_stream_data => @intFromEnum(quic.FrameType.max_stream_data),
+            .stop_sending => @intFromEnum(quic.FrameType.stop_sending),
+            else => 0,
         };
     }
 
@@ -2698,6 +2711,10 @@ test "QUIC 1-RTT connection preflights stream frames before receive-side effects
     try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
+    try std.testing.expect(client.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.stream_limit_error), client.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.stream) | 0x02), client.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("stream limit", client.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT connection rejects invalid unidirectional stream controls before effects" {
