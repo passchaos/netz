@@ -27,6 +27,7 @@ pub const Error = wire.Error || error{
     InvalidContentLength,
     IntegerOverflow,
     ExcessiveLoad,
+    ExtendedConnectDisabled,
     QpackDynamicTableUnsupported,
 } || std.mem.Allocator.Error;
 
@@ -1057,6 +1058,13 @@ fn requestHasProtocolPseudo(headers: []const Qpack.HeaderField) bool {
     return false;
 }
 
+fn findHeader(headers: []const Qpack.HeaderField, name: []const u8) ?[]const u8 {
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    }
+    return null;
+}
+
 pub const Response = struct {
     status: u16,
     headers: []const Qpack.HeaderField = &.{},
@@ -1189,10 +1197,23 @@ pub const DecodedResponse = struct {
 };
 
 pub fn decodeRequest(allocator: std.mem.Allocator, bytes: []const u8) Error!DecodedRequest {
-    return decodeRequestWithSettings(allocator, bytes, .{});
+    // `decodeRequest` is the codec-level entry point and intentionally does
+    // not assume a SETTINGS exchange has happened. Negotiated runtime paths
+    // call `decodeRequestWithSettings`, which enforces advertised features such
+    // as RFC 9220 extended CONNECT.
+    return decodeRequestWithOptions(allocator, bytes, .{}, false);
 }
 
 pub fn decodeRequestWithSettings(allocator: std.mem.Allocator, bytes: []const u8, settings: Settings) Error!DecodedRequest {
+    return decodeRequestWithOptions(allocator, bytes, settings, true);
+}
+
+fn decodeRequestWithOptions(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    settings: Settings,
+    enforce_extended_connect_setting: bool,
+) Error!DecodedRequest {
     var message = try decodeMessage(allocator, bytes, .request, settings.max_field_section_size);
     errdefer message.deinit(allocator);
 
@@ -1219,7 +1240,11 @@ pub fn decodeRequestWithSettings(allocator: std.mem.Allocator, bytes: []const u8
         }
     }
     const method_value = method orelse return error.MissingMethod;
-    const plain_connect = std.mem.eql(u8, method_value, "CONNECT") and !requestHasProtocolPseudo(message.headers);
+    const has_protocol = requestHasProtocolPseudo(message.headers);
+    if (enforce_extended_connect_setting and has_protocol and !settings.enable_connect_protocol) {
+        return error.ExtendedConnectDisabled;
+    }
+    const plain_connect = std.mem.eql(u8, method_value, "CONNECT") and !has_protocol;
 
     return .{
         .method = method_value,
@@ -2675,6 +2700,21 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
         .{ .name = ":authority", .value = "example.com" },
     });
     try std.testing.expectError(error.InvalidHeader, decodeRequest(allocator, extended_connect_missing_target.items));
+
+    var extended_connect = std.ArrayList(u8).empty;
+    defer extended_connect.deinit(allocator);
+    try (Request{
+        .method = "CONNECT",
+        .path = "/wt",
+        .scheme = "https",
+        .authority = "example.com",
+        .headers = &.{.{ .name = ":protocol", .value = "webtransport" }},
+    }).write(&extended_connect, allocator);
+    try std.testing.expectError(error.ExtendedConnectDisabled, decodeRequestWithSettings(allocator, extended_connect.items, .{}));
+    var extended_decoded = try decodeRequestWithSettings(allocator, extended_connect.items, .{ .enable_connect_protocol = true });
+    defer extended_decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("CONNECT", extended_decoded.method);
+    try std.testing.expectEqualStrings("webtransport", findHeader(extended_decoded.headers, ":protocol").?);
 
     var invalid_protocol_token = std.ArrayList(u8).empty;
     defer invalid_protocol_token.deinit(allocator);
