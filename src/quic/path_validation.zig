@@ -16,10 +16,57 @@ pub const Challenge = struct {
     deadline_ns: ?u64 = null,
 };
 
+fn Fifo(comptime T: type) type {
+    return struct {
+        items: std.ArrayList(T) = .empty,
+        head: usize = 0,
+
+        const Self = @This();
+
+        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.items.deinit(allocator);
+            self.* = undefined;
+        }
+
+        fn append(self: *Self, allocator: std.mem.Allocator, value: T) std.mem.Allocator.Error!void {
+            self.compactIfEmpty();
+            try self.items.append(allocator, value);
+        }
+
+        fn appendSlice(self: *Self, allocator: std.mem.Allocator, values: []const T) std.mem.Allocator.Error!void {
+            self.compactIfEmpty();
+            try self.items.appendSlice(allocator, values);
+        }
+
+        fn popFront(self: *Self) ?T {
+            if (self.len() == 0) return null;
+            const value = self.items.items[self.head];
+            self.head += 1;
+            self.compactIfEmpty();
+            return value;
+        }
+
+        fn len(self: Self) usize {
+            return self.items.items.len - self.head;
+        }
+
+        fn activeConst(self: Self) []const T {
+            return self.items.items[self.head..];
+        }
+
+        fn compactIfEmpty(self: *Self) void {
+            if (self.head != 0 and self.head == self.items.items.len) {
+                self.items.clearRetainingCapacity();
+                self.head = 0;
+            }
+        }
+    };
+}
+
 pub const State = struct {
     allocator: std.mem.Allocator,
-    pending_responses: std.ArrayList([8]u8) = .empty,
-    pending_challenges: std.ArrayList(Challenge) = .empty,
+    pending_responses: Fifo([8]u8) = .{},
+    pending_challenges: Fifo(Challenge) = .{},
     outstanding_challenges: std.ArrayList(Challenge) = .empty,
     failed_challenges: std.ArrayList(Challenge) = .empty,
     max_challenge_transmissions: u8 = default_max_challenge_transmissions,
@@ -39,8 +86,8 @@ pub const State = struct {
     pub fn clone(self: State, allocator: std.mem.Allocator) Error!State {
         var out = State.init(allocator);
         errdefer out.deinit();
-        try out.pending_responses.appendSlice(allocator, self.pending_responses.items);
-        try out.pending_challenges.appendSlice(allocator, self.pending_challenges.items);
+        try out.pending_responses.appendSlice(allocator, self.pending_responses.activeConst());
+        try out.pending_challenges.appendSlice(allocator, self.pending_challenges.activeConst());
         try out.outstanding_challenges.appendSlice(allocator, self.outstanding_challenges.items);
         try out.failed_challenges.appendSlice(allocator, self.failed_challenges.items);
         out.max_challenge_transmissions = self.max_challenge_transmissions;
@@ -48,7 +95,7 @@ pub const State = struct {
     }
 
     pub fn queueChallenge(self: *State, data: [8]u8) Error!void {
-        for (self.pending_challenges.items) |challenge| {
+        for (self.pending_challenges.activeConst()) |challenge| {
             if (std.mem.eql(u8, &challenge.data, &data)) return;
         }
         for (self.outstanding_challenges.items) |challenge| {
@@ -58,15 +105,14 @@ pub const State = struct {
     }
 
     pub fn receiveChallenge(self: *State, data: [8]u8) Error!void {
-        for (self.pending_responses.items) |existing| {
+        for (self.pending_responses.activeConst()) |existing| {
             if (std.mem.eql(u8, &existing, &data)) return;
         }
         try self.pending_responses.append(self.allocator, data);
     }
 
     pub fn nextResponseFrame(self: *State) Error!quic.Frame {
-        if (self.pending_responses.items.len == 0) return error.NoPendingPathResponse;
-        const data = self.pending_responses.orderedRemove(0);
+        const data = self.pending_responses.popFront() orelse return error.NoPendingPathResponse;
         return .{ .path_response = .{ .data = data } };
     }
 
@@ -75,8 +121,7 @@ pub const State = struct {
     }
 
     pub fn nextChallengeFrameAt(self: *State, now_ns: ?u64, timeout_ns: ?u64) Error!quic.Frame {
-        if (self.pending_challenges.items.len == 0) return error.NoPendingPathChallenge;
-        var challenge = self.pending_challenges.orderedRemove(0);
+        var challenge = self.pending_challenges.popFront() orelse return error.NoPendingPathChallenge;
         challenge.transmissions +|= 1;
         challenge.sent_time_ns = now_ns;
         if (now_ns) |now| {
@@ -101,11 +146,11 @@ pub const State = struct {
     }
 
     pub fn pendingResponseCount(self: State) usize {
-        return self.pending_responses.items.len;
+        return self.pending_responses.len();
     }
 
     pub fn pendingChallengeCount(self: State) usize {
-        return self.pending_challenges.items.len;
+        return self.pending_challenges.len();
     }
 
     pub fn outstandingChallengeCount(self: State) usize {
@@ -171,6 +216,36 @@ test "QUIC path validation state queues responses and validates challenges" {
     try state.receiveResponse(challenge);
     try std.testing.expectEqual(@as(usize, 0), state.outstandingChallengeCount());
     try std.testing.expectError(error.UnknownPathResponse, state.receiveResponse(challenge));
+}
+
+test "QUIC path validation pending queues pop FIFO without shifting" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+
+    const a = [_]u8{ 'a', 0, 0, 0, 0, 0, 0, 1 };
+    const b = [_]u8{ 'b', 0, 0, 0, 0, 0, 0, 2 };
+    const c = [_]u8{ 'c', 0, 0, 0, 0, 0, 0, 3 };
+
+    try state.receiveChallenge(a);
+    try state.receiveChallenge(b);
+    try std.testing.expectEqual(@as(usize, 2), state.pendingResponseCount());
+    try std.testing.expectEqualSlices(u8, &a, &(try state.nextResponseFrame()).path_response.data);
+    try state.receiveChallenge(c);
+    try std.testing.expectEqualSlices(u8, &b, &(try state.nextResponseFrame()).path_response.data);
+    try std.testing.expectEqualSlices(u8, &c, &(try state.nextResponseFrame()).path_response.data);
+    try std.testing.expectError(error.NoPendingPathResponse, state.nextResponseFrame());
+
+    try state.queueChallenge(a);
+    try state.queueChallenge(b);
+    try std.testing.expectEqualSlices(u8, &a, &(try state.nextChallengeFrame()).path_challenge.data);
+    try state.queueChallenge(c);
+
+    var cloned = try state.clone(allocator);
+    defer cloned.deinit();
+    try std.testing.expectEqual(@as(usize, 2), cloned.pendingChallengeCount());
+    try std.testing.expectEqualSlices(u8, &b, &(try cloned.nextChallengeFrame()).path_challenge.data);
+    try std.testing.expectEqualSlices(u8, &c, &(try cloned.nextChallengeFrame()).path_challenge.data);
 }
 
 test "QUIC path validation retries and fails timed-out challenges" {
