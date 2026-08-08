@@ -3446,6 +3446,7 @@ pub const sdp = struct {
             if (std.ascii.eqlIgnoreCase(codec_name, "rtx")) return "video/rtx";
             if (std.ascii.eqlIgnoreCase(codec_name, "flexfec")) return "video/flexfec";
             if (std.ascii.eqlIgnoreCase(codec_name, "flexfec-03")) return "video/flexfec-03";
+            if (std.ascii.eqlIgnoreCase(codec_name, "ulpfec")) return "video/ulpfec";
         }
         return codec_name;
     }
@@ -10757,14 +10758,16 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
         "v=0\r\n" ++
         "s=-\r\n" ++
         "t=0 0\r\n" ++
-        "m=video 9 UDP/TLS/RTP/SAVPF 96 120\r\n" ++
+        "m=video 9 UDP/TLS/RTP/SAVPF 96 120 121\r\n" ++
         "a=rtpmap:96 VP8/90000\r\n" ++
-        "a=rtpmap:120 flexfec-03/90000\r\n";
+        "a=rtpmap:120 flexfec-03/90000\r\n" ++
+        "a=rtpmap:121 ulpfec/90000\r\n";
     var flexfec_codec_session = try sdp.parse(allocator, flexfec_codec_text);
     defer flexfec_codec_session.deinit(allocator);
     const flexfec_codecs = try sdp.extractRtpCodecs(allocator, flexfec_codec_session.media[0]);
     defer sdp.freeRtpCodecs(allocator, flexfec_codecs);
     try std.testing.expectEqualStrings("video/flexfec-03", flexfec_codecs[1].mime_type);
+    try std.testing.expectEqualStrings("video/ulpfec", flexfec_codecs[2].mime_type);
     try std.testing.expectEqual(@as(?u8, 120), sdp.fecPayloadType(flexfec_codecs));
     try std.testing.expectEqual(@as(?u8, null), sdp.fecPayloadType(rtx_codecs));
 
