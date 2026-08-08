@@ -1254,6 +1254,15 @@ pub const sdp = struct {
         return false;
     }
 
+    pub fn preferredLocalDirectionsForRemote(remote: MediaDirection) []const MediaDirection {
+        return switch (remote) {
+            .sendrecv => &.{ .recvonly, .sendrecv, .sendonly },
+            .sendonly => &.{.recvonly},
+            .recvonly => &.{ .sendonly, .sendrecv },
+            .inactive => &.{},
+        };
+    }
+
     pub fn formatMediaDirectionLine(allocator: std.mem.Allocator, direction: MediaDirection) Error![]u8 {
         return std.fmt.allocPrint(allocator, "a={s}\r\n", .{direction.attribute()});
     }
@@ -10582,6 +10591,10 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(sdp.MediaDirection.inactive, sdp.reverseMediaDirection(.inactive));
     try std.testing.expect(sdp.mediaDirectionIntersects(&.{ .sendrecv, .recvonly }, &.{.recvonly}));
     try std.testing.expect(!sdp.mediaDirectionIntersects(&.{.sendonly}, &.{ .recvonly, .inactive }));
+    try std.testing.expectEqualSlices(sdp.MediaDirection, &[_]sdp.MediaDirection{ .recvonly, .sendrecv, .sendonly }, sdp.preferredLocalDirectionsForRemote(.sendrecv));
+    try std.testing.expectEqualSlices(sdp.MediaDirection, &[_]sdp.MediaDirection{.recvonly}, sdp.preferredLocalDirectionsForRemote(.sendonly));
+    try std.testing.expectEqualSlices(sdp.MediaDirection, &[_]sdp.MediaDirection{ .sendonly, .sendrecv }, sdp.preferredLocalDirectionsForRemote(.recvonly));
+    try std.testing.expectEqual(@as(usize, 0), sdp.preferredLocalDirectionsForRemote(.inactive).len);
     const direction_line = try sdp.formatMediaDirectionLine(allocator, .sendrecv);
     defer allocator.free(direction_line);
     try std.testing.expectEqualStrings("a=sendrecv\r\n", direction_line);
