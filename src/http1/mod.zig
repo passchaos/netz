@@ -883,6 +883,7 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
         if (semi != line.len) {
             extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
             if (extension_bytes > max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
+            try validateChunkExtension(line[semi + 1 ..]);
         }
         const size_part = try chunkSizePart(line[0..semi]);
         const size = try parseChunkSize(size_part);
@@ -926,6 +927,16 @@ fn freeHeaderValueStorage(allocator: std.mem.Allocator, storage: [][]u8) void {
 pub fn validateTrailers(trailers: []const Header) Error!void {
     for (trailers) |trailer| {
         if (!validTrailerFieldName(trailer.name)) return error.InvalidTrailer;
+    }
+}
+
+fn validateChunkExtension(extension: []const u8) Error!void {
+    for (extension) |byte| {
+        // Hyper rejects bare LF inside ignored chunk extensions because some
+        // permissive intermediaries accidentally treat it as a line boundary.
+        // Reject CR too unless it is the actual CRLF delimiter consumed by the
+        // caller; otherwise peers can disagree about where the chunk header ends.
+        if (byte == 0x0a or byte == 0x0d) return error.InvalidChunk;
     }
 }
 
@@ -1214,6 +1225,8 @@ test "HTTP/1 chunked extensions are bounded" {
     try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "+1\r\nx\r\n0\r\n\r\n", .{}));
     try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, " 1\r\nx\r\n0\r\n\r\n", .{}));
     try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "1 1\r\nxxxxxxxxxxx\r\n0\r\n\r\n", .{}));
+    try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "1;bad\next\r\nx\r\n0\r\n\r\n", .{}));
+    try std.testing.expectError(error.InvalidChunk, decodeChunked(allocator, "1;bad\rbare\r\nx\r\n0\r\n\r\n", .{}));
     var post_size_lws = try decodeChunked(allocator, "1 \t;ignored\r\nx\r\n0\r\n\r\n", .{});
     defer post_size_lws.deinit(allocator);
     try std.testing.expectEqualStrings("x", post_size_lws.body);
