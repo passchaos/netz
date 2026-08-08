@@ -54,9 +54,11 @@ pub const RecvFlow = struct {
     }
 
     pub fn consume(self: *RecvFlow, amount: u64) ?u64 {
-        self.consumed = @min(self.highest_received, self.consumed + amount);
+        self.consumed = @min(self.highest_received, self.consumed +| amount);
         if (self.limit - self.consumed <= self.window / 2) {
-            self.limit = self.consumed + self.window;
+            const next_limit = @min(self.consumed +| self.window, quic.varint.max_value);
+            if (next_limit <= self.limit) return null;
+            self.limit = next_limit;
             return self.limit;
         }
         return null;
@@ -106,6 +108,17 @@ test "QUIC receive flow emits MAX_DATA after consumption threshold" {
     try std.testing.expectEqual(@as(u64, 160), new_limit);
     const frame = flow.maxDataFrame();
     try std.testing.expectEqual(@as(u64, 160), frame.max_data.maximum_data);
+}
+
+test "QUIC receive flow consumes and expands near varint ceiling safely" {
+    var flow = try RecvFlow.init(quic.varint.max_value - 1, quic.varint.max_value);
+    try flow.receive(quic.varint.max_value - 1);
+
+    const new_limit = flow.consume(std.math.maxInt(u64)).?;
+    try std.testing.expectEqual(quic.varint.max_value, new_limit);
+    try std.testing.expectEqual(quic.varint.max_value - 1, flow.consumed);
+    try std.testing.expectEqual(@as(?u64, null), flow.consume(1));
+    try std.testing.expectEqual(quic.varint.max_value, flow.limit);
 }
 
 test "QUIC stream flow produces stream-specific frames" {
