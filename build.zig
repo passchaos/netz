@@ -66,6 +66,12 @@ pub fn build(b: *std.Build) void {
             .run_step = "run-websocket-echo",
             .description = "Run the WebSocket local echo example",
         },
+        .{
+            .exe_name = "netz-bench-mqtt-router",
+            .path = "examples/bench_mqtt_router.zig",
+            .run_step = "bench-mqtt-router",
+            .description = "Benchmark MQTT router trie matching against a linear scan",
+        },
     };
     const linux_example_specs = [_]struct {
         exe_name: []const u8,
