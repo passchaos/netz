@@ -226,6 +226,69 @@ pub const CloseState = enum {
     closed,
 };
 
+const DatagramRecvQueue = struct {
+    slots: std.ArrayList(?[]u8) = .empty,
+    head: usize = 0,
+    len: usize = 0,
+
+    fn deinit(self: *DatagramRecvQueue, allocator: std.mem.Allocator) void {
+        for (self.slots.items) |maybe_payload| {
+            if (maybe_payload) |payload| allocator.free(payload);
+        }
+        self.slots.deinit(allocator);
+        self.* = undefined;
+    }
+
+    fn count(self: DatagramRecvQueue) usize {
+        return self.len;
+    }
+
+    /// Insert a payload into a bounded FIFO queue, returning an evicted oldest
+    /// payload when the queue is already full. s2n-quic's default receiver
+    /// favors the newest unreliable DATAGRAM data on overflow; mirroring that
+    /// behavior here also keeps receive-pop O(1) by avoiding `orderedRemove(0)`.
+    fn pushDroppingOldest(
+        self: *DatagramRecvQueue,
+        allocator: std.mem.Allocator,
+        payload: []u8,
+        capacity: usize,
+    ) std.mem.Allocator.Error!?[]u8 {
+        std.debug.assert(capacity > 0);
+        std.debug.assert(self.len <= capacity);
+
+        if (self.len < capacity) {
+            const tail = if (self.slots.items.len == 0) 0 else (self.head + self.len) % capacity;
+            if (tail < self.slots.items.len) {
+                std.debug.assert(self.slots.items[tail] == null);
+                self.slots.items[tail] = payload;
+            } else {
+                std.debug.assert(tail == self.slots.items.len);
+                try self.slots.append(allocator, payload);
+            }
+            self.len += 1;
+            return null;
+        }
+
+        const dropped = self.slots.items[self.head].?;
+        self.slots.items[self.head] = payload;
+        self.head = (self.head + 1) % self.slots.items.len;
+        return dropped;
+    }
+
+    fn pop(self: *DatagramRecvQueue) ?[]u8 {
+        if (self.len == 0) return null;
+        const payload = self.slots.items[self.head].?;
+        self.slots.items[self.head] = null;
+        self.len -= 1;
+        if (self.len == 0) {
+            self.head = 0;
+        } else {
+            self.head = (self.head + 1) % self.slots.items.len;
+        }
+        return payload;
+    }
+};
+
 pub const LossDetectionTimerKind = enum {
     loss_time,
     pto,
@@ -277,7 +340,7 @@ pub const Connection = struct {
     peer_address_bytes_received: usize = 0,
     peer_address_bytes_sent: usize = 0,
     pmtud: quic.pmtu.State = .{},
-    datagram_recv_queue: std.ArrayList([]u8) = .empty,
+    datagram_recv_queue: DatagramRecvQueue = .{},
     datagrams_sent_count: u64 = 0,
     datagrams_received_count: u64 = 0,
     datagrams_dropped_incoming_count: u64 = 0,
@@ -342,7 +405,6 @@ pub const Connection = struct {
         self.stream_send_flows.deinit(self.endpoint.allocator);
         for (self.stream_recv_flows.items) |*entry| entry.deinit();
         self.stream_recv_flows.deinit(self.endpoint.allocator);
-        for (self.datagram_recv_queue.items) |payload| self.endpoint.allocator.free(payload);
         self.datagram_recv_queue.deinit(self.endpoint.allocator);
         self.send_frame_buffer.deinit(self.endpoint.allocator);
         self.send_packet_buffer.deinit(self.endpoint.allocator);
@@ -472,8 +534,7 @@ pub const Connection = struct {
     }
 
     pub fn popDatagram(self: *Connection, out: []u8) Error!?[]u8 {
-        if (self.datagram_recv_queue.items.len == 0) return null;
-        const payload = self.datagram_recv_queue.orderedRemove(0);
+        const payload = self.datagram_recv_queue.pop() orelse return null;
         defer self.endpoint.allocator.free(payload);
         if (payload.len > out.len) return error.DatagramBufferTooSmall;
         @memcpy(out[0..payload.len], payload);
@@ -481,7 +542,7 @@ pub const Connection = struct {
     }
 
     pub fn datagramReceiveQueueLen(self: Connection) usize {
-        return self.datagram_recv_queue.items.len;
+        return self.datagram_recv_queue.count();
     }
 
     pub fn datagramsSent(self: Connection) u64 {
@@ -2043,13 +2104,23 @@ pub const Connection = struct {
 
     fn receiveDatagramFrame(self: *Connection, datagram: quic.DatagramFrame) Error!void {
         try self.validateDatagramFrame(datagram);
-        if (self.datagram_recv_queue.items.len >= self.config.max_datagram_queue_items) {
+        if (self.config.max_datagram_queue_items == 0) {
             self.datagrams_dropped_incoming_count +|= 1;
             return;
         }
         const owned = try self.endpoint.allocator.dupe(u8, datagram.data);
-        errdefer self.endpoint.allocator.free(owned);
-        try self.datagram_recv_queue.append(self.endpoint.allocator, owned);
+        var owns_payload = true;
+        errdefer if (owns_payload) self.endpoint.allocator.free(owned);
+        const dropped = try self.datagram_recv_queue.pushDroppingOldest(
+            self.endpoint.allocator,
+            owned,
+            self.config.max_datagram_queue_items,
+        );
+        owns_payload = false;
+        if (dropped) |payload| {
+            self.endpoint.allocator.free(payload);
+            self.datagrams_dropped_incoming_count +|= 1;
+        }
         self.datagrams_received_count +|= 1;
     }
 
@@ -2688,6 +2759,51 @@ fn maxDatagramPayloadForFrameSize(frame_size: usize) ?usize {
         if (candidate_len == len_len) return candidate;
         len_len = candidate_len;
     }
+}
+
+test "QUIC DATAGRAM receive queue drops oldest without shifting" {
+    const allocator = std.testing.allocator;
+    var queue: DatagramRecvQueue = .{};
+    defer queue.deinit(allocator);
+
+    const one = try allocator.dupe(u8, "one");
+    var owns_one = true;
+    errdefer if (owns_one) allocator.free(one);
+    try std.testing.expectEqual(@as(?[]u8, null), try queue.pushDroppingOldest(allocator, one, 2));
+    owns_one = false;
+
+    const two = try allocator.dupe(u8, "two");
+    var owns_two = true;
+    errdefer if (owns_two) allocator.free(two);
+    try std.testing.expectEqual(@as(?[]u8, null), try queue.pushDroppingOldest(allocator, two, 2));
+    owns_two = false;
+
+    const three = try allocator.dupe(u8, "three");
+    var owns_three = true;
+    errdefer if (owns_three) allocator.free(three);
+    const dropped = (try queue.pushDroppingOldest(allocator, three, 2)).?;
+    owns_three = false;
+    defer allocator.free(dropped);
+    try std.testing.expectEqualStrings("one", dropped);
+    try std.testing.expectEqual(@as(usize, 2), queue.count());
+
+    const first = queue.pop().?;
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("two", first);
+
+    const four = try allocator.dupe(u8, "four");
+    var owns_four = true;
+    errdefer if (owns_four) allocator.free(four);
+    try std.testing.expectEqual(@as(?[]u8, null), try queue.pushDroppingOldest(allocator, four, 2));
+    owns_four = false;
+
+    const second = queue.pop().?;
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings("three", second);
+    const third = queue.pop().?;
+    defer allocator.free(third);
+    try std.testing.expectEqualStrings("four", third);
+    try std.testing.expect(queue.pop() == null);
 }
 
 pub fn receiveZeroRtt(
@@ -6976,12 +7092,25 @@ test "QUIC 1-RTT DATAGRAM send receive and queue limits" {
     });
     var queued = try server.receivePacket();
     defer queued.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 3), server.datagramsReceived());
+    try std.testing.expectEqual(@as(u64, 4), server.datagramsReceived());
     try std.testing.expectEqual(@as(u64, 1), server.datagramsDroppedIncoming());
     try std.testing.expectEqual(@as(usize, 2), server.datagramReceiveQueueLen());
 
-    try std.testing.expect((try server.popDatagram(&out)) != null);
+    const kept_first = (try server.popDatagram(&out)).?;
+    try std.testing.expectEqualStrings("three", kept_first);
     try std.testing.expectError(error.DatagramBufferTooSmall, server.popDatagram(out[0..2]));
+    try std.testing.expectEqual(@as(usize, 0), server.datagramReceiveQueueLen());
+
+    try client.send(&.{
+        .{ .datagram = .{ .data = "four", .length_present = true } },
+        .{ .datagram = .{ .data = "five", .length_present = true } },
+    });
+    var wrapped = try server.receivePacket();
+    defer wrapped.deinit(allocator);
+    const wrapped_first = (try server.popDatagram(&out)).?;
+    try std.testing.expectEqualStrings("four", wrapped_first);
+    const wrapped_second = (try server.popDatagram(&out)).?;
+    try std.testing.expectEqualStrings("five", wrapped_second);
 }
 
 test "QUIC 1-RTT DATAGRAM enforces negotiation and frame-size limits" {
