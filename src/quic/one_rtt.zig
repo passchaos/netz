@@ -1200,6 +1200,15 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn sendPendingPathChallengesAt(self: *Connection, now_ns: ?u64, timeout_ns: ?u64) Error!usize {
+        try self.validateNextPacketNumber();
+        var frames: [8]quic.Frame = undefined;
+        const count = try self.path_validation.nextChallengeFramesAt(&frames, now_ns, timeout_ns);
+        if (count == 0) return 0;
+        try self.send(frames[0..count]);
+        return count;
+    }
+
     pub fn pathValidationDeadline(self: Connection) ?u64 {
         return self.path_validation.earliestChallengeDeadline();
     }
@@ -1213,6 +1222,15 @@ pub const Connection = struct {
         const frame = try self.path_validation.nextResponseFrame();
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
+    }
+
+    pub fn sendPendingPathResponses(self: *Connection) Error!usize {
+        try self.validateNextPacketNumber();
+        var frames: [8]quic.Frame = undefined;
+        const count = self.path_validation.nextResponseFrames(&frames);
+        if (count == 0) return 0;
+        try self.send(frames[0..count]);
+        return count;
     }
 
     pub fn closeTransport(self: *Connection, error_code: u64, frame_type: u64, reason_phrase: []const u8) Error!void {
@@ -5294,6 +5312,61 @@ test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {
 
     var response_packet = try client.receivePacket();
     defer response_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), client.path_validation.outstandingChallengeCount());
+}
+
+test "QUIC 1-RTT connection batches PATH_CHALLENGE and PATH_RESPONSE frames" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const server_cid = [_]u8{ 0x75, 0x76, 0x77, 0x78 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xd2} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const first = [_]u8{ 1, 1, 2, 3, 5, 8, 13, 21 };
+    const second = [_]u8{ 2, 3, 5, 8, 13, 21, 34, 55 };
+    try client.queuePathChallenge(first);
+    try client.queuePathChallenge(second);
+    try std.testing.expectEqual(@as(usize, 2), try client.sendPendingPathChallengesAt(100, 50));
+    try std.testing.expectEqual(@as(usize, 2), client.path_validation.outstandingChallengeCount());
+
+    var challenge_packet = try server.receivePacket();
+    defer challenge_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), challenge_packet.frames.len);
+    try std.testing.expectEqualSlices(u8, &first, &challenge_packet.frames[0].path_challenge.data);
+    try std.testing.expectEqualSlices(u8, &second, &challenge_packet.frames[1].path_challenge.data);
+    try std.testing.expectEqual(@as(usize, 2), server.path_validation.pendingResponseCount());
+
+    try std.testing.expectEqual(@as(usize, 2), try server.sendPendingPathResponses());
+    var response_packet = try client.receivePacket();
+    defer response_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), response_packet.frames.len);
     try std.testing.expectEqual(@as(usize, 0), client.path_validation.outstandingChallengeCount());
 }
 
