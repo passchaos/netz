@@ -15,6 +15,9 @@ pub const Error = quic.Error || error{
 pub const Limits = struct {
     max_datagram_size: usize = 65_535,
     max_frames_per_datagram: usize = 256,
+    /// Use Linux UDP_SEGMENT when a batch is already laid out as compatible
+    /// contiguous segments. Unsupported kernels still fall back automatically.
+    enable_gso_send: bool = true,
 };
 
 pub const SendManyBytesResult = struct {
@@ -100,6 +103,7 @@ pub const Endpoint = struct {
     limits: Limits = .{},
     receive_ecn_enabled: bool = false,
     send_ecn_mark: quic.packet_space.EcnCodepoint = .not_ect,
+    gso_send_enabled: bool = udpGsoSupported(),
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Endpoint {
         var endpoint = Endpoint{
@@ -107,6 +111,7 @@ pub const Endpoint = struct {
             .allocator = allocator,
             .socket = try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp }),
             .limits = limits,
+            .gso_send_enabled = limits.enable_gso_send and udpGsoSupported(),
         };
         errdefer endpoint.deinit();
         endpoint.enableEcnReceive();
@@ -120,6 +125,10 @@ pub const Endpoint = struct {
 
     pub fn address(self: Endpoint) net.IpAddress {
         return self.socket.address;
+    }
+
+    pub fn gsoSendEnabled(self: Endpoint) bool {
+        return self.gso_send_enabled;
     }
 
     pub fn sendBytes(self: *Endpoint, to: net.IpAddress, bytes: []const u8) Error!void {
@@ -164,6 +173,12 @@ pub const Endpoint = struct {
             if (bytes.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
         }
         try self.applyOutgoingEcnMark(.not_ect);
+
+        if (self.gso_send_enabled) {
+            if (gsoPlan(datagrams)) |plan| {
+                if (self.sendGso(to, plan)) |result| return result;
+            }
+        }
 
         // Match the Threaded backend's Linux sendmmsg chunk size. Keeping the
         // descriptors on the stack makes steady-state batch submission
@@ -214,6 +229,51 @@ pub const Endpoint = struct {
             }
         }
         return .{ .sent_count = offset };
+    }
+
+    /// Submit a Linux UDP GSO super-packet. Returning `null` means the kernel
+    /// rejected GSO before accepting data and the caller should retry through
+    /// the portable send-many path.
+    fn sendGso(self: *Endpoint, to: net.IpAddress, plan: GsoPlan) ?SendManyBytesResult {
+        var control: [udp_gso_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        const control_slice = encodeUdpGsoControl(&control, plan.segment_size);
+        var message: net.OutgoingMessage = .{
+            .address = &to,
+            .data_ptr = plan.data_ptr,
+            .data_len = plan.total_len,
+            .control = control_slice,
+        };
+        const send_error, const sent_count = self.io.vtable.netSend(
+            self.io.userdata,
+            self.socket.handle,
+            (&message)[0..1],
+            .{},
+        );
+        if (sent_count == 1) {
+            return .{
+                .sent_count = plan.segment_count,
+                .send_error = if (message.data_len == plan.total_len)
+                    send_error
+                else
+                    error.MessageOversize,
+            };
+        }
+        if (sent_count > 1) {
+            // The backend violated its ABI. Conservatively consume every
+            // segment because the exact subset visible on the network is no
+            // longer knowable and QUIC packet numbers must never be reused.
+            return .{ .sent_count = plan.segment_count, .send_error = error.Unexpected };
+        }
+        const err = send_error orelse return .{ .sent_count = 0, .send_error = error.Unexpected };
+        if (gsoFallbackError(err)) {
+            // Linux reports unsupported UDP_SEGMENT through an I/O-style
+            // socket error. Zig deliberately normalizes undocumented errno
+            // values to Unexpected, so remember the failure and avoid paying
+            // for another speculative GSO syscall on this endpoint.
+            self.gso_send_enabled = false;
+            return null;
+        }
+        return .{ .sent_count = 0, .send_error = err };
     }
 
     pub fn sendFrames(self: *Endpoint, to: net.IpAddress, frames: []const quic.Frame) Error!void {
@@ -424,6 +484,10 @@ const EcnCmsgHdr = switch (builtin.os.tag) {
 };
 
 const ecn_control_buffer_len = cmsgSpace(@sizeOf(u32)) * 2;
+const udp_gso_level: i32 = 17; // SOL_UDP on Linux.
+const udp_gso_segment: i32 = 103; // UDP_SEGMENT from linux/udp.h.
+const udp_gso_max_segments: usize = 64;
+const udp_gso_control_len = cmsgSpace(@sizeOf(u16));
 
 const ipproto_ip: i32 = 0;
 const ip_tos: u32 = switch (builtin.os.tag) {
@@ -461,6 +525,66 @@ pub fn socketEcnSupported() bool {
         .linux, .macos => true,
         else => false,
     };
+}
+
+pub fn udpGsoSupported() bool {
+    return builtin.os.tag == .linux;
+}
+
+const GsoPlan = struct {
+    data_ptr: [*]const u8,
+    total_len: usize,
+    segment_size: u16,
+    segment_count: usize,
+};
+
+/// Return a zero-copy GSO plan only when the caller's datagrams already have
+/// the exact memory layout required by UDP_SEGMENT: contiguous equal-sized
+/// segments, with only the final segment allowed to be shorter.
+fn gsoPlan(datagrams: []const []const u8) ?GsoPlan {
+    if (!udpGsoSupported() or datagrams.len < 2 or datagrams.len > udp_gso_max_segments) return null;
+    const segment_size = std.math.cast(u16, datagrams[0].len) orelse return null;
+    if (segment_size == 0) return null;
+
+    var total_len = datagrams[0].len;
+    var previous = datagrams[0];
+    for (datagrams[1..], 1..) |bytes, index| {
+        if (@intFromPtr(bytes.ptr) != @intFromPtr(previous.ptr) + previous.len) return null;
+        const is_last = index == datagrams.len - 1;
+        if ((!is_last and bytes.len != segment_size) or (is_last and bytes.len > segment_size)) return null;
+        total_len = std.math.add(usize, total_len, bytes.len) catch return null;
+        previous = bytes;
+    }
+    // Linux stores the UDP super-packet length in a 16-bit field. This bound
+    // also matches mature s2n-quic's GSO aggregation limit.
+    if (total_len > std.math.maxInt(u16)) return null;
+    return .{
+        .data_ptr = datagrams[0].ptr,
+        .total_len = total_len,
+        .segment_size = segment_size,
+        .segment_count = datagrams.len,
+    };
+}
+
+fn encodeUdpGsoControl(storage: *[udp_gso_control_len]u8, segment_size: u16) []const u8 {
+    @memset(storage, 0);
+    const header: *EcnCmsgHdr = @ptrCast(@alignCast(storage));
+    header.* = .{
+        .len = @sizeOf(EcnCmsgHdr) + @sizeOf(u16),
+        .level = udp_gso_level,
+        .type = udp_gso_segment,
+    };
+    @memcpy(
+        storage[@sizeOf(EcnCmsgHdr)..][0..@sizeOf(u16)],
+        std.mem.asBytes(&segment_size),
+    );
+    return storage;
+}
+
+fn gsoFallbackError(err: net.Socket.SendError) bool {
+    // Linux uses EIO for a rejected UDP_SEGMENT operation. Zig's portable
+    // socket error set has no EIO case, so std.Io normalizes it to Unexpected.
+    return err == error.Unexpected;
 }
 
 fn rawSetSockOpt(fd: std.posix.socket_t, level: i32, optname: u32, opt: []const u8) bool {
@@ -1071,6 +1195,148 @@ test "QUIC UDP endpoint sends many datagrams in one batch" {
 
     const invalid = [_][]const u8{ "valid-but-must-not-send", "" };
     try std.testing.expectError(error.EmptyDatagram, sender.sendManyBytes(receiver.address(), &invalid));
+}
+
+test "QUIC UDP GSO planner requires a contiguous equal-sized prefix" {
+    if (!udpGsoSupported()) return error.SkipZigTest;
+
+    const storage = "aaaabbbbcc";
+    const valid = [_][]const u8{
+        storage[0..4],
+        storage[4..8],
+        storage[8..10],
+    };
+    const plan = gsoPlan(&valid) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), plan.segment_count);
+    try std.testing.expectEqual(@as(u16, 4), plan.segment_size);
+    try std.testing.expectEqual(@as(usize, storage.len), plan.total_len);
+    try std.testing.expectEqual(@intFromPtr(storage.ptr), @intFromPtr(plan.data_ptr));
+
+    const discontiguous = [_][]const u8{ "aaaa", "bbbb" };
+    try std.testing.expect(gsoPlan(&discontiguous) == null);
+    const short_middle = [_][]const u8{
+        storage[0..4],
+        storage[4..6],
+        storage[6..10],
+    };
+    try std.testing.expect(gsoPlan(&short_middle) == null);
+}
+
+test "QUIC UDP GSO control message encodes native segment size" {
+    if (!udpGsoSupported()) return error.SkipZigTest;
+
+    var control: [udp_gso_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+    const encoded = encodeUdpGsoControl(&control, 1200);
+    try std.testing.expectEqual(@as(usize, udp_gso_control_len), encoded.len);
+    const header: *const EcnCmsgHdr = @ptrCast(@alignCast(encoded.ptr));
+    try std.testing.expectEqual(@as(usize, @sizeOf(EcnCmsgHdr) + @sizeOf(u16)), header.len);
+    try std.testing.expectEqual(udp_gso_level, header.level);
+    try std.testing.expectEqual(udp_gso_segment, header.type);
+    try std.testing.expectEqual(
+        @as(u16, 1200),
+        std.mem.bytesToValue(u16, encoded[@sizeOf(EcnCmsgHdr)..][0..@sizeOf(u16)]),
+    );
+}
+
+test "QUIC UDP endpoint segments a contiguous GSO super-packet" {
+    if (!udpGsoSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    defer sender.deinit();
+
+    const storage = "aaaabbbbcc";
+    const datagrams = [_][]const u8{
+        storage[0..4],
+        storage[4..8],
+        storage[8..10],
+    };
+    try sender.sendManyBytes(receiver.address(), &datagrams);
+    if (!sender.gsoSendEnabled()) return error.SkipZigTest;
+
+    for (datagrams) |expected| {
+        var received = try receiver.receiveBytes();
+        defer received.deinit(allocator);
+        try std.testing.expectEqualStrings(expected, received.bytes);
+    }
+}
+
+const RejectFirstGsoSend = struct {
+    delegate: std.Io,
+    calls: usize = 0,
+    gso_calls: usize = 0,
+    fallback_calls: usize = 0,
+
+    fn netSend(
+        userdata: ?*anyopaque,
+        socket_handle: net.Socket.Handle,
+        messages: []net.OutgoingMessage,
+        flags: net.SendFlags,
+    ) struct { ?net.Socket.SendError, usize } {
+        const self: *RejectFirstGsoSend = @ptrCast(@alignCast(userdata));
+        self.calls += 1;
+        if (messages.len == 1 and messages[0].control.len != 0) {
+            self.gso_calls += 1;
+            return .{ error.Unexpected, 0 };
+        }
+        self.fallback_calls += 1;
+        return self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages,
+            flags,
+        );
+    }
+};
+
+test "QUIC UDP endpoint disables rejected GSO and retries send-many" {
+    if (!udpGsoSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    defer sender.deinit();
+
+    var rejecting = RejectFirstGsoSend{ .delegate = sender.io };
+    var rejecting_vtable = sender.io.vtable.*;
+    rejecting_vtable.netSend = RejectFirstGsoSend.netSend;
+    sender.io = .{ .userdata = &rejecting, .vtable = &rejecting_vtable };
+    defer sender.io = rejecting.delegate;
+
+    const storage = "aaaabbbb";
+    const datagrams = [_][]const u8{ storage[0..4], storage[4..8] };
+    try sender.sendManyBytes(receiver.address(), &datagrams);
+    try std.testing.expect(!sender.gsoSendEnabled());
+    try std.testing.expectEqual(@as(usize, 2), rejecting.calls);
+    try std.testing.expectEqual(@as(usize, 1), rejecting.gso_calls);
+    try std.testing.expectEqual(@as(usize, 1), rejecting.fallback_calls);
+
+    for (datagrams) |expected| {
+        var received = try receiver.receiveBytes();
+        defer received.deinit(allocator);
+        try std.testing.expectEqualStrings(expected, received.bytes);
+    }
+
+    try sender.sendManyBytes(receiver.address(), &datagrams);
+    try std.testing.expectEqual(@as(usize, 3), rejecting.calls);
+    try std.testing.expectEqual(@as(usize, 1), rejecting.gso_calls);
+    try std.testing.expectEqual(@as(usize, 2), rejecting.fallback_calls);
+    for (datagrams) |expected| {
+        var received = try receiver.receiveBytes();
+        defer received.deinit(allocator);
+        try std.testing.expectEqualStrings(expected, received.bytes);
+    }
 }
 
 test "QUIC UDP endpoint routes protected short datagrams by DCID" {

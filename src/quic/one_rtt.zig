@@ -6697,7 +6697,13 @@ test "QUIC 1-RTT PTO service sends up to two probes" {
     const serviced = (try client.serviceLossDetectionTimer(210_000_000)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
     try std.testing.expectEqual(@as(usize, 1), observed_send.calls);
-    try std.testing.expectEqual(@as(usize, 2), observed_send.last_message_count);
+    if (client.endpoint.gsoSendEnabled()) {
+        try std.testing.expectEqual(@as(usize, 1), observed_send.last_message_count);
+        try std.testing.expect(observed_send.last_control_len != 0);
+    } else {
+        try std.testing.expectEqual(@as(usize, 2), observed_send.last_message_count);
+        try std.testing.expectEqual(@as(usize, 0), observed_send.last_control_len);
+    }
     try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
     try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
     try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[1].packetCount());
@@ -6793,6 +6799,7 @@ const ObservedBatchSend = struct {
     fail_after_prefix: ?usize = null,
     calls: usize = 0,
     last_message_count: usize = 0,
+    last_control_len: usize = 0,
 
     fn netSend(
         userdata: ?*anyopaque,
@@ -6803,6 +6810,7 @@ const ObservedBatchSend = struct {
         const self: *ObservedBatchSend = @ptrCast(@alignCast(userdata));
         self.calls += 1;
         self.last_message_count = messages.len;
+        self.last_control_len = if (messages.len == 0) 0 else messages[0].control.len;
         const configured_prefix = self.fail_after_prefix orelse {
             return self.delegate.vtable.netSend(
                 self.delegate.userdata,
@@ -6865,6 +6873,7 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
     try client.sendAt(&ping, 10_000_000);
     try client.sendAt(&ping, 10_000_000);
     const bytes_in_flight_before = client.bytesInFlight();
+    client.endpoint.gso_send_enabled = false;
 
     // Replace only the client's send function after setup. The wrapper lets
     // the real socket emit the first datagram, then reproduces the partial

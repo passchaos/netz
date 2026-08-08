@@ -115,7 +115,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   single-allocation batch wrappers, and portable UDP batch submission that maps
   to Linux `sendmmsg` through Zig `std.Io`, including paced two-probe PTO batch
   submission and transactional partial-send recovery that never reuses an
-  already-emitted packet number,
+  already-emitted packet number, plus zero-copy Linux `UDP_SEGMENT` offload for
+  contiguous equal-sized packet batches with one-shot capability fallback,
   endpoint-level connection-ID routing with unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route
@@ -222,6 +223,7 @@ zig build bench-http2-hpack -Doptimize=ReleaseFast
 zig build bench-http3-dev -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
+zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 ```
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
@@ -231,7 +233,9 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 cleartext development request/response round trips,
 - MQTT subscription-router trie matching versus a linear filter scan,
 - QUIC short-packet sealing with caller-provided storage versus the allocating
-  convenience wrapper.
+  convenience wrapper,
+- QUIC Linux `UDP_SEGMENT` batching versus `sendmmsg` for contiguous
+  equal-sized packet batches.
 
 The build script pins the package to Zig `0.16.0`.
 

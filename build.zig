@@ -96,6 +96,12 @@ pub fn build(b: *std.Build) void {
             .run_step = "bench-quic-short-packet",
             .description = "Benchmark QUIC short packet in-place sealing against allocating sealing",
         },
+        .{
+            .exe_name = "netz-bench-quic-udp-batch",
+            .path = "examples/bench_quic_udp_batch.zig",
+            .run_step = "bench-quic-udp-batch",
+            .description = "Benchmark QUIC UDP_SEGMENT batches against sendmmsg",
+        },
     };
     const linux_example_specs = [_]struct {
         exe_name: []const u8,
