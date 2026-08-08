@@ -3104,6 +3104,10 @@ pub const sdp = struct {
         return applicationMedia(session) != null;
     }
 
+    pub fn hasDataChannelMedia(session: Session) bool {
+        return dataChannelMedia(session) != null;
+    }
+
     pub fn findAttr(attrs: []const Attribute, name: []const u8) ?[]const u8 {
         for (attrs) |attr| {
             if (std.ascii.eqlIgnoreCase(attr.name, name)) return attr.value;
@@ -3515,7 +3519,7 @@ pub const sdp = struct {
         return std.fmt.parseInt(u32, raw, 10) catch return error.InvalidSdp;
     }
 
-    fn dataChannelMedia(session: Session) ?Media {
+    pub fn dataChannelMedia(session: Session) ?Media {
         if (candidateMedia(session)) |media| {
             if (mediaLooksLikeDataChannel(media)) return media;
         }
@@ -3525,7 +3529,7 @@ pub const sdp = struct {
         return null;
     }
 
-    fn mediaLooksLikeDataChannel(media: Media) bool {
+    pub fn mediaLooksLikeDataChannel(media: Media) bool {
         if (!std.ascii.eqlIgnoreCase(media.kind, "application")) return false;
         if (findAttr(media.attributes, "sctp-port") != null or findAttr(media.attributes, "sctpmap") != null) return true;
         if (std.ascii.indexOfIgnoreCase(media.protocol, "SCTP") != null) return true;
@@ -9713,6 +9717,9 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("application", session.media[0].kind);
     try std.testing.expect(sdp.hasApplicationMedia(session));
     try std.testing.expectEqualStrings("application", sdp.applicationMedia(session).?.kind);
+    try std.testing.expect(sdp.hasDataChannelMedia(session));
+    try std.testing.expect(sdp.mediaLooksLikeDataChannel(session.media[0]));
+    try std.testing.expectEqualStrings("application", sdp.dataChannelMedia(session).?.kind);
     try std.testing.expectEqual(@as(u16, 9), session.media[0].port);
     try std.testing.expectEqual(@as(?u16, 2), session.media[0].port_range);
     try std.testing.expectEqualStrings("Data channel media", session.media[0].title.?);
@@ -10038,6 +10045,8 @@ test "ICE candidate parser and SDP parser" {
     defer audio_only.deinit(allocator);
     try std.testing.expect(!sdp.hasApplicationMedia(audio_only));
     try std.testing.expect(sdp.applicationMedia(audio_only) == null);
+    try std.testing.expect(!sdp.hasDataChannelMedia(audio_only));
+    try std.testing.expect(sdp.dataChannelMedia(audio_only) == null);
 }
 
 test "ICE candidate priority helpers mirror RFC and Pion defaults" {
