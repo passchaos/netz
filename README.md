@@ -26,7 +26,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   outbound frame splitting plus h2-style CONTINUATION chain flood, stream-id overflow, wrong-direction HEADERS, and idle-stream DATA/WINDOW_UPDATE send limits, with DATA sends that wait for WINDOW_UPDATE capacity
   and inbound DATA consumers that account for full padded frame payloads and restore connection/stream receive capacity,
   frame-envelope validation including fixed-size RST_STREAM and SETTINGS payload-multiple checks, stream-id direction/monotonicity validation, request/response trailers with forbidden-field rejection, pre-HEADERS frame ordering checks, interim 1xx response skipping and explicit server-side informational response sending, content-length
-  validation with pure-digit Content-Length enforcement, HTTP/2 pseudo-header/lowercase field-name/value and control-character validation, `:method` and `:protocol` token validation,
+  validation with pure-digit Content-Length enforcement, HTTP/2 pseudo-header/lowercase field-name/value and control-character validation, `:method` token validation with case-sensitive HEAD/CONNECT/OPTIONS semantics and `:protocol` token validation,
   URI-like `:scheme`/`:path`/`:authority` validation with Host fallback and Host/`:authority` mismatch rejection,
   connection-specific header rejection including `TE` rules,
   status-forbidden response-body write rejection,

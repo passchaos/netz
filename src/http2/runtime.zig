@@ -598,7 +598,7 @@ pub const Connection = struct {
 
         var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
         defer fields.deinit(self.allocator);
-        const method_is_connect = std.ascii.eqlIgnoreCase(request_options.method, "CONNECT");
+        const method_is_connect = methodIsConnect(request_options.method);
         const extended_connect = request_options.protocol != null;
         if (method_is_connect and !extended_connect and (request_options.body.len != 0 or request_options.trailers.len != 0)) {
             return error.InvalidContentLength;
@@ -629,7 +629,7 @@ pub const Connection = struct {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
         if (request_options.authority == null) request_options.authority = self.default_authority;
-        if (!std.ascii.eqlIgnoreCase(request_options.method, "CONNECT")) return error.InvalidHeader;
+        if (!methodIsConnect(request_options.method)) return error.InvalidHeader;
         const protocol = request_options.protocol orelse return error.InvalidHeader;
         if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
         if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
@@ -658,7 +658,7 @@ pub const Connection = struct {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
         if (request_options.authority == null) request_options.authority = self.default_authority;
-        if (!std.ascii.eqlIgnoreCase(request_options.method, "CONNECT") or request_options.protocol != null) return error.InvalidHeader;
+        if (!methodIsConnect(request_options.method) or request_options.protocol != null) return error.InvalidHeader;
         if (request_options.authority == null) return error.MissingPseudoHeader;
         if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
 
@@ -700,7 +700,7 @@ pub const Connection = struct {
                     try validateHeaderBlock(headers, .request);
                     const method = findHeader(headers, ":method") orelse return error.MissingPseudoHeader;
                     const protocol = findHeader(headers, ":protocol") orelse return error.InvalidHeader;
-                    if (!std.ascii.eqlIgnoreCase(method, "CONNECT")) return error.InvalidHeader;
+                    if (!methodIsConnect(method)) return error.InvalidHeader;
                     if (!std.mem.eql(u8, protocol, expected_protocol)) return error.InvalidHeader;
 
                     return .{
@@ -735,7 +735,7 @@ pub const Connection = struct {
         response_headers: []const http2.Hpack.HeaderField,
     ) Error!Tunnel {
         if (self.role != .server) return error.UnexpectedFrame;
-        if (!std.ascii.eqlIgnoreCase(connect_request.method, "CONNECT") or connect_request.protocol != null) return error.InvalidHeader;
+        if (!methodIsConnect(connect_request.method) or connect_request.protocol != null) return error.InvalidHeader;
         if (connect_request.body.len != 0 or connect_request.trailers.len != 0) return error.InvalidContentLength;
         try self.writeExtendedConnectResponse(connect_request.stream_id, 200, response_headers, false);
         return .{ .connection = self, .stream_id = connect_request.stream_id };
@@ -781,7 +781,7 @@ pub const Connection = struct {
                         return error.ExtendedConnectDisabled;
                     }
                     const expected_request_len = try contentLength(headers);
-                    const is_connect = std.ascii.eqlIgnoreCase(method, "CONNECT");
+                    const is_connect = methodIsConnect(method);
                     const is_extended_connect = is_connect and protocol != null;
                     if (is_connect and !is_extended_connect and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
 
@@ -1106,9 +1106,9 @@ pub const Connection = struct {
         self.forgetResponseSemantics(stream_id);
         try self.response_semantics.append(self.allocator, .{
             .stream_id = stream_id,
-            .head = std.ascii.eqlIgnoreCase(method, "HEAD"),
-            .traditional_connect = std.ascii.eqlIgnoreCase(method, "CONNECT") and protocol == null,
-            .extended_connect = std.ascii.eqlIgnoreCase(method, "CONNECT") and protocol != null,
+            .head = methodIsHead(method),
+            .traditional_connect = methodIsConnect(method) and protocol == null,
+            .extended_connect = methodIsConnect(method) and protocol != null,
         });
     }
 
@@ -1227,7 +1227,7 @@ pub const Connection = struct {
                         }
                         if (responseForbidsBody(status, request_method, extended_connect)) {
                             const response_content_length = try contentLength(headers.?);
-                            const traditional_connect = std.ascii.eqlIgnoreCase(request_method, "CONNECT") and !extended_connect;
+                            const traditional_connect = methodIsConnect(request_method) and !extended_connect;
                             if (traditional_connect and response_content_length != null) return error.InvalidContentLength;
                             if ((statusIsInformational(status) or status == 204) and response_content_length != null) return error.InvalidContentLength;
                             if (!traditional_connect and (frame.frame.header.flags & flag_end_stream) == 0) {
@@ -2213,11 +2213,11 @@ fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: HeaderBlo
             if (protocol_value) |protocol| {
                 try validateHttpToken(protocol);
                 const method = method_value orelse return error.MissingPseudoHeader;
-                if (!std.ascii.eqlIgnoreCase(method, "CONNECT")) return error.InvalidHeader;
+                if (!methodIsConnect(method)) return error.InvalidHeader;
                 if (!seen_scheme or !seen_path) return error.MissingPseudoHeader;
                 if (!seen_authority and host_value == null) return error.MissingPseudoHeader;
             } else if (method_value) |method| {
-                if (std.ascii.eqlIgnoreCase(method, "CONNECT")) {
+                if (methodIsConnect(method)) {
                     if (!seen_authority) return error.MissingPseudoHeader;
                     if (seen_scheme or seen_path) return error.InvalidHeader;
                     try validateConnectAuthority(authority_value.?);
@@ -2265,6 +2265,18 @@ fn validateHttpToken(value: []const u8) Error!void {
     }
 }
 
+fn methodIsHead(method: []const u8) bool {
+    return std.mem.eql(u8, method, "HEAD");
+}
+
+fn methodIsConnect(method: []const u8) bool {
+    return std.mem.eql(u8, method, "CONNECT");
+}
+
+fn methodIsOptions(method: []const u8) bool {
+    return std.mem.eql(u8, method, "OPTIONS");
+}
+
 fn isHttpTchar(byte: u8) bool {
     return std.ascii.isAlphanumeric(byte) or switch (byte) {
         '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
@@ -2283,7 +2295,7 @@ fn validateUriScheme(scheme: []const u8) Error!void {
 fn validateUriPath(method: []const u8, path: []const u8) Error!void {
     if (path.len == 0) return error.InvalidHeader;
     if (std.mem.eql(u8, path, "*")) {
-        if (!std.ascii.eqlIgnoreCase(method, "OPTIONS")) return error.InvalidHeader;
+        if (!methodIsOptions(method)) return error.InvalidHeader;
         return;
     }
     if (path[0] != '/' and path[0] != '?') return error.InvalidHeader;
@@ -2405,16 +2417,16 @@ fn forbiddenTrailerFieldName(name: []const u8) bool {
 
 fn responseForbidsBody(status: u16, request_method: []const u8, extended_connect: bool) bool {
     if ((status >= 100 and status < 200) or status == 204 or status == 304) return true;
-    if (std.ascii.eqlIgnoreCase(request_method, "HEAD")) return true;
-    if (!extended_connect and std.ascii.eqlIgnoreCase(request_method, "CONNECT") and status >= 200 and status < 300) return true;
+    if (methodIsHead(request_method)) return true;
+    if (!extended_connect and methodIsConnect(request_method) and status >= 200 and status < 300) return true;
     return false;
 }
 
 fn responseSemanticsFromMethod(method: []const u8, extended_connect: bool) ResponseBodySemantics {
     return .{
-        .head = std.ascii.eqlIgnoreCase(method, "HEAD"),
-        .traditional_connect = std.ascii.eqlIgnoreCase(method, "CONNECT") and !extended_connect,
-        .extended_connect = std.ascii.eqlIgnoreCase(method, "CONNECT") and extended_connect,
+        .head = methodIsHead(method),
+        .traditional_connect = methodIsConnect(method) and !extended_connect,
+        .extended_connect = methodIsConnect(method) and extended_connect,
     };
 }
 
@@ -5270,6 +5282,27 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&connect_bad_port, .request));
 
+    const lowercase_connect_authority_only = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "connect" },
+        .{ .name = ":authority", .value = "example.com:443" },
+    };
+    try std.testing.expectError(error.MissingPseudoHeader, validateHeaderBlock(&lowercase_connect_authority_only, .request));
+
+    const lowercase_connect_origin_form = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "connect" },
+        .{ .name = ":path", .value = "/ordinary-extension-method" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+    };
+    try validateHeaderBlock(&lowercase_connect_origin_form, .request);
+
+    const lowercase_options_asterisk = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "options" },
+        .{ .name = ":path", .value = "*" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&lowercase_options_asterisk, .request));
+
     const empty_method = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "" },
         .{ .name = ":path", .value = "/" },
@@ -5404,6 +5437,11 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = "set-cookie", .value = "a=b" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_response_trailer, .response_trailers));
+
+    try std.testing.expect(responseForbidsBody(200, "HEAD", false));
+    try std.testing.expect(!responseForbidsBody(200, "head", false));
+    try std.testing.expect(responseForbidsBody(200, "CONNECT", false));
+    try std.testing.expect(!responseForbidsBody(200, "connect", false));
 }
 
 test "HTTP/2 async std.Io server handles concurrent h2c clients" {
@@ -6061,6 +6099,15 @@ test "HTTP/2 extended CONNECT requires peer opt-in" {
         .{ .name = ":protocol", .value = "websocket" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&invalid_protocol_method, .request));
+
+    const lowercase_extended_connect = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "connect" },
+        .{ .name = ":path", .value = "/bad" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":protocol", .value = "websocket" },
+        .{ .name = ":authority", .value = "example.com" },
+    };
+    try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&lowercase_extended_connect, .request));
 
     const empty_protocol = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "CONNECT" },
