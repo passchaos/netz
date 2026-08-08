@@ -1079,7 +1079,14 @@ pub const Request = struct {
 
     pub fn writeWithSettings(self: Request, list: *std.ArrayList(u8), allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
-        const fields = try self.headerFields(&fields_buf);
+        var fields = try self.headerFields(&fields_buf);
+        var content_length_buf: [32]u8 = undefined;
+        if (requestShouldDefaultContentLength(self.method, fields, self.body.len)) {
+            var field_count = fields.len;
+            const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{self.body.len}) catch unreachable;
+            try appendHeaderField(&fields_buf, &field_count, .{ .name = "content-length", .value = content_length });
+            fields = fields_buf[0..field_count];
+        }
         try validateHeaderBlock(fields, .request);
         try validateHeaderBlock(self.trailers, .trailers);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
@@ -1095,6 +1102,24 @@ fn requestHasProtocolPseudo(headers: []const Qpack.HeaderField) bool {
         if (std.mem.eql(u8, header.name, ":protocol")) return true;
     }
     return false;
+}
+
+fn requestShouldDefaultContentLength(method: []const u8, headers: []const Qpack.HeaderField, body_len: usize) bool {
+    if (std.mem.eql(u8, method, "CONNECT")) return false;
+    // Align the HTTP/3 convenience writer with Hyper's h2 shaping and our
+    // HTTP/2 runtime: known non-empty bodies get an explicit length, and empty
+    // bodies on methods with defined payload semantics (POST/PUT/PATCH/etc.)
+    // get `content-length: 0` so intermediaries and applications do not have
+    // to infer intent from the absence of DATA frames.
+    if (body_len == 0 and !methodHasDefinedPayloadSemantics(method)) return false;
+    return (contentLength(headers) catch return false) == null;
+}
+
+fn methodHasDefinedPayloadSemantics(method: []const u8) bool {
+    return !std.mem.eql(u8, method, "GET") and
+        !std.mem.eql(u8, method, "HEAD") and
+        !std.mem.eql(u8, method, "DELETE") and
+        !std.mem.eql(u8, method, "CONNECT");
 }
 
 fn findHeader(headers: []const Qpack.HeaderField, name: []const u8) ?[]const u8 {
@@ -1131,16 +1156,29 @@ pub const Response = struct {
     pub fn writeWithSettings(self: Response, list: *std.ArrayList(u8), allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         var status_buf: [3]u8 = undefined;
-        const fields = try self.headerFields(&fields_buf, &status_buf);
+        var fields = try self.headerFields(&fields_buf, &status_buf);
+        var content_length_buf: [32]u8 = undefined;
+        if (responseShouldDefaultContentLength(self.status, fields, self.body.len)) {
+            var field_count = fields.len;
+            const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{self.body.len}) catch unreachable;
+            try appendHeaderField(&fields_buf, &field_count, .{ .name = "content-length", .value = content_length });
+            fields = fields_buf[0..field_count];
+        }
         try validateHeaderBlock(fields, .response);
         try validateHeaderBlock(self.trailers, .trailers);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
-        try validateResponseBodyForStatus(self.status, self.headers, self.body, self.trailers);
+        try validateResponseBodyForStatus(self.status, fields, self.body, self.trailers);
         try validateContentLengthForStatus(self.status, fields, self.body.len);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 };
+
+fn responseShouldDefaultContentLength(status: u16, headers: []const Qpack.HeaderField, body_len: usize) bool {
+    if (body_len == 0) return false;
+    if ((status >= 100 and status < 200) or status == 204 or status == 304) return false;
+    return (contentLength(headers) catch return false) == null;
+}
 
 pub const InformationalResponse = struct {
     status: u16,
@@ -2281,6 +2319,27 @@ test "HTTP/3 request encode decode" {
     try std.testing.expectEqualStrings("/submit", decoded.path);
     try std.testing.expectEqualStrings("example.com", decoded.authority.?);
     try std.testing.expectEqualStrings("hello", decoded.body);
+    try std.testing.expectEqualStrings("5", findHeader(decoded.headers, "content-length") orelse return error.MissingHeader);
+
+    encoded.clearRetainingCapacity();
+    try (Request{
+        .method = "POST",
+        .path = "/empty",
+        .authority = "example.com",
+    }).write(&encoded, allocator);
+    var empty_post = try decodeRequest(allocator, encoded.items);
+    defer empty_post.deinit(allocator);
+    try std.testing.expectEqualStrings("0", findHeader(empty_post.headers, "content-length") orelse return error.MissingHeader);
+
+    encoded.clearRetainingCapacity();
+    try (Request{
+        .method = "GET",
+        .path = "/no-length",
+        .authority = "example.com",
+    }).write(&encoded, allocator);
+    var get = try decodeRequest(allocator, encoded.items);
+    defer get.deinit(allocator);
+    try std.testing.expect(findHeader(get.headers, "content-length") == null);
 }
 
 test "HTTP/3 message aggregates DATA frames and trailing HEADERS" {
@@ -2829,6 +2888,18 @@ test "HTTP/3 response encode decode" {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
 
+    try (Response{
+        .status = 201,
+        .headers = &.{.{ .name = "server", .value = "netz" }},
+        .body = "created",
+    }).write(&encoded, allocator);
+    var default_length = try decodeResponse(allocator, encoded.items);
+    defer default_length.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 201), default_length.status);
+    try std.testing.expectEqualStrings("created", default_length.body);
+    try std.testing.expectEqualStrings("7", findHeader(default_length.headers, "content-length") orelse return error.MissingHeader);
+
+    encoded.clearRetainingCapacity();
     const response = Response{
         .status = 201,
         .headers = &.{
