@@ -702,6 +702,11 @@ pub const Qpack = struct {
     /// normal capacity pressure amortized O(1) while absolute indexes remain
     /// explicit and independent of storage position.
     pub const DynamicTable = struct {
+        pub const Match = struct {
+            absolute_index: u64,
+            full_match: bool,
+        };
+
         allocator: std.mem.Allocator,
         entries: std.ArrayList(DynamicEntry) = .empty,
         head: usize = 0,
@@ -801,7 +806,12 @@ pub const Qpack = struct {
         }
 
         pub fn findExact(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
-            return self.findExactBefore(name, value, self.insert_count);
+            const match = self.findMatchBefore(
+                name,
+                value,
+                self.insert_count,
+            ) orelse return null;
+            return if (match.full_match) match.absolute_index else null;
         }
 
         pub fn findExactBefore(
@@ -810,16 +820,41 @@ pub const Qpack = struct {
             value: []const u8,
             absolute_index_limit: u64,
         ) ?u64 {
+            const match = self.findMatchBefore(
+                name,
+                value,
+                absolute_index_limit,
+            ) orelse return null;
+            return if (match.full_match) match.absolute_index else null;
+        }
+
+        /// Find the newest exact match, or otherwise the newest name match,
+        /// before `absolute_index_limit` in one reverse table scan.
+        pub fn findMatchBefore(
+            self: DynamicTable,
+            name: []const u8,
+            value: []const u8,
+            absolute_index_limit: u64,
+        ) ?Match {
+            var name_match: ?u64 = null;
             var index = self.entries.items.len;
             while (index > self.head) {
                 index -= 1;
                 const entry = self.entries.items[index];
                 if (entry.absolute_index >= absolute_index_limit) continue;
-                if (std.mem.eql(u8, entry.name, name) and std.mem.eql(u8, entry.value, value)) {
-                    return entry.absolute_index;
+                if (!std.mem.eql(u8, entry.name, name)) continue;
+                if (std.mem.eql(u8, entry.value, value)) {
+                    return .{
+                        .absolute_index = entry.absolute_index,
+                        .full_match = true,
+                    };
                 }
+                if (name_match == null) name_match = entry.absolute_index;
             }
-            return null;
+            return if (name_match) |absolute_index| .{
+                .absolute_index = absolute_index,
+                .full_match = false,
+            } else null;
         }
 
         pub fn findName(self: DynamicTable, name: []const u8) ?u64 {
@@ -1171,17 +1206,15 @@ pub const Qpack = struct {
         const base = table.insert_count;
         var required_insert_count: u64 = 0;
         for (fields) |field| {
-            if (table.findExactBefore(
+            if (table.findMatchBefore(
                 field.name,
                 field.value,
                 reference_limit,
-            )) |absolute_index| {
-                required_insert_count = @max(required_insert_count, absolute_index + 1);
-            } else if (table.findNameBefore(
-                field.name,
-                reference_limit,
-            )) |absolute_index| {
-                required_insert_count = @max(required_insert_count, absolute_index + 1);
+            )) |match| {
+                required_insert_count = @max(
+                    required_insert_count,
+                    match.absolute_index + 1,
+                );
             }
         }
 
@@ -1202,31 +1235,41 @@ pub const Qpack = struct {
         );
 
         for (fields) |field| {
-            if (!field.never_indexed) if (table.findExactBefore(
+            const dynamic_match = table.findMatchBefore(
                 field.name,
                 field.value,
                 reference_limit,
-            )) |absolute_index| {
-                try appendReferenceUnique(references, allocator, absolute_index);
-                if (absolute_index < base) {
-                    try encodePrefixedInteger(
-                        list,
-                        allocator,
-                        6,
-                        0x80,
-                        base - absolute_index - 1,
-                    );
-                } else {
-                    try encodePrefixedInteger(
-                        list,
-                        allocator,
-                        4,
-                        0x10,
-                        absolute_index - base,
-                    );
+            );
+            if (!field.never_indexed) {
+                if (dynamic_match) |match| {
+                    if (match.full_match) {
+                        const absolute_index = match.absolute_index;
+                        try appendReferenceUnique(
+                            references,
+                            allocator,
+                            absolute_index,
+                        );
+                        if (absolute_index < base) {
+                            try encodePrefixedInteger(
+                                list,
+                                allocator,
+                                6,
+                                0x80,
+                                base - absolute_index - 1,
+                            );
+                        } else {
+                            try encodePrefixedInteger(
+                                list,
+                                allocator,
+                                4,
+                                0x10,
+                                absolute_index - base,
+                            );
+                        }
+                        continue;
+                    }
                 }
-                continue;
-            };
+            }
 
             if (findStaticMatch(field.name, field.value)) |match| {
                 if (match.full_match and !field.never_indexed) {
@@ -1244,10 +1287,8 @@ pub const Qpack = struct {
                 continue;
             }
 
-            if (table.findNameBefore(
-                field.name,
-                reference_limit,
-            )) |absolute_index| {
+            if (dynamic_match) |match| {
+                const absolute_index = match.absolute_index;
                 try appendReferenceUnique(references, allocator, absolute_index);
                 if (absolute_index < base) {
                     try encodePrefixedInteger(
@@ -3167,6 +3208,58 @@ test "HTTP/3 QPACK dynamic table applies RFC 9204 Appendix B encoder stream" {
     try std.testing.expectEqual(@as(u64, 4), table.insert_count);
     try std.testing.expectEqual(@as(usize, 214), table.current_size);
     try std.testing.expectEqualStrings("custom-key", table.absolute(3).?.name);
+}
+
+test "HTTP/3 QPACK dynamic match prefers exact then newest name before limit" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 512);
+    defer table.deinit();
+    try table.setCapacity(512);
+
+    _ = try table.insert("x-match", "old-exact");
+    _ = try table.insert("x-match", "name-only");
+    _ = try table.insert("x-other", "unrelated");
+    _ = try table.insert("x-match", "new-exact");
+
+    const exact = table.findMatchBefore(
+        "x-match",
+        "new-exact",
+        table.insert_count,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(exact.full_match);
+    try std.testing.expectEqual(@as(u64, 3), exact.absolute_index);
+    try std.testing.expectEqual(
+        @as(?u64, 3),
+        table.findExact("x-match", "new-exact"),
+    );
+
+    const name_only = table.findMatchBefore(
+        "x-match",
+        "missing",
+        table.insert_count,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!name_only.full_match);
+    try std.testing.expectEqual(@as(u64, 3), name_only.absolute_index);
+    try std.testing.expect(
+        table.findExact("x-match", "missing") == null,
+    );
+
+    // Excluding absolute index 3 must reveal the newest eligible name match,
+    // while an older exact value still outranks that newer name-only entry.
+    const limited_name = table.findMatchBefore(
+        "x-match",
+        "missing",
+        3,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!limited_name.full_match);
+    try std.testing.expectEqual(@as(u64, 1), limited_name.absolute_index);
+    const limited_exact = table.findMatchBefore(
+        "x-match",
+        "old-exact",
+        3,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(limited_exact.full_match);
+    try std.testing.expectEqual(@as(u64, 0), limited_exact.absolute_index);
 }
 
 test "HTTP/3 QPACK dynamic table evicts by capacity and rejects invalid instructions" {

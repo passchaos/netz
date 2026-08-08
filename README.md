@@ -230,6 +230,7 @@ zig build bench -Doptimize=ReleaseFast
 zig build bench-http1-parse -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
 zig build bench-http3-dev -Doptimize=ReleaseFast
+zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
@@ -242,6 +243,7 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/1 borrowed request-head parsing versus owned full request parsing,
 - HTTP/2 HPACK stateful dynamic-table encode/decode versus stateless helpers,
 - HTTP/3 cleartext development request/response round trips,
+- HTTP/3 QPACK field-section encoding against a populated dynamic table,
 - MQTT subscription-router trie matching versus a linear filter scan,
 - QUIC short-packet sealing with caller-provided storage versus the allocating
   convenience wrapper,
@@ -345,7 +347,8 @@ if (session.maxDatagramPayloadSize()) |limit| {
 - The HTTP/2 HPACK helper maintains per-connection dynamic table state and RFC
   7541 Huffman strings; the stateless literal convenience helpers accept legal
   leading table-size updates while keeping dynamic state scoped to one block.
-  HTTP/3 QPACK now provides RFC 9204 dynamic-table state, dynamic field
+  HTTP/3 QPACK now provides RFC 9204 dynamic-table state with single-pass
+  exact/name matching, dynamic field
   sections, both instruction stream codecs, and Protected plus handshake-backed
   client/server decode-side live encoder-stream processing with decoder
   feedback. Both protected runtimes persist their encoder/decoder streams and
