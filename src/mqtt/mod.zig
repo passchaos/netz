@@ -185,7 +185,7 @@ pub fn hasWildcards(value: []const u8) bool {
 }
 
 pub fn validTopicName(topic: []const u8) bool {
-    return topic.len > 0 and !hasWildcards(topic);
+    return topic.len > 0 and validMqttUtf8(topic) and !hasWildcards(topic);
 }
 
 pub fn validateTopicName(topic: []const u8) Error!void {
@@ -193,6 +193,7 @@ pub fn validateTopicName(topic: []const u8) Error!void {
 }
 
 pub fn validTopicFilter(filter: []const u8) bool {
+    if (!validMqttUtf8(filter)) return false;
     if (std.mem.startsWith(u8, filter, "$share/")) return validSharedTopicFilter(filter);
     return validTopicFilterLevels(filter);
 }
@@ -210,9 +211,14 @@ fn sharedTopicFilterInner(filter: []const u8) ?[]const u8 {
     // MQTT 5 shared subscriptions use "$share/{ShareName}/{TopicFilter}".
     // The share name is a literal name, not a topic level, so reject empty
     // groups and wildcard characters before validating the nested TopicFilter.
-    if (group.len == 0 or hasWildcards(group)) return null;
+    if (group.len == 0 or !validMqttUtf8(group) or hasWildcards(group)) return null;
     if (!validTopicFilterLevels(shared_filter)) return null;
     return shared_filter;
+}
+
+fn validMqttUtf8(value: []const u8) bool {
+    validateMqttUtf8String(value) catch return false;
+    return true;
 }
 
 fn validTopicFilterLevels(filter: []const u8) bool {
@@ -2208,6 +2214,8 @@ test "MQTT topic validation and filter matching" {
     try std.testing.expect(!validTopicName(""));
     try std.testing.expect(!validTopicName("wrong/#/path"));
     try std.testing.expect(!validTopicName("w/r/o/n/g+"));
+    try std.testing.expect(!validTopicName("bad\x00topic"));
+    try std.testing.expect(!validTopicName(&[_]u8{ 0xff, 0xfe }));
 
     try std.testing.expect(validTopicFilter("correct/filter/#"));
     try std.testing.expect(validTopicFilter("cor/+/rect/+"));
@@ -2215,10 +2223,13 @@ test "MQTT topic validation and filter matching" {
     try std.testing.expect(!validTopicFilter("wrong/#/filter"));
     try std.testing.expect(!validTopicFilter("wrong/wr#ng/filter"));
     try std.testing.expect(!validTopicFilter("wr/+o+/ng"));
+    try std.testing.expect(!validTopicFilter("bad\x00/filter"));
+    try std.testing.expect(!validTopicFilter(&[_]u8{ 'b', 'a', 'd', '/', 0xff }));
     try std.testing.expect(validTopicFilter("$share/group/sensors/+/temp"));
     try std.testing.expect(validTopicFilter("$share/group/#"));
     try std.testing.expect(!validTopicFilter("$share/group"));
     try std.testing.expect(!validTopicFilter("$share//sensors/temp"));
+    try std.testing.expect(!validTopicFilter("$share/bad\x00group/sensors/temp"));
     try std.testing.expect(!validTopicFilter("$share/gr+oup/sensors/temp"));
     try std.testing.expect(!validTopicFilter("$share/group/bad/#/filter"));
 
