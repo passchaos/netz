@@ -112,6 +112,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const examples_step = b.step("examples", "Build all examples");
+    const bench_step = b.step("bench", "Run all native protocol benchmarks");
     for (example_specs) |spec| {
         const exe = b.addExecutable(.{
             .name = spec.exe_name,
@@ -127,6 +128,9 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(exe);
         const run_step = b.step(spec.run_step, spec.description);
         run_step.dependOn(&run.step);
+        if (std.mem.startsWith(u8, spec.run_step, "bench-")) {
+            bench_step.dependOn(&run.step);
+        }
     }
     if (target.result.os.tag == .linux) {
         for (linux_example_specs) |spec| {
