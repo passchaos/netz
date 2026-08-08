@@ -8797,6 +8797,7 @@ pub const sctp = struct {
             if (chunk_type == .init or chunk_type == .init_ack) {
                 if (pos != 12 or has_init_chunk or bytes.len != pos + padded_len) return error.InvalidSctpPacket;
                 if (chunk_type == .init and std.mem.readInt(u32, bytes[4..8], .big) != 0) return error.InvalidSctpPacket;
+                if (chunk_type == .init_ack and std.mem.readInt(u32, bytes[4..8], .big) == 0) return error.InvalidSctpPacket;
                 has_init_chunk = true;
             }
             if (chunk_type == .cookie_echo and pos != 12) return error.InvalidSctpPacket;
@@ -8864,6 +8865,7 @@ pub const sctp = struct {
         init: InitChunk,
     ) Error!void {
         if (!is_ack and options.verification_tag != 0) return error.InvalidSctpPacket;
+        if (is_ack and options.verification_tag == 0) return error.InvalidSctpPacket;
         const start = list.items.len;
         try writePacketHeader(list, allocator, options);
         try writeInitChunk(list, allocator, if (is_ack) .init_ack else .init, init);
@@ -13568,7 +13570,7 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     try sctp.writeInitPacket(&encoded, allocator, .{
         .source_port = 5000,
         .destination_port = 5000,
-        .verification_tag = 0,
+        .verification_tag = 0x0a0b0c0d,
     }, true, .{
         .initiate_tag = 0x01020304,
         .advertised_receiver_window_credit = 256 * 1024,
@@ -13580,7 +13582,15 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     try std.testing.expect(try sctp.validChecksum(encoded.items));
     var parsed = try sctp.parsePacket(allocator, encoded.items, true);
     defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x0a0b0c0d), parsed.header.verification_tag);
     try std.testing.expectEqual(sctp.ChunkType.init_ack, parsed.chunks[0].chunk_type);
+    var zero_vtag_init_ack = try encoded.clone(allocator);
+    defer zero_vtag_init_ack.deinit(allocator);
+    std.mem.writeInt(u32, zero_vtag_init_ack.items[4..8], 0, .big);
+    std.mem.writeInt(u32, zero_vtag_init_ack.items[8..12], 0, .little);
+    const zero_vtag_checksum = try sctp.checksum(zero_vtag_init_ack.items);
+    std.mem.writeInt(u32, zero_vtag_init_ack.items[8..12], zero_vtag_checksum, .little);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, zero_vtag_init_ack.items, true));
     var init_ack = try sctp.InitChunk.parse(allocator, parsed.chunks[0]);
     defer init_ack.deinit(allocator);
     try std.testing.expectEqual(@as(u32, 0x01020304), init_ack.initiate_tag);
@@ -13618,6 +13628,18 @@ test "SCTP INIT cookie echo and cookie ack packets" {
         .source_port = 5000,
         .destination_port = 5000,
         .verification_tag = 0,
+    }, true, .{
+        .initiate_tag = 0x01020304,
+        .advertised_receiver_window_credit = 256 * 1024,
+        .outbound_streams = 16,
+        .inbound_streams = 16,
+        .initial_tsn = 0x10203040,
+        .parameters = &params,
+    }));
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.writeInitPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x0a0b0c0d,
     }, true, .{
         .initiate_tag = 0x01020304,
         .advertised_receiver_window_credit = 256 * 1024,
