@@ -642,6 +642,10 @@ pub const ice = struct {
         active,
         passive,
         so,
+
+        pub fn string(self: TcpType) []const u8 {
+            return @tagName(self);
+        }
     };
 
     pub const RelayProtocol = enum {
@@ -763,7 +767,7 @@ pub const ice = struct {
 
         pub fn parsedTcpType(self: Candidate) Error!?TcpType {
             const value = self.tcp_type orelse return null;
-            return parseTcpType(value) orelse error.InvalidIceCandidate;
+            return tcpTypeFromString(value) orelse error.InvalidIceCandidate;
         }
 
         pub fn extensionValue(self: Candidate, key: []const u8) ?[]const u8 {
@@ -941,7 +945,7 @@ pub const ice = struct {
         return null;
     }
 
-    fn parseTcpType(value: []const u8) ?TcpType {
+    pub fn tcpTypeFromString(value: []const u8) ?TcpType {
         inline for (std.meta.fields(TcpType)) |field| {
             if (std.mem.eql(u8, value, field.name)) return @enumFromInt(field.value);
         }
@@ -1037,7 +1041,7 @@ pub const ice = struct {
     }
 
     fn validTcpType(value: []const u8) bool {
-        return parseTcpType(value) != null;
+        return tcpTypeFromString(value) != null;
     }
 };
 
@@ -9701,6 +9705,9 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqual(ice.Transport.tcp, tcp.transport);
     try std.testing.expectEqualStrings("active", tcp.tcp_type.?);
     try std.testing.expectEqual(ice.TcpType.active, (try tcp.parsedTcpType()).?);
+    try std.testing.expectEqualStrings("active", (try tcp.parsedTcpType()).?.string());
+    try std.testing.expectEqual(ice.TcpType.passive, ice.tcpTypeFromString("passive").?);
+    try std.testing.expect(ice.tcpTypeFromString("PASSIVE") == null);
     try std.testing.expectEqualStrings("active", tcp.extensionValue("tcptype").?);
     try std.testing.expectEqual(@as(u32, 1_675_624_447), try tcp.computedPriority(.{}));
 
