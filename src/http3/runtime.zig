@@ -711,7 +711,7 @@ fn receiveConnectionStreamBytes(
             if (try applyControlStreamFrameForRole(control, connection.endpoint.allocator, frame.stream, role)) continue;
             if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
             const incoming_id: u62 = @intCast(frame.stream.stream_id);
-            if (!control.acceptsLocalRequestStream(incoming_id)) return error.RequestRejected;
+            if (rejectByLocalGoAway(control.*, role, incoming_id)) return error.RequestRejected;
             if (stream_id) |id| {
                 if (incoming_id != id) continue;
             } else {
@@ -744,6 +744,19 @@ fn validateClientGoAwayPushId(push_id: u64) Error!void {
     // tquic behavior of sending client GOAWAY with push ID 0.  Accepting larger
     // IDs would imply outstanding pushes can be retried or drained correctly.
     if (push_id != 0) return error.InvalidFrame;
+}
+
+fn rejectByLocalGoAway(control: http3.ControlState, role: ControlStreamRole, stream_id: u64) bool {
+    return switch (role) {
+        // A server GOAWAY carries the largest client-initiated request stream
+        // ID that can still be processed, so server receive paths must reject
+        // newer request streams after sending GOAWAY.  A client GOAWAY carries
+        // a push ID instead (RFC 9114 §5.2), not a response stream ID; using it
+        // to filter server responses would incorrectly reject the in-flight
+        // response on stream 0 after a client sends GOAWAY(0).
+        .server => !control.acceptsLocalRequestStream(stream_id),
+        .client => false,
+    };
 }
 
 fn controlFramePayload(
@@ -1056,6 +1069,11 @@ test "HTTP/3 server GOAWAY validates request stream ids" {
     try std.testing.expectError(error.InvalidFrame, validateServerGoAwayStreamId(3));
     try validateClientGoAwayPushId(0);
     try std.testing.expectError(error.InvalidFrame, validateClientGoAwayPushId(1));
+
+    try std.testing.expect(!rejectByLocalGoAway(.{ .local_goaway_id = 0 }, .client, 0));
+    try std.testing.expect(!rejectByLocalGoAway(.{ .local_goaway_id = 0 }, .client, 4));
+    try std.testing.expect(!rejectByLocalGoAway(.{ .local_goaway_id = 4 }, .server, 0));
+    try std.testing.expect(rejectByLocalGoAway(.{ .local_goaway_id = 4 }, .server, 4));
 }
 
 test "HTTP/3 client rejects server-only control frames" {
