@@ -1305,6 +1305,7 @@ pub const Connection = struct {
                     const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
                     if (informationalResponseToSkip(status)) {
                         if ((frame.frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
+                        if ((try contentLength(headers)) != null) return error.InvalidContentLength;
                         freeHeaders(self.allocator, headers);
                         continue;
                     }
@@ -1417,6 +1418,7 @@ pub const Connection = struct {
         try fields.append(self.allocator, .{ .name = ":status", .value = status });
         for (response_headers) |header| try fields.append(self.allocator, header);
         stripConnectionHeaders(&fields, .response);
+        try validateResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
         if (status_code >= 200 and status_code < 300 and (try contentLength(fields.items)) != null) {
             return error.InvalidContentLength;
         }
@@ -6463,6 +6465,126 @@ test "HTTP/2 client rejects Content-Length on successful CONNECT tunnel" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 CONNECT tunnel skips valid informational responses" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("CONNECT", request.method);
+
+            try connection.writeExtendedConnectResponse(request.stream_id, 103, &.{
+                .{ .name = "link", .value = "</proxy-hint>; rel=preload" },
+            }, false);
+            try connection.writeExtendedConnectResponse(request.stream_id, 200, &.{}, false);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var response = try client.openConnectTunnel(.{
+        .method = "CONNECT",
+        .authority = "example.com:443",
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+}
+
+test "HTTP/2 CONNECT tunnel rejects content-length on informational response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("CONNECT", request.method);
+
+            // Raw HEADERS emulate an invalid peer; the high-level writer rejects
+            // this field before it can hit the wire.
+            try connection.writeHeaders(request.stream_id, &.{
+                .{ .name = ":status", .value = "103" },
+                .{ .name = "content-length", .value = "0" },
+            }, false);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.InvalidContentLength, client.openConnectTunnel(.{
+        .method = "CONNECT",
+        .authority = "example.com:443",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 runtime accepts traditional CONNECT DATA tunnel" {
     const allocator = std.testing.allocator;
 
@@ -6578,6 +6700,9 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     try std.testing.expectError(error.InvalidContentLength, connection.writeInformationalResponse(1, 103, &.{
         .{ .name = "content-length", .value = "0" },
     }));
+    try std.testing.expectError(error.InvalidContentLength, connection.writeExtendedConnectResponse(1, 103, &.{
+        .{ .name = "content-length", .value = "0" },
+    }, false));
     try std.testing.expectError(error.InvalidContentLength, connection.writeExtendedConnectResponse(1, 200, &.{
         .{ .name = "content-length", .value = "0" },
     }, false));
