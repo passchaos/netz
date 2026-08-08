@@ -1509,6 +1509,7 @@ pub const Connection = struct {
                 if (self.config.local_endpoint == .server and frame == .handshake_done) break semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.handshake_done), "handshake done");
             } else null,
             error.StreamLimitExceeded => firstFrameClose(frames, .stream_limit_error, "stream limit"),
+            error.StreamStateError => firstFrameClose(frames, .stream_state_error, "stream state"),
             else => null,
         };
     }
@@ -2757,8 +2758,6 @@ test "QUIC 1-RTT connection rejects invalid unidirectional stream controls befor
         .packet_number = 0,
         .frames = &[_]quic.Frame{
             .{ .stream = .{ .stream_id = 1, .data = "before-max-stream-error", .fin = false } },
-            // Server-initiated unidirectional stream 3 is receive-only for the
-            // client, so MAX_STREAM_DATA/STOP_SENDING are stream-state errors.
             .{ .max_stream_data = .{ .stream_id = 3, .maximum_stream_data = 64 } },
         },
     });
@@ -2766,34 +2765,71 @@ test "QUIC 1-RTT connection rejects invalid unidirectional stream controls befor
     try std.testing.expectEqual(@as(u64, 0), client.recv_data_total);
     try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
+    try std.testing.expect(client.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.stream_state_error), client.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.max_stream_data)), client.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("stream state", client.close_info.?.reason_phrase);
 
-    try sendFrames(&server_endpoint, client_endpoint.address(), keys, .{
-        .destination_connection_id = &client_cid,
-        .packet_number = 1,
+    var client2_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client2_endpoint.deinit();
+    const client2_cid = [_]u8{ 0x41, 0x4a, 0x4b, 0x4c };
+    var client2 = try Connection.init(&client2_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client2_cid,
+        .peer_connection_id = &server_cid,
+        .local_endpoint = .client,
+    });
+    defer client2.deinit();
+
+    try sendFrames(&server_endpoint, client2_endpoint.address(), keys, .{
+        .destination_connection_id = &client2_cid,
+        .packet_number = 0,
         .frames = &[_]quic.Frame{
             .{ .stream = .{ .stream_id = 1, .data = "before-stop-error", .fin = false } },
             .{ .stop_sending = .{ .stream_id = 3, .application_error_code = 7 } },
         },
     });
-    try std.testing.expectError(error.StreamStateError, client.receivePacket());
-    try std.testing.expectEqual(@as(u64, 0), client.recv_data_total);
-    try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
-    try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
+    try std.testing.expectError(error.StreamStateError, client2.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), client2.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), client2.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client2.received.ranges.items.len);
+    try std.testing.expect(client2.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.stream_state_error), client2.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.stop_sending)), client2.close_info.?.frame_type);
 
-    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
-        .destination_connection_id = &server_cid,
+    var client3_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client3_endpoint.deinit();
+    var server3_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server3_endpoint.deinit();
+    const client3_cid = [_]u8{ 0x51, 0x5a, 0x5b, 0x5c };
+    const server3_cid = [_]u8{ 0x55, 0x5e, 0x5f, 0x60 };
+    var server3 = try Connection.init(&server3_endpoint, .{
+        .peer = client3_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server3_cid,
+        .peer_connection_id = &client3_cid,
+        .local_endpoint = .server,
+    });
+    defer server3.deinit();
+
+    try sendFrames(&client3_endpoint, server3_endpoint.address(), keys, .{
+        .destination_connection_id = &server3_cid,
         .packet_number = 0,
         .frames = &[_]quic.Frame{
             .{ .stream = .{ .stream_id = 0, .data = "before-blocked-error", .fin = false } },
-            // Server-initiated unidirectional stream 3 is send-only for the
-            // server, so STREAM_DATA_BLOCKED is invalid on its receive side.
             .{ .stream_data_blocked = .{ .stream_id = 3, .maximum_stream_data = 64 } },
         },
     });
-    try std.testing.expectError(error.StreamStateError, server.receivePacket());
-    try std.testing.expectEqual(@as(u64, 0), server.recv_data_total);
-    try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
-    try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
+    try std.testing.expectError(error.StreamStateError, server3.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), server3.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), server3.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server3.received.ranges.items.len);
+    try std.testing.expect(server3.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.stream_state_error), server3.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.stream_data_blocked)), server3.close_info.?.frame_type);
 }
 
 test "QUIC 1-RTT connection preflights CID frames before receive-side effects" {
