@@ -4310,7 +4310,14 @@ pub const rtp = struct {
         while (pos < data.len) {
             const id = data[pos];
             pos += 1;
-            if (id == 0) continue; // Single-byte padding.
+            if (id == 0) {
+                // RFC 8285 two-byte form defines a single zero byte as
+                // padding.  Pion/rtp skips exactly that byte and resumes at
+                // the next octet rather than consuming an id/len pair, so
+                // trailing padding such as 00 00 after a real extension stays
+                // parseable.
+                continue;
+            }
             if (pos >= data.len) return error.InvalidRtpPacket;
             const len = data[pos];
             pos += 1;
@@ -11770,6 +11777,13 @@ test "RTP packet extension padding and writer" {
     try std.testing.expectEqualStrings("wide", rtp.findHeaderExtension(mutable_extensions, 200).?);
     try std.testing.expectError(error.InvalidRtpPacket, rtp.setHeaderExtensionForProfile(allocator, &mutable_extensions, rtp.one_byte_header_extension_profile, 13, "small"));
     try std.testing.expectEqualStrings("wide", rtp.findHeaderExtension(mutable_extensions, 200).?);
+    const two_byte_with_padding = try rtp.parseHeaderExtensionElements(allocator, .{
+        .profile = rtp.two_byte_header_extension_profile,
+        .data = &.{ 200, 4, 'w', 'i', 'd', 'e', 0, 0 },
+    });
+    defer rtp.freeHeaderExtensionElements(allocator, two_byte_with_padding);
+    try std.testing.expectEqual(@as(usize, 1), two_byte_with_padding.len);
+    try std.testing.expectEqualStrings("wide", rtp.findHeaderExtension(two_byte_with_padding, 200).?);
     const mutable_ids = try rtp.headerExtensionIds(allocator, mutable_extensions);
     defer allocator.free(mutable_ids);
     try std.testing.expectEqual(@as(u8, 1), mutable_ids[0]);
