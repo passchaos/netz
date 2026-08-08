@@ -19,6 +19,107 @@ const server_control_stream_id: u62 = 3;
 const server_qpack_encoder_stream_id: u62 = 7;
 const server_qpack_decoder_stream_id: u62 = 11;
 
+/// Reusable protection scratch for the preconfigured-key HTTP/3 runtime.
+///
+/// The handshake-backed runtime owns this storage inside `one_rtt.Connection`;
+/// the lightweight Protected runtime has no connection object, so it keeps the
+/// same lifetime explicitly to avoid sizing allocations on every packet batch.
+const ProtectedSendState = struct {
+    allocator: std.mem.Allocator,
+    payload_scratch: std.ArrayList(u8) = .empty,
+    packet_scratch: std.ArrayList(u8) = .empty,
+
+    fn init(allocator: std.mem.Allocator) ProtectedSendState {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(self: *ProtectedSendState) void {
+        self.payload_scratch.deinit(self.allocator);
+        self.packet_scratch.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn sendFrames(
+        self: *ProtectedSendState,
+        endpoint: *quic.runtime.Endpoint,
+        to: net.IpAddress,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id: []const u8,
+        next_packet_number: *u64,
+        frames: []const quic.Frame,
+        max_frames_per_packet: usize,
+    ) Error!void {
+        const chunk_size = @max(@as(usize, 1), max_frames_per_packet);
+        var frame_offset: usize = 0;
+        while (frame_offset < frames.len) {
+            var packets: [quic.one_rtt.max_batch_packets][]const quic.Frame =
+                undefined;
+            var packet_count: usize = 0;
+            while (frame_offset < frames.len and packet_count < packets.len) {
+                const end = @min(frames.len, frame_offset + chunk_size);
+                packets[packet_count] = frames[frame_offset..end];
+                packet_count += 1;
+                frame_offset = end;
+            }
+
+            // Preserve the direct path for the latency-sensitive single-packet
+            // case. Batch sizing and scratch management only pay off once at
+            // least two UDP datagrams can share one GSO/sendmmsg submission.
+            if (packet_count == 1) {
+                try quic.one_rtt.sendFrames(endpoint, to, keys, .{
+                    .destination_connection_id = destination_connection_id,
+                    .packet_number = next_packet_number.*,
+                    .frames = packets[0],
+                });
+                next_packet_number.* = std.math.add(
+                    u64,
+                    next_packet_number.*,
+                    1,
+                ) catch return error.InvalidPacketNumber;
+                continue;
+            }
+
+            const options: quic.one_rtt.BatchSendOptions = .{
+                .destination_connection_id = destination_connection_id,
+                .first_packet_number = next_packet_number.*,
+                .packets = packets[0..packet_count],
+            };
+            const sizes = try quic.one_rtt.batchStorageSizes(options);
+            try self.payload_scratch.ensureTotalCapacity(
+                self.allocator,
+                sizes.payload,
+            );
+            try self.packet_scratch.ensureTotalCapacity(
+                self.allocator,
+                sizes.packet,
+            );
+            self.payload_scratch.items.len = sizes.payload;
+            defer self.payload_scratch.items.len = 0;
+            self.packet_scratch.items.len = sizes.packet;
+            defer self.packet_scratch.items.len = 0;
+
+            const result = try quic.one_rtt.sendFramesBatchIntoProgress(
+                endpoint,
+                to,
+                keys,
+                options,
+                self.payload_scratch.items,
+                self.packet_scratch.items,
+            );
+            // A packet number becomes consumed as soon as the socket accepts
+            // its datagram. Preserve a partial batch prefix even though this
+            // lightweight runtime has no retransmission queue for the suffix.
+            next_packet_number.* = std.math.add(
+                u64,
+                next_packet_number.*,
+                result.sent_count,
+            ) catch return error.InvalidPacketNumber;
+            if (result.send_error) |err| return err;
+            std.debug.assert(result.sent_count == packet_count);
+        }
+    }
+};
+
 pub const Limits = struct {
     quic: quic.runtime.Limits = .{},
     /// Maximum bytes buffered while reassembling one HTTP/3 request/response
@@ -1280,6 +1381,7 @@ pub const ProtectedServer = struct {
     qpack_encoder_prefix_sent: bool = false,
     qpack_decoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(server_qpack_decoder_stream_id),
     qpack_decoder_prefix_sent: bool = false,
+    protected_send: ProtectedSendState,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
 
@@ -1299,10 +1401,12 @@ pub const ProtectedServer = struct {
                 allocator,
                 config.max_stream_buffer,
             ),
+            .protected_send = .init(allocator),
         };
     }
 
     pub fn deinit(self: *ProtectedServer) void {
+        self.protected_send.deinit();
         self.qpack_encode.deinit();
         self.qpack_decode.deinit();
         self.quic_server.deinit();
@@ -1358,6 +1462,7 @@ pub const ProtectedServer = struct {
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
+            &self.protected_send,
             server_control_stream_id,
         );
         var encoded: std.ArrayList(u8) = .empty;
@@ -1385,6 +1490,7 @@ pub const ProtectedServer = struct {
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
             &self.next_packet_number,
+            &self.protected_send,
         );
         var send_state = quic.stream_state.SendState.init(stream_id);
         var frames: std.ArrayList(quic.Frame) = .empty;
@@ -1398,6 +1504,7 @@ pub const ProtectedServer = struct {
             &self.next_packet_number,
             frames.items,
             self.config.max_frames_per_packet,
+            &self.protected_send,
         );
         response_sent = true;
     }
@@ -1415,9 +1522,10 @@ pub const ProtectedServer = struct {
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
+            &self.protected_send,
             server_control_stream_id,
         );
-        try sendProtectedControlFrame(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, .goaway, stream_id);
+        try sendProtectedControlFrame(&self.quic_server.endpoint, to, self.config, &self.control, &self.control_send, &self.next_packet_number, &self.protected_send, .goaway, stream_id);
     }
 
     fn receiveStreamBytes(self: *ProtectedServer, expected_stream_id: ?u62) Error!AssembledStream {
@@ -1509,6 +1617,7 @@ pub const ProtectedServer = struct {
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
+            &self.protected_send,
         );
     }
 };
@@ -1524,6 +1633,7 @@ pub const ProtectedClient = struct {
     qpack_encoder_prefix_sent: bool = false,
     qpack_decoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(client_qpack_decoder_stream_id),
     qpack_decoder_prefix_sent: bool = false,
+    protected_send: ProtectedSendState,
     next_stream_id: u62 = 0,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
@@ -1541,10 +1651,12 @@ pub const ProtectedClient = struct {
                 allocator,
                 config.max_stream_buffer,
             ),
+            .protected_send = .init(allocator),
         };
     }
 
     pub fn deinit(self: *ProtectedClient) void {
+        self.protected_send.deinit();
         self.qpack_encode.deinit();
         self.qpack_decode.deinit();
         self.quic_client.deinit();
@@ -1567,6 +1679,7 @@ pub const ProtectedClient = struct {
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
+            &self.protected_send,
             client_control_stream_id,
         );
         var encoded: std.ArrayList(u8) = .empty;
@@ -1588,6 +1701,7 @@ pub const ProtectedClient = struct {
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
             &self.next_packet_number,
+            &self.protected_send,
         );
         var send_state = quic.stream_state.SendState.init(stream_id);
         var frames: std.ArrayList(quic.Frame) = .empty;
@@ -1601,6 +1715,7 @@ pub const ProtectedClient = struct {
             &self.next_packet_number,
             frames.items,
             self.config.max_frames_per_packet,
+            &self.protected_send,
         );
         request_sent = true;
 
@@ -1635,9 +1750,10 @@ pub const ProtectedClient = struct {
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
+            &self.protected_send,
             client_control_stream_id,
         );
-        try sendProtectedControlFrame(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, .goaway, stream_id);
+        try sendProtectedControlFrame(&self.quic_client.endpoint, self.quic_client.peer, self.config, &self.control, &self.control_send, &self.next_packet_number, &self.protected_send, .goaway, stream_id);
     }
 
     fn receiveStreamBytes(self: *ProtectedClient, expected_stream_id: u62) Error!AssembledStream {
@@ -1715,6 +1831,7 @@ pub const ProtectedClient = struct {
             &self.qpack_decoder_send,
             &self.qpack_decoder_prefix_sent,
             &self.next_packet_number,
+            &self.protected_send,
         );
     }
 };
@@ -1976,6 +2093,7 @@ fn sendProtectedControlFrame(
     control: *http3.ControlState,
     control_send: *quic.stream_state.SendState,
     next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
     kind: ControlFrameKind,
     value: u64,
 ) Error!void {
@@ -1985,7 +2103,7 @@ fn sendProtectedControlFrame(
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(endpoint.allocator);
     try control_send.appendFrames(&frames, endpoint.allocator, payload.items, payload.items.len, false);
-    try sendProtectedFrames(endpoint, to, config.send_keys, config.peer_connection_id, next_packet_number, frames.items, config.max_frames_per_packet);
+    try sendProtectedFrames(endpoint, to, config.send_keys, config.peer_connection_id, next_packet_number, frames.items, config.max_frames_per_packet, protected_send);
 }
 
 fn sendConnectionSettings(
@@ -2160,6 +2278,7 @@ fn sendProtectedSettings(
     qpack_decoder_send: *quic.stream_state.SendState,
     qpack_decoder_prefix_sent: *bool,
     next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
     stream_id: u62,
 ) Error!void {
     if (control.settings.sent) return;
@@ -2231,6 +2350,7 @@ fn sendProtectedSettings(
         next_packet_number,
         frames.items,
         config.max_frames_per_packet,
+        protected_send,
     );
     if (qpack_encoder.items.len != 0) qpack_encoder_prefix_sent.* = true;
     if (qpack_decoder.items.len != 0) qpack_decoder_prefix_sent.* = true;
@@ -2244,6 +2364,7 @@ fn sendProtectedQpackEncoderInstructions(
     send_state: *quic.stream_state.SendState,
     prefix_sent: *bool,
     next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
 ) Error!void {
     const pending = qpack.pendingEncoderInstructions();
     if (pending.len == 0) return;
@@ -2277,6 +2398,7 @@ fn sendProtectedQpackEncoderInstructions(
         next_packet_number,
         frames.items,
         config.max_frames_per_packet,
+        protected_send,
     );
     prefix_sent.* = true;
     qpack.clearEncoderInstructions();
@@ -2290,6 +2412,7 @@ fn sendProtectedQpackFeedback(
     send_state: *quic.stream_state.SendState,
     prefix_sent: *bool,
     next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
 ) Error!void {
     const pending = qpack.pendingDecoderInstructions();
     if (pending.len == 0) return;
@@ -2322,6 +2445,7 @@ fn sendProtectedQpackFeedback(
         next_packet_number,
         frames.items,
         config.max_frames_per_packet,
+        protected_send,
     );
     prefix_sent.* = true;
     _ = instruction_offset;
@@ -2510,19 +2634,17 @@ fn sendProtectedFrames(
     next_packet_number: *u64,
     frames: []const quic.Frame,
     max_frames_per_packet: usize,
+    protected_send: *ProtectedSendState,
 ) Error!void {
-    const chunk_size = @max(@as(usize, 1), max_frames_per_packet);
-    var offset: usize = 0;
-    while (offset < frames.len) {
-        const end = @min(frames.len, offset + chunk_size);
-        try quic.one_rtt.sendFrames(endpoint, to, keys, .{
-            .destination_connection_id = destination_connection_id,
-            .packet_number = next_packet_number.*,
-            .frames = frames[offset..end],
-        });
-        next_packet_number.* += 1;
-        offset = end;
-    }
+    try protected_send.sendFrames(
+        endpoint,
+        to,
+        keys,
+        destination_connection_id,
+        next_packet_number,
+        frames,
+        max_frames_per_packet,
+    );
 }
 
 const MessageStreamDisposition = enum {
@@ -2754,6 +2876,76 @@ test "HTTP/3 runtime rejects non-empty QPACK critical streams" {
         .data = payload.items,
     }));
     try std.testing.expectEqual(@as(?u64, client_qpack_encoder_stream_id), control.peer_qpack_encoder_stream_id);
+}
+
+test "HTTP/3 protected send state reuses batch scratch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6b} ** quic.protection.secret_len,
+    );
+    const frame_storage = [_]quic.Frame{
+        .{ .stream = .{ .stream_id = 0, .data = "one" } },
+        .{ .stream = .{ .stream_id = 0, .offset = 3, .data = "two" } },
+        .{ .stream = .{ .stream_id = 0, .offset = 6, .data = "three" } },
+    };
+    var send_state = ProtectedSendState.init(allocator);
+    defer send_state.deinit();
+    var next_packet_number: u64 = 0;
+    try send_state.sendFrames(
+        &sender,
+        receiver.address(),
+        keys,
+        "cid",
+        &next_packet_number,
+        &frame_storage,
+        1,
+    );
+    const payload_capacity = send_state.payload_scratch.capacity;
+    const packet_capacity = send_state.packet_scratch.capacity;
+    try std.testing.expect(payload_capacity != 0);
+    try std.testing.expect(packet_capacity != 0);
+    try std.testing.expectEqual(@as(u64, 3), next_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), send_state.payload_scratch.items.len);
+    try std.testing.expectEqual(@as(usize, 0), send_state.packet_scratch.items.len);
+
+    // A same-sized batch must stay on the steady-state allocation-free path.
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    send_state.allocator = no_alloc.allocator();
+    try send_state.sendFrames(
+        &sender,
+        receiver.address(),
+        keys,
+        "cid",
+        &next_packet_number,
+        &frame_storage,
+        1,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(payload_capacity, send_state.payload_scratch.capacity);
+    try std.testing.expectEqual(packet_capacity, send_state.packet_scratch.capacity);
+    try std.testing.expectEqual(@as(u64, 6), next_packet_number);
 }
 
 test "HTTP/3 QPACK decoder state reassembles split and reordered encoder instructions" {
@@ -3714,6 +3906,7 @@ test "HTTP/3 protected server decodes dynamic QPACK request and sends feedback" 
         &client.qpack_decoder_send,
         &client.qpack_decoder_prefix_sent,
         &client.next_packet_number,
+        &client.protected_send,
         client_control_stream_id,
     );
 
@@ -3751,6 +3944,7 @@ test "HTTP/3 protected server decodes dynamic QPACK request and sends feedback" 
         &client.next_packet_number,
         frames.items,
         client.config.max_frames_per_packet,
+        &client.protected_send,
     );
 
     var encoder_table = http3.Qpack.DynamicTable.init(allocator, 256);
@@ -3796,6 +3990,7 @@ test "HTTP/3 protected server decodes dynamic QPACK request and sends feedback" 
         &client.next_packet_number,
         frames.items,
         client.config.max_frames_per_packet,
+        &client.protected_send,
     );
 
     var received = try server.receiveRequest();
@@ -3944,6 +4139,8 @@ test "HTTP/3 protected client decodes dynamic QPACK response and sends feedback"
             );
             var frames: std.ArrayList(quic.Frame) = .empty;
             defer frames.deinit(allocator);
+            var protected_send = ProtectedSendState.init(allocator);
+            defer protected_send.deinit();
             var encoder_send = quic.stream_state.SendState.init(
                 server_qpack_encoder_stream_id,
             );
@@ -3963,6 +4160,7 @@ test "HTTP/3 protected client decodes dynamic QPACK response and sends feedback"
                 &next_packet_number,
                 frames.items,
                 8,
+                &protected_send,
             );
 
             var table = http3.Qpack.DynamicTable.init(allocator, 256);
@@ -4005,6 +4203,7 @@ test "HTTP/3 protected client decodes dynamic QPACK response and sends feedback"
                 &next_packet_number,
                 frames.items,
                 8,
+                &protected_send,
             );
         }
     };
@@ -4183,6 +4382,7 @@ test "HTTP/3 protected server rejects requests beyond local GOAWAY" {
         &client.qpack_decoder_send,
         &client.qpack_decoder_prefix_sent,
         &client.next_packet_number,
+        &client.protected_send,
         client_control_stream_id,
     );
     var encoded: std.ArrayList(u8) = .empty;
@@ -4192,7 +4392,7 @@ test "HTTP/3 protected server rejects requests beyond local GOAWAY" {
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(allocator);
     try send_state.appendFrames(&frames, allocator, encoded.items, encoded.items.len, true);
-    try sendProtectedFrames(&client.quic_client.endpoint, client.quic_client.peer, client.config.send_keys, client.config.peer_connection_id, &client.next_packet_number, frames.items, client.config.max_frames_per_packet);
+    try sendProtectedFrames(&client.quic_client.endpoint, client.quic_client.peer, client.config.send_keys, client.config.peer_connection_id, &client.next_packet_number, frames.items, client.config.max_frames_per_packet, &client.protected_send);
 
     thread.join();
     if (shared.err) |err| return err;
@@ -4245,6 +4445,7 @@ test "HTTP/3 protected runtime rejects server-initiated bidirectional message st
         &client.next_packet_number,
         &invalid,
         client.config.max_frames_per_packet,
+        &client.protected_send,
     );
 
     try std.testing.expectError(error.StreamCreationError, server.receiveRequest());

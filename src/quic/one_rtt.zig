@@ -40,6 +40,16 @@ pub const BatchSendOptions = struct {
     packets: []const []const quic.Frame,
 };
 
+pub const BatchSendResult = struct {
+    /// Number of consecutive packets handed to the socket. Packet numbers in
+    /// this prefix must never be reused, even when `send_error` is non-null.
+    sent_count: usize,
+    /// Protected bytes corresponding to `sent_count`.
+    sent_bytes: usize,
+    /// A sendmmsg-style backend can accept a prefix before failing.
+    send_error: ?net.Socket.SendError = null,
+};
+
 pub const max_batch_packets: usize = 64;
 
 const PayloadSendOptions = struct {
@@ -3047,7 +3057,36 @@ pub fn sendFramesBatchInto(
     payload_storage: []u8,
     packet_storage: []u8,
 ) Error!usize {
-    if (options.packets.len == 0) return 0;
+    const result = try sendFramesBatchIntoProgress(
+        endpoint,
+        to,
+        keys,
+        options,
+        payload_storage,
+        packet_storage,
+    );
+    if (result.send_error) |err| return err;
+    std.debug.assert(result.sent_count == options.packets.len);
+    return result.sent_bytes;
+}
+
+/// Allocation-free batch protection and send with explicit socket progress.
+///
+/// Unlike `sendFramesBatchInto`, network errors are returned in the result so
+/// stateful callers can consume packet numbers for a socket-visible prefix.
+/// Validation, sizing, and packet protection still finish before the first
+/// datagram is submitted.
+pub fn sendFramesBatchIntoProgress(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    options: BatchSendOptions,
+    payload_storage: []u8,
+    packet_storage: []u8,
+) Error!BatchSendResult {
+    if (options.packets.len == 0) {
+        return .{ .sent_count = 0, .sent_bytes = 0 };
+    }
     if (options.packets.len > max_batch_packets) return error.DatagramTooLarge;
 
     var payload_lengths: [max_batch_packets]usize = undefined;
@@ -3107,8 +3146,19 @@ pub fn sendFramesBatchInto(
         packet_offset += packet.len;
     }
 
-    try endpoint.sendManyBytes(to, datagrams[0..options.packets.len]);
-    return packet_offset;
+    const send_result = try endpoint.sendManyBytesProgress(
+        to,
+        datagrams[0..options.packets.len],
+    );
+    var sent_bytes: usize = 0;
+    for (packet_lengths[0..send_result.sent_count]) |packet_len| {
+        sent_bytes += packet_len;
+    }
+    return .{
+        .sent_count = send_result.sent_count,
+        .sent_bytes = sent_bytes,
+        .send_error = send_result.send_error,
+    };
 }
 
 pub fn sendFramesBatch(
@@ -3130,6 +3180,7 @@ pub fn sendFramesBatch(
     );
 }
 
+/// Return the exact reusable scratch required by `sendFramesBatchInto`.
 pub fn batchStorageSizes(options: BatchSendOptions) Error!struct { payload: usize, packet: usize } {
     if (options.packets.len > max_batch_packets) return error.DatagramTooLarge;
     var payload_total: usize = 0;
@@ -3557,6 +3608,82 @@ test "QUIC 1-RTT batch send allocating wrapper uses one allocation" {
     const allocations_before = counting.allocations;
     try sendFramesBatch(&sender, receiver.address(), keys, options);
     try std.testing.expectEqual(@as(usize, 1), counting.allocations - allocations_before);
+}
+
+test "QUIC 1-RTT batch send reports a socket-sent prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096, .enable_gso_send = false },
+    );
+    defer sender.deinit();
+
+    var partial_send = ObservedBatchSend{
+        .delegate = sender.io,
+        .fail_after_prefix = 1,
+    };
+    var partial_vtable = sender.io.vtable.*;
+    partial_vtable.netSend = ObservedBatchSend.netSend;
+    sender.io = .{
+        .userdata = &partial_send,
+        .vtable = &partial_vtable,
+    };
+    defer sender.io = partial_send.delegate;
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb4} ** quic.protection.secret_len,
+    );
+    const first = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "first",
+    } }};
+    const second = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .data = "second",
+    } }};
+    const packets = [_][]const quic.Frame{ &first, &second };
+    const options: BatchSendOptions = .{
+        .destination_connection_id = "cid",
+        .first_packet_number = 20,
+        .packets = &packets,
+    };
+    const sizes = try batchStorageSizes(options);
+    const storage = try allocator.alloc(u8, sizes.payload + sizes.packet);
+    defer allocator.free(storage);
+
+    const result = try sendFramesBatchIntoProgress(
+        &sender,
+        receiver.address(),
+        keys,
+        options,
+        storage[0..sizes.payload],
+        storage[sizes.payload..],
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.sent_count);
+    try std.testing.expect(result.sent_bytes != 0);
+    try std.testing.expectEqual(error.NetworkDown, result.send_error.?);
+
+    var received = try receive(&receiver, keys, "cid".len, 20, 8);
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 20), received.packet.packet_number);
+    try std.testing.expectEqualStrings(
+        "first",
+        received.frames[0].stream.data,
+    );
 }
 
 test "QUIC 1-RTT STREAM frame exchange over UDP endpoint" {

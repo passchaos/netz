@@ -233,6 +233,7 @@ zig build bench-http3-dev -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
+zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 ```
 
@@ -246,6 +247,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   convenience wrapper,
 - QUIC Linux `UDP_SEGMENT` batching versus `sendmmsg`, plus `UDP_GRO`
   coalesced receive versus plain per-datagram receive,
+- QUIC 1-RTT sequential packet protection/send versus allocation-free batched
+  protection with reusable scratch and UDP GSO/sendmmsg submission,
 - end-to-end QUIC 1-RTT UDP_GRO batch receive versus per-packet receive,
   including decryption, frame parsing, state application, and cleanup.
 
@@ -348,7 +351,10 @@ if (session.maxDatagramPayloadSize()) |limit| {
   feedback. Both protected runtimes persist their encoder/decoder streams and
   automatically use peer-capacity-bounded, reference-safe dynamic compression
   for repeated request and response fields after either preconfigured 1-RTT or
-  a full QUIC handshake. They advertise and implement
+  a full QUIC handshake. The preconfigured 1-RTT runtime also reuses protected
+  packet scratch and batches multi-packet STREAM sends through UDP GSO or
+  sendmmsg while preserving packet-number progress on partial socket writes.
+  Both runtimes advertise and implement
   `SETTINGS_QPACK_BLOCKED_STREAMS=0`: newly inserted fields stay literal until
   acknowledged, while non-zero blocked-stream scheduling remains intentionally
   unsupported.
