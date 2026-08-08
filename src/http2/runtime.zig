@@ -2124,8 +2124,13 @@ fn validateDeclaredRequestLength(headers: []const http2.Hpack.HeaderField, body_
 }
 
 fn requestShouldDefaultContentLength(method: []const u8, headers: []const http2.Hpack.HeaderField, body_len: usize) bool {
-    if (body_len == 0) return false;
     if (methodIsConnect(method)) return false;
+    // Match Hyper's h2 request shaping: exact non-empty bodies always get a
+    // length, and bodyless methods with defined payload semantics (for example
+    // POST/PUT/PATCH) get an explicit `content-length: 0`.  The explicit zero
+    // preserves application intent for methods where an empty payload is
+    // materially different from a method that normally carries no payload.
+    if (body_len == 0 and !methodHasDefinedPayloadSemantics(method)) return false;
     return (contentLength(headers) catch return false) == null;
 }
 
@@ -2296,6 +2301,13 @@ fn methodIsHead(method: []const u8) bool {
 
 fn methodIsConnect(method: []const u8) bool {
     return std.mem.eql(u8, method, "CONNECT");
+}
+
+fn methodHasDefinedPayloadSemantics(method: []const u8) bool {
+    return !std.mem.eql(u8, method, "GET") and
+        !methodIsHead(method) and
+        !std.mem.eql(u8, method, "DELETE") and
+        !methodIsConnect(method);
 }
 
 fn methodIsOptions(method: []const u8) bool {
@@ -5845,6 +5857,82 @@ test "HTTP/2 request writer defaults content-length for known body" {
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HTTP/2 request writer defaults zero content-length for payload methods" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var post = try connection.readRequest();
+            defer post.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/default-empty-post-length", post.path);
+            try std.testing.expectEqualStrings("", post.body);
+            try std.testing.expectEqualStrings("0", findHeader(post.headers, "content-length") orelse return error.MissingPseudoHeader);
+            try connection.writeResponse(post.stream_id, .{ .body = "post" });
+
+            var get = try connection.readRequest();
+            defer get.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/default-empty-get-length", get.path);
+            try std.testing.expectEqualStrings("", get.body);
+            try std.testing.expect(findHeader(get.headers, "content-length") == null);
+            try connection.writeResponse(get.stream_id, .{ .body = "get" });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var post_response = try client.request(.{
+        .method = "POST",
+        .path = "/default-empty-post-length",
+        .authority = "localhost",
+    });
+    defer post_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), post_response.status);
+    try std.testing.expectEqualStrings("post", post_response.body);
+
+    var get_response = try client.request(.{
+        .method = "GET",
+        .path = "/default-empty-get-length",
+        .authority = "localhost",
+    });
+    defer get_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), get_response.status);
+    try std.testing.expectEqualStrings("get", get_response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/2 runtime validates request content-length before accepting trailers" {
