@@ -78,6 +78,12 @@ pub fn build(b: *std.Build) void {
             .run_step = "bench-http1-parse",
             .description = "Benchmark HTTP/1 borrowed head parsing against owned parsing",
         },
+        .{
+            .exe_name = "netz-bench-quic-short-packet",
+            .path = "examples/bench_quic_short_packet.zig",
+            .run_step = "bench-quic-short-packet",
+            .description = "Benchmark QUIC short packet in-place sealing against allocating sealing",
+        },
     };
     const linux_example_specs = [_]struct {
         exe_name: []const u8,
