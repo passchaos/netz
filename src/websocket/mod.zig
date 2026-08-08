@@ -645,8 +645,14 @@ pub const MessageAssembler = struct {
         try self.buffer.appendSlice(self.allocator, frame.payload);
         if (!frame.header.fin) return null;
         const payload = try self.buffer.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(payload);
         const opcode = self.opcode.?;
         const compressed = self.compressed;
+        // Keep the public assembler as strict as the runtime wrapper and
+        // tungstenite's text collector: fragmented text is allowed to split
+        // UTF-8 code points, but the completed uncompressed message must be
+        // valid UTF-8 before it is handed to callers.
+        if (opcode == .text and !compressed and !std.unicode.utf8ValidateSlice(payload)) return error.InvalidUtf8;
         self.opcode = null;
         self.compressed = false;
         self.buffer = .empty;
@@ -792,8 +798,8 @@ test "WebSocket frame masked roundtrip" {
     try std.testing.expectEqualStrings("Hello", frame.payload);
 
     var payload = [_]u8{
-        0, 1, 2, 3, 4, 5, 6, 7,
-        8, 9, 10, 11, 12, 13, 14, 15,
+        0,  1,  2,  3,  4,  5,  6,  7,
+        8,  9,  10, 11, 12, 13, 14, 15,
         16, 17, 18, 19, 20, 21, 22, 23,
         24, 25, 26, 27, 28, 29, 30, 31,
         32, 33, 34,
@@ -1115,6 +1121,65 @@ test "WebSocket message assembler enforces aggregate payload limit" {
         .consumed = 2 + second_payload.len,
     };
     try std.testing.expectError(error.PayloadTooLarge, assembler.feed(second));
+}
+
+test "WebSocket message assembler validates completed text fragments" {
+    const allocator = std.testing.allocator;
+    var assembler = MessageAssembler.init(allocator);
+    defer assembler.deinit();
+
+    var first_payload = [_]u8{0xf0};
+    const first = Frame{
+        .header = .{
+            .fin = false,
+            .opcode = .text,
+            .masked = false,
+            .payload_len = first_payload.len,
+            .mask_key = null,
+            .header_len = 2,
+        },
+        .payload = &first_payload,
+        .consumed = 2 + first_payload.len,
+    };
+    try std.testing.expectEqual(@as(?MessageAssembler.Message, null), try assembler.feed(first));
+
+    var invalid_tail = [_]u8{ 0x28, 0x8c, 0x28 };
+    const second = Frame{
+        .header = .{
+            .fin = true,
+            .opcode = .continuation,
+            .masked = false,
+            .payload_len = invalid_tail.len,
+            .mask_key = null,
+            .header_len = 2,
+        },
+        .payload = &invalid_tail,
+        .consumed = 2 + invalid_tail.len,
+    };
+    try std.testing.expectError(error.InvalidUtf8, assembler.feed(second));
+
+    assembler.deinit();
+    assembler = MessageAssembler.init(allocator);
+    var compressed_first_payload = [_]u8{0xf0};
+    const compressed_first = Frame{
+        .header = .{
+            .fin = false,
+            .rsv1 = true,
+            .opcode = .text,
+            .masked = false,
+            .payload_len = compressed_first_payload.len,
+            .mask_key = null,
+            .header_len = 2,
+        },
+        .payload = &compressed_first_payload,
+        .consumed = 2 + compressed_first_payload.len,
+    };
+    try std.testing.expectEqual(@as(?MessageAssembler.Message, null), try assembler.feed(compressed_first));
+
+    const compressed_message = (try assembler.feed(second)).?;
+    defer allocator.free(compressed_message.payload);
+    try std.testing.expect(compressed_message.compressed);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xf0, 0x28, 0x8c, 0x28 }, compressed_message.payload);
 }
 
 test "WebSocket handshake rejects malformed nonce" {
