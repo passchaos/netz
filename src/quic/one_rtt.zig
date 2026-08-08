@@ -29,6 +29,18 @@ pub const SendOptions = struct {
     frames: []const quic.Frame,
 };
 
+pub const BatchSendOptions = struct {
+    destination_connection_id: []const u8,
+    first_packet_number: u64,
+    packet_number_len: u8 = 4,
+    spin_bit: bool = false,
+    key_phase: bool = false,
+    /// One frame slice per UDP datagram.
+    packets: []const []const quic.Frame,
+};
+
+pub const max_batch_packets: usize = 64;
+
 const PayloadSendOptions = struct {
     destination_connection_id: []const u8,
     packet_number: u64,
@@ -2413,6 +2425,13 @@ fn allZero(comptime T: type, values: []const T) bool {
     return true;
 }
 
+fn allEqual(comptime T: type, values: []const T, expected: T) bool {
+    for (values) |value| {
+        if (value != expected) return false;
+    }
+    return true;
+}
+
 fn closeExpiryMillis(now_ms: ?u64, pto_ms: ?u64) ?u64 {
     const now = now_ms orelse return null;
     const pto = pto_ms orelse return null;
@@ -2441,6 +2460,128 @@ pub fn sendFrames(
         .key_phase = options.key_phase,
         .payload = payload,
     });
+}
+
+/// Encode, protect, and submit a batch of independent 1-RTT packets.
+///
+/// The caller supplies scratch storage for both encoded frame payloads and
+/// protected datagrams, making the entire path allocation-free. The function
+/// validates every frame and computes every required size before writing either
+/// buffer or issuing the first UDP send.
+pub fn sendFramesBatchInto(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    options: BatchSendOptions,
+    payload_storage: []u8,
+    packet_storage: []u8,
+) Error!usize {
+    if (options.packets.len == 0) return 0;
+    if (options.packets.len > max_batch_packets) return error.DatagramTooLarge;
+
+    var payload_lengths: [max_batch_packets]usize = undefined;
+    var packet_lengths: [max_batch_packets]usize = undefined;
+    var total_payload_len: usize = 0;
+    var total_packet_len: usize = 0;
+
+    for (options.packets, 0..) |frames, i| {
+        if (frames.len == 0) return error.MissingFrame;
+        var payload_len: usize = 0;
+        for (frames) |frame| {
+            try quic.validateFrameForPacketType(frame, .one_rtt);
+            payload_len = std.math.add(usize, payload_len, try frame.wireLen()) catch return error.InvalidFrameLength;
+        }
+        payload_lengths[i] = payload_len;
+        total_payload_len = std.math.add(usize, total_payload_len, payload_len) catch return error.InvalidFrameLength;
+
+        const packet_number = std.math.add(u64, options.first_packet_number, i) catch return error.InvalidPacketNumber;
+        const packet_len = try quic.protection.shortPacketLen(.{
+            .destination_connection_id = options.destination_connection_id,
+            .packet_number = packet_number,
+            .packet_number_len = options.packet_number_len,
+            .payload = payload_storage[0..0],
+        });
+        packet_lengths[i] = std.math.add(usize, packet_len, payload_len) catch return error.InvalidPayloadLength;
+        if (packet_lengths[i] > endpoint.limits.max_datagram_size) return error.DatagramTooLarge;
+        total_packet_len = std.math.add(usize, total_packet_len, packet_lengths[i]) catch return error.InvalidPayloadLength;
+    }
+    if (payload_storage.len < total_payload_len or packet_storage.len < total_packet_len) return error.BufferTooShort;
+
+    var datagrams: [max_batch_packets][]const u8 = undefined;
+    var payload_offset: usize = 0;
+    var packet_offset: usize = 0;
+    for (options.packets, 0..) |frames, i| {
+        const payload_len = payload_lengths[i];
+        const payload_out = payload_storage[payload_offset..][0..payload_len];
+        var fixed = std.heap.FixedBufferAllocator.init(payload_out);
+        var encoded = try std.ArrayList(u8).initCapacity(fixed.allocator(), payload_len);
+        for (frames) |frame| try frame.write(&encoded, fixed.allocator());
+        std.debug.assert(encoded.items.len == payload_len);
+
+        const packet_number = options.first_packet_number + i;
+        const packet = try quic.protection.sealShortPacketInto(
+            packet_storage[packet_offset..][0..packet_lengths[i]],
+            keys,
+            .{
+                .destination_connection_id = options.destination_connection_id,
+                .packet_number = packet_number,
+                .packet_number_len = options.packet_number_len,
+                .spin_bit = options.spin_bit,
+                .key_phase = options.key_phase,
+                .payload = encoded.items,
+            },
+        );
+        datagrams[i] = packet;
+        payload_offset += payload_len;
+        packet_offset += packet.len;
+    }
+
+    try endpoint.sendManyBytes(to, datagrams[0..options.packets.len]);
+    return packet_offset;
+}
+
+pub fn sendFramesBatch(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    options: BatchSendOptions,
+) Error!void {
+    const sizes = try batchStorageSizes(options);
+    const storage = try endpoint.allocator.alloc(u8, sizes.payload + sizes.packet);
+    defer endpoint.allocator.free(storage);
+    _ = try sendFramesBatchInto(
+        endpoint,
+        to,
+        keys,
+        options,
+        storage[0..sizes.payload],
+        storage[sizes.payload..],
+    );
+}
+
+pub fn batchStorageSizes(options: BatchSendOptions) Error!struct { payload: usize, packet: usize } {
+    if (options.packets.len > max_batch_packets) return error.DatagramTooLarge;
+    var payload_total: usize = 0;
+    var packet_total: usize = 0;
+    for (options.packets, 0..) |frames, i| {
+        if (frames.len == 0) return error.MissingFrame;
+        var payload_len: usize = 0;
+        for (frames) |frame| {
+            try quic.validateFrameForPacketType(frame, .one_rtt);
+            payload_len = std.math.add(usize, payload_len, try frame.wireLen()) catch return error.InvalidFrameLength;
+        }
+        payload_total = std.math.add(usize, payload_total, payload_len) catch return error.InvalidFrameLength;
+        const packet_number = std.math.add(u64, options.first_packet_number, i) catch return error.InvalidPacketNumber;
+        const overhead = try quic.protection.shortPacketLen(.{
+            .destination_connection_id = options.destination_connection_id,
+            .packet_number = packet_number,
+            .packet_number_len = options.packet_number_len,
+            .payload = &.{},
+        });
+        const packet_len = std.math.add(usize, overhead, payload_len) catch return error.InvalidPayloadLength;
+        packet_total = std.math.add(usize, packet_total, packet_len) catch return error.InvalidPayloadLength;
+    }
+    return .{ .payload = payload_total, .packet = packet_total };
 }
 
 pub fn sendZeroRttFrames(
@@ -2666,6 +2807,140 @@ fn parsePacketFramesForType(
     }
     if (frames.items.len == 0) return error.MissingFrame;
     return frames.toOwnedSlice(endpoint.allocator);
+}
+
+test "QUIC 1-RTT batch send protects consecutive packets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xb1} ** quic.protection.secret_len);
+    const packet0 = [_]quic.Frame{
+        .{ .ping = {} },
+        .{ .stream = .{ .stream_id = 0, .data = "first", .fin = false } },
+    };
+    const packet1 = [_]quic.Frame{.{ .datagram = .{ .data = "second", .length_present = true } }};
+    const packet2 = [_]quic.Frame{.{ .path_challenge = .{ .data = [_]u8{3} ** 8 } }};
+    const packets = [_][]const quic.Frame{ &packet0, &packet1, &packet2 };
+    const options: BatchSendOptions = .{
+        .destination_connection_id = "batch-cid",
+        .first_packet_number = 40,
+        .packet_number_len = 2,
+        .packets = &packets,
+    };
+    const sizes = try batchStorageSizes(options);
+    const payload_storage = try allocator.alloc(u8, sizes.payload);
+    defer allocator.free(payload_storage);
+    const packet_storage = try allocator.alloc(u8, sizes.packet);
+    defer allocator.free(packet_storage);
+
+    const written = try sendFramesBatchInto(
+        &sender,
+        receiver.address(),
+        keys,
+        options,
+        payload_storage,
+        packet_storage,
+    );
+    try std.testing.expectEqual(sizes.packet, written);
+
+    for (packets, 0..) |expected_frames, i| {
+        var received = try receive(&receiver, keys, "batch-cid".len, 40 + i, 8);
+        defer received.deinit(allocator);
+        try std.testing.expectEqual(@as(u64, @intCast(40 + i)), received.packet.packet_number);
+        try std.testing.expectEqual(expected_frames.len, received.frames.len);
+        for (expected_frames, received.frames) |expected, actual| {
+            try std.testing.expectEqual(@intFromEnum(expected), @intFromEnum(actual));
+        }
+    }
+}
+
+test "QUIC 1-RTT batch send preflights storage and all packets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xb2} ** quic.protection.secret_len);
+    const valid = [_]quic.Frame{.{ .ping = {} }};
+    const invalid = [_]quic.Frame{.{ .ack_frequency = .{
+        .sequence_number = 0,
+        .ack_eliciting_threshold = 0,
+        .request_max_ack_delay = 0,
+        .reordering_threshold = 0,
+    } }};
+    const packets = [_][]const quic.Frame{ &valid, &invalid };
+    const options: BatchSendOptions = .{
+        .destination_connection_id = "cid",
+        .first_packet_number = 0,
+        .packets = &packets,
+    };
+    var payload_storage: [128]u8 = undefined;
+    var packet_storage: [256]u8 = undefined;
+    @memset(&payload_storage, 0xa5);
+    @memset(&packet_storage, 0x5a);
+    try std.testing.expectError(
+        error.InvalidFrame,
+        sendFramesBatchInto(&sender, receiver.address(), keys, options, &payload_storage, &packet_storage),
+    );
+    try std.testing.expect(allEqual(u8, &payload_storage, 0xa5));
+    try std.testing.expect(allEqual(u8, &packet_storage, 0x5a));
+
+    const only_valid = [_][]const quic.Frame{&valid};
+    const valid_options: BatchSendOptions = .{
+        .destination_connection_id = "cid",
+        .first_packet_number = 0,
+        .packets = &only_valid,
+    };
+    const sizes = try batchStorageSizes(valid_options);
+    try std.testing.expectError(
+        error.BufferTooShort,
+        sendFramesBatchInto(
+            &sender,
+            receiver.address(),
+            keys,
+            valid_options,
+            payload_storage[0 .. sizes.payload - 1],
+            &packet_storage,
+        ),
+    );
+}
+
+test "QUIC 1-RTT batch send allocating wrapper uses one allocation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer receiver.deinit();
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    const sender_allocator = counting.allocator();
+    var sender = try quic.runtime.Endpoint.bind(sender_allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xb3} ** quic.protection.secret_len);
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    const packets = [_][]const quic.Frame{ &ping, &ping };
+    const options: BatchSendOptions = .{
+        .destination_connection_id = "cid",
+        .first_packet_number = 10,
+        .packets = &packets,
+    };
+    const allocations_before = counting.allocations;
+    try sendFramesBatch(&sender, receiver.address(), keys, options);
+    try std.testing.expectEqual(@as(usize, 1), counting.allocations - allocations_before);
 }
 
 test "QUIC 1-RTT STREAM frame exchange over UDP endpoint" {

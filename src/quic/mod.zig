@@ -1070,6 +1070,142 @@ pub const Frame = union(enum) {
     datagram: DatagramFrame,
     ack_frequency: AckFrequencyFrame,
 
+    pub fn wireLen(self: Frame) Error!usize {
+        return switch (self) {
+            .padding => |padding| padding.len,
+            .ping => @as(usize, try varint.length(@intFromEnum(FrameType.ping))),
+            .ack => |ack| blk: {
+                try validateAckFrame(ack);
+                var len: usize = try varint.length(if (ack.ecn_counts == null) @intFromEnum(FrameType.ack) else @intFromEnum(FrameType.ack_ecn));
+                len = try addWireLen(len, try varint.length(ack.largest_acknowledged));
+                len = try addWireLen(len, try varint.length(ack.ack_delay));
+                len = try addWireLen(len, try varint.length(ack.ranges.len));
+                len = try addWireLen(len, try varint.length(ack.first_ack_range));
+                for (ack.ranges) |range| {
+                    len = try addWireLen(len, try varint.length(range.gap));
+                    len = try addWireLen(len, try varint.length(range.ack_range_length));
+                }
+                if (ack.ecn_counts) |ecn| {
+                    len = try addWireLen(len, try varint.length(ecn.ect0_count));
+                    len = try addWireLen(len, try varint.length(ecn.ect1_count));
+                    len = try addWireLen(len, try varint.length(ecn.ecn_ce_count));
+                }
+                break :blk len;
+            },
+            .reset_stream => |reset| try varintWireLen(&.{
+                @intFromEnum(FrameType.reset_stream),
+                reset.stream_id,
+                reset.application_error_code,
+                reset.final_size,
+            }),
+            .stop_sending => |stop| try varintWireLen(&.{
+                @intFromEnum(FrameType.stop_sending),
+                stop.stream_id,
+                stop.application_error_code,
+            }),
+            .new_token => |new_token| blk: {
+                if (new_token.token.len == 0) return error.InvalidFrame;
+                const prefix = try varintWireLen(&.{ @intFromEnum(FrameType.new_token), new_token.token.len });
+                break :blk try addWireLen(prefix, new_token.token.len);
+            },
+            .crypto => |crypto| blk: {
+                try validateEndOffset(crypto.offset, crypto.data.len);
+                const prefix = try varintWireLen(&.{ @intFromEnum(FrameType.crypto), crypto.offset, crypto.data.len });
+                break :blk try addWireLen(prefix, crypto.data.len);
+            },
+            .stream => |stream| blk: {
+                try validateEndOffset(stream.offset, stream.data.len);
+                var frame_type: u64 = @intFromEnum(FrameType.stream) | 0x02;
+                if (stream.offset != 0) frame_type |= 0x04;
+                if (stream.fin) frame_type |= 0x01;
+                var len = try varintWireLen(&.{ frame_type, stream.stream_id });
+                if (stream.offset != 0) len = try addWireLen(len, try varint.length(stream.offset));
+                len = try addWireLen(len, try varint.length(stream.data.len));
+                break :blk try addWireLen(len, stream.data.len);
+            },
+            .max_data => |frame| try varintWireLen(&.{ @intFromEnum(FrameType.max_data), frame.maximum_data }),
+            .max_stream_data => |frame| try varintWireLen(&.{
+                @intFromEnum(FrameType.max_stream_data),
+                frame.stream_id,
+                frame.maximum_stream_data,
+            }),
+            .max_streams_bidi => |frame| blk: {
+                try validateStreamCount(frame.maximum_streams);
+                break :blk try varintWireLen(&.{ @intFromEnum(FrameType.max_streams_bidi), frame.maximum_streams });
+            },
+            .max_streams_uni => |frame| blk: {
+                try validateStreamCount(frame.maximum_streams);
+                break :blk try varintWireLen(&.{ @intFromEnum(FrameType.max_streams_uni), frame.maximum_streams });
+            },
+            .data_blocked => |frame| try varintWireLen(&.{ @intFromEnum(FrameType.data_blocked), frame.maximum_data }),
+            .stream_data_blocked => |frame| try varintWireLen(&.{
+                @intFromEnum(FrameType.stream_data_blocked),
+                frame.stream_id,
+                frame.maximum_stream_data,
+            }),
+            .streams_blocked_bidi => |frame| blk: {
+                try validateStreamCount(frame.maximum_streams);
+                break :blk try varintWireLen(&.{ @intFromEnum(FrameType.streams_blocked_bidi), frame.maximum_streams });
+            },
+            .streams_blocked_uni => |frame| blk: {
+                try validateStreamCount(frame.maximum_streams);
+                break :blk try varintWireLen(&.{ @intFromEnum(FrameType.streams_blocked_uni), frame.maximum_streams });
+            },
+            .new_connection_id => |frame| blk: {
+                try validateConnectionIdLen(frame.connection_id.len);
+                if (frame.retire_prior_to > frame.sequence_number) return error.InvalidFrame;
+                var len = try varintWireLen(&.{
+                    @intFromEnum(FrameType.new_connection_id),
+                    frame.sequence_number,
+                    frame.retire_prior_to,
+                });
+                len = try addWireLen(len, 1);
+                len = try addWireLen(len, frame.connection_id.len);
+                break :blk try addWireLen(len, frame.stateless_reset_token.len);
+            },
+            .retire_connection_id => |frame| try varintWireLen(&.{
+                @intFromEnum(FrameType.retire_connection_id),
+                frame.sequence_number,
+            }),
+            .path_challenge => try addWireLen(try varint.length(@intFromEnum(FrameType.path_challenge)), 8),
+            .path_response => try addWireLen(try varint.length(@intFromEnum(FrameType.path_response)), 8),
+            .connection_close => |close| blk: {
+                const prefix = try varintWireLen(&.{
+                    @intFromEnum(FrameType.connection_close),
+                    close.error_code,
+                    close.frame_type,
+                    close.reason_phrase.len,
+                });
+                break :blk try addWireLen(prefix, close.reason_phrase.len);
+            },
+            .application_close => |close| blk: {
+                const prefix = try varintWireLen(&.{
+                    @intFromEnum(FrameType.connection_close_app),
+                    close.error_code,
+                    close.reason_phrase.len,
+                });
+                break :blk try addWireLen(prefix, close.reason_phrase.len);
+            },
+            .handshake_done => @as(usize, try varint.length(@intFromEnum(FrameType.handshake_done))),
+            .immediate_ack => @as(usize, try varint.length(@intFromEnum(FrameType.immediate_ack))),
+            .datagram => |datagram| blk: {
+                var len: usize = try varint.length(if (datagram.length_present) @intFromEnum(FrameType.datagram_len) else @intFromEnum(FrameType.datagram));
+                if (datagram.length_present) len = try addWireLen(len, try varint.length(datagram.data.len));
+                break :blk try addWireLen(len, datagram.data.len);
+            },
+            .ack_frequency => |frame| blk: {
+                try validateAckFrequencyFrame(frame);
+                break :blk try varintWireLen(&.{
+                    @intFromEnum(FrameType.ack_frequency),
+                    frame.sequence_number,
+                    frame.ack_eliciting_threshold,
+                    frame.request_max_ack_delay,
+                    frame.reordering_threshold,
+                });
+            },
+        };
+    }
+
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         switch (self) {
             .padding => |padding| try list.appendNTimes(allocator, @intFromEnum(FrameType.padding), padding.len),
@@ -1209,6 +1345,16 @@ pub fn deinitOwnedFrame(frame: *Frame, allocator: std.mem.Allocator) void {
 
 pub fn deinitOwnedFrameSlice(frames: []Frame, allocator: std.mem.Allocator) void {
     for (frames) |*frame| deinitOwnedFrame(frame, allocator);
+}
+
+fn addWireLen(a: usize, b: usize) Error!usize {
+    return std.math.add(usize, a, b) catch error.InvalidFrameLength;
+}
+
+fn varintWireLen(values: []const u64) Error!usize {
+    var len: usize = 0;
+    for (values) |value| len = try addWireLen(len, try varint.length(value));
+    return len;
 }
 
 pub const FramePacketType = enum {
@@ -2485,4 +2631,62 @@ test "QUIC ACK_ECN frame codec rejects invalid ranges" {
     try varint.encode(&range_too_long, allocator, 1);
     try varint.encode(&range_too_long, allocator, 1);
     try std.testing.expectError(error.InvalidAckRange, parseFrameOwned(allocator, range_too_long.items));
+}
+
+test "QUIC frame wire lengths match encoders for every variant" {
+    const allocator = std.testing.allocator;
+    const ranges = [_]AckRange{.{ .gap = 0, .ack_range_length = 1 }};
+    const frames = [_]Frame{
+        .{ .padding = .{ .len = 3 } },
+        .{ .ping = {} },
+        .{ .ack = .{ .largest_acknowledged = 5, .ack_delay = 2, .first_ack_range = 1, .ranges = &ranges } },
+        .{ .ack = .{
+            .largest_acknowledged = 5,
+            .ack_delay = 2,
+            .first_ack_range = 1,
+            .ranges = &ranges,
+            .ecn_counts = .{ .ect0_count = 3, .ect1_count = 2, .ecn_ce_count = 1 },
+        } },
+        .{ .reset_stream = .{ .stream_id = 4, .application_error_code = 7, .final_size = 99 } },
+        .{ .stop_sending = .{ .stream_id = 4, .application_error_code = 7 } },
+        .{ .new_token = .{ .token = "token" } },
+        .{ .crypto = .{ .offset = 2, .data = "crypto" } },
+        .{ .stream = .{ .stream_id = 4, .offset = 2, .fin = true, .data = "stream" } },
+        .{ .max_data = .{ .maximum_data = 1000 } },
+        .{ .max_stream_data = .{ .stream_id = 4, .maximum_stream_data = 1000 } },
+        .{ .max_streams_bidi = .{ .maximum_streams = 4 } },
+        .{ .max_streams_uni = .{ .maximum_streams = 4 } },
+        .{ .data_blocked = .{ .maximum_data = 1000 } },
+        .{ .stream_data_blocked = .{ .stream_id = 4, .maximum_stream_data = 1000 } },
+        .{ .streams_blocked_bidi = .{ .maximum_streams = 4 } },
+        .{ .streams_blocked_uni = .{ .maximum_streams = 4 } },
+        .{ .new_connection_id = .{
+            .sequence_number = 2,
+            .retire_prior_to = 1,
+            .connection_id = "cid",
+            .stateless_reset_token = [_]u8{0xa5} ** 16,
+        } },
+        .{ .retire_connection_id = .{ .sequence_number = 1 } },
+        .{ .path_challenge = .{ .data = [_]u8{1} ** 8 } },
+        .{ .path_response = .{ .data = [_]u8{2} ** 8 } },
+        .{ .connection_close = .{ .error_code = 1, .frame_type = 8, .reason_phrase = "close" } },
+        .{ .application_close = .{ .error_code = 1, .reason_phrase = "app" } },
+        .{ .handshake_done = {} },
+        .{ .immediate_ack = {} },
+        .{ .datagram = .{ .data = "datagram", .length_present = false } },
+        .{ .datagram = .{ .data = "datagram", .length_present = true } },
+        .{ .ack_frequency = .{
+            .sequence_number = 1,
+            .ack_eliciting_threshold = 2,
+            .request_max_ack_delay = 3,
+            .reordering_threshold = 4,
+        } },
+    };
+
+    for (frames) |frame| {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try frame.write(&encoded, allocator);
+        try std.testing.expectEqual(encoded.items.len, try frame.wireLen());
+    }
 }

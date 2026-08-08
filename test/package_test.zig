@@ -204,6 +204,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "validateTransportParameters"));
     try std.testing.expect(@hasDecl(netz.quic, "practical_transport_parameters"));
     try std.testing.expect(@hasDecl(netz.quic, "FramePacketType"));
+    try std.testing.expect(@hasDecl(netz.quic.Frame, "wireLen"));
     try std.testing.expect(@hasDecl(netz.quic, "frameAllowedInPacketType"));
     try std.testing.expect(@hasDecl(netz.quic, "validateFrameForPacketType"));
     try std.testing.expect(@hasDecl(netz.quic, "VersionNegotiationPacket"));
@@ -280,6 +281,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.protection, "Aes128KeyPhaseState"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "openShortPacketWithKeyUpdate"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendFrames"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "BatchSendOptions"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "batchStorageSizes"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendFramesBatchInto"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendFramesBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendZeroRttFrames"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "receiveZeroRtt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "openZeroRttBytes"));

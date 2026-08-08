@@ -108,7 +108,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   probe sizing state with IPv4/IPv6 ceilings, loss-driven search backoff, and
   1-RTT PING+PADDING probe packets wired to ACK/loss feedback,
   a 1-RTT recovery queue for PTO plus packet-threshold and time-threshold
-  retransmission of unacknowledged ack-eliciting frame payloads,
+  retransmission of unacknowledged ack-eliciting frame payloads, exact frame
+  wire-length prediction, allocation-free caller-storage multi-packet protection,
+  single-allocation batch wrappers, and portable UDP batch submission that maps
+  to Linux `sendmmsg` through Zig `std.Io`,
   endpoint-level connection-ID routing with unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route
