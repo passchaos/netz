@@ -1512,6 +1512,7 @@ pub const Connection = struct {
             error.StreamStateError => firstFrameClose(frames, .stream_state_error, "stream state"),
             error.FlowControlViolation => firstFrameClose(frames, .flow_control_error, "flow control"),
             error.FinalSizeMismatch => firstFrameClose(frames, .final_size_error, "final size"),
+            error.ConflictingStreamData => firstFrameClose(frames, .protocol_violation, "stream data"),
             else => null,
         };
     }
@@ -2574,6 +2575,10 @@ test "QUIC 1-RTT connection accounts only new overlapping stream bytes" {
     try std.testing.expectError(error.ConflictingStreamData, server.receivePacket());
     try std.testing.expectEqual(@as(u64, 8), server.recv_data_total);
     try std.testing.expectEqual(@as(usize, 1), server.received.ranges.items.len);
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.stream) | 0x02), server.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("stream data", server.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT connection drops duplicate packet numbers before frame effects" {
