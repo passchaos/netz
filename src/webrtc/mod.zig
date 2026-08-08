@@ -1206,6 +1206,26 @@ pub const sdp = struct {
         rtcp_rsize: bool = false,
     };
 
+    pub const RtpCodecType = enum {
+        unknown,
+        audio,
+        video,
+
+        pub fn mediaKind(self: RtpCodecType) []const u8 {
+            return switch (self) {
+                .audio => "audio",
+                .video => "video",
+                .unknown => "unknown",
+            };
+        }
+    };
+
+    pub fn rtpCodecTypeForMediaKind(kind: []const u8) RtpCodecType {
+        if (std.ascii.eqlIgnoreCase(kind, "audio")) return .audio;
+        if (std.ascii.eqlIgnoreCase(kind, "video")) return .video;
+        return .unknown;
+    }
+
     pub const MediaDirection = enum {
         sendrecv,
         sendonly,
@@ -10694,6 +10714,11 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqualStrings("video_track", sdp.trackDetailsForSsrc(tracks, 3000).?.track_id);
     try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 4000) == null);
     try std.testing.expect(sdp.trackDetailsForSsrc(tracks, 5000) == null);
+    try std.testing.expectEqual(sdp.RtpCodecType.audio, sdp.rtpCodecTypeForMediaKind("AUDIO"));
+    try std.testing.expectEqual(sdp.RtpCodecType.video, sdp.rtpCodecTypeForMediaKind("video"));
+    try std.testing.expectEqual(sdp.RtpCodecType.unknown, sdp.rtpCodecTypeForMediaKind("application"));
+    try std.testing.expectEqualStrings("audio", sdp.RtpCodecType.audio.mediaKind());
+    try std.testing.expectEqualStrings("unknown", sdp.RtpCodecType.unknown.mediaKind());
     try std.testing.expectEqualStrings("simulcast", tracks[5].mid);
     try std.testing.expectEqualStrings("sim_stream", tracks[5].stream_id);
     try std.testing.expectEqual(@as(usize, 2), tracks[5].rids.len);
