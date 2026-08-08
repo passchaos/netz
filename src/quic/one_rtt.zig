@@ -1513,6 +1513,7 @@ pub const Connection = struct {
             error.FlowControlViolation => firstFrameClose(frames, .flow_control_error, "flow control"),
             error.FinalSizeMismatch => firstFrameClose(frames, .final_size_error, "final size"),
             error.ConflictingStreamData => firstFrameClose(frames, .protocol_violation, "stream data"),
+            error.InvalidAckFrame => ackFrameClose(frames),
             else => null,
         };
     }
@@ -1520,6 +1521,13 @@ pub const Connection = struct {
     fn firstFrameClose(frames: []const quic.Frame, code: quic.TransportErrorCode, reason: []const u8) ?quic.FramePayloadCloseError {
         if (frames.len == 0) return null;
         return semanticClose(code, frameTypeForSemanticClose(frames[frames.len - 1]), reason);
+    }
+
+    fn ackFrameClose(frames: []const quic.Frame) ?quic.FramePayloadCloseError {
+        for (frames) |frame| {
+            if (frame == .ack) return semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.ack), "ack");
+        }
+        return null;
     }
 
     fn semanticClose(code: quic.TransportErrorCode, frame_type: u64, reason: []const u8) quic.FramePayloadCloseError {
@@ -2676,6 +2684,10 @@ test "QUIC 1-RTT connection preflights ACK frames before receive-side effects" {
     try std.testing.expectEqual(@as(usize, 0), client.stream_recv_flows.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), client.expected_packet_number);
+    try std.testing.expect(client.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), client.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.ack)), client.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("ack", client.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT connection preflights stream frames before receive-side effects" {
@@ -3266,11 +3278,16 @@ test "QUIC 1-RTT connection rejects ACK for unsent packet numbers" {
     });
 
     try std.testing.expectError(error.InvalidAckFrame, client.receivePacket());
-    try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.sent.packets.items.len);
     try std.testing.expect(!client.sent.packets.items[0].acknowledged);
-    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
-    try std.testing.expectEqual(in_flight, client.congestion.bytes_in_flight);
+    try std.testing.expect(client.sent.packets.items[1].ack_eliciting);
+    try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
+    try std.testing.expect(client.congestion.bytes_in_flight > in_flight);
     try std.testing.expectEqual(@as(?u64, null), client.sent.largestAcknowledged());
+    try std.testing.expect(client.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), client.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.ack)), client.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("ack", client.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT connection sends ACK_ECN for received ECN-marked packets" {
