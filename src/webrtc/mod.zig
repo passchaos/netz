@@ -1116,6 +1116,17 @@ pub const sdp = struct {
         stop_time: u64,
     };
 
+    pub const RepeatTime = struct {
+        interval: i64,
+        duration: i64,
+        offsets: []const i64 = &.{},
+    };
+
+    pub const TimeZone = struct {
+        adjustment_time: u64,
+        offset: i64,
+    };
+
     pub const Session = struct {
         version: []const u8 = "0",
         origin: []const u8 = "- 0 0 IN IP4 127.0.0.1",
@@ -1649,6 +1660,77 @@ pub const sdp = struct {
             .start_time = std.fmt.parseInt(u64, start_s, 10) catch return error.InvalidSdp,
             .stop_time = std.fmt.parseInt(u64, stop_s, 10) catch return error.InvalidSdp,
         };
+    }
+
+    fn parseTimeUnits(value: []const u8) Error!i64 {
+        if (value.len == 0) return error.InvalidSdp;
+        const suffix = value[value.len - 1];
+        const multiplier: i64 = switch (suffix) {
+            'd' => 86_400,
+            'h' => 3_600,
+            'm' => 60,
+            's' => 1,
+            else => 0,
+        };
+        const numeric = if (multiplier == 0) value else value[0 .. value.len - 1];
+        if (numeric.len == 0) return error.InvalidSdp;
+        const parsed = std.fmt.parseInt(i64, numeric, 10) catch return error.InvalidSdp;
+        return std.math.mul(i64, parsed, if (multiplier == 0) 1 else multiplier) catch return error.InvalidSdp;
+    }
+
+    pub fn formatRepeatTimeAttribute(allocator: std.mem.Allocator, repeat_time: RepeatTime) Error![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        const header = try std.fmt.allocPrint(allocator, "{d} {d}", .{ repeat_time.interval, repeat_time.duration });
+        defer allocator.free(header);
+        try out.appendSlice(allocator, header);
+        for (repeat_time.offsets) |offset| {
+            const item = try std.fmt.allocPrint(allocator, " {d}", .{offset});
+            defer allocator.free(item);
+            try out.appendSlice(allocator, item);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn parseRepeatTimeAttribute(allocator: std.mem.Allocator, raw: []const u8) Error!RepeatTime {
+        var parts = std.mem.tokenizeAny(u8, raw, " \t");
+        const interval_s = parts.next() orelse return error.InvalidSdp;
+        const duration_s = parts.next() orelse return error.InvalidSdp;
+        var offsets: std.ArrayList(i64) = .empty;
+        errdefer offsets.deinit(allocator);
+        while (parts.next()) |offset_s| try offsets.append(allocator, try parseTimeUnits(offset_s));
+        return .{
+            .interval = try parseTimeUnits(interval_s),
+            .duration = try parseTimeUnits(duration_s),
+            .offsets = try offsets.toOwnedSlice(allocator),
+        };
+    }
+
+    pub fn formatTimeZonesAttribute(allocator: std.mem.Allocator, time_zones: []const TimeZone) Error![]u8 {
+        if (time_zones.len == 0) return error.InvalidSdp;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        for (time_zones, 0..) |time_zone, index| {
+            const item = try std.fmt.allocPrint(allocator, "{s}{d} {d}", .{ if (index == 0) "" else " ", time_zone.adjustment_time, time_zone.offset });
+            defer allocator.free(item);
+            try out.appendSlice(allocator, item);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn parseTimeZonesAttribute(allocator: std.mem.Allocator, raw: []const u8) Error![]TimeZone {
+        var parts = std.mem.tokenizeAny(u8, raw, " \t");
+        var out: std.ArrayList(TimeZone) = .empty;
+        errdefer out.deinit(allocator);
+        while (parts.next()) |adjustment_s| {
+            const offset_s = parts.next() orelse return error.InvalidSdp;
+            try out.append(allocator, .{
+                .adjustment_time = std.fmt.parseInt(u64, adjustment_s, 10) catch return error.InvalidSdp,
+                .offset = try parseTimeUnits(offset_s),
+            });
+        }
+        if (out.items.len == 0) return error.InvalidSdp;
+        return out.toOwnedSlice(allocator);
     }
 
     pub fn formatRtcpAttribute(allocator: std.mem.Allocator, rtcp_address: RtcpAddress) Error![]u8 {
@@ -9592,6 +9674,28 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectError(error.InvalidSdp, sdp.parseTimingAttribute("0"));
     try std.testing.expectError(error.InvalidSdp, sdp.parseTimingAttribute("0 0 extra"));
     try std.testing.expectError(error.InvalidSdp, sdp.parseTimingAttribute("start 0"));
+    const parsed_repeat = try sdp.parseRepeatTimeAttribute(allocator, "7d 1h 0 25h");
+    defer allocator.free(parsed_repeat.offsets);
+    try std.testing.expectEqual(@as(i64, 604800), parsed_repeat.interval);
+    try std.testing.expectEqual(@as(i64, 3600), parsed_repeat.duration);
+    try std.testing.expectEqualSlices(i64, &[_]i64{ 0, 90000 }, parsed_repeat.offsets);
+    const repeat_attr = try sdp.formatRepeatTimeAttribute(allocator, parsed_repeat);
+    defer allocator.free(repeat_attr);
+    try std.testing.expectEqualStrings("604800 3600 0 90000", repeat_attr);
+    const parsed_zones = try sdp.parseTimeZonesAttribute(allocator, "2882844526 -1h 2898848070 0");
+    defer allocator.free(parsed_zones);
+    try std.testing.expectEqual(@as(usize, 2), parsed_zones.len);
+    try std.testing.expectEqual(@as(u64, 2882844526), parsed_zones[0].adjustment_time);
+    try std.testing.expectEqual(@as(i64, -3600), parsed_zones[0].offset);
+    try std.testing.expectEqual(@as(i64, 0), parsed_zones[1].offset);
+    const zones_attr = try sdp.formatTimeZonesAttribute(allocator, parsed_zones);
+    defer allocator.free(zones_attr);
+    try std.testing.expectEqualStrings("2882844526 -3600 2898848070 0", zones_attr);
+    try std.testing.expectError(error.InvalidSdp, sdp.parseRepeatTimeAttribute(allocator, "7d"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseRepeatTimeAttribute(allocator, "bad 1h"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseTimeZonesAttribute(allocator, ""));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseTimeZonesAttribute(allocator, "2882844526"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatTimeZonesAttribute(allocator, &.{}));
     var invalid_header_session = session;
     invalid_header_session.name = "bad\nname";
     try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
