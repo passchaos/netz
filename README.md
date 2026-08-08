@@ -345,9 +345,10 @@ if (session.maxDatagramPayloadSize()) |limit| {
   HTTP/3 QPACK now provides RFC 9204 dynamic-table state, dynamic field
   sections, both instruction stream codecs, and Protected plus handshake-backed
   client/server decode-side live encoder-stream processing with decoder
-  feedback. The Protected runtime also persists its encoder/decoder streams and
-  automatically uses peer-capacity-bounded, reference-safe dynamic compression
-  for repeated request and response fields. It advertises and implements
+  feedback. Both protected runtimes persist their encoder/decoder streams and
+  automatically use peer-capacity-bounded, reference-safe dynamic compression
+  for repeated request and response fields after either preconfigured 1-RTT or
+  a full QUIC handshake. They advertise and implement
   `SETTINGS_QPACK_BLOCKED_STREAMS=0`: newly inserted fields stay literal until
   acknowledged, while non-zero blocked-stream scheduling remains intentionally
   unsupported.

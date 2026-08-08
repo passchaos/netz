@@ -145,6 +145,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedClient, "qpack_encode"));
     try std.testing.expect(@hasField(netz.http3.runtime.ProtectedServer, "qpack_encode"));
     try std.testing.expect(@hasField(netz.http3.runtime.HandshakeClient, "control"));
+    try std.testing.expect(@hasField(netz.http3.runtime.HandshakeClient, "qpack_encode"));
+    try std.testing.expect(@hasField(netz.http3.runtime.HandshakeServerSession, "qpack_encode"));
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());
     try std.testing.expect(@hasDecl(netz.mqtt, "validTopicName"));
     try std.testing.expect(@hasDecl(netz.mqtt, "validTopicFilter"));
