@@ -1251,16 +1251,17 @@ pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool
             .stream_data_blocked,
             .streams_blocked_bidi,
             .streams_blocked_uni,
+            .new_connection_id,
             .path_challenge,
             .application_close,
             .datagram,
             => true,
             // ACK, CRYPTO, transport CONNECTION_CLOSE (0x1c), HANDSHAKE_DONE, NEW_TOKEN,
-            // NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, PATH_RESPONSE, and the
-            // ACK_FREQUENCY draft control frames are not 0-RTT frames.  tquic
-            // and quic-zig both keep these 1-RTT-only because peers cannot
-            // safely process connection-ID lifecycle or ACK policy changes from
-            // replayable early data.
+            // RETIRE_CONNECTION_ID, PATH_RESPONSE, and the ACK_FREQUENCY draft
+            // control frames are not 0-RTT frames.  NEW_CONNECTION_ID remains
+            // allowed by RFC 9000 Table 3 and mature stacks such as tquic and
+            // quicz, while RETIRE_CONNECTION_ID can be treated as a 0-RTT
+            // protocol violation under RFC 9000 §12.5.
             else => false,
         },
         .one_rtt => true,
@@ -2240,12 +2241,13 @@ test "QUIC frame packet context rules follow RFC 9000" {
     try std.testing.expect(!frameAllowedInPacketType(ack, .zero_rtt));
     try std.testing.expect(!frameAllowedInPacketType(crypto, .zero_rtt));
     try std.testing.expect(!frameAllowedInPacketType(.{ .path_response = .{ .data = [_]u8{0} ** 8 } }, .zero_rtt));
-    try std.testing.expect(!frameAllowedInPacketType(.{ .new_connection_id = .{
+    try std.testing.expect(frameAllowedInPacketType(.{ .new_connection_id = .{
         .sequence_number = 1,
         .retire_prior_to = 0,
         .connection_id = "new-cid",
         .stateless_reset_token = [_]u8{0} ** 16,
     } }, .zero_rtt));
+    try std.testing.expect(!frameAllowedInPacketType(.{ .retire_connection_id = .{ .sequence_number = 1 } }, .zero_rtt));
     try std.testing.expect(frameAllowedInPacketType(app_close, .zero_rtt));
     try validateFrameForPacketType(app_close, .zero_rtt);
     try std.testing.expect(!frameAllowedInPacketType(.{ .connection_close = .{ .error_code = 0, .frame_type = 0, .reason_phrase = "" } }, .zero_rtt));
