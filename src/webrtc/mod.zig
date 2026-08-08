@@ -1438,6 +1438,20 @@ pub const sdp = struct {
         allocator.free(mids);
     }
 
+    pub fn bundleMatchesMid(session: Session, mid: []const u8) bool {
+        for (session.attributes) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, "group")) continue;
+            var parts = std.mem.tokenizeAny(u8, attr.value, " \t");
+            const semantic = parts.next() orelse continue;
+            if (!std.mem.eql(u8, semantic, "BUNDLE")) continue;
+            while (parts.next()) |bundle_mid| {
+                if (std.mem.eql(u8, bundle_mid, mid)) return true;
+            }
+            return false;
+        }
+        return true;
+    }
+
     fn validateSdpToken(value: []const u8) Error!void {
         if (value.len == 0) return error.InvalidSdp;
         for (value) |byte| {
@@ -10071,6 +10085,8 @@ test "ICE candidate parser and SDP parser" {
     defer sdp.freeBundleMids(allocator, extracted_bundle_mids);
     try std.testing.expectEqual(@as(usize, 1), extracted_bundle_mids.len);
     try std.testing.expectEqualStrings("0", extracted_bundle_mids[0]);
+    try std.testing.expect(sdp.bundleMatchesMid(session, "0"));
+    try std.testing.expect(!sdp.bundleMatchesMid(session, "1"));
     const bundle_line = try sdp.formatBundleGroupLine(allocator, &.{ "0", "1" });
     defer allocator.free(bundle_line);
     try std.testing.expectEqualStrings("a=group:BUNDLE 0 1\r\n", bundle_line);
@@ -10093,6 +10109,7 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqual(@as(usize, 0), no_bundle_mids.len);
     var audio_only = try sdp.parse(allocator, "v=0\r\ns=-\r\nt=0 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n");
     defer audio_only.deinit(allocator);
+    try std.testing.expect(sdp.bundleMatchesMid(audio_only, "anything"));
     try std.testing.expect(!sdp.hasApplicationMedia(audio_only));
     try std.testing.expect(sdp.applicationMedia(audio_only) == null);
     try std.testing.expect(!sdp.hasDataChannelMedia(audio_only));
