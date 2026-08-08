@@ -1104,6 +1104,9 @@ pub const sdp = struct {
         origin: []const u8 = "- 0 0 IN IP4 127.0.0.1",
         name: []const u8 = "-",
         information: ?[]const u8 = null,
+        uri: ?[]const u8 = null,
+        email: ?[]const u8 = null,
+        phone: ?[]const u8 = null,
         connection: ?Connection = null,
         bandwidth: []Bandwidth = &.{},
         timing: []const u8 = "0 0",
@@ -1473,6 +1476,39 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub fn formatUriLine(allocator: std.mem.Allocator, uri: []const u8) Error![]u8 {
+        try validateSdpAttributeValue(uri);
+        return std.fmt.allocPrint(allocator, "u={s}\r\n", .{uri});
+    }
+
+    pub fn appendUriLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, uri: []const u8) Error!void {
+        const line = try formatUriLine(allocator, uri);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatEmailLine(allocator: std.mem.Allocator, email: []const u8) Error![]u8 {
+        try validateSdpAttributeValue(email);
+        return std.fmt.allocPrint(allocator, "e={s}\r\n", .{email});
+    }
+
+    pub fn appendEmailLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, email: []const u8) Error!void {
+        const line = try formatEmailLine(allocator, email);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn formatPhoneLine(allocator: std.mem.Allocator, phone: []const u8) Error![]u8 {
+        try validateSdpAttributeValue(phone);
+        return std.fmt.allocPrint(allocator, "p={s}\r\n", .{phone});
+    }
+
+    pub fn appendPhoneLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, phone: []const u8) Error!void {
+        const line = try formatPhoneLine(allocator, phone);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub fn formatRtcpAttribute(allocator: std.mem.Allocator, rtcp_address: RtcpAddress) Error![]u8 {
         if (rtcp_address.connection) |connection| {
             try validateSdpToken(connection.network_type);
@@ -1567,6 +1603,9 @@ pub const sdp = struct {
         try validateSdpAttributeValue(session.origin);
         try validateSdpAttributeValue(session.name);
         if (session.information) |information| try validateSdpAttributeValue(information);
+        if (session.uri) |uri| try validateSdpAttributeValue(uri);
+        if (session.email) |email| try validateSdpAttributeValue(email);
+        if (session.phone) |phone| try validateSdpAttributeValue(phone);
         try validateSdpAttributeValue(session.timing);
         const version_line = try std.fmt.allocPrint(allocator, "v={s}\r\n", .{session.version});
         defer allocator.free(version_line);
@@ -1578,6 +1617,9 @@ pub const sdp = struct {
         defer allocator.free(name_line);
         try list.appendSlice(allocator, name_line);
         if (session.information) |information| try appendInformationLine(list, allocator, information);
+        if (session.uri) |uri| try appendUriLine(list, allocator, uri);
+        if (session.email) |email| try appendEmailLine(list, allocator, email);
+        if (session.phone) |phone| try appendPhoneLine(list, allocator, phone);
         // WebRTC implementations such as Pion serialize connection
         // information for every generated m-section (including rejected
         // tracks) because older SIPCC/Firefox SDP parsers require a c= line
@@ -2138,6 +2180,9 @@ pub const sdp = struct {
         var origin: []const u8 = "- 0 0 IN IP4 127.0.0.1";
         var name: []const u8 = "-";
         var session_information: ?[]const u8 = null;
+        var session_uri: ?[]const u8 = null;
+        var session_email: ?[]const u8 = null;
+        var session_phone: ?[]const u8 = null;
         var session_connection: ?Connection = null;
         var session_bandwidth: std.ArrayList(Bandwidth) = .empty;
         errdefer session_bandwidth.deinit(allocator);
@@ -2160,6 +2205,18 @@ pub const sdp = struct {
                     } else {
                         session_information = value;
                     }
+                },
+                'u' => {
+                    try validateSdpAttributeValue(value);
+                    session_uri = value;
+                },
+                'e' => {
+                    try validateSdpAttributeValue(value);
+                    session_email = value;
+                },
+                'p' => {
+                    try validateSdpAttributeValue(value);
+                    session_phone = value;
                 },
                 't' => timing = value,
                 'c' => {
@@ -2228,6 +2285,9 @@ pub const sdp = struct {
             .origin = origin,
             .name = name,
             .information = session_information,
+            .uri = session_uri,
+            .email = session_email,
+            .phone = session_phone,
             .connection = session_connection,
             .bandwidth = try session_bandwidth.toOwnedSlice(allocator),
             .timing = timing,
@@ -9201,6 +9261,9 @@ test "ICE candidate parser and SDP parser" {
         "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
         "s=-\r\n" ++
         "i=Session information\r\n" ++
+        "u=https://example.com/sdp\r\n" ++
+        "e=j.doe@example.com (Jane Doe)\r\n" ++
+        "p=+1 617 555-6011\r\n" ++
         "c=IN IP4 198.51.100.1\r\n" ++
         "b=AS:1234\r\n" ++
         "b=X-YZ:128\r\n" ++
@@ -9218,6 +9281,9 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("IP4", session.connection.?.address_type);
     try std.testing.expectEqualStrings("198.51.100.1", session.connection.?.address);
     try std.testing.expectEqualStrings("Session information", session.information.?);
+    try std.testing.expectEqualStrings("https://example.com/sdp", session.uri.?);
+    try std.testing.expectEqualStrings("j.doe@example.com (Jane Doe)", session.email.?);
+    try std.testing.expectEqualStrings("+1 617 555-6011", session.phone.?);
     try std.testing.expectEqual(@as(usize, 2), session.bandwidth.len);
     try std.testing.expectEqualStrings("AS", session.bandwidth[0].typ);
     try std.testing.expectEqual(@as(u64, 1234), session.bandwidth[0].bandwidth);
@@ -9266,6 +9332,9 @@ test "ICE candidate parser and SDP parser" {
             "o=- 0 0 IN IP4 127.0.0.1\r\n" ++
             "s=-\r\n" ++
             "i=Session information\r\n" ++
+            "u=https://example.com/sdp\r\n" ++
+            "e=j.doe@example.com (Jane Doe)\r\n" ++
+            "p=+1 617 555-6011\r\n" ++
             "c=IN IP4 198.51.100.1\r\n" ++
             "b=AS:1234\r\n" ++
             "b=X-YZ:128\r\n" ++
@@ -9281,6 +9350,15 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
     invalid_header_session = session;
     invalid_header_session.information = "bad\ninfo";
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
+    invalid_header_session = session;
+    invalid_header_session.uri = "bad\nuri";
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
+    invalid_header_session = session;
+    invalid_header_session.email = "bad\nemail";
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
+    invalid_header_session = session;
+    invalid_header_session.phone = "bad\nphone";
     try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
     const media_line = try sdp.formatMediaLine(allocator, session.media[0].kind, session.media[0].port, session.media[0].protocol, session.media[0].formats);
     defer allocator.free(media_line);
@@ -9298,8 +9376,20 @@ test "ICE candidate parser and SDP parser" {
     var information_lines: std.ArrayList(u8) = .empty;
     defer information_lines.deinit(allocator);
     try sdp.appendInformationLine(&information_lines, allocator, "Session info");
-    try std.testing.expectEqualStrings("i=Session info\r\n", information_lines.items);
+    try sdp.appendUriLine(&information_lines, allocator, "https://example.com/sdp");
+    try sdp.appendEmailLine(&information_lines, allocator, "j.doe@example.com");
+    try sdp.appendPhoneLine(&information_lines, allocator, "+1 617 555-6011");
+    try std.testing.expectEqualStrings(
+        "i=Session info\r\n" ++
+            "u=https://example.com/sdp\r\n" ++
+            "e=j.doe@example.com\r\n" ++
+            "p=+1 617 555-6011\r\n",
+        information_lines.items,
+    );
     try std.testing.expectError(error.InvalidSdp, sdp.formatInformationLine(allocator, "bad\ninfo"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatUriLine(allocator, "bad\nuri"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatEmailLine(allocator, "bad\nemail"));
+    try std.testing.expectError(error.InvalidSdp, sdp.formatPhoneLine(allocator, "bad\nphone"));
     const connection_line = try sdp.formatConnectionLine(allocator, "IN", "IP4", "0.0.0.0");
     defer allocator.free(connection_line);
     try std.testing.expectEqualStrings("c=IN IP4 0.0.0.0\r\n", connection_line);
