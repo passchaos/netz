@@ -1232,6 +1232,14 @@ pub const sdp = struct {
         return .unknown;
     }
 
+    pub fn parseSdpTypeIgnoreCase(raw: []const u8) SdpType {
+        if (std.ascii.eqlIgnoreCase(raw, "offer")) return .offer;
+        if (std.ascii.eqlIgnoreCase(raw, "pranswer")) return .pranswer;
+        if (std.ascii.eqlIgnoreCase(raw, "answer")) return .answer;
+        if (std.ascii.eqlIgnoreCase(raw, "rollback")) return .rollback;
+        return .unknown;
+    }
+
     pub const RtpCodecType = enum {
         unknown,
         audio,
@@ -9667,6 +9675,9 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqual(sdp.SdpType.answer, sdp.parseSdpType("answer"));
     try std.testing.expectEqual(sdp.SdpType.rollback, sdp.parseSdpType("rollback"));
     try std.testing.expectEqual(sdp.SdpType.unknown, sdp.parseSdpType("OFFER"));
+    try std.testing.expectEqual(sdp.SdpType.offer, sdp.parseSdpTypeIgnoreCase("OFFER"));
+    try std.testing.expectEqual(sdp.SdpType.pranswer, sdp.parseSdpTypeIgnoreCase("PrAnswer"));
+    try std.testing.expectEqual(sdp.SdpType.unknown, sdp.parseSdpTypeIgnoreCase("bogus"));
     try std.testing.expectEqualStrings("offer", sdp.SdpType.offer.string());
     try std.testing.expectEqualStrings("unknown", sdp.SdpType.unknown.string());
     const line = "candidate:1 1 UDP 2130706431 192.0.2.1 54400 typ host";
