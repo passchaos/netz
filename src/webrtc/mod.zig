@@ -9975,6 +9975,29 @@ test "ICE candidate parser and SDP parser" {
         "candidate:750 0 udp 500 fcd9:e3b8:12ce:9fc5:74a5:c6bb:d8b:e08a 53987 typ host",
         zone_line.items,
     );
+    var invalid_write_line: std.ArrayList(u8) = .empty;
+    defer invalid_write_line.deinit(allocator);
+    const bad_writer_candidate = ice.Candidate{
+        .foundation = "bad foundation",
+        .component = 1,
+        .transport = .udp,
+        .priority = 1,
+        .address = "192.0.2.1",
+        .port = 9,
+        .candidate_type = .host,
+    };
+    try std.testing.expectError(error.InvalidIceCandidate, bad_writer_candidate.write(&invalid_write_line, allocator));
+    var reserved_extension = [_]ice.CandidateExtension{.{ .key = "tcptype", .value = "active" }};
+    try std.testing.expectError(error.InvalidIceCandidate, sdp.formatCandidateLine(allocator, .{
+        .foundation = "1",
+        .component = 1,
+        .transport = .udp,
+        .priority = 1,
+        .address = "192.0.2.1",
+        .port = 9,
+        .candidate_type = .host,
+        .extensions = &reserved_extension,
+    }));
 
     // Match the mature Pion ICE parser's defensive checks for SDP candidate
     // lines: malformed addresses, incomplete related-address pairs, invalid
