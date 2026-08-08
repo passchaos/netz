@@ -200,7 +200,9 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     const consumed_head = head_end + 4;
     const parsed_body = try parseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
-    if (parsed_body.framing == .chunked) try parsed_headers.stripContentLength(allocator);
+    if (parsed_body.framing == .chunked or parsed_body.framing == .close_delimited) {
+        try parsed_headers.stripContentLength(allocator);
+    }
 
     return .{
         .method = method,
@@ -260,9 +262,11 @@ pub fn parseResponseWithContext(
             .consumed = consumed_head,
         }
     else
-        try parseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
+        try parseResponseBody(allocator, bytes, consumed_head, parsed_headers.headers, options);
     errdefer parsed_body.deinit(allocator);
-    if (parsed_body.framing == .chunked) try parsed_headers.stripContentLength(allocator);
+    if (parsed_body.framing == .chunked or parsed_body.framing == .close_delimited) {
+        try parsed_headers.stripContentLength(allocator);
+    }
 
     return .{
         .version = version,
@@ -424,6 +428,26 @@ fn parseBody(
     };
 }
 
+fn parseResponseBody(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    body_start: usize,
+    headers: []const Header,
+    options: ParseOptions,
+) Error!ParsedBody {
+    return parseBody(allocator, bytes, body_start, headers, options) catch |err| switch (err) {
+        error.InvalidTransferEncoding => blk: {
+            if (!responseTransferEncodingIsCloseDelimited(headers)) return error.InvalidTransferEncoding;
+            break :blk .{
+                .framing = .close_delimited,
+                .body = bytes[body_start..],
+                .consumed = bytes.len,
+            };
+        },
+        else => |e| return e,
+    };
+}
+
 pub fn bodyFraming(headers: []const Header) Error!BodyFraming {
     if (try transferEncodingFraming(headers)) |framing| return framing;
     if ((try contentLength(headers)) != null) return .content_length;
@@ -490,6 +514,29 @@ fn transferEncodingFraming(headers: []const Header) Error!?BodyFraming {
     if (!saw_transfer_encoding) return null;
     if (!saw_chunked) return error.InvalidTransferEncoding;
     return .chunked;
+}
+
+fn responseTransferEncodingIsCloseDelimited(headers: []const Header) bool {
+    var saw_transfer_encoding = false;
+    var final_coding: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!header.eqlName("transfer-encoding")) continue;
+        saw_transfer_encoding = true;
+        const final = finalTransferCoding(header.value) orelse return false;
+        final_coding = final;
+    }
+    return saw_transfer_encoding and !std.ascii.eqlIgnoreCase(final_coding orelse return false, "chunked");
+}
+
+fn finalTransferCoding(value: []const u8) ?[]const u8 {
+    var tokens = std.mem.splitScalar(u8, value, ',');
+    var final: ?[]const u8 = null;
+    while (tokens.next()) |raw| {
+        const token = wire.trimOws(raw);
+        if (token.len == 0) return null;
+        final = token;
+    }
+    return final;
 }
 
 pub fn statusCodeForbidsBody(status: u16) bool {
@@ -1287,6 +1334,15 @@ test "HTTP/1 response body framing helpers" {
     try std.testing.expectEqual(BodyFraming.chunked, chunked_resp.body_framing);
     try std.testing.expect(chunked_resp.header("content-length") == null);
     try std.testing.expectEqualStrings("pong", chunked_resp.body);
+
+    const non_chunked_te = "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nTransfer-Encoding: gzip\r\n\r\ncompressed-until-close";
+    var close_delimited_resp = try parseResponse(allocator, non_chunked_te, .{});
+    defer close_delimited_resp.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.close_delimited, close_delimited_resp.body_framing);
+    try std.testing.expect(close_delimited_resp.header("content-length") == null);
+    try std.testing.expectEqualStrings("gzip", close_delimited_resp.header("transfer-encoding").?);
+    try std.testing.expectEqualStrings("compressed-until-close", close_delimited_resp.body);
+    try std.testing.expectEqual(non_chunked_te.len, close_delimited_resp.consumed);
 
     const http10_te_response = "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
     try std.testing.expectError(error.InvalidTransferEncoding, parseResponse(allocator, http10_te_response, .{}));
