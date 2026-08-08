@@ -1229,6 +1229,31 @@ pub const sdp = struct {
         return null;
     }
 
+    pub fn mediaDirection(media: Media) ?MediaDirection {
+        for (media.attributes) |attr| {
+            if (attr.value.len != 0) continue;
+            if (parseMediaDirection(attr.name)) |direction| return direction;
+        }
+        return null;
+    }
+
+    pub fn reverseMediaDirection(direction: MediaDirection) MediaDirection {
+        return switch (direction) {
+            .sendonly => .recvonly,
+            .recvonly => .sendonly,
+            else => direction,
+        };
+    }
+
+    pub fn mediaDirectionIntersects(haystack: []const MediaDirection, needle: []const MediaDirection) bool {
+        for (needle) |candidate| {
+            for (haystack) |existing| {
+                if (existing == candidate) return true;
+            }
+        }
+        return false;
+    }
+
     pub fn formatMediaDirectionLine(allocator: std.mem.Allocator, direction: MediaDirection) Error![]u8 {
         return std.fmt.allocPrint(allocator, "a={s}\r\n", .{direction.attribute()});
     }
@@ -10549,6 +10574,14 @@ test "SDP extracts DTLS fingerprint ICE credentials and RTP extmaps" {
     try std.testing.expectEqual(@as(usize, 6), tracks.len);
     try std.testing.expectEqual(sdp.MediaDirection.sendrecv, sdp.parseMediaDirection("SENDRECV").?);
     try std.testing.expect(sdp.parseMediaDirection("sideways") == null);
+    try std.testing.expectEqual(sdp.MediaDirection.sendrecv, sdp.mediaDirection(track_session.media[0]).?);
+    try std.testing.expectEqual(sdp.MediaDirection.inactive, sdp.mediaDirection(track_session.media[6]).?);
+    try std.testing.expect(sdp.mediaDirection(rid_session.media[0]) == null);
+    try std.testing.expectEqual(sdp.MediaDirection.recvonly, sdp.reverseMediaDirection(.sendonly));
+    try std.testing.expectEqual(sdp.MediaDirection.sendonly, sdp.reverseMediaDirection(.recvonly));
+    try std.testing.expectEqual(sdp.MediaDirection.inactive, sdp.reverseMediaDirection(.inactive));
+    try std.testing.expect(sdp.mediaDirectionIntersects(&.{ .sendrecv, .recvonly }, &.{.recvonly}));
+    try std.testing.expect(!sdp.mediaDirectionIntersects(&.{.sendonly}, &.{ .recvonly, .inactive }));
     const direction_line = try sdp.formatMediaDirectionLine(allocator, .sendrecv);
     defer allocator.free(direction_line);
     try std.testing.expectEqualStrings("a=sendrecv\r\n", direction_line);
