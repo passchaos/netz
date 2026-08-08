@@ -7960,7 +7960,7 @@ pub const sctp = struct {
     pub fn writeZeroChecksumAcceptableParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, edmid: u32) Error!void {
         var value: [4]u8 = undefined;
         std.mem.writeInt(u32, &value, edmid, .big);
-        try writeInitParameter(list, allocator, .{ .param_type = .zero_checksum_acceptable, .value = &value });
+        _ = try writeInitParameter(list, allocator, .{ .param_type = .zero_checksum_acceptable, .value = &value });
     }
 
     pub const HeartbeatChunk = struct {
@@ -8080,7 +8080,10 @@ pub const sctp = struct {
                 params.deinit(allocator);
             }
             while (!cursor.eof()) {
-                if (cursor.remaining() < 4) return error.InvalidSctpPacket;
+                if (cursor.remaining() < 4) {
+                    try validateZeroPadding(cursor.buf[cursor.pos..]);
+                    break;
+                }
                 const raw_type = try cursor.readInt(u16, .big);
                 const param_type: ReconfigParameterType = @enumFromInt(raw_type);
                 const len = try cursor.readInt(u16, .big);
@@ -8095,10 +8098,7 @@ pub const sctp = struct {
                         else => unreachable,
                     },
                 }
-                const padding = (4 - (len % 4)) % 4;
-                if (cursor.remaining() < padding) return error.InvalidSctpPacket;
-                try validateZeroPadding(cursor.buf[cursor.pos .. cursor.pos + padding]);
-                try cursor.skip(padding);
+                if (!try skipTlvPadding(&cursor, len)) break;
             }
             if (params.items.len == 0) return error.InvalidSctpPacket;
             return .{ .parameters = try params.toOwnedSlice(allocator) };
@@ -8875,7 +8875,10 @@ pub const sctp = struct {
         try wire.appendInt(&value, allocator, u16, init.outbound_streams, .big);
         try wire.appendInt(&value, allocator, u16, init.inbound_streams, .big);
         try wire.appendInt(&value, allocator, u32, init.initial_tsn, .big);
-        for (init.parameters) |parameter| try writeInitParameter(&value, allocator, parameter);
+        for (init.parameters, 0..) |parameter, index| {
+            const len = try writeInitParameter(&value, allocator, parameter);
+            if (index + 1 != init.parameters.len) try appendTlvPadding(&value, allocator, len);
+        }
         const chunk_len = 4 + value.items.len;
         if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
         try list.append(allocator, @intFromEnum(chunk_type));
@@ -9132,7 +9135,10 @@ pub const sctp = struct {
         if (parameters.len == 0) return error.InvalidSctpPacket;
         var value: std.ArrayList(u8) = .empty;
         defer value.deinit(allocator);
-        for (parameters) |parameter| try writeReconfigParameter(&value, allocator, parameter);
+        for (parameters, 0..) |parameter, index| {
+            const len = try writeReconfigParameter(&value, allocator, parameter);
+            if (index + 1 != parameters.len) try appendTlvPadding(&value, allocator, len);
+        }
         const chunk_len = 4 + value.items.len;
         if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
         try list.append(allocator, @intFromEnum(ChunkType.reconfig));
@@ -9263,16 +9269,16 @@ pub const sctp = struct {
         var causes: std.ArrayList(ErrorCause) = .empty;
         errdefer causes.deinit(allocator);
         while (!cursor.eof()) {
-            if (cursor.remaining() < 4) return error.InvalidSctpPacket;
+            if (cursor.remaining() < 4) {
+                try validateZeroPadding(cursor.buf[cursor.pos..]);
+                break;
+            }
             const code: ErrorCauseCode = @enumFromInt(try cursor.readInt(u16, .big));
             const len = try cursor.readInt(u16, .big);
             if (len < 4 or cursor.remaining() < len - 4) return error.InvalidSctpPacket;
             const value = try cursor.readSlice(len - 4);
             try causes.append(allocator, .{ .code = code, .value = value });
-            const padding = (4 - (len % 4)) % 4;
-            if (cursor.remaining() < padding) return error.InvalidSctpPacket;
-            try validateZeroPadding(cursor.buf[cursor.pos .. cursor.pos + padding]);
-            try cursor.skip(padding);
+            if (!try skipTlvPadding(&cursor, len)) break;
         }
         return causes.toOwnedSlice(allocator);
     }
@@ -9281,7 +9287,10 @@ pub const sctp = struct {
         if (chunk_type != .abort and chunk_type != .error_chunk) return error.InvalidSctpPacket;
         var value: std.ArrayList(u8) = .empty;
         defer value.deinit(allocator);
-        for (causes) |cause| try writeErrorCause(&value, allocator, cause);
+        for (causes, 0..) |cause, index| {
+            const len = try writeErrorCause(&value, allocator, cause);
+            if (index + 1 != causes.len) try appendTlvPadding(&value, allocator, len);
+        }
         const chunk_len = 4 + value.items.len;
         if (chunk_len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
         try list.append(allocator, @intFromEnum(chunk_type));
@@ -9291,13 +9300,13 @@ pub const sctp = struct {
         try list.appendNTimes(allocator, 0, align4(chunk_len) - chunk_len);
     }
 
-    fn writeErrorCause(list: *std.ArrayList(u8), allocator: std.mem.Allocator, cause: ErrorCause) Error!void {
+    fn writeErrorCause(list: *std.ArrayList(u8), allocator: std.mem.Allocator, cause: ErrorCause) Error!usize {
         const len = 4 + cause.value.len;
         if (len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
         try wire.appendInt(list, allocator, u16, @intFromEnum(cause.code), .big);
         try wire.appendInt(list, allocator, u16, @intCast(len), .big);
         try list.appendSlice(allocator, cause.value);
-        try list.appendNTimes(allocator, 0, align4(len) - len);
+        return len;
     }
 
     fn parseInitParameters(allocator: std.mem.Allocator, bytes: []const u8) Error![]InitParameter {
@@ -9305,7 +9314,10 @@ pub const sctp = struct {
         var params: std.ArrayList(InitParameter) = .empty;
         errdefer params.deinit(allocator);
         while (!cursor.eof()) {
-            if (cursor.remaining() < 4) return error.InvalidSctpPacket;
+            if (cursor.remaining() < 4) {
+                try validateZeroPadding(cursor.buf[cursor.pos..]);
+                break;
+            }
             const raw_type = try cursor.readInt(u16, .big);
             const param_type: InitParameterType = @enumFromInt(raw_type);
             const len = try cursor.readInt(u16, .big);
@@ -9321,10 +9333,7 @@ pub const sctp = struct {
                     else => unreachable,
                 }
             }
-            const padding = (4 - (len % 4)) % 4;
-            if (cursor.remaining() < padding) return error.InvalidSctpPacket;
-            try validateZeroPadding(cursor.buf[cursor.pos .. cursor.pos + padding]);
-            try cursor.skip(padding);
+            if (!try skipTlvPadding(&cursor, len)) break;
         }
         return params.toOwnedSlice(allocator);
     }
@@ -9349,13 +9358,13 @@ pub const sctp = struct {
         };
     }
 
-    fn writeInitParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameter: InitParameter) Error!void {
+    fn writeInitParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameter: InitParameter) Error!usize {
         const len = 4 + parameter.value.len;
         if (len > std.math.maxInt(u16)) return error.InvalidSctpPacket;
         try wire.appendInt(list, allocator, u16, @intFromEnum(parameter.param_type), .big);
         try wire.appendInt(list, allocator, u16, @intCast(len), .big);
         try list.appendSlice(allocator, parameter.value);
-        try list.appendNTimes(allocator, 0, align4(len) - len);
+        return len;
     }
 
     fn parseOutgoingSsnResetRequest(allocator: std.mem.Allocator, value: []const u8) Error!OutgoingSsnResetRequest {
@@ -9384,7 +9393,7 @@ pub const sctp = struct {
         };
     }
 
-    fn writeReconfigParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameter: ReconfigParameter) Error!void {
+    fn writeReconfigParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, parameter: ReconfigParameter) Error!usize {
         var value: std.ArrayList(u8) = .empty;
         defer value.deinit(allocator);
         const param_type: ReconfigParameterType = switch (parameter) {
@@ -9410,7 +9419,7 @@ pub const sctp = struct {
         try wire.appendInt(list, allocator, u16, @intFromEnum(param_type), .big);
         try wire.appendInt(list, allocator, u16, @intCast(len), .big);
         try list.appendSlice(allocator, value.items);
-        try list.appendNTimes(allocator, 0, align4(len) - len);
+        return len;
     }
 
     fn isConstEmptyU16(value: []const u16) bool {
@@ -9427,6 +9436,26 @@ pub const sctp = struct {
             }
         }
         try list.append(allocator, message);
+    }
+
+    fn appendTlvPadding(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len: usize) Error!void {
+        try list.appendNTimes(allocator, 0, align4(len) - len);
+    }
+
+    fn skipTlvPadding(cursor: *wire.Cursor, len: usize) Error!bool {
+        const padding = align4(len) - len;
+        if (cursor.remaining() < padding) {
+            // Mature SCTP encoders such as Pion omit padding for the final
+            // variable-length parameter/cause from the chunk length; that
+            // padding is packet chunk padding instead and has already been
+            // stripped by parsePacket.  Accept the truncated-final-padding
+            // form as long as any bytes still present are zero.
+            try validateZeroPadding(cursor.buf[cursor.pos..]);
+            return false;
+        }
+        try validateZeroPadding(cursor.buf[cursor.pos .. cursor.pos + padding]);
+        try cursor.skip(padding);
+        return true;
     }
 
     fn validateZeroPadding(bytes: []const u8) Error!void {
@@ -13177,11 +13206,41 @@ test "SCTP ABORT and ERROR causes" {
     defer error_chunk.deinit(allocator);
     try std.testing.expectEqual(sctp.ErrorCauseCode.protocol_violation, error_chunk.causes[0].code);
     try std.testing.expectEqualStrings("bad chunk", error_chunk.causes[0].value);
+    // Pion/sctp follows the SCTP chunk rule that padding after the final
+    // variable-length cause is chunk padding, not part of the ERROR chunk
+    // length.  Keep accepting that mature wire image.
+    try std.testing.expectEqual(@as(usize, 13), error_packet.chunks[0].value.len);
 
     encoded.items[encoded.items.len - 1] = 0xff; // non-zero ERROR cause padding
     std.mem.writeInt(u32, encoded.items[8..12], 0, .little);
     const repaired_error_checksum = try sctp.checksum(encoded.items);
     std.mem.writeInt(u32, encoded.items[8..12], repaired_error_checksum, .little);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, encoded.items, true));
+
+    encoded.clearRetainingCapacity();
+    try sctp.writeErrorPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, &.{
+        .{ .code = .invalid_mandatory_parameter, .value = "abc" },
+        .{ .code = .protocol_violation, .value = "tail" },
+    });
+    const first_cause_len = 4 + "abc".len;
+    const inter_cause_padding_index = 12 + 4 + first_cause_len;
+    try std.testing.expectEqual(@as(u8, 0), encoded.items[inter_cause_padding_index]);
+    var two_cause_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer two_cause_packet.deinit(allocator);
+    var two_cause_error = try sctp.ErrorChunk.parse(allocator, two_cause_packet.chunks[0]);
+    defer two_cause_error.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), two_cause_error.causes.len);
+    try std.testing.expectEqualStrings("abc", two_cause_error.causes[0].value);
+    try std.testing.expectEqualStrings("tail", two_cause_error.causes[1].value);
+
+    encoded.items[inter_cause_padding_index] = 0xff;
+    std.mem.writeInt(u32, encoded.items[8..12], 0, .little);
+    const repaired_inter_cause_checksum = try sctp.checksum(encoded.items);
+    std.mem.writeInt(u32, encoded.items[8..12], repaired_inter_cause_checksum, .little);
     var bad_error_padding = try sctp.parsePacket(allocator, encoded.items, true);
     defer bad_error_padding.deinit(allocator);
     try std.testing.expectError(error.InvalidSctpPacket, sctp.ErrorChunk.parse(allocator, bad_error_padding.chunks[0]));
@@ -13397,6 +13456,36 @@ test "SCTP RE-CONFIG stream reset request and response" {
     try std.testing.expectEqual(@as(u32, 11), reset_response.response_sequence_number);
     try std.testing.expectEqual(sctp.ReconfigResult.success_performed, reset_response.result);
 
+    encoded.clearRetainingCapacity();
+    try sctp.writeReconfigPacket(&encoded, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0x01020304,
+    }, &.{
+        .{ .unknown = .{ .param_type = @enumFromInt(@as(u16, 0x800d)), .value = "abc" } },
+        .{ .outgoing_ssn_reset_response = .{
+            .response_sequence_number = 44,
+            .result = .success_nothing_to_do,
+        } },
+    });
+    const first_param_len = 4 + "abc".len;
+    const inter_param_padding_index = 12 + 4 + first_param_len;
+    try std.testing.expectEqual(@as(u8, 0), encoded.items[inter_param_padding_index]);
+    var two_param_packet = try sctp.parsePacket(allocator, encoded.items, true);
+    defer two_param_packet.deinit(allocator);
+    var two_param_reconfig = try sctp.ReconfigChunk.parse(allocator, two_param_packet.chunks[0]);
+    defer two_param_reconfig.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), two_param_reconfig.parameters.len);
+    try std.testing.expectEqual(@as(u32, 44), two_param_reconfig.parameters[0].outgoing_ssn_reset_response.response_sequence_number);
+
+    encoded.items[inter_param_padding_index] = 0xff;
+    std.mem.writeInt(u32, encoded.items[8..12], 0, .little);
+    const repaired_inter_param_checksum = try sctp.checksum(encoded.items);
+    std.mem.writeInt(u32, encoded.items[8..12], repaired_inter_param_checksum, .little);
+    var bad_reconfig_padding = try sctp.parsePacket(allocator, encoded.items, true);
+    defer bad_reconfig_padding.deinit(allocator);
+    try std.testing.expectError(error.InvalidSctpPacket, sctp.ReconfigChunk.parse(allocator, bad_reconfig_padding.chunks[0]));
+
     var invalid: std.ArrayList(u8) = .empty;
     defer invalid.deinit(allocator);
     try std.testing.expectError(error.InvalidSctpPacket, sctp.writeReconfigChunk(&invalid, allocator, &.{}));
@@ -13510,6 +13599,32 @@ test "SCTP INIT cookie echo and cookie ack packets" {
     const bundled_checksum = try sctp.checksum(bundled_init.items);
     std.mem.writeInt(u32, bundled_init.items[8..12], bundled_checksum, .little);
     try std.testing.expectError(error.InvalidSctpPacket, sctp.parsePacket(allocator, bundled_init.items, true));
+
+    var odd_final_init: std.ArrayList(u8) = .empty;
+    defer odd_final_init.deinit(allocator);
+    const single_extension = [_]u8{@intFromEnum(sctp.ChunkType.reconfig)};
+    var single_extension_param = [_]sctp.InitParameter{.{ .param_type = .supported_extensions, .value = &single_extension }};
+    try sctp.writeInitPacket(&odd_final_init, allocator, .{
+        .source_port = 5000,
+        .destination_port = 5000,
+        .verification_tag = 0,
+    }, false, .{
+        .initiate_tag = 0x01020304,
+        .advertised_receiver_window_credit = 256 * 1024,
+        .outbound_streams = 16,
+        .inbound_streams = 16,
+        .initial_tsn = 0x10203040,
+        .parameters = &single_extension_param,
+    });
+    var odd_final_init_packet = try sctp.parsePacket(allocator, odd_final_init.items, true);
+    defer odd_final_init_packet.deinit(allocator);
+    // Pion/sctp omits final parameter padding from the INIT chunk length; the
+    // packet-level chunk padding remains present and is validated by parsePacket.
+    try std.testing.expectEqual(@as(usize, 16 + 4 + single_extension.len), odd_final_init_packet.chunks[0].value.len);
+    var odd_final_init_chunk = try sctp.InitChunk.parse(allocator, odd_final_init_packet.chunks[0]);
+    defer odd_final_init_chunk.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), odd_final_init_chunk.parameters.len);
+    try std.testing.expectEqualSlices(u8, &single_extension, odd_final_init_chunk.parameters[0].value);
 
     var invalid_init: std.ArrayList(u8) = .empty;
     defer invalid_init.deinit(allocator);
