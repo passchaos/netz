@@ -697,6 +697,42 @@ pub const ice = struct {
         };
     }
 
+    pub const NetworkType = enum {
+        unknown,
+        udp4,
+        udp6,
+        tcp4,
+        tcp6,
+
+        pub fn string(self: NetworkType) []const u8 {
+            return switch (self) {
+                .udp4 => "udp4",
+                .udp6 => "udp6",
+                .tcp4 => "tcp4",
+                .tcp6 => "tcp6",
+                .unknown => "unknown",
+            };
+        }
+
+        pub fn protocol(self: NetworkType) ?Transport {
+            return switch (self) {
+                .udp4, .udp6 => .udp,
+                .tcp4, .tcp6 => .tcp,
+                .unknown => null,
+            };
+        }
+    };
+
+    pub const supported_network_types: []const NetworkType = &.{ .udp4, .udp6 };
+
+    pub fn networkTypeFromString(value: []const u8) NetworkType {
+        if (std.mem.eql(u8, value, "udp4")) return .udp4;
+        if (std.mem.eql(u8, value, "udp6")) return .udp6;
+        if (std.mem.eql(u8, value, "tcp4")) return .tcp4;
+        if (std.mem.eql(u8, value, "tcp6")) return .tcp6;
+        return .unknown;
+    }
+
     pub const default_local_preference: u16 = 65_535;
     pub const default_tcp_priority_offset: u8 = 27;
     pub const max_tcp_direction_preference: u3 = 7;
@@ -9741,6 +9777,14 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("rtp", ice.Component.rtp.string());
     try std.testing.expectEqual(ice.Component.rtcp, ice.componentFromString("rtcp"));
     try std.testing.expectEqual(ice.Component.unknown, ice.componentFromString("RTCP"));
+    try std.testing.expectEqual(ice.NetworkType.udp4, ice.networkTypeFromString("udp4"));
+    try std.testing.expectEqual(ice.NetworkType.unknown, ice.networkTypeFromString("UDP4"));
+    try std.testing.expectEqualStrings("tcp6", ice.NetworkType.tcp6.string());
+    try std.testing.expectEqual(ice.Transport.udp, ice.NetworkType.udp6.protocol().?);
+    try std.testing.expectEqual(ice.Transport.tcp, ice.NetworkType.tcp4.protocol().?);
+    try std.testing.expect(ice.NetworkType.unknown.protocol() == null);
+    try std.testing.expectEqual(@as(usize, 2), ice.supported_network_types.len);
+    try std.testing.expectEqual(ice.NetworkType.udp4, ice.supported_network_types[0]);
     try std.testing.expectEqual(@as(u16, 54400), candidate.port);
     try std.testing.expectEqual(@as(u8, 126), candidate.candidate_type.preference());
     try std.testing.expectEqual(@as(u32, 2_130_706_431), try candidate.computedPriority(.{}));
