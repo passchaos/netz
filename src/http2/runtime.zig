@@ -1222,6 +1222,7 @@ pub const Connection = struct {
                         const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
                         if (informationalResponseToSkip(status)) {
                             if ((frame.frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
+                            if ((try contentLength(headers.?)) != null) return error.InvalidContentLength;
                             freeHeaders(self.allocator, headers.?);
                             headers = null;
                             continue;
@@ -4498,6 +4499,67 @@ test "HTTP/2 client rejects END_STREAM on informational response" {
     try std.testing.expectError(error.UnexpectedFrame, client.request(.{
         .method = "GET",
         .path = "/bad-interim-h2",
+        .authority = "localhost",
+    }));
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 client rejects content-length on informational response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/bad-interim-length-h2", request.path);
+            // HTTP semantics forbid Content-Length on informational responses.
+            // Validate before skipping 1xx HEADERS; otherwise this invalid
+            // response could be silently ignored before the final response.
+            try connection.writeHeaders(request.stream_id, &.{
+                .{ .name = ":status", .value = "103" },
+                .{ .name = "content-length", .value = "0" },
+            }, false);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    try std.testing.expectError(error.InvalidContentLength, client.request(.{
+        .method = "GET",
+        .path = "/bad-interim-length-h2",
         .authority = "localhost",
     }));
 
