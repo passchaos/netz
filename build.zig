@@ -72,6 +72,12 @@ pub fn build(b: *std.Build) void {
             .run_step = "bench-mqtt-router",
             .description = "Benchmark MQTT router trie matching against a linear scan",
         },
+        .{
+            .exe_name = "netz-bench-http1-parse",
+            .path = "examples/bench_http1_parse.zig",
+            .run_step = "bench-http1-parse",
+            .description = "Benchmark HTTP/1 borrowed head parsing against owned parsing",
+        },
     };
     const linux_example_specs = [_]struct {
         exe_name: []const u8,
