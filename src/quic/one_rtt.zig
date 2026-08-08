@@ -1306,7 +1306,7 @@ pub const Connection = struct {
         packet_destination_connection_id: ?[]const u8,
     ) Error!void {
         self.applyReceivedFramesForDestination(packet_number, frames, now_ns, ecn, packet_destination_connection_id) catch |err| {
-            if (classifySemanticCloseError(frames, err)) |close| {
+            if (self.classifySemanticCloseError(frames, err)) |close| {
                 try self.closeTransportAt(@intFromEnum(close.code), close.frame_type, close.reason_phrase, nsToMs(now_ns), null);
             }
             return err;
@@ -1495,13 +1495,25 @@ pub const Connection = struct {
         }
     }
 
-    fn classifySemanticCloseError(frames: []const quic.Frame, err: anyerror) ?quic.FramePayloadCloseError {
+    fn classifySemanticCloseError(self: Connection, frames: []const quic.Frame, err: anyerror) ?quic.FramePayloadCloseError {
         return switch (err) {
             error.UnknownPathResponse => for (frames) |frame| {
                 if (frame == .path_response) break quic.FramePayloadCloseError{
                     .code = .protocol_violation,
                     .frame_type = @intFromEnum(quic.FrameType.path_response),
                     .reason_phrase = "path response",
+                };
+            } else null,
+            error.InvalidFrame => for (frames) |frame| {
+                if (self.config.local_endpoint == .server and frame == .new_token) break quic.FramePayloadCloseError{
+                    .code = .protocol_violation,
+                    .frame_type = @intFromEnum(quic.FrameType.new_token),
+                    .reason_phrase = "new token",
+                };
+                if (self.config.local_endpoint == .server and frame == .handshake_done) break quic.FramePayloadCloseError{
+                    .code = .protocol_violation,
+                    .frame_type = @intFromEnum(quic.FrameType.handshake_done),
+                    .reason_phrase = "handshake done",
                 };
             } else null,
             else => null,
@@ -2856,9 +2868,24 @@ test "QUIC 1-RTT connection preflights role and path control frames before recei
     try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 0), server.expected_packet_number);
     try std.testing.expect(!server.handshakeConfirmed());
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.handshake_done)), server.close_info.?.frame_type);
 
-    try sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
-        .destination_connection_id = &server_cid,
+    var path_server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer path_server_endpoint.deinit();
+    const path_server_cid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    var path_server = try Connection.init(&path_server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &path_server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer path_server.deinit();
+
+    try sendFrames(&client_endpoint, path_server_endpoint.address(), keys, .{
+        .destination_connection_id = &path_server_cid,
         .packet_number = 0,
         .frames = &[_]quic.Frame{
             .{ .stream = .{ .stream_id = 0, .data = "before-path-error", .fin = false } },
@@ -2866,16 +2893,16 @@ test "QUIC 1-RTT connection preflights role and path control frames before recei
         },
     });
 
-    try std.testing.expectError(error.UnknownPathResponse, server.receivePacket());
-    try std.testing.expectEqual(@as(u64, 0), server.recv_data_total);
-    try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
-    try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
-    try std.testing.expectEqual(@as(u64, 0), server.expected_packet_number);
-    try std.testing.expectEqual(@as(usize, 0), server.path_validation.outstandingChallengeCount());
-    try std.testing.expect(server.closing());
-    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server.close_info.?.error_code);
-    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.path_response)), server.close_info.?.frame_type);
-    try std.testing.expectEqualStrings("path response", server.close_info.?.reason_phrase);
+    try std.testing.expectError(error.UnknownPathResponse, path_server.receivePacket());
+    try std.testing.expectEqual(@as(u64, 0), path_server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 0), path_server.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), path_server.received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 0), path_server.expected_packet_number);
+    try std.testing.expectEqual(@as(usize, 0), path_server.path_validation.outstandingChallengeCount());
+    try std.testing.expect(path_server.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), path_server.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.path_response)), path_server.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("path response", path_server.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT receivePacketAt updates RTT from ACK" {
@@ -4599,14 +4626,35 @@ test "QUIC 1-RTT handles server-only NEW_TOKEN and HANDSHAKE_DONE roles" {
     });
     try std.testing.expectError(error.InvalidFrame, server.receivePacket());
     try std.testing.expect(!server.handshakeConfirmed());
+    try std.testing.expect(server.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.handshake_done)), server.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("handshake done", server.close_info.?.reason_phrase);
 
-    try sendFrames(&client_endpoint, server_endpoint.address(), client_keys, .{
-        .destination_connection_id = &server_cid,
-        .packet_number = 1,
+    var server2_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server2_endpoint.deinit();
+    const server2_cid = [_]u8{ 0x65, 0x66, 0x77, 0x89 };
+    var server2 = try Connection.init(&server2_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server2_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server2.deinit();
+
+    try sendFrames(&client_endpoint, server2_endpoint.address(), client_keys, .{
+        .destination_connection_id = &server2_cid,
+        .packet_number = 0,
         .frames = &[_]quic.Frame{.{ .new_token = .{ .token = "illegal" } }},
     });
-    try std.testing.expectError(error.InvalidFrame, server.receivePacket());
-    try std.testing.expectEqual(@as(?[]const u8, null), server.latestNewToken());
+    try std.testing.expectError(error.InvalidFrame, server2.receivePacket());
+    try std.testing.expectEqual(@as(?[]const u8, null), server2.latestNewToken());
+    try std.testing.expect(server2.closing());
+    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server2.close_info.?.error_code);
+    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.new_token)), server2.close_info.?.frame_type);
+    try std.testing.expectEqualStrings("new token", server2.close_info.?.reason_phrase);
 }
 
 test "QUIC 1-RTT connection closes with transport and application close frames" {
