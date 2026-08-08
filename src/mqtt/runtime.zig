@@ -366,6 +366,8 @@ pub const Connection = struct {
     local_shared_subscription_available: bool = true,
     incoming_qos1: std.StaticBitSet(packet_identifier_slots) = .empty,
     incoming_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
+    outgoing_qos1: std.StaticBitSet(packet_identifier_slots) = .empty,
+    outgoing_qos2: std.StaticBitSet(packet_identifier_slots) = .empty,
     incoming_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
     outgoing_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
 
@@ -456,17 +458,18 @@ pub const Connection = struct {
     }
 
     pub fn publish(self: *Connection, topic: []const u8, payload: []const u8, options: PublishOptions) Error!void {
-        const packet_id = if (options.qos == .at_most_once) null else self.nextPacketId();
-        if (packet_id != null) {
-            if (self.outgoing_inflight >= self.max_outgoing_inflight) return error.InflightFull;
-            self.outgoing_inflight += 1;
-        }
-        defer {
-            if (packet_id != null) self.outgoing_inflight -= 1;
-        }
+        const packet_id = try self.writePublish(topic, payload, options);
+        if (packet_id) |id| try self.completePublish(id, options.qos);
+    }
+
+    pub fn writePublish(self: *Connection, topic: []const u8, payload: []const u8, options: PublishOptions) Error!?u16 {
         if (@intFromEnum(options.qos) > @intFromEnum(self.peer_maximum_qos)) return error.InvalidQoS;
         if (options.retain and !self.peer_retain_available) return error.InvalidProperty;
         try self.validateOutgoingTopicAlias(topic, options.properties);
+
+        const packet_id = if (options.qos == .at_most_once) null else try self.reserveOutgoingPublish(options.qos);
+        errdefer if (packet_id) |id| self.releaseOutgoingPublish(id, options.qos);
+
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
         try mqtt.writePublish(&encoded, self.allocator, self.protocol, topic, payload, .{
@@ -478,28 +481,41 @@ pub const Connection = struct {
         });
         try self.writePacket(encoded.items);
         try self.rememberOutgoingTopicAlias(topic, options.properties);
-        if (packet_id) |id| {
-            switch (options.qos) {
-                .at_most_once => unreachable,
-                .at_least_once => {
-                    var ack = try self.readPubAck();
-                    defer ack.deinit(self.allocator);
-                    if (ack.ack.packet_id != id) return error.UnexpectedPacket;
-                    if (!ack.ack.accepted()) return error.PublishRefused;
-                },
-                .exactly_once => {
-                    var pubrec = try self.readPubRec();
-                    defer pubrec.deinit(self.allocator);
-                    if (pubrec.ack.packet_id != id) return error.UnexpectedPacket;
-                    if (!pubrec.ack.accepted()) return error.PublishRefused;
-                    try self.writePubRel(id, 0);
-                    var pubcomp = try self.readPubComp();
-                    defer pubcomp.deinit(self.allocator);
-                    if (pubcomp.ack.packet_id != id) return error.UnexpectedPacket;
-                    if (!pubcomp.ack.accepted()) return error.PublishRefused;
-                },
-            }
+        return packet_id;
+    }
+
+    pub fn completePublish(self: *Connection, packet_id: u16, qos: mqtt.QoS) Error!void {
+        switch (qos) {
+            .at_most_once => return,
+            .at_least_once => try self.completePublishPubAck(packet_id),
+            .exactly_once => try self.completePublishQoS2(packet_id),
         }
+    }
+
+    pub fn completePublishPubAck(self: *Connection, packet_id: u16) Error!void {
+        if (!self.outgoing_qos1.isSet(@as(usize, packet_id))) return error.UnexpectedPacket;
+        var ack = try self.readPubAck();
+        defer ack.deinit(self.allocator);
+        if (ack.ack.packet_id != packet_id) return error.UnexpectedPacket;
+        self.releaseOutgoingPublish(packet_id, .at_least_once);
+        if (!ack.ack.accepted()) return error.PublishRefused;
+    }
+
+    pub fn completePublishQoS2(self: *Connection, packet_id: u16) Error!void {
+        if (!self.outgoing_qos2.isSet(@as(usize, packet_id))) return error.UnexpectedPacket;
+        var pubrec = try self.readPubRec();
+        defer pubrec.deinit(self.allocator);
+        if (pubrec.ack.packet_id != packet_id) return error.UnexpectedPacket;
+        if (!pubrec.ack.accepted()) {
+            self.releaseOutgoingPublish(packet_id, .exactly_once);
+            return error.PublishRefused;
+        }
+        try self.writePubRel(packet_id, 0);
+        var pubcomp = try self.readPubComp();
+        defer pubcomp.deinit(self.allocator);
+        if (pubcomp.ack.packet_id != packet_id) return error.UnexpectedPacket;
+        self.releaseOutgoingPublish(packet_id, .exactly_once);
+        if (!pubcomp.ack.accepted()) return error.PublishRefused;
     }
 
     pub fn readPublish(self: *Connection) Error!OwnedPublish {
@@ -857,6 +873,38 @@ pub const Connection = struct {
         self.next_packet_id +%= 1;
         if (self.next_packet_id == 0) self.next_packet_id = 1;
         return id;
+    }
+
+    fn reserveOutgoingPublish(self: *Connection, qos: mqtt.QoS) Error!u16 {
+        if (self.outgoing_inflight >= self.max_outgoing_inflight) return error.InflightFull;
+
+        var attempts: usize = 0;
+        while (attempts < std.math.maxInt(u16)) : (attempts += 1) {
+            const packet_id = self.nextPacketId();
+            const index = @as(usize, packet_id);
+            if (self.outgoing_qos1.isSet(index) or self.outgoing_qos2.isSet(index)) continue;
+
+            switch (qos) {
+                .at_most_once => unreachable,
+                .at_least_once => self.outgoing_qos1.set(index),
+                .exactly_once => self.outgoing_qos2.set(index),
+            }
+            self.outgoing_inflight += 1;
+            return packet_id;
+        }
+        return error.InflightFull;
+    }
+
+    fn releaseOutgoingPublish(self: *Connection, packet_id: u16, qos: mqtt.QoS) void {
+        const index = @as(usize, packet_id);
+        const set = switch (qos) {
+            .at_most_once => return,
+            .at_least_once => &self.outgoing_qos1,
+            .exactly_once => &self.outgoing_qos2,
+        };
+        if (!set.isSet(index)) return;
+        set.setValue(index, false);
+        self.outgoing_inflight -= 1;
     }
 };
 
@@ -1294,6 +1342,82 @@ test "MQTT connection enforces outgoing inflight limit before writing" {
 
     try std.testing.expectError(error.InflightFull, connection.publish("limited/topic", "blocked", .{ .qos = .at_least_once }));
     try std.testing.expectEqual(@as(u16, 1), connection.outgoing_inflight);
+}
+
+test "MQTT split publish API pipelines QoS publishes up to receive maximum" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_packet_size = 4096 });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var accepted = try server_ptr.accept(.{
+                .protocol = .v5,
+                .max_outgoing_inflight = 2,
+            });
+            defer accepted.deinit(server_ptr.allocator);
+
+            var first = try accepted.connection.readPublish();
+            defer first.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("pipeline/one", first.publish.topic);
+            try std.testing.expectEqualStrings("one", first.publish.payload);
+
+            var second = try accepted.connection.readPublish();
+            defer second.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("pipeline/two", second.publish.topic);
+            try std.testing.expectEqualStrings("two", second.publish.payload);
+
+            // Delay acknowledgements until both publishes have arrived. This
+            // proves the client API can actually fill the negotiated in-flight
+            // window instead of waiting for each PUBACK before writing the next
+            // PUBLISH, matching rumqtt's state-machine model.
+            try accepted.connection.writePubAck(first.publish.packet_id.?, 0);
+            try accepted.connection.writePubAck(second.publish.packet_id.?, 0);
+
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(server_ptr.allocator);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .protocol = .v5,
+        .client_id = "pipeline-client",
+        .limits = .{ .max_packet_size = 4096 },
+        .max_outgoing_inflight = 2,
+    });
+    defer client.close();
+    try std.testing.expectEqual(@as(u16, 2), client.max_outgoing_inflight);
+
+    const first_id = (try client.writePublish("pipeline/one", "one", .{ .qos = .at_least_once })).?;
+    const second_id = (try client.writePublish("pipeline/two", "two", .{ .qos = .at_least_once })).?;
+    try std.testing.expectEqual(@as(u16, 2), client.outgoing_inflight);
+    try std.testing.expectError(error.InflightFull, client.writePublish("pipeline/three", "three", .{ .qos = .at_least_once }));
+
+    try client.completePublishPubAck(first_id);
+    try std.testing.expectEqual(@as(u16, 1), client.outgoing_inflight);
+    try client.completePublishPubAck(second_id);
+    try std.testing.expectEqual(@as(u16, 0), client.outgoing_inflight);
+    try client.disconnect(0);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "MQTT Receive Maximum cannot raise local outgoing inflight cap" {
