@@ -1375,6 +1375,35 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub fn parseBundleGroupAttribute(allocator: std.mem.Allocator, value: []const u8) Error![]const []const u8 {
+        var parts = std.mem.tokenizeAny(u8, value, " \t");
+        const semantic = parts.next() orelse return error.InvalidSdp;
+        if (!std.mem.eql(u8, semantic, "BUNDLE")) return error.InvalidSdp;
+        var mids: std.ArrayList([]const u8) = .empty;
+        errdefer mids.deinit(allocator);
+        while (parts.next()) |mid| {
+            try validateSdpToken(mid);
+            try mids.append(allocator, mid);
+        }
+        if (mids.items.len == 0) return error.InvalidSdp;
+        return mids.toOwnedSlice(allocator);
+    }
+
+    pub fn extractBundleMids(allocator: std.mem.Allocator, session: Session) Error![]const []const u8 {
+        for (session.attributes) |attr| {
+            if (!std.ascii.eqlIgnoreCase(attr.name, "group")) continue;
+            var parts = std.mem.tokenizeAny(u8, attr.value, " \t");
+            const semantic = parts.next() orelse continue;
+            if (!std.mem.eql(u8, semantic, "BUNDLE")) continue;
+            return parseBundleGroupAttribute(allocator, attr.value);
+        }
+        return allocator.alloc([]const u8, 0);
+    }
+
+    pub fn freeBundleMids(allocator: std.mem.Allocator, mids: []const []const u8) void {
+        allocator.free(mids);
+    }
+
     fn validateSdpToken(value: []const u8) Error!void {
         if (value.len == 0) return error.InvalidSdp;
         for (value) |byte| {
@@ -9963,6 +9992,15 @@ test "ICE candidate parser and SDP parser" {
     const bundle_attr = try sdp.formatBundleGroupAttribute(allocator, &.{ "0", "1" });
     defer allocator.free(bundle_attr);
     try std.testing.expectEqualStrings("BUNDLE 0 1", bundle_attr);
+    const parsed_bundle_mids = try sdp.parseBundleGroupAttribute(allocator, bundle_attr);
+    defer sdp.freeBundleMids(allocator, parsed_bundle_mids);
+    try std.testing.expectEqual(@as(usize, 2), parsed_bundle_mids.len);
+    try std.testing.expectEqualStrings("0", parsed_bundle_mids[0]);
+    try std.testing.expectEqualStrings("1", parsed_bundle_mids[1]);
+    const extracted_bundle_mids = try sdp.extractBundleMids(allocator, session);
+    defer sdp.freeBundleMids(allocator, extracted_bundle_mids);
+    try std.testing.expectEqual(@as(usize, 1), extracted_bundle_mids.len);
+    try std.testing.expectEqualStrings("0", extracted_bundle_mids[0]);
     const bundle_line = try sdp.formatBundleGroupLine(allocator, &.{ "0", "1" });
     defer allocator.free(bundle_line);
     try std.testing.expectEqualStrings("a=group:BUNDLE 0 1\r\n", bundle_line);
@@ -9974,6 +10012,15 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectError(error.InvalidSdp, sdp.formatMidLine(allocator, ""));
     try std.testing.expectError(error.InvalidSdp, sdp.formatBundleGroupLine(allocator, &.{}));
     try std.testing.expectError(error.InvalidSdp, sdp.formatBundleGroupLine(allocator, &.{"bad mid"}));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseBundleGroupAttribute(allocator, "BUNDLE"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseBundleGroupAttribute(allocator, "LS 0"));
+    var no_bundle_attrs = [_]sdp.Attribute{.{ .name = "group", .value = "LS 0" }};
+    const no_bundle_mids = try sdp.extractBundleMids(allocator, .{
+        .attributes = &no_bundle_attrs,
+        .media = &.{},
+    });
+    defer sdp.freeBundleMids(allocator, no_bundle_mids);
+    try std.testing.expectEqual(@as(usize, 0), no_bundle_mids.len);
 }
 
 test "ICE candidate priority helpers mirror RFC and Pion defaults" {
