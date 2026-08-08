@@ -8761,7 +8761,12 @@ pub const sctp = struct {
 
     pub fn parsePacket(allocator: std.mem.Allocator, bytes: []const u8, verify_checksum: bool) Error!ParsedPacket {
         if (bytes.len < 12) return error.BufferTooShort;
-        if ((verify_checksum or packetRequiresChecksum(bytes)) and !try validChecksum(bytes)) return error.BadSctpChecksum;
+        const received_checksum = std.mem.readInt(u32, bytes[8..12], .little);
+        // Pion/sctp's zero-checksum mode only relaxes packets whose checksum
+        // field is actually zero.  If a peer sends a non-zero checksum, validate
+        // it even when the DTLS zero-checksum extension is enabled so corrupt
+        // packets cannot bypass integrity checks by toggling receive policy.
+        if ((verify_checksum or packetRequiresChecksum(bytes) or received_checksum != 0) and !try validChecksum(bytes)) return error.BadSctpChecksum;
         const header = try Header.parse(bytes[0..12]);
 
         var chunks: std.ArrayList(Chunk) = .empty;
@@ -13598,6 +13603,10 @@ test "SCTP INIT cookie echo and cookie ack packets" {
         .user_data = "zero-checksum-ok",
     }});
     try std.testing.expect(!sctp.packetRequiresChecksum(encoded.items));
+    var stale_checksum_data = try encoded.clone(allocator);
+    defer stale_checksum_data.deinit(allocator);
+    stale_checksum_data.items[stale_checksum_data.items.len - 1] ^= 0xff;
+    try std.testing.expectError(error.BadSctpChecksum, sctp.parsePacket(allocator, stale_checksum_data.items, false));
     std.mem.writeInt(u32, encoded.items[8..12], 0, .little);
     var zero_checksum_data = try sctp.parsePacket(allocator, encoded.items, false);
     zero_checksum_data.deinit(allocator);
