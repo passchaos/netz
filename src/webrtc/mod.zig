@@ -1111,6 +1111,11 @@ pub const sdp = struct {
         unicast_address: []const u8,
     };
 
+    pub const Timing = struct {
+        start_time: u64,
+        stop_time: u64,
+    };
+
     pub const Session = struct {
         version: []const u8 = "0",
         origin: []const u8 = "- 0 0 IN IP4 127.0.0.1",
@@ -1616,6 +1621,33 @@ pub const sdp = struct {
             .network_type = network_type,
             .address_type = address_type,
             .unicast_address = unicast_address,
+        };
+    }
+
+    pub fn formatTimingAttribute(allocator: std.mem.Allocator, timing: Timing) Error![]u8 {
+        return std.fmt.allocPrint(allocator, "{d} {d}", .{ timing.start_time, timing.stop_time });
+    }
+
+    pub fn formatTimingLine(allocator: std.mem.Allocator, timing: Timing) Error![]u8 {
+        const attr = try formatTimingAttribute(allocator, timing);
+        defer allocator.free(attr);
+        return std.fmt.allocPrint(allocator, "t={s}\r\n", .{attr});
+    }
+
+    pub fn appendTimingLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, timing: Timing) Error!void {
+        const line = try formatTimingLine(allocator, timing);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
+    pub fn parseTimingAttribute(raw: []const u8) Error!Timing {
+        var parts = std.mem.tokenizeAny(u8, raw, " \t");
+        const start_s = parts.next() orelse return error.InvalidSdp;
+        const stop_s = parts.next() orelse return error.InvalidSdp;
+        if (parts.next() != null) return error.InvalidSdp;
+        return .{
+            .start_time = std.fmt.parseInt(u64, start_s, 10) catch return error.InvalidSdp,
+            .stop_time = std.fmt.parseInt(u64, stop_s, 10) catch return error.InvalidSdp,
         };
     }
 
@@ -9446,6 +9478,9 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("IN", parsed_origin.network_type);
     try std.testing.expectEqualStrings("IP4", parsed_origin.address_type);
     try std.testing.expectEqualStrings("127.0.0.1", parsed_origin.unicast_address);
+    const parsed_timing = try sdp.parseTimingAttribute(session.timing);
+    try std.testing.expectEqual(@as(u64, 0), parsed_timing.start_time);
+    try std.testing.expectEqual(@as(u64, 0), parsed_timing.stop_time);
     try std.testing.expectEqualStrings("IN", session.connection.?.network_type);
     try std.testing.expectEqualStrings("IP4", session.connection.?.address_type);
     try std.testing.expectEqualStrings("198.51.100.1", session.connection.?.address);
@@ -9544,6 +9579,19 @@ test "ICE candidate parser and SDP parser" {
     }));
     try std.testing.expectError(error.InvalidSdp, sdp.parseOriginAttribute("- 0 0 IN IP4"));
     try std.testing.expectError(error.InvalidSdp, sdp.parseOriginAttribute("- not-id 0 IN IP4 127.0.0.1"));
+    const timing_attr = try sdp.formatTimingAttribute(allocator, parsed_timing);
+    defer allocator.free(timing_attr);
+    try std.testing.expectEqualStrings("0 0", timing_attr);
+    const timing_line = try sdp.formatTimingLine(allocator, parsed_timing);
+    defer allocator.free(timing_line);
+    try std.testing.expectEqualStrings("t=0 0\r\n", timing_line);
+    var timing_lines: std.ArrayList(u8) = .empty;
+    defer timing_lines.deinit(allocator);
+    try sdp.appendTimingLine(&timing_lines, allocator, .{ .start_time = 1, .stop_time = 2 });
+    try std.testing.expectEqualStrings("t=1 2\r\n", timing_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.parseTimingAttribute("0"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseTimingAttribute("0 0 extra"));
+    try std.testing.expectError(error.InvalidSdp, sdp.parseTimingAttribute("start 0"));
     var invalid_header_session = session;
     invalid_header_session.name = "bad\nname";
     try std.testing.expectError(error.InvalidSdp, sdp.formatSessionHeaderLines(allocator, invalid_header_session));
