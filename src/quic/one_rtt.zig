@@ -479,8 +479,9 @@ pub const Connection = struct {
         defer self.endpoint.allocator.free(payload);
 
         const is_ack_eliciting = ackEliciting(frames);
+        const is_in_flight = packetInFlight(frames);
         var tracked_congestion = false;
-        if (is_ack_eliciting) {
+        if (is_in_flight) {
             try self.congestion.reserve(payload.len);
             tracked_congestion = true;
         }
@@ -495,7 +496,7 @@ pub const Connection = struct {
         errdefer {
             if (tracked_recovery) _ = self.recovery.forgetPacketNumber(packet_number);
         }
-        try self.sent.sentAt(packet_number, is_ack_eliciting, if (is_ack_eliciting) payload.len else 0, ecn, sent_time_ns);
+        try self.sent.sentInFlightAt(packet_number, is_ack_eliciting, is_in_flight, payload.len, ecn, sent_time_ns);
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacket(packet_number, payload);
         self.next_packet_number += 1;
@@ -2162,6 +2163,21 @@ fn ackEliciting(frames: []const quic.Frame) bool {
     return false;
 }
 
+fn packetInFlight(frames: []const quic.Frame) bool {
+    for (frames) |frame| {
+        switch (frame) {
+            // RFC 9002 counts packets that contain PADDING in bytes-in-flight
+            // even though PADDING is not ack-eliciting.  Mature stacks such as
+            // tquic model this separately from ack-eliciting recovery so pure
+            // padding can still consume and later release congestion credit.
+            .ack, .connection_close, .application_close => {},
+            .padding => return true,
+            else => return true,
+        }
+    }
+    return false;
+}
+
 fn countStreamBytes(frames: []const quic.Frame) u64 {
     var total: u64 = 0;
     for (frames) |frame| {
@@ -2556,6 +2572,63 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     try std.testing.expectEqual(@as(u64, 25), ack_packet.frames[0].ack.ack_delay);
     try std.testing.expect(client.sent.packets.items[0].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
+}
+
+test "QUIC 1-RTT padding-only packets are in flight but non-eliciting" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x73, 0x74, 0x75, 0x76 };
+    const server_cid = [_]u8{ 0x77, 0x78, 0x79, 0x7a };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x7b} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x7c} ** quic.protection.secret_len);
+
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try client.send(&[_]quic.Frame{.{ .padding = .{ .len = 16 } }});
+    try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
+    try std.testing.expect(!client.sent.packets.items[0].ack_eliciting);
+    try std.testing.expect(client.sent.packets.items[0].in_flight);
+    try std.testing.expectEqual(@as(usize, 16), client.sent.packets.items[0].bytes);
+    try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadline());
+    try std.testing.expectEqual(@as(usize, 16), client.congestion.bytes_in_flight);
+
+    var padded = try server.receivePacket();
+    defer padded.deinit(allocator);
+    try std.testing.expectEqual(quic.Frame.padding, std.meta.activeTag(padded.frames[0]));
+    try std.testing.expectEqual(@as(usize, 16), padded.frames[0].padding.len);
+
+    try server.sendAck(0);
+    var ack_packet = try client.receivePacket();
+    defer ack_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), ack_packet.frames[0].ack.largest_acknowledged);
+    try std.testing.expect(client.sent.packets.items[0].acknowledged);
     try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
 }
 

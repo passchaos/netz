@@ -200,6 +200,7 @@ fn rangesOverlapOrAdjacent(lower: PacketRange, higher: PacketRange) bool {
 pub const SentPacket = struct {
     packet_number: u64,
     ack_eliciting: bool = true,
+    in_flight: bool = true,
     acknowledged: bool = false,
     lost: bool = false,
     bytes: usize = 0,
@@ -247,10 +248,19 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn sentAtWithPmtu(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize) !void {
+        try self.sentInFlightAtWithPmtu(packet_number, ack_eliciting, ack_eliciting, bytes, ecn, sent_time_ns, pmtu_probe_size);
+    }
+
+    pub fn sentInFlightAt(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64) !void {
+        try self.sentInFlightAtWithPmtu(packet_number, ack_eliciting, in_flight, bytes, ecn, sent_time_ns, null);
+    }
+
+    pub fn sentInFlightAtWithPmtu(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize) !void {
         try self.packets.append(self.allocator, .{
             .packet_number = packet_number,
             .ack_eliciting = ack_eliciting,
-            .bytes = bytes,
+            .in_flight = in_flight,
+            .bytes = if (in_flight) bytes else 0,
             .ecn = ecn,
             .sent_time_ns = sent_time_ns,
             .pmtu_probe_size = pmtu_probe_size,
@@ -496,13 +506,13 @@ pub const SentPacketTracker = struct {
 
         var lost: AckResult = .{};
         for (self.packets.items) |*packet| {
-            if (packet.acknowledged or packet.lost or packet.packet_number > largest_lost) continue;
+            if (packet.acknowledged or packet.lost or !packet.in_flight or packet.packet_number > largest_lost) continue;
             packet.lost = true;
             lost.packets += 1;
             lost.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
+            lost.bytes += packet.bytes;
             if (packet.ack_eliciting) {
                 lost.ack_eliciting_packets += 1;
-                lost.bytes += packet.bytes;
             }
         }
         return lost;
@@ -511,7 +521,7 @@ pub const SentPacketTracker = struct {
     pub fn detectTimeThresholdLoss(self: *SentPacketTracker, now_ns: u64, loss_delay_ns: u64, largest_acknowledged: ?u64) AckResult {
         var lost: AckResult = .{};
         for (self.packets.items) |*packet| {
-            if (packet.acknowledged or packet.lost) continue;
+            if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             if (largest_acknowledged) |largest| {
                 if (packet.packet_number > largest) continue;
             }
@@ -521,9 +531,9 @@ pub const SentPacketTracker = struct {
             packet.lost = true;
             lost.packets += 1;
             lost.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
+            lost.bytes += packet.bytes;
             if (packet.ack_eliciting) {
                 lost.ack_eliciting_packets += 1;
-                lost.bytes += packet.bytes;
             }
         }
         return lost;
@@ -532,7 +542,7 @@ pub const SentPacketTracker = struct {
     pub fn timeThresholdLossDeadline(self: SentPacketTracker, loss_delay_ns: u64, largest_acknowledged: ?u64) ?u64 {
         var deadline: ?u64 = null;
         for (self.packets.items) |packet| {
-            if (packet.acknowledged or packet.lost) continue;
+            if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             if (largest_acknowledged) |largest| {
                 if (packet.packet_number > largest) continue;
             }
@@ -631,9 +641,9 @@ pub const SentPacketTracker = struct {
                 packet.acknowledged = true;
                 result.packets += 1;
                 result.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
+                if (packet.in_flight and !packet.lost) result.bytes += packet.bytes;
                 if (packet.ack_eliciting) {
                     result.ack_eliciting_packets += 1;
-                    if (!packet.lost) result.bytes += packet.bytes;
                 }
                 switch (packet.ecn) {
                     .not_ect => {},
@@ -1091,6 +1101,39 @@ test "QUIC sent packet tracker reports latest ack-eliciting in-flight send time"
 
     sent.packets.items[0].lost = true;
     try std.testing.expectEqual(@as(?u64, null), sent.latestAckElicitingInFlightSentTime());
+}
+
+test "QUIC sent packet tracker accounts non-eliciting in-flight packets" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    // RFC 9002 treats packets containing only PADDING as non-ack-eliciting but
+    // still in flight.  Model that independently from ACK-only / close packets
+    // so congestion bytes are released when such a packet is ACKed or declared
+    // lost, without arming PTO as though it could elicit an ACK.
+    try sent.sentInFlightAt(0, false, true, 256, .not_ect, 100);
+    try std.testing.expectEqual(@as(?u64, null), sent.latestAckElicitingInFlightSentTime());
+
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    const acked = try sent.applyAckDetailed(ack);
+    try std.testing.expectEqual(@as(usize, 1), acked.packets);
+    try std.testing.expectEqual(@as(usize, 0), acked.ack_eliciting_packets);
+    try std.testing.expectEqual(@as(usize, 256), acked.bytes);
+    try std.testing.expect(sent.packets.items[0].acknowledged);
+
+    var lost_sent = SentPacketTracker.init(allocator);
+    defer lost_sent.deinit();
+    try lost_sent.sentInFlightAt(0, false, true, 300, .not_ect, 100);
+    const lost = lost_sent.detectTimeThresholdLoss(250, 150, 0);
+    try std.testing.expectEqual(@as(usize, 1), lost.packets);
+    try std.testing.expectEqual(@as(usize, 0), lost.ack_eliciting_packets);
+    try std.testing.expectEqual(@as(usize, 300), lost.bytes);
+    try std.testing.expect(lost_sent.packets.items[0].lost);
 }
 
 test "QUIC sent packet tracker finds persistent congestion periods" {
