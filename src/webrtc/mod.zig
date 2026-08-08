@@ -1649,6 +1649,17 @@ pub const sdp = struct {
         try list.appendSlice(allocator, line);
     }
 
+    pub fn formatSessionNameLine(allocator: std.mem.Allocator, name: []const u8) Error![]u8 {
+        try validateSdpAttributeValue(name);
+        return std.fmt.allocPrint(allocator, "s={s}\r\n", .{name});
+    }
+
+    pub fn appendSessionNameLine(list: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) Error!void {
+        const line = try formatSessionNameLine(allocator, name);
+        defer allocator.free(line);
+        try list.appendSlice(allocator, line);
+    }
+
     pub fn formatOriginAttribute(allocator: std.mem.Allocator, origin: Origin) Error![]u8 {
         try validateSdpToken(origin.username);
         try validateSdpNetworkType(origin.network_type);
@@ -1909,9 +1920,7 @@ pub const sdp = struct {
         const origin_line = try std.fmt.allocPrint(allocator, "o={s}\r\n", .{session.origin});
         defer allocator.free(origin_line);
         try list.appendSlice(allocator, origin_line);
-        const name_line = try std.fmt.allocPrint(allocator, "s={s}\r\n", .{session.name});
-        defer allocator.free(name_line);
-        try list.appendSlice(allocator, name_line);
+        try appendSessionNameLine(list, allocator, session.name);
         if (session.information) |information| try appendInformationLine(list, allocator, information);
         if (session.uri) |uri| try appendUriLine(list, allocator, uri);
         if (session.email) |email| try appendEmailLine(list, allocator, email);
@@ -9687,6 +9696,14 @@ test "ICE candidate parser and SDP parser" {
     try std.testing.expectEqualStrings("a=mid:0\r\na=rtcp-mux\r\n", generic_attr_lines.items);
     try std.testing.expectError(error.InvalidSdp, sdp.formatAttributeLine(allocator, .{ .name = "bad name", .value = "" }));
     try std.testing.expectError(error.InvalidSdp, sdp.formatAttributeLine(allocator, .{ .name = "mid", .value = "bad\nvalue" }));
+    const session_name_line = try sdp.formatSessionNameLine(allocator, "A Seminar");
+    defer allocator.free(session_name_line);
+    try std.testing.expectEqualStrings("s=A Seminar\r\n", session_name_line);
+    var session_name_lines: std.ArrayList(u8) = .empty;
+    defer session_name_lines.deinit(allocator);
+    try sdp.appendSessionNameLine(&session_name_lines, allocator, "-");
+    try std.testing.expectEqualStrings("s=-\r\n", session_name_lines.items);
+    try std.testing.expectError(error.InvalidSdp, sdp.formatSessionNameLine(allocator, "bad\nname"));
     const session_header = try sdp.formatSessionHeaderLines(allocator, session);
     defer allocator.free(session_header);
     try std.testing.expectEqualStrings(
