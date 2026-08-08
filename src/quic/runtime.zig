@@ -10,6 +10,7 @@ pub const Error = quic.Error || error{
     TrailingBytes,
     NoConnectionRoute,
     EcnUnavailable,
+    InvalidGroSegment,
 } || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError || std.Io.Cancelable;
 
 pub const Limits = struct {
@@ -18,6 +19,10 @@ pub const Limits = struct {
     /// Use Linux UDP_SEGMENT when a batch is already laid out as compatible
     /// contiguous segments. Unsupported kernels still fall back automatically.
     enable_gso_send: bool = true,
+    /// Enable Linux UDP_GRO coalescing. Coalesced packets are exposed through
+    /// the batch receive API without per-packet syscalls. Keep this opt-in
+    /// because single-datagram consumers cannot amortize GRO bookkeeping.
+    enable_gro_receive: bool = false,
 };
 
 pub const SendManyBytesResult = struct {
@@ -104,6 +109,11 @@ pub const Endpoint = struct {
     receive_ecn_enabled: bool = false,
     send_ecn_mark: quic.packet_space.EcnCodepoint = .not_ect,
     gso_send_enabled: bool = udpGsoSupported(),
+    gro_receive_enabled: bool = false,
+    socket_receive_mutex: std.Io.Mutex = .init,
+    pending_receive_mutex: std.Io.Mutex = .init,
+    pending_received: std.ArrayList(OwnedBytes) = .empty,
+    pending_receive_index: usize = 0,
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Endpoint {
         var endpoint = Endpoint{
@@ -115,10 +125,15 @@ pub const Endpoint = struct {
         };
         errdefer endpoint.deinit();
         endpoint.enableEcnReceive();
+        endpoint.enableGroReceive();
         return endpoint;
     }
 
     pub fn deinit(self: *Endpoint) void {
+        for (self.pending_received.items[self.pending_receive_index..]) |*pending| {
+            pending.deinit(self.allocator);
+        }
+        self.pending_received.deinit(self.allocator);
         self.socket.close(self.io);
         self.* = undefined;
     }
@@ -129,6 +144,10 @@ pub const Endpoint = struct {
 
     pub fn gsoSendEnabled(self: Endpoint) bool {
         return self.gso_send_enabled;
+    }
+
+    pub fn groReceiveEnabled(self: Endpoint) bool {
+        return self.gro_receive_enabled;
     }
 
     pub fn sendBytes(self: *Endpoint, to: net.IpAddress, bytes: []const u8) Error!void {
@@ -349,20 +368,96 @@ pub const Endpoint = struct {
         }
 
         const owned_frames = try frames.toOwnedSlice(self.allocator);
-        return .{ .from = raw.from, .bytes = raw.bytes, .ecn = raw.ecn, .frames = owned_frames };
+        return .{
+            .from = raw.from,
+            .bytes = raw.bytes,
+            .ecn = raw.ecn,
+            .frames = owned_frames,
+            .shared_buffer = raw.shared_buffer,
+        };
     }
 
     pub fn receiveBytes(self: *Endpoint) Error!OwnedBytes {
         return self.receiveBytesWithEcn();
     }
 
+    /// Receive one kernel datagram, which may contain multiple UDP_GRO
+    /// segments. The returned batch owns one allocation and exposes individual
+    /// datagrams as borrowed slices through `datagramAt`.
+    pub fn receiveBytesBatch(self: *Endpoint) Error!OwnedBytesBatch {
+        return self.receiveBytesBatchWithEcn();
+    }
+
+    pub fn receiveBytesBatchWithEcn(self: *Endpoint) Error!OwnedBytesBatch {
+        if (self.takePendingReceived()) |pending| {
+            return ownedBytesAsBatch(pending);
+        }
+        self.socket_receive_mutex.lockUncancelable(self.io);
+        defer self.socket_receive_mutex.unlock(self.io);
+        // Another receive may have filled the FIFO while this caller waited
+        // for the socket. Recheck before issuing an unnecessary blocking recv.
+        if (self.takePendingReceived()) |pending| return ownedBytesAsBatch(pending);
+        return self.receiveKernelBytesBatchWithEcn();
+    }
+
     /// Receive one UDP datagram and preserve the kernel-reported ECN codepoint.
     /// If ancillary ECN reception was unavailable when the socket was bound,
     /// callers get `.not_ect`, matching the conservative QUIC fallback.
     pub fn receiveBytesWithEcn(self: *Endpoint) Error!OwnedBytes {
-        const buffer = try self.allocator.alloc(u8, self.limits.max_datagram_size);
-        defer self.allocator.free(buffer);
-        var control_buffer: [ecn_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        if (self.takePendingReceived()) |pending| return pending;
+        self.socket_receive_mutex.lockUncancelable(self.io);
+        defer self.socket_receive_mutex.unlock(self.io);
+        if (self.takePendingReceived()) |pending| return pending;
+
+        var batch = try self.receiveKernelBytesBatchWithEcn();
+        errdefer batch.deinit(self.allocator);
+        if (batch.segment_count == 1) {
+            const result: OwnedBytes = .{
+                .from = batch.from,
+                .bytes = batch.storage,
+                .ecn = batch.ecn,
+                .shared_buffer = batch.shared_buffer,
+            };
+            batch.disown();
+            return result;
+        }
+
+        self.pending_receive_mutex.lockUncancelable(self.io);
+        defer self.pending_receive_mutex.unlock(self.io);
+        try self.pending_received.ensureUnusedCapacity(self.allocator, batch.segment_count - 1);
+        const shared = try self.allocator.create(SharedReceiveBuffer);
+        shared.* = .{
+            .allocator = self.allocator,
+            .storage = batch.storage,
+            .references = .init(batch.segment_count),
+        };
+        batch.disown();
+        var index: usize = 1;
+        while (index < batch.segment_count) : (index += 1) {
+            self.pending_received.appendAssumeCapacity(.{
+                .from = batch.from,
+                .bytes = batch.datagramAtUnchecked(index),
+                .ecn = batch.ecn,
+                .shared_buffer = shared,
+            });
+        }
+        return .{
+            .from = batch.from,
+            .bytes = batch.datagramAtUnchecked(0),
+            .ecn = batch.ecn,
+            .shared_buffer = shared,
+        };
+    }
+
+    fn receiveKernelBytesBatchWithEcn(self: *Endpoint) Error!OwnedBytesBatch {
+        const receive_capacity = if (self.gro_receive_enabled)
+            std.math.maxInt(u16)
+        else
+            self.limits.max_datagram_size;
+        const buffer = try self.allocator.alloc(u8, receive_capacity);
+        var buffer_owned = true;
+        errdefer if (buffer_owned) self.allocator.free(buffer);
+        var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
         @memset(&control_buffer, 0);
         var incoming: net.IncomingMessage = .init;
         incoming.control = &control_buffer;
@@ -375,13 +470,58 @@ pub const Endpoint = struct {
         if (maybe_err) |err| return err;
         std.debug.assert(count == 1);
         if (incoming.data.len == 0) return error.EmptyDatagram;
+        if (incoming.flags.trunc or incoming.flags.ctrunc) return error.DatagramTooLarge;
 
-        const bytes = try self.allocator.dupe(u8, incoming.data);
+        const control = receiveControlFromBytes(incoming.control);
+        const ecn = if (self.receive_ecn_enabled) control.ecn else .not_ect;
+        const segment_size = control.gro_segment_size orelse {
+            if (incoming.data.len > self.limits.max_datagram_size) return error.DatagramTooLarge;
+            // Most allocator implementations can shrink this allocation in
+            // place. Returning the receive storage directly removes the
+            // previous alloc-copy-free cycle even when GRO is not involved.
+            const bytes = try self.allocator.realloc(buffer, incoming.data.len);
+            return .{
+                .from = incoming.from,
+                .storage = bytes,
+                .segment_size = bytes.len,
+                .segment_count = 1,
+                .ecn = ecn,
+            };
+        };
+        if (!self.gro_receive_enabled or
+            segment_size == 0 or
+            segment_size > self.limits.max_datagram_size or
+            incoming.data.len <= segment_size)
+        {
+            return error.InvalidGroSegment;
+        }
+
+        const segment_count = std.math.divCeil(usize, incoming.data.len, segment_size) catch
+            return error.InvalidGroSegment;
+        if (segment_count < 2 or segment_count > udp_gro_max_segments) return error.InvalidGroSegment;
+        const storage = try self.allocator.realloc(buffer, incoming.data.len);
+        buffer_owned = false;
         return .{
             .from = incoming.from,
-            .bytes = bytes,
-            .ecn = if (self.receive_ecn_enabled) ecnFromControl(incoming.control) else .not_ect,
+            .storage = storage,
+            .segment_size = segment_size,
+            .segment_count = segment_count,
+            .ecn = ecn,
         };
+    }
+
+    fn takePendingReceived(self: *Endpoint) ?OwnedBytes {
+        self.pending_receive_mutex.lockUncancelable(self.io);
+        defer self.pending_receive_mutex.unlock(self.io);
+        if (self.pending_receive_index >= self.pending_received.items.len) return null;
+
+        const pending = self.pending_received.items[self.pending_receive_index];
+        self.pending_receive_index += 1;
+        if (self.pending_receive_index == self.pending_received.items.len) {
+            self.pending_received.clearRetainingCapacity();
+            self.pending_receive_index = 0;
+        }
+        return pending;
     }
 
     fn enableEcnReceive(self: *Endpoint) void {
@@ -395,6 +535,17 @@ pub const Endpoint = struct {
         const ipv4 = rawSetSockOpt(self.socket.handle, ipproto_ip, ip_recvtos, enabled_bytes);
         const ipv6 = rawSetSockOpt(self.socket.handle, ipproto_ipv6, ipv6_recvtclass, enabled_bytes);
         self.receive_ecn_enabled = ipv4 or ipv6;
+    }
+
+    fn enableGroReceive(self: *Endpoint) void {
+        if (!self.limits.enable_gro_receive or !udpGroSupported()) return;
+        const enabled: u32 = 1;
+        self.gro_receive_enabled = rawSetSockOpt(
+            self.socket.handle,
+            udp_gso_level,
+            udp_gro_segment,
+            std.mem.asBytes(&enabled),
+        );
     }
 
     fn applyOutgoingEcnMark(self: *Endpoint, ecn: quic.packet_space.EcnCodepoint) Error!void {
@@ -488,6 +639,9 @@ const udp_gso_level: i32 = 17; // SOL_UDP on Linux.
 const udp_gso_segment: i32 = 103; // UDP_SEGMENT from linux/udp.h.
 const udp_gso_max_segments: usize = 64;
 const udp_gso_control_len = cmsgSpace(@sizeOf(u16));
+const udp_gro_segment: u32 = 104; // UDP_GRO from linux/udp.h.
+const udp_gro_max_segments: usize = 64;
+const receive_control_buffer_len = ecn_control_buffer_len + cmsgSpace(@sizeOf(i32));
 
 const ipproto_ip: i32 = 0;
 const ip_tos: u32 = switch (builtin.os.tag) {
@@ -528,6 +682,10 @@ pub fn socketEcnSupported() bool {
 }
 
 pub fn udpGsoSupported() bool {
+    return builtin.os.tag == .linux;
+}
+
+pub fn udpGroSupported() bool {
     return builtin.os.tag == .linux;
 }
 
@@ -615,7 +773,17 @@ fn cmsgSpace(data_len: usize) usize {
 }
 
 fn ecnFromControl(control: []const u8) quic.packet_space.EcnCodepoint {
-    if (!socketEcnSupported()) return .not_ect;
+    return receiveControlFromBytes(control).ecn;
+}
+
+const ReceiveControl = struct {
+    ecn: quic.packet_space.EcnCodepoint = .not_ect,
+    gro_segment_size: ?usize = null,
+};
+
+fn receiveControlFromBytes(control: []const u8) ReceiveControl {
+    var result: ReceiveControl = .{};
+    if (!socketEcnSupported() and !udpGroSupported()) return result;
     var offset: usize = 0;
     while (offset + @sizeOf(EcnCmsgHdr) <= control.len) {
         const header: *const EcnCmsgHdr = @ptrCast(@alignCast(control[offset..].ptr));
@@ -625,11 +793,17 @@ fn ecnFromControl(control: []const u8) quic.packet_space.EcnCodepoint {
         const ipv4_tos = header.level == ipproto_ip and header.type == ip_tos_cmsg_type;
         const ipv6_tclass_cmsg = header.level == ipproto_ipv6 and header.type == @as(i32, @intCast(ipv6_tclass));
         if ((ipv4_tos or ipv6_tclass_cmsg) and data.len != 0) {
-            return ecnFromBits(@truncate(data[0] & 0x03));
+            result.ecn = ecnFromBits(@truncate(data[0] & 0x03));
+        } else if (header.level == udp_gso_level and
+            header.type == @as(i32, @intCast(udp_gro_segment)) and
+            data.len >= @sizeOf(i32))
+        {
+            const segment_size = std.mem.bytesToValue(i32, data[0..@sizeOf(i32)]);
+            if (segment_size > 0) result.gro_segment_size = @intCast(segment_size);
         }
         offset += cmsgSpace(cmsg_len - @sizeOf(EcnCmsgHdr));
     }
-    return .not_ect;
+    return result;
 }
 
 const LongHeaderConnectionIds = struct {
@@ -712,16 +886,84 @@ const ReceiveTask = struct {
     }
 };
 
+const SharedReceiveBuffer = struct {
+    allocator: std.mem.Allocator,
+    storage: []u8,
+    references: std.atomic.Value(usize),
+
+    fn release(self: *SharedReceiveBuffer) void {
+        // Each GRO segment owns one reference. The acquire pairs with releases
+        // from other threads so the final owner can safely free both objects.
+        if (self.references.fetchSub(1, .release) != 1) return;
+        _ = self.references.load(.acquire);
+        const allocator = self.allocator;
+        allocator.free(self.storage);
+        allocator.destroy(self);
+    }
+};
+
+pub const OwnedBytesBatch = struct {
+    from: net.IpAddress,
+    storage: []u8,
+    segment_size: usize,
+    segment_count: usize,
+    ecn: quic.packet_space.EcnCodepoint = .not_ect,
+    shared_buffer: ?*SharedReceiveBuffer = null,
+    owns_storage: bool = true,
+
+    pub fn datagramAt(self: OwnedBytesBatch, index: usize) ?[]const u8 {
+        if (index >= self.segment_count) return null;
+        return self.datagramAtUnchecked(index);
+    }
+
+    fn datagramAtUnchecked(self: OwnedBytesBatch, index: usize) []u8 {
+        const start = index * self.segment_size;
+        const end = @min(start + self.segment_size, self.storage.len);
+        return self.storage[start..end];
+    }
+
+    fn disown(self: *OwnedBytesBatch) void {
+        self.owns_storage = false;
+    }
+
+    pub fn deinit(self: *OwnedBytesBatch, allocator: std.mem.Allocator) void {
+        if (self.owns_storage) {
+            if (self.shared_buffer) |shared| {
+                shared.release();
+            } else {
+                allocator.free(self.storage);
+            }
+        }
+        self.* = undefined;
+    }
+};
+
 pub const OwnedBytes = struct {
     from: net.IpAddress,
     bytes: []u8,
     ecn: quic.packet_space.EcnCodepoint = .not_ect,
+    shared_buffer: ?*SharedReceiveBuffer = null,
 
     pub fn deinit(self: *OwnedBytes, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
+        if (self.shared_buffer) |shared| {
+            shared.release();
+        } else {
+            allocator.free(self.bytes);
+        }
         self.* = undefined;
     }
 };
+
+fn ownedBytesAsBatch(bytes: OwnedBytes) OwnedBytesBatch {
+    return .{
+        .from = bytes.from,
+        .storage = bytes.bytes,
+        .segment_size = bytes.bytes.len,
+        .segment_count = 1,
+        .ecn = bytes.ecn,
+        .shared_buffer = bytes.shared_buffer,
+    };
+}
 
 pub const RoutedBytes = struct {
     datagram: OwnedBytes,
@@ -739,11 +981,16 @@ pub const OwnedDatagram = struct {
     bytes: []u8,
     ecn: quic.packet_space.EcnCodepoint = .not_ect,
     frames: []quic.Frame,
+    shared_buffer: ?*SharedReceiveBuffer = null,
 
     pub fn deinit(self: *OwnedDatagram, allocator: std.mem.Allocator) void {
         quic.deinitOwnedFrameSlice(self.frames, allocator);
         allocator.free(self.frames);
-        allocator.free(self.bytes);
+        if (self.shared_buffer) |shared| {
+            shared.release();
+        } else {
+            allocator.free(self.bytes);
+        }
         self.* = undefined;
     }
 };
@@ -1238,6 +1485,42 @@ test "QUIC UDP GSO control message encodes native segment size" {
     );
 }
 
+test "QUIC UDP receive control decodes ECN and GRO segment size" {
+    if (!udpGroSupported()) return error.SkipZigTest;
+
+    const ecn_len = cmsgSpace(@sizeOf(u32));
+    var control: [cmsgSpace(@sizeOf(u32)) + cmsgSpace(@sizeOf(i32))]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+    @memset(&control, 0);
+
+    const ecn_header: *EcnCmsgHdr = @ptrCast(@alignCast(control[0..].ptr));
+    ecn_header.* = .{
+        .len = @sizeOf(EcnCmsgHdr) + @sizeOf(u32),
+        .level = ipproto_ip,
+        .type = ip_tos_cmsg_type,
+    };
+    const ecn_value: u32 = ecnCodepointBits(.ect0);
+    @memcpy(
+        control[@sizeOf(EcnCmsgHdr)..][0..@sizeOf(u32)],
+        std.mem.asBytes(&ecn_value),
+    );
+
+    const gro_header: *EcnCmsgHdr = @ptrCast(@alignCast(control[ecn_len..].ptr));
+    gro_header.* = .{
+        .len = @sizeOf(EcnCmsgHdr) + @sizeOf(i32),
+        .level = udp_gso_level,
+        .type = @intCast(udp_gro_segment),
+    };
+    const gro_value: i32 = 1200;
+    @memcpy(
+        control[ecn_len + @sizeOf(EcnCmsgHdr) ..][0..@sizeOf(i32)],
+        std.mem.asBytes(&gro_value),
+    );
+
+    const decoded = receiveControlFromBytes(&control);
+    try std.testing.expectEqual(quic.packet_space.EcnCodepoint.ect0, decoded.ecn);
+    try std.testing.expectEqual(@as(?usize, 1200), decoded.gro_segment_size);
+}
+
 test "QUIC UDP endpoint segments a contiguous GSO super-packet" {
     if (!udpGsoSupported()) return error.SkipZigTest;
 
@@ -1246,7 +1529,10 @@ test "QUIC UDP endpoint segments a contiguous GSO super-packet" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 128,
+        .enable_gro_receive = true,
+    });
     defer receiver.deinit();
     var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
     defer sender.deinit();
@@ -1259,12 +1545,55 @@ test "QUIC UDP endpoint segments a contiguous GSO super-packet" {
     };
     try sender.sendManyBytes(receiver.address(), &datagrams);
     if (!sender.gsoSendEnabled()) return error.SkipZigTest;
+    if (!receiver.groReceiveEnabled()) return error.SkipZigTest;
 
-    for (datagrams) |expected| {
-        var received = try receiver.receiveBytes();
-        defer received.deinit(allocator);
-        try std.testing.expectEqualStrings(expected, received.bytes);
+    var received = try receiver.receiveBytesBatch();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(datagrams.len, received.segment_count);
+    try std.testing.expectEqual(@as(usize, 4), received.segment_size);
+    for (datagrams, 0..) |expected, index| {
+        try std.testing.expectEqualStrings(expected, received.datagramAt(index).?);
     }
+    try std.testing.expect(received.datagramAt(datagrams.len) == null);
+}
+
+test "QUIC UDP GRO shared storage survives frame-datagram ownership transfer" {
+    if (!udpGroSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .max_datagram_size = 128,
+        .enable_gro_receive = true,
+    });
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 128 });
+    defer sender.deinit();
+    if (!receiver.groReceiveEnabled()) return error.SkipZigTest;
+
+    // Frame type 0x01 is PING and zero bytes are PADDING. Use realistic-sized
+    // segments because some NIC/kernel combinations reject one-byte GSO
+    // segments even though the payload is otherwise valid.
+    const segment = [_]u8{0x01} ++ [_]u8{0x00} ** 15;
+    const storage = segment ++ segment;
+    const datagrams = [_][]const u8{ storage[0..segment.len], storage[segment.len..] };
+    try sender.sendManyBytes(receiver.address(), &datagrams);
+    if (!sender.gsoSendEnabled()) return error.SkipZigTest;
+
+    var first = try receiver.receive();
+    defer first.deinit(allocator);
+    var second = try receiver.receive();
+    defer second.deinit(allocator);
+    try std.testing.expect(first.shared_buffer != null);
+    try std.testing.expectEqual(first.shared_buffer, second.shared_buffer);
+    // Consecutive PADDING bytes are represented as one parsed frame.
+    try std.testing.expectEqual(@as(usize, 2), first.frames.len);
+    try std.testing.expectEqual(@as(usize, 2), second.frames.len);
+    try std.testing.expect(first.frames[0] == .ping);
+    try std.testing.expect(second.frames[0] == .ping);
 }
 
 const RejectFirstGsoSend = struct {
