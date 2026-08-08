@@ -1611,11 +1611,14 @@ pub fn writeConnectPacket(
     options: ConnectPacketOptions,
 ) Error!void {
     try validateConnectClientId(options.client_id, options.clean_start);
+    const flags = connectFlags(options);
+    try validateConnectFlags(protocol, flags);
+
     var variable: std.ArrayList(u8) = .empty;
     defer variable.deinit(allocator);
     try writeUtf8(&variable, allocator, "MQTT");
     try variable.append(allocator, protocol.byte());
-    try variable.append(allocator, connectFlags(options));
+    try variable.append(allocator, flags);
     try wire.appendInt(&variable, allocator, u16, options.keep_alive_seconds, .big);
     if (protocol == .v5) {
         try validatePropertiesFor(.connect, options.properties);
@@ -2128,6 +2131,10 @@ test "MQTT CONNECT validates flags and will topic" {
     }).write(&password_without_username_v3, allocator);
     try password_without_username_v3.appendSlice(allocator, password_v3_variable.items);
     try std.testing.expectError(error.InvalidFlags, Connect.parse(allocator, password_without_username_v3.items));
+    try std.testing.expectError(error.InvalidFlags, writeConnectPacket(&password_without_username_v3, allocator, .v3_1_1, .{
+        .client_id = "client",
+        .password = "password",
+    }));
 
     // MQTT 5 keeps the Username and Password payload flags independent for
     // enhanced-authentication deployments, so the v3.1.1 guard above must not
