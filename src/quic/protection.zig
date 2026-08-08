@@ -814,28 +814,67 @@ pub fn sealShortPacket(
     keys: PacketProtectionKeys,
     options: ShortPacketOptions,
 ) Error![]u8 {
+    const packet_len = try shortPacketLen(options);
+    const packet = try allocator.alloc(u8, packet_len);
+    errdefer allocator.free(packet);
+    const written = try sealShortPacketInto(packet, keys, options);
+    std.debug.assert(written.len == packet.len);
+    return packet;
+}
+
+/// Seal a QUIC short-header packet directly into caller-provided storage.
+///
+/// This is the allocation-free primitive used by long-lived 1-RTT
+/// connections. Callers can provision `shortPacketLen(options)` bytes once and
+/// reuse the storage for every send, while `sealShortPacket` remains the
+/// ownership-friendly allocating wrapper.
+pub fn sealShortPacketInto(
+    out: []u8,
+    keys: PacketProtectionKeys,
+    options: ShortPacketOptions,
+) Error![]u8 {
+    const packet_len = try shortPacketLen(options);
+    if (out.len < packet_len) return error.BufferTooShort;
+
+    const packet = out[0..packet_len];
+    const pn_len = @as(usize, options.packet_number_len);
+    const pn_offset = 1 + options.destination_connection_id.len;
+    const payload_offset = pn_offset + pn_len;
+    packet[0] = shortHeaderFirstByte(options, pn_len);
+    @memcpy(packet[1..pn_offset], options.destination_connection_id);
+    try writeTruncatedPacketNumber(packet[pn_offset..payload_offset], options.packet_number);
+
+    const ciphertext = packet[payload_offset .. payload_offset + options.payload.len];
+    const tag = packet[payload_offset + options.payload.len ..][0..aead_tag_len];
+    try protectAes128Payload(keys, options.packet_number, packet[0..payload_offset], options.payload, ciphertext, tag);
+    try applyHeaderProtection(keys.hp, .short, packet, pn_offset);
+    return packet;
+}
+
+pub fn shortPacketLen(options: ShortPacketOptions) Error!usize {
     try validatePacketNumberLen(options.packet_number_len);
+    try validatePacketNumber(options.packet_number);
     if (options.destination_connection_id.len > 20) return error.InvalidInitialPacket;
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
     const pn_len = @as(usize, options.packet_number_len);
-    const first_byte: u8 = 0x40 |
+    const header_len = std.math.add(usize, 1 + pn_len, options.destination_connection_id.len) catch return error.InvalidPayloadLength;
+    const protected_payload_len = std.math.add(usize, options.payload.len, aead_tag_len) catch return error.InvalidPayloadLength;
+    return std.math.add(usize, header_len, protected_payload_len) catch error.InvalidPayloadLength;
+}
+
+fn shortHeaderFirstByte(options: ShortPacketOptions, packet_number_len: usize) u8 {
+    return 0x40 |
         (if (options.spin_bit) @as(u8, 0x20) else 0) |
         (if (options.key_phase) @as(u8, 0x04) else 0) |
-        @as(u8, @intCast(pn_len - 1));
-    try out.append(allocator, first_byte);
-    try out.appendSlice(allocator, options.destination_connection_id);
-    const pn_offset = out.items.len;
-    try appendTruncatedPacketNumber(&out, allocator, options.packet_number, options.packet_number_len);
-    const payload_offset = out.items.len;
+        @as(u8, @intCast(packet_number_len - 1));
+}
 
-    try out.resize(allocator, payload_offset + options.payload.len + aead_tag_len);
-    const ciphertext = out.items[payload_offset .. payload_offset + options.payload.len];
-    const tag = out.items[payload_offset + options.payload.len ..][0..aead_tag_len];
-    try protectAes128Payload(keys, options.packet_number, out.items[0..payload_offset], options.payload, ciphertext, tag);
-    try applyHeaderProtection(keys.hp, .short, out.items, pn_offset);
-    return out.toOwnedSlice(allocator);
+fn writeTruncatedPacketNumber(out: []u8, packet_number: u64) Error!void {
+    if (out.len == 0 or out.len > 4) return error.InvalidPacketNumberLength;
+    try validatePacketNumber(packet_number);
+    var full: [8]u8 = undefined;
+    std.mem.writeInt(u64, &full, packet_number, .big);
+    @memcpy(out, full[8 - out.len ..]);
 }
 
 pub fn openShortPacket(
@@ -1446,6 +1485,64 @@ test "QUIC 1-RTT short packet seal/open roundtrip" {
     try std.testing.expectEqual(@as(u64, 9), opened.packet_number);
     try std.testing.expectEqualSlices(u8, &dcid, opened.destination_connection_id);
     try std.testing.expectEqualStrings(payload, opened.payload);
+}
+
+test "QUIC short packet in-place sealing matches allocating wrapper" {
+    const allocator = std.testing.allocator;
+    const keys = deriveAes128Keys([_]u8{0x9b} ** secret_len);
+    const options: ShortPacketOptions = .{
+        .destination_connection_id = "\x01\x02\x03\x04\x05\x06\x07\x08",
+        .packet_number = 0x12_3456,
+        .packet_number_len = 3,
+        .spin_bit = true,
+        .key_phase = true,
+        .payload = "allocation-free packet protection",
+    };
+
+    const allocated = try sealShortPacket(allocator, keys, options);
+    defer allocator.free(allocated);
+
+    var storage: [128]u8 = undefined;
+    const in_place = try sealShortPacketInto(&storage, keys, options);
+    try std.testing.expectEqual(try shortPacketLen(options), in_place.len);
+    try std.testing.expectEqualSlices(u8, allocated, in_place);
+    try std.testing.expectError(error.BufferTooShort, sealShortPacketInto(storage[0 .. in_place.len - 1], keys, options));
+}
+
+test "QUIC short packet in-place sealing reuses caller storage" {
+    const keys = deriveAes128Keys([_]u8{0x9c} ** secret_len);
+    const options: ShortPacketOptions = .{
+        .destination_connection_id = "destination",
+        .packet_number = 77,
+        .packet_number_len = 2,
+        .payload = "steady-state",
+    };
+    var storage: [128]u8 = undefined;
+
+    // The API has no allocator and both calls return slices into the same
+    // caller-owned array, making reuse explicit rather than timing-dependent.
+    const first = try sealShortPacketInto(&storage, keys, options);
+    const first_ptr = first.ptr;
+    const second = try sealShortPacketInto(&storage, keys, options);
+    try std.testing.expectEqualSlices(u8, first, second);
+    try std.testing.expectEqual(first_ptr, second.ptr);
+}
+
+test "QUIC allocating short packet wrapper performs one allocation" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = counting.allocator();
+    const keys = deriveAes128Keys([_]u8{0x9d} ** secret_len);
+    const options: ShortPacketOptions = .{
+        .destination_connection_id = "destination",
+        .packet_number = 78,
+        .packet_number_len = 2,
+        .payload = "single exact allocation",
+    };
+
+    const packet = try sealShortPacket(allocator, keys, options);
+    defer allocator.free(packet);
+    try std.testing.expectEqual(try shortPacketLen(options), packet.len);
+    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
 }
 
 test "QUIC short packet preserves spin bit" {

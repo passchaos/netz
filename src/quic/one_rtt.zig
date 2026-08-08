@@ -216,6 +216,7 @@ pub const LossDetectionTimerDeadline = struct {
 };
 
 pub const anti_amplification_multiplier: usize = 3;
+const max_short_packet_overhead: usize = 1 + 20 + 4 + quic.protection.aead_tag_len;
 
 pub const Connection = struct {
     endpoint: *quic.runtime.Endpoint,
@@ -264,6 +265,13 @@ pub const Connection = struct {
     requested_max_ack_delay: u64 = 0,
     ack_reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
     immediate_ack_requested: bool = false,
+    /// Reused plaintext frame storage. ACK-eliciting payloads are copied only
+    /// when recovery needs stable ownership; transient encoding itself is
+    /// allocation-free after connection initialization.
+    send_frame_buffer: std.ArrayList(u8) = .empty,
+    /// Reused protected-datagram storage. Packet protection writes directly
+    /// into this buffer, avoiding one heap allocation/free pair per 1-RTT send.
+    send_packet_buffer: std.ArrayList(u8) = .empty,
 
     pub fn init(endpoint: *quic.runtime.Endpoint, config: ConnectionConfig) Error!Connection {
         var connection = Connection{
@@ -285,6 +293,10 @@ pub const Connection = struct {
             .recv_max_streams_bidi = config.initial_receive_max_streams_bidi,
             .recv_max_streams_uni = config.initial_receive_max_streams_uni,
         };
+        errdefer connection.deinit();
+        try connection.send_frame_buffer.ensureTotalCapacity(endpoint.allocator, config.max_datagram_size);
+        const send_buffer_capacity = std.math.add(usize, config.max_datagram_size, max_short_packet_overhead) catch return error.OutOfMemory;
+        try connection.send_packet_buffer.ensureTotalCapacity(endpoint.allocator, send_buffer_capacity);
         if (config.local_stateless_reset_key) |key| {
             try connection.local_connection_ids.registerInitialWithStaticKey(config.local_connection_id, key);
         } else {
@@ -308,6 +320,8 @@ pub const Connection = struct {
         self.stream_recv_flows.deinit(self.endpoint.allocator);
         for (self.datagram_recv_queue.items) |payload| self.endpoint.allocator.free(payload);
         self.datagram_recv_queue.deinit(self.endpoint.allocator);
+        self.send_frame_buffer.deinit(self.endpoint.allocator);
+        self.send_packet_buffer.deinit(self.endpoint.allocator);
         self.* = undefined;
     }
 
@@ -503,8 +517,10 @@ pub const Connection = struct {
     fn sendTrackedFramesEcnAtUnchecked(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         try self.validateNextPacketNumber();
         const packet_number = self.next_packet_number;
-        const payload = try encodeFrames(self.endpoint.allocator, frames);
-        defer self.endpoint.allocator.free(payload);
+        std.debug.assert(self.send_frame_buffer.items.len == 0);
+        defer self.send_frame_buffer.items.len = 0;
+        for (frames) |frame| try frame.write(&self.send_frame_buffer, self.endpoint.allocator);
+        const payload = self.send_frame_buffer.items;
 
         const is_ack_eliciting = ackEliciting(frames);
         const is_in_flight = packetInFlight(frames);
@@ -646,14 +662,24 @@ pub const Connection = struct {
     fn sendPayloadPacketWithPacketNumberLen(self: *Connection, packet_number: u64, payload: []const u8, packet_number_len: u8) Error!void {
         try self.reserveAntiAmplification(payload.len);
         errdefer self.releaseAntiAmplification(payload.len);
-        try sendPayload(self.endpoint, self.config.peer, self.send_key_phase.currentKeys(), .{
+        const packet_options: quic.protection.ShortPacketOptions = .{
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = packet_number,
             .packet_number_len = packet_number_len,
             .spin_bit = self.nextSpinBit(),
             .key_phase = self.send_key_phase.currentKeyPhase(),
             .payload = payload,
-        });
+        };
+        const packet_len = try quic.protection.shortPacketLen(packet_options);
+        try self.send_packet_buffer.ensureTotalCapacity(self.endpoint.allocator, packet_len);
+        self.send_packet_buffer.items.len = self.send_packet_buffer.capacity;
+        defer self.send_packet_buffer.items.len = 0;
+        const packet = try quic.protection.sealShortPacketInto(
+            self.send_packet_buffer.items,
+            self.send_key_phase.currentKeys(),
+            packet_options,
+        );
+        try self.endpoint.sendBytes(self.config.peer, packet);
     }
 
     pub fn retransmitPto(self: *Connection) Error!bool {
@@ -3489,6 +3515,44 @@ test "QUIC 1-RTT connection selects and exposes CUBIC congestion control" {
     });
     defer reno.deinit();
     try std.testing.expectEqual(quic.congestion.Algorithm.new_reno, reno.congestionAlgorithm());
+}
+
+test "QUIC 1-RTT connection reuses protected send storage" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var peer_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer peer_endpoint.deinit();
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    const connection_allocator = counting.allocator();
+    var local_endpoint = try quic.runtime.Endpoint.bind(connection_allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer local_endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x7a} ** quic.protection.secret_len);
+    var connection = try Connection.init(&local_endpoint, .{
+        .peer = peer_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .max_datagram_size = 4096,
+    });
+    defer connection.deinit();
+
+    // Pre-size bookkeeping that is intentionally retained for recovery and
+    // ACK processing; packet protection itself should then need no allocator.
+    try connection.sent.packets.ensureTotalCapacity(connection_allocator, 2);
+    counting.fail_index = counting.alloc_index;
+    const payload = [_]quic.Frame{.{ .padding = .{ .len = 32 } }};
+    try connection.sendAt(&payload, 100);
+    try connection.sendAt(&payload, 200);
+    try std.testing.expect(!counting.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 2), connection.sent.packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.send_packet_buffer.items.len);
 }
 
 test "QUIC 1-RTT send paths reject packet number exhaustion before mutation" {

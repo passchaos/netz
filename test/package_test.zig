@@ -257,6 +257,8 @@ test "public modules are reachable" {
     try std.testing.expectEqual(netz.quic.varint.max_value, netz.quic.protection.max_packet_number);
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLenForPayload"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "shortPacketLen"));
+    try std.testing.expect(@hasDecl(netz.quic.protection, "sealShortPacketInto"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "initial_salt_v2"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "deriveInitialSecretsForVersion"));
     try std.testing.expect(@hasDecl(netz.quic.protection, "deriveAes128KeysForVersion"));

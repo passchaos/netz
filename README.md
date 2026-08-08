@@ -98,7 +98,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   encode/decode and adjustment, packet/time-threshold loss detection, earliest loss/PTO timer
   deadlines, capped exponential PTO backoff, two-probe PTO service, and persistent
   congestion detection that collapses the congestion window and resets the RTT
-  measurement epoch after long contiguous lost periods, PMTUD/DPLPMTUD path MTU
+  measurement epoch after long contiguous lost periods, allocation-free short-packet
+  sealing into caller storage and connection-level plaintext/protected send-buffer
+  reuse (while retaining stable recovery payload ownership), PMTUD/DPLPMTUD path MTU
   probe sizing state with IPv4/IPv6 ceilings, loss-driven search backoff, and
   1-RTT PING+PADDING probe packets wired to ACK/loss feedback,
   a 1-RTT recovery queue for PTO plus packet-threshold and time-threshold
