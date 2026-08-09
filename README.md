@@ -87,7 +87,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   transport overlap-validation window, and emit ACK/MAX_DATA/MAX_STREAM_DATA so
   bodies can continue beyond their initially negotiated stream credit. Both
   protected clients also maintain persistent MAX_PUSH_ID/CANCEL_PUSH control
-  state with monotonic advertisement and advertised-range cancellation, plus a
+  state with monotonic advertisement and advertised-range cancellation.
+  Streaming response readers decode PUSH_PROMISE into owned promised-request
+  heads, preserve the push ID, enforce the advertised limit, and account
+  dynamic QPACK section feedback instead of discarding promised fields like
+  the current reference runtimes, plus a
   `std.Io.async` request receive helper for the development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and

@@ -477,6 +477,19 @@ pub const PushPromisePayload = struct {
     field_section: []const u8,
 };
 
+pub const DecodedPushPromise = struct {
+    push_id: u64,
+    request: DecodedRequestHead,
+
+    pub fn deinit(
+        self: *DecodedPushPromise,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.request.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const Priority = struct {
     urgency: u3 = 3,
     incremental: bool = false,
@@ -625,6 +638,25 @@ pub fn parsePushPromisePayload(payload: []const u8) Error!PushPromisePayload {
     var cursor = wire.Cursor.init(payload);
     const push_id = quic.varint.decode(&cursor) catch return error.InvalidFrame;
     return .{ .push_id = push_id, .field_section = payload[cursor.pos..] };
+}
+
+/// Decode and own the promised request field section.
+pub fn decodePushPromiseWithDynamicTable(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    settings: Settings,
+    table: Qpack.DynamicTable,
+) Error!DecodedPushPromise {
+    const promise = try parsePushPromisePayload(payload);
+    var request = try decodeRequestHeadFieldSectionWithDynamicTable(
+        allocator,
+        promise.field_section,
+        settings,
+        table,
+    );
+    errdefer request.deinit(allocator);
+    request.consumed = payload.len;
+    return .{ .push_id = promise.push_id, .request = request };
 }
 
 pub fn writePriorityUpdateFrame(
@@ -4419,7 +4451,9 @@ test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
     defer field_section.deinit(allocator);
     try Qpack.encodeLiteralBlock(&field_section, allocator, &.{
         .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
         .{ .name = ":path", .value = "/pushed.css" },
+        .{ .name = ":authority", .value = "example.test" },
     });
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -4431,11 +4465,26 @@ test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
     try std.testing.expectEqual(@as(u64, 3), promise.push_id);
     const decoded = try Qpack.decodeLiteralBlock(allocator, promise.field_section);
     defer Qpack.freeDecodedFields(allocator, decoded);
-    try std.testing.expectEqualStrings("/pushed.css", decoded[1].value);
+    try std.testing.expectEqualStrings("/pushed.css", decoded[2].value);
 
     try validatePushPromise(.{ .local_max_push_id = 3 }, promise.push_id);
     try std.testing.expectError(error.PushIdExceeded, validatePushPromise(.{}, promise.push_id));
     try std.testing.expectError(error.PushIdExceeded, validatePushPromise(.{ .local_max_push_id = 2 }, promise.push_id));
+
+    var dynamic_table = Qpack.DynamicTable.init(allocator, 0);
+    defer dynamic_table.deinit();
+    var decoded_promise = try decodePushPromiseWithDynamicTable(
+        allocator,
+        frame.payload,
+        .{},
+        dynamic_table,
+    );
+    defer decoded_promise.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 3), decoded_promise.push_id);
+    try std.testing.expectEqualStrings(
+        "/pushed.css",
+        decoded_promise.request.path,
+    );
 
     var response_with_push: std.ArrayList(u8) = .empty;
     defer response_with_push.deinit(allocator);

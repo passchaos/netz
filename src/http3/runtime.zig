@@ -307,13 +307,28 @@ pub const StreamingHead = union(enum) {
 
 pub const StreamingEvent = union(enum) {
     head: StreamingHead,
+    push_promise: PushPromise,
     data_available,
     trailers: http3.DecodedTrailers,
     finished,
 
+    pub const PushPromise = struct {
+        push_id: u64,
+        request: http3.DecodedRequestHead,
+
+        pub fn deinit(
+            self: *PushPromise,
+            allocator: std.mem.Allocator,
+        ) void {
+            self.request.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
     pub fn deinit(self: *StreamingEvent, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .head => |*head| head.deinit(allocator),
+            .push_promise => |*promise| promise.deinit(allocator),
             .trailers => |*trailers| trailers.deinit(allocator),
             .data_available, .finished => {},
         }
@@ -472,11 +487,13 @@ pub const StreamingMessageReader = struct {
                 self.current_frame = header;
                 self.current_header_consumed = false;
                 self.current_payload_read = 0;
-                // HEADERS remains wholly unconsumed until QPACK and semantic
+                // QPACK field sections remain wholly unconsumed until semantic
                 // decoding succeeds, making QpackBlocked/OOM retryable without
                 // cloning the receive window. DATA and ignorable frames can
                 // commit their header immediately.
-                if (header.frame_type != http3.FrameType.headers) {
+                if (header.frame_type != http3.FrameType.headers and
+                    header.frame_type != http3.FrameType.push_promise)
+                {
                     try self.receive.consume(header.header_length);
                     self.current_header_consumed = true;
                 }
@@ -550,6 +567,36 @@ pub const StreamingMessageReader = struct {
                     self.current_header_consumed = false;
                     self.phase = .trailers;
                     return .{ .trailers = trailers };
+                },
+                http3.FrameType.push_promise => {
+                    if (self.kind != .response or
+                        self.phase == .trailers)
+                    {
+                        return error.UnexpectedFrame;
+                    }
+                    const total_length = try header.totalLength();
+                    if (self.receive.available().len < total_length) {
+                        if (self.framePayloadTruncated()) {
+                            return error.BufferTooShort;
+                        }
+                        return null;
+                    }
+                    const payload = self.receive.available()[header.header_length..total_length];
+                    var promise = try http3
+                        .decodePushPromiseWithDynamicTable(
+                        self.allocator,
+                        payload,
+                        self.settings,
+                        table,
+                    );
+                    errdefer promise.deinit(self.allocator);
+                    try self.receive.consume(total_length);
+                    self.current_frame = null;
+                    self.current_header_consumed = false;
+                    return .{ .push_promise = .{
+                        .push_id = promise.push_id,
+                        .request = promise.request,
+                    } };
                 },
                 http3.FrameType.data => {
                     if (self.phase != .body) return error.UnexpectedFrame;
@@ -665,10 +712,10 @@ pub const StreamingMessageReader = struct {
     /// Whether abandoning the current field section requires a QPACK Stream
     /// Cancellation instruction.
     ///
-    /// HEADERS bytes remain unconsumed until decoding succeeds. Consequently a
-    /// complete dynamic prefix here identifies a section that has not emitted
-    /// a Section Acknowledgment yet, regardless of whether its required inserts
-    /// have since arrived.
+    /// HEADERS and PUSH_PROMISE bytes remain unconsumed until decoding succeeds.
+    /// Consequently a complete dynamic prefix here identifies a section that
+    /// has not emitted a Section Acknowledgment yet, regardless of whether its
+    /// required inserts have since arrived.
     fn hasUnacknowledgedDynamicSection(
         self: StreamingMessageReader,
         table: http3.Qpack.DynamicTable,
@@ -676,16 +723,16 @@ pub const StreamingMessageReader = struct {
         const available = self.receive.available();
         var offset: usize = 0;
         if (self.current_frame) |current| {
-            if (current.frame_type == http3.FrameType.headers) {
-                return fieldSectionPrefixUsesDynamicTable(
+            if (frameCarriesFieldSection(current.frame_type)) {
+                return frameFieldSectionUsesDynamicTable(
                     available,
                     current,
                     table,
                 );
             }
-            // Non-HEADERS frame headers are consumed eagerly. Skip the
-            // unconsumed payload before scanning any complete frames already
-            // queued behind it (notably dynamic trailer HEADERS).
+            // Frames without field sections commit their headers eagerly. Skip
+            // the unconsumed payload before scanning complete frames queued
+            // behind it (notably dynamic trailers or promises).
             const remaining =
                 current.payload_length - self.current_payload_read;
             if (available.len < remaining) return false;
@@ -698,8 +745,8 @@ pub const StreamingMessageReader = struct {
                 error.BufferTooShort => return false,
                 else => return err,
             };
-            if (header.frame_type == http3.FrameType.headers and
-                try fieldSectionPrefixUsesDynamicTable(
+            if (frameCarriesFieldSection(header.frame_type) and
+                try frameFieldSectionUsesDynamicTable(
                     available[offset..],
                     header,
                     table,
@@ -715,7 +762,12 @@ pub const StreamingMessageReader = struct {
     }
 };
 
-fn fieldSectionPrefixUsesDynamicTable(
+fn frameCarriesFieldSection(frame_type: u64) bool {
+    return frame_type == http3.FrameType.headers or
+        frame_type == http3.FrameType.push_promise;
+}
+
+fn frameFieldSectionUsesDynamicTable(
     bytes: []const u8,
     header: http3.Frame.Header,
     table: http3.Qpack.DynamicTable,
@@ -725,8 +777,17 @@ fn fieldSectionPrefixUsesDynamicTable(
         header.payload_length,
         bytes.len - header.header_length,
     );
+    const payload = bytes[header.header_length..][0..payload_available];
+    const field_section = if (header.frame_type ==
+        http3.FrameType.push_promise)
+        (http3.parsePushPromisePayload(payload) catch |err| switch (err) {
+            error.BufferTooShort => return false,
+            else => return err,
+        }).field_section
+    else
+        payload;
     const prefix = http3.Qpack.decodeFieldSectionPrefix(
-        bytes[header.header_length..][0..payload_available],
+        field_section,
         table,
     ) catch |err| switch (err) {
         error.BufferTooShort => return false,
@@ -2388,6 +2449,7 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
+                try self.sendQpackFeedback();
                 _ = self.request_lifecycle.finish(stream_id);
                 _ = self.outbound_bodies.finish(stream_id);
                 self.qpack_encode.abandonStream(stream_id);
@@ -2424,6 +2486,7 @@ pub const HandshakeClient = struct {
             if (self.response_streams.firstReset()) |reset| {
                 if (self.request_lifecycle.contains(reset.stream_id)) {
                     _ = self.response_streams.takeReset(reset.stream_id);
+                    try self.sendQpackFeedback();
                     _ = self.request_lifecycle.finish(reset.stream_id);
                     _ = self.outbound_bodies.finish(reset.stream_id);
                     self.qpack_encode.abandonStream(reset.stream_id);
@@ -2478,6 +2541,7 @@ pub const HandshakeClient = struct {
             );
         }
         if (self.response_streams.takeReset(stream_id)) |code| {
+            try self.sendQpackFeedback();
             self.finishStreamingResponse(stream_id);
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
@@ -2489,8 +2553,12 @@ pub const HandshakeClient = struct {
             stream_id,
         );
         if (try entry.reader.next(self.qpack_decode.table)) |event| {
-            try self.applyStreamingResponseEvent(stream_id, event);
-            return event;
+            var owned_event = event;
+            errdefer owned_event.deinit(
+                self.established.connection.endpoint.allocator,
+            );
+            try self.applyStreamingResponseEvent(stream_id, owned_event);
+            return owned_event;
         }
         try receiveConnectionResponsePacket(
             &self.established.connection,
@@ -2503,6 +2571,7 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
         );
         if (self.response_streams.takeReset(stream_id)) |code| {
+            try self.sendQpackFeedback();
             self.finishStreamingResponse(stream_id);
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
@@ -2511,12 +2580,15 @@ pub const HandshakeClient = struct {
         }
         const active = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
-        const event = try active.reader.next(self.qpack_decode.table);
-        if (event) |value| try self.applyStreamingResponseEvent(
-            stream_id,
-            value,
-        );
-        return event;
+        if (try active.reader.next(self.qpack_decode.table)) |event| {
+            var owned_event = event;
+            errdefer owned_event.deinit(
+                self.established.connection.endpoint.allocator,
+            );
+            try self.applyStreamingResponseEvent(stream_id, owned_event);
+            return owned_event;
+        }
+        return null;
     }
 
     /// Copy currently available DATA bytes into caller-owned storage.
@@ -2560,6 +2632,7 @@ pub const HandshakeClient = struct {
                     return error.UnexpectedStream;
                 }
                 _ = self.response_streams.takeReset(reset.stream_id);
+                try self.sendQpackFeedback();
                 self.finishStreamingResponse(reset.stream_id);
                 return .{ .reset = .{
                     .stream_id = reset.stream_id,
@@ -2574,13 +2647,17 @@ pub const HandshakeClient = struct {
                 const stream_id: u62 = @intCast(
                     ready.entry.reader.receive.stream_id,
                 );
+                var owned_event = ready.event;
+                errdefer owned_event.deinit(
+                    self.established.connection.endpoint.allocator,
+                );
                 try self.applyStreamingResponseEvent(
                     stream_id,
-                    ready.event,
+                    owned_event,
                 );
                 return .{ .message = .{
                     .stream_id = stream_id,
-                    .value = ready.event,
+                    .value = owned_event,
                 } };
             }
             try receiveConnectionResponsePacket(
@@ -2668,6 +2745,16 @@ pub const HandshakeClient = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        var cancel_qpack = try self.response_streams
+            .requiresQpackCancellation(
+            stream_id,
+            self.qpack_decode.table,
+        );
+        cancel_qpack = cancel_qpack or
+            try self.streaming_responses.hasUnacknowledgedDynamicSection(
+                stream_id,
+                self.qpack_decode.table,
+            );
         try cancelConnectionRequest(
             &self.established.connection,
             &self.qpack_decode,
@@ -2676,7 +2763,7 @@ pub const HandshakeClient = struct {
             self.options,
             stream_id,
             application_error_code,
-            false,
+            cancel_qpack,
         );
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
@@ -2730,6 +2817,12 @@ pub const HandshakeClient = struct {
         event: StreamingEvent,
     ) Error!void {
         const section = try streamingResponseSectionAcknowledgments(event);
+        if (event == .push_promise) {
+            try http3.validatePushPromise(
+                self.control,
+                event.push_promise.push_id,
+            );
+        }
         if (section) |acknowledgments| {
             try self.qpack_decode.acknowledgeSections(
                 stream_id,
@@ -3579,6 +3672,7 @@ pub const ProtectedClient = struct {
         }
         const assembled = self.receiveStreamBytes(stream_id) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
+                try self.sendQpackFeedback();
                 _ = self.request_lifecycle.finish(stream_id);
                 _ = self.outbound_bodies.finish(stream_id);
                 self.qpack_encode.abandonStream(stream_id);
@@ -3659,8 +3753,12 @@ pub const ProtectedClient = struct {
             stream_id,
         );
         if (try entry.reader.next(self.qpack_decode.table)) |event| {
-            try self.applyStreamingResponseEvent(stream_id, event);
-            return event;
+            var owned_event = event;
+            errdefer owned_event.deinit(
+                self.quic_client.endpoint.allocator,
+            );
+            try self.applyStreamingResponseEvent(stream_id, owned_event);
+            return owned_event;
         }
         try self.receiveResponsePacket();
         if (self.response_streams.takeReset(stream_id)) |code| {
@@ -3672,12 +3770,15 @@ pub const ProtectedClient = struct {
         }
         const active = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
-        const event = try active.reader.next(self.qpack_decode.table);
-        if (event) |value| try self.applyStreamingResponseEvent(
-            stream_id,
-            value,
-        );
-        return event;
+        if (try active.reader.next(self.qpack_decode.table)) |event| {
+            var owned_event = event;
+            errdefer owned_event.deinit(
+                self.quic_client.endpoint.allocator,
+            );
+            try self.applyStreamingResponseEvent(stream_id, owned_event);
+            return owned_event;
+        }
+        return null;
     }
 
     /// Poll one incremental event from any outstanding response stream.
@@ -3711,13 +3812,17 @@ pub const ProtectedClient = struct {
                 const stream_id: u62 = @intCast(
                     ready.entry.reader.receive.stream_id,
                 );
+                var owned_event = ready.event;
+                errdefer owned_event.deinit(
+                    self.quic_client.endpoint.allocator,
+                );
                 try self.applyStreamingResponseEvent(
                     stream_id,
-                    ready.event,
+                    owned_event,
                 );
                 return .{ .message = .{
                     .stream_id = stream_id,
-                    .value = ready.event,
+                    .value = owned_event,
                 } };
             }
             try self.receiveResponsePacket();
@@ -3820,6 +3925,16 @@ pub const ProtectedClient = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
+        var cancel_qpack = try self.response_streams
+            .requiresQpackCancellation(
+            stream_id,
+            self.qpack_decode.table,
+        );
+        cancel_qpack = cancel_qpack or
+            try self.streaming_responses.hasUnacknowledgedDynamicSection(
+                stream_id,
+                self.qpack_decode.table,
+            );
         try sendProtectedRequestCancellation(
             &self.quic_client.endpoint,
             self.quic_client.peer,
@@ -3831,7 +3946,7 @@ pub const ProtectedClient = struct {
             &self.protected_send,
             stream_id,
             application_error_code,
-            false,
+            cancel_qpack,
         );
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
@@ -3911,6 +4026,7 @@ pub const ProtectedClient = struct {
             self.config.max_frames_per_packet,
         );
         defer packet.deinit(self.quic_client.endpoint.allocator);
+        var flush_qpack_feedback = false;
         for (packet.frames) |frame| {
             try rejectCriticalStreamClosureFrame(self.control, frame, .client);
             if (frame == .reset_stream and
@@ -3922,10 +4038,14 @@ pub const ProtectedClient = struct {
                 if (!self.request_lifecycle.contains(stream_id)) {
                     return error.UnexpectedStream;
                 }
-                try self.response_streams.recordReset(
-                    stream_id,
-                    frame.reset_stream.application_error_code,
-                );
+                flush_qpack_feedback =
+                    try recordClientResponseReset(
+                        &self.response_streams,
+                        &self.streaming_responses,
+                        &self.qpack_decode,
+                        stream_id,
+                        frame.reset_stream.application_error_code,
+                    ) or flush_qpack_feedback;
                 continue;
             }
             if (frame != .stream) continue;
@@ -3977,6 +4097,7 @@ pub const ProtectedClient = struct {
             }
             try self.response_streams.insert(packet.from, frame.stream);
         }
+        if (flush_qpack_feedback) try self.sendQpackFeedback();
     }
 
     fn applyStreamingResponseEvent(
@@ -3985,6 +4106,12 @@ pub const ProtectedClient = struct {
         event: StreamingEvent,
     ) Error!void {
         const section = try streamingResponseSectionAcknowledgments(event);
+        if (event == .push_promise) {
+            try http3.validatePushPromise(
+                self.control,
+                event.push_promise.push_id,
+            );
+        }
         if (section) |acknowledgments| {
             try self.qpack_decode.acknowledgeSections(
                 stream_id,
@@ -4031,6 +4158,7 @@ fn streamingResponseSectionAcknowledgments(
             .request => error.UnexpectedFrame,
             .response => |response| response.qpack_section_acknowledgments,
         },
+        .push_promise => |promise| promise.request.qpack_section_acknowledgments,
         .trailers => |trailers| trailers.qpack_section_acknowledgments,
         .data_available, .finished => null,
     };
@@ -4044,6 +4172,7 @@ fn streamingRequestSectionAcknowledgments(
             .request => |request| request.qpack_section_acknowledgments,
             .response => error.UnexpectedFrame,
         },
+        .push_promise => error.UnexpectedFrame,
         .trailers => |trailers| trailers.qpack_section_acknowledgments,
         .data_available, .finished => null,
     };
@@ -4254,14 +4383,10 @@ const RequestStreamSet = struct {
     ) Error!bool {
         for (self.entries.items) |entry| {
             if (entry.receive.stream_id != stream_id) continue;
-            return if (entry.receive.final_size) |final_size|
-                entry.receive.contiguous_end >= final_size and
-                    try messageUsesDynamicQpack(
-                        entry.receive.buffer.items[0..final_size],
-                        table,
-                    )
-            else
-                false;
+            return try bufferedReceiveUsesDynamicQpack(
+                entry.receive,
+                table,
+            );
         }
         return false;
     }
@@ -4353,12 +4478,12 @@ const ResponseStreamSet = struct {
         stream_id: u62,
         application_error_code: u64,
     ) std.mem.Allocator.Error!void {
-        self.remove(stream_id);
         try self.resets.put(
             self.allocator,
             stream_id,
             application_error_code,
         );
+        self.remove(stream_id);
     }
 
     fn takeReset(self: *ResponseStreamSet, stream_id: u62) ?u64 {
@@ -4455,6 +4580,14 @@ const ResponseStreamSet = struct {
         }
     }
 
+    fn takeEntry(self: *ResponseStreamSet, stream_id: u62) ?Entry {
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.receive.stream_id != stream_id) continue;
+            return self.entries.swapRemove(index);
+        }
+        return null;
+    }
+
     fn takeReceive(
         self: *ResponseStreamSet,
         stream_id: u62,
@@ -4471,6 +4604,21 @@ const ResponseStreamSet = struct {
             };
         }
         return null;
+    }
+
+    fn requiresQpackCancellation(
+        self: ResponseStreamSet,
+        stream_id: u62,
+        table: http3.Qpack.DynamicTable,
+    ) Error!bool {
+        for (self.entries.items) |entry| {
+            if (entry.receive.stream_id != stream_id) continue;
+            return try bufferedReceiveUsesDynamicQpack(
+                entry.receive,
+                table,
+            );
+        }
+        return false;
     }
 
     fn getOrCreate(
@@ -5065,9 +5213,12 @@ fn messageBlockedByQpack(
     while (offset < bytes.len) {
         const frame = try http3.Frame.parse(bytes[offset..]);
         offset += frame.consumed;
-        if (frame.frame_type != http3.FrameType.headers) continue;
-        const prefix = try http3.Qpack.decodeFieldSectionPrefix(
+        const field_section = try frameFieldSectionPayload(
+            frame.frame_type,
             frame.payload,
+        ) orelse continue;
+        const prefix = try http3.Qpack.decodeFieldSectionPrefix(
+            field_section,
             table,
         );
         if (prefix.required_insert_count > table.insert_count) return true;
@@ -5083,14 +5234,57 @@ fn messageUsesDynamicQpack(
     while (offset < bytes.len) {
         const frame = try http3.Frame.parse(bytes[offset..]);
         offset += frame.consumed;
-        if (frame.frame_type != http3.FrameType.headers) continue;
-        const prefix = try http3.Qpack.decodeFieldSectionPrefix(
+        const field_section = try frameFieldSectionPayload(
+            frame.frame_type,
             frame.payload,
+        ) orelse continue;
+        const prefix = try http3.Qpack.decodeFieldSectionPrefix(
+            field_section,
             table,
         );
         if (prefix.required_insert_count != 0) return true;
     }
     return false;
+}
+
+fn bufferedReceiveUsesDynamicQpack(
+    receive: quic.stream_state.RecvState,
+    table: http3.Qpack.DynamicTable,
+) Error!bool {
+    const relative_start = receive.read_offset - receive.storage_offset;
+    const relative_end = receive.contiguous_end - receive.storage_offset;
+    const available = receive.buffer.items[relative_start..relative_end];
+    var offset: usize = 0;
+    while (offset < available.len) {
+        const frame = http3.Frame.parse(available[offset..]) catch |err| switch (err) {
+            // A reset can interrupt any frame. Only complete field-section
+            // frames can have established a QPACK dependency at this point.
+            error.BufferTooShort => return false,
+            else => return err,
+        };
+        offset += frame.consumed;
+        const field_section = try frameFieldSectionPayload(
+            frame.frame_type,
+            frame.payload,
+        ) orelse continue;
+        const prefix = try http3.Qpack.decodeFieldSectionPrefix(
+            field_section,
+            table,
+        );
+        if (prefix.required_insert_count != 0) return true;
+    }
+    return false;
+}
+
+fn frameFieldSectionPayload(
+    frame_type: u64,
+    payload: []const u8,
+) Error!?[]const u8 {
+    return switch (frame_type) {
+        http3.FrameType.headers => payload,
+        http3.FrameType.push_promise => (try http3.parsePushPromisePayload(payload)).field_section,
+        else => null,
+    };
 }
 
 fn sendConnectionMessage(
@@ -5748,7 +5942,10 @@ fn receiveConnectionResponsePacket(
                     return error.UnexpectedStream;
                 }
             }
-            try response_streams.recordReset(
+            _ = try recordClientResponseReset(
+                response_streams,
+                streaming_responses,
+                qpack_decode,
                 stream_id,
                 frame.reset_stream.application_error_code,
             );
@@ -5797,6 +5994,66 @@ fn receiveConnectionResponsePacket(
         }
         try response_streams.insert(packet.from, frame.stream);
     }
+}
+
+/// Retire all receive-side state for a reset response stream atomically.
+///
+/// The reset map and both stream containers reserve their final shapes before
+/// QPACK feedback mutates. Once Stream Cancellation is queued, no remaining
+/// operation can fail, so an allocator error can never leave a cancellation
+/// instruction referring to a reader that is still live and retryable.
+fn recordClientResponseReset(
+    response_streams: *ResponseStreamSet,
+    streaming_responses: ?*StreamingResponseSet,
+    qpack_decode: *QpackDecodeState,
+    stream_id: u62,
+    application_error_code: u64,
+) Error!bool {
+    const reset_slot = try response_streams.resets.getOrPut(
+        response_streams.allocator,
+        stream_id,
+    );
+    if (reset_slot.found_existing) {
+        reset_slot.value_ptr.* = application_error_code;
+        return false;
+    }
+    errdefer _ = response_streams.resets.remove(stream_id);
+
+    var buffered_entry = response_streams.takeEntry(stream_id);
+    errdefer if (buffered_entry) |entry| {
+        response_streams.entries.appendAssumeCapacity(entry);
+    };
+    var streaming_entry = if (streaming_responses) |streaming|
+        streaming.takeEntry(stream_id)
+    else
+        null;
+    errdefer if (streaming_entry) |entry| {
+        streaming_responses.?.entries.appendAssumeCapacity(entry);
+    };
+
+    var cancel_qpack = if (buffered_entry) |entry|
+        try bufferedReceiveUsesDynamicQpack(
+            entry.receive,
+            qpack_decode.table,
+        )
+    else
+        false;
+    if (streaming_entry) |entry| {
+        cancel_qpack = cancel_qpack or
+            try entry.reader.hasUnacknowledgedDynamicSection(
+                qpack_decode.table,
+            );
+    }
+    if (cancel_qpack) {
+        try qpack_decode.recordStreamCancellation(stream_id);
+    }
+
+    reset_slot.value_ptr.* = application_error_code;
+    if (buffered_entry) |*entry| entry.deinit();
+    buffered_entry = null;
+    if (streaming_entry) |*entry| entry.deinit();
+    streaming_entry = null;
+    return cancel_qpack;
 }
 
 const ControlFrameKind = enum { goaway };
@@ -7854,6 +8111,117 @@ test "HTTP/3 incremental response reader emits informational and detects truncat
     );
 }
 
+test "HTTP/3 incremental response reader owns dynamic PUSH_PROMISE before final head" {
+    const allocator = std.testing.allocator;
+    var table = http3.Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-promise-kind", "dynamic-asset");
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+
+    try http3.Qpack.encodeDynamicBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/asset.css" },
+        .{ .name = ":authority", .value = "example.test" },
+        .{ .name = "x-promise-kind", .value = "dynamic-asset" },
+    }, table);
+    try http3.writePushPromiseFrame(&bytes, allocator, 3, block.items);
+    block.clearRetainingCapacity();
+    try http3.Qpack.encodeDynamicBlock(&block, allocator, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "0" },
+    }, table);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&bytes, allocator);
+
+    var reader = StreamingMessageReader.initResponse(
+        allocator,
+        0,
+        512,
+        .{},
+    );
+    var reader_owned = true;
+    defer if (reader_owned) reader.deinit();
+    try reader.insert(.{
+        .stream_id = 0,
+        .data = bytes.items,
+        .fin = true,
+    });
+    var promise = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer promise.deinit(allocator);
+    try std.testing.expect(promise == .push_promise);
+    try std.testing.expectEqual(@as(u64, 3), promise.push_promise.push_id);
+    try std.testing.expectEqualStrings(
+        "/asset.css",
+        promise.push_promise.request.path,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        promise.push_promise.request.qpack_section_acknowledgments,
+    );
+    try std.testing.expectEqualStrings(
+        "dynamic-asset",
+        promise.push_promise.request.headers[4].value,
+    );
+    // A promise is metadata for the eventual response; it must not advance the
+    // message phase or make the following final HEADERS look like trailers.
+    var head = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .head);
+    try std.testing.expectEqual(@as(u16, 200), head.head.response.status);
+    // Event storage must remain valid after the stream window is destroyed.
+    reader.deinit();
+    reader_owned = false;
+    try std.testing.expectEqualStrings(
+        "example.test",
+        promise.push_promise.request.authority.?,
+    );
+}
+
+test "HTTP/3 incremental response reader detects dynamic PUSH_PROMISE cancellation" {
+    const allocator = std.testing.allocator;
+    var table = http3.Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-promise-kind", "dynamic-asset");
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/asset.css" },
+        .{ .name = ":authority", .value = "example.test" },
+        .{ .name = "x-promise-kind", .value = "dynamic-asset" },
+    }, table);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try http3.writePushPromiseFrame(&bytes, allocator, 3, block.items);
+
+    var reader = StreamingMessageReader.initResponse(
+        allocator,
+        0,
+        512,
+        .{},
+    );
+    defer reader.deinit();
+    try reader.insert(.{
+        .stream_id = 0,
+        .data = bytes.items,
+    });
+    try std.testing.expect(
+        try reader.hasUnacknowledgedDynamicSection(table),
+    );
+}
+
 test "HTTP/3 incremental reader retries blocked HEADERS transactionally" {
     const allocator = std.testing.allocator;
     var encoder_table = http3.Qpack.DynamicTable.init(allocator, 256);
@@ -9237,6 +9605,7 @@ test "HTTP/3 protected client polls interleaved streaming responses" {
                 try std.testing.expectEqual(first_id, message.stream_id);
                 switch (message.value) {
                     .head => saw_head = true,
+                    .push_promise => return error.TestUnexpectedResult,
                     .data_available => {
                         const read = try client.readResponseData(
                             first_id,
@@ -9266,6 +9635,205 @@ test "HTTP/3 protected client polls interleaved streaming responses" {
         @as(usize, 0),
         client.streaming_responses.entries.items.len,
     );
+}
+
+test "HTTP/3 protected client streams owned push promise events" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xc9, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xca, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcb} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcc} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .local_settings = .{ .qpack_max_table_capacity = 256 },
+        },
+    );
+    defer client.deinit();
+
+    try client.sendMaxPushId(3);
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/index",
+        .authority = "example.test",
+    });
+    var request = try server.receiveRequest();
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(stream_id, request.stream_id);
+
+    var response_block: std.ArrayList(u8) = .empty;
+    defer response_block.deinit(allocator);
+    var table = http3.Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    _ = try table.insert("x-promise-kind", "dynamic-asset");
+    try http3.Qpack.encodeDynamicBlock(
+        &response_block,
+        allocator,
+        &.{.{ .name = ":status", .value = "200" }},
+        table,
+    );
+    var promise_block: std.ArrayList(u8) = .empty;
+    defer promise_block.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(&promise_block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/asset.css" },
+        .{ .name = ":authority", .value = "example.test" },
+        .{ .name = "x-promise-kind", .value = "dynamic-asset" },
+    }, table);
+    var response_bytes: std.ArrayList(u8) = .empty;
+    defer response_bytes.deinit(allocator);
+    try http3.writePushPromiseFrame(
+        &response_bytes,
+        allocator,
+        3,
+        promise_block.items,
+    );
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = response_block.items,
+        .consumed = 0,
+    }).write(&response_bytes, allocator);
+
+    var encoder_bytes: std.ArrayList(u8) = .empty;
+    defer encoder_bytes.deinit(allocator);
+    try http3.writeQpackEncoderStreamPrefix(&encoder_bytes, allocator);
+    try http3.Qpack.writeEncoderInstruction(
+        &encoder_bytes,
+        allocator,
+        .{ .set_capacity = 256 },
+    );
+    try http3.Qpack.writeEncoderInstruction(
+        &encoder_bytes,
+        allocator,
+        .{ .insert_literal = .{
+            .name = "x-promise-kind",
+            .value = "dynamic-asset",
+        } },
+    );
+    const frames = [_]quic.Frame{
+        .{ .stream = .{
+            .stream_id = server_qpack_encoder_stream_id,
+            .data = encoder_bytes.items,
+        } },
+        .{ .stream = .{
+            .stream_id = stream_id,
+            .data = response_bytes.items,
+            .fin = true,
+        } },
+    };
+    try sendProtectedFrames(
+        &server.quic_server.endpoint,
+        client.quic_client.address(),
+        server.config.send_keys,
+        server.config.peer_connection_id,
+        &server.next_packet_number,
+        &frames,
+        server.config.max_frames_per_packet,
+        &server.protected_send,
+    );
+
+    var promise = (try client.receiveResponseEvent(stream_id)) orelse
+        return error.TestUnexpectedResult;
+    defer promise.deinit(allocator);
+    try std.testing.expect(promise == .push_promise);
+    try std.testing.expectEqual(@as(u64, 3), promise.push_promise.push_id);
+    try std.testing.expectEqualStrings(
+        "/asset.css",
+        promise.push_promise.request.path,
+    );
+    try std.testing.expectEqualStrings(
+        "example.test",
+        promise.push_promise.request.authority.?,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        promise.push_promise.request.qpack_section_acknowledgments,
+    );
+    try std.testing.expectEqualStrings(
+        "dynamic-asset",
+        promise.push_promise.request.headers[4].value,
+    );
+
+    // The event path must flush both feedback instructions generated by this
+    // packet: the insert-count increment and the promise's section ack.
+    var feedback_packet = try server.receive_packets.take(
+        &server.quic_server.endpoint,
+        server.config.receive_keys,
+        server.config.local_connection_id.len,
+        &server.expected_packet_number,
+        server.config.max_frames_per_packet,
+    );
+    defer feedback_packet.deinit(allocator);
+    var feedback_bytes: std.ArrayList(u8) = .empty;
+    defer feedback_bytes.deinit(allocator);
+    for (feedback_packet.frames) |frame| {
+        if (frame != .stream or
+            frame.stream.stream_id != client_qpack_decoder_stream_id)
+        {
+            continue;
+        }
+        try feedback_bytes.appendSlice(allocator, frame.stream.data);
+    }
+    const increment = try http3.Qpack.decodeDecoderInstruction(
+        feedback_bytes.items,
+    );
+    const acknowledgment = try http3.Qpack.decodeDecoderInstruction(
+        feedback_bytes.items[increment.consumed..],
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        increment.instruction.insert_count_increment,
+    );
+    try std.testing.expectEqual(
+        stream_id,
+        acknowledgment.instruction.section_acknowledgment,
+    );
+
+    var head = (try client.receiveResponseEvent(stream_id)) orelse
+        return error.TestUnexpectedResult;
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .head);
+    var finished = (try client.receiveResponseEvent(stream_id)) orelse
+        return error.TestUnexpectedResult;
+    defer finished.deinit(allocator);
+    try std.testing.expect(finished == .finished);
 }
 
 test "HTTP/3 protected client reports next response reset with stream id" {
@@ -9670,6 +10238,7 @@ test "HTTP/3 protected server streams interleaved requests through small windows
                 }
                 heads += 1;
             },
+            .push_promise => return error.TestUnexpectedResult,
             .data_available => {
                 while (true) {
                     const active = server.streaming_requests.find(
@@ -9953,6 +10522,7 @@ test "HTTP/3 protected client streams large response through small window" {
                 );
                 saw_head = true;
             },
+            .push_promise => return error.TestUnexpectedResult,
             .data_available => {
                 while (true) {
                     const active = client.streaming_responses.find(stream_id).?;
@@ -12110,6 +12680,7 @@ test "HTTP/3 handshake server streams large request through small window" {
                         );
                         saw_head = true;
                     },
+                    .push_promise => return error.TestUnexpectedResult,
                     .data_available => {
                         while (true) {
                             const active = session.streaming_requests.find(
@@ -12489,6 +13060,7 @@ test "HTTP/3 handshake client streams dynamic response through small window" {
                 );
                 saw_head = true;
             },
+            .push_promise => return error.TestUnexpectedResult,
             .data_available => {
                 while (true) {
                     const active = client.streaming_responses.find(

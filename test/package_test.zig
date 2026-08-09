@@ -193,6 +193,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3, "writeCancelPushFrame"));
     try std.testing.expect(@hasDecl(netz.http3, "writePushPromiseFrame"));
     try std.testing.expect(@hasDecl(netz.http3, "parsePushPromisePayload"));
+    try std.testing.expect(@hasDecl(netz.http3, "decodePushPromiseWithDynamicTable"));
+    try std.testing.expect(@hasDecl(netz.http3, "DecodedPushPromise"));
     try std.testing.expect(@hasField(netz.http3.Request, "trailers"));
     try std.testing.expect(@hasField(netz.http3.Response, "trailers"));
     try std.testing.expect(@hasField(netz.http3.DecodedRequest, "trailers"));
