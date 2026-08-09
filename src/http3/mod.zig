@@ -2526,6 +2526,7 @@ pub const DecodedRequestHead = struct {
     authority: ?[]const u8,
     headers: []Qpack.HeaderField,
     content_length: ?usize,
+    body_allowed: bool,
     consumed: usize,
     qpack_section_acknowledgments: usize,
 
@@ -2542,6 +2543,7 @@ pub const DecodedResponseHead = struct {
     status: u16,
     headers: []Qpack.HeaderField,
     content_length: ?usize,
+    body_allowed: bool,
     consumed: usize,
     qpack_section_acknowledgments: usize,
 
@@ -2554,6 +2556,41 @@ pub const DecodedResponseHead = struct {
     }
 };
 
+pub const DecodedTrailers = struct {
+    fields: []Qpack.HeaderField,
+    qpack_section_acknowledgments: usize,
+
+    pub fn deinit(
+        self: *DecodedTrailers,
+        allocator: std.mem.Allocator,
+    ) void {
+        Qpack.freeDecodedFields(allocator, self.fields);
+        self.* = undefined;
+    }
+};
+
+pub fn decodeTrailersWithDynamicTable(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    settings: Settings,
+    table: Qpack.DynamicTable,
+) Error!DecodedTrailers {
+    const field_decoder = FieldSectionDecoder{ .dynamic = table };
+    const decoded = try field_decoder.decode(allocator, payload);
+    errdefer Qpack.freeDecodedFields(allocator, decoded.fields);
+    try validateHeaderBlock(decoded.fields, .trailers);
+    try validateFieldSectionSize(
+        decoded.fields,
+        settings.max_field_section_size,
+    );
+    const owned = try ownHeaderFields(allocator, decoded.fields);
+    Qpack.freeDecodedFields(allocator, decoded.fields);
+    return .{
+        .fields = owned,
+        .qpack_section_acknowledgments = @intFromBool(decoded.requires_acknowledgment),
+    };
+}
+
 pub fn decodeRequestHeadWithDynamicTable(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -2561,11 +2598,24 @@ pub fn decodeRequestHeadWithDynamicTable(
     table: Qpack.DynamicTable,
 ) Error!DecodedRequestHead {
     const frame = try firstHeadersFrame(bytes, .request);
-    const field_decoder = FieldSectionDecoder{ .dynamic = table };
-    const decoded = try field_decoder.decode(
+    var head = try decodeRequestHeadFieldSectionWithDynamicTable(
         allocator,
         frame.value.payload,
+        settings,
+        table,
     );
+    head.consumed = frame.consumed;
+    return head;
+}
+
+pub fn decodeRequestHeadFieldSectionWithDynamicTable(
+    allocator: std.mem.Allocator,
+    field_section: []const u8,
+    settings: Settings,
+    table: Qpack.DynamicTable,
+) Error!DecodedRequestHead {
+    const field_decoder = FieldSectionDecoder{ .dynamic = table };
+    const decoded = try field_decoder.decode(allocator, field_section);
     errdefer Qpack.freeDecodedFields(allocator, decoded.fields);
     try validateHeaderBlock(decoded.fields, .request);
     try validateFieldSectionSize(
@@ -2620,7 +2670,8 @@ pub fn decodeRequestHeadWithDynamicTable(
             ownedFieldValueCaseInsensitive(owned_fields, "host"),
         .headers = owned_fields,
         .content_length = declared_length,
-        .consumed = frame.consumed,
+        .body_allowed = !plain_connect,
+        .consumed = 0,
         .qpack_section_acknowledgments = @intFromBool(decoded.requires_acknowledgment),
     };
 }
@@ -2635,39 +2686,54 @@ pub fn decodeResponseHeadWithDynamicTable(
     var acknowledgments: usize = 0;
     while (true) {
         const frame = try firstHeadersFrame(bytes[offset..], .response);
-        const field_decoder = FieldSectionDecoder{ .dynamic = table };
-        const decoded = try field_decoder.decode(
+        var head = try decodeResponseHeadFieldSectionWithDynamicTable(
             allocator,
             frame.value.payload,
+            settings,
+            table,
         );
-        errdefer Qpack.freeDecodedFields(allocator, decoded.fields);
-        try validateHeaderBlock(decoded.fields, .response);
-        try validateFieldSectionSize(
-            decoded.fields,
-            settings.max_field_section_size,
-        );
-        const status = try responseStatus(decoded.fields);
-        acknowledgments += @intFromBool(decoded.requires_acknowledgment);
+        acknowledgments += head.qpack_section_acknowledgments;
         offset += frame.consumed;
-        if (status < 200) {
-            Qpack.freeDecodedFields(allocator, decoded.fields);
+        if (head.status < 200) {
+            head.deinit(allocator);
             if (offset >= bytes.len) return error.BufferTooShort;
             continue;
         }
-        const declared_length = try contentLength(decoded.fields);
-        if (status == 204 and declared_length != null) {
-            return error.InvalidContentLength;
-        }
-        const owned_fields = try ownHeaderFields(allocator, decoded.fields);
-        Qpack.freeDecodedFields(allocator, decoded.fields);
-        return .{
-            .status = status,
-            .headers = owned_fields,
-            .content_length = declared_length,
-            .consumed = offset,
-            .qpack_section_acknowledgments = acknowledgments,
-        };
+        head.consumed = offset;
+        head.qpack_section_acknowledgments = acknowledgments;
+        return head;
     }
+}
+
+pub fn decodeResponseHeadFieldSectionWithDynamicTable(
+    allocator: std.mem.Allocator,
+    field_section: []const u8,
+    settings: Settings,
+    table: Qpack.DynamicTable,
+) Error!DecodedResponseHead {
+    const field_decoder = FieldSectionDecoder{ .dynamic = table };
+    const decoded = try field_decoder.decode(allocator, field_section);
+    errdefer Qpack.freeDecodedFields(allocator, decoded.fields);
+    try validateHeaderBlock(decoded.fields, .response);
+    try validateFieldSectionSize(
+        decoded.fields,
+        settings.max_field_section_size,
+    );
+    const status = try responseStatus(decoded.fields);
+    const declared_length = try contentLength(decoded.fields);
+    if (status == 204 and declared_length != null) {
+        return error.InvalidContentLength;
+    }
+    const owned_fields = try ownHeaderFields(allocator, decoded.fields);
+    Qpack.freeDecodedFields(allocator, decoded.fields);
+    return .{
+        .status = status,
+        .headers = owned_fields,
+        .content_length = declared_length,
+        .body_allowed = status != 204 and status != 304,
+        .consumed = 0,
+        .qpack_section_acknowledgments = @intFromBool(decoded.requires_acknowledgment),
+    };
 }
 
 const FirstHeaders = struct {

@@ -287,8 +287,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3, "decodeResponseWithDynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3, "DecodedRequestHead"));
     try std.testing.expect(@hasDecl(netz.http3, "DecodedResponseHead"));
+    try std.testing.expect(@hasDecl(netz.http3, "DecodedTrailers"));
     try std.testing.expect(@hasDecl(netz.http3, "decodeRequestHeadWithDynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3, "decodeResponseHeadWithDynamicTable"));
+    try std.testing.expect(@hasDecl(netz.http3, "decodeTrailersWithDynamicTable"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingMessageReader"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequest"));
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));

@@ -140,6 +140,290 @@ pub const Limits = struct {
     max_stream_frame_data: usize = 1200,
 };
 
+pub const StreamingHead = union(enum) {
+    request: http3.DecodedRequestHead,
+    response: http3.DecodedResponseHead,
+
+    pub fn deinit(self: *StreamingHead, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .request => |*head| head.deinit(allocator),
+            .response => |*head| head.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const StreamingEvent = union(enum) {
+    head: StreamingHead,
+    data_available,
+    trailers: http3.DecodedTrailers,
+    finished,
+
+    pub fn deinit(self: *StreamingEvent, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .head => |*head| head.deinit(allocator),
+            .trailers => |*trailers| trailers.deinit(allocator),
+            .data_available, .finished => {},
+        }
+        self.* = undefined;
+    }
+};
+
+pub const StreamingMessageReader = struct {
+    const Kind = enum { request, response };
+    const Phase = enum {
+        initial_headers,
+        body,
+        trailers,
+        done,
+    };
+
+    allocator: std.mem.Allocator,
+    receive: quic.stream_state.RecvState,
+    settings: http3.Settings,
+    kind: Kind,
+    phase: Phase = .initial_headers,
+    current_frame: ?http3.Frame.Header = null,
+    current_payload_read: usize = 0,
+    body_read: usize = 0,
+    content_length: ?usize = null,
+    body_allowed: bool = true,
+    final_observed: bool = false,
+
+    pub fn initRequest(
+        allocator: std.mem.Allocator,
+        stream_id: u64,
+        max_buffered: usize,
+        settings: http3.Settings,
+    ) StreamingMessageReader {
+        return .{
+            .allocator = allocator,
+            .receive = .init(allocator, stream_id, max_buffered),
+            .settings = settings,
+            .kind = .request,
+        };
+    }
+
+    pub fn initResponse(
+        allocator: std.mem.Allocator,
+        stream_id: u64,
+        max_buffered: usize,
+        settings: http3.Settings,
+    ) StreamingMessageReader {
+        return .{
+            .allocator = allocator,
+            .receive = .init(allocator, stream_id, max_buffered),
+            .settings = settings,
+            .kind = .response,
+        };
+    }
+
+    pub fn deinit(self: *StreamingMessageReader) void {
+        self.receive.deinit();
+        self.* = undefined;
+    }
+
+    pub fn insert(
+        self: *StreamingMessageReader,
+        frame: quic.StreamFrame,
+    ) Error!void {
+        try self.receive.insert(frame);
+        if (frame.fin) self.final_observed = true;
+    }
+
+    pub fn next(
+        self: *StreamingMessageReader,
+        table: http3.Qpack.DynamicTable,
+    ) Error!?StreamingEvent {
+        if (self.phase == .done) return null;
+        while (true) {
+            if (self.current_frame == null) {
+                const available = self.receive.available();
+                if (available.len == 0) {
+                    if (self.receive.complete()) {
+                        return self.finishAtStreamEnd();
+                    }
+                    return null;
+                }
+                const header = http3.Frame.parseHeader(available) catch |err| switch (err) {
+                    error.BufferTooShort => return null,
+                    else => return err,
+                };
+                try self.receive.consume(header.header_length);
+                self.current_frame = header;
+                self.current_payload_read = 0;
+            }
+            const header = self.current_frame.?;
+            switch (header.frame_type) {
+                http3.FrameType.headers => {
+                    if (self.receive.available().len < header.payload_length) {
+                        if (self.framePayloadTruncated()) {
+                            return error.BufferTooShort;
+                        }
+                        return null;
+                    }
+                    const payload = self.receive.available()[0..header.payload_length];
+                    if (self.phase == .initial_headers) {
+                        var final_head = true;
+                        const event = switch (self.kind) {
+                            .request => blk: {
+                                var head = try http3.decodeRequestHeadFieldSectionWithDynamicTable(
+                                    self.allocator,
+                                    payload,
+                                    self.settings,
+                                    table,
+                                );
+                                head.consumed =
+                                    header.header_length +
+                                    header.payload_length;
+                                self.content_length = head.content_length;
+                                self.body_allowed = head.body_allowed;
+                                break :blk StreamingEvent{
+                                    .head = .{ .request = head },
+                                };
+                            },
+                            .response => blk: {
+                                var head = try http3.decodeResponseHeadFieldSectionWithDynamicTable(
+                                    self.allocator,
+                                    payload,
+                                    self.settings,
+                                    table,
+                                );
+                                head.consumed =
+                                    header.header_length +
+                                    header.payload_length;
+                                final_head = head.status >= 200;
+                                if (final_head) {
+                                    self.content_length = head.content_length;
+                                    self.body_allowed = head.body_allowed;
+                                }
+                                break :blk StreamingEvent{
+                                    .head = .{ .response = head },
+                                };
+                            },
+                        };
+                        try self.receive.consume(header.payload_length);
+                        self.current_frame = null;
+                        if (final_head) self.phase = .body;
+                        return event;
+                    }
+                    if (self.phase != .body) return error.UnexpectedFrame;
+                    if (!self.body_allowed) return error.InvalidContentLength;
+                    const trailers = try http3.decodeTrailersWithDynamicTable(
+                        self.allocator,
+                        payload,
+                        self.settings,
+                        table,
+                    );
+                    try self.receive.consume(header.payload_length);
+                    self.current_frame = null;
+                    self.phase = .trailers;
+                    return .{ .trailers = trailers };
+                },
+                http3.FrameType.data => {
+                    if (self.phase != .body) return error.UnexpectedFrame;
+                    if (!self.body_allowed and header.payload_length != 0) {
+                        return error.InvalidContentLength;
+                    }
+                    const next_body = std.math.add(
+                        usize,
+                        self.body_read,
+                        header.payload_length - self.current_payload_read,
+                    ) catch return error.InvalidContentLength;
+                    if (self.content_length) |expected| {
+                        if (next_body > expected) return error.InvalidContentLength;
+                    }
+                    if (header.payload_length == 0) {
+                        self.current_frame = null;
+                        continue;
+                    }
+                    if (self.receive.available().len == 0) {
+                        if (self.framePayloadTruncated()) {
+                            return error.BufferTooShort;
+                        }
+                        return null;
+                    }
+                    return .data_available;
+                },
+                else => {
+                    if (streamingForbiddenFrame(header.frame_type)) {
+                        return error.UnexpectedFrame;
+                    }
+                    const remaining = header.payload_length - self.current_payload_read;
+                    const skip = @min(remaining, self.receive.available().len);
+                    try self.receive.consume(skip);
+                    self.current_payload_read += skip;
+                    if (self.current_payload_read == header.payload_length) {
+                        self.current_frame = null;
+                        continue;
+                    }
+                    if (self.framePayloadTruncated()) {
+                        return error.BufferTooShort;
+                    }
+                    return null;
+                },
+            }
+        }
+    }
+
+    pub fn readData(
+        self: *StreamingMessageReader,
+        out: []u8,
+    ) Error!usize {
+        const header = self.current_frame orelse return error.UnexpectedFrame;
+        if (header.frame_type != http3.FrameType.data or self.phase != .body) {
+            return error.UnexpectedFrame;
+        }
+        const remaining = header.payload_length - self.current_payload_read;
+        const count = @min(remaining, @min(out.len, self.receive.available().len));
+        if (count == 0) return 0;
+        @memcpy(out[0..count], self.receive.available()[0..count]);
+        try self.receive.consume(count);
+        self.current_payload_read += count;
+        self.body_read += count;
+        if (self.current_payload_read == header.payload_length) {
+            self.current_frame = null;
+            self.current_payload_read = 0;
+        }
+        return count;
+    }
+
+    fn finishAtStreamEnd(self: *StreamingMessageReader) Error!?StreamingEvent {
+        if (self.current_frame != null) return error.BufferTooShort;
+        if (self.phase == .initial_headers) return error.ExpectedHeadersFrame;
+        if (self.content_length) |expected| {
+            if (self.body_read != expected) return error.InvalidContentLength;
+        }
+        self.phase = .done;
+        return .finished;
+    }
+
+    fn framePayloadTruncated(self: StreamingMessageReader) bool {
+        const header = self.current_frame orelse return false;
+        const final_size = self.receive.final_size orelse return false;
+        const remaining = header.payload_length - self.current_payload_read;
+        const required_end = std.math.add(
+            usize,
+            self.receive.read_offset,
+            remaining,
+        ) catch return true;
+        return required_end > final_size;
+    }
+};
+
+fn streamingForbiddenFrame(frame_type: u64) bool {
+    return switch (frame_type) {
+        http3.FrameType.cancel_push,
+        http3.FrameType.settings,
+        http3.FrameType.goaway,
+        http3.FrameType.max_push_id,
+        http3.FrameType.priority_update_request,
+        http3.FrameType.priority_update_push,
+        => true,
+        else => false,
+    };
+}
+
 /// Connection-scoped receive side of QPACK.
 ///
 /// Encoder-stream bytes are QUIC stream data, so instructions can be split,
@@ -5827,6 +6111,212 @@ test "HTTP/3 streaming response head enforces bodyless status" {
             null,
             &encoder,
         ),
+    );
+}
+
+test "HTTP/3 incremental reader streams DATA through bounded window" {
+    const allocator = std.testing.allocator;
+    const body_len: usize = 100 * 1024;
+    var table = http3.Qpack.DynamicTable.init(allocator, 512);
+    defer table.deinit();
+    try table.setCapacity(512);
+    _ = try table.insert("x-stream", "owned");
+
+    var fields: [6]http3.Qpack.HeaderField = .{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/large-stream" },
+        .{ .name = ":authority", .value = "example.test" },
+        .{ .name = "content-length", .value = undefined },
+        .{ .name = "x-stream", .value = "owned" },
+    };
+    var content_length_buf: [32]u8 = undefined;
+    fields[4].value = try std.fmt.bufPrint(
+        &content_length_buf,
+        "{}",
+        .{body_len},
+    );
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(&block, allocator, &fields, table);
+    var message_prefix: std.ArrayList(u8) = .empty;
+    defer message_prefix.deinit(allocator);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&message_prefix, allocator);
+    try quic.varint.encode(
+        &message_prefix,
+        allocator,
+        http3.FrameType.data,
+    );
+    try quic.varint.encode(&message_prefix, allocator, body_len);
+
+    var trailer_block: std.ArrayList(u8) = .empty;
+    defer trailer_block.deinit(allocator);
+    try http3.Qpack.encodeDynamicBlock(
+        &trailer_block,
+        allocator,
+        &.{.{ .name = "x-finished", .value = "yes" }},
+        table,
+    );
+    var trailer_frame: std.ArrayList(u8) = .empty;
+    defer trailer_frame.deinit(allocator);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = trailer_block.items,
+        .consumed = 0,
+    }).write(&trailer_frame, allocator);
+
+    var reader = StreamingMessageReader.initRequest(
+        allocator,
+        0,
+        512,
+        .{},
+    );
+    defer reader.deinit();
+    var absolute_offset: u64 = 0;
+    try reader.insert(.{
+        .stream_id = 0,
+        .offset = absolute_offset,
+        .data = message_prefix.items,
+    });
+    absolute_offset += message_prefix.items.len;
+    var head_event = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer head_event.deinit(allocator);
+    try std.testing.expect(head_event == .head);
+    try std.testing.expectEqualStrings(
+        "/large-stream",
+        head_event.head.request.path,
+    );
+    try std.testing.expectEqual(
+        @as(?usize, body_len),
+        head_event.head.request.content_length,
+    );
+
+    var body_checksum: u64 = 0;
+    var body_read: usize = 0;
+    var payload_chunk: [257]u8 = undefined;
+    for (&payload_chunk, 0..) |*byte, index| byte.* = @truncate(index);
+    var read_buf: [113]u8 = undefined;
+    while (body_read < body_len) {
+        const send_len = @min(payload_chunk.len, body_len - body_read);
+        try reader.insert(.{
+            .stream_id = 0,
+            .offset = absolute_offset,
+            .data = payload_chunk[0..send_len],
+        });
+        absolute_offset += send_len;
+        while (true) {
+            const event = (try reader.next(table)) orelse break;
+            try std.testing.expect(event == .data_available);
+            while (reader.current_frame != null) {
+                const read = try reader.readData(&read_buf);
+                if (read == 0) break;
+                for (read_buf[0..read]) |byte| body_checksum +%= byte;
+                body_read += read;
+            }
+        }
+        try std.testing.expect(reader.receive.buffer.items.len <= 512);
+    }
+
+    try reader.insert(.{
+        .stream_id = 0,
+        .offset = absolute_offset,
+        .data = trailer_frame.items,
+        .fin = true,
+    });
+    var trailers_event = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer trailers_event.deinit(allocator);
+    try std.testing.expect(trailers_event == .trailers);
+    try std.testing.expectEqualStrings(
+        "yes",
+        trailers_event.trailers.fields[0].value,
+    );
+    var finished = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer finished.deinit(allocator);
+    try std.testing.expect(finished == .finished);
+    try std.testing.expectEqual(body_len, body_read);
+
+    // Each transmitted chunk restarts the deterministic payload pattern.
+    var expected_checksum: u64 = 0;
+    var remaining = body_len;
+    while (remaining != 0) {
+        const send_len = @min(payload_chunk.len, remaining);
+        for (payload_chunk[0..send_len]) |byte| expected_checksum +%= byte;
+        remaining -= send_len;
+    }
+    try std.testing.expectEqual(expected_checksum, body_checksum);
+}
+
+test "HTTP/3 incremental response reader emits informational and detects truncation" {
+    const allocator = std.testing.allocator;
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+
+    try http3.Qpack.encodeDynamicBlock(&block, allocator, &.{
+        .{ .name = ":status", .value = "103" },
+    }, table);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&bytes, allocator);
+    block.clearRetainingCapacity();
+    try http3.Qpack.encodeDynamicBlock(&block, allocator, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "4" },
+    }, table);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&bytes, allocator);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.data,
+        .payload = "abc",
+        .consumed = 0,
+    }).write(&bytes, allocator);
+
+    var reader = StreamingMessageReader.initResponse(
+        allocator,
+        0,
+        128,
+        .{},
+    );
+    defer reader.deinit();
+    try reader.insert(.{
+        .stream_id = 0,
+        .data = bytes.items,
+        .fin = true,
+    });
+    var informational = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer informational.deinit(allocator);
+    try std.testing.expect(informational == .head);
+    try std.testing.expectEqual(
+        @as(u16, 103),
+        informational.head.response.status,
+    );
+    var final = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer final.deinit(allocator);
+    try std.testing.expect(final == .head);
+    try std.testing.expectEqual(@as(u16, 200), final.head.response.status);
+    try std.testing.expect((try reader.next(table)).? == .data_available);
+    var data: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try reader.readData(&data));
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        reader.next(table),
     );
 }
 
