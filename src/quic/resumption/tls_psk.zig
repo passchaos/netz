@@ -11,6 +11,7 @@ const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 
 pub const ext_pre_shared_key: u16 = 0x0029;
+pub const ext_early_data: u16 = 0x002a;
 pub const ext_psk_key_exchange_modes: u16 = 0x002d;
 pub const psk_dhe_ke: u8 = 1;
 pub const selected_identity_first: u16 = 0;
@@ -23,6 +24,7 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidPskBinder,
     InvalidPskAge,
     ExpiredPsk,
+    UnexpectedEarlyData,
     UnsupportedPskKeyExchangeMode,
     PskExtensionNotLast,
 };
@@ -49,6 +51,24 @@ pub fn appendClientOffer(
     obfuscated_ticket_age: u32,
     psk: [Sha256.digest_length]u8,
 ) Error!void {
+    return appendClientOfferWithEarlyData(
+        client_hello,
+        allocator,
+        identity,
+        obfuscated_ticket_age,
+        psk,
+        false,
+    );
+}
+
+pub fn appendClientOfferWithEarlyData(
+    client_hello: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    identity: []const u8,
+    obfuscated_ticket_age: u32,
+    psk: [Sha256.digest_length]u8,
+    offer_early_data: bool,
+) Error!void {
     if (identity.len == 0 or identity.len > std.math.maxInt(u16)) {
         return error.InvalidPskIdentity;
     }
@@ -67,6 +87,12 @@ pub fn appendClientOffer(
     mode_extension[4] = 1;
     mode_extension[5] = psk_dhe_ke;
     try client_hello.appendSlice(allocator, &mode_extension);
+    if (offer_early_data) {
+        var early_data_extension: [4]u8 = undefined;
+        std.mem.writeInt(u16, early_data_extension[0..2], ext_early_data, .big);
+        std.mem.writeInt(u16, early_data_extension[2..4], 0, .big);
+        try client_hello.appendSlice(allocator, &early_data_extension);
+    }
 
     const identity_entry_len = 2 + identity.len + 4;
     const identities_len = identity_entry_len;
@@ -151,7 +177,10 @@ fn rejectExistingPskExtensions(
             len,
         ) catch return error.InvalidClientHello;
         if (payload_end > extensions_end) return error.InvalidClientHello;
-        if (typ == ext_psk_key_exchange_modes or typ == ext_pre_shared_key) {
+        if (typ == ext_psk_key_exchange_modes or
+            typ == ext_pre_shared_key or
+            typ == ext_early_data)
+        {
             return error.InvalidClientHello;
         }
         pos = payload_end;
@@ -260,6 +289,59 @@ pub fn parseServerSelection(payload: []const u8) Error!u16 {
     return selected;
 }
 
+pub fn clientOfferedEarlyData(client_hello: []const u8) Error!bool {
+    const offsets = try clientHelloOffsets(client_hello);
+    return containsEmptyEarlyDataExtension(
+        client_hello,
+        offsets.extensions_offset,
+        offsets.extensions_len,
+        error.InvalidClientHello,
+    );
+}
+
+pub fn serverAcceptedEarlyData(extensions: []const u8) Error!bool {
+    return containsEmptyEarlyDataExtension(
+        extensions,
+        0,
+        extensions.len,
+        error.InvalidServerHello,
+    );
+}
+
+fn containsEmptyEarlyDataExtension(
+    bytes: []const u8,
+    extensions_offset: usize,
+    extensions_len: usize,
+    invalid_error: Error,
+) Error!bool {
+    var pos = extensions_offset;
+    const extensions_end = std.math.add(
+        usize,
+        extensions_offset,
+        extensions_len,
+    ) catch return invalid_error;
+    if (extensions_end > bytes.len) return invalid_error;
+    var found = false;
+    while (pos < extensions_end) {
+        if (extensions_end - pos < 4) return invalid_error;
+        const typ = std.mem.readInt(u16, bytes[pos..][0..2], .big);
+        const len = std.mem.readInt(u16, bytes[pos + 2 ..][0..2], .big);
+        const payload_start = pos + 4;
+        const payload_end = std.math.add(
+            usize,
+            payload_start,
+            len,
+        ) catch return invalid_error;
+        if (payload_end > extensions_end) return invalid_error;
+        if (typ == ext_early_data) {
+            if (found or len != 0) return invalid_error;
+            found = true;
+        }
+        pos = payload_end;
+    }
+    return found;
+}
+
 pub fn computeBinder(
     psk: [Sha256.digest_length]u8,
     truncated_client_hello_hash: [Sha256.digest_length]u8,
@@ -298,6 +380,19 @@ pub fn earlySecret(
     // empty input. Keeping that distinction here makes the ordinary and
     // resumed key schedules interoperable with independent TLS 1.3 stacks.
     return HkdfSha256.extract(&zero, if (psk) |value| &value else &zero);
+}
+
+pub fn deriveClientEarlyTrafficSecret(
+    psk: [Sha256.digest_length]u8,
+    client_hello_hash: [Sha256.digest_length]u8,
+) [Sha256.digest_length]u8 {
+    return std.crypto.tls.hkdfExpandLabel(
+        HkdfSha256,
+        earlySecret(psk),
+        "c e traffic",
+        &client_hello_hash,
+        Sha256.digest_length,
+    );
 }
 
 fn parseOfferPayload(
@@ -532,6 +627,32 @@ test "TLS PSK rejects duplicate offer extensions" {
     );
 }
 
+test "TLS PSK offers and parses early data before mandatory-last PSK" {
+    const allocator = std.testing.allocator;
+    var hello = try baseClientHello(allocator);
+    defer hello.deinit(allocator);
+    const psk = [_]u8{0x36} ** Sha256.digest_length;
+    try appendClientOfferWithEarlyData(
+        &hello,
+        allocator,
+        "ticket",
+        0,
+        psk,
+        true,
+    );
+    const offer = try parseClientOffer(hello.items);
+    try verifyClientOffer(hello.items, offer, "ticket", psk);
+    try std.testing.expect(try clientOfferedEarlyData(hello.items));
+
+    var server_extensions: std.ArrayList(u8) = .empty;
+    defer server_extensions.deinit(allocator);
+    var early_data_extension: [4]u8 = undefined;
+    std.mem.writeInt(u16, early_data_extension[0..2], ext_early_data, .big);
+    std.mem.writeInt(u16, early_data_extension[2..4], 0, .big);
+    try server_extensions.appendSlice(allocator, &early_data_extension);
+    try std.testing.expect(try serverAcceptedEarlyData(server_extensions.items));
+}
+
 test "TLS PSK changes handshake key schedule" {
     const psk = [_]u8{0x55} ** Sha256.digest_length;
     const with_psk = earlySecret(psk);
@@ -544,6 +665,11 @@ test "TLS PSK changes handshake key schedule" {
         &HkdfSha256.extract(&zero, &zero),
         &without_psk,
     );
+    const early = deriveClientEarlyTrafficSecret(
+        psk,
+        [_]u8{0xa5} ** Sha256.digest_length,
+    );
+    try std.testing.expect(!std.mem.eql(u8, &early, &with_psk));
 }
 
 test "TLS PSK validates ticket age, lifetime, and skew" {

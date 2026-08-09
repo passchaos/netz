@@ -87,6 +87,7 @@ pub const ApplicationSecrets = struct {
 pub const ParsedEncryptedExtensions = struct {
     alpn: []const u8,
     transport_parameters: []const u8,
+    early_data_accepted: bool = false,
 };
 
 pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: ClientHelloOptions) Error!void {
@@ -161,10 +162,34 @@ pub fn writeEncryptedExtensions(
     alpn: []const u8,
     transport_parameters: []const u8,
 ) Error!void {
+    return writeEncryptedExtensionsWithEarlyData(
+        list,
+        allocator,
+        alpn,
+        transport_parameters,
+        false,
+    );
+}
+
+pub fn writeEncryptedExtensionsWithEarlyData(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    alpn: []const u8,
+    transport_parameters: []const u8,
+    early_data_accepted: bool,
+) Error!void {
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
     if (alpn.len != 0) try writeAlpnExtension(&extensions, allocator, &.{alpn});
     try writeExtension(&extensions, allocator, ext_quic_transport_parameters, transport_parameters);
+    if (early_data_accepted) {
+        try writeExtension(
+            &extensions,
+            allocator,
+            quic.resumption.tls_psk.ext_early_data,
+            &.{},
+        );
+    }
 
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
@@ -318,6 +343,7 @@ pub fn parseEncryptedExtensions(bytes: []const u8) Error!ParsedEncryptedExtensio
 
     var alpn: ?[]const u8 = null;
     var transport_parameters: ?[]const u8 = null;
+    var early_data_accepted = false;
     var seen_extensions = SeenExtensions{};
     var ext_cursor = wire.Cursor.init(extensions);
     while (!ext_cursor.eof()) {
@@ -330,12 +356,17 @@ pub fn parseEncryptedExtensions(bytes: []const u8) Error!ParsedEncryptedExtensio
                 alpn = try parseSingleAlpn(payload);
             },
             ext_quic_transport_parameters => transport_parameters = payload,
+            quic.resumption.tls_psk.ext_early_data => {
+                if (payload.len != 0) return error.InvalidEncryptedExtensions;
+                early_data_accepted = true;
+            },
             else => return error.InvalidEncryptedExtensions,
         }
     }
     return .{
         .alpn = alpn orelse return error.MissingAlpn,
         .transport_parameters = transport_parameters orelse return error.MissingTransportParameters,
+        .early_data_accepted = early_data_accepted,
     };
 }
 

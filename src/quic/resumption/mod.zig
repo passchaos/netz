@@ -1,9 +1,8 @@
 //! Session resumption and 0-RTT policy state.
 //!
-//! This layer owns cached tickets and remembered transport parameters. It does
-//! not pretend to implement the TLS PSK extension itself; TLS integrations can
-//! acquire the owned session bytes/PSK and must consume the early-data lease
-//! when any 0-RTT packet is offered.
+//! This layer owns cached tickets, remembered transport parameters, and the
+//! TLS 1.3 resumption-PSK extension/key-schedule helpers.  Early-data callers
+//! must still consume an exclusive lease once any 0-RTT packet is offered.
 
 pub const parameters = @import("parameters.zig");
 pub const cache = @import("cache.zig");

@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.zero_rtt.Error || error{
     MissingCryptoFrame,
 };
 
@@ -106,6 +106,79 @@ pub fn sendCoalescedInitialHandshakeCrypto(
     defer coalesced.deinit(endpoint.allocator);
     try coalesced.appendSlice(endpoint.allocator, initial_packet);
     try coalesced.appendSlice(endpoint.allocator, handshake_packet);
+    try endpoint.sendBytes(to, coalesced.items);
+}
+
+pub fn sendCoalescedInitialZeroRtt(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    initial_keys: quic.protection.PacketProtectionKeys,
+    initial_options: SendInitialOptions,
+    zero_rtt_keys: quic.protection.PacketProtectionKeys,
+    zero_rtt_options: quic.zero_rtt.SendOptions,
+) Error!void {
+    for (zero_rtt_options.frames) |frame| {
+        try quic.validateFrameForPacketType(frame, .zero_rtt);
+    }
+
+    const zero_rtt_payload = try quic.zero_rtt.encodeFrames(
+        endpoint.allocator,
+        zero_rtt_options.frames,
+    );
+    defer endpoint.allocator.free(zero_rtt_payload);
+    const zero_rtt_packet = try quic.protection.sealZeroRttPacket(
+        endpoint.allocator,
+        zero_rtt_keys,
+        .{
+            .version = zero_rtt_options.version,
+            .destination_connection_id = zero_rtt_options.destination_connection_id,
+            .source_connection_id = zero_rtt_options.source_connection_id,
+            .packet_number = zero_rtt_options.packet_number,
+            .packet_number_len = zero_rtt_options.packet_number_len,
+            .payload = zero_rtt_payload,
+        },
+    );
+    defer endpoint.allocator.free(zero_rtt_packet);
+
+    var unpadded_initial_options = initial_options;
+    unpadded_initial_options.min_datagram_size = 0;
+    var initial_packet = try sealInitialCryptoPacket(
+        endpoint.allocator,
+        initial_keys,
+        unpadded_initial_options,
+    );
+    defer endpoint.allocator.free(initial_packet);
+
+    const unpadded_len = std.math.add(
+        usize,
+        initial_packet.len,
+        zero_rtt_packet.len,
+    ) catch return error.DatagramTooLarge;
+    if (unpadded_len < initial_options.min_datagram_size) {
+        unpadded_initial_options.min_datagram_size =
+            initial_options.min_datagram_size - zero_rtt_packet.len;
+        const padded_initial_packet = try sealInitialCryptoPacket(
+            endpoint.allocator,
+            initial_keys,
+            unpadded_initial_options,
+        );
+        endpoint.allocator.free(initial_packet);
+        initial_packet = padded_initial_packet;
+    }
+
+    const coalesced_len = std.math.add(
+        usize,
+        initial_packet.len,
+        zero_rtt_packet.len,
+    ) catch return error.DatagramTooLarge;
+    var coalesced: std.ArrayList(u8) = .empty;
+    defer coalesced.deinit(endpoint.allocator);
+    try coalesced.ensureTotalCapacity(
+        endpoint.allocator,
+        coalesced_len,
+    );
+    coalesced.appendSliceAssumeCapacity(initial_packet);
+    coalesced.appendSliceAssumeCapacity(zero_rtt_packet);
     try endpoint.sendBytes(to, coalesced.items);
 }
 

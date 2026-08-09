@@ -612,6 +612,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "resumption"));
     try std.testing.expect(@hasDecl(netz.quic.resumption, "Cache"));
     try std.testing.expect(@hasDecl(netz.quic.resumption, "tls_psk"));
+    try std.testing.expect(@hasDecl(netz.quic.zero_rtt, "handshake"));
+    try std.testing.expect(@hasDecl(netz.quic.zero_rtt, "ReplayFilter"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "EarlyDataSender"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "processClient"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "ClientState"));

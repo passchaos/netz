@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.one_rtt.Error || quic.resumption.tls_psk.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
     InvalidHandshakeFlight,
     MissingCryptoFrame,
     MissingAlpn,
@@ -43,6 +43,7 @@ pub const ClientOptions = struct {
     resumption_session: ?*const quic.resumption.Session = null,
     resumption_now_ms: ?u64 = null,
     resumption_server_id: ?[]const u8 = null,
+    early_data: ?quic.zero_rtt.handshake.ClientOffer = null,
 };
 
 pub const ServerPsk = struct {
@@ -53,6 +54,14 @@ pub const ServerPsk = struct {
     lifetime_seconds: u32,
     now_ms: u64,
     age_tolerance_ms: u32 = 10_000,
+};
+
+pub const ServerEarlyDataPolicy = struct {
+    accept: bool = false,
+    replay_filter: *quic.zero_rtt.ReplayFilter,
+    /// Stable application request identity (for example method+origin+request
+    /// nonce), not merely the replayable ticket identity itself.
+    replay_key: []const u8 = &.{},
 };
 
 pub const ServerOptions = struct {
@@ -86,6 +95,7 @@ pub const ServerOptions = struct {
     x25519_secret_key: ?[32]u8 = null,
     keylog: ?*quic.keylog.Log = null,
     psk: ?ServerPsk = null,
+    early_data: ?ServerEarlyDataPolicy = null,
 };
 
 pub const OneRttConfig = struct {
@@ -176,6 +186,7 @@ pub const EstablishedConnection = struct {
     peer_connection_id: []u8,
     alpn: []u8,
     resumed: bool = false,
+    early_data_status: quic.zero_rtt.handshake.Status = .not_offered,
 
     pub fn deinit(self: *EstablishedConnection) void {
         const allocator = self.connection.endpoint.allocator;
@@ -248,7 +259,35 @@ fn connectAttempt(
         .alpn_protocols = options.alpn_protocols,
         .transport_parameters = transport_parameters,
     });
-    if (options.resumption_session) |session| {
+    const resumption_session = if (options.early_data) |early_data|
+        &early_data.lease.session
+    else
+        options.resumption_session;
+    const offer_early_data = options.early_data != null;
+    if (offer_early_data and options.retry_source_connection_id.len != 0) {
+        // RFC 9001 §4.6: a client MUST NOT send 0-RTT after Retry because the
+        // original early-data keys are bound to the pre-Retry ClientHello.
+        return error.EarlyDataIncompatibleWithRetry;
+    }
+    if (options.early_data) |early_data| {
+        try early_data.validate();
+        if (options.resumption_session) |explicit_session| {
+            if (!std.mem.eql(
+                u8,
+                &early_data.lease.session.psk,
+                &explicit_session.psk,
+            ) or
+                !std.mem.eql(
+                    u8,
+                    early_data.lease.session.ticket,
+                    explicit_session.ticket,
+                ))
+            {
+                return error.InvalidEarlyDataLease;
+            }
+        }
+    }
+    if (resumption_session) |session| {
         const now_ms = options.resumption_now_ms orelse
             return error.InvalidClientHello;
         if (now_ms < session.issued_at_ms) return error.InvalidClientHello;
@@ -271,25 +310,59 @@ fn connectAttempt(
         {
             return error.ExpiredPsk;
         }
-        try quic.resumption.tls_psk.appendClientOffer(
+        try quic.resumption.tls_psk.appendClientOfferWithEarlyData(
             &client_hello,
             endpoint.allocator,
             session.ticket,
             session.obfuscatedTicketAge(now_ms),
             session.psk,
+            offer_early_data,
         );
     }
 
-    try quic.initial_exchange.sendInitialCrypto(endpoint, peer, initial_secrets.client, .{
-        .version = options.version.wireValue(),
-        .destination_connection_id = initial_destination_connection_id,
-        .source_connection_id = options.local_connection_id,
-        .token = options.address_validation_token,
-        .packet_number = options.client_initial_packet_number,
-        .crypto_data = client_hello.items,
-        .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
-        .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
-    });
+    if (options.early_data) |early_data| {
+        const keys = try quic.zero_rtt.handshake.clientKeysForVersion(
+            options.version.wireValue(),
+            early_data.lease.session.psk,
+            client_hello.items,
+        );
+        try quic.initial_exchange.sendCoalescedInitialZeroRtt(
+            endpoint,
+            peer,
+            initial_secrets.client,
+            .{
+                .version = options.version.wireValue(),
+                .destination_connection_id = initial_destination_connection_id,
+                .source_connection_id = options.local_connection_id,
+                .token = options.address_validation_token,
+                .packet_number = options.client_initial_packet_number,
+                .crypto_data = client_hello.items,
+                .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+                .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+            },
+            keys.packet,
+            .{
+                .version = options.version.wireValue(),
+                .destination_connection_id = initial_destination_connection_id,
+                .source_connection_id = options.local_connection_id,
+                .packet_number = 0,
+                .packet_number_len = early_data.packet_number_len,
+                .frames = early_data.frames,
+            },
+        );
+        early_data.cache.consumeEarlyData(early_data.lease) catch unreachable;
+    } else {
+        try quic.initial_exchange.sendInitialCrypto(endpoint, peer, initial_secrets.client, .{
+            .version = options.version.wireValue(),
+            .destination_connection_id = initial_destination_connection_id,
+            .source_connection_id = options.local_connection_id,
+            .token = options.address_validation_token,
+            .packet_number = options.client_initial_packet_number,
+            .crypto_data = client_hello.items,
+            .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+            .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+        });
+    }
 
     var server_datagram = try endpoint.receiveBytes();
     defer server_datagram.deinit(endpoint.allocator);
@@ -304,7 +377,13 @@ fn connectAttempt(
             .version_negotiation_processed = version_negotiation_processed,
         }, server_datagram.bytes)) orelse return error.InvalidHandshakeFlight;
         defer negotiated.deinit(endpoint.allocator);
-        return connectAttempt(endpoint, peer, negotiated.clientOptions(options), true);
+        var next = negotiated.clientOptions(options);
+        // 0-RTT keys are version-specific and the lease was consumed once its
+        // first packet left the socket. Continue with ordinary PSK resumption
+        // rather than replaying early data under the negotiated version.
+        next.early_data = null;
+        next.resumption_session = resumption_session;
+        return connectAttempt(endpoint, peer, next, true);
     }
 
     const server_initial_info = try quic.protection.peekProtectedLongPacketInfo(server_datagram.bytes);
@@ -320,10 +399,10 @@ fn connectAttempt(
     );
     defer server_initial.deinit(endpoint.allocator);
     const parsed_server = try quic.tls_client_hello.parseServerHello(server_initial.crypto_data);
-    const offered_psk = options.resumption_session != null;
+    const offered_psk = resumption_session != null;
     if (parsed_server.selected_psk and !offered_psk) return error.InvalidServerHello;
     const selected_psk: ?[32]u8 = if (parsed_server.selected_psk)
-        options.resumption_session.?.psk
+        resumption_session.?.psk
     else
         null;
     const shared = try quic.tls_client_hello.x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
@@ -368,6 +447,16 @@ fn connectAttempt(
         options.available_versions,
         version_negotiation_processed,
     );
+    const early_data_status = try quic.zero_rtt.handshake.validateClientAcceptance(
+        offer_early_data,
+        parsed_server.selected_psk,
+        encrypted_extensions.early_data_accepted,
+        if (options.early_data) |early_data|
+            early_data.lease.session.transport_parameters
+        else
+            quic.resumption.Snapshot.fromTransportParameters(.{}),
+        peer_transport_parameters,
+    );
     const server_finished = try quic.tls_client_hello.parseFinished(server_flight.finished);
     const server_finished_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions });
     try quic.tls_client_hello.verifyFinished(handshake.server_handshake_traffic_secret, server_finished_hash, server_finished);
@@ -396,7 +485,7 @@ fn connectAttempt(
             application.server_application_traffic_secret,
         );
     }
-    return try establishedConnection(
+    var established = try establishedConnection(
         endpoint,
         server_initial.from,
         application.server_quic,
@@ -409,7 +498,16 @@ fn connectAttempt(
         peer_transport_parameters,
         encrypted_extensions.alpn,
         parsed_server.selected_psk,
+        early_data_status,
     );
+    errdefer established.deinit();
+    if (options.early_data) |early_data| {
+        try established.connection.importSentEarlyData(
+            0,
+            early_data.frames,
+        );
+    }
+    return established;
 }
 
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
@@ -451,6 +549,15 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     const server_random = try random32(endpoint.io, options.random);
     const shared = try quic.tls_client_hello.x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
     var selected_psk: ?[32]u8 = null;
+    var early_data_accepted = false;
+    var early_data_keys: ?quic.zero_rtt.handshake.ClientKeys = null;
+    const client_offered_early_data =
+        try quic.resumption.tls_psk.clientOfferedEarlyData(
+            client_initial.crypto_data,
+        );
+    if (client_offered_early_data and parsed_client.psk_offer == null) {
+        return error.UnexpectedEarlyData;
+    }
     if (parsed_client.psk_offer) |offer| {
         if (options.psk) |configured_psk| {
             if (std.mem.eql(u8, offer.identity, configured_psk.identity)) {
@@ -468,8 +575,53 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                     .tolerance_ms = configured_psk.age_tolerance_ms,
                 });
                 selected_psk = configured_psk.secret;
+                const early_data_policy = options.early_data;
+                if (client_offered_early_data and
+                    early_data_policy != null and
+                    early_data_policy.?.accept)
+                {
+                    const replay = early_data_policy.?;
+                    const lifetime_ms =
+                        @as(u64, configured_psk.lifetime_seconds) *
+                        std.time.ms_per_s;
+                    const expires_at_ms = std.math.add(
+                        u64,
+                        configured_psk.issued_at_ms,
+                        lifetime_ms,
+                    ) catch return error.ExpiredPsk;
+                    try replay.replay_filter.checkAndMark(
+                        replay.replay_key,
+                        configured_psk.now_ms,
+                        expires_at_ms,
+                    );
+                    early_data_keys =
+                        try quic.zero_rtt.handshake.clientKeysForVersion(
+                            options.version.wireValue(),
+                            configured_psk.secret,
+                            client_initial.crypto_data,
+                        );
+                    early_data_accepted = true;
+                }
             }
         }
+    }
+    var pending_early_data: ?quic.zero_rtt.Packet = null;
+    defer if (pending_early_data) |*early_data| {
+        early_data.deinit(endpoint.allocator);
+    };
+    if (early_data_accepted) {
+        pending_early_data = try openClientEarlyData(
+            endpoint,
+            client_initial.from,
+            client_initial.coalesced_tail,
+            early_data_keys.?.packet,
+            0,
+            options.initial_one_rtt_config.max_frames_per_packet,
+            client_initial.packet.destination_connection_id,
+            client_initial.packet.source_connection_id,
+        );
+    } else if (client_initial.coalesced_tail.len != 0) {
+        try validateRejectedEarlyDataTail(client_initial.coalesced_tail);
     }
 
     var server_hello: std.ArrayList(u8) = .empty;
@@ -508,7 +660,13 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
 
     var encrypted_extensions: std.ArrayList(u8) = .empty;
     defer encrypted_extensions.deinit(endpoint.allocator);
-    try quic.tls_client_hello.writeEncryptedExtensions(&encrypted_extensions, endpoint.allocator, alpn, transport_parameters);
+    try quic.tls_client_hello.writeEncryptedExtensionsWithEarlyData(
+        &encrypted_extensions,
+        endpoint.allocator,
+        alpn,
+        transport_parameters,
+        early_data_accepted,
+    );
     const server_finished_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items });
     const server_verify = quic.tls_client_hello.computeFinishedVerifyData(handshake.server_handshake_traffic_secret, server_finished_hash);
     var server_finished: std.ArrayList(u8) = .empty;
@@ -558,7 +716,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             application.server_application_traffic_secret,
         );
     }
-    const established = try establishedConnection(
+    var established = try establishedConnection(
         endpoint,
         client_initial.from,
         application.client_quic,
@@ -571,7 +729,15 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         peer_transport_parameters,
         alpn,
         selected_psk != null,
+        if (early_data_accepted) .accepted else if (client_offered_early_data) .rejected else .not_offered,
     );
+    errdefer established.deinit();
+    if (pending_early_data) |*early_data| {
+        try established.connection.applyEarlyDataFrames(
+            early_data.packet.packet_number,
+            early_data.frames,
+        );
+    }
     return established;
 }
 
@@ -622,10 +788,12 @@ const ReceivedClientInitial = struct {
     packet: quic.protection.OpenedInitialPacket,
     crypto_data: []u8,
     initial_secrets: quic.protection.InitialSecrets,
+    coalesced_tail: []u8,
 
     fn deinit(self: *ReceivedClientInitial, allocator: std.mem.Allocator) void {
         self.packet.deinit(allocator);
         allocator.free(self.crypto_data);
+        allocator.free(self.coalesced_tail);
         self.* = undefined;
     }
 };
@@ -655,8 +823,22 @@ fn receiveClientInitial(
 
     if (header.version != version.wireValue()) return error.InvalidInitialPacket;
     const initial_secrets = try quic.protection.deriveInitialSecretsForVersion(version.wireValue(), header.destination_connection_id);
-    var packet = try quic.protection.openInitialPacket(endpoint.allocator, initial_secrets.client, datagram.bytes, expected_packet_number);
+    const initial_info = try quic.protection.peekProtectedLongPacketInfo(
+        datagram.bytes,
+    );
+    if (initial_info.packet_type != .initial) return error.InvalidInitialPacket;
+    var packet = try quic.protection.openInitialPacket(
+        endpoint.allocator,
+        initial_secrets.client,
+        datagram.bytes[0..initial_info.len],
+        expected_packet_number,
+    );
     errdefer packet.deinit(endpoint.allocator);
+    const coalesced_tail = try endpoint.allocator.dupe(
+        u8,
+        datagram.bytes[initial_info.len..],
+    );
+    errdefer endpoint.allocator.free(coalesced_tail);
 
     var reassembler = quic.crypto_stream.Reassembler.init(endpoint.allocator, max_crypto_buffer);
     defer reassembler.deinit();
@@ -680,6 +862,7 @@ fn receiveClientInitial(
         .packet = packet,
         .crypto_data = crypto_data,
         .initial_secrets = initial_secrets,
+        .coalesced_tail = coalesced_tail,
     };
 }
 
@@ -707,6 +890,55 @@ fn receiveServerHandshakeCrypto(
     );
 }
 
+fn openClientEarlyData(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    coalesced_tail: []const u8,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_frames: usize,
+    expected_destination_connection_id: []const u8,
+    expected_source_connection_id: []const u8,
+) Error!quic.zero_rtt.Packet {
+    if (coalesced_tail.len == 0) return error.InvalidHandshakeFlight;
+    const info = try quic.protection.peekProtectedLongPacketInfo(coalesced_tail);
+    if (info.packet_type != .zero_rtt or info.len != coalesced_tail.len) {
+        return error.InvalidHandshakeFlight;
+    }
+    var packet = try quic.zero_rtt.openBytes(
+        endpoint,
+        from,
+        coalesced_tail,
+        keys,
+        expected_packet_number,
+        max_frames,
+    );
+    errdefer packet.deinit(endpoint.allocator);
+    if (!std.mem.eql(
+        u8,
+        packet.packet.destination_connection_id,
+        expected_destination_connection_id,
+    ) or
+        !std.mem.eql(
+            u8,
+            packet.packet.source_connection_id,
+            expected_source_connection_id,
+        ))
+    {
+        return error.InvalidInitialPacket;
+    }
+    return packet;
+}
+
+fn validateRejectedEarlyDataTail(coalesced_tail: []const u8) Error!void {
+    const info = try quic.protection.peekProtectedLongPacketInfo(coalesced_tail);
+    if (info.packet_type != .zero_rtt or info.len != coalesced_tail.len) {
+        return error.InvalidHandshakeFlight;
+    }
+    // RFC 9001 permits a server to reject 0-RTT while continuing PSK
+    // resumption. The packet is deliberately left undecrypted and discarded.
+}
+
 fn establishedConnection(
     endpoint: *quic.runtime.Endpoint,
     peer: net.IpAddress,
@@ -720,6 +952,7 @@ fn establishedConnection(
     peer_transport_parameters: quic.TransportParameters,
     alpn: []const u8,
     resumed: bool,
+    early_data_status: quic.zero_rtt.handshake.Status,
 ) Error!EstablishedConnection {
     const local_owned = try endpoint.allocator.dupe(u8, local_connection_id);
     errdefer endpoint.allocator.free(local_owned);
@@ -744,6 +977,7 @@ fn establishedConnection(
         .peer_connection_id = peer_owned,
         .alpn = alpn_owned,
         .resumed = resumed,
+        .early_data_status = early_data_status,
     };
 }
 

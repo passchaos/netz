@@ -9,6 +9,10 @@ const quic = @import("../mod.zig");
 
 const net = std.Io.net;
 
+pub const handshake = @import("handshake.zig");
+pub const replay_filter = @import("replay_filter.zig");
+pub const ReplayFilter = replay_filter.Filter;
+
 pub const Error = quic.runtime.Error || quic.protection.Error || quic.Error || error{
     MissingFrame,
 };
@@ -193,4 +197,5 @@ fn parseFrames(
 
 test {
     _ = @import("tests.zig");
+    _ = @import("handshake_tests.zig");
 }

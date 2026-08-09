@@ -1987,6 +1987,21 @@ pub const Connection = struct {
         return null;
     }
 
+    /// Copy the currently assembled receive bytes for diagnostics and
+    /// handshake-integrated early-data consumers. The returned slice is owned
+    /// by the caller; consuming flow-control credit remains explicit.
+    pub fn copyReceivedStream(
+        self: Connection,
+        allocator: std.mem.Allocator,
+        stream_id: u64,
+    ) Error!?[]u8 {
+        for (self.stream_recv_flows.items) |entry| {
+            if (entry.stream_id != stream_id) continue;
+            return try allocator.dupe(u8, entry.recv_state.available());
+        }
+        return null;
+    }
+
     pub fn streamStopped(self: Connection, stream_id: u64) ?StopSendingInfo {
         for (self.stream_send_flows.items) |entry| {
             if (entry.stream_id == stream_id) return entry.stopped;
@@ -2506,6 +2521,113 @@ pub const Connection = struct {
         var datagram = try self.endpoint.receiveBytes();
         defer datagram.deinit(self.endpoint.allocator);
         return try self.processReceivedBytesAt(datagram.from, datagram.bytes, datagram.ecn, now_ns);
+    }
+
+    /// Import authenticated 0-RTT frames into the shared application-data
+    /// packet-number space after the TLS handshake commits early-data
+    /// acceptance. The caller retains ownership of frame payloads.
+    pub fn applyEarlyDataFrames(
+        self: *Connection,
+        packet_number: u64,
+        frames: []const quic.Frame,
+    ) Error!void {
+        for (frames) |frame| {
+            try quic.validateFrameForPacketType(frame, .zero_rtt);
+        }
+        try self.applyReceivedFrames(
+            packet_number,
+            frames,
+            null,
+            .not_ect,
+        );
+    }
+
+    /// Import a successfully transmitted 0-RTT packet into the shared
+    /// application-data send state. This preserves packet-number, flow-control,
+    /// stream-offset, ACK validation, and loss-recovery continuity when the
+    /// connection later installs 1-RTT keys.
+    pub fn importSentEarlyData(
+        self: *Connection,
+        packet_number: u64,
+        frames: []const quic.Frame,
+    ) Error!void {
+        if (packet_number != self.next_packet_number) {
+            return error.InvalidPacketNumber;
+        }
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.endpoint.allocator);
+        var stream_bytes: u64 = 0;
+        for (frames) |frame| {
+            try quic.validateFrameForPacketType(frame, .zero_rtt);
+            try frame.write(&payload, self.endpoint.allocator);
+            if (frame != .stream) continue;
+            try self.validateStreamFrameForSend(frame.stream);
+            stream_bytes = std.math.add(
+                u64,
+                stream_bytes,
+                frame.stream.data.len,
+            ) catch return error.InvalidFrameLength;
+            _ = try self.sendStreamEntry(frame.stream.stream_id);
+        }
+        if (frames.len == 0) return error.MissingFrame;
+
+        try self.send_flow.reserve(stream_bytes);
+        var connection_reserved = true;
+        errdefer {
+            if (connection_reserved) self.send_flow.used -|= stream_bytes;
+        }
+
+        var reserved_streams: std.ArrayList(ReservedStreamCredit) = .empty;
+        defer reserved_streams.deinit(self.endpoint.allocator);
+        errdefer for (reserved_streams.items) |reserved| {
+            const entry = self.findSendStreamEntry(reserved.stream_id) orelse
+                continue;
+            entry.flow.used -|= reserved.bytes;
+        };
+        for (frames) |frame| {
+            if (frame != .stream or frame.stream.data.len == 0) continue;
+            try reserved_streams.append(self.endpoint.allocator, .{
+                .stream_id = frame.stream.stream_id,
+                .bytes = 0,
+            });
+            const entry = self.findSendStreamEntry(
+                frame.stream.stream_id,
+            ) orelse unreachable;
+            try entry.flow.reserve(frame.stream.data.len);
+            reserved_streams.items[reserved_streams.items.len - 1].bytes =
+                frame.stream.data.len;
+        }
+
+        const is_ack_eliciting = ackEliciting(frames);
+        const is_in_flight = packetInFlight(frames);
+        if (is_ack_eliciting) {
+            try self.recovery.trackSent(packet_number, payload.items);
+        }
+        errdefer {
+            if (is_ack_eliciting) {
+                _ = self.recovery.forgetPacketNumber(packet_number);
+            }
+        }
+        try self.sent.sentInFlightAt(
+            packet_number,
+            is_ack_eliciting,
+            is_in_flight,
+            payload.items.len,
+            .not_ect,
+            null,
+        );
+        errdefer _ = self.sent.forget(packet_number);
+        if (is_in_flight) {
+            try self.congestion.reserve(payload.items.len);
+        }
+        errdefer {
+            if (is_in_flight) self.congestion.discard(payload.items.len);
+        }
+
+        self.noteSentStreams(frames);
+        self.next_packet_number = packet_number + 1;
+        connection_reserved = false;
+        reserved_streams.clearRetainingCapacity();
     }
 
     /// Receive and process every 1-RTT packet represented by one kernel
