@@ -2,6 +2,7 @@ const std = @import("std");
 const quic = @import("../mod.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
+const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 
 test "QUIC integrated mutual TLS proves both Ed25519 identities" {
     const result = try runMutualTls(
@@ -31,6 +32,95 @@ test "QUIC integrated mutual TLS requires a client certificate" {
         @errorName(result.client_err orelse return error.TestUnexpectedResult),
     );
     try std.testing.expect(result.server_err != null);
+}
+
+test "QUIC integrated mutual TLS proves both P-384 identities" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const server_key = try EcdsaP384Sha384.KeyPair.generateDeterministic(
+        [_]u8{0x31} ** EcdsaP384Sha384.KeyPair.seed_length,
+    );
+    const client_key = try EcdsaP384Sha384.KeyPair.generateDeterministic(
+        [_]u8{0x32} ** EcdsaP384Sha384.KeyPair.seed_length,
+    );
+    const server_public = server_key.public_key.toUncompressedSec1();
+    const client_public = client_key.public_key.toUncompressedSec1();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        server_key: EcdsaP384Sha384.KeyPair,
+        server_public: *const [97]u8,
+        client_public: [97]u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = quic.handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .random = [_]u8{0x33} ** 32,
+                .x25519_secret_key = [_]u8{0x34} ** 32,
+                .identity = .{
+                    .certificate_chain = &.{shared.server_public},
+                    .signer = .{ .ecdsa_p384_sha384 = .{
+                        .key_pair = shared.server_key,
+                    } },
+                },
+                .client_auth = .{ .verifier = .{
+                    .pinned_ecdsa_p384_public_key = shared.client_public,
+                } },
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            established.deinit();
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .server_key = server_key,
+        .server_public = &server_public,
+        .client_public = client_public,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try quic.handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = "p384mtls",
+            .local_connection_id = "client",
+            .random = [_]u8{0x35} ** 32,
+            .x25519_secret_key = [_]u8{0x36} ** 32,
+            .server_auth = .{
+                .pinned_ecdsa_p384_public_key = server_public,
+            },
+            .client_identity = .{
+                .certificate_chain = &.{&client_public},
+                .signer = .{ .ecdsa_p384_sha384 = .{
+                    .key_pair = client_key,
+                } },
+            },
+        },
+    );
+    established.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 const Result = struct {

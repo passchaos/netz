@@ -158,7 +158,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   associated-data binding, explicit key IDs, current+three-history key
   rotation, tamper/expiry enforcement, and a native seal/open benchmark,
   Vail-backed non-PSK TLS 1.3 server authentication with Certificate and
-  Ed25519/ECDSA-P256 CertificateVerify signing and verification,
+  Ed25519/ECDSA-P256/ECDSA-P384 CertificateVerify signing and verification,
   RSA-PSS/RSAE SHA-256 X.509 CertificateVerify verification, pinned raw-key
   verification or an application X.509 trust-policy callback, transcript/signature tamper
   rejection, and optional mutual TLS with CertificateRequest plus client

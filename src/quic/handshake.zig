@@ -722,6 +722,7 @@ fn connectAttempt(
         const signer_supported = switch (identity.signer.scheme()) {
             quic.tls.auth.signature_scheme_ed25519 => request.supports_ed25519,
             quic.tls.auth.signature_scheme_ecdsa_secp256r1_sha256 => request.supports_ecdsa_p256_sha256,
+            quic.tls.auth.signature_scheme_ecdsa_secp384r1_sha384 => request.supports_ecdsa_p384_sha384,
             else => false,
         };
         if (!signer_supported) return error.UnsupportedSignatureScheme;
@@ -949,6 +950,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             const supported = switch (identity.signer.scheme()) {
                 quic.tls.auth.signature_scheme_ed25519 => parsed_client.supports_ed25519,
                 quic.tls.auth.signature_scheme_ecdsa_secp256r1_sha256 => parsed_client.supports_ecdsa_p256_sha256,
+                quic.tls.auth.signature_scheme_ecdsa_secp384r1_sha384 => parsed_client.supports_ecdsa_p384_sha384,
                 else => false,
             };
             if (!supported) return error.UnsupportedSignatureScheme;

@@ -82,6 +82,7 @@ pub const ParsedClientHello = struct {
     cipher_suites: []const u8,
     supports_ed25519: bool = false,
     supports_ecdsa_p256_sha256: bool = false,
+    supports_ecdsa_p384_sha384: bool = false,
     supports_rsa_pss_rsae_sha256: bool = false,
     supports_x25519: bool = false,
     supports_secp256r1: bool = false,
@@ -339,6 +340,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var supports_secp256r1 = false;
     var supports_ed25519 = false;
     var supports_ecdsa_p256_sha256 = false;
+    var supports_ecdsa_p384_sha384 = false;
     var supports_rsa_pss_rsae_sha256 = false;
     var alpn_list: std.ArrayList([]const u8) = .empty;
     errdefer alpn_list.deinit(allocator);
@@ -372,6 +374,11 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                     payload,
                     quic.tls.auth
                         .signature_scheme_ecdsa_secp256r1_sha256,
+                );
+                supports_ecdsa_p384_sha384 = try signatureAlgorithmsContain(
+                    payload,
+                    quic.tls.auth
+                        .signature_scheme_ecdsa_secp384r1_sha384,
                 );
                 supports_rsa_pss_rsae_sha256 =
                     try signatureAlgorithmsContain(
@@ -417,6 +424,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .cipher_suites = cipher_suites,
         .supports_ed25519 = supports_ed25519,
         .supports_ecdsa_p256_sha256 = supports_ecdsa_p256_sha256,
+        .supports_ecdsa_p384_sha384 = supports_ecdsa_p384_sha384,
         .supports_rsa_pss_rsae_sha256 = supports_rsa_pss_rsae_sha256,
         .supports_x25519 = supports_x25519,
         .supports_secp256r1 = supports_secp256r1,
@@ -934,11 +942,12 @@ fn writeSupportedGroupsExtension(
 fn writeSignatureAlgorithmsExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
     // These are exactly the schemes Vail can verify for peer
     // CertificateVerify. Built-in signing remains Ed25519/ECDSA-P256.
-    var payload: [8]u8 = undefined;
-    std.mem.writeInt(u16, payload[0..2], 6, .big);
+    var payload: [10]u8 = undefined;
+    std.mem.writeInt(u16, payload[0..2], 8, .big);
     std.mem.writeInt(u16, payload[2..4], 0x0403, .big);
-    std.mem.writeInt(u16, payload[4..6], 0x0804, .big);
-    std.mem.writeInt(u16, payload[6..8], 0x0807, .big);
+    std.mem.writeInt(u16, payload[4..6], 0x0503, .big);
+    std.mem.writeInt(u16, payload[6..8], 0x0804, .big);
+    std.mem.writeInt(u16, payload[8..10], 0x0807, .big);
     try writeExtension(list, allocator, ext_signature_algorithms, &payload);
 }
 
