@@ -617,6 +617,10 @@ test "public modules are reachable" {
         netz.quic.resumption.ticket,
         "ServerStore",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.resumption.ticket,
+        "Keyring",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.zero_rtt, "handshake"));
     try std.testing.expect(@hasDecl(netz.quic.zero_rtt, "ReplayFilter"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "EarlyDataSender"));

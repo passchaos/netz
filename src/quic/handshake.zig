@@ -612,9 +612,9 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     if (effective_psk == null) {
         if (options.auto_resumption) |automatic| {
             if (parsed_client.psk_offer) |offer| {
-                automatic_psk_lease = try automatic.store.lookup(
+                automatic_psk_lease = try quic.resumption.ticket.handshake.lookupServer(
+                    automatic,
                     offer.identity,
-                    automatic.now_ms,
                 );
                 if (automatic_psk_lease) |*lease| {
                     effective_psk = .{

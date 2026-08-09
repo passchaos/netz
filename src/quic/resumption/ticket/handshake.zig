@@ -3,11 +3,13 @@
 const std = @import("std");
 const quic = @import("../../mod.zig");
 const codec = @import("codec.zig");
+const keyring = @import("keyring.zig");
 const store = @import("store.zig");
 
 pub const Error = codec.Error || store.Error || quic.resumption.cache.Error ||
-    quic.one_rtt.Error || std.Io.RandomSecureError || error{
+    keyring.Error || quic.one_rtt.Error || std.Io.RandomSecureError || error{
     InvalidNewSessionTicket,
+    MissingTicketBackend,
 };
 
 pub const ClientConfig = struct {
@@ -17,13 +19,21 @@ pub const ClientConfig = struct {
 };
 
 pub const ServerConfig = struct {
-    store: *store.Store,
+    store: ?*store.Store = null,
+    stateless: ?StatelessIssue = null,
     now_ms: u64,
     lifetime_seconds: u32 = 24 * 60 * 60,
     allow_early_data: bool = true,
     nonce: ?[16]u8 = null,
     identity: ?[32]u8 = null,
     age_add: ?u32 = null,
+};
+
+pub const StatelessIssue = struct {
+    keyring: *const keyring.Keyring,
+    server_id: []const u8,
+    alpn: []const u8,
+    nonce: ?[keyring.nonce_len]u8 = null,
 };
 
 pub const ClientAutoResume = struct {
@@ -33,14 +43,23 @@ pub const ClientAutoResume = struct {
 };
 
 pub const ServerAutoResume = struct {
-    store: *store.Store,
+    allocator: std.mem.Allocator,
+    store: ?*store.Store = null,
+    stateless: ?StatelessResume = null,
     now_ms: u64,
     age_tolerance_ms: u32 = 10_000,
 };
 
+pub const StatelessResume = struct {
+    keyring: *const keyring.Keyring,
+    server_id: []const u8,
+    alpn: []const u8,
+};
+
 pub const Issued = struct {
     nonce: [16]u8,
-    identity: [32]u8,
+    identity: [keyring.sealed_len]u8,
+    identity_len: usize,
     age_add: u32,
     psk: [32]u8,
 };
@@ -57,11 +76,6 @@ pub fn issue(
         try std.Io.randomSecure(io, &value);
         break :blk value;
     };
-    var identity = config.identity orelse blk: {
-        var value: [32]u8 = undefined;
-        try std.Io.randomSecure(io, &value);
-        break :blk value;
-    };
     var age_add = config.age_add orelse blk: {
         var bytes: [4]u8 = undefined;
         try std.Io.randomSecure(io, &bytes);
@@ -72,6 +86,35 @@ pub fn issue(
     if (age_add == 0 and config.age_add == null) age_add = 1;
 
     const psk = codec.derivePsk(resumption_master_secret, &nonce);
+    var identity_storage: [keyring.sealed_len]u8 = undefined;
+    const identity: []const u8 = if (config.stateless) |stateless| blk: {
+        const seal_nonce = stateless.nonce orelse random: {
+            var value: [keyring.nonce_len]u8 = undefined;
+            try std.Io.randomSecure(io, &value);
+            break :random value;
+        };
+        const sealed = try stateless.keyring.seal(
+            seal_nonce,
+            stateless.server_id,
+            stateless.alpn,
+            .{
+                .secret = psk,
+                .age_add = age_add,
+                .issued_at_ms = config.now_ms,
+                .lifetime_seconds = config.lifetime_seconds,
+            },
+        );
+        @memcpy(&identity_storage, &sealed);
+        break :blk &identity_storage;
+    } else blk: {
+        const stateful = config.identity orelse random: {
+            var value: [32]u8 = undefined;
+            try std.Io.randomSecure(io, &value);
+            break :random value;
+        };
+        @memcpy(identity_storage[0..stateful.len], &stateful);
+        break :blk identity_storage[0..stateful.len];
+    };
 
     var message: std.ArrayList(u8) = .empty;
     defer message.deinit(connection.endpoint.allocator);
@@ -79,23 +122,25 @@ pub fn issue(
         .lifetime_seconds = config.lifetime_seconds,
         .age_add = age_add,
         .nonce = &nonce,
-        .ticket = &identity,
+        .ticket = identity,
         .allow_early_data = config.allow_early_data,
     });
-    try config.store.issue(.{
-        .identity = &identity,
-        .secret = psk,
-        .age_add = age_add,
-        .issued_at_ms = config.now_ms,
-        .lifetime_seconds = config.lifetime_seconds,
-    });
-    // Store before the socket write so a successfully delivered identity is
-    // always selectable. A send failure may leave one unreachable entry, which
-    // is bounded and expires naturally.
+    if (config.store) |server_store| {
+        try server_store.issue(.{
+            .identity = identity,
+            .secret = psk,
+            .age_add = age_add,
+            .issued_at_ms = config.now_ms,
+            .lifetime_seconds = config.lifetime_seconds,
+        });
+    } else if (config.stateless == null) {
+        return error.MissingTicketBackend;
+    }
     try connection.sendPostHandshakeCrypto(crypto_offset, message.items);
     return .{
         .nonce = nonce,
-        .identity = identity,
+        .identity = identity_storage,
+        .identity_len = identity.len,
         .age_add = age_add,
         .psk = psk,
     };
@@ -156,4 +201,38 @@ pub fn acquireFirst(
         }
     }
     return null;
+}
+
+pub fn lookupServer(
+    config: ServerAutoResume,
+    identity: []const u8,
+) Error!?store.Lease {
+    if (config.stateless) |stateless| {
+        const opened = stateless.keyring.open(
+            identity,
+            stateless.server_id,
+            stateless.alpn,
+            config.now_ms,
+        ) catch |err| switch (err) {
+            error.InvalidTicket,
+            error.ExpiredTicket,
+            error.UnknownKey,
+            error.AuthenticationFailed,
+            => return null,
+            else => return err,
+        };
+        const identity_copy = try config.allocator.dupe(u8, identity);
+        return .{
+            .allocator = config.allocator,
+            .identity = identity_copy,
+            .secret = opened.secret,
+            .age_add = opened.age_add,
+            .issued_at_ms = opened.issued_at_ms,
+            .lifetime_seconds = opened.lifetime_seconds,
+        };
+    }
+    if (config.store) |server_store| {
+        return try server_store.lookup(identity, config.now_ms);
+    }
+    return error.MissingTicketBackend;
 }

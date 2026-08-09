@@ -132,6 +132,12 @@ pub fn build(b: *std.Build) void {
             .run_step = "bench-quic-stream-window",
             .description = "Benchmark bounded QUIC receive stream compaction",
         },
+        .{
+            .exe_name = "netz-bench-quic-ticket-keyring",
+            .path = "examples/bench_quic_ticket_keyring.zig",
+            .run_step = "bench-quic-ticket-keyring",
+            .description = "Benchmark stateless QUIC session ticket seal/open",
+        },
     };
     const linux_example_specs = [_]struct {
         exe_name: []const u8,

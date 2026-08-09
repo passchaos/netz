@@ -2,6 +2,95 @@ const std = @import("std");
 const ticket = @import("mod.zig");
 const quic = @import("../../mod.zig");
 
+test "stateless ticket keyring seals context-bound rotating tickets" {
+    var keyring = try ticket.Keyring.init(.{
+        .id = 1,
+        .secret = [_]u8{0x11} ** ticket.keyring.key_len,
+    });
+    defer keyring.deinit();
+    const opened = ticket.keyring.Opened{
+        .secret = [_]u8{0x42} ** 32,
+        .age_add = 17,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 10,
+    };
+    const identity = try keyring.seal(
+        [_]u8{0x01} ** ticket.keyring.nonce_len,
+        "example:443",
+        "h3",
+        opened,
+    );
+    const decoded = try keyring.open(
+        &identity,
+        "example:443",
+        "h3",
+        1500,
+    );
+    try std.testing.expectEqualSlices(u8, &opened.secret, &decoded.secret);
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        keyring.open(&identity, "other:443", "h3", 1500),
+    );
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        keyring.open(&identity, "example:443", "hq", 1500),
+    );
+
+    try keyring.rotate(.{
+        .id = 2,
+        .secret = [_]u8{0x22} ** ticket.keyring.key_len,
+    });
+    _ = try keyring.open(&identity, "example:443", "h3", 1500);
+    const current = try keyring.seal(
+        [_]u8{0x02} ** ticket.keyring.nonce_len,
+        "example:443",
+        "h3",
+        opened,
+    );
+    try std.testing.expectEqual(@as(u32, 2), keyring.currentId());
+    _ = try keyring.open(&current, "example:443", "h3", 1500);
+
+    var tampered = identity;
+    tampered[tampered.len - 1] ^= 1;
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        keyring.open(&tampered, "example:443", "h3", 1500),
+    );
+    try std.testing.expectError(
+        error.ExpiredTicket,
+        keyring.open(&identity, "example:443", "h3", 11_001),
+    );
+}
+
+test "stateless ticket keyring bounds retained rotation history" {
+    var keyring = try ticket.Keyring.init(.{
+        .id = 1,
+        .secret = [_]u8{1} ** ticket.keyring.key_len,
+    });
+    defer keyring.deinit();
+    const identity = try keyring.seal(
+        [_]u8{0} ** ticket.keyring.nonce_len,
+        "example:443",
+        "h3",
+        .{
+            .secret = [_]u8{9} ** 32,
+            .age_add = 0,
+            .issued_at_ms = 1000,
+            .lifetime_seconds = 100,
+        },
+    );
+    inline for (2..ticket.keyring.max_keys + 2) |id| {
+        try keyring.rotate(.{
+            .id = id,
+            .secret = [_]u8{@intCast(id)} ** ticket.keyring.key_len,
+        });
+    }
+    try std.testing.expectError(
+        error.UnknownKey,
+        keyring.open(&identity, "example:443", "h3", 1500),
+    );
+}
+
 test "NewSessionTicket codec round-trips QUIC early-data permission" {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(std.testing.allocator);
@@ -319,6 +408,7 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
                 .random = [_]u8{0xe5} ** 32,
                 .x25519_secret_key = [_]u8{0xe6} ** 32,
                 .auto_resumption = .{
+                    .allocator = shared.endpoint.allocator,
                     .store = shared.store,
                     .now_ms = 1500,
                 },
@@ -347,6 +437,157 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
             .local_connection_id = "client",
             .random = [_]u8{0xe7} ** 32,
             .x25519_secret_key = [_]u8{0xe8} ** 32,
+            .auto_resumption = .{
+                .cache = &client_cache,
+                .server_id = "localhost:443",
+                .now_ms = 1500,
+            },
+        },
+    );
+    defer second_client.deinit();
+    second_thread.join();
+    if (second_server.err) |err| return err;
+    try std.testing.expect(second_client.resumed);
+    try std.testing.expect(second_server.resumed);
+}
+
+test "integrated handshake resumes stateless tickets across key rotation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    var client_cache = try quic.resumption.Cache.init(allocator, 2);
+    defer client_cache.deinit();
+    var keyring = try ticket.Keyring.init(.{
+        .id = 1,
+        .secret = [_]u8{0x71} ** ticket.keyring.key_len,
+    });
+    defer keyring.deinit();
+
+    const FirstServer = struct {
+        endpoint: *quic.runtime.Endpoint,
+        keyring: *ticket.Keyring,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = quic.handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .random = [_]u8{0x81} ** 32,
+                .x25519_secret_key = [_]u8{0x82} ** 32,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer established.deinit();
+            _ = established.issueSessionTicket(shared.endpoint.io, .{
+                .stateless = .{
+                    .keyring = shared.keyring,
+                    .server_id = "localhost:443",
+                    .alpn = "h3",
+                    .nonce = [_]u8{0x33} ** ticket.keyring.nonce_len,
+                },
+                .now_ms = 1000,
+                .lifetime_seconds = 3600,
+                .nonce = [_]u8{0x44} ** 16,
+                .age_add = 19,
+            }) catch |err| {
+                shared.err = err;
+            };
+        }
+    };
+    var first_server = FirstServer{
+        .endpoint = &server_endpoint,
+        .keyring = &keyring,
+    };
+    const first_thread = try std.Thread.spawn(
+        .{},
+        FirstServer.run,
+        .{&first_server},
+    );
+    var first_client = try quic.handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = "state001",
+            .local_connection_id = "client",
+            .random = [_]u8{0x83} ** 32,
+            .x25519_secret_key = [_]u8{0x84} ** 32,
+        },
+    );
+    try first_client.receiveAndCacheSessionTicket(.{
+        .cache = &client_cache,
+        .server_id = "localhost:443",
+        .now_ms = 1000,
+    });
+    first_thread.join();
+    if (first_server.err) |err| return err;
+    first_client.deinit();
+    try std.testing.expectEqual(@as(usize, 1), client_cache.count());
+
+    try keyring.rotate(.{
+        .id = 2,
+        .secret = [_]u8{0x72} ** ticket.keyring.key_len,
+    });
+
+    const SecondServer = struct {
+        endpoint: *quic.runtime.Endpoint,
+        keyring: *ticket.Keyring,
+        err: ?anyerror = null,
+        resumed: bool = false,
+
+        fn run(shared: *@This()) void {
+            var established = quic.handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .random = [_]u8{0x85} ** 32,
+                .x25519_secret_key = [_]u8{0x86} ** 32,
+                .auto_resumption = .{
+                    .allocator = shared.endpoint.allocator,
+                    .stateless = .{
+                        .keyring = shared.keyring,
+                        .server_id = "localhost:443",
+                        .alpn = "h3",
+                    },
+                    .now_ms = 1500,
+                },
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            shared.resumed = established.resumed;
+            established.deinit();
+        }
+    };
+    var second_server = SecondServer{
+        .endpoint = &server_endpoint,
+        .keyring = &keyring,
+    };
+    const second_thread = try std.Thread.spawn(
+        .{},
+        SecondServer.run,
+        .{&second_server},
+    );
+    var second_client = try quic.handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = "state002",
+            .local_connection_id = "client",
+            .random = [_]u8{0x87} ** 32,
+            .x25519_secret_key = [_]u8{0x88} ** 32,
             .auto_resumption = .{
                 .cache = &client_cache,
                 .server_id = "localhost:443",

@@ -154,6 +154,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   bound resumption PSK derivation, bounded owning server ticket storage,
   client cache insertion, and origin+ALPN automatic ticket selection on both
   sides of the next connection,
+  plus allocation-free AES-256-GCM stateless tickets with origin+ALPN
+  associated-data binding, explicit key IDs, current+three-history key
+  rotation, tamper/expiry enforcement, and a native seal/open benchmark,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,
