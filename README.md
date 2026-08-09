@@ -74,7 +74,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   `finishRequestTrailers`/`finishResponseTrailers`. Preconfigured-protection
   and handshake-backed servers expose
   `receiveRequestEvent`/`readRequestData`, while their clients expose
-  `receiveResponseEvent`/`readResponseData`. Both directions provide
+  per-stream `receiveResponseEvent`/`readResponseData` plus
+  `receiveNextResponseEvent` for one tquic-style poll loop over every
+  outstanding response and reset. Both directions provide
   bounded-window network reads with automatic QPACK head/trailer feedback,
   interleaved-stream and reset identity preservation, Content-Length
   validation, and no full-body aggregation. When UDP_GRO is enabled, protected

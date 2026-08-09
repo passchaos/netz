@@ -124,6 +124,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveNextResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveResponseEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveNextResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "readResponseData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendRequestBody"));
@@ -147,6 +148,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveResponseEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "readResponseData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBody"));
@@ -305,6 +307,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingMessageReader"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingRequestEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequest"));
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
