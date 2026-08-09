@@ -210,6 +210,35 @@ pub fn sendCoalescedInitialZeroRtt(
     try endpoint.sendBytes(to, coalesced.items);
 }
 
+/// Send a potentially fragmented Initial CRYPTO flight followed by one
+/// standalone 0-RTT datagram.
+///
+/// A large post-quantum ClientHello cannot be coalesced with 0-RTT inside a
+/// 1200-byte path-MTU budget. RFC 9000 permits separate UDP datagrams; preserving
+/// packet-number spaces and CRYPTO offsets is more important than coalescing.
+pub fn sendInitialFlightThenZeroRtt(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    initial_keys: quic.protection.PacketProtectionKeys,
+    initial_options: SendInitialFlightOptions,
+    zero_rtt_keys: quic.protection.PacketProtectionKeys,
+    zero_rtt_options: quic.zero_rtt.SendOptions,
+) Error!SentInitialFlight {
+    const sent = try flight.send(
+        endpoint,
+        to,
+        initial_keys,
+        initial_options,
+    );
+    try quic.zero_rtt.sendFrames(
+        endpoint,
+        to,
+        zero_rtt_keys,
+        zero_rtt_options,
+    );
+    return sent;
+}
+
 pub fn receiveInitialCrypto(
     endpoint: *quic.runtime.Endpoint,
     keys: quic.protection.PacketProtectionKeys,

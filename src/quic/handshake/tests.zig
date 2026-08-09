@@ -46,40 +46,27 @@ fn receiveClientInitialForTest(
         datagram.bytes,
     );
     if (initial_info.packet_type != .initial) return error.InvalidInitialPacket;
-    var packet = try quic.protection.openInitialPacket(
-        endpoint.allocator,
-        initial_secrets.client,
+    var flight = try quic.initial_exchange.openInitialCryptoFlight(
+        endpoint,
+        datagram.from,
         datagram.bytes[0..initial_info.len],
-        expected_packet_number,
+        initial_secrets.client,
+        .{
+            .expected_packet_number = expected_packet_number,
+            .max_crypto_buffer = max_crypto_buffer,
+            .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+        },
     );
-    errdefer packet.deinit(endpoint.allocator);
+    errdefer flight.deinit(endpoint.allocator);
     const coalesced_tail = try endpoint.allocator.dupe(
         u8,
         datagram.bytes[initial_info.len..],
     );
     errdefer endpoint.allocator.free(coalesced_tail);
-
-    var reassembler = quic.crypto_stream.Reassembler.init(endpoint.allocator, max_crypto_buffer);
-    defer reassembler.deinit();
-    var pos: usize = 0;
-    var saw_crypto = false;
-    while (pos < packet.payload.len) {
-        var parsed = try quic.parseFrameOwned(endpoint.allocator, packet.payload[pos..]);
-        defer parsed.deinitOwned(endpoint.allocator);
-        try quic.validateFrameForPacketType(parsed.frame, .initial);
-        if (parsed.frame == .crypto) {
-            saw_crypto = true;
-            try reassembler.insert(parsed.frame.crypto);
-        }
-        pos += parsed.consumed;
-    }
-    if (!saw_crypto) return error.MissingCryptoFrame;
-    const crypto_data = try reassembler.readAllAvailable(endpoint.allocator);
-    errdefer endpoint.allocator.free(crypto_data);
     return .{
         .from = datagram.from,
-        .packet = packet,
-        .crypto_data = crypto_data,
+        .packet = flight.first_packet,
+        .crypto_data = flight.crypto_data,
         .initial_secrets = initial_secrets,
         .coalesced_tail = coalesced_tail,
     };
@@ -628,6 +615,7 @@ test "QUIC integrated client restarts after Version Negotiation" {
                 .local_connection_id = cid,
                 .random = [_]u8{0x82} ** 32,
                 .x25519_secret_key = [_]u8{0x84} ** 32,
+                .key_exchange_groups = &.{.x25519},
             });
             defer established.deinit();
             try std.testing.expectEqualStrings("h3", established.alpn);
@@ -652,6 +640,7 @@ test "QUIC integrated client restarts after Version Negotiation" {
         .server_name = "localhost",
         .random = [_]u8{0x81} ** 32,
         .x25519_secret_key = [_]u8{0x83} ** 32,
+        .key_exchange_groups = &.{.x25519},
     });
     defer established.deinit();
     try std.testing.expectEqualStrings("h3", established.alpn);
@@ -799,6 +788,7 @@ test "QUIC integrated client rejects mismatched Version Information after VN" {
         .server_name = "localhost",
         .random = client_random,
         .x25519_secret_key = client_secret_key,
+        .key_exchange_groups = &.{.x25519},
     }));
 
     thread.join();

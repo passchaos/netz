@@ -184,8 +184,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   netz keeps only ticket issuance/storage policy and transport integration,
   and Vail-owned X25519/secp256r1/secp384r1 ECDHE plus registered
   X25519MLKEM768 hybrid post-quantum exchange and SHA-256/SHA-384 transcript
-  hashing, with ordered multi-key-share negotiation while netz supplies
-  randomness and retains QUIC packet/transport orchestration,
+  hashing, with X25519MLKEM768 preferred by default, ordered classical fallback,
+  and split multi-Initial plus standalone 0-RTT flights under a 1200-byte path
+  budget while netz supplies randomness and retains QUIC packet/transport
+  orchestration,
   plus Vail domain-separated HMAC and constant-time comparison primitives for
   Retry/NEW_TOKEN authentication and stateless reset derivation while netz
   retains their QUIC wire formats, lifetimes, replay policy, and key rotation,

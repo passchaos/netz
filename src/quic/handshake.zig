@@ -58,7 +58,12 @@ pub const ClientOptions = struct {
             .x25519_mlkem768.mlkem_seed_len
     ]u8 = null,
     key_exchange_groups: []const quic.tls_client_hello.NamedGroup =
-        &.{ .x25519, .secp256r1, .secp384r1 },
+        &.{
+            .x25519_mlkem768,
+            .x25519,
+            .secp256r1,
+            .secp384r1,
+        },
     keylog: ?*quic.keylog.Log = null,
     resumption_session: ?*const quic.resumption.Session = null,
     resumption_now_ms: ?u64 = null,
@@ -135,7 +140,12 @@ pub const ServerOptions = struct {
             .x25519_mlkem768.encaps_seed_len
     ]u8 = null,
     key_exchange_groups: []const quic.tls_client_hello.NamedGroup =
-        &.{ .x25519, .secp256r1, .secp384r1 },
+        &.{
+            .x25519_mlkem768,
+            .x25519,
+            .secp256r1,
+            .secp384r1,
+        },
     keylog: ?*quic.keylog.Log = null,
     psk: ?ServerPsk = null,
     auto_resumption: ?quic.resumption.ticket.handshake.ServerAutoResume = null,
@@ -334,17 +344,21 @@ const EarlyDataFlight = struct {
     endpoint: *quic.runtime.Endpoint,
     peer: net.IpAddress,
     initial_keys: quic.protection.PacketProtectionKeys,
-    initial_options: quic.initial_exchange.SendInitialOptions,
+    initial_options: quic.initial_exchange.SendInitialFlightOptions,
     zero_rtt_keys: quic.protection.PacketProtectionKeys,
     zero_rtt_options: quic.zero_rtt.SendOptions,
 
     fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *EarlyDataFlight = @ptrCast(@alignCast(context));
         var initial_options = self.initial_options;
-        initial_options.packet_number = std.math.add(
+        initial_options.initial.packet_number = std.math.add(
             u64,
-            self.initial_options.packet_number,
-            retransmission,
+            self.initial_options.initial.packet_number,
+            std.math.mul(
+                u64,
+                self.initial_options.max_datagrams,
+                retransmission,
+            ) catch return error.InvalidPacketNumber,
         ) catch return error.InvalidPacketNumber;
         var zero_rtt_options = self.zero_rtt_options;
         zero_rtt_options.packet_number = std.math.add(
@@ -352,7 +366,7 @@ const EarlyDataFlight = struct {
             self.zero_rtt_options.packet_number,
             retransmission,
         ) catch return error.InvalidPacketNumber;
-        try quic.initial_exchange.sendCoalescedInitialZeroRtt(
+        _ = try quic.initial_exchange.sendInitialFlightThenZeroRtt(
             self.endpoint,
             self.peer,
             self.initial_keys,
@@ -519,14 +533,17 @@ fn connectAttempt(
             .peer = peer,
             .initial_keys = initial_secrets.client,
             .initial_options = .{
-                .version = options.version.wireValue(),
-                .destination_connection_id = initial_destination_connection_id,
-                .source_connection_id = options.local_connection_id,
-                .token = options.address_validation_token,
-                .packet_number = options.client_initial_packet_number,
-                .crypto_data = client_hello.items,
-                .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
-                .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+                .initial = .{
+                    .version = options.version.wireValue(),
+                    .destination_connection_id = initial_destination_connection_id,
+                    .source_connection_id = options.local_connection_id,
+                    .token = options.address_validation_token,
+                    .packet_number = options.client_initial_packet_number,
+                    .crypto_data = client_hello.items,
+                    .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+                    .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+                },
+                .max_datagram_size = endpoint.limits.max_datagram_size,
             },
             .zero_rtt_keys = keys.packet,
             .zero_rtt_options = .{
@@ -1135,8 +1152,24 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             client_initial.packet.destination_connection_id,
             client_initial.packet.source_connection_id,
         );
+        if (pending_early_data == null) {
+            pending_early_data = try receiveStandaloneClientEarlyData(
+                endpoint,
+                client_initial.from,
+                early_data_keys.?.packet,
+                0,
+                options.initial_one_rtt_config.max_frames_per_packet,
+                client_initial.packet.destination_connection_id,
+                client_initial.packet.source_connection_id,
+            );
+        }
+    } else if (client_offered_early_data) {
+        try discardClientEarlyData(
+            endpoint,
+            client_initial.coalesced_tail,
+        );
     } else if (client_initial.coalesced_tail.len != 0) {
-        try validateRejectedEarlyDataTail(client_initial.coalesced_tail);
+        return error.InvalidHandshakeFlight;
     }
 
     var server_hello: std.ArrayList(u8) = .empty;
@@ -1548,8 +1581,8 @@ fn openClientEarlyData(
     max_frames: usize,
     expected_destination_connection_id: []const u8,
     expected_source_connection_id: []const u8,
-) Error!quic.zero_rtt.Packet {
-    if (coalesced_tail.len == 0) return error.InvalidHandshakeFlight;
+) Error!?quic.zero_rtt.Packet {
+    if (coalesced_tail.len == 0) return null;
     const info = try quic.protection.peekProtectedLongPacketInfo(coalesced_tail);
     if (info.packet_type != .zero_rtt or info.len != coalesced_tail.len) {
         return error.InvalidHandshakeFlight;
@@ -1579,13 +1612,51 @@ fn openClientEarlyData(
     return packet;
 }
 
-fn validateRejectedEarlyDataTail(coalesced_tail: []const u8) Error!void {
-    const info = try quic.protection.peekProtectedLongPacketInfo(coalesced_tail);
-    if (info.packet_type != .zero_rtt or info.len != coalesced_tail.len) {
+fn receiveStandaloneClientEarlyData(
+    endpoint: *quic.runtime.Endpoint,
+    expected_from: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_frames: usize,
+    expected_destination_connection_id: []const u8,
+    expected_source_connection_id: []const u8,
+) Error!quic.zero_rtt.Packet {
+    var datagram = try endpoint.receiveBytes();
+    defer datagram.deinit(endpoint.allocator);
+    if (!datagram.from.eql(&expected_from)) {
         return error.InvalidHandshakeFlight;
     }
-    // RFC 9001 permits a server to reject 0-RTT while continuing PSK
-    // resumption. The packet is deliberately left undecrypted and discarded.
+    return (try openClientEarlyData(
+        endpoint,
+        datagram.from,
+        datagram.bytes,
+        keys,
+        expected_packet_number,
+        max_frames,
+        expected_destination_connection_id,
+        expected_source_connection_id,
+    )) orelse return error.InvalidHandshakeFlight;
+}
+
+fn discardClientEarlyData(
+    endpoint: *quic.runtime.Endpoint,
+    coalesced_tail: []const u8,
+) Error!void {
+    if (coalesced_tail.len != 0) {
+        return validateRejectedEarlyData(coalesced_tail);
+    }
+    var datagram = try endpoint.receiveBytes();
+    defer datagram.deinit(endpoint.allocator);
+    try validateRejectedEarlyData(datagram.bytes);
+}
+
+fn validateRejectedEarlyData(bytes: []const u8) Error!void {
+    const info = try quic.protection.peekProtectedLongPacketInfo(bytes);
+    if (info.packet_type != .zero_rtt or info.len != bytes.len) {
+        return error.InvalidHandshakeFlight;
+    }
+    // RFC 9001 permits rejecting 0-RTT while continuing PSK resumption. The
+    // authenticated-length packet is deliberately left undecrypted.
 }
 
 fn establishedConnection(

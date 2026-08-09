@@ -127,6 +127,10 @@ fn runAcceptedEarlyData(
             .local_connection_id = "client",
             .random = [_]u8{0xb4} ** 32,
             .x25519_secret_key = [_]u8{0xb5} ** 32,
+            .key_exchange_groups = &.{
+                .x25519_mlkem768,
+                .x25519,
+            },
             .cipher_suites = &.{cipher_suite},
             .resumption_now_ms = 1500,
             .resumption_server_id = "localhost:443",
@@ -161,6 +165,9 @@ fn runAcceptedEarlyData(
         shared.early_data orelse return error.TestUnexpectedResult,
     );
     try std.testing.expectEqual(.consumed, lease.state);
+    // X25519MLKEM768 makes ClientHello exceed one 1200-byte Initial. Reaching
+    // this assertion proves the server consumed the following standalone
+    // 0-RTT datagram after cross-datagram Initial CRYPTO reassembly.
     try established.connection.send(&.{.{ .ping = {} }});
     var one_rtt = try sharedEndpointReceive(
         &server_endpoint,
