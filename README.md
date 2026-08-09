@@ -91,7 +91,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   Streaming response readers decode PUSH_PROMISE into owned promised-request
   heads, preserve the push ID, enforce the advertised limit, and account
   dynamic QPACK section feedback instead of discarding promised fields like
-  the current reference runtimes, plus a
+  the current reference runtimes. Protected and handshake runtimes also bind
+  reordered server-initiated push streams to those promises, expose bounded
+  streaming and owned aggregate pushed-response APIs, and can emit
+  PUSH_PROMISE plus the corresponding unidirectional pushed response with
+  shared dynamic QPACK state, plus a
   `std.Io.async` request receive helper for the development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and

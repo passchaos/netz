@@ -15,6 +15,7 @@ pub const Error = wire.Error || error{
     GoAwayIdIncreased,
     MaxPushIdReduced,
     PushIdExceeded,
+    DuplicatePushId,
     ExpectedHeadersFrame,
     UnexpectedFrame,
     MissingMethod,
@@ -632,6 +633,38 @@ pub fn writePushPromiseFrame(
     try quic.varint.encode(&payload, allocator, push_id);
     try payload.appendSlice(allocator, field_section);
     try (Frame{ .frame_type = FrameType.push_promise, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+}
+
+pub fn writePushPromiseDynamic(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    push_id: u64,
+    promised_request: Request,
+    peer_settings: Settings,
+    request_stream_id: u64,
+    encoder: anytype,
+) Error!void {
+    if (promised_request.body.len != 0 or
+        promised_request.trailers.len != 0)
+    {
+        return error.InvalidContentLength;
+    }
+    var fields_buf: [64]Qpack.HeaderField = undefined;
+    const fields = try promised_request.headerFields(&fields_buf);
+    try validateHeaderBlock(fields, .request);
+    try validateFieldSectionSize(
+        fields,
+        peer_settings.max_field_section_size,
+    );
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeFieldSection(
+        &block,
+        request_stream_id,
+        fields,
+    );
+    try writePushPromiseFrame(list, allocator, push_id, block.items);
+    try queueIndexableFields(encoder, fields);
 }
 
 pub fn parsePushPromisePayload(payload: []const u8) Error!PushPromisePayload {

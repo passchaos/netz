@@ -128,6 +128,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveNextResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "readResponseData"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receivePush"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receivePushEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "readPushData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendRequestBody"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "finishRequestTrailers"));
@@ -154,6 +157,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "readResponseData"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receivePush"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receivePushEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "readPushData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBody"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "finishRequestTrailers"));
@@ -192,6 +198,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3, "writeMaxPushIdFrame"));
     try std.testing.expect(@hasDecl(netz.http3, "writeCancelPushFrame"));
     try std.testing.expect(@hasDecl(netz.http3, "writePushPromiseFrame"));
+    try std.testing.expect(@hasDecl(netz.http3, "writePushPromiseDynamic"));
     try std.testing.expect(@hasDecl(netz.http3, "parsePushPromisePayload"));
     try std.testing.expect(@hasDecl(netz.http3, "decodePushPromiseWithDynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3, "DecodedPushPromise"));
@@ -314,8 +321,13 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingRequestEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingResponseEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingPushEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "PushedResponse"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "ServerPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequest"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendResponseWithPush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequest"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseWithPush"));
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));
     try std.testing.expectEqual(@as(usize, 1200), netz.quic.initial_exchange.min_initial_udp_datagram_size);
     try std.testing.expect(@hasDecl(netz.quic.initial_exchange, "sendInitialCrypto"));
