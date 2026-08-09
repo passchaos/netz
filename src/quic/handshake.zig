@@ -1542,11 +1542,7 @@ fn handshakeMessageLen(bytes: []const u8) Error!usize {
 }
 
 fn hashParts(parts: []const []const u8) [32]u8 {
-    var sha = std.crypto.hash.sha2.Sha256.init(.{});
-    for (parts) |part| sha.update(part);
-    var out: [32]u8 = undefined;
-    sha.final(&out);
-    return out;
+    return quic.tls.transcript.hash(parts);
 }
 
 fn random32(io: std.Io, provided: ?[32]u8) std.Io.RandomSecureError![32]u8 {

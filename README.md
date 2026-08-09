@@ -172,6 +172,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   retains origin+ALPN caches, replay leases, and remembered QUIC parameters,
   with stateless ticket AEAD formats and key rotation also owned by Vail while
   netz keeps only ticket issuance/storage policy and transport integration,
+  and Vail-owned X25519 key exchange plus transcript hashing while netz
+  supplies randomness and retains QUIC packet/transport orchestration,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,

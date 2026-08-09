@@ -398,21 +398,22 @@ pub fn parseFinished(bytes: []const u8) Error![32]u8 {
 }
 
 pub fn x25519PublicKey(secret_key: [32]u8) Error![32]u8 {
-    return std.crypto.dh.X25519.recoverPublicKey(secret_key) catch return error.KeyExchangeFailed;
+    return quic.tls.key_exchange.publicKey(secret_key) catch
+        return error.KeyExchangeFailed;
 }
 
 pub fn x25519SharedSecret(secret_key: [32]u8, peer_public_key: []const u8) Error![32]u8 {
-    if (peer_public_key.len != 32) return error.MissingKeyShare;
-    return std.crypto.dh.X25519.scalarmult(secret_key, peer_public_key[0..32].*) catch return error.KeyExchangeFailed;
+    return quic.tls.key_exchange.sharedSecret(
+        secret_key,
+        peer_public_key,
+    ) catch |err| switch (err) {
+        error.InvalidPublicKey => error.MissingKeyShare,
+        error.KeyExchangeFailed => error.KeyExchangeFailed,
+    };
 }
 
 pub fn transcriptHash(client_hello: []const u8, server_hello: []const u8) [32]u8 {
-    var sha = std.crypto.hash.sha2.Sha256.init(.{});
-    sha.update(client_hello);
-    sha.update(server_hello);
-    var out: [32]u8 = undefined;
-    sha.final(&out);
-    return out;
+    return quic.tls.transcript.hash(&.{ client_hello, server_hello });
 }
 
 pub fn deriveHandshakeSecrets(shared_secret: [32]u8, transcript_hash: [32]u8) HandshakeSecrets {
