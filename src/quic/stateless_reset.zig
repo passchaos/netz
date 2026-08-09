@@ -1,4 +1,5 @@
 const std = @import("std");
+const vail = @import("vail");
 
 pub const token_len: usize = 16;
 pub const static_key_len: usize = 16;
@@ -10,8 +11,11 @@ pub const Error = error{
 } || std.Io.RandomSecureError || std.mem.Allocator.Error;
 
 pub fn tokenForConnectionId(static_key: [static_key_len]u8, connection_id: []const u8) [token_len]u8 {
-    var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
-    std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, connection_id, &static_key);
+    const mac = vail.crypto.mac.authenticate(
+        &static_key,
+        "netz/quic/stateless-reset/v1",
+        &.{connection_id},
+    );
     return mac[0..token_len].*;
 }
 
@@ -24,7 +28,11 @@ pub fn tokenCandidate(datagram: []const u8) ?[token_len]u8 {
 
 pub fn matches(datagram: []const u8, expected_token: [token_len]u8) bool {
     const candidate = tokenCandidate(datagram) orelse return false;
-    return std.crypto.timing_safe.eql([token_len]u8, candidate, expected_token);
+    return vail.crypto.mac.verifyTruncated(
+        token_len,
+        candidate,
+        expected_token,
+    );
 }
 
 pub fn validPrefix(prefix: []const u8) bool {

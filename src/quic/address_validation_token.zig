@@ -1,11 +1,10 @@
 const std = @import("std");
 const quic = @import("mod.zig");
+const vail = @import("vail");
 
-const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
-
-pub const secret_len = HmacSha256.key_length;
+pub const secret_len = vail.crypto.mac.key_len;
 pub const nonce_len = 16;
-pub const mac_len = HmacSha256.mac_length;
+pub const mac_len = vail.crypto.mac.tag_len;
 pub const fingerprint_len = mac_len;
 
 const magic = "netz-av1";
@@ -131,7 +130,7 @@ pub fn validate(secret: Secret, expected_kind: Kind, expected_version: quic.Vers
 
     const expected = tokenMac(secret, token[0..body_len], peer_address);
     const got = token[body_len..][0..mac_len].*;
-    if (!std.crypto.timing_safe.eql([mac_len]u8, expected, got)) return error.InvalidToken;
+    if (!vail.crypto.mac.verify(expected, got)) return error.InvalidToken;
 
     if (now_ns < issued_ns) return error.TokenNotYetValid;
     const expires = expiresAt(issued_ns, lifetime_ns) orelse return error.InvalidToken;
@@ -184,7 +183,7 @@ pub const ReplayFilter = struct {
         while (checked < self.len) : (checked += 1) {
             const index = (self.head + checked) % self.fingerprints.items.len;
             const existing = self.fingerprints.items[index];
-            if (std.crypto.timing_safe.eql(Fingerprint, existing, fp)) return true;
+            if (vail.crypto.mac.verify(existing, fp)) return true;
         }
         return false;
     }
@@ -195,7 +194,7 @@ pub const ReplayFilter = struct {
         while (checked < self.len) : (checked += 1) {
             const index = (self.head + checked) % self.fingerprints.items.len;
             const existing = self.fingerprints.items[index];
-            if (std.crypto.timing_safe.eql(Fingerprint, existing, fp)) return error.TokenReplay;
+            if (vail.crypto.mac.verify(existing, fp)) return error.TokenReplay;
         }
         if (self.max_entries == 0) return;
 
@@ -259,15 +258,11 @@ fn expiresAt(issued_ns: i64, lifetime_ns: u64) ?i64 {
 }
 
 fn tokenMac(secret: Secret, body: []const u8, peer_address: []const u8) [mac_len]u8 {
-    var len_bytes: [2]u8 = undefined;
-    std.mem.writeInt(u16, &len_bytes, @intCast(peer_address.len), .big);
-    var hmac = HmacSha256.init(&secret);
-    hmac.update(body);
-    hmac.update(&len_bytes);
-    hmac.update(peer_address);
-    var tag: [mac_len]u8 = undefined;
-    hmac.final(&tag);
-    return tag;
+    return vail.crypto.mac.authenticate(
+        &secret,
+        "netz/quic/address-validation/v1",
+        &.{ body, peer_address },
+    );
 }
 
 test "QUIC address validation token validates kind lifetime version and peer address" {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
+const vail = @import("vail");
 
 pub const varint = @import("varint.zig");
 pub const runtime = @import("runtime.zig");
@@ -307,7 +308,11 @@ pub fn verifyRetryIntegrityTag(
     const retry_without_tag = retry_datagram[0 .. retry_datagram.len - retry_integrity_tag_len];
     const expected = try retryIntegrityTag(allocator, original_destination_connection_id, retry_without_tag);
     const received = retry_datagram[retry_datagram.len - retry_integrity_tag_len ..][0..retry_integrity_tag_len].*;
-    return std.crypto.timing_safe.eql([retry_integrity_tag_len]u8, expected, received);
+    return vail.crypto.mac.verifyTruncated(
+        retry_integrity_tag_len,
+        expected,
+        received,
+    );
 }
 
 fn longHeaderPacketType(first_byte: u8, version: u32) PacketType {
