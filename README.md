@@ -125,8 +125,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   filtering, Retry datagram issue/validate helpers, client-side Retry
   processing that enforces one-Retry/early-Retry rules, automatically resends
   the exact ClientHello under Retry-derived Initial keys, ignores invalid Retry
-  injection, suppresses 0-RTT replay, plus server-side retried Initial
-  token/transport-parameter validation hooks, minimal TLS
+  injection, suppresses 0-RTT replay, plus an integrated server Retry policy
+  with secure nonce generation, queued pre-Retry 0-RTT discard, and retried
+  Initial token/DCID/transport-parameter validation, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
   packet server/client Finished flights, and handshake/application secret

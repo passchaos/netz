@@ -2,6 +2,7 @@ const std = @import("std");
 const quic = @import("mod.zig");
 const key_exchange = @import("handshake/key_exchange.zig");
 const retransmit = @import("handshake/retransmit.zig");
+const retry = @import("handshake/retry.zig");
 
 const net = std.Io.net;
 
@@ -9,6 +10,7 @@ pub const ClientNistHybridKeyMaterial =
     key_exchange.ClientNistHybridKeyMaterial;
 pub const ServerNistHybridKeyMaterial =
     key_exchange.ServerNistHybridKeyMaterial;
+pub const ServerRetryPolicy = retry.Policy;
 
 pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.tls.auth.Error || quic.tls.client_auth.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.resumption.ticket.handshake.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
     InvalidHandshakeFlight,
@@ -123,6 +125,11 @@ pub const ServerOptions = struct {
     /// `retry_source_connection_id` transport parameters.
     retry_original_destination_connection_id: []const u8 = &.{},
     retry_source_connection_id: []const u8 = &.{},
+    /// When present on a fresh connection, accept() sends one Retry and then
+    /// continues the same blocking handshake with the validated retried
+    /// Initial. Retry metadata fields above remain available for callers that
+    /// already performed Retry outside this adapter.
+    retry: ?ServerRetryPolicy = null,
     version: quic.Version = .version_1,
     /// Versions this server advertises in RFC 9368 version_information.  If the
     /// server sends Version Negotiation, keep this aligned with that response so
@@ -353,40 +360,6 @@ fn isHandshakeDatagram(bytes: []const u8) bool {
     return info.packet_type == .handshake;
 }
 
-const InitialResponseFilter = struct {
-    allocator: std.mem.Allocator,
-    version: quic.Version,
-    original_destination_connection_id: []const u8,
-    initial_source_connection_id: []const u8,
-    retry_already_processed: bool,
-
-    fn accept(context: *anyopaque, bytes: []const u8) bool {
-        const self: *const InitialResponseFilter =
-            @ptrCast(@alignCast(context));
-        if (isVersionNegotiationDatagram(bytes)) return true;
-        // Protected Initial type bits are header-protected, so the generic
-        // LongHeader parser cannot reliably classify them. Use the protected
-        // packet peeker first; Retry is the only accepted response here that
-        // remains unprotected.
-        if (quic.protection.peekProtectedLongPacketInfo(bytes)) |info| {
-            return info.version == self.version.wireValue() and
-                info.packet_type == .initial;
-        } else |_| {}
-        if (self.retry_already_processed) return false;
-        const valid = quic.retry_flow.validateClientPacket(
-            self.allocator,
-            .{
-                .version = self.version,
-                .original_destination_connection_id = self.original_destination_connection_id,
-                .initial_source_connection_id = self.initial_source_connection_id,
-            },
-            bytes,
-        ) catch return false;
-        _ = valid;
-        return true;
-    }
-};
-
 const EarlyDataFlight = struct {
     endpoint: *quic.runtime.Endpoint,
     peer: net.IpAddress,
@@ -583,7 +556,7 @@ fn connectAttempt(
     var server_datagram: quic.runtime.OwnedBytes = undefined;
 
     while (true) {
-        var response_filter = InitialResponseFilter{
+        var response_filter = retry.InitialResponseFilter{
             .allocator = endpoint.allocator,
             .version = options.version,
             .original_destination_connection_id = options.original_destination_connection_id,
@@ -634,7 +607,7 @@ fn connectAttempt(
                     &send_context,
                     EarlyDataFlight.send,
                     &response_filter,
-                    InitialResponseFilter.accept,
+                    retry.InitialResponseFilter.accept,
                 ) catch |err| {
                     // A successful coalesced socket write consumes the
                     // exclusive lease even if the peer rejects the handshake.
@@ -677,14 +650,19 @@ fn connectAttempt(
                     &send_context,
                     retransmit.InitialFlight.send,
                     &response_filter,
-                    InitialResponseFilter.accept,
+                    retry.InitialResponseFilter.accept,
                 );
         }
 
-        const header = quic.LongHeader.parse(
+        _ = quic.retry_flow.validateClientPacket(
+            endpoint.allocator,
+            .{
+                .version = options.version,
+                .original_destination_connection_id = options.original_destination_connection_id,
+                .initial_source_connection_id = options.local_connection_id,
+            },
             server_datagram.bytes,
         ) catch break;
-        if (header.packet_type != .retry) break;
         const processed = quic.retry_flow.processClient(
             endpoint.allocator,
             .{
@@ -1100,14 +1078,95 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     if ((options.retry_original_destination_connection_id.len == 0) != (options.retry_source_connection_id.len == 0)) {
         return error.InvalidPacket;
     }
+    if (options.retry != null and
+        options.retry_source_connection_id.len != 0)
+    {
+        return error.InvalidPacket;
+    }
 
-    var client_initial = try receiveClientInitial(endpoint, 0, options.max_crypto_buffer, options.retry_source_connection_id, options.version);
+    var effective_options = options;
+    var owned_retry_original_destination_connection_id: ?[]u8 = null;
+    defer if (owned_retry_original_destination_connection_id) |cid|
+        endpoint.allocator.free(cid);
+    var owned_retry_source_connection_id: ?[]u8 = null;
+    defer if (owned_retry_source_connection_id) |cid|
+        endpoint.allocator.free(cid);
+
+    var client_initial = try receiveClientInitial(
+        endpoint,
+        0,
+        options.max_crypto_buffer,
+        options.retry_source_connection_id,
+        options.version,
+    );
+    if (options.retry) |policy| {
+        const odcid = try endpoint.allocator.dupe(
+            u8,
+            client_initial.packet.destination_connection_id,
+        );
+        errdefer endpoint.allocator.free(odcid);
+        const rscid = if (policy.source_connection_id.len != 0)
+            try endpoint.allocator.dupe(
+                u8,
+                policy.source_connection_id,
+            )
+        else
+            try endpoint.allocator.dupe(
+                u8,
+                options.local_connection_id,
+            );
+        errdefer endpoint.allocator.free(rscid);
+        const prepared = retry.prepare(
+            endpoint.allocator,
+            endpoint.io,
+            policy,
+            rscid,
+            odcid,
+            client_initial.packet.source_connection_id,
+        ) catch |err| switch (err) {
+            error.InvalidToken,
+            error.TokenExpired,
+            error.TokenNotYetValid,
+            error.TokenReplay,
+            error.RetryAlreadyProcessed,
+            error.InitialAlreadyProcessed,
+            => return error.InvalidPacket,
+            else => |other| return @errorCast(other),
+        };
+        defer endpoint.allocator.free(prepared.datagram);
+        try endpoint.sendBytes(client_initial.from, prepared.datagram);
+        client_initial.deinit(endpoint.allocator);
+
+        // A first-flight 0-RTT packet can already be queued when Retry is
+        // transmitted. Ignore non-Initial packets until the client responds
+        // with an Initial protected by the Retry SCID-derived keys.
+        client_initial = try receiveRetriedClientInitial(
+            endpoint,
+            options.max_crypto_buffer,
+            rscid,
+            options.version,
+        );
+        owned_retry_original_destination_connection_id = odcid;
+        owned_retry_source_connection_id = rscid;
+        effective_options.retry_original_destination_connection_id = odcid;
+        effective_options.retry_source_connection_id = rscid;
+        effective_options.address_validation_secrets =
+            @as(*const [1]quic.address_validation_token.Secret, &policy.secret);
+        effective_options.address_validation_peer = policy.peer_address;
+        effective_options.address_validation_now_ns =
+            policy.validation_now_ns orelse policy.issued_ns;
+    }
     defer client_initial.deinit(endpoint.allocator);
     const original_destination_connection_id = serverOriginalDestinationConnectionId(
         client_initial.packet.destination_connection_id,
-        options,
+        effective_options,
     );
-    try validateAddressTokenForInitial(endpoint.allocator, client_initial.packet.token, original_destination_connection_id, options);
+    try validateAddressTokenForInitial(
+        endpoint.allocator,
+        client_initial.packet.token,
+        original_destination_connection_id,
+        effective_options,
+    );
 
     var parsed_client = try quic.tls_client_hello.parseClientHello(endpoint.allocator, client_initial.crypto_data);
     defer parsed_client.deinit(endpoint.allocator);
@@ -1236,7 +1295,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                 selected_psk = configured_secret;
                 const early_data_policy = options.early_data;
                 if (client_offered_early_data and
-                    options.retry_source_connection_id.len == 0 and
+                    effective_options.retry_source_connection_id.len == 0 and
                     early_data_policy != null and
                     early_data_policy.?.accept and
                     configured_psk.cipher_suite == cipher_suite)
@@ -1294,7 +1353,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             );
         }
     } else if (client_offered_early_data and
-        options.retry_source_connection_id.len != 0)
+        effective_options.retry_source_connection_id.len != 0)
     {
         // The ClientHello is byte-for-byte identical across Retry and can
         // still carry early_data, but RFC 9001 §4.6 forbids sending another
@@ -1346,9 +1405,9 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     defer encoded_transport_parameters.deinit(endpoint.allocator);
     const transport_parameters = try serverTransportParameters(
         endpoint.allocator,
-        options,
+        effective_options,
         original_destination_connection_id,
-        options.retry_source_connection_id,
+        effective_options.retry_source_connection_id,
         &local_transport_parameters,
         &encoded_transport_parameters,
     );
@@ -1686,6 +1745,67 @@ fn receiveClientInitial(
         .initial_secrets = initial_secrets,
         .coalesced_tail = coalesced_tail,
     };
+}
+
+fn receiveRetriedClientInitial(
+    endpoint: *quic.runtime.Endpoint,
+    max_crypto_buffer: usize,
+    retry_destination_connection_id: []const u8,
+    version: quic.Version,
+) Error!ReceivedClientInitial {
+    while (true) {
+        var datagram = try endpoint.receiveBytes();
+        defer datagram.deinit(endpoint.allocator);
+        if (datagram.bytes.len <
+            quic.initial_exchange.min_initial_udp_datagram_size)
+        {
+            // Standalone 0-RTT is allowed to be smaller than 1200 bytes and
+            // belongs to the discarded pre-Retry flight.
+            continue;
+        }
+        const info = quic.protection.peekProtectedLongPacketInfo(
+            datagram.bytes,
+        ) catch continue;
+        if (info.version != version.wireValue() or
+            info.packet_type != .initial or
+            !std.mem.eql(
+                u8,
+                info.destination_connection_id,
+                retry_destination_connection_id,
+            ))
+        {
+            continue;
+        }
+        const initial_secrets =
+            try quic.protection.deriveInitialSecretsForVersion(
+                version.wireValue(),
+                retry_destination_connection_id,
+            );
+        var flight = try quic.initial_exchange.openInitialCryptoFlight(
+            endpoint,
+            datagram.from,
+            datagram.bytes[0..info.len],
+            initial_secrets.client,
+            .{
+                .expected_packet_number = 0,
+                .max_crypto_buffer = max_crypto_buffer,
+                .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+            },
+        );
+        errdefer flight.deinit(endpoint.allocator);
+        const coalesced_tail = try endpoint.allocator.dupe(
+            u8,
+            datagram.bytes[info.len..],
+        );
+        errdefer endpoint.allocator.free(coalesced_tail);
+        return .{
+            .from = datagram.from,
+            .packet = flight.first_packet,
+            .crypto_data = flight.crypto_data,
+            .initial_secrets = initial_secrets,
+            .coalesced_tail = coalesced_tail,
+        };
+    }
 }
 
 fn receiveServerHandshakeCrypto(

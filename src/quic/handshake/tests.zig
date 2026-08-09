@@ -1284,6 +1284,216 @@ test "QUIC automatic Retry suppresses replayed 0-RTT but resumes PSK" {
     try std.testing.expectEqual(.consumed, lease.state);
 }
 
+test "QUIC integrated server automatically issues Retry" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = "srvretry";
+    const client_cid = "client";
+    const server_cid = "server";
+    const secret: quic.address_validation_token.Secret =
+        [_]u8{0xd1} ** quic.address_validation_token.secret_len;
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = handshake.accept(shared.endpoint, .{
+                .local_connection_id = server_cid,
+                .retry = .{
+                    .secret = secret,
+                    .peer_address = "client-path",
+                    .issued_ns = 1_000,
+                    .lifetime_ns = 5_000,
+                    .nonce = [_]u8{0xd2} **
+                        quic.address_validation_token.nonce_len,
+                },
+                .random = [_]u8{0xd3} ** 32,
+                .x25519_secret_key = [_]u8{0xd4} ** 32,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer established.deinit();
+            var ping = established.connection.receivePacket() catch |err| {
+                shared.err = err;
+                return;
+            };
+            ping.deinit(shared.endpoint.allocator);
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = original_dcid,
+            .local_connection_id = client_cid,
+            .random = [_]u8{0xd5} ** 32,
+            .x25519_secret_key = [_]u8{0xd6} ** 32,
+        },
+    );
+    defer established.deinit();
+    try established.connection.send(&.{.{ .ping = {} }});
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "QUIC automatic server Retry discards queued pre-Retry 0-RTT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = "srv0rtry";
+    const client_cid = "client";
+    const ticket = "server-retry-ticket";
+    const psk = [_]u8{0xe1} ** 32;
+    const secret: quic.address_validation_token.Secret =
+        [_]u8{0xe2} ** quic.address_validation_token.secret_len;
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = "localhost:443",
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1_000,
+        .lifetime_seconds = 3_600,
+        .age_add = 0,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var lease = (try cache.beginEarlyData(
+        "localhost:443",
+        "h3",
+        1_100,
+    )).?;
+    defer lease.deinit();
+    var replay_filter = try quic.zero_rtt.ReplayFilter.init(
+        allocator,
+        io,
+        8,
+    );
+    defer replay_filter.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        replay_filter: *quic.zero_rtt.ReplayFilter,
+        err: ?anyerror = null,
+        resumed: bool = false,
+        status: quic.zero_rtt.handshake.Status = .not_offered,
+
+        fn run(shared: *@This()) void {
+            var established = handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .retry = .{
+                    .secret = secret,
+                    .peer_address = "client-path",
+                    .issued_ns = 1_000,
+                    .lifetime_ns = 5_000,
+                    .nonce = [_]u8{0xe3} **
+                        quic.address_validation_token.nonce_len,
+                },
+                .psk = .{
+                    .identity = ticket,
+                    .secret = psk,
+                    .age_add = 0,
+                    .issued_at_ms = 1_000,
+                    .lifetime_seconds = 3_600,
+                    .now_ms = 1_100,
+                },
+                .early_data = .{
+                    .accept = true,
+                    .replay_filter = shared.replay_filter,
+                    .replay_key = "server-retry-request",
+                },
+                .random = [_]u8{0xe4} ** 32,
+                .x25519_secret_key = [_]u8{0xe5} ** 32,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer established.deinit();
+            shared.resumed = established.resumed;
+            shared.status = established.early_data_status;
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .replay_filter = &replay_filter,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    const early_frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "discard-after-retry",
+    } }};
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = original_dcid,
+            .local_connection_id = client_cid,
+            .random = [_]u8{0xe6} ** 32,
+            .x25519_secret_key = [_]u8{0xe7} ** 32,
+            .resumption_now_ms = 1_100,
+            .resumption_server_id = "localhost:443",
+            .early_data = .{
+                .cache = &cache,
+                .lease = &lease,
+                .frames = &early_frames,
+            },
+        },
+    );
+    defer established.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(established.resumed);
+    try std.testing.expect(shared.resumed);
+    try std.testing.expectEqual(
+        quic.zero_rtt.handshake.Status.rejected,
+        established.early_data_status,
+    );
+    try std.testing.expectEqual(
+        quic.zero_rtt.handshake.Status.rejected,
+        shared.status,
+    );
+}
+
 test "QUIC integrated client ignores an invalid Retry before a valid Retry" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
