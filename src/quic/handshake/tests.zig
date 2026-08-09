@@ -656,6 +656,72 @@ test "QUIC integrated client restarts after Version Negotiation" {
     try std.testing.expectEqualStrings("VN OK", response.frames[0].stream.data);
 }
 
+test "QUIC integrated server automatically handles Version Negotiation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = handshake.accept(shared.endpoint, .{
+                .version = .version_2,
+                .available_versions = &.{.version_2},
+                .local_connection_id = "server",
+                .random = [_]u8{0x91} ** 32,
+                .x25519_secret_key = [_]u8{0x92} ** 32,
+                .key_exchange_groups = &.{.x25519},
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer established.deinit();
+            var ping = established.connection.receivePacket() catch |err| {
+                shared.err = err;
+                return;
+            };
+            ping.deinit(shared.endpoint.allocator);
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .version = .version_1,
+            .available_versions = &.{ .version_2, .version_1 },
+            .original_destination_connection_id = "autovn01",
+            .local_connection_id = "client",
+            .random = [_]u8{0x93} ** 32,
+            .x25519_secret_key = [_]u8{0x94} ** 32,
+            .key_exchange_groups = &.{.x25519},
+        },
+    );
+    defer established.deinit();
+    try established.connection.send(&.{.{ .ping = {} }});
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "QUIC integrated client rejects mismatched Version Information after VN" {
     const allocator = std.testing.allocator;
 

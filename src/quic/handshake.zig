@@ -1091,6 +1091,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     var owned_retry_source_connection_id: ?[]u8 = null;
     defer if (owned_retry_source_connection_id) |cid|
         endpoint.allocator.free(cid);
+    var automatic_retry_secrets: [1]quic.address_validation_token.Secret = undefined;
 
     var client_initial = try receiveClientInitial(
         endpoint,
@@ -1098,6 +1099,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         options.max_crypto_buffer,
         options.retry_source_connection_id,
         options.version,
+        options.available_versions,
     );
     if (options.retry) |policy| {
         const odcid = try endpoint.allocator.dupe(
@@ -1150,8 +1152,9 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         owned_retry_source_connection_id = rscid;
         effective_options.retry_original_destination_connection_id = odcid;
         effective_options.retry_source_connection_id = rscid;
+        automatic_retry_secrets[0] = policy.secret;
         effective_options.address_validation_secrets =
-            @as(*const [1]quic.address_validation_token.Secret, &policy.secret);
+            &automatic_retry_secrets;
         effective_options.address_validation_peer = policy.peer_address;
         effective_options.address_validation_now_ns =
             policy.validation_now_ns orelse policy.issued_ns;
@@ -1698,8 +1701,20 @@ fn receiveClientInitial(
     max_crypto_buffer: usize,
     retry_destination_connection_id: []const u8,
     version: quic.Version,
+    available_versions: []const quic.Version,
 ) Error!ReceivedClientInitial {
-    var datagram = try endpoint.receiveBytes();
+    const supported_wire_versions = try endpoint.allocator.alloc(
+        u32,
+        available_versions.len,
+    );
+    defer endpoint.allocator.free(supported_wire_versions);
+    for (available_versions, supported_wire_versions) |available, *wire| {
+        wire.* = available.wireValue();
+    }
+    var datagram =
+        try endpoint.receiveBytesHandlingVersionNegotiation(
+            supported_wire_versions,
+        );
     defer datagram.deinit(endpoint.allocator);
     if (datagram.bytes.len < quic.initial_exchange.min_initial_udp_datagram_size) return error.InvalidInitialPacket;
 
