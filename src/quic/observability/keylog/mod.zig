@@ -35,21 +35,21 @@ pub const Log = struct {
         self: *Log,
         label: Label,
         client_random: [32]u8,
-        secret: [32]u8,
+        secret: []const u8,
     ) std.Io.Writer.Error!void {
         try self.writer.writeAll(label.text());
         try self.writer.writeByte(' ');
         try self.writer.printHex(&client_random, .lower);
         try self.writer.writeByte(' ');
-        try self.writer.printHex(&secret, .lower);
+        try self.writer.printHex(secret, .lower);
         try self.writer.writeByte('\n');
     }
 
     pub fn writeHandshakeSecrets(
         self: *Log,
         client_random: [32]u8,
-        client_secret: [32]u8,
-        server_secret: [32]u8,
+        client_secret: []const u8,
+        server_secret: []const u8,
     ) std.Io.Writer.Error!void {
         try self.writeSecret(
             .client_handshake_traffic_secret,
@@ -66,8 +66,8 @@ pub const Log = struct {
     pub fn writeApplicationSecrets(
         self: *Log,
         client_random: [32]u8,
-        client_secret: [32]u8,
-        server_secret: [32]u8,
+        client_secret: []const u8,
+        server_secret: []const u8,
     ) std.Io.Writer.Error!void {
         try self.writeSecret(
             .client_traffic_secret_0,
@@ -89,7 +89,7 @@ test "NSS keylog emits exact lowercase traffic-secret lines" {
     try log.writeSecret(
         .client_handshake_traffic_secret,
         [_]u8{0xab} ** 32,
-        [_]u8{0x01} ** 32,
+        &([_]u8{0x01} ** 32),
     );
     try std.testing.expectEqualStrings(
         "CLIENT_HANDSHAKE_TRAFFIC_SECRET " ++
@@ -106,7 +106,23 @@ test "NSS keylog propagates sink failure" {
         log.writeSecret(
             .server_traffic_secret_0,
             [_]u8{0} ** 32,
-            [_]u8{1} ** 32,
+            &([_]u8{1} ** 32),
         ),
+    );
+}
+
+test "NSS keylog preserves a 48-byte SHA-384 traffic secret" {
+    var storage: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&storage);
+    var log = Log.init(&writer);
+    try log.writeSecret(
+        .client_traffic_secret_0,
+        [_]u8{0xcd} ** 32,
+        &([_]u8{0x02} ** 48),
+    );
+    try std.testing.expectEqualStrings(
+        "CLIENT_TRAFFIC_SECRET_0 " ++
+            ("cd" ** 32) ++ " " ++ ("02" ** 48) ++ "\n",
+        writer.buffered(),
     );
 }

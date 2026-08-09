@@ -507,8 +507,8 @@ fn connectAttempt(
     if (options.keylog) |keylog| {
         try keylog.writeHandshakeSecrets(
             client_random,
-            handshake.client_handshake_traffic_secret,
-            handshake.server_handshake_traffic_secret,
+            &handshake.client_handshake_traffic_secret,
+            &handshake.server_handshake_traffic_secret,
         );
     }
 
@@ -573,15 +573,16 @@ fn connectAttempt(
             try quic.tls.auth.parseCertificateVerify(
                 certificate_verify_bytes,
             );
+        const certificate_transcript_hash = hashParts(&.{
+            client_hello.items,
+            server_initial.crypto_data,
+            server_flight.through_certificate orelse
+                return error.InvalidHandshakeFlight,
+        });
         try quic.tls.auth.verifyCertificateVerify(
             certificate.entries[0],
             certificate_verify,
-            hashParts(&.{
-                client_hello.items,
-                server_initial.crypto_data,
-                server_flight.through_certificate orelse
-                    return error.InvalidHandshakeFlight,
-            }),
+            &certificate_transcript_hash,
         );
     } else if (server_flight.certificate != null or
         server_flight.certificate_verify != null)
@@ -609,17 +610,18 @@ fn connectAttempt(
             identity.certificate_chain,
             request.request_context,
         );
+        const client_certificate_transcript_hash = hashParts(&.{
+            client_hello.items,
+            server_initial.crypto_data,
+            server_flight.before_finished,
+            server_flight.finished,
+            client_certificate.items,
+        });
         try quic.tls.auth.writeCertificateVerifyForRole(
             &client_certificate_verify,
             endpoint.allocator,
             identity.signer,
-            hashParts(&.{
-                client_hello.items,
-                server_initial.crypto_data,
-                server_flight.before_finished,
-                server_flight.finished,
-                client_certificate.items,
-            }),
+            &client_certificate_transcript_hash,
             .client,
         );
     }
@@ -698,8 +700,8 @@ fn connectAttempt(
     if (options.keylog) |keylog| {
         try keylog.writeApplicationSecrets(
             client_random,
-            application.client_application_traffic_secret,
-            application.server_application_traffic_secret,
+            &application.client_application_traffic_secret,
+            &application.server_application_traffic_secret,
         );
     }
     var established = try establishedConnection(
@@ -913,8 +915,8 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     if (options.keylog) |keylog| {
         try keylog.writeHandshakeSecrets(
             parsed_client.random,
-            handshake.client_handshake_traffic_secret,
-            handshake.server_handshake_traffic_secret,
+            &handshake.client_handshake_traffic_secret,
+            &handshake.server_handshake_traffic_secret,
         );
     }
 
@@ -970,15 +972,16 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
 
         var certificate_verify: std.ArrayList(u8) = .empty;
         defer certificate_verify.deinit(endpoint.allocator);
+        const certificate_transcript_hash = hashParts(&.{
+            client_initial.crypto_data,
+            server_hello.items,
+            server_flight.items,
+        });
         try quic.tls.auth.writeCertificateVerify(
             &certificate_verify,
             endpoint.allocator,
             identity.signer,
-            hashParts(&.{
-                client_initial.crypto_data,
-                server_hello.items,
-                server_flight.items,
-            }),
+            &certificate_transcript_hash,
         );
         try server_flight.appendSlice(
             endpoint.allocator,
@@ -1044,15 +1047,16 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             try quic.tls.auth.parseCertificateVerify(
                 client_flight.certificate_verify.?,
             );
+        const client_certificate_transcript_hash = hashParts(&.{
+            client_initial.crypto_data,
+            server_hello.items,
+            server_flight.items,
+            client_flight.certificate.?,
+        });
         try quic.tls.auth.verifyCertificateVerifyForRole(
             certificate.entries[0],
             certificate_verify,
-            hashParts(&.{
-                client_initial.crypto_data,
-                server_hello.items,
-                server_flight.items,
-                client_flight.certificate.?,
-            }),
+            &client_certificate_transcript_hash,
             .client,
         );
     }
@@ -1077,8 +1081,8 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     if (options.keylog) |keylog| {
         try keylog.writeApplicationSecrets(
             parsed_client.random,
-            application.client_application_traffic_secret,
-            application.server_application_traffic_secret,
+            &application.client_application_traffic_secret,
+            &application.server_application_traffic_secret,
         );
     }
     var established = try establishedConnection(
