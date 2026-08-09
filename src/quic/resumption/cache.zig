@@ -9,6 +9,8 @@ const std = @import("std");
 const vail = @import("vail");
 const parameters = @import("parameters.zig");
 
+const CipherSuite = vail.tls.cipher_suite.Suite;
+
 pub const max_ticket_lifetime_seconds: u32 = 7 * 24 * 60 * 60;
 pub const quic_early_data_size: u32 = std.math.maxInt(u32);
 
@@ -30,6 +32,7 @@ pub const Ticket = struct {
     issued_at_ms: u64,
     lifetime_seconds: u32,
     age_add: u32,
+    cipher_suite: CipherSuite = .aes_128_gcm_sha256,
     max_early_data_size: ?u32 = null,
     transport_parameters: parameters.Snapshot,
 };
@@ -43,6 +46,7 @@ pub const Session = struct {
     issued_at_ms: u64,
     lifetime_seconds: u32,
     age_add: u32,
+    cipher_suite: CipherSuite,
     max_early_data_size: ?u32,
     transport_parameters: parameters.Snapshot,
 
@@ -94,6 +98,7 @@ const Entry = struct {
     issued_at_ms: u64,
     lifetime_seconds: u32,
     age_add: u32,
+    cipher_suite: CipherSuite,
     max_early_data_size: ?u32,
     transport_parameters: parameters.Snapshot,
     last_used: u64,
@@ -342,6 +347,7 @@ pub const Cache = struct {
             .issued_at_ms = ticket.issued_at_ms,
             .lifetime_seconds = ticket.lifetime_seconds,
             .age_add = ticket.age_add,
+            .cipher_suite = ticket.cipher_suite,
             .max_early_data_size = ticket.max_early_data_size,
             .transport_parameters = ticket.transport_parameters,
             .last_used = 0,
@@ -363,6 +369,7 @@ pub const Cache = struct {
             .issued_at_ms = entry.issued_at_ms,
             .lifetime_seconds = entry.lifetime_seconds,
             .age_add = entry.age_add,
+            .cipher_suite = entry.cipher_suite,
             .max_early_data_size = entry.max_early_data_size,
             .transport_parameters = entry.transport_parameters,
         };

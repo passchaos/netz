@@ -4,6 +4,16 @@ const quic = @import("../mod.zig");
 const handshake = quic.handshake;
 
 test "QUIC integrated handshake accepts authenticated 0-RTT stream data" {
+    try runAcceptedEarlyData(.aes_128_gcm_sha256);
+}
+
+test "QUIC integrated handshake accepts ChaCha20 0-RTT and 1-RTT data" {
+    try runAcceptedEarlyData(.chacha20_poly1305_sha256);
+}
+
+fn runAcceptedEarlyData(
+    cipher_suite: quic.tls_client_hello.CipherSuite,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -28,7 +38,7 @@ test "QUIC integrated handshake accepts authenticated 0-RTT stream data" {
     const psk = [_]u8{0xb1} ** 32;
     var cache = try quic.resumption.Cache.init(allocator, 1);
     defer cache.deinit();
-    try cache.store(earlyTicket(ticket, psk));
+    try cache.store(earlyTicket(ticket, psk, cipher_suite));
     var lease = (try cache.beginEarlyData("localhost:443", "h3", 1500)).?;
     defer lease.deinit();
     var replay_filter = try quic.zero_rtt.ReplayFilter.init(
@@ -43,6 +53,7 @@ test "QUIC integrated handshake accepts authenticated 0-RTT stream data" {
         replay_filter: *quic.zero_rtt.ReplayFilter,
         ticket: []const u8,
         psk: [32]u8,
+        cipher_suite: quic.tls_client_hello.CipherSuite,
         err: ?anyerror = null,
         resumed: bool = false,
         early_data_status: quic.zero_rtt.handshake.Status = .not_offered,
@@ -60,12 +71,14 @@ test "QUIC integrated handshake accepts authenticated 0-RTT stream data" {
                     .issued_at_ms = 1000,
                     .lifetime_seconds = 3600,
                     .now_ms = 1500,
+                    .cipher_suite = shared.cipher_suite,
                 },
                 .early_data = .{
                     .accept = true,
                     .replay_filter = shared.replay_filter,
                     .replay_key = "request-1",
                 },
+                .cipher_suites = &.{shared.cipher_suite},
             }) catch |err| {
                 shared.err = err;
                 return;
@@ -87,6 +100,7 @@ test "QUIC integrated handshake accepts authenticated 0-RTT stream data" {
         .replay_filter = &replay_filter,
         .ticket = ticket,
         .psk = psk,
+        .cipher_suite = cipher_suite,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
@@ -103,6 +117,7 @@ test "QUIC integrated handshake accepts authenticated 0-RTT stream data" {
             .local_connection_id = "client",
             .random = [_]u8{0xb4} ** 32,
             .x25519_secret_key = [_]u8{0xb5} ** 32,
+            .cipher_suites = &.{cipher_suite},
             .resumption_now_ms = 1500,
             .resumption_server_id = "localhost:443",
             .early_data = .{
@@ -118,6 +133,10 @@ test "QUIC integrated handshake accepts authenticated 0-RTT stream data" {
     if (shared.err) |err| return err;
 
     try std.testing.expect(established.resumed);
+    try std.testing.expectEqual(
+        cipher_suite,
+        established.connection.config.send_keys.suite,
+    );
     try std.testing.expectEqual(
         quic.zero_rtt.handshake.Status.accepted,
         established.early_data_status,
@@ -166,12 +185,23 @@ test "QUIC integrated handshake rejects 0-RTT but resumes with PSK" {
     const psk = [_]u8{0xc1} ** 32;
     var cache = try quic.resumption.Cache.init(allocator, 1);
     defer cache.deinit();
-    try cache.store(earlyTicket(ticket, psk));
+    try cache.store(earlyTicket(
+        ticket,
+        psk,
+        .aes_128_gcm_sha256,
+    ));
     var lease = (try cache.beginEarlyData("localhost:443", "h3", 1500)).?;
     defer lease.deinit();
+    var replay_filter = try quic.zero_rtt.ReplayFilter.init(
+        allocator,
+        io,
+        8,
+    );
+    defer replay_filter.deinit();
 
     const Shared = struct {
         endpoint: *quic.runtime.Endpoint,
+        replay_filter: *quic.zero_rtt.ReplayFilter,
         ticket: []const u8,
         psk: [32]u8,
         err: ?anyerror = null,
@@ -191,6 +221,16 @@ test "QUIC integrated handshake rejects 0-RTT but resumes with PSK" {
                     .lifetime_seconds = 3600,
                     .now_ms = 1500,
                 },
+                // The ticket was issued under AES. Selecting ChaCha remains
+                // valid for PSK-DHE resumption because both suites use
+                // SHA-256, but RFC 8446 requires rejecting 0-RTT when the
+                // selected AEAD differs from the ticket's suite.
+                .cipher_suites = &.{.chacha20_poly1305_sha256},
+                .early_data = .{
+                    .accept = true,
+                    .replay_filter = shared.replay_filter,
+                    .replay_key = "suite-mismatch",
+                },
             }) catch |err| {
                 shared.err = err;
                 return;
@@ -202,6 +242,7 @@ test "QUIC integrated handshake rejects 0-RTT but resumes with PSK" {
     };
     var shared = Shared{
         .endpoint = &server_endpoint,
+        .replay_filter = &replay_filter,
         .ticket = ticket,
         .psk = psk,
     };
@@ -233,6 +274,10 @@ test "QUIC integrated handshake rejects 0-RTT but resumes with PSK" {
     if (shared.err) |err| return err;
 
     try std.testing.expect(established.resumed);
+    try std.testing.expectEqual(
+        quic.tls_client_hello.CipherSuite.chacha20_poly1305_sha256,
+        established.connection.config.send_keys.suite,
+    );
     try std.testing.expectEqual(
         quic.zero_rtt.handshake.Status.rejected,
         established.early_data_status,
@@ -269,7 +314,11 @@ test "QUIC integrated server replay gate rejects a repeated early-data key" {
     const psk = [_]u8{0xd1} ** 32;
     var cache = try quic.resumption.Cache.init(allocator, 1);
     defer cache.deinit();
-    try cache.store(earlyTicket(ticket, psk));
+    try cache.store(earlyTicket(
+        ticket,
+        psk,
+        .aes_128_gcm_sha256,
+    ));
     var lease = (try cache.beginEarlyData("localhost:443", "h3", 1500)).?;
     defer lease.deinit();
     var replay_filter = try quic.zero_rtt.ReplayFilter.init(
@@ -373,7 +422,11 @@ test "QUIC integrated server replay gate rejects a repeated early-data key" {
     try std.testing.expectEqual(.consumed, lease.state);
 }
 
-fn earlyTicket(ticket: []const u8, psk: [32]u8) quic.resumption.Ticket {
+fn earlyTicket(
+    ticket: []const u8,
+    psk: [32]u8,
+    cipher_suite: quic.tls_client_hello.CipherSuite,
+) quic.resumption.Ticket {
     return .{
         .server_id = "localhost:443",
         .alpn = "h3",
@@ -382,6 +435,7 @@ fn earlyTicket(ticket: []const u8, psk: [32]u8) quic.resumption.Ticket {
         .issued_at_ms = 1000,
         .lifetime_seconds = 3600,
         .age_add = 17,
+        .cipher_suite = cipher_suite,
         .max_early_data_size = quic.resumption.cache.quic_early_data_size,
         .transport_parameters = .fromTransportParameters(
             quic.practical_transport_parameters,

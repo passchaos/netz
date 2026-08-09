@@ -347,6 +347,7 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
                 .local_connection_id = "server",
                 .random = [_]u8{0xe1} ** 32,
                 .x25519_secret_key = [_]u8{0xe2} ** 32,
+                .cipher_suites = &.{.chacha20_poly1305_sha256},
             }) catch |err| {
                 shared.err = err;
                 return;
@@ -382,6 +383,7 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
             .local_connection_id = "client",
             .random = [_]u8{0xe3} ** 32,
             .x25519_secret_key = [_]u8{0xe4} ** 32,
+            .cipher_suites = &.{.chacha20_poly1305_sha256},
         },
     );
     try first_client.receiveAndCacheSessionTicket(.{
@@ -392,6 +394,10 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
     first_thread.join();
     if (first_server.err) |err| return err;
     try std.testing.expect(!first_client.resumed);
+    try std.testing.expectEqual(
+        quic.tls_client_hello.CipherSuite.chacha20_poly1305_sha256,
+        first_client.connection.config.send_keys.suite,
+    );
     try std.testing.expectEqual(@as(usize, 1), client_cache.count());
     try std.testing.expectEqual(@as(usize, 1), server_store.count(1000));
     first_client.deinit();
@@ -407,6 +413,7 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
                 .local_connection_id = "server",
                 .random = [_]u8{0xe5} ** 32,
                 .x25519_secret_key = [_]u8{0xe6} ** 32,
+                .cipher_suites = &.{.chacha20_poly1305_sha256},
                 .auto_resumption = .{
                     .allocator = shared.endpoint.allocator,
                     .store = shared.store,
@@ -437,6 +444,7 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
             .local_connection_id = "client",
             .random = [_]u8{0xe7} ** 32,
             .x25519_secret_key = [_]u8{0xe8} ** 32,
+            .cipher_suites = &.{.chacha20_poly1305_sha256},
             .auto_resumption = .{
                 .cache = &client_cache,
                 .server_id = "localhost:443",
@@ -449,6 +457,10 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
     if (second_server.err) |err| return err;
     try std.testing.expect(second_client.resumed);
     try std.testing.expect(second_server.resumed);
+    try std.testing.expectEqual(
+        quic.tls_client_hello.CipherSuite.chacha20_poly1305_sha256,
+        second_client.connection.config.send_keys.suite,
+    );
 }
 
 test "integrated handshake resumes stateless tickets across key rotation" {

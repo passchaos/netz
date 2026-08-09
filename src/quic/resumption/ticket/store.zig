@@ -8,6 +8,8 @@ const std = @import("std");
 const vail = @import("vail");
 const codec = @import("vail").tls.ticket;
 
+const CipherSuite = vail.tls.cipher_suite.Suite;
+
 pub const Error = std.mem.Allocator.Error || error{
     InvalidCapacity,
     InvalidTicket,
@@ -18,6 +20,7 @@ pub const Issued = struct {
     identity: []const u8,
     secret: [32]u8,
     age_add: u32,
+    cipher_suite: CipherSuite = .aes_128_gcm_sha256,
     issued_at_ms: u64,
     lifetime_seconds: u32,
 };
@@ -27,6 +30,7 @@ pub const Lease = struct {
     identity: []u8,
     secret: [32]u8,
     age_add: u32,
+    cipher_suite: CipherSuite,
     issued_at_ms: u64,
     lifetime_seconds: u32,
 
@@ -42,6 +46,7 @@ const Entry = struct {
     identity: []u8,
     secret: [32]u8,
     age_add: u32,
+    cipher_suite: CipherSuite,
     issued_at_ms: u64,
     lifetime_seconds: u32,
     sequence: u64,
@@ -103,6 +108,7 @@ pub const Store = struct {
                 .identity = identity,
                 .secret = issued.secret,
                 .age_add = issued.age_add,
+                .cipher_suite = issued.cipher_suite,
                 .issued_at_ms = issued.issued_at_ms,
                 .lifetime_seconds = issued.lifetime_seconds,
                 .sequence = self.nextSequence(),
@@ -130,6 +136,7 @@ pub const Store = struct {
             .identity = identity,
             .secret = issued.secret,
             .age_add = issued.age_add,
+            .cipher_suite = issued.cipher_suite,
             .issued_at_ms = issued.issued_at_ms,
             .lifetime_seconds = issued.lifetime_seconds,
             .sequence = self.nextSequence(),
@@ -153,6 +160,7 @@ pub const Store = struct {
                 .identity = identity_copy,
                 .secret = entry.secret,
                 .age_add = entry.age_add,
+                .cipher_suite = entry.cipher_suite,
                 .issued_at_ms = entry.issued_at_ms,
                 .lifetime_seconds = entry.lifetime_seconds,
             };

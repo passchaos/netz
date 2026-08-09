@@ -179,9 +179,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   retains their QUIC wire formats, lifetimes, replay policy, and key rotation,
   and Vail secure-memory/SHA-256 helpers for ticket caches and replay filters
   while netz retains cache eviction and single-use policy,
-  with existing AES-128-GCM traffic key derivation, nonce construction, AEAD,
-  and header-protection execution delegated to Vail behind source-compatible
-  QUIC packet APIs,
+  with TLS 1.3 AES-128-GCM/ChaCha20-Poly1305 negotiation, traffic-key
+  derivation, nonce construction, AEAD, and header-protection execution
+  delegated to Vail behind source-compatible QUIC packet APIs, including
+  suite-bound tickets/0-RTT and suite-specific RFC 9001 usage limits,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,
@@ -190,9 +191,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   budget enforcement for unvalidated server paths,
   1-RTT key-update derivation and key-phase state with ACK gating and retained
   previous receive/send generations for reordered short-header packets, peer-triggered
-  send-key synchronization before ACK, and RFC 9001 AES-128-GCM `2^23`
-  per-generation confidentiality plus `2^52` lifetime authentication-failure
-  integrity limits with proactive key rotation and terminal limit handling,
+  send-key synchronization before ACK, and negotiated-suite RFC 9001
+  confidentiality/integrity limits with proactive key rotation and terminal
+  limit handling,
   configurable RFC 9438 CUBIC (default) and NewReno congestion-window control with
   bytes-in-flight send admission wired into 1-RTT sending and ACK/ACK_ECN processing,
   deterministic timestamp injection plus automatic monotonic runtime timing,
@@ -358,8 +359,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 cleartext development request/response round trips,
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
 - MQTT subscription-router trie matching versus a linear filter scan,
-- QUIC short-packet sealing with caller-provided storage versus the allocating
-  convenience wrapper,
+- QUIC AES-128-GCM and ChaCha20-Poly1305 short-packet sealing with
+  caller-provided storage versus the allocating convenience wrapper,
 - QUIC-LB encrypted server-ID extraction with the draft's three-pass
   load-balancer optimization,
 - QUIC Linux `UDP_SEGMENT` batching versus `sendmmsg`, plus `UDP_GRO`

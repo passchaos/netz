@@ -62,6 +62,7 @@ pub const Issued = struct {
     identity_len: usize,
     age_add: u32,
     psk: [32]u8,
+    cipher_suite: quic.tls.cipher_suite.Suite,
 };
 
 pub fn issue(
@@ -71,6 +72,7 @@ pub fn issue(
     resumption_master_secret: [32]u8,
     crypto_offset: *u64,
 ) Error!Issued {
+    const cipher_suite = connection.config.send_keys.suite;
     var nonce = config.nonce orelse blk: {
         var value: [16]u8 = undefined;
         try std.Io.randomSecure(io, &value);
@@ -102,6 +104,7 @@ pub fn issue(
                 .age_add = age_add,
                 .issued_at_ms = config.now_ms,
                 .lifetime_seconds = config.lifetime_seconds,
+                .cipher_suite = cipher_suite,
             },
         );
         @memcpy(&identity_storage, &sealed);
@@ -130,6 +133,7 @@ pub fn issue(
             .identity = identity,
             .secret = psk,
             .age_add = age_add,
+            .cipher_suite = cipher_suite,
             .issued_at_ms = config.now_ms,
             .lifetime_seconds = config.lifetime_seconds,
         });
@@ -143,6 +147,7 @@ pub fn issue(
         .identity_len = identity.len,
         .age_add = age_add,
         .psk = psk,
+        .cipher_suite = cipher_suite,
     };
 }
 
@@ -177,6 +182,7 @@ pub fn receiveAndCache(
         .issued_at_ms = config.now_ms,
         .lifetime_seconds = parsed.lifetime_seconds,
         .age_add = parsed.age_add,
+        .cipher_suite = connection.config.receive_keys.suite,
         .max_early_data_size = parsed.max_early_data_size,
         .transport_parameters = peer_transport_parameters,
     });
@@ -227,6 +233,7 @@ pub fn lookupServer(
             .identity = identity_copy,
             .secret = opened.secret,
             .age_add = opened.age_add,
+            .cipher_suite = opened.cipher_suite,
             .issued_at_ms = opened.issued_at_ms,
             .lifetime_seconds = opened.lifetime_seconds,
         };

@@ -54,6 +54,20 @@ pub fn clientKeysForVersion(
     psk: [Sha256.digest_len]u8,
     client_hello: []const u8,
 ) Error!ClientKeys {
+    return clientKeysForSuiteAndVersion(
+        version,
+        .aes_128_gcm_sha256,
+        psk,
+        client_hello,
+    );
+}
+
+pub fn clientKeysForSuiteAndVersion(
+    version: u32,
+    cipher_suite: quic.tls.cipher_suite.Suite,
+    psk: [Sha256.digest_len]u8,
+    client_hello: []const u8,
+) Error!ClientKeys {
     const client_hello_hash = Sha256.hash(client_hello);
     const traffic_secret =
         quic.resumption.tls_psk.deriveClientEarlyTrafficSecret(
@@ -62,8 +76,9 @@ pub fn clientKeysForVersion(
         );
     return .{
         .traffic_secret = traffic_secret,
-        .packet = try quic.protection.deriveAes128KeysForVersion(
+        .packet = try quic.protection.deriveKeysForVersion(
             version,
+            cipher_suite,
             traffic_secret,
         ),
     };

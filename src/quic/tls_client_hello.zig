@@ -5,6 +5,8 @@ const wire = @import("../internal/wire.zig");
 pub const Error = error{
     InvalidClientHello,
     InvalidServerHello,
+    InvalidCipherSuite,
+    NoSharedCipherSuite,
     InvalidEncryptedExtensions,
     InvalidFinished,
     MissingKeyShare,
@@ -22,8 +24,12 @@ const handshake_type_encrypted_extensions: u8 = 0x08;
 const handshake_type_finished: u8 = 0x14;
 const tls_1_2: u16 = 0x0303;
 const tls_1_3: u16 = 0x0304;
-const cipher_tls_aes_128_gcm_sha256: u16 = 0x1301;
 const group_x25519: u16 = 0x001d;
+pub const CipherSuite = quic.tls.cipher_suite.Suite;
+pub const CipherSuiteSelectionPolicy =
+    quic.tls.cipher_suite.SelectionPolicy;
+pub const default_cipher_suites =
+    quic.tls.cipher_suite.default_preference;
 
 const ext_server_name: u16 = 0x0000;
 const ext_supported_groups: u16 = 0x000a;
@@ -40,6 +46,7 @@ pub const ClientHelloOptions = struct {
     server_name: ?[]const u8 = null,
     alpn_protocols: []const []const u8 = &.{"h3"},
     transport_parameters: []const u8 = &.{},
+    cipher_suites: []const CipherSuite = &default_cipher_suites,
 };
 
 pub const ParsedClientHello = struct {
@@ -48,6 +55,7 @@ pub const ParsedClientHello = struct {
     alpn_protocols: [][]const u8,
     x25519_public_key: []const u8,
     transport_parameters: []const u8,
+    cipher_suites: []const u8,
     supports_ed25519: bool = false,
     supports_ecdsa_p256_sha256: bool = false,
     psk_offer: ?quic.resumption.tls_psk.Offer = null,
@@ -62,12 +70,14 @@ pub const ServerHelloOptions = struct {
     random: [32]u8,
     x25519_public_key: [32]u8,
     select_psk: bool = false,
+    cipher_suite: CipherSuite = .aes_128_gcm_sha256,
 };
 
 pub const ParsedServerHello = struct {
     random: [32]u8,
     x25519_public_key: []const u8,
     selected_psk: bool = false,
+    cipher_suite: CipherSuite,
 };
 
 pub const HandshakeSecrets = struct {
@@ -99,8 +109,11 @@ pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try appendInt(&body, allocator, u16, tls_1_2);
     try body.appendSlice(allocator, &options.random);
     try body.append(allocator, 0); // legacy_session_id
-    try appendInt(&body, allocator, u16, 2);
-    try appendInt(&body, allocator, u16, cipher_tls_aes_128_gcm_sha256);
+    try writeCipherSuites(
+        &body,
+        allocator,
+        options.cipher_suites,
+    );
     try body.append(allocator, 1);
     try body.append(allocator, 0); // null compression
 
@@ -129,7 +142,12 @@ pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try appendInt(&body, allocator, u16, tls_1_2);
     try body.appendSlice(allocator, &options.random);
     try body.append(allocator, 0); // legacy_session_id_echo
-    try appendInt(&body, allocator, u16, cipher_tls_aes_128_gcm_sha256);
+    try appendInt(
+        &body,
+        allocator,
+        u16,
+        options.cipher_suite.wireValue(),
+    );
     try body.append(allocator, 0); // legacy_compression_method
 
     var extensions: std.ArrayList(u8) = .empty;
@@ -225,7 +243,6 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     const cipher_suites_len = try body_cursor.readInt(u16, .big);
     if (cipher_suites_len == 0 or cipher_suites_len % 2 != 0) return error.InvalidClientHello;
     const cipher_suites = try body_cursor.readSlice(cipher_suites_len);
-    if (!cipherSuitesContain(cipher_suites, cipher_tls_aes_128_gcm_sha256)) return error.InvalidClientHello;
     const compression_len = try body_cursor.readByte();
     if (compression_len != 1) return error.InvalidClientHello;
     if (try body_cursor.readByte() != 0) return error.InvalidClientHello;
@@ -289,6 +306,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .alpn_protocols = try alpn_list.toOwnedSlice(allocator),
         .x25519_public_key = x25519.?,
         .transport_parameters = transport_parameters.?,
+        .cipher_suites = cipher_suites,
         .supports_ed25519 = supports_ed25519,
         .supports_ecdsa_p256_sha256 = supports_ecdsa_p256_sha256,
         .psk_offer = psk_offer,
@@ -307,7 +325,9 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
     const random = (try body_cursor.readSlice(32))[0..32].*;
     const session_id_len = try body_cursor.readByte();
     try body_cursor.skip(session_id_len);
-    if (try body_cursor.readInt(u16, .big) != cipher_tls_aes_128_gcm_sha256) return error.InvalidServerHello;
+    const cipher_suite = CipherSuite.fromWire(
+        try body_cursor.readInt(u16, .big),
+    ) orelse return error.InvalidCipherSuite;
     if (try body_cursor.readByte() != 0) return error.InvalidServerHello;
     const extensions_len = try body_cursor.readInt(u16, .big);
     const extensions = try body_cursor.readSlice(extensions_len);
@@ -343,6 +363,24 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
         .random = random,
         .x25519_public_key = x25519.?,
         .selected_psk = selected_psk,
+        .cipher_suite = cipher_suite,
+    };
+}
+
+pub fn selectCipherSuite(
+    client_wire: []const u8,
+    server_preference: []const CipherSuite,
+    policy: CipherSuiteSelectionPolicy,
+) Error!CipherSuite {
+    return quic.tls.cipher_suite.selectFromWire(
+        client_wire,
+        server_preference,
+        policy,
+    ) catch |err| switch (err) {
+        error.NoSharedCipherSuite => error.NoSharedCipherSuite,
+        error.InvalidCipherSuiteList,
+        error.InvalidServerPreference,
+        => error.InvalidCipherSuite,
     };
 }
 
@@ -435,6 +473,22 @@ pub fn deriveHandshakeSecretsWithPskForVersion(
     transcript_hash: [32]u8,
     psk: ?[32]u8,
 ) quic.protection.VersionError!HandshakeSecrets {
+    return deriveHandshakeSecretsWithPskAndSuiteForVersion(
+        version,
+        .aes_128_gcm_sha256,
+        shared_secret,
+        transcript_hash,
+        psk,
+    );
+}
+
+pub fn deriveHandshakeSecretsWithPskAndSuiteForVersion(
+    version: u32,
+    cipher_suite: CipherSuite,
+    shared_secret: [32]u8,
+    transcript_hash: [32]u8,
+    psk: ?[32]u8,
+) quic.protection.VersionError!HandshakeSecrets {
     const secrets = quic.tls.key_schedule.deriveHandshake(
         shared_secret,
         transcript_hash,
@@ -444,12 +498,14 @@ pub fn deriveHandshakeSecretsWithPskForVersion(
         .handshake_secret = secrets.handshake_secret,
         .client_handshake_traffic_secret = secrets.client_traffic_secret,
         .server_handshake_traffic_secret = secrets.server_traffic_secret,
-        .client_quic = try quic.protection.deriveAes128KeysForVersion(
+        .client_quic = try quic.protection.deriveKeysForVersion(
             version,
+            cipher_suite,
             secrets.client_traffic_secret,
         ),
-        .server_quic = try quic.protection.deriveAes128KeysForVersion(
+        .server_quic = try quic.protection.deriveKeysForVersion(
             version,
+            cipher_suite,
             secrets.server_traffic_secret,
         ),
     };
@@ -460,6 +516,20 @@ pub fn deriveApplicationSecrets(handshake_secret: [32]u8, transcript_hash: [32]u
 }
 
 pub fn deriveApplicationSecretsForVersion(version: u32, handshake_secret: [32]u8, transcript_hash: [32]u8) quic.protection.VersionError!ApplicationSecrets {
+    return deriveApplicationSecretsWithSuiteForVersion(
+        version,
+        .aes_128_gcm_sha256,
+        handshake_secret,
+        transcript_hash,
+    );
+}
+
+pub fn deriveApplicationSecretsWithSuiteForVersion(
+    version: u32,
+    cipher_suite: CipherSuite,
+    handshake_secret: [32]u8,
+    transcript_hash: [32]u8,
+) quic.protection.VersionError!ApplicationSecrets {
     const secrets = quic.tls.key_schedule.deriveApplication(
         handshake_secret,
         transcript_hash,
@@ -468,12 +538,14 @@ pub fn deriveApplicationSecretsForVersion(version: u32, handshake_secret: [32]u8
         .master_secret = secrets.master_secret,
         .client_application_traffic_secret = secrets.client_traffic_secret,
         .server_application_traffic_secret = secrets.server_traffic_secret,
-        .client_quic = try quic.protection.deriveAes128KeysForVersion(
+        .client_quic = try quic.protection.deriveKeysForVersion(
             version,
+            cipher_suite,
             secrets.client_traffic_secret,
         ),
-        .server_quic = try quic.protection.deriveAes128KeysForVersion(
+        .server_quic = try quic.protection.deriveKeysForVersion(
             version,
+            cipher_suite,
             secrets.server_traffic_secret,
         ),
     };
@@ -505,12 +577,35 @@ const SeenExtensions = struct {
     }
 };
 
-fn cipherSuitesContain(cipher_suites: []const u8, wanted: u16) bool {
-    var pos: usize = 0;
-    while (pos < cipher_suites.len) : (pos += 2) {
-        if (std.mem.readInt(u16, cipher_suites[pos..][0..2], .big) == wanted) return true;
+fn writeCipherSuites(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    suites: []const CipherSuite,
+) Error!void {
+    if (suites.len == 0 or
+        suites.len > std.math.maxInt(u16) / @sizeOf(u16))
+    {
+        return error.InvalidCipherSuite;
     }
-    return false;
+    for (suites, 0..) |suite, index| {
+        for (suites[0..index]) |previous| {
+            if (suite == previous) return error.InvalidCipherSuite;
+        }
+    }
+    try appendInt(
+        list,
+        allocator,
+        u16,
+        @intCast(suites.len * @sizeOf(u16)),
+    );
+    for (suites) |suite| {
+        try appendInt(
+            list,
+            allocator,
+            u16,
+            suite.wireValue(),
+        );
+    }
 }
 
 fn writeServerNameExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) Error!void {
@@ -711,652 +806,6 @@ fn readU24(cursor: *wire.Cursor) !usize {
     return (@as(usize, bytes[0]) << 16) | (@as(usize, bytes[1]) << 8) | bytes[2];
 }
 
-test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
-    const allocator = std.testing.allocator;
-    const random = [_]u8{0x11} ** 32;
-    const key = [_]u8{0x22} ** 32;
-    var tp: std.ArrayList(u8) = .empty;
-    defer tp.deinit(allocator);
-    try quic.encodeTransportParameter(&tp, allocator, @intFromEnum(quic.TransportParameterId.initial_max_data), &.{ 0x40, 0x64 });
-
-    var hello: std.ArrayList(u8) = .empty;
-    defer hello.deinit(allocator);
-    try writeClientHello(&hello, allocator, .{
-        .random = random,
-        .x25519_public_key = key,
-        .server_name = "example.com",
-        .alpn_protocols = &.{ "h3", "h3-29" },
-        .transport_parameters = tp.items,
-    });
-
-    var parsed = try parseClientHello(allocator, hello.items);
-    defer parsed.deinit(allocator);
-    try std.testing.expectEqualSlices(u8, &random, &parsed.random);
-    try std.testing.expectEqualStrings("example.com", parsed.server_name.?);
-    try std.testing.expectEqualStrings("h3", parsed.alpn_protocols[0]);
-    try std.testing.expectEqualStrings("h3-29", parsed.alpn_protocols[1]);
-    try std.testing.expectEqualSlices(u8, &key, parsed.x25519_public_key);
-
-    const params = try quic.parseTransportParameters(allocator, parsed.transport_parameters);
-    defer allocator.free(params);
-    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.TransportParameterId.initial_max_data)), params[0].id);
-
-    var duplicate_transport_parameters = try hello.clone(allocator);
-    defer duplicate_transport_parameters.deinit(allocator);
-    try appendClientHelloExtensionForTest(&duplicate_transport_parameters, allocator, ext_quic_transport_parameters, &.{});
-    try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, duplicate_transport_parameters.items));
-
-    const offsets = try clientHelloOffsetsForTest(hello.items);
-    var unsupported_cipher = try hello.clone(allocator);
-    defer unsupported_cipher.deinit(allocator);
-    std.mem.writeInt(u16, unsupported_cipher.items[offsets.cipher_suites_start..][0..2], 0x1302, .big);
-    try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, unsupported_cipher.items));
-
-    var non_null_compression = try hello.clone(allocator);
-    defer non_null_compression.deinit(allocator);
-    non_null_compression.items[offsets.compression_start] = 1;
-    try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, non_null_compression.items));
-
-    // Real TLS 1.3 clients commonly send a version preference vector instead of
-    // the one-element vector produced by this minimal writer. QUIC still requires
-    // TLS 1.3 to be offered, but the parser must not reject otherwise valid
-    // multi-version ClientHellos before negotiation can happen.
-    const multi_version_payload = [_]u8{ 4, 0x03, 0x03, 0x03, 0x04 };
-    var multi_version_hello = try hello.clone(allocator);
-    defer multi_version_hello.deinit(allocator);
-    try replaceClientHelloExtensionForTest(&multi_version_hello, allocator, ext_supported_versions, &multi_version_payload);
-    var multi_version_parsed = try parseClientHello(allocator, multi_version_hello.items);
-    defer multi_version_parsed.deinit(allocator);
-    try std.testing.expectEqualSlices(u8, &key, multi_version_parsed.x25519_public_key);
-
-    const malformed_supported_versions = [_][]const u8{
-        &.{},
-        &.{0},
-        &.{ 1, 0x03 },
-        &.{ 3, 0x03, 0x03, 0x04 },
-        &.{ 2, 0x03, 0x03 },
-        &.{ 4, 0x03, 0x04 },
-    };
-    for (malformed_supported_versions) |payload| {
-        var malformed_version_hello = try hello.clone(allocator);
-        defer malformed_version_hello.deinit(allocator);
-        try replaceClientHelloExtensionForTest(&malformed_version_hello, allocator, ext_supported_versions, payload);
-        try std.testing.expectError(error.InvalidClientHello, parseClientHello(allocator, malformed_version_hello.items));
-    }
-
-    const huge_transport_parameters = try allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) + 1);
-    defer allocator.free(huge_transport_parameters);
-    try std.testing.expectError(error.InvalidClientHello, writeClientHello(&hello, allocator, .{
-        .random = random,
-        .x25519_public_key = key,
-        .transport_parameters = huge_transport_parameters,
-    }));
-
-    const huge_sni = try allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) - 1);
-    defer allocator.free(huge_sni);
-    @memset(huge_sni, 'a');
-    try std.testing.expectError(error.InvalidClientHello, writeClientHello(&hello, allocator, .{
-        .random = random,
-        .x25519_public_key = key,
-        .server_name = huge_sni,
-    }));
-
-    const long_proto = try allocator.alloc(u8, 255);
-    defer allocator.free(long_proto);
-    @memset(long_proto, 'h');
-    const too_many_protocols = try allocator.alloc([]const u8, 257);
-    defer allocator.free(too_many_protocols);
-    for (too_many_protocols) |*protocol| protocol.* = long_proto;
-    try std.testing.expectError(error.InvalidClientHello, writeClientHello(&hello, allocator, .{
-        .random = random,
-        .x25519_public_key = key,
-        .alpn_protocols = too_many_protocols,
-    }));
-}
-
-fn appendClientHelloExtensionForTest(
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    typ: u16,
-    payload: []const u8,
-) Error!void {
-    if (list.items.len < 4 or list.items[0] != handshake_type_client_hello) return error.InvalidClientHello;
-    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
-    if (body_len + 4 != list.items.len) return error.InvalidClientHello;
-
-    var pos: usize = 4;
-    pos += 2 + 32; // legacy_version + random
-    if (pos >= list.items.len) return error.InvalidClientHello;
-    const session_id_len = list.items[pos];
-    pos += 1 + @as(usize, session_id_len);
-    if (pos + 2 > list.items.len) return error.InvalidClientHello;
-    const cipher_suites_len = std.mem.readInt(u16, list.items[pos..][0..2], .big);
-    pos += 2 + @as(usize, cipher_suites_len);
-    if (pos >= list.items.len) return error.InvalidClientHello;
-    const compression_len = list.items[pos];
-    pos += 1 + @as(usize, compression_len);
-    if (pos + 2 > list.items.len) return error.InvalidClientHello;
-
-    const extensions_len_pos = pos;
-    const extensions_len = std.mem.readInt(u16, list.items[extensions_len_pos..][0..2], .big);
-    if (extensions_len_pos + 2 + @as(usize, extensions_len) != list.items.len) return error.InvalidClientHello;
-    const added_len = std.math.add(usize, 4, payload.len) catch return error.InvalidClientHello;
-    const next_extensions_len = std.math.add(usize, extensions_len, added_len) catch return error.InvalidClientHello;
-    const next_body_len = std.math.add(usize, body_len, added_len) catch return error.InvalidClientHello;
-    if (next_extensions_len > std.math.maxInt(u16) or next_body_len > std.math.maxInt(u24)) return error.InvalidClientHello;
-
-    try appendInt(list, allocator, u16, typ);
-    try appendU16Len(list, allocator, payload.len, error.InvalidClientHello);
-    try list.appendSlice(allocator, payload);
-    std.mem.writeInt(u16, list.items[extensions_len_pos..][0..2], @intCast(next_extensions_len), .big);
-    list.items[1] = @truncate(next_body_len >> 16);
-    list.items[2] = @truncate(next_body_len >> 8);
-    list.items[3] = @truncate(next_body_len);
-}
-
-fn replaceClientHelloExtensionForTest(
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    typ: u16,
-    replacement_payload: []const u8,
-) Error!void {
-    if (list.items.len < 4 or list.items[0] != handshake_type_client_hello) return error.InvalidClientHello;
-    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
-    if (body_len + 4 != list.items.len) return error.InvalidClientHello;
-
-    var pos: usize = 4 + 2 + 32;
-    if (pos >= list.items.len) return error.InvalidClientHello;
-    const session_id_len = list.items[pos];
-    pos += 1 + @as(usize, session_id_len);
-    if (pos + 2 > list.items.len) return error.InvalidClientHello;
-    const cipher_suites_len = std.mem.readInt(u16, list.items[pos..][0..2], .big);
-    pos += 2 + @as(usize, cipher_suites_len);
-    if (pos >= list.items.len) return error.InvalidClientHello;
-    const compression_len = list.items[pos];
-    pos += 1 + @as(usize, compression_len);
-    if (pos + 2 > list.items.len) return error.InvalidClientHello;
-
-    const extensions_len_pos = pos;
-    const extensions_len = std.mem.readInt(u16, list.items[extensions_len_pos..][0..2], .big);
-    var ext_pos = extensions_len_pos + 2;
-    const ext_end = ext_pos + @as(usize, extensions_len);
-    if (ext_end != list.items.len) return error.InvalidClientHello;
-    while (ext_pos < ext_end) {
-        if (ext_pos + 4 > ext_end) return error.InvalidClientHello;
-        const ext_type = std.mem.readInt(u16, list.items[ext_pos..][0..2], .big);
-        const old_len = std.mem.readInt(u16, list.items[ext_pos + 2 ..][0..2], .big);
-        const old_payload_start = ext_pos + 4;
-        const old_payload_end = old_payload_start + @as(usize, old_len);
-        if (old_payload_end > ext_end) return error.InvalidClientHello;
-        if (ext_type == typ) {
-            const old_total = 4 + @as(usize, old_len);
-            const new_total = std.math.add(usize, 4, replacement_payload.len) catch return error.InvalidClientHello;
-            const next_extensions_len = if (new_total >= old_total)
-                std.math.add(usize, extensions_len, new_total - old_total) catch return error.InvalidClientHello
-            else
-                extensions_len - (old_total - new_total);
-            const next_body_len = if (new_total >= old_total)
-                std.math.add(usize, body_len, new_total - old_total) catch return error.InvalidClientHello
-            else
-                body_len - (old_total - new_total);
-            if (next_extensions_len > std.math.maxInt(u16) or next_body_len > std.math.maxInt(u24)) return error.InvalidClientHello;
-
-            const tail = try allocator.dupe(u8, list.items[old_payload_end..]);
-            defer allocator.free(tail);
-            try list.resize(allocator, old_payload_start + replacement_payload.len + tail.len);
-            try appendU16LenToSlice(list.items[ext_pos + 2 ..][0..2], replacement_payload.len);
-            @memcpy(list.items[old_payload_start..][0..replacement_payload.len], replacement_payload);
-            @memcpy(list.items[old_payload_start + replacement_payload.len ..], tail);
-            std.mem.writeInt(u16, list.items[extensions_len_pos..][0..2], @intCast(next_extensions_len), .big);
-            list.items[1] = @truncate(next_body_len >> 16);
-            list.items[2] = @truncate(next_body_len >> 8);
-            list.items[3] = @truncate(next_body_len);
-            return;
-        }
-        ext_pos = old_payload_end;
-    }
-    return error.InvalidClientHello;
-}
-
-fn appendU16LenToSlice(out: *[2]u8, len: usize) Error!void {
-    if (len > std.math.maxInt(u16)) return error.InvalidClientHello;
-    std.mem.writeInt(u16, out, @intCast(len), .big);
-}
-
-const ClientHelloOffsetsForTest = struct {
-    cipher_suites_start: usize,
-    compression_start: usize,
-};
-
-fn clientHelloOffsetsForTest(bytes: []const u8) Error!ClientHelloOffsetsForTest {
-    if (bytes.len < 4 or bytes[0] != handshake_type_client_hello) return error.InvalidClientHello;
-    const body_len = (@as(usize, bytes[1]) << 16) | (@as(usize, bytes[2]) << 8) | bytes[3];
-    if (body_len + 4 != bytes.len) return error.InvalidClientHello;
-
-    var pos: usize = 4 + 2 + 32;
-    if (pos >= bytes.len) return error.InvalidClientHello;
-    const session_id_len = bytes[pos];
-    pos += 1 + @as(usize, session_id_len);
-    if (pos + 2 > bytes.len) return error.InvalidClientHello;
-    const cipher_suites_len = std.mem.readInt(u16, bytes[pos..][0..2], .big);
-    const cipher_suites_start = pos + 2;
-    pos += 2 + @as(usize, cipher_suites_len);
-    if (pos >= bytes.len) return error.InvalidClientHello;
-    const compression_len = bytes[pos];
-    const compression_start = pos + 1;
-    if (compression_start + @as(usize, compression_len) > bytes.len) return error.InvalidClientHello;
-    return .{ .cipher_suites_start = cipher_suites_start, .compression_start = compression_start };
-}
-
-fn appendServerHelloExtensionForTest(
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    typ: u16,
-    payload: []const u8,
-) Error!void {
-    if (list.items.len < 4 or list.items[0] != handshake_type_server_hello) return error.InvalidServerHello;
-    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
-    if (body_len + 4 != list.items.len) return error.InvalidServerHello;
-
-    var pos: usize = 4 + 2 + 32;
-    if (pos >= list.items.len) return error.InvalidServerHello;
-    const session_id_len = list.items[pos];
-    pos += 1 + @as(usize, session_id_len) + 2 + 1; // session id + cipher suite + compression
-    if (pos + 2 > list.items.len) return error.InvalidServerHello;
-    try appendHandshakeExtensionForTest(list, allocator, pos, typ, payload, error.InvalidServerHello);
-}
-
-fn appendEncryptedExtensionsExtensionForTest(
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    typ: u16,
-    payload: []const u8,
-) Error!void {
-    if (list.items.len < 6 or list.items[0] != handshake_type_encrypted_extensions) return error.InvalidEncryptedExtensions;
-    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
-    if (body_len + 4 != list.items.len) return error.InvalidEncryptedExtensions;
-    try appendHandshakeExtensionForTest(list, allocator, 4, typ, payload, error.InvalidEncryptedExtensions);
-}
-
-fn appendHandshakeExtensionForTest(
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    extensions_len_pos: usize,
-    typ: u16,
-    payload: []const u8,
-    err: Error,
-) Error!void {
-    if (extensions_len_pos + 2 > list.items.len) return err;
-    const body_len = (@as(usize, list.items[1]) << 16) | (@as(usize, list.items[2]) << 8) | list.items[3];
-    const extensions_len = std.mem.readInt(u16, list.items[extensions_len_pos..][0..2], .big);
-    if (extensions_len_pos + 2 + @as(usize, extensions_len) != list.items.len) return err;
-    const added_len = std.math.add(usize, 4, payload.len) catch return err;
-    const next_extensions_len = std.math.add(usize, extensions_len, added_len) catch return err;
-    const next_body_len = std.math.add(usize, body_len, added_len) catch return err;
-    if (next_extensions_len > std.math.maxInt(u16) or next_body_len > std.math.maxInt(u24)) return err;
-
-    try appendInt(list, allocator, u16, typ);
-    try appendU16Len(list, allocator, payload.len, err);
-    try list.appendSlice(allocator, payload);
-    std.mem.writeInt(u16, list.items[extensions_len_pos..][0..2], @intCast(next_extensions_len), .big);
-    list.items[1] = @truncate(next_body_len >> 16);
-    list.items[2] = @truncate(next_body_len >> 8);
-    list.items[3] = @truncate(next_body_len);
-}
-
-test "QUIC TLS ClientHello travels over Initial CRYPTO exchange" {
-    const allocator = std.testing.allocator;
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var server = try quic.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
-    defer server.deinit();
-    var client = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{ .max_datagram_size = 4096 });
-    defer client.deinit();
-
-    const original_dcid = [_]u8{ 8, 7, 6, 5, 4, 3, 2, 1 };
-    const client_scid = [_]u8{ 1, 1, 1, 1 };
-    const secrets = quic.protection.deriveInitialSecrets(&original_dcid);
-    var hello: std.ArrayList(u8) = .empty;
-    defer hello.deinit(allocator);
-    try writeClientHello(&hello, allocator, .{
-        .random = [_]u8{0x33} ** 32,
-        .x25519_public_key = [_]u8{0x44} ** 32,
-        .server_name = "localhost",
-        .transport_parameters = &.{},
-    });
-
-    try quic.initial_exchange.sendInitialCrypto(&client.endpoint, server.address(), secrets.client, .{
-        .destination_connection_id = &original_dcid,
-        .source_connection_id = &client_scid,
-        .packet_number = 0,
-        .crypto_data = hello.items,
-        .max_crypto_frame_data_len = 64,
-    });
-
-    var received = try quic.initial_exchange.receiveInitialCrypto(&server.endpoint, secrets.client, 0, 4096);
-    defer received.deinit(allocator);
-    var parsed = try parseClientHello(allocator, received.crypto_data);
-    defer parsed.deinit(allocator);
-    try std.testing.expectEqualStrings("localhost", parsed.server_name.?);
-    try std.testing.expectEqualStrings("h3", parsed.alpn_protocols[0]);
-}
-
-test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
-    const allocator = std.testing.allocator;
-    const client_secret = [_]u8{0x11} ** 32;
-    const server_secret = [_]u8{0x22} ** 32;
-    const client_public = try x25519PublicKey(client_secret);
-    const server_public = try x25519PublicKey(server_secret);
-
-    var client_hello: std.ArrayList(u8) = .empty;
-    defer client_hello.deinit(allocator);
-    try writeClientHello(&client_hello, allocator, .{
-        .random = [_]u8{0x33} ** 32,
-        .x25519_public_key = client_public,
-        .server_name = "localhost",
-        .transport_parameters = &.{},
-    });
-
-    var parsed_client = try parseClientHello(allocator, client_hello.items);
-    defer parsed_client.deinit(allocator);
-    const server_shared = try x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
-
-    var server_hello: std.ArrayList(u8) = .empty;
-    defer server_hello.deinit(allocator);
-    try writeServerHello(&server_hello, allocator, .{
-        .random = [_]u8{0x44} ** 32,
-        .x25519_public_key = server_public,
-    });
-    const parsed_server = try parseServerHello(server_hello.items);
-    const client_shared = try x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
-    try std.testing.expectEqualSlices(u8, &client_shared, &server_shared);
-
-    var duplicate_server_supported_versions = try server_hello.clone(allocator);
-    defer duplicate_server_supported_versions.deinit(allocator);
-    try appendServerHelloExtensionForTest(&duplicate_server_supported_versions, allocator, ext_supported_versions, &.{ 0x03, 0x04 });
-    try std.testing.expectError(error.InvalidServerHello, parseServerHello(duplicate_server_supported_versions.items));
-
-    const th = transcriptHash(client_hello.items, server_hello.items);
-    const client_keys = deriveHandshakeSecrets(client_shared, th);
-    const server_keys = deriveHandshakeSecrets(server_shared, th);
-    try std.testing.expectEqualSlices(u8, &client_keys.handshake_secret, &server_keys.handshake_secret);
-    try std.testing.expectEqualSlices(u8, &client_keys.client_quic.key, &server_keys.client_quic.key);
-    try std.testing.expectEqualSlices(u8, &client_keys.server_quic.key, &server_keys.server_quic.key);
-    try std.testing.expect(!std.mem.eql(u8, &client_keys.client_quic.key, &client_keys.server_quic.key));
-}
-
-test "QUIC TLS QUIC keys use version-specific packet-protection labels" {
-    const shared = [_]u8{0x33} ** 32;
-    const transcript = [_]u8{0x44} ** 32;
-    const v1 = try deriveHandshakeSecretsForVersion(quic.Version.version_1.wireValue(), shared, transcript);
-    const v2 = try deriveHandshakeSecretsForVersion(quic.Version.version_2.wireValue(), shared, transcript);
-
-    try std.testing.expectEqualSlices(u8, &v1.handshake_secret, &v2.handshake_secret);
-    try std.testing.expectEqualSlices(u8, &v1.client_handshake_traffic_secret, &v2.client_handshake_traffic_secret);
-    try std.testing.expect(!std.mem.eql(u8, &v1.client_quic.key, &v2.client_quic.key));
-
-    const app_v1 = try deriveApplicationSecretsForVersion(quic.Version.version_1.wireValue(), v1.handshake_secret, transcript);
-    const app_v2 = try deriveApplicationSecretsForVersion(quic.Version.version_2.wireValue(), v1.handshake_secret, transcript);
-    try std.testing.expectEqualSlices(u8, &app_v1.master_secret, &app_v2.master_secret);
-    try std.testing.expect(!std.mem.eql(u8, &app_v1.client_quic.key, &app_v2.client_quic.key));
-}
-
-test "QUIC TLS versioned packet-protection derivation rejects unsupported versions" {
-    const unsupported_version: u32 = 0xface_b00c;
-    const shared = [_]u8{0x35} ** 32;
-    const transcript = [_]u8{0x36} ** 32;
-    const handshake_secret = [_]u8{0x37} ** quic.protection.secret_len;
-
-    try std.testing.expectError(error.UnsupportedVersion, deriveHandshakeSecretsForVersion(unsupported_version, shared, transcript));
-    try std.testing.expectError(error.UnsupportedVersion, deriveApplicationSecretsForVersion(unsupported_version, handshake_secret, transcript));
-}
-
-test "QUIC TLS ClientHello and ServerHello exchange over protected Initial packets" {
-    const allocator = std.testing.allocator;
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var server = try quic.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
-    defer server.deinit();
-    var client = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{ .max_datagram_size = 4096 });
-    defer client.deinit();
-
-    const original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0x01, 0x02, 0x03, 0x04 };
-    const client_scid = [_]u8{ 0x10, 0x11, 0x12, 0x13 };
-    const server_scid = [_]u8{ 0x20, 0x21, 0x22, 0x23 };
-    const initial_secrets = quic.protection.deriveInitialSecrets(&original_dcid);
-
-    const client_secret = [_]u8{0x45} ** 32;
-    const server_secret = [_]u8{0x46} ** 32;
-    const client_public = try x25519PublicKey(client_secret);
-    const server_public = try x25519PublicKey(server_secret);
-
-    var client_hello: std.ArrayList(u8) = .empty;
-    defer client_hello.deinit(allocator);
-    try writeClientHello(&client_hello, allocator, .{
-        .random = [_]u8{0x47} ** 32,
-        .x25519_public_key = client_public,
-        .server_name = "localhost",
-        .alpn_protocols = &.{"h3"},
-        .transport_parameters = &.{},
-    });
-
-    try quic.initial_exchange.sendInitialCrypto(&client.endpoint, server.address(), initial_secrets.client, .{
-        .destination_connection_id = &original_dcid,
-        .source_connection_id = &client_scid,
-        .packet_number = 0,
-        .crypto_data = client_hello.items,
-        .max_crypto_frame_data_len = 64,
-    });
-
-    var server_received = try quic.initial_exchange.receiveInitialCrypto(&server.endpoint, initial_secrets.client, 0, 4096);
-    defer server_received.deinit(allocator);
-    var parsed_client = try parseClientHello(allocator, server_received.crypto_data);
-    defer parsed_client.deinit(allocator);
-    const server_shared = try x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
-
-    var server_hello: std.ArrayList(u8) = .empty;
-    defer server_hello.deinit(allocator);
-    try writeServerHello(&server_hello, allocator, .{
-        .random = [_]u8{0x48} ** 32,
-        .x25519_public_key = server_public,
-    });
-    const server_transcript = transcriptHash(client_hello.items, server_hello.items);
-    const server_handshake = deriveHandshakeSecrets(server_shared, server_transcript);
-
-    try quic.initial_exchange.sendInitialCrypto(&server.endpoint, server_received.from, initial_secrets.server, .{
-        .destination_connection_id = &client_scid,
-        .source_connection_id = &server_scid,
-        .packet_number = 0,
-        .crypto_data = server_hello.items,
-        .max_crypto_frame_data_len = 64,
-    });
-
-    var client_received = try quic.initial_exchange.receiveInitialCrypto(&client.endpoint, initial_secrets.server, 0, 4096);
-    defer client_received.deinit(allocator);
-    const parsed_server = try parseServerHello(client_received.crypto_data);
-    const client_shared = try x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
-    const client_transcript = transcriptHash(client_hello.items, client_received.crypto_data);
-    const client_handshake = deriveHandshakeSecrets(client_shared, client_transcript);
-
-    try std.testing.expectEqualSlices(u8, &server_shared, &client_shared);
-    try std.testing.expectEqualSlices(u8, &server_handshake.client_quic.key, &client_handshake.client_quic.key);
-    try std.testing.expectEqualSlices(u8, &server_handshake.server_quic.key, &client_handshake.server_quic.key);
-}
-
-test "QUIC TLS EncryptedExtensions and Finished verify data" {
-    const allocator = std.testing.allocator;
-    var tp: std.ArrayList(u8) = .empty;
-    defer tp.deinit(allocator);
-    try quic.encodeTransportParameter(&tp, allocator, @intFromEnum(quic.TransportParameterId.initial_max_data), &.{ 0x40, 0x64 });
-
-    var ee: std.ArrayList(u8) = .empty;
-    defer ee.deinit(allocator);
-    try writeEncryptedExtensions(&ee, allocator, "h3", tp.items);
-    const parsed_ee = try parseEncryptedExtensions(ee.items);
-    try std.testing.expectEqualStrings("h3", parsed_ee.alpn);
-    const params = try quic.parseTransportParameters(allocator, parsed_ee.transport_parameters);
-    defer allocator.free(params);
-    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.TransportParameterId.initial_max_data)), params[0].id);
-
-    var duplicate_ee_alpn = try ee.clone(allocator);
-    defer duplicate_ee_alpn.deinit(allocator);
-    try appendEncryptedExtensionsExtensionForTest(&duplicate_ee_alpn, allocator, ext_alpn, &.{ 0x00, 0x03, 0x02, 'h', '3' });
-    try std.testing.expectError(error.InvalidEncryptedExtensions, parseEncryptedExtensions(duplicate_ee_alpn.items));
-
-    const base_key = [_]u8{0x5a} ** 32;
-    var transcript_hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(ee.items, &transcript_hash, .{});
-    const verify_data = computeFinishedVerifyData(base_key, transcript_hash);
-
-    var finished: std.ArrayList(u8) = .empty;
-    defer finished.deinit(allocator);
-    try writeFinished(&finished, allocator, verify_data);
-    const parsed_finished = try parseFinished(finished.items);
-    try verifyFinished(base_key, transcript_hash, parsed_finished);
-
-    var wrong_hash = transcript_hash;
-    wrong_hash[0] ^= 0xff;
-    try std.testing.expectError(error.BadFinished, verifyFinished(base_key, wrong_hash, parsed_finished));
-}
-
-test "QUIC TLS server handshake flight travels over Handshake packet" {
-    const allocator = std.testing.allocator;
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var server = try quic.runtime.Server.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
-    defer server.deinit();
-    var client = try quic.runtime.Client.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{ .max_datagram_size = 4096 });
-    defer client.deinit();
-
-    const original_dcid = [_]u8{ 0xf0, 0xe1, 0xd2, 0xc3, 0xb4, 0xa5, 0x96, 0x87 };
-    const client_scid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
-    const server_scid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
-    const initial_secrets = quic.protection.deriveInitialSecrets(&original_dcid);
-
-    const client_secret = [_]u8{0x51} ** 32;
-    const server_secret = [_]u8{0x52} ** 32;
-    const client_public = try x25519PublicKey(client_secret);
-    const server_public = try x25519PublicKey(server_secret);
-
-    var client_hello: std.ArrayList(u8) = .empty;
-    defer client_hello.deinit(allocator);
-    try writeClientHello(&client_hello, allocator, .{
-        .random = [_]u8{0x53} ** 32,
-        .x25519_public_key = client_public,
-        .server_name = "localhost",
-        .transport_parameters = &.{},
-    });
-    try quic.initial_exchange.sendInitialCrypto(&client.endpoint, server.address(), initial_secrets.client, .{
-        .destination_connection_id = &original_dcid,
-        .source_connection_id = &client_scid,
-        .packet_number = 0,
-        .crypto_data = client_hello.items,
-        .max_crypto_frame_data_len = 64,
-    });
-
-    var server_received = try quic.initial_exchange.receiveInitialCrypto(&server.endpoint, initial_secrets.client, 0, 4096);
-    defer server_received.deinit(allocator);
-    var parsed_client = try parseClientHello(allocator, server_received.crypto_data);
-    defer parsed_client.deinit(allocator);
-    const server_shared = try x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
-
-    var server_hello: std.ArrayList(u8) = .empty;
-    defer server_hello.deinit(allocator);
-    try writeServerHello(&server_hello, allocator, .{
-        .random = [_]u8{0x54} ** 32,
-        .x25519_public_key = server_public,
-    });
-    const hs_hash = transcriptHash(client_hello.items, server_hello.items);
-    const server_keys = deriveHandshakeSecrets(server_shared, hs_hash);
-
-    var ee: std.ArrayList(u8) = .empty;
-    defer ee.deinit(allocator);
-    try writeEncryptedExtensions(&ee, allocator, "h3", &.{});
-    var transcript = std.crypto.hash.sha2.Sha256.init(.{});
-    transcript.update(client_hello.items);
-    transcript.update(server_hello.items);
-    transcript.update(ee.items);
-    var server_finished_hash: [32]u8 = undefined;
-    transcript.final(&server_finished_hash);
-    const verify_data = computeFinishedVerifyData(server_keys.server_handshake_traffic_secret, server_finished_hash);
-
-    var finished: std.ArrayList(u8) = .empty;
-    defer finished.deinit(allocator);
-    try writeFinished(&finished, allocator, verify_data);
-
-    var server_flight: std.ArrayList(u8) = .empty;
-    defer server_flight.deinit(allocator);
-    try server_flight.appendSlice(allocator, ee.items);
-    try server_flight.appendSlice(allocator, finished.items);
-    try quic.initial_exchange.sendHandshakeCrypto(&server.endpoint, server_received.from, server_keys.server_quic, .{
-        .destination_connection_id = &client_scid,
-        .source_connection_id = &server_scid,
-        .packet_number = 0,
-        .crypto_data = server_flight.items,
-        .max_crypto_frame_data_len = 64,
-    });
-
-    var client_received = try quic.initial_exchange.receiveHandshakeCrypto(&client.endpoint, server_keys.server_quic, 0, 4096);
-    defer client_received.deinit(allocator);
-    const ee_len = handshakeMessageLen(client_received.crypto_data);
-    const parsed_ee = try parseEncryptedExtensions(client_received.crypto_data[0..ee_len]);
-    try std.testing.expectEqualStrings("h3", parsed_ee.alpn);
-    const parsed_finished = try parseFinished(client_received.crypto_data[ee_len..]);
-
-    const parsed_server = try parseServerHello(server_hello.items);
-    const client_shared = try x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
-    const client_keys = deriveHandshakeSecrets(client_shared, hs_hash);
-    try verifyFinished(client_keys.server_handshake_traffic_secret, server_finished_hash, parsed_finished);
-
-    var through_server_finished = std.crypto.hash.sha2.Sha256.init(.{});
-    through_server_finished.update(client_hello.items);
-    through_server_finished.update(server_hello.items);
-    through_server_finished.update(ee.items);
-    through_server_finished.update(finished.items);
-    var client_finished_hash: [32]u8 = undefined;
-    through_server_finished.final(&client_finished_hash);
-    const client_verify = computeFinishedVerifyData(client_keys.client_handshake_traffic_secret, client_finished_hash);
-
-    var client_finished: std.ArrayList(u8) = .empty;
-    defer client_finished.deinit(allocator);
-    try writeFinished(&client_finished, allocator, client_verify);
-    try quic.initial_exchange.sendHandshakeCrypto(&client.endpoint, server.address(), client_keys.client_quic, .{
-        .destination_connection_id = &server_scid,
-        .source_connection_id = &client_scid,
-        .packet_number = 0,
-        .crypto_data = client_finished.items,
-        .max_crypto_frame_data_len = 64,
-    });
-
-    var server_client_finished = try quic.initial_exchange.receiveHandshakeCrypto(&server.endpoint, server_keys.client_quic, 0, 4096);
-    defer server_client_finished.deinit(allocator);
-    const parsed_client_finished = try parseFinished(server_client_finished.crypto_data);
-    try verifyFinished(server_keys.client_handshake_traffic_secret, client_finished_hash, parsed_client_finished);
-
-    var full_transcript = std.crypto.hash.sha2.Sha256.init(.{});
-    full_transcript.update(client_hello.items);
-    full_transcript.update(server_hello.items);
-    full_transcript.update(ee.items);
-    full_transcript.update(finished.items);
-    full_transcript.update(client_finished.items);
-    var app_hash: [32]u8 = undefined;
-    full_transcript.final(&app_hash);
-    const client_app = deriveApplicationSecrets(client_keys.handshake_secret, app_hash);
-    const server_app = deriveApplicationSecrets(server_keys.handshake_secret, app_hash);
-    try std.testing.expectEqualSlices(u8, &client_app.client_quic.key, &server_app.client_quic.key);
-    try std.testing.expectEqualSlices(u8, &client_app.server_quic.key, &server_app.server_quic.key);
-    try std.testing.expect(!std.mem.eql(u8, &client_app.client_quic.key, &client_app.server_quic.key));
-}
-
-fn handshakeMessageLen(bytes: []const u8) usize {
-    return 4 + ((@as(usize, bytes[1]) << 16) | (@as(usize, bytes[2]) << 8) | bytes[3]);
+test {
+    _ = @import("tls/client_hello_tests.zig");
 }
