@@ -26,6 +26,7 @@ pub const address_validation_token = @import("address_validation_token.zig");
 pub const retry_flow = @import("retry_flow.zig");
 pub const version_negotiation = @import("version_negotiation.zig");
 pub const qlog = @import("observability/qlog/mod.zig");
+pub const keylog = @import("observability/keylog/mod.zig");
 pub const quic_lb = @import("load_balancing/quic_lb/mod.zig");
 pub const resumption = @import("resumption/mod.zig");
 
@@ -1849,6 +1850,7 @@ test {
     _ = retry_flow;
     _ = version_negotiation;
     _ = qlog;
+    _ = keylog;
     _ = quic_lb;
     _ = resumption;
 }

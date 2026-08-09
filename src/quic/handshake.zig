@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.one_rtt.Error || quic.Error || std.Io.RandomSecureError || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.one_rtt.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
     InvalidHandshakeFlight,
     MissingCryptoFrame,
     MissingAlpn,
@@ -39,6 +39,7 @@ pub const ClientOptions = struct {
     initial_one_rtt_config: OneRttConfig = .{},
     random: ?[32]u8 = null,
     x25519_secret_key: ?[32]u8 = null,
+    keylog: ?*quic.keylog.Log = null,
 };
 
 pub const ServerOptions = struct {
@@ -70,6 +71,7 @@ pub const ServerOptions = struct {
     initial_one_rtt_config: OneRttConfig = .{},
     random: ?[32]u8 = null,
     x25519_secret_key: ?[32]u8 = null,
+    keylog: ?*quic.keylog.Log = null,
 };
 
 pub const OneRttConfig = struct {
@@ -275,6 +277,13 @@ fn connectAttempt(
     const shared = try quic.tls_client_hello.x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
     const hs_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data });
     const handshake = try quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
+    if (options.keylog) |keylog| {
+        try keylog.writeHandshakeSecrets(
+            client_random,
+            handshake.client_handshake_traffic_secret,
+            handshake.server_handshake_traffic_secret,
+        );
+    }
 
     var server_handshake = try receiveServerHandshakeCrypto(
         endpoint,
@@ -323,6 +332,13 @@ fn connectAttempt(
 
     const app_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions, server_flight.finished, client_finished.items });
     const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
+    if (options.keylog) |keylog| {
+        try keylog.writeApplicationSecrets(
+            client_random,
+            application.client_application_traffic_secret,
+            application.server_application_traffic_secret,
+        );
+    }
     return try establishedConnection(
         endpoint,
         server_initial.from,
@@ -380,6 +396,13 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     });
     const hs_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items });
     const handshake = try quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
+    if (options.keylog) |keylog| {
+        try keylog.writeHandshakeSecrets(
+            parsed_client.random,
+            handshake.client_handshake_traffic_secret,
+            handshake.server_handshake_traffic_secret,
+        );
+    }
 
     var local_transport_parameters = options.local_transport_parameters;
     var encoded_transport_parameters: std.ArrayList(u8) = .empty;
@@ -438,6 +461,13 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
 
     const app_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items, server_finished.items, client_finished.crypto_data });
     const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
+    if (options.keylog) |keylog| {
+        try keylog.writeApplicationSecrets(
+            parsed_client.random,
+            application.client_application_traffic_secret,
+            application.server_application_traffic_secret,
+        );
+    }
     const established = try establishedConnection(
         endpoint,
         client_initial.from,
@@ -871,6 +901,159 @@ test "QUIC integrated handshake establishes 1-RTT stream exchange" {
     if (shared.err) |err| return err;
 
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
+}
+
+test "QUIC integrated handshake emits matching NSS key logs on both roles" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const client_cid = [_]u8{ 9, 10, 11, 12 };
+    const server_cid = [_]u8{ 13, 14, 15, 16 };
+    const client_random = [_]u8{0xa5} ** 32;
+    var client_output: std.Io.Writer.Allocating = .init(allocator);
+    defer client_output.deinit();
+    var client_log = quic.keylog.Log.init(&client_output.writer);
+    var server_output: std.Io.Writer.Allocating = .init(allocator);
+    defer server_output.deinit();
+    var server_log = quic.keylog.Log.init(&server_output.writer);
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        cid: []const u8,
+        keylog: *quic.keylog.Log,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = accept(shared.endpoint, .{
+                .local_connection_id = shared.cid,
+                .random = [_]u8{0xb6} ** 32,
+                .x25519_secret_key = [_]u8{0xc7} ** 32,
+                .keylog = shared.keylog,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            established.deinit();
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .cid = &server_cid,
+        .keylog = &server_log,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .random = client_random,
+            .x25519_secret_key = [_]u8{0xd8} ** 32,
+            .keylog = &client_log,
+        },
+    );
+    established.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expectEqualSlices(
+        u8,
+        client_output.written(),
+        server_output.written(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        std.mem.count(u8, client_output.written(), "\n"),
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "CLIENT_HANDSHAKE_TRAFFIC_SECRET " ++ ("a5" ** 32),
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "SERVER_TRAFFIC_SECRET_0 " ++ ("a5" ** 32),
+    ) != null);
+}
+
+test "QUIC integrated handshake propagates keylog sink failures" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .random = [_]u8{0x31} ** 32,
+                .x25519_secret_key = [_]u8{0x32} ** 32,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            established.deinit();
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var failing: std.Io.Writer = .failing;
+    var keylog = quic.keylog.Log.init(&failing);
+    try std.testing.expectError(
+        error.WriteFailed,
+        connect(&client_endpoint, server_endpoint.address(), .{
+            .original_destination_connection_id = "12345678",
+            .local_connection_id = "client",
+            .random = [_]u8{0x30} ** 32,
+            .x25519_secret_key = [_]u8{0x33} ** 32,
+            .keylog = &keylog,
+        }),
+    );
+    // The client deliberately aborts once it derives handshake secrets. Wake
+    // the server's pending Handshake receive with a malformed datagram so this
+    // error-path test remains deterministic without closing shared I/O state.
+    try client_endpoint.sendBytes(server_endpoint.address(), "invalid");
+    thread.join();
+    try std.testing.expect(shared.err != null);
 }
 
 test "QUIC integrated client restarts after Version Negotiation" {

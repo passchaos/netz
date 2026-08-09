@@ -201,6 +201,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   streaming qlog 0.4 observability with RFC 7464 JSON-SEQ framing, strict JSON
   escaping, caller-visible sink failures, allocation-free event views, complete
   ACK-range/ECN and packet-frame emission without fixed-size truncation,
+  plus NSS SSLKEYLOGFILE-compatible handshake/application traffic-secret
+  streaming from both integrated handshake roles with caller-visible sink
+  failures,
   plus a blocking UDP endpoint runtime for frame datagrams with a
   `std.Io.async` concurrent receive helper
 - WebSocket handshakes with Host authority, body-framing rejection, duplicate-subprotocol and nonce validation, frame masking, strict frame/control
