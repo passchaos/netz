@@ -7,6 +7,7 @@ pub const protection = @import("protection.zig");
 pub const crypto_stream = @import("crypto_stream.zig");
 pub const initial_exchange = @import("initial_exchange.zig");
 pub const tls_client_hello = @import("tls_client_hello.zig");
+pub const tls = @import("tls/mod.zig");
 pub const handshake = @import("handshake.zig");
 pub const zero_rtt = @import("zero_rtt/mod.zig");
 pub const one_rtt = @import("one_rtt.zig");
@@ -1832,6 +1833,7 @@ test {
     _ = crypto_stream;
     _ = initial_exchange;
     _ = tls_client_hello;
+    _ = tls;
     _ = handshake;
     _ = zero_rtt;
     _ = one_rtt;

@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.resumption.ticket.handshake.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.tls.auth.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.resumption.ticket.handshake.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
     InvalidHandshakeFlight,
     MissingCryptoFrame,
     MissingAlpn,
@@ -45,6 +45,7 @@ pub const ClientOptions = struct {
     resumption_server_id: ?[]const u8 = null,
     auto_resumption: ?quic.resumption.ticket.handshake.ClientAutoResume = null,
     early_data: ?quic.zero_rtt.handshake.ClientOffer = null,
+    server_auth: ?quic.tls.auth.ClientVerifier = null,
 };
 
 pub const ServerPsk = struct {
@@ -98,6 +99,7 @@ pub const ServerOptions = struct {
     psk: ?ServerPsk = null,
     auto_resumption: ?quic.resumption.ticket.handshake.ServerAutoResume = null,
     early_data: ?ServerEarlyDataPolicy = null,
+    identity: ?quic.tls.auth.ServerIdentity = null,
 };
 
 pub const OneRttConfig = struct {
@@ -484,7 +486,10 @@ fn connectAttempt(
         options.max_crypto_buffer,
     );
     defer server_handshake.deinit(endpoint.allocator);
-    const server_flight = try splitServerFlight(server_handshake.crypto_data);
+    const server_flight = try splitServerFlight(
+        server_handshake.crypto_data,
+        parsed_server.selected_psk or options.server_auth == null,
+    );
     const encrypted_extensions = try quic.tls_client_hello.parseEncryptedExtensions(server_flight.encrypted_extensions);
     try ensureOfferedAlpn(options.alpn_protocols, encrypted_extensions.alpn);
     const peer_transport_parameters = try quic.parseTransportParametersTyped(
@@ -511,13 +516,54 @@ fn connectAttempt(
             quic.resumption.Snapshot.fromTransportParameters(.{}),
         peer_transport_parameters,
     );
+    if (parsed_server.selected_psk) {
+        if (server_flight.certificate != null or
+            server_flight.certificate_verify != null)
+        {
+            return error.InvalidHandshakeFlight;
+        }
+    } else if (options.server_auth) |verifier| {
+        const certificate_bytes = server_flight.certificate orelse
+            return error.InvalidHandshakeFlight;
+        const certificate_verify_bytes =
+            server_flight.certificate_verify orelse
+            return error.InvalidHandshakeFlight;
+        var certificate = try quic.tls.auth.parseCertificate(
+            endpoint.allocator,
+            certificate_bytes,
+        );
+        defer certificate.deinit(endpoint.allocator);
+        try verifier.verifyTrust(options.server_name, certificate.entries);
+        const certificate_verify =
+            try quic.tls.auth.parseCertificateVerify(
+                certificate_verify_bytes,
+            );
+        try quic.tls.auth.verifyCertificateVerify(
+            certificate.entries[0],
+            certificate_verify,
+            hashParts(&.{
+                client_hello.items,
+                server_initial.crypto_data,
+                server_flight.encrypted_extensions,
+                certificate_bytes,
+            }),
+        );
+    } else if (server_flight.certificate != null or
+        server_flight.certificate_verify != null)
+    {
+        return error.InvalidHandshakeFlight;
+    }
     const server_finished = try quic.tls_client_hello.parseFinished(server_flight.finished);
-    const server_finished_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions });
+    const server_finished_hash = hashServerFlightBeforeFinished(
+        client_hello.items,
+        server_initial.crypto_data,
+        server_flight,
+    );
     try quic.tls_client_hello.verifyFinished(handshake.server_handshake_traffic_secret, server_finished_hash, server_finished);
     const application_transcript_hash = hashParts(&.{
         client_hello.items,
         server_initial.crypto_data,
-        server_flight.encrypted_extensions,
+        server_flight.before_finished,
         server_flight.finished,
     });
     const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(
@@ -569,7 +615,7 @@ fn connectAttempt(
             hashParts(&.{
                 client_hello.items,
                 server_initial.crypto_data,
-                server_flight.encrypted_extensions,
+                server_flight.before_finished,
                 server_flight.finished,
                 client_finished.items,
             }),
@@ -766,15 +812,56 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         transport_parameters,
         early_data_accepted,
     );
-    const server_finished_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items });
-    const server_verify = quic.tls_client_hello.computeFinishedVerifyData(handshake.server_handshake_traffic_secret, server_finished_hash);
-    var server_finished: std.ArrayList(u8) = .empty;
-    defer server_finished.deinit(endpoint.allocator);
-    try quic.tls_client_hello.writeFinished(&server_finished, endpoint.allocator, server_verify);
-
     var server_flight: std.ArrayList(u8) = .empty;
     defer server_flight.deinit(endpoint.allocator);
     try server_flight.appendSlice(endpoint.allocator, encrypted_extensions.items);
+    if (selected_psk == null and options.identity != null) {
+        const identity = options.identity.?;
+        try identity.validate();
+        var certificate: std.ArrayList(u8) = .empty;
+        defer certificate.deinit(endpoint.allocator);
+        try quic.tls.auth.writeCertificate(
+            &certificate,
+            endpoint.allocator,
+            identity.certificate_chain,
+        );
+        try server_flight.appendSlice(endpoint.allocator, certificate.items);
+
+        var certificate_verify: std.ArrayList(u8) = .empty;
+        defer certificate_verify.deinit(endpoint.allocator);
+        try quic.tls.auth.writeCertificateVerify(
+            &certificate_verify,
+            endpoint.allocator,
+            identity.signing_key,
+            hashParts(&.{
+                client_initial.crypto_data,
+                server_hello.items,
+                encrypted_extensions.items,
+                certificate.items,
+            }),
+            identity.signing_noise,
+        );
+        try server_flight.appendSlice(
+            endpoint.allocator,
+            certificate_verify.items,
+        );
+    }
+    const server_finished_hash = hashParts(&.{
+        client_initial.crypto_data,
+        server_hello.items,
+        server_flight.items,
+    });
+    const server_verify = quic.tls_client_hello.computeFinishedVerifyData(
+        handshake.server_handshake_traffic_secret,
+        server_finished_hash,
+    );
+    var server_finished: std.ArrayList(u8) = .empty;
+    defer server_finished.deinit(endpoint.allocator);
+    try quic.tls_client_hello.writeFinished(
+        &server_finished,
+        endpoint.allocator,
+        server_verify,
+    );
     try server_flight.appendSlice(endpoint.allocator, server_finished.items);
     try quic.initial_exchange.sendCoalescedInitialHandshakeCrypto(
         endpoint,
@@ -803,7 +890,11 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     var client_finished = try quic.initial_exchange.receiveHandshakeCrypto(endpoint, handshake.client_quic, 0, options.max_crypto_buffer);
     defer client_finished.deinit(endpoint.allocator);
     const client_verify = try quic.tls_client_hello.parseFinished(client_finished.crypto_data);
-    const client_finished_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items, server_finished.items });
+    const client_finished_hash = hashParts(&.{
+        client_initial.crypto_data,
+        server_hello.items,
+        server_flight.items,
+    });
     try quic.tls_client_hello.verifyFinished(handshake.client_handshake_traffic_secret, client_finished_hash, client_verify);
 
     const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(
@@ -837,8 +928,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             hashParts(&.{
                 client_initial.crypto_data,
                 server_hello.items,
-                encrypted_extensions.items,
-                server_finished.items,
+                server_flight.items,
                 client_finished.crypto_data,
             }),
         ),
@@ -1217,18 +1307,54 @@ fn validatePeerVersionInformation(
 
 const ServerFlight = struct {
     encrypted_extensions: []const u8,
+    certificate: ?[]const u8 = null,
+    certificate_verify: ?[]const u8 = null,
+    before_finished: []const u8,
     finished: []const u8,
 };
 
-fn splitServerFlight(bytes: []const u8) Error!ServerFlight {
+fn splitServerFlight(
+    bytes: []const u8,
+    selected_psk: bool,
+) Error!ServerFlight {
     const ee_len = try handshakeMessageLen(bytes);
     if (ee_len >= bytes.len) return error.InvalidHandshakeFlight;
-    const finished_len = try handshakeMessageLen(bytes[ee_len..]);
-    if (ee_len + finished_len != bytes.len) return error.InvalidHandshakeFlight;
+    var offset = ee_len;
+    var certificate: ?[]const u8 = null;
+    var certificate_verify: ?[]const u8 = null;
+    if (!selected_psk) {
+        const certificate_len = try handshakeMessageLen(bytes[offset..]);
+        certificate = bytes[offset..][0..certificate_len];
+        offset += certificate_len;
+        if (offset >= bytes.len) return error.InvalidHandshakeFlight;
+        const verify_len = try handshakeMessageLen(bytes[offset..]);
+        certificate_verify = bytes[offset..][0..verify_len];
+        offset += verify_len;
+        if (offset >= bytes.len) return error.InvalidHandshakeFlight;
+    }
+    const finished_len = try handshakeMessageLen(bytes[offset..]);
+    if (offset + finished_len != bytes.len) {
+        return error.InvalidHandshakeFlight;
+    }
     return .{
         .encrypted_extensions = bytes[0..ee_len],
-        .finished = bytes[ee_len..],
+        .certificate = certificate,
+        .certificate_verify = certificate_verify,
+        .before_finished = bytes[0..offset],
+        .finished = bytes[offset..],
     };
+}
+
+fn hashServerFlightBeforeFinished(
+    client_hello: []const u8,
+    server_hello: []const u8,
+    flight: ServerFlight,
+) [32]u8 {
+    return hashParts(&.{
+        client_hello,
+        server_hello,
+        flight.before_finished,
+    });
 }
 
 fn handshakeMessageLen(bytes: []const u8) Error!usize {

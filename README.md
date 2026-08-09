@@ -157,6 +157,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   plus allocation-free AES-256-GCM stateless tickets with origin+ALPN
   associated-data binding, explicit key IDs, current+three-history key
   rotation, tamper/expiry enforcement, and a native seal/open benchmark,
+  optional non-PSK TLS 1.3 server authentication with Certificate and
+  Ed25519 CertificateVerify, pinned raw-key verification or an application
+  X.509 trust-policy callback, and transcript/signature tamper rejection,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,
