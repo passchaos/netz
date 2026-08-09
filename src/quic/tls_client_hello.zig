@@ -33,11 +33,13 @@ pub const default_cipher_suites =
 
 pub const NamedGroup = enum(u16) {
     secp256r1 = 0x0017,
+    secp384r1 = 0x0018,
     x25519 = 0x001d,
 };
 
 pub const KeyShare = union(NamedGroup) {
     secp256r1: [quic.tls.key_exchange.p256.public_len]u8,
+    secp384r1: [quic.tls.key_exchange.p384.public_len]u8,
     x25519: [quic.tls.key_exchange.public_len]u8,
 
     pub fn group(self: KeyShare) NamedGroup {
@@ -47,6 +49,7 @@ pub const KeyShare = union(NamedGroup) {
     pub fn bytes(self: *const KeyShare) []const u8 {
         return switch (self.*) {
             .secp256r1 => |*key| key,
+            .secp384r1 => |*key| key,
             .x25519 => |*key| key,
         };
     }
@@ -78,6 +81,7 @@ pub const ParsedClientHello = struct {
     alpn_protocols: [][]const u8,
     x25519_public_key: []const u8,
     secp256r1_public_key: ?[]const u8 = null,
+    secp384r1_public_key: ?[]const u8 = null,
     transport_parameters: []const u8,
     cipher_suites: []const u8,
     supports_ed25519: bool = false,
@@ -86,6 +90,7 @@ pub const ParsedClientHello = struct {
     supports_rsa_pss_rsae_sha256: bool = false,
     supports_x25519: bool = false,
     supports_secp256r1: bool = false,
+    supports_secp384r1: bool = false,
     psk_offer: ?quic.resumption.tls_psk.Offer = null,
 
     pub fn keyShare(
@@ -98,6 +103,7 @@ pub const ParsedClientHello = struct {
             else
                 self.x25519_public_key,
             .secp256r1 => self.secp256r1_public_key,
+            .secp384r1 => self.secp384r1_public_key,
         };
     }
 
@@ -333,11 +339,13 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var server_name: ?[]const u8 = null;
     var x25519: ?[]const u8 = null;
     var secp256r1: ?[]const u8 = null;
+    var secp384r1: ?[]const u8 = null;
     var transport_parameters: ?[]const u8 = null;
     var saw_supported_versions = false;
     var saw_supported_groups = false;
     var supports_x25519 = false;
     var supports_secp256r1 = false;
+    var supports_secp384r1 = false;
     var supports_ed25519 = false;
     var supports_ecdsa_p256_sha256 = false;
     var supports_ecdsa_p384_sha384 = false;
@@ -358,6 +366,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                 const groups = try parseSupportedGroups(payload);
                 supports_x25519 = groups.x25519;
                 supports_secp256r1 = groups.secp256r1;
+                supports_secp384r1 = groups.secp384r1;
                 saw_supported_groups = true;
             },
             ext_alpn => try parseAlpn(allocator, &alpn_list, payload),
@@ -391,6 +400,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                 const shares = try parseClientKeyShares(payload);
                 x25519 = shares.x25519;
                 secp256r1 = shares.secp256r1;
+                secp384r1 = shares.secp384r1;
             },
             ext_quic_transport_parameters => transport_parameters = payload,
             else => {},
@@ -399,11 +409,12 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
 
     if (!saw_supported_versions) return error.MissingSupportedVersions;
     if (!saw_supported_groups) return error.MissingKeyShare;
-    if (x25519 == null and secp256r1 == null) {
+    if (x25519 == null and secp256r1 == null and secp384r1 == null) {
         return error.MissingKeyShare;
     }
     if ((x25519 != null and !supports_x25519) or
-        (secp256r1 != null and !supports_secp256r1))
+        (secp256r1 != null and !supports_secp256r1) or
+        (secp384r1 != null and !supports_secp384r1))
     {
         return error.InvalidClientHello;
     }
@@ -420,6 +431,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .alpn_protocols = try alpn_list.toOwnedSlice(allocator),
         .x25519_public_key = x25519 orelse &.{},
         .secp256r1_public_key = secp256r1,
+        .secp384r1_public_key = secp384r1,
         .transport_parameters = transport_parameters.?,
         .cipher_suites = cipher_suites,
         .supports_ed25519 = supports_ed25519,
@@ -428,6 +440,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .supports_rsa_pss_rsae_sha256 = supports_rsa_pss_rsae_sha256,
         .supports_x25519 = supports_x25519,
         .supports_secp256r1 = supports_secp256r1,
+        .supports_secp384r1 = supports_secp384r1,
         .psk_offer = psk_offer,
     };
 }
@@ -640,6 +653,27 @@ pub fn p256SharedSecret(
     };
 }
 
+pub fn p384PublicKey(
+    secret_key: [quic.tls.key_exchange.p384.secret_len]u8,
+) Error![quic.tls.key_exchange.p384.public_len]u8 {
+    return quic.tls.key_exchange.p384.publicKey(secret_key) catch
+        return error.KeyExchangeFailed;
+}
+
+pub fn p384SharedSecret(
+    secret_key: [quic.tls.key_exchange.p384.secret_len]u8,
+    peer_public_key: []const u8,
+) Error![quic.tls.key_exchange.p384.shared_len]u8 {
+    return quic.tls.key_exchange.p384.sharedSecret(
+        secret_key,
+        peer_public_key,
+    ) catch |err| switch (err) {
+        error.InvalidSecretKey => error.KeyExchangeFailed,
+        error.InvalidPublicKey => error.MissingKeyShare,
+        error.KeyExchangeFailed => error.KeyExchangeFailed,
+    };
+}
+
 pub fn transcriptHash(client_hello: []const u8, server_hello: []const u8) [32]u8 {
     return quic.tls.transcript.hash(&.{ client_hello, server_hello });
 }
@@ -710,11 +744,32 @@ pub fn deriveRuntimeHandshakeSecretsForVersion(
 ) (quic.protection.VersionError ||
     quic.tls.key_schedule.Error ||
     error{HashMismatch})!RuntimeHandshakeSecrets {
+    return deriveRuntimeHandshakeSecretsFromSliceForVersion(
+        version,
+        cipher_suite,
+        &shared_secret,
+        transcript_hash,
+        psk,
+    );
+}
+
+/// Derives runtime TLS secrets from a named group's complete ECDHE output.
+/// Unlike the source-compatible 32-byte entry point above, this accepts the
+/// 48-byte x-coordinate produced by secp384r1 without truncation.
+pub fn deriveRuntimeHandshakeSecretsFromSliceForVersion(
+    version: u32,
+    cipher_suite: CipherSuite,
+    shared_secret: []const u8,
+    transcript_hash: quic.tls.transcript.Digest,
+    psk: ?quic.tls.secret.Secret,
+) (quic.protection.VersionError ||
+    quic.tls.key_schedule.Error ||
+    error{HashMismatch})!RuntimeHandshakeSecrets {
     const hash = cipher_suite.hash();
     if (transcript_hash.hash != hash) return error.HashMismatch;
     const secrets = try quic.tls.key_schedule.deriveHandshakeFor(
         hash,
-        &shared_secret,
+        shared_secret,
         transcript_hash,
         psk,
     );
@@ -1088,6 +1143,7 @@ fn validateClientSupportedVersions(payload: []const u8) Error!void {
 const ParsedSupportedGroups = struct {
     x25519: bool = false,
     secp256r1: bool = false,
+    secp384r1: bool = false,
 };
 
 fn parseSupportedGroups(
@@ -1123,6 +1179,7 @@ fn parseSupportedGroups(
         switch (group) {
             .x25519 => result.x25519 = true,
             .secp256r1 => result.secp256r1 = true,
+            .secp384r1 => result.secp384r1 = true,
         }
     }
     return result;
@@ -1157,6 +1214,7 @@ fn parseSingleAlpn(payload: []const u8) Error![]const u8 {
 const ParsedClientKeyShares = struct {
     x25519: ?[]const u8 = null,
     secp256r1: ?[]const u8 = null,
+    secp384r1: ?[]const u8 = null,
 };
 
 const ParsedKeyShare = struct {
@@ -1199,9 +1257,21 @@ fn parseClientKeyShares(
                 }
                 result.secp256r1 = key;
             },
+            .secp384r1 => {
+                if (result.secp384r1 != null or
+                    key.len != quic.tls.key_exchange.p384.public_len or
+                    key[0] != 0x04)
+                {
+                    return error.InvalidClientHello;
+                }
+                result.secp384r1 = key;
+            },
         }
     }
-    if (result.x25519 == null and result.secp256r1 == null) {
+    if (result.x25519 == null and
+        result.secp256r1 == null and
+        result.secp384r1 == null)
+    {
         return error.MissingKeyShare;
     }
     return result;
@@ -1221,6 +1291,8 @@ fn parseServerKeyShare(payload: []const u8) Error!ParsedKeyShare {
         .x25519 => key.len == quic.tls.key_exchange.public_len,
         .secp256r1 => key.len ==
             quic.tls.key_exchange.p256.public_len and key[0] == 0x04,
+        .secp384r1 => key.len ==
+            quic.tls.key_exchange.p384.public_len and key[0] == 0x04,
     };
     if (!valid) return error.MissingKeyShare;
     return .{ .group = group, .key = key };
@@ -1255,4 +1327,5 @@ fn readU24(cursor: *wire.Cursor) !usize {
 
 test {
     _ = @import("tls/client_hello_tests.zig");
+    _ = @import("tls/key_exchange_tests.zig");
 }
