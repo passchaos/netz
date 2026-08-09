@@ -410,6 +410,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "AckFrequencyFrame"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id, "PeerPool"));
     try std.testing.expect(@hasDecl(netz.quic.connection_id.PeerPool, "addWithLimit"));
+    try std.testing.expect(@hasDecl(netz.quic.connection_id.LocalPool, "issueQuicLb"));
     try std.testing.expect(@hasDecl(netz.quic.stateless_reset, "matches"));
     try std.testing.expectEqual(netz.quic.varint.max_value, netz.quic.protection.max_packet_number);
     try std.testing.expect(@hasDecl(netz.quic.protection, "packetNumberLen"));
@@ -472,6 +473,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "streamStopped"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendHandshakeDone"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendNewToken"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendNewConnectionIdQuicLb"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAddressValidationToken"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "latestNewToken"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "handshakeConfirmed"));
@@ -597,6 +599,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "qlog"));
     try std.testing.expect(@hasDecl(netz.quic.qlog, "Trace"));
     try std.testing.expect(@hasDecl(netz.quic.qlog, "frame_adapter"));
+    try std.testing.expect(@hasDecl(netz.quic, "quic_lb"));
+    try std.testing.expect(@hasDecl(netz.quic.quic_lb, "encode"));
+    try std.testing.expect(@hasDecl(netz.quic.quic_lb, "decodeServerId"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "processClient"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "ClientState"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "Processed"));

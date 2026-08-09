@@ -103,6 +103,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark QUIC short packet in-place sealing against allocating sealing",
         },
         .{
+            .exe_name = "netz-bench-quic-lb",
+            .path = "examples/bench_quic_lb.zig",
+            .run_step = "bench-quic-lb",
+            .description = "Benchmark draft-21 QUIC-LB encrypted server routing",
+        },
+        .{
             .exe_name = "netz-bench-quic-udp-batch",
             .path = "examples/bench_quic_udp_batch.zig",
             .run_step = "bench-quic-udp-batch",

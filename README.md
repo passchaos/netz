@@ -184,7 +184,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route
   rejection, NEW_CONNECTION_ID receive/send active-limit, duplicate-CID/reset-token validation and RETIRE_CONNECTION_ID lifecycle/preflight state with NEW/RETIRE CID-error close mapping wired into
-  1-RTT, transport/application CONNECTION_CLOSE state including frame-payload, ACK, ACK_FREQUENCY negotiation, DATAGRAM negotiation, stream-limit/state/flow-control/final-size/data-conflict, server-only frame, and selected semantic error close emission, PATH_CHALLENGE/PATH_RESPONSE validation state with duplicate challenge suppression and caller-storage batch drains/sends wired into 1-RTT,
+  1-RTT, draft-ietf-quic-load-balancers-21 QUIC-LB CID generation/routing
+  extraction with validated config rotation/lengths, Appendix B single-pass and
+  nibble-correct four-pass AES vectors, caller-provided nonce entropy, and
+  transactional local-CID/reset-token issuance,
+  transport/application CONNECTION_CLOSE state including frame-payload, ACK, ACK_FREQUENCY negotiation, DATAGRAM negotiation, stream-limit/state/flow-control/final-size/data-conflict, server-only frame, and selected semantic error close emission, PATH_CHALLENGE/PATH_RESPONSE validation state with duplicate challenge suppression and caller-storage batch drains/sends wired into 1-RTT,
   peer-migration helpers that honor disable_active_migration, apply a server
   preferred_address by selecting its CID/reset token and peer IP/port, reset
   anti-amplification and PMTUD path state, queue PATH_CHALLENGE,
@@ -290,6 +294,7 @@ zig build bench-http3-dev -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
+zig build bench-quic-lb -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
@@ -305,6 +310,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - MQTT subscription-router trie matching versus a linear filter scan,
 - QUIC short-packet sealing with caller-provided storage versus the allocating
   convenience wrapper,
+- QUIC-LB encrypted server-ID extraction with the draft's three-pass
+  load-balancer optimization,
 - QUIC Linux `UDP_SEGMENT` batching versus `sendmmsg`, plus `UDP_GRO`
   coalesced receive versus plain per-datagram receive,
 - QUIC 1-RTT stateful sequential send versus stateful batched protection with

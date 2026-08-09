@@ -2230,6 +2230,77 @@ pub const Connection = struct {
         try self.send(&frames);
     }
 
+    pub fn sendNewConnectionIdQuicLb(
+        self: *Connection,
+        config: quic.quic_lb.Config,
+        server_id: []const u8,
+        nonce: []const u8,
+        first_octet_random_bits: u5,
+    ) Error!void {
+        try self.sendNewConnectionIdQuicLbAt(
+            config,
+            server_id,
+            nonce,
+            first_octet_random_bits,
+            0,
+            null,
+        );
+    }
+
+    pub fn sendNewConnectionIdQuicLbAt(
+        self: *Connection,
+        config: quic.quic_lb.Config,
+        server_id: []const u8,
+        nonce: []const u8,
+        first_octet_random_bits: u5,
+        retire_prior_to: u64,
+        sent_time_ns: ?u64,
+    ) Error!void {
+        return self.sendNewConnectionIdQuicLbRetiringPriorTo(
+            config,
+            server_id,
+            nonce,
+            first_octet_random_bits,
+            retire_prior_to,
+            sent_time_ns,
+        );
+    }
+
+    fn sendNewConnectionIdQuicLbRetiringPriorTo(
+        self: *Connection,
+        config: quic.quic_lb.Config,
+        server_id: []const u8,
+        nonce: []const u8,
+        first_octet_random_bits: u5,
+        retire_prior_to: u64,
+        sent_time_ns: ?u64,
+    ) Error!void {
+        const reset_key = self.config.local_stateless_reset_key orelse
+            return error.InvalidConnectionId;
+        try self.validateLocalConnectionIdIssueLimit(retire_prior_to);
+        try self.validateNextPacketNumber();
+
+        // LocalPool is fixed-size state, so a value snapshot cheaply makes CID
+        // issuance transactional with the packet send. A failed UDP write must
+        // not consume an active-CID slot for an ID the peer never received.
+        const pool_before = self.local_connection_ids;
+        errdefer self.local_connection_ids = pool_before;
+        const frame = try self.local_connection_ids.issueQuicLbRetirePriorTo(
+            config,
+            server_id,
+            nonce,
+            first_octet_random_bits,
+            reset_key,
+            retire_prior_to,
+        );
+        const frames = [_]quic.Frame{frame};
+        if (sent_time_ns) |timestamp| {
+            try self.sendAt(&frames, timestamp);
+        } else {
+            try self.send(&frames);
+        }
+    }
+
     fn validateLocalConnectionIdIssueLimit(self: Connection, retire_prior_to: u64) Error!void {
         // Retire Prior To lets a replacement NEW_CONNECTION_ID atomically ask
         // the peer to drop lower-numbered local CIDs.  Count only IDs that
@@ -7015,6 +7086,143 @@ test "QUIC 1-RTT derives local CID stateless reset tokens from config key" {
         &quic.stateless_reset.tokenForConnectionId(reset_key, "derived-cid"),
         &packet.frames[0].new_connection_id.stateless_reset_token,
     );
+}
+
+test "QUIC 1-RTT sends QUIC-LB connection IDs with derived reset tokens" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const server_cid = [_]u8{ 0x95, 0x96, 0x97, 0x98 };
+    const reset_key = [_]u8{0x6c} ** quic.stateless_reset.static_key_len;
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe5} ** quic.protection.secret_len,
+    );
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .local_stateless_reset_key = reset_key,
+    });
+    defer server.deinit();
+
+    const config = quic.quic_lb.Config{
+        .config_rotation = 3,
+        .server_id_len = 3,
+        .nonce_len = 4,
+        .key = .{
+            0x8f, 0x95, 0xf0, 0x92, 0x45, 0x76, 0x5f, 0x80,
+            0x25, 0x69, 0x34, 0xe5, 0x0c, 0x66, 0x20, 0x7f,
+        },
+    };
+    const server_id = [_]u8{ 0xed, 0x79, 0x3a };
+    try server.sendNewConnectionIdQuicLb(
+        config,
+        &server_id,
+        &.{ 0xee, 0x08, 0x0d, 0xbf },
+        0,
+    );
+    var packet = try client.receivePacket();
+    defer packet.deinit(allocator);
+    const advertised = packet.frames[0].new_connection_id;
+    var decoded: [3]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        &server_id,
+        try quic.quic_lb.decodeServerId(
+            config,
+            advertised.connection_id,
+            &decoded,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &quic.stateless_reset.tokenForConnectionId(
+            reset_key,
+            advertised.connection_id,
+        ),
+        &advertised.stateless_reset_token,
+    );
+}
+
+test "QUIC 1-RTT QUIC-LB issuance rolls back when sending fails" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe6} ** quic.protection.secret_len,
+    );
+    const reset_key = [_]u8{0x7c} ** quic.stateless_reset.static_key_len;
+    var connection = try Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .local_stateless_reset_key = reset_key,
+    });
+    defer connection.deinit();
+    const before = connection.local_connection_ids;
+    connection.pacer.budget = 0;
+    connection.pacer.last_sent_time_ns = 0;
+    connection.rtt_stats.has_measurement = true;
+    connection.rtt_stats.smoothed_rtt = 100_000_000;
+
+    try std.testing.expectError(
+        error.PacingLimited,
+        connection.sendNewConnectionIdQuicLbAt(
+            .{
+                .config_rotation = 1,
+                .server_id_len = 2,
+                .nonce_len = 4,
+            },
+            "id",
+            "abcd",
+            0,
+            0,
+            1,
+        ),
+    );
+    try std.testing.expectEqualDeep(before, connection.local_connection_ids);
 }
 
 test "QUIC 1-RTT preflights RETIRE_CONNECTION_ID for packet destination CID" {

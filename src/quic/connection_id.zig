@@ -14,7 +14,7 @@ pub const Error = error{
     RetireQueueFull,
     RetirePriorToTooLarge,
     ConnectionIdSequenceLimit,
-} || std.mem.Allocator.Error;
+} || quic.quic_lb.Error || std.mem.Allocator.Error;
 
 pub const Entry = struct {
     sequence_number: u64 = 0,
@@ -272,6 +272,54 @@ pub const LocalPool = struct {
         return try self.issueWithRetirePriorTo(connection_id, quic.stateless_reset.tokenForConnectionId(static_key, connection_id), retire_prior_to);
     }
 
+    /// Generate, register, and advertise a QUIC-LB CID as one transaction.
+    ///
+    /// The encoded CID is first built in stack storage. `issueWithStaticKey`
+    /// then performs duplicate, pool-capacity, sequence, and retire-prior-to
+    /// validation before copying it into stable pool storage. No caller-owned
+    /// nonce or temporary CID slice escapes this function.
+    pub fn issueQuicLb(
+        self: *LocalPool,
+        config: quic.quic_lb.Config,
+        server_id: []const u8,
+        nonce: []const u8,
+        first_octet_random_bits: u5,
+        static_reset_key: [quic.stateless_reset.static_key_len]u8,
+    ) Error!quic.Frame {
+        return self.issueQuicLbRetirePriorTo(
+            config,
+            server_id,
+            nonce,
+            first_octet_random_bits,
+            static_reset_key,
+            self.retire_prior_to,
+        );
+    }
+
+    pub fn issueQuicLbRetirePriorTo(
+        self: *LocalPool,
+        config: quic.quic_lb.Config,
+        server_id: []const u8,
+        nonce: []const u8,
+        first_octet_random_bits: u5,
+        static_reset_key: [quic.stateless_reset.static_key_len]u8,
+        retire_prior_to: u64,
+    ) Error!quic.Frame {
+        var cid_storage: [max_connection_id_len]u8 = undefined;
+        const connection_id = try quic.quic_lb.encode(
+            config,
+            server_id,
+            nonce,
+            first_octet_random_bits,
+            &cid_storage,
+        );
+        return self.issueWithStaticKeyRetirePriorTo(
+            connection_id,
+            static_reset_key,
+            retire_prior_to,
+        );
+    }
+
     pub fn retire(self: *LocalPool, sequence_number: u64) Error!void {
         try self.retireExceptPacketDestination(sequence_number, null);
     }
@@ -460,4 +508,95 @@ test "QUIC local CID pool derives stateless reset tokens from static key" {
         &quic.stateless_reset.tokenForConnectionId(key, "new-cid"),
         &frame.new_connection_id.stateless_reset_token,
     );
+}
+
+test "QUIC local CID pool issues draft-21 QUIC-LB IDs with reset tokens" {
+    const config = quic.quic_lb.Config{
+        .config_rotation = 2,
+        .server_id_len = 3,
+        .nonce_len = 4,
+        .key = .{
+            0x8f, 0x95, 0xf0, 0x92, 0x45, 0x76, 0x5f, 0x80,
+            0x25, 0x69, 0x34, 0xe5, 0x0c, 0x66, 0x20, 0x7f,
+        },
+    };
+    const reset_key = [_]u8{0x42} ** quic.stateless_reset.static_key_len;
+    var pool = LocalPool{};
+    try pool.registerInitialWithStaticKey("initial", reset_key);
+
+    const frame = try pool.issueQuicLbRetirePriorTo(
+        config,
+        &.{ 0xed, 0x79, 0x3a },
+        &.{ 0xee, 0x08, 0x0d, 0xbf },
+        0,
+        reset_key,
+        1,
+    );
+    try std.testing.expectEqual(@as(u64, 1), frame.new_connection_id.sequence_number);
+    try std.testing.expectEqual(@as(u64, 1), frame.new_connection_id.retire_prior_to);
+    try std.testing.expectEqual(@as(u3, 2), quic.quic_lb.extractConfigRotation(
+        frame.new_connection_id.connection_id[0],
+    ));
+    var server_id: [3]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xed, 0x79, 0x3a },
+        try quic.quic_lb.decodeServerId(
+            config,
+            frame.new_connection_id.connection_id,
+            &server_id,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &quic.stateless_reset.tokenForConnectionId(
+            reset_key,
+            frame.new_connection_id.connection_id,
+        ),
+        &frame.new_connection_id.stateless_reset_token,
+    );
+    // The frame borrows stable pool storage, not the stack scratch used by
+    // issueQuicLbRetirePriorTo.
+    try std.testing.expectEqualSlices(
+        u8,
+        pool.entries[1].slice(),
+        frame.new_connection_id.connection_id,
+    );
+}
+
+test "QUIC local CID pool QUIC-LB issuance is transactional on failure" {
+    const config = quic.quic_lb.Config{
+        .config_rotation = 1,
+        .server_id_len = 2,
+        .nonce_len = 4,
+    };
+    const reset_key = [_]u8{0x24} ** quic.stateless_reset.static_key_len;
+    var pool = LocalPool{};
+    try pool.registerInitialWithStaticKey("initial", reset_key);
+    const before = pool;
+
+    try std.testing.expectError(
+        error.InvalidNonceLength,
+        pool.issueQuicLb(
+            config,
+            "id",
+            "bad",
+            0,
+            reset_key,
+        ),
+    );
+    try std.testing.expectEqualDeep(before, pool);
+
+    try std.testing.expectError(
+        error.RetirePriorToTooLarge,
+        pool.issueQuicLbRetirePriorTo(
+            config,
+            "id",
+            "good",
+            0,
+            reset_key,
+            2,
+        ),
+    );
+    try std.testing.expectEqualDeep(before, pool);
 }
