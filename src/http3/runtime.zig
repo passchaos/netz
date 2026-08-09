@@ -169,6 +169,40 @@ pub const StreamingEvent = union(enum) {
     }
 };
 
+/// One event from the server-side request-stream poller.
+///
+/// Request streams are multiplexed, so every event carries its peer and stream
+/// identity. A reset is data rather than an unqualified error: otherwise an
+/// application polling several streams could not determine which request was
+/// cancelled.
+pub const StreamingRequestEvent = union(enum) {
+    message: Message,
+    reset: Reset,
+
+    pub const Message = struct {
+        from: net.IpAddress,
+        stream_id: u62,
+        value: StreamingEvent,
+    };
+
+    pub const Reset = struct {
+        from: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    };
+
+    pub fn deinit(
+        self: *StreamingRequestEvent,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .message => |*message| message.value.deinit(allocator),
+            .reset => {},
+        }
+        self.* = undefined;
+    }
+};
+
 pub const StreamingMessageReader = struct {
     const Kind = enum { request, response };
     const Phase = enum {
@@ -432,7 +466,79 @@ pub const StreamingMessageReader = struct {
         ) catch return true;
         return required_end > final_size;
     }
+
+    /// Whether abandoning the current field section requires a QPACK Stream
+    /// Cancellation instruction.
+    ///
+    /// HEADERS bytes remain unconsumed until decoding succeeds. Consequently a
+    /// complete dynamic prefix here identifies a section that has not emitted
+    /// a Section Acknowledgment yet, regardless of whether its required inserts
+    /// have since arrived.
+    fn hasUnacknowledgedDynamicSection(
+        self: StreamingMessageReader,
+        table: http3.Qpack.DynamicTable,
+    ) Error!bool {
+        const available = self.receive.available();
+        var offset: usize = 0;
+        if (self.current_frame) |current| {
+            if (current.frame_type == http3.FrameType.headers) {
+                return fieldSectionPrefixUsesDynamicTable(
+                    available,
+                    current,
+                    table,
+                );
+            }
+            // Non-HEADERS frame headers are consumed eagerly. Skip the
+            // unconsumed payload before scanning any complete frames already
+            // queued behind it (notably dynamic trailer HEADERS).
+            const remaining =
+                current.payload_length - self.current_payload_read;
+            if (available.len < remaining) return false;
+            offset = remaining;
+        }
+        while (offset < available.len) {
+            const header = http3.Frame.parseHeader(
+                available[offset..],
+            ) catch |err| switch (err) {
+                error.BufferTooShort => return false,
+                else => return err,
+            };
+            if (header.frame_type == http3.FrameType.headers and
+                try fieldSectionPrefixUsesDynamicTable(
+                    available[offset..],
+                    header,
+                    table,
+                ))
+            {
+                return true;
+            }
+            const frame_length = try header.totalLength();
+            if (available.len - offset < frame_length) return false;
+            offset += frame_length;
+        }
+        return false;
+    }
 };
+
+fn fieldSectionPrefixUsesDynamicTable(
+    bytes: []const u8,
+    header: http3.Frame.Header,
+    table: http3.Qpack.DynamicTable,
+) Error!bool {
+    if (bytes.len <= header.header_length) return false;
+    const payload_available = @min(
+        header.payload_length,
+        bytes.len - header.header_length,
+    );
+    const prefix = http3.Qpack.decodeFieldSectionPrefix(
+        bytes[header.header_length..][0..payload_available],
+        table,
+    ) catch |err| switch (err) {
+        error.BufferTooShort => return false,
+        else => return err,
+    };
+    return prefix.required_insert_count != 0;
+}
 
 fn streamingForbiddenFrame(frame_type: u64) bool {
     return switch (frame_type) {
@@ -1435,6 +1541,13 @@ pub const HandshakeServer = struct {
                 self.session_options.max_stream_buffer,
                 self.session_options.max_concurrent_request_streams,
             ),
+            .streaming_requests = .init(
+                established.connection.endpoint.allocator,
+                self.session_options.max_concurrent_request_streams,
+                self.session_options.max_stream_buffer,
+                self.session_options.local_settings,
+                .request,
+            ),
             .request_lifecycle = .init(
                 established.connection.endpoint.allocator,
             ),
@@ -1458,6 +1571,7 @@ pub const HandshakeServerSession = struct {
     qpack_decoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(server_qpack_decoder_stream_id),
     qpack_decoder_prefix_sent: bool = false,
     request_streams: RequestStreamSet,
+    streaming_requests: StreamingRequestSet,
     request_lifecycle: ServerRequestLifecycle,
     outbound_bodies: OutboundBodySet,
 
@@ -1465,6 +1579,7 @@ pub const HandshakeServerSession = struct {
         self.outbound_bodies.deinit();
         self.control.deinit(self.established.connection.endpoint.allocator);
         self.request_lifecycle.deinit();
+        self.streaming_requests.deinit();
         self.request_streams.deinit();
         self.qpack_encode.deinit();
         self.qpack_decode.deinit();
@@ -1473,15 +1588,16 @@ pub const HandshakeServerSession = struct {
     }
 
     pub fn receiveRequest(self: *HandshakeServerSession) Error!OwnedHandshakeRequest {
-        const assembled = receiveConnectionStreamBytes(
+        if (self.streaming_requests.retainedCount() != 0) {
+            return error.UnexpectedStream;
+        }
+        const assembled = receiveConnectionRequestStreamBytes(
             &self.established.connection,
-            null,
             self.options,
             &self.control,
             &self.qpack_decode,
             &self.qpack_encode,
             &self.request_streams,
-            .server,
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
                 try self.sendQpackFeedback();
@@ -1509,6 +1625,48 @@ pub const HandshakeServerSession = struct {
             .stream_bytes = assembled.bytes,
             .request = request,
         };
+    }
+
+    /// Poll one event from any multiplexed request stream without aggregating
+    /// DATA payloads. The returned stream ID is then used with
+    /// `readRequestData`, matching tquic's poll/recv_body split while retaining
+    /// netz's owned decoded heads and dynamic trailers.
+    pub fn receiveRequestEvent(
+        self: *HandshakeServerSession,
+    ) Error!StreamingRequestEvent {
+        while (true) {
+            if (self.streaming_requests.takeFirstReset()) |reset| {
+                self.request_lifecycle.markFinished(reset.stream_id);
+                self.qpack_encode.abandonStream(reset.stream_id);
+                _ = self.outbound_bodies.finish(reset.stream_id);
+                return .{ .reset = .{
+                    .from = reset.from,
+                    .stream_id = reset.stream_id,
+                    .application_error_code = reset.application_error_code,
+                } };
+            }
+            if (try self.streaming_requests.nextRequest(
+                &self.request_streams,
+                self.qpack_decode.table,
+                self.options.local_settings.qpack_blocked_streams,
+            )) |ready| {
+                return try self.applyStreamingRequestEvent(
+                    ready.entry,
+                    ready.event,
+                );
+            }
+            try self.receiveRequestPacket();
+        }
+    }
+
+    pub fn readRequestData(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        out: []u8,
+    ) Error!usize {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        return entry.reader.readData(out);
     }
 
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
@@ -1655,7 +1813,9 @@ pub const HandshakeServerSession = struct {
 
     pub fn completeShutdown(self: *HandshakeServerSession) Error!void {
         if (self.request_lifecycle.shutdown_state != .initial_goaway) return;
-        if (self.request_streams.entries.items.len != 0) {
+        if (self.request_streams.entries.items.len != 0 or
+            self.streaming_requests.retainedCount() != 0)
+        {
             return error.RequestIncomplete;
         }
         try self.sendGoAway(try self.request_lifecycle.finalGoAwayId());
@@ -1665,6 +1825,7 @@ pub const HandshakeServerSession = struct {
     pub fn drainComplete(self: HandshakeServerSession) bool {
         return self.request_lifecycle.drainComplete(
             self.request_streams,
+            self.streaming_requests,
             self.control.local_goaway_id,
         );
     }
@@ -1674,10 +1835,16 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
-        const cancel_qpack = try self.request_streams.cancel(
+        var cancel_qpack = try self.request_streams.cancel(
             stream_id,
             self.qpack_decode.table,
         );
+        cancel_qpack = cancel_qpack or
+            try self.streaming_requests.hasUnacknowledgedDynamicSection(
+                stream_id,
+                self.qpack_decode.table,
+            );
+        self.streaming_requests.remove(stream_id);
         try cancelConnectionRequest(
             &self.established.connection,
             &self.qpack_decode,
@@ -1701,6 +1868,52 @@ pub const HandshakeServerSession = struct {
             stream_id,
             http3.ApplicationErrorCode.request_rejected,
         );
+    }
+
+    fn receiveRequestPacket(self: *HandshakeServerSession) Error!void {
+        var packet = try self.established.connection.receivePacket();
+        defer packet.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        _ = try applyServerRequestPacketFrames(
+            packet.from,
+            packet.frames,
+            self.established.connection.endpoint.allocator,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.request_streams,
+            &self.streaming_requests,
+        );
+        // Encoder-stream inserts and reset cancellations both queue decoder
+        // instructions. Flush them at the packet boundary so a peer does not
+        // remain artificially blocked until another HEADERS event appears.
+        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
+            try self.sendQpackFeedback();
+        }
+    }
+
+    fn applyStreamingRequestEvent(
+        self: *HandshakeServerSession,
+        entry: *StreamingRequestSet.Entry,
+        event: StreamingEvent,
+    ) Error!StreamingRequestEvent {
+        const stream_id: u62 = @intCast(entry.reader.receive.stream_id);
+        const from = entry.from orelse return error.UnexpectedStream;
+        if (try streamingRequestSectionAcknowledgments(event)) |count| {
+            try self.qpack_decode.acknowledgeSections(stream_id, count);
+            try self.sendQpackFeedback();
+        }
+        if (event == .head) {
+            try self.request_lifecycle.markReceived(stream_id);
+        } else if (event == .finished) {
+            self.streaming_requests.remove(stream_id);
+        }
+        return .{ .message = .{
+            .from = from,
+            .stream_id = stream_id,
+            .value = event,
+        } };
     }
 
     fn sendQpackFeedback(self: *HandshakeServerSession) Error!void {
@@ -1775,6 +1988,7 @@ pub const HandshakeClient = struct {
                 options.session.max_concurrent_request_streams,
                 options.session.max_stream_buffer,
                 options.session.local_settings,
+                .response,
             ),
             .request_lifecycle = .init(
                 allocator,
@@ -2044,7 +2258,7 @@ pub const HandshakeClient = struct {
             else
                 error.RequestCancelled;
         }
-        const entry = try self.streaming_responses.activate(
+        const entry = try self.streaming_responses.activateResponse(
             &self.response_streams,
             stream_id,
         );
@@ -2254,6 +2468,7 @@ pub const ProtectedServer = struct {
     qpack_decoder_prefix_sent: bool = false,
     protected_send: ProtectedSendState,
     request_streams: RequestStreamSet,
+    streaming_requests: StreamingRequestSet,
     request_lifecycle: ServerRequestLifecycle,
     outbound_bodies: OutboundBodySet,
     next_packet_number: u64 = 0,
@@ -2285,6 +2500,13 @@ pub const ProtectedServer = struct {
                 config.max_stream_buffer,
                 limits.max_concurrent_request_streams,
             ),
+            .streaming_requests = .init(
+                allocator,
+                limits.max_concurrent_request_streams,
+                config.max_stream_buffer,
+                config.local_settings,
+                .request,
+            ),
             .request_lifecycle = .init(allocator),
             .outbound_bodies = .init(
                 allocator,
@@ -2297,6 +2519,7 @@ pub const ProtectedServer = struct {
         self.outbound_bodies.deinit();
         self.control.deinit(self.quic_server.endpoint.allocator);
         self.request_lifecycle.deinit();
+        self.streaming_requests.deinit();
         self.request_streams.deinit();
         self.protected_send.deinit();
         self.qpack_encode.deinit();
@@ -2310,6 +2533,9 @@ pub const ProtectedServer = struct {
     }
 
     pub fn receiveRequest(self: *ProtectedServer) Error!OwnedProtectedRequest {
+        if (self.streaming_requests.retainedCount() != 0) {
+            return error.UnexpectedStream;
+        }
         const assembled = try self.receiveStreamBytes(null);
         errdefer self.quic_server.endpoint.allocator.free(assembled.bytes);
         var request = try http3.decodeRequestWithDynamicTable(
@@ -2331,6 +2557,50 @@ pub const ProtectedServer = struct {
             .stream_bytes = assembled.bytes,
             .request = request,
         };
+    }
+
+    /// Poll the next event from any client request stream.
+    ///
+    /// Unlike `receiveRequest`, this never aggregates DATA payloads. Once a
+    /// head identifies a stream, applications can interleave polling with
+    /// `readRequestData`; STREAM ranges for every active request remain bounded
+    /// by `ProtectedConfig.max_stream_buffer`.
+    pub fn receiveRequestEvent(
+        self: *ProtectedServer,
+    ) Error!StreamingRequestEvent {
+        while (true) {
+            if (self.streaming_requests.takeFirstReset()) |reset| {
+                self.request_lifecycle.markFinished(reset.stream_id);
+                self.qpack_encode.abandonStream(reset.stream_id);
+                _ = self.outbound_bodies.finish(reset.stream_id);
+                return .{ .reset = .{
+                    .from = reset.from,
+                    .stream_id = reset.stream_id,
+                    .application_error_code = reset.application_error_code,
+                } };
+            }
+            if (try self.streaming_requests.nextRequest(
+                &self.request_streams,
+                self.qpack_decode.table,
+                self.config.local_settings.qpack_blocked_streams,
+            )) |ready| {
+                return try self.applyStreamingRequestEvent(
+                    ready.entry,
+                    ready.event,
+                );
+            }
+            try self.receiveRequestPacket();
+        }
+    }
+
+    pub fn readRequestData(
+        self: *ProtectedServer,
+        stream_id: u62,
+        out: []u8,
+    ) Error!usize {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        return entry.reader.readData(out);
     }
 
     pub fn sendResponse(self: *ProtectedServer, to: net.IpAddress, stream_id: u62, response: http3.Response) Error!void {
@@ -2537,7 +2807,9 @@ pub const ProtectedServer = struct {
         to: net.IpAddress,
     ) Error!void {
         if (self.request_lifecycle.shutdown_state != .initial_goaway) return;
-        if (self.request_streams.entries.items.len != 0) {
+        if (self.request_streams.entries.items.len != 0 or
+            self.streaming_requests.retainedCount() != 0)
+        {
             return error.RequestIncomplete;
         }
         try self.sendGoAway(
@@ -2550,6 +2822,7 @@ pub const ProtectedServer = struct {
     pub fn drainComplete(self: ProtectedServer) bool {
         return self.request_lifecycle.drainComplete(
             self.request_streams,
+            self.streaming_requests,
             self.control.local_goaway_id,
         );
     }
@@ -2560,10 +2833,16 @@ pub const ProtectedServer = struct {
         stream_id: u62,
         application_error_code: u64,
     ) Error!void {
-        const cancel_qpack = try self.request_streams.cancel(
+        var cancel_qpack = try self.request_streams.cancel(
             stream_id,
             self.qpack_decode.table,
         );
+        cancel_qpack = cancel_qpack or
+            try self.streaming_requests.hasUnacknowledgedDynamicSection(
+                stream_id,
+                self.qpack_decode.table,
+            );
+        self.streaming_requests.remove(stream_id);
         try sendProtectedRequestCancellation(
             &self.quic_server.endpoint,
             to,
@@ -2611,72 +2890,18 @@ pub const ProtectedServer = struct {
             );
             defer packet.deinit(self.quic_server.endpoint.allocator);
             self.expected_packet_number = packet.packet.packet_number + 1;
-
-            for (packet.frames) |frame| {
-                try rejectCriticalStreamClosureFrame(self.control, frame, .server);
-                if (frame == .reset_stream and
-                    (try messageStreamDisposition(
-                        frame.reset_stream.stream_id,
-                    )) == .request_response)
-                {
-                    if (try self.request_streams.cancel(
-                        frame.reset_stream.stream_id,
-                        self.qpack_decode.table,
-                    )) {
-                        try self.qpack_decode.recordStreamCancellation(
-                            frame.reset_stream.stream_id,
-                        );
-                    }
-                    try self.sendQpackFeedback(packet.from);
-                    return if (frame.reset_stream.application_error_code ==
-                        http3.ApplicationErrorCode.request_rejected)
-                        error.RequestRejected
-                    else
-                        error.RequestCancelled;
-                }
-                if (frame != .stream) continue;
-                if (isPeerQpackStreamFrame(
-                    self.control,
-                    self.qpack_encode.decoder_stream,
-                    frame.stream,
-                    .server,
-                    .qpack_decoder,
-                )) {
-                    try self.qpack_encode.applyDecoderStreamFrame(
-                        &self.control,
-                        frame.stream,
-                    );
-                    continue;
-                }
-                if (isPeerQpackStreamFrame(
-                    self.control,
-                    self.qpack_decode.encoder_stream,
-                    frame.stream,
-                    .server,
-                    .qpack_encoder,
-                )) {
-                    try self.qpack_decode.applyEncoderStreamFrame(
-                        &self.control,
-                        frame.stream,
-                    );
-                    continue;
-                }
-                if (try applyControlStreamFrameForRole(
-                    &self.control,
-                    self.quic_server.endpoint.allocator,
-                    frame.stream,
-                    .server,
-                )) {
-                    try configureQpackEncoderFromPeerSettings(
-                        self.control,
-                        &self.qpack_encode,
-                    );
-                    continue;
-                }
-                if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
-                const incoming_id: u62 = @intCast(frame.stream.stream_id);
-                if (!self.control.acceptsLocalRequestStream(incoming_id)) return error.RequestRejected;
-                try self.request_streams.insert(packet.from, frame.stream);
+            if (try applyServerRequestPacketFrames(
+                packet.from,
+                packet.frames,
+                self.quic_server.endpoint.allocator,
+                &self.control,
+                &self.qpack_decode,
+                &self.qpack_encode,
+                &self.request_streams,
+                null,
+            )) |reset| {
+                try self.sendQpackFeedback(reset.from);
+                return requestResetError(reset.application_error_code);
             }
             if (try self.request_streams.takeReady(
                 self.qpack_decode.table,
@@ -2685,6 +2910,55 @@ pub const ProtectedServer = struct {
                 return ready;
             }
         }
+    }
+
+    fn receiveRequestPacket(self: *ProtectedServer) Error!void {
+        var packet = try quic.one_rtt.receive(
+            &self.quic_server.endpoint,
+            self.config.receive_keys,
+            self.config.local_connection_id.len,
+            self.expected_packet_number,
+            self.config.max_frames_per_packet,
+        );
+        defer packet.deinit(self.quic_server.endpoint.allocator);
+        self.expected_packet_number = packet.packet.packet_number + 1;
+
+        _ = try applyServerRequestPacketFrames(
+            packet.from,
+            packet.frames,
+            self.quic_server.endpoint.allocator,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.request_streams,
+            &self.streaming_requests,
+        );
+        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
+            try self.sendQpackFeedback(packet.from);
+        }
+    }
+
+    fn applyStreamingRequestEvent(
+        self: *ProtectedServer,
+        entry: *StreamingRequestSet.Entry,
+        event: StreamingEvent,
+    ) Error!StreamingRequestEvent {
+        const stream_id: u62 = @intCast(entry.reader.receive.stream_id);
+        const from = entry.from orelse return error.UnexpectedStream;
+        if (try streamingRequestSectionAcknowledgments(event)) |count| {
+            try self.qpack_decode.acknowledgeSections(stream_id, count);
+            try self.sendQpackFeedback(from);
+        }
+        if (event == .head) {
+            try self.request_lifecycle.markReceived(stream_id);
+        } else if (event == .finished) {
+            self.streaming_requests.remove(stream_id);
+        }
+        return .{ .message = .{
+            .from = from,
+            .stream_id = stream_id,
+            .value = event,
+        } };
     }
 
     fn sendQpackFeedback(self: *ProtectedServer, to: net.IpAddress) Error!void {
@@ -2749,6 +3023,7 @@ pub const ProtectedClient = struct {
                 limits.max_concurrent_request_streams,
                 config.max_stream_buffer,
                 config.local_settings,
+                .response,
             ),
             .request_lifecycle = .init(
                 allocator,
@@ -3030,7 +3305,7 @@ pub const ProtectedClient = struct {
             else
                 error.RequestCancelled;
         }
-        const entry = try self.streaming_responses.activate(
+        const entry = try self.streaming_responses.activateResponse(
             &self.response_streams,
             stream_id,
         );
@@ -3301,6 +3576,19 @@ fn streamingResponseSectionAcknowledgments(
     };
 }
 
+fn streamingRequestSectionAcknowledgments(
+    event: StreamingEvent,
+) Error!?usize {
+    return switch (event) {
+        .head => |head| switch (head) {
+            .request => |request| request.qpack_section_acknowledgments,
+            .response => error.UnexpectedFrame,
+        },
+        .trailers => |trailers| trailers.qpack_section_acknowledgments,
+        .data_available, .finished => null,
+    };
+}
+
 pub const OwnedProtectedRequest = struct {
     from: net.IpAddress,
     stream_id: u62,
@@ -3480,9 +3768,20 @@ const RequestStreamSet = struct {
         stream_id: u64,
         table: http3.Qpack.DynamicTable,
     ) Error!bool {
-        for (self.entries.items, 0..) |entry, index| {
+        const requires_qpack_cancellation =
+            try self.requiresQpackCancellation(stream_id, table);
+        self.remove(stream_id);
+        return requires_qpack_cancellation;
+    }
+
+    fn requiresQpackCancellation(
+        self: RequestStreamSet,
+        stream_id: u64,
+        table: http3.Qpack.DynamicTable,
+    ) Error!bool {
+        for (self.entries.items) |entry| {
             if (entry.receive.stream_id != stream_id) continue;
-            const requires_qpack_cancellation = if (entry.receive.final_size) |final_size|
+            return if (entry.receive.final_size) |final_size|
                 entry.receive.contiguous_end >= final_size and
                     try messageUsesDynamicQpack(
                         entry.receive.buffer.items[0..final_size],
@@ -3490,9 +3789,40 @@ const RequestStreamSet = struct {
                     )
             else
                 false;
+        }
+        return false;
+    }
+
+    fn remove(self: *RequestStreamSet, stream_id: u64) void {
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.receive.stream_id != stream_id) continue;
             var removed = self.entries.swapRemove(index);
             removed.deinit();
-            return requires_qpack_cancellation;
+            return;
+        }
+    }
+
+    fn takeReceive(
+        self: *RequestStreamSet,
+        stream_id: u62,
+    ) ?struct {
+        receive: quic.stream_state.RecvState,
+        from: net.IpAddress,
+    } {
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.receive.stream_id != stream_id) continue;
+            const removed = self.entries.swapRemove(index);
+            return .{
+                .receive = removed.receive,
+                .from = removed.from,
+            };
+        }
+        return null;
+    }
+
+    fn contains(self: RequestStreamSet, stream_id: u62) bool {
+        for (self.entries.items) |entry| {
+            if (entry.receive.stream_id == stream_id) return true;
         }
         return false;
     }
@@ -3691,7 +4021,15 @@ const ResponseStreamSet = struct {
     }
 };
 
-const StreamingResponseSet = struct {
+const StreamingMessageSet = struct {
+    const Kind = enum { request, response };
+
+    const Reset = struct {
+        from: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    };
+
     const Entry = struct {
         reader: StreamingMessageReader,
         from: ?net.IpAddress = null,
@@ -3704,35 +4042,41 @@ const StreamingResponseSet = struct {
 
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
+    resets: std.ArrayList(Reset) = .empty,
     max_streams: usize,
     max_stream_buffer: usize,
     settings: http3.Settings,
+    kind: Kind,
 
     fn init(
         allocator: std.mem.Allocator,
         max_streams: usize,
         max_stream_buffer: usize,
         settings: http3.Settings,
-    ) StreamingResponseSet {
+        kind: Kind,
+    ) StreamingMessageSet {
         return .{
             .allocator = allocator,
             .max_streams = max_streams,
             .max_stream_buffer = max_stream_buffer,
             .settings = settings,
+            .kind = kind,
         };
     }
 
-    fn deinit(self: *StreamingResponseSet) void {
+    fn deinit(self: *StreamingMessageSet) void {
         for (self.entries.items) |*entry| entry.deinit();
         self.entries.deinit(self.allocator);
+        self.resets.deinit(self.allocator);
         self.* = undefined;
     }
 
-    fn activate(
-        self: *StreamingResponseSet,
+    fn activateResponse(
+        self: *StreamingMessageSet,
         buffered: *ResponseStreamSet,
         stream_id: u62,
     ) Error!*Entry {
+        if (self.kind != .response) return error.UnexpectedStream;
         if (self.find(stream_id)) |entry| return entry;
         if (self.entries.items.len >= self.max_streams) {
             return error.ExcessiveLoad;
@@ -3761,8 +4105,42 @@ const StreamingResponseSet = struct {
         return &self.entries.items[self.entries.items.len - 1];
     }
 
+    fn activateRequest(
+        self: *StreamingMessageSet,
+        buffered: *RequestStreamSet,
+        stream_id: u62,
+    ) Error!*Entry {
+        if (self.kind != .request) return error.UnexpectedStream;
+        if (self.find(stream_id)) |entry| return entry;
+        if (self.retainedCount() >= self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        if (buffered.takeReceive(stream_id)) |owned| {
+            self.entries.appendAssumeCapacity(.{
+                .reader = .{
+                    .allocator = self.allocator,
+                    .receive = owned.receive,
+                    .settings = self.settings,
+                    .kind = .request,
+                },
+                .from = owned.from,
+            });
+        } else {
+            self.entries.appendAssumeCapacity(.{
+                .reader = .initRequest(
+                    self.allocator,
+                    stream_id,
+                    self.max_stream_buffer,
+                    self.settings,
+                ),
+            });
+        }
+        return &self.entries.items[self.entries.items.len - 1];
+    }
+
     fn insert(
-        self: *StreamingResponseSet,
+        self: *StreamingMessageSet,
         from: net.IpAddress,
         frame: quic.StreamFrame,
     ) Error!bool {
@@ -3777,7 +4155,16 @@ const StreamingResponseSet = struct {
         return true;
     }
 
-    fn remove(self: *StreamingResponseSet, stream_id: u62) void {
+    fn remove(self: *StreamingMessageSet, stream_id: u62) void {
+        self.removeEntry(stream_id);
+        for (self.resets.items, 0..) |reset, index| {
+            if (reset.stream_id != stream_id) continue;
+            _ = self.resets.swapRemove(index);
+            break;
+        }
+    }
+
+    fn removeEntry(self: *StreamingMessageSet, stream_id: u62) void {
         for (self.entries.items, 0..) |entry, index| {
             if (entry.reader.receive.stream_id != stream_id) continue;
             var removed = self.entries.swapRemove(index);
@@ -3786,13 +4173,157 @@ const StreamingResponseSet = struct {
         }
     }
 
-    fn find(self: *StreamingResponseSet, stream_id: u62) ?*Entry {
+    fn takeEntry(self: *StreamingMessageSet, stream_id: u62) ?Entry {
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.reader.receive.stream_id != stream_id) continue;
+            return self.entries.swapRemove(index);
+        }
+        return null;
+    }
+
+    fn find(self: *StreamingMessageSet, stream_id: u62) ?*Entry {
         for (self.entries.items) |*entry| {
             if (entry.reader.receive.stream_id == stream_id) return entry;
         }
         return null;
     }
+
+    fn activateBufferedRequests(
+        self: *StreamingMessageSet,
+        buffered: *RequestStreamSet,
+    ) Error!void {
+        while (buffered.entries.items.len != 0) {
+            const stream_id: u62 = @intCast(
+                buffered.entries.items[0].receive.stream_id,
+            );
+            _ = try self.activateRequest(buffered, stream_id);
+        }
+    }
+
+    fn prepareReset(
+        self: *StreamingMessageSet,
+        from: net.IpAddress,
+        stream_id: u62,
+        buffered_streams: usize,
+        replaces_stream: bool,
+    ) Error!void {
+        if (self.kind != .request) return error.UnexpectedStream;
+        for (self.resets.items) |reset| {
+            if (reset.stream_id != stream_id) continue;
+            if (!reset.from.eql(&from)) return error.UnexpectedStream;
+            return;
+        }
+        const projected_count =
+            buffered_streams +
+            self.retainedCount() +
+            @intFromBool(!replaces_stream);
+        if (projected_count > self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        try self.resets.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    fn recordResetAssumeCapacity(
+        self: *StreamingMessageSet,
+        from: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    ) void {
+        for (self.resets.items) |*reset| {
+            if (reset.stream_id != stream_id) continue;
+            reset.application_error_code = application_error_code;
+            return;
+        }
+        var removed_entry = self.takeEntry(stream_id);
+        self.resets.appendAssumeCapacity(.{
+            .from = from,
+            .stream_id = stream_id,
+            .application_error_code = application_error_code,
+        });
+        if (removed_entry) |*entry| entry.deinit();
+    }
+
+    fn takeFirstReset(self: *StreamingMessageSet) ?Reset {
+        if (self.resets.items.len == 0) return null;
+        return self.resets.orderedRemove(0);
+    }
+
+    fn contains(self: StreamingMessageSet, stream_id: u62) bool {
+        for (self.entries.items) |entry| {
+            if (entry.reader.receive.stream_id == stream_id) return true;
+        }
+        for (self.resets.items) |reset| {
+            if (reset.stream_id == stream_id) return true;
+        }
+        return false;
+    }
+
+    fn retainedCount(self: StreamingMessageSet) usize {
+        return self.entries.items.len + self.resets.items.len;
+    }
+
+    fn insertRequest(
+        self: *StreamingMessageSet,
+        buffered: *RequestStreamSet,
+        from: net.IpAddress,
+        frame: quic.StreamFrame,
+    ) Error!void {
+        if (self.kind != .request) return error.UnexpectedStream;
+        if (try self.insert(from, frame)) return;
+        const stream_id: u62 = @intCast(frame.stream_id);
+        // RESET_STREAM is terminal for an HTTP/3 request stream. Ignore any
+        // STREAM frame later in the same packet instead of recreating a reader
+        // behind the queued reset event.
+        if (self.contains(stream_id)) return;
+        if (!buffered.contains(stream_id) and
+            buffered.entries.items.len + self.retainedCount() >=
+                self.max_streams)
+        {
+            return error.ExcessiveLoad;
+        }
+        try buffered.insert(from, frame);
+    }
+
+    fn nextRequest(
+        self: *StreamingMessageSet,
+        buffered: *RequestStreamSet,
+        table: http3.Qpack.DynamicTable,
+        max_blocked_streams: u64,
+    ) Error!?struct {
+        entry: *Entry,
+        event: StreamingEvent,
+    } {
+        if (self.kind != .request) return error.UnexpectedStream;
+        try self.activateBufferedRequests(buffered);
+        var blocked_streams: u64 = 0;
+        for (self.entries.items) |*entry| {
+            const event = entry.reader.next(table) catch |err| switch (err) {
+                error.QpackBlocked => {
+                    blocked_streams += 1;
+                    if (blocked_streams > max_blocked_streams) {
+                        return error.QpackDecompressionFailed;
+                    }
+                    continue;
+                },
+                else => return err,
+            };
+            if (event) |value| return .{ .entry = entry, .event = value };
+        }
+        return null;
+    }
+
+    fn hasUnacknowledgedDynamicSection(
+        self: *StreamingMessageSet,
+        stream_id: u62,
+        table: http3.Qpack.DynamicTable,
+    ) Error!bool {
+        const entry = self.find(stream_id) orelse return false;
+        return entry.reader.hasUnacknowledgedDynamicSection(table);
+    }
 };
+
+const StreamingResponseSet = StreamingMessageSet;
+const StreamingRequestSet = StreamingMessageSet;
 
 const ClientRequestLifecycle = struct {
     allocator: std.mem.Allocator,
@@ -3972,6 +4503,7 @@ const ServerRequestLifecycle = struct {
     fn drainComplete(
         self: ServerRequestLifecycle,
         request_streams: RequestStreamSet,
+        streaming_requests: StreamingRequestSet,
         local_goaway_id: ?u64,
     ) bool {
         if (self.shutdown_state != .final_goaway) return false;
@@ -3981,6 +4513,12 @@ const ServerRequestLifecycle = struct {
         }
         for (request_streams.entries.items) |entry| {
             if (entry.receive.stream_id < goaway_id) return false;
+        }
+        for (streaming_requests.entries.items) |entry| {
+            if (entry.reader.receive.stream_id < goaway_id) return false;
+        }
+        for (streaming_requests.resets.items) |reset| {
+            if (reset.stream_id < goaway_id) return false;
         }
         return true;
     }
@@ -4412,126 +4950,6 @@ fn sendConnectionFrames(connection: *quic.one_rtt.Connection, frames: []const qu
     }
 }
 
-fn receiveConnectionStreamBytes(
-    connection: *quic.one_rtt.Connection,
-    expected_stream_id: ?u62,
-    options: HandshakeSessionOptions,
-    control: *http3.ControlState,
-    qpack_decode: *QpackDecodeState,
-    qpack_encode: *QpackEncodeState,
-    request_streams: ?*RequestStreamSet,
-    role: ControlStreamRole,
-) Error!AssembledStream {
-    if (role == .server) {
-        const streams = request_streams orelse return error.UnexpectedStream;
-        std.debug.assert(expected_stream_id == null);
-        return receiveConnectionRequestStreamBytes(
-            connection,
-            options,
-            control,
-            qpack_decode,
-            qpack_encode,
-            streams,
-        );
-    }
-    std.debug.assert(request_streams == null);
-
-    var recv: ?quic.stream_state.RecvState = null;
-    defer if (recv) |*state| state.deinit();
-    var from: ?net.IpAddress = null;
-    var stream_id: ?u62 = expected_stream_id;
-    var blocked_bytes: ?[]u8 = null;
-    defer if (blocked_bytes) |bytes| connection.endpoint.allocator.free(bytes);
-
-    while (true) {
-        var packet = try connection.receivePacket();
-        defer packet.deinit(connection.endpoint.allocator);
-        if (from == null) from = packet.from;
-
-        for (packet.frames) |frame| {
-            try rejectCriticalStreamClosureFrame(control.*, frame, role);
-            if (frame != .stream) continue;
-            if (isPeerQpackStreamFrame(
-                control.*,
-                qpack_encode.decoder_stream,
-                frame.stream,
-                role,
-                .qpack_decoder,
-            )) {
-                try qpack_encode.applyDecoderStreamFrame(control, frame.stream);
-                continue;
-            }
-            if (isPeerQpackStreamFrame(
-                control.*,
-                qpack_decode.encoder_stream,
-                frame.stream,
-                role,
-                .qpack_encoder,
-            )) {
-                try qpack_decode.applyEncoderStreamFrame(control, frame.stream);
-                if (blocked_bytes) |bytes| {
-                    if (!try messageBlockedByQpack(bytes, qpack_decode.table)) {
-                        blocked_bytes = null;
-                        return .{
-                            .from = from.?,
-                            .stream_id = stream_id.?,
-                            .bytes = bytes,
-                        };
-                    }
-                }
-                continue;
-            }
-            if (try applyControlStreamFrameForRole(
-                control,
-                connection.endpoint.allocator,
-                frame.stream,
-                role,
-            )) {
-                try configureQpackEncoderFromPeerSettings(
-                    control.*,
-                    qpack_encode,
-                );
-                continue;
-            }
-            if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
-            const incoming_id: u62 = @intCast(frame.stream.stream_id);
-            if (rejectByLocalGoAway(control.*, role, incoming_id)) return error.RequestRejected;
-            if (stream_id) |id| {
-                if (incoming_id != id) continue;
-            } else {
-                stream_id = incoming_id;
-                recv = quic.stream_state.RecvState.init(connection.endpoint.allocator, incoming_id, options.max_stream_buffer);
-            }
-            if (recv == null) recv = quic.stream_state.RecvState.init(connection.endpoint.allocator, incoming_id, options.max_stream_buffer);
-            if (recv) |*state| {
-                if (blocked_bytes != null) continue;
-                try state.insert(frame.stream);
-                if (state.final_size != null and state.contiguous_end >= state.final_size.?) {
-                    const bytes = try connection.endpoint.allocator.dupe(u8, state.buffer.items[0..state.final_size.?]);
-                    const blocked = if (options.local_settings.qpack_blocked_streams == 0)
-                        false
-                    else
-                        messageBlockedByQpack(
-                            bytes,
-                            qpack_decode.table,
-                        ) catch |err| {
-                            connection.endpoint.allocator.free(bytes);
-                            return err;
-                        };
-                    if (!blocked) {
-                        return .{
-                            .from = from.?,
-                            .stream_id = stream_id.?,
-                            .bytes = bytes,
-                        };
-                    }
-                    blocked_bytes = bytes;
-                }
-            }
-        }
-    }
-}
-
 fn receiveConnectionRequestStreamBytes(
     connection: *quic.one_rtt.Connection,
     options: HandshakeSessionOptions,
@@ -4548,66 +4966,17 @@ fn receiveConnectionRequestStreamBytes(
     while (true) {
         var packet = try connection.receivePacket();
         defer packet.deinit(connection.endpoint.allocator);
-        for (packet.frames) |frame| {
-            try rejectCriticalStreamClosureFrame(control.*, frame, .server);
-            if (frame == .reset_stream and
-                (try messageStreamDisposition(
-                    frame.reset_stream.stream_id,
-                )) == .request_response)
-            {
-                if (try request_streams.cancel(
-                    frame.reset_stream.stream_id,
-                    qpack_decode.table,
-                )) {
-                    try qpack_decode.recordStreamCancellation(
-                        frame.reset_stream.stream_id,
-                    );
-                }
-                return if (frame.reset_stream.application_error_code ==
-                    http3.ApplicationErrorCode.request_rejected)
-                    error.RequestRejected
-                else
-                    error.RequestCancelled;
-            }
-            if (frame != .stream) continue;
-            if (isPeerQpackStreamFrame(
-                control.*,
-                qpack_encode.decoder_stream,
-                frame.stream,
-                .server,
-                .qpack_decoder,
-            )) {
-                try qpack_encode.applyDecoderStreamFrame(control, frame.stream);
-                continue;
-            }
-            if (isPeerQpackStreamFrame(
-                control.*,
-                qpack_decode.encoder_stream,
-                frame.stream,
-                .server,
-                .qpack_encoder,
-            )) {
-                try qpack_decode.applyEncoderStreamFrame(control, frame.stream);
-                continue;
-            }
-            if (try applyControlStreamFrameForRole(
-                control,
-                connection.endpoint.allocator,
-                frame.stream,
-                .server,
-            )) {
-                try configureQpackEncoderFromPeerSettings(
-                    control.*,
-                    qpack_encode,
-                );
-                continue;
-            }
-            if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
-            const incoming_id: u62 = @intCast(frame.stream.stream_id);
-            if (rejectByLocalGoAway(control.*, .server, incoming_id)) {
-                return error.RequestRejected;
-            }
-            try request_streams.insert(packet.from, frame.stream);
+        if (try applyServerRequestPacketFrames(
+            packet.from,
+            packet.frames,
+            connection.endpoint.allocator,
+            control,
+            qpack_decode,
+            qpack_encode,
+            request_streams,
+            null,
+        )) |reset| {
+            return requestResetError(reset.application_error_code);
         }
         if (try request_streams.takeReady(
             qpack_decode.table,
@@ -4616,6 +4985,145 @@ fn receiveConnectionRequestStreamBytes(
             return ready;
         }
     }
+}
+
+const RequestStreamReset = struct {
+    from: net.IpAddress,
+    stream_id: u62,
+    application_error_code: u64,
+};
+
+fn requestResetError(application_error_code: u64) Error {
+    return if (application_error_code ==
+        http3.ApplicationErrorCode.request_rejected)
+        error.RequestRejected
+    else
+        error.RequestCancelled;
+}
+
+/// Route one packet through the shared server-side HTTP/3 stream state.
+///
+/// Aggregate and incremental consumers intentionally share this function:
+/// control/QPACK classification, GOAWAY rejection, peer-address validation,
+/// concurrency accounting, and reset cancellation must not drift merely
+/// because an application chooses a different body-consumption API.
+fn applyServerRequestPacketFrames(
+    from: net.IpAddress,
+    frames: []const quic.Frame,
+    allocator: std.mem.Allocator,
+    control: *http3.ControlState,
+    qpack_decode: *QpackDecodeState,
+    qpack_encode: *QpackEncodeState,
+    request_streams: *RequestStreamSet,
+    streaming_requests: ?*StreamingRequestSet,
+) Error!?RequestStreamReset {
+    var first_reset: ?RequestStreamReset = null;
+    for (frames) |frame| {
+        try rejectCriticalStreamClosureFrame(control.*, frame, .server);
+        if (frame == .reset_stream and
+            (try messageStreamDisposition(
+                frame.reset_stream.stream_id,
+            )) == .request_response)
+        {
+            const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
+            const replaces_stream =
+                request_streams.contains(stream_id) or
+                if (streaming_requests) |streaming|
+                    streaming.contains(stream_id)
+                else
+                    false;
+            var cancel_qpack = try request_streams
+                .requiresQpackCancellation(
+                stream_id,
+                qpack_decode.table,
+            );
+            if (streaming_requests) |streaming| {
+                cancel_qpack = cancel_qpack or
+                    try streaming.hasUnacknowledgedDynamicSection(
+                        stream_id,
+                        qpack_decode.table,
+                    );
+                // Reserve before mutating QPACK or destroying the reader. This
+                // makes reset routing transactional under allocator failure.
+                try streaming.prepareReset(
+                    from,
+                    stream_id,
+                    request_streams.entries.items.len,
+                    replaces_stream,
+                );
+                // Reserve decoder feedback before retiring the reader. If the
+                // event queue has been reserved, all remaining operations are
+                // allocation-free and cannot strand one half of the state.
+                if (cancel_qpack) {
+                    try qpack_decode.recordStreamCancellation(stream_id);
+                    cancel_qpack = false;
+                }
+                streaming.recordResetAssumeCapacity(
+                    from,
+                    stream_id,
+                    frame.reset_stream.application_error_code,
+                );
+            }
+            if (cancel_qpack) {
+                try qpack_decode.recordStreamCancellation(stream_id);
+            }
+            request_streams.remove(stream_id);
+            if (first_reset == null) {
+                first_reset = .{
+                    .from = from,
+                    .stream_id = stream_id,
+                    .application_error_code = frame.reset_stream.application_error_code,
+                };
+            }
+            continue;
+        }
+        if (frame != .stream) continue;
+        if (isPeerQpackStreamFrame(
+            control.*,
+            qpack_encode.decoder_stream,
+            frame.stream,
+            .server,
+            .qpack_decoder,
+        )) {
+            try qpack_encode.applyDecoderStreamFrame(control, frame.stream);
+            continue;
+        }
+        if (isPeerQpackStreamFrame(
+            control.*,
+            qpack_decode.encoder_stream,
+            frame.stream,
+            .server,
+            .qpack_encoder,
+        )) {
+            try qpack_decode.applyEncoderStreamFrame(control, frame.stream);
+            continue;
+        }
+        if (try applyControlStreamFrameForRole(
+            control,
+            allocator,
+            frame.stream,
+            .server,
+        )) {
+            try configureQpackEncoderFromPeerSettings(
+                control.*,
+                qpack_encode,
+            );
+            continue;
+        }
+        if ((try messageStreamDisposition(
+            frame.stream.stream_id,
+        )) == .ignore) continue;
+        const stream_id: u62 = @intCast(frame.stream.stream_id);
+        if (rejectByLocalGoAway(control.*, .server, stream_id)) {
+            return error.RequestRejected;
+        }
+        if (streaming_requests) |streaming| {
+            try streaming.insertRequest(request_streams, from, frame.stream);
+        } else {
+            try request_streams.insert(from, frame.stream);
+        }
+    }
+    return first_reset;
 }
 
 fn receiveConnectionResponseStreamBytes(
@@ -7845,6 +8353,345 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     );
 }
 
+test "HTTP/3 protected server streams interleaved requests through small windows" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    const body_len: usize = 64 * 1024;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xd1, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xd2, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd3} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd4} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .local_settings = .{
+                .qpack_max_table_capacity = 512,
+                .qpack_blocked_streams = 2,
+            },
+            .max_stream_buffer = 512,
+            .max_stream_frame_data = 480,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .local_settings = .{
+                .qpack_max_table_capacity = 512,
+                .qpack_blocked_streams = 2,
+            },
+            .max_stream_buffer = 512,
+            .max_stream_frame_data = 480,
+        },
+    );
+    defer client.deinit();
+
+    // Two exchanges are required by the non-blocking encoder policy: the first
+    // advertises SETTINGS and queues inserts, while feedback received during
+    // the second unlocks dynamic references for the streamed requests below.
+    for (0..2) |_| {
+        const warmup_id = try client.sendRequest(.{
+            .method = "POST",
+            .path = "/stream-request",
+            .authority = "localhost",
+            .headers = &.{.{
+                .name = "x-request-kind",
+                .value = "bounded-protected",
+            }},
+            .body = "warmup",
+            .trailers = &.{.{
+                .name = "x-request-finished",
+                .value = "yes",
+            }},
+        });
+        var warmup = try server.receiveRequest();
+        defer warmup.deinit(allocator);
+        try std.testing.expectEqual(warmup_id, warmup.stream_id);
+        try server.sendResponse(warmup.from, warmup.stream_id, .{
+            .status = 204,
+        });
+        var warmup_response = try client.receiveResponse(warmup_id);
+        defer warmup_response.deinit(allocator);
+    }
+
+    const first_id = try client.startRequest(
+        .{
+            .method = "POST",
+            .path = "/stream-request",
+            .authority = "localhost",
+            .headers = &.{.{
+                .name = "x-request-kind",
+                .value = "bounded-protected",
+            }},
+        },
+        body_len,
+    );
+    try client.sendRequestBody(first_id, &([_]u8{0xa5} ** 400), false);
+    const second_id = try client.startRequest(
+        .{
+            .method = "POST",
+            .path = "/stream-request",
+            .authority = "localhost",
+            .headers = &.{.{
+                .name = "x-request-kind",
+                .value = "bounded-protected",
+            }},
+        },
+        6,
+    );
+    try client.sendRequestBody(second_id, "second", false);
+    try client.finishRequestTrailers(second_id, &.{.{
+        .name = "x-request-finished",
+        .value = "yes",
+    }});
+
+    const Sender = struct {
+        client: *ProtectedClient,
+        stream_id: u62,
+        err: ?anyerror = null,
+
+        fn run(sender: *@This()) void {
+            sender.runFallible() catch |err| {
+                sender.err = err;
+            };
+        }
+
+        fn runFallible(sender: *@This()) !void {
+            var chunk: [400]u8 = undefined;
+            for (&chunk, 0..) |*byte, index| byte.* = @truncate(index);
+            var remaining = body_len - 400;
+            while (remaining != 0) {
+                const count = @min(chunk.len, remaining);
+                try sender.client.sendRequestBody(
+                    sender.stream_id,
+                    chunk[0..count],
+                    false,
+                );
+                remaining -= count;
+            }
+            try sender.client.finishRequestTrailers(sender.stream_id, &.{.{
+                .name = "x-request-finished",
+                .value = "yes",
+            }});
+        }
+    };
+    var sender = Sender{ .client = &client, .stream_id = first_id };
+    const sender_thread = try std.Thread.spawn(.{}, Sender.run, .{&sender});
+    var sender_joined = false;
+    defer if (!sender_joined) sender_thread.join();
+
+    var heads: usize = 0;
+    var dynamic_heads: usize = 0;
+    var trailers: usize = 0;
+    var dynamic_trailers: usize = 0;
+    var finished: usize = 0;
+    var first_read: usize = 0;
+    var second_read: usize = 0;
+    var first_checksum: u64 = 0;
+    var second_checksum: u64 = 0;
+    var read_buf: [113]u8 = undefined;
+    while (finished != 2) {
+        var event = try server.receiveRequestEvent();
+        defer event.deinit(allocator);
+        try std.testing.expect(event == .message);
+        const message = &event.message;
+        switch (message.value) {
+            .head => |head| {
+                try std.testing.expect(head == .request);
+                if (head.request.qpack_section_acknowledgments != 0) {
+                    dynamic_heads += 1;
+                }
+                heads += 1;
+            },
+            .data_available => {
+                while (true) {
+                    const active = server.streaming_requests.find(
+                        message.stream_id,
+                    ).?;
+                    if (active.reader.current_frame == null) break;
+                    const read = try server.readRequestData(
+                        message.stream_id,
+                        &read_buf,
+                    );
+                    if (read == 0) break;
+                    if (message.stream_id == first_id) {
+                        for (read_buf[0..read]) |byte| {
+                            first_checksum +%= byte;
+                        }
+                        first_read += read;
+                    } else {
+                        try std.testing.expectEqual(second_id, message.stream_id);
+                        for (read_buf[0..read]) |byte| {
+                            second_checksum +%= byte;
+                        }
+                        second_read += read;
+                    }
+                }
+                const active = server.streaming_requests.find(
+                    message.stream_id,
+                ).?;
+                try std.testing.expect(
+                    active.reader.receive.buffer.items.len <= 512,
+                );
+            },
+            .trailers => |decoded| {
+                try std.testing.expectEqualStrings(
+                    "yes",
+                    decoded.fields[0].value,
+                );
+                if (decoded.qpack_section_acknowledgments != 0) {
+                    dynamic_trailers += 1;
+                }
+                trailers += 1;
+            },
+            .finished => finished += 1,
+        }
+    }
+    sender_thread.join();
+    sender_joined = true;
+    if (sender.err) |err| return err;
+
+    var expected_first: u64 = 400 * 0xa5;
+    var chunk: [400]u8 = undefined;
+    for (&chunk, 0..) |*byte, index| byte.* = @truncate(index);
+    const remaining = body_len - 400;
+    var chunk_sum: u64 = 0;
+    for (chunk) |byte| chunk_sum += byte;
+    expected_first += chunk_sum * (remaining / chunk.len);
+    for (chunk[0 .. remaining % chunk.len]) |byte| expected_first += byte;
+    var expected_second: u64 = 0;
+    for ("second") |byte| expected_second += byte;
+
+    try std.testing.expectEqual(@as(usize, 2), heads);
+    try std.testing.expect(dynamic_heads != 0);
+    try std.testing.expectEqual(@as(usize, 2), trailers);
+    try std.testing.expect(dynamic_trailers != 0);
+    try std.testing.expectEqual(body_len, first_read);
+    try std.testing.expectEqual(@as(usize, 6), second_read);
+    try std.testing.expectEqual(expected_first, first_checksum);
+    try std.testing.expectEqual(expected_second, second_checksum);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.streaming_requests.retainedCount(),
+    );
+}
+
+test "HTTP/3 protected server reports streamed request reset with stream id" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xd5, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xd6, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd8} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .max_stream_buffer = 512,
+        },
+    );
+    defer server.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .max_stream_buffer = 512,
+        },
+    );
+    defer client.deinit();
+
+    const stream_id = try client.startRequest(
+        .{
+            .method = "POST",
+            .path = "/cancel-stream",
+            .authority = "localhost",
+        },
+        null,
+    );
+    var event = try server.receiveRequestEvent();
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .message);
+    try std.testing.expect(event.message.value == .head);
+    try std.testing.expectEqual(stream_id, event.message.stream_id);
+
+    try client.cancelRequest(
+        stream_id,
+        http3.ApplicationErrorCode.request_cancelled,
+    );
+    var reset = try server.receiveRequestEvent();
+    defer reset.deinit(allocator);
+    try std.testing.expect(reset == .reset);
+    try std.testing.expectEqual(stream_id, reset.reset.stream_id);
+    try std.testing.expectEqual(
+        @as(u64, http3.ApplicationErrorCode.request_cancelled),
+        reset.reset.application_error_code,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.streaming_requests.retainedCount(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.request_lifecycle.active_streams.items.len,
+    );
+}
+
 test "HTTP/3 protected client streams large response through small window" {
     const allocator = std.testing.allocator;
     const body_len: usize = 64 * 1024;
@@ -9750,6 +10597,200 @@ test "HTTP/3 handshake runtime streams request and response DATA chunks" {
         "ok",
         response.response.trailers[0].value,
     );
+}
+
+test "HTTP/3 handshake server streams large request through small window" {
+    const allocator = std.testing.allocator;
+    const body_len: usize = 64 * 1024;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7 };
+    const client_cid = [_]u8{ 0xe8, 0xe9, 0xea, 0xeb };
+    const server_cid = [_]u8{ 0xec, 0xed, 0xee, 0xef };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 65_535,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 65_535,
+                },
+                .random = [_]u8{0xf3} ** 32,
+                .x25519_secret_key = [_]u8{0xf4} ** 32,
+            },
+            .session = .{
+                .local_settings = .{
+                    .qpack_max_table_capacity = 512,
+                    .qpack_blocked_streams = 2,
+                },
+                .max_stream_buffer = 512,
+                .max_stream_frame_data = 480,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            var saw_head = false;
+            var saw_trailers = false;
+            var body_read: usize = 0;
+            var checksum: u64 = 0;
+            var stream_id: ?u62 = null;
+            var read_buf: [113]u8 = undefined;
+            while (session.streaming_requests.retainedCount() != 0 or
+                !saw_head)
+            {
+                var event = try session.receiveRequestEvent();
+                defer event.deinit(
+                    session.established.connection.endpoint.allocator,
+                );
+                try std.testing.expect(event == .message);
+                const message = &event.message;
+                if (stream_id) |expected| {
+                    try std.testing.expectEqual(expected, message.stream_id);
+                } else {
+                    stream_id = message.stream_id;
+                }
+                switch (message.value) {
+                    .head => |head| {
+                        try std.testing.expect(head == .request);
+                        try std.testing.expectEqual(
+                            @as(?usize, body_len),
+                            head.request.content_length,
+                        );
+                        saw_head = true;
+                    },
+                    .data_available => {
+                        while (true) {
+                            const active = session.streaming_requests.find(
+                                message.stream_id,
+                            ).?;
+                            if (active.reader.current_frame == null) break;
+                            const read = try session.readRequestData(
+                                message.stream_id,
+                                &read_buf,
+                            );
+                            if (read == 0) break;
+                            for (read_buf[0..read]) |byte| checksum +%= byte;
+                            body_read += read;
+                        }
+                        const active = session.streaming_requests.find(
+                            message.stream_id,
+                        ).?;
+                        try std.testing.expect(
+                            active.reader.receive.buffer.items.len <= 512,
+                        );
+                    },
+                    .trailers => |trailers| {
+                        try std.testing.expectEqualStrings(
+                            "yes",
+                            trailers.fields[0].value,
+                        );
+                        saw_trailers = true;
+                    },
+                    .finished => {},
+                }
+            }
+            try std.testing.expect(saw_head);
+            try std.testing.expect(saw_trailers);
+            try std.testing.expectEqual(body_len, body_read);
+
+            var chunk: [400]u8 = undefined;
+            var chunk_sum: u64 = 0;
+            for (&chunk, 0..) |*byte, index| {
+                byte.* = @truncate(index);
+                chunk_sum += byte.*;
+            }
+            var expected = chunk_sum * (body_len / chunk.len);
+            for (chunk[0 .. body_len % chunk.len]) |byte| expected += byte;
+            try std.testing.expectEqual(expected, checksum);
+            try session.sendResponse(stream_id.?, .{ .status = 204 });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 65_535,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 65_535,
+                },
+                .random = [_]u8{0xf1} ** 32,
+                .x25519_secret_key = [_]u8{0xf2} ** 32,
+            },
+            .session = .{
+                .local_settings = .{
+                    .qpack_max_table_capacity = 512,
+                    .qpack_blocked_streams = 2,
+                },
+                .max_stream_buffer = 512,
+                .max_stream_frame_data = 480,
+            },
+        },
+    );
+    defer client.deinit();
+
+    const stream_id = try client.startRequest(
+        .{
+            .method = "POST",
+            .path = "/large-handshake-request",
+            .authority = "localhost",
+        },
+        body_len,
+    );
+    var chunk: [400]u8 = undefined;
+    for (&chunk, 0..) |*byte, index| byte.* = @truncate(index);
+    var remaining = body_len;
+    while (remaining != 0) {
+        const count = @min(chunk.len, remaining);
+        try client.sendRequestBody(
+            stream_id,
+            chunk[0..count],
+            false,
+        );
+        remaining -= count;
+    }
+    try client.finishRequestTrailers(stream_id, &.{.{
+        .name = "x-request-finished",
+        .value = "yes",
+    }});
+    var response = try client.receiveResponse(stream_id);
+    defer response.deinit(allocator);
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 204), response.response.status);
 }
 
 test "HTTP/3 handshake client streams dynamic response through small window" {

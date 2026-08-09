@@ -134,6 +134,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "initiateShutdown"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "completeShutdown"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "drainComplete"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequestEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "readRequestData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "startResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "sendResponseBody"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "finishResponseTrailers"));
@@ -155,6 +157,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "initiateShutdown"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "completeShutdown"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "drainComplete"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequestEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "readRequestData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "startResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseBody"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "finishResponseTrailers"));
@@ -297,6 +301,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3, "decodeTrailersWithDynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingMessageReader"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingRequestEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedServer, "receiveRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequest"));
     try std.testing.expect(@hasDecl(netz.quic.crypto_stream, "Reassembler"));

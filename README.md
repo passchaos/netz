@@ -72,10 +72,12 @@ starts with deterministic parsers, serializers, and state helpers for:
   multiple DATA chunks and enforcing declared Content-Length at FIN. Streaming
   messages can instead finish with dynamic QPACK trailer HEADERS through
   `finishRequestTrailers`/`finishResponseTrailers`. Preconfigured-protection
-  and handshake-backed clients expose
-  `receiveResponseEvent`/`readResponseData` for bounded-window network reads with
-  automatic QPACK head/trailer feedback, interleaved-stream preservation, and
-  no full-body aggregation, plus a
+  and handshake-backed servers expose
+  `receiveRequestEvent`/`readRequestData`, while their clients expose
+  `receiveResponseEvent`/`readResponseData`. Both directions provide
+  bounded-window network reads with automatic QPACK head/trailer feedback,
+  interleaved-stream and reset identity preservation, Content-Length
+  validation, and no full-body aggregation, plus a
   `std.Io.async` request receive helper for the development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
