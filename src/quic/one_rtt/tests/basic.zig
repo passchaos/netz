@@ -1115,7 +1115,7 @@ test "QUIC 1-RTT connection updates RTT from ACK samples" {
     try std.testing.expect(!(try connection.updateRttFromAck(ack, 102_000_000)));
     try std.testing.expectEqual(@as(u64, 100_000_000), connection.rtt_stats.latest_rtt);
 
-    connection.handshake_confirmed = true;
+    connection.markTlsHandshakeComplete();
     try connection.sent.sentAt(1, true, 1200, .not_ect, 201_000_000);
     const ack2 = quic.AckFrame{ .largest_acknowledged = 1, .ack_delay = 5, .first_ack_range = 0 };
     try std.testing.expect(try connection.updateRttFromAck(ack2, 331_000_000));

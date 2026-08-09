@@ -284,9 +284,9 @@ test "QUIC 1-RTT loss detection timer reports earliest loss or PTO deadline" {
 
     connection.rtt_stats.updateAt(100_000_000, 0, true, 100_000_000);
     try connection.sent.sentAt(0, true, 1200, .not_ect, 0);
-    try connection.recovery.trackSent(0, "zero");
+    _ = try connection.recovery.trackSent(0, "zero");
     try connection.sent.sentAt(1, true, 1200, .not_ect, 200_000_000);
-    try connection.recovery.trackSent(1, "one");
+    _ = try connection.recovery.trackSent(1, "one");
     _ = connection.sent.markAcknowledged(1);
 
     const loss_first = connection.lossDetectionTimerDeadline() orelse return error.TestUnexpectedResult;
@@ -295,7 +295,7 @@ test "QUIC 1-RTT loss detection timer reports earliest loss or PTO deadline" {
 
     connection.sent.packets.items[0].lost = true;
     try connection.sent.sentAt(2, true, 1200, .not_ect, 200_000_000);
-    try connection.recovery.trackSent(2, "two");
+    _ = try connection.recovery.trackSent(2, "two");
     const pto_first = connection.lossDetectionTimerDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.LossDetectionTimerKind.pto, pto_first.kind);
     try std.testing.expectEqual(@as(u64, 525_000_000), pto_first.deadline_ns);

@@ -249,6 +249,7 @@ pub const OneRttConfig = struct {
             .enable_ack_frequency = local_transport_parameters.min_ack_delay != null or peer_transport_parameters.min_ack_delay != null,
             .local_min_ack_delay = local_transport_parameters.min_ack_delay,
             .peer_min_ack_delay = peer_transport_parameters.min_ack_delay,
+            .tls_handshake_complete = true,
         };
     }
 };

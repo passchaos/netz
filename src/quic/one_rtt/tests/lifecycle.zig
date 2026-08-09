@@ -276,7 +276,9 @@ test "QUIC 1-RTT handles server-only NEW_TOKEN and HANDSHAKE_DONE roles" {
         .frames = &[_]quic.Frame{.{ .handshake_done = {} }},
     });
     try std.testing.expectError(error.InvalidFrame, server.receivePacket());
-    try std.testing.expect(!server.handshakeConfirmed());
+    // Servers confirm the handshake when TLS completes, independently of the
+    // peer's illegal HANDSHAKE_DONE frame.
+    try std.testing.expect(server.handshakeConfirmed());
     try std.testing.expect(server.closing());
     try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), server.close_info.?.error_code);
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.handshake_done)), server.close_info.?.frame_type);

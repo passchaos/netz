@@ -1,5 +1,6 @@
 const std = @import("std");
 const quic = @import("mod.zig");
+const handshake_status = @import("one_rtt/handshake_status.zig");
 
 const net = std.Io.net;
 
@@ -201,6 +202,10 @@ pub const ConnectionConfig = struct {
     /// the negotiated suite's limit”.
     aead_integrity_limit: u64 = std.math.maxInt(u64),
     qlog_observer: ?*quic.qlog.Observer = null,
+    /// Integrated TLS handshakes set this once their Finished exchange
+    /// succeeds. Manually keyed connections leave it false and can call
+    /// `markTlsHandshakeComplete` explicitly.
+    tls_handshake_complete: bool = false,
 };
 
 const StreamFlowEntry = struct {
@@ -376,7 +381,7 @@ pub const Connection = struct {
     send_key_generation_encrypted_packets: u64 = 0,
     receive_authentication_failures: u64 = 0,
     stored_new_tokens: std.ArrayList([]u8) = .empty,
-    handshake_confirmed: bool = false,
+    handshake_status: handshake_status.Status = .in_progress,
     peer_max_streams_bidi: u64,
     peer_max_streams_uni: u64,
     recv_max_streams_bidi: u64,
@@ -453,6 +458,12 @@ pub const Connection = struct {
         }
         try connection.peer_connection_ids.add(0, config.peer_connection_id, [_]u8{0} ** 16);
         try connection.peer_connection_ids.markInUse(0);
+        if (config.tls_handshake_complete) {
+            connection.handshake_status.onTlsComplete(switch (config.local_endpoint) {
+                .client => .client,
+                .server => .server,
+            });
+        }
         return connection;
     }
 
@@ -506,12 +517,20 @@ pub const Connection = struct {
             crypto_offset.*,
             data.len,
         ) catch return error.InvalidPostHandshakeCrypto;
-        const frame = [_]quic.Frame{.{ .crypto = .{
+        const crypto = quic.Frame{ .crypto = .{
             .offset = crypto_offset.*,
             .data = data,
-        } }};
+        } };
+        const frames_with_done = [_]quic.Frame{
+            crypto,
+            .{ .handshake_done = {} },
+        };
+        const frames = if (self.handshake_status.needsHandshakeDone())
+            frames_with_done[0..]
+        else
+            @as([]const quic.Frame, @as(*const [1]quic.Frame, &crypto));
         try self.sendTrackedFramesEcnAtUnchecked(
-            &frame,
+            frames,
             .not_ect,
             self.monotonicNowNs(),
         );
@@ -572,6 +591,18 @@ pub const Connection = struct {
         self.pacing_blocked_until_ns = null;
         if (self.close_info != null or self.idle_timed_out) {
             return error.ConnectionClosed;
+        }
+        // Route the first application packet through the single-packet path
+        // while HANDSHAKE_DONE is unsent. It appends the control frame after
+        // the caller's frames, preserving application order, and later calls
+        // retain normal GSO/sendmmsg batching.
+        if (self.handshake_status.needsHandshakeDone()) {
+            try self.sendWithEcnAt(
+                packets[0],
+                .not_ect,
+                sent_time_ns,
+            );
+            return .{ .sent_count = 1, .protected_count = 1 };
         }
         try self.validateNextPacketNumber();
 
@@ -860,7 +891,7 @@ pub const Connection = struct {
         for (prepared[0..count]) |packet| {
             const payload = self.send_frame_buffer.items[packet.payload_offset..][0..packet.payload_len];
             if (packet.ack_eliciting) {
-                try self.recovery.trackSent(packet.packet_number, payload);
+                _ = try self.recovery.trackSent(packet.packet_number, payload);
             }
             tracked_recovery_count += 1;
             try self.sent.sentInFlightAt(
@@ -984,6 +1015,14 @@ pub const Connection = struct {
     }
 
     pub fn sendWithEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
+        try self.sendWithEcnLoop(frames, ecn);
+    }
+
+    fn sendWithEcnLoop(
+        self: *Connection,
+        frames: []const quic.Frame,
+        ecn: quic.packet_space.EcnCodepoint,
+    ) Error!void {
         while (true) {
             const now_ns = self.monotonicNowNs();
             self.sendWithEcnAt(frames, ecn, now_ns) catch |err| switch (err) {
@@ -1002,6 +1041,29 @@ pub const Connection = struct {
     }
 
     pub fn sendWithEcnAt(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
+        if (frames.len != 0 and
+            self.handshake_status.needsHandshakeDone() and
+            !containsHandshakeDone(frames))
+        {
+            const combined = try self.endpoint.allocator.alloc(
+                quic.Frame,
+                frames.len + 1,
+            );
+            defer self.endpoint.allocator.free(combined);
+            @memcpy(combined[0..frames.len], frames);
+            // Keep caller frames first so scheduling HANDSHAKE_DONE cannot
+            // reorder the application's first 1-RTT frame.
+            combined[frames.len] = .{ .handshake_done = {} };
+            return self.sendWithEcnAtRaw(
+                combined,
+                ecn,
+                sent_time_ns,
+            );
+        }
+        try self.sendWithEcnAtRaw(frames, ecn, sent_time_ns);
+    }
+
+    fn sendWithEcnAtRaw(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         self.pacing_blocked_until_ns = null;
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         if (ecn != .not_ect and self.sent.ecnDisabled()) return error.EcnDisabled;
@@ -1260,6 +1322,31 @@ pub const Connection = struct {
 
     fn sendTrackedFramesEcnAtUnchecked(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         try self.validateNextPacketNumber();
+        if (frames.len != 0 and
+            self.handshake_status.needsHandshakeDone() and
+            !containsHandshakeDone(frames))
+        {
+            const combined = try self.endpoint.allocator.alloc(
+                quic.Frame,
+                frames.len + 1,
+            );
+            defer self.endpoint.allocator.free(combined);
+            @memcpy(combined[0..frames.len], frames);
+            combined[frames.len] = .{ .handshake_done = {} };
+            return self.sendTrackedFramesEcnAtUncheckedRaw(
+                combined,
+                ecn,
+                sent_time_ns,
+            );
+        }
+        try self.sendTrackedFramesEcnAtUncheckedRaw(
+            frames,
+            ecn,
+            sent_time_ns,
+        );
+    }
+
+    fn sendTrackedFramesEcnAtUncheckedRaw(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint, sent_time_ns: ?u64) Error!void {
         const prepared = try self.prepareFramesForSend(frames, sent_time_ns);
         defer self.send_frame_buffer.items.len = 0;
         const qlog_now_ns = sent_time_ns orelse self.monotonicNowNs();
@@ -1278,6 +1365,7 @@ pub const Connection = struct {
         packet_len: usize,
         is_ack_eliciting: bool,
         is_in_flight: bool,
+        contains_handshake_done: bool,
     };
 
     fn prepareFramesForSend(self: *Connection, frames: []const quic.Frame, sent_time_ns: ?u64) Error!PreparedFrames {
@@ -1311,6 +1399,7 @@ pub const Connection = struct {
             .packet_len = packet_len,
             .is_ack_eliciting = is_ack_eliciting,
             .is_in_flight = is_in_flight,
+            .contains_handshake_done = containsHandshakeDone(frames),
         };
     }
 
@@ -1331,12 +1420,52 @@ pub const Connection = struct {
             if (tracked_congestion) self.congestion.discard(payload.len);
         }
         var tracked_recovery = false;
+        // This rollback must live at function scope. Non-HANDSHAKE_DONE sends
+        // leave the allocation block before packet protection/socket errors can
+        // occur, so a block-local errdefer would leak recovery state.
+        errdefer if (tracked_recovery) {
+            _ = self.recovery.forgetPacketNumber(packet_number);
+        };
         if (prepared.is_ack_eliciting) {
-            try self.recovery.trackSent(packet_number, payload);
+            const recovery_group_id = try self.recovery.trackSent(
+                packet_number,
+                payload,
+            );
             tracked_recovery = true;
-        }
-        errdefer {
-            if (tracked_recovery) _ = self.recovery.forgetPacketNumber(packet_number);
+            if (self.handshake_status.needsHandshakeDone() and
+                prepared.contains_handshake_done)
+            {
+                // Commit the control-frame state only after every remaining
+                // fallible allocation has succeeded. A socket error will then
+                // roll the group back through the errdefer below.
+                try self.sent.sentInFlightAt(
+                    packet_number,
+                    prepared.is_ack_eliciting,
+                    prepared.is_in_flight,
+                    payload.len,
+                    ecn,
+                    sent_time_ns,
+                );
+                var tracked_sent = true;
+                errdefer if (tracked_sent) {
+                    _ = self.sent.forget(packet_number);
+                };
+                try self.sendPayloadPacketWithPacketNumberLenAt(
+                    packet_number,
+                    payload,
+                    prepared.packet_number_len,
+                    ecn,
+                    sent_time_ns,
+                    prepared.is_in_flight,
+                );
+                self.handshake_status.onHandshakeDoneTracked(
+                    recovery_group_id,
+                );
+                tracked_sent = false;
+                tracked_recovery = false;
+                self.next_packet_number += 1;
+                return;
+            }
         }
         try self.sent.sentInFlightAt(packet_number, prepared.is_ack_eliciting, prepared.is_in_flight, payload.len, ecn, sent_time_ns);
         errdefer _ = self.sent.forget(packet_number);
@@ -1348,6 +1477,7 @@ pub const Connection = struct {
             sent_time_ns,
             prepared.is_in_flight,
         );
+        tracked_recovery = false;
         self.next_packet_number += 1;
     }
 
@@ -1404,7 +1534,7 @@ pub const Connection = struct {
 
         try self.congestion.reserve(payload.items.len);
         errdefer self.congestion.discard(payload.items.len);
-        try self.recovery.trackSent(packet_number, payload.items);
+        _ = try self.recovery.trackSent(packet_number, payload.items);
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
         try self.sent.sentAtWithPmtu(packet_number, true, payload.items.len, .not_ect, sent_time_ns, probe_size);
         errdefer _ = self.sent.forget(packet_number);
@@ -1923,8 +2053,15 @@ pub const Connection = struct {
     }
 
     pub fn markPacketAcknowledged(self: *Connection, packet_number: u64) bool {
+        const handshake_done_group =
+            self.handshake_status.recoveryGroupId();
         const marked_sent = self.sent.markAcknowledged(packet_number);
         const removed_recovery = self.recovery.acknowledgePacketNumber(packet_number);
+        if (handshake_done_group) |group_id| {
+            self.handshake_status.onRecoveryUpdated(
+                self.recovery.containsGroupId(group_id),
+            );
+        }
         if (marked_sent) {
             if (self.pending_key_update_ack_threshold) |threshold| {
                 if (packet_number >= threshold) self.pending_key_update_ack_threshold = null;
@@ -2233,7 +2370,12 @@ pub const Connection = struct {
 
     pub fn updateRttFromAck(self: *Connection, ack: quic.AckFrame, now_ns: u64) Error!bool {
         const sample = try self.ackRttSample(ack, now_ns) orelse return false;
-        self.rtt_stats.updateAt(sample.latest_rtt_ns, sample.ack_delay_ns, self.handshake_confirmed, now_ns);
+        self.rtt_stats.updateAt(
+            sample.latest_rtt_ns,
+            sample.ack_delay_ns,
+            self.handshake_status.isConfirmed(),
+            now_ns,
+        );
         self.congestion.onRttSample(sample.largest_acknowledged, sample.latest_rtt_ns);
         return true;
     }
@@ -2397,8 +2539,17 @@ pub const Connection = struct {
 
     pub fn sendHandshakeDone(self: *Connection) Error!void {
         if (self.config.local_endpoint != .server) return error.InvalidFrame;
+        if (!self.handshake_status.isComplete()) {
+            self.markTlsHandshakeComplete();
+        }
+        try self.sendPendingHandshakeDone();
+    }
+
+    fn sendPendingHandshakeDone(self: *Connection) Error!void {
+        if (self.config.local_endpoint != .server) return error.InvalidFrame;
+        if (!self.handshake_status.needsHandshakeDone()) return;
         const frames = [_]quic.Frame{.{ .handshake_done = {} }};
-        try self.send(&frames);
+        try self.sendWithEcnLoop(&frames, .not_ect);
     }
 
     pub fn sendNewToken(self: *Connection, token: []const u8) Error!void {
@@ -2465,7 +2616,28 @@ pub const Connection = struct {
     }
 
     pub fn handshakeConfirmed(self: Connection) bool {
-        return self.handshake_confirmed;
+        return self.handshake_status.isConfirmed();
+    }
+
+    pub fn handshakeComplete(self: Connection) bool {
+        return self.handshake_status.isComplete();
+    }
+
+    pub fn handshakeDonePending(self: Connection) bool {
+        return self.handshake_status.needsHandshakeDone();
+    }
+
+    pub fn handshakeDoneAwaitingAck(self: Connection) bool {
+        return self.handshake_status.awaitingHandshakeDoneAck();
+    }
+
+    /// Transition a manually keyed connection to the same state installed by
+    /// the integrated TLS handshake. This never writes to the socket.
+    pub fn markTlsHandshakeComplete(self: *Connection) void {
+        self.handshake_status.onTlsComplete(switch (self.config.local_endpoint) {
+            .client => .client,
+            .server => .server,
+        });
     }
 
     pub fn localOneRttKeyPhase(self: Connection) bool {
@@ -2627,7 +2799,7 @@ pub const Connection = struct {
         const is_ack_eliciting = ackEliciting(frames);
         const is_in_flight = packetInFlight(frames);
         if (is_ack_eliciting) {
-            try self.recovery.trackSent(packet_number, payload.items);
+            _ = try self.recovery.trackSent(packet_number, payload.items);
         }
         errdefer {
             if (is_ack_eliciting) {
@@ -3023,6 +3195,8 @@ pub const Connection = struct {
         for (frames) |frame| {
             switch (frame) {
                 .ack => {
+                    const handshake_done_group =
+                        self.handshake_status.recoveryGroupId();
                     if (now_ns) |now| _ = try self.updateRttFromAck(frame.ack, now);
                     const acked = self.sent.applyAckDetailed(frame.ack) catch |err| switch (err) {
                         error.InvalidAckFrame => try self.applyAckWithEcnFailure(frame.ack),
@@ -3062,6 +3236,11 @@ pub const Connection = struct {
                     }
                     self.observeRecoveryMetrics(now_ns);
                     _ = try self.recovery.applyAck(frame.ack);
+                    if (handshake_done_group) |group_id| {
+                        self.handshake_status.onRecoveryUpdated(
+                            self.recovery.containsGroupId(group_id),
+                        );
+                    }
                     if (self.pending_key_update_ack_threshold) |threshold| {
                         if (self.hasAcknowledgedPacketAtOrAbove(threshold)) {
                             self.pending_key_update_ack_threshold = null;
@@ -3422,8 +3601,10 @@ pub const Connection = struct {
     }
 
     fn receiveHandshakeDone(self: *Connection) Error!void {
-        if (self.config.local_endpoint == .server) return error.InvalidFrame;
-        self.handshake_confirmed = true;
+        try self.handshake_status.onHandshakeDoneReceived(switch (self.config.local_endpoint) {
+            .client => .client,
+            .server => .server,
+        });
     }
 
     fn receiveDatagramFrame(self: *Connection, datagram: quic.DatagramFrame) Error!void {
@@ -4190,6 +4371,13 @@ fn ackEliciting(frames: []const quic.Frame) bool {
             .ack, .padding, .connection_close, .application_close => {},
             else => return true,
         }
+    }
+    return false;
+}
+
+fn containsHandshakeDone(frames: []const quic.Frame) bool {
+    for (frames) |frame| {
+        if (frame == .handshake_done) return true;
     }
     return false;
 }

@@ -27,6 +27,7 @@ pub const Candidate = struct {
 };
 
 const PendingDatagram = struct {
+    group_id: u64,
     /// Almost every payload is acknowledged without retransmission. Keep its
     /// original packet number inline so the common case does not allocate a
     /// one-element ArrayList; only actual retransmissions grow dynamic storage.
@@ -34,11 +35,17 @@ const PendingDatagram = struct {
     retransmission_packet_numbers: std.ArrayList(u64) = .empty,
     payload: []u8,
 
-    fn init(allocator: std.mem.Allocator, packet_number: u64, payload: []const u8) Error!PendingDatagram {
+    fn init(
+        allocator: std.mem.Allocator,
+        group_id: u64,
+        packet_number: u64,
+        payload: []const u8,
+    ) Error!PendingDatagram {
         if (payload.len == 0) return error.EmptyPayload;
 
         const payload_copy = try allocator.dupe(u8, payload);
         return .{
+            .group_id = group_id,
             .original_packet_number = packet_number,
             .payload = payload_copy,
         };
@@ -90,6 +97,7 @@ const PendingDatagram = struct {
 pub const Queue = struct {
     allocator: std.mem.Allocator,
     pending: std.ArrayList(PendingDatagram) = .empty,
+    next_group_id: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Queue {
         return .{ .allocator = allocator };
@@ -105,10 +113,46 @@ pub const Queue = struct {
         return self.pending.items.len;
     }
 
-    pub fn trackSent(self: *Queue, packet_number: u64, payload: []const u8) Error!void {
-        var entry = try PendingDatagram.init(self.allocator, packet_number, payload);
+    pub fn trackSent(
+        self: *Queue,
+        packet_number: u64,
+        payload: []const u8,
+    ) Error!u64 {
+        const group_id = self.next_group_id;
+        const next_group_id = std.math.add(
+            u64,
+            group_id,
+            1,
+        ) catch return error.InvalidRetransmission;
+        var entry = try PendingDatagram.init(
+            self.allocator,
+            group_id,
+            packet_number,
+            payload,
+        );
         errdefer entry.deinit(self.allocator);
         try self.pending.append(self.allocator, entry);
+        self.next_group_id = next_group_id;
+        return group_id;
+    }
+
+    pub fn groupIdForPacketNumber(
+        self: Queue,
+        packet_number: u64,
+    ) ?u64 {
+        for (self.pending.items) |entry| {
+            if (entry.containsRange(packet_number, packet_number)) {
+                return entry.group_id;
+            }
+        }
+        return null;
+    }
+
+    pub fn containsGroupId(self: Queue, group_id: u64) bool {
+        for (self.pending.items) |entry| {
+            if (entry.group_id == group_id) return true;
+        }
+        return false;
     }
 
     pub fn ptoCandidate(self: *const Queue) ?Candidate {
@@ -249,7 +293,7 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
     var queue = Queue.init(allocator);
     defer queue.deinit();
 
-    try queue.trackSent(0, "stream frame bytes");
+    _ = try queue.trackSent(0, "stream frame bytes");
     const candidate = queue.ptoCandidate().?;
     try std.testing.expectEqual(@as(u64, 0), candidate.packet_number);
     try std.testing.expectEqualStrings("stream frame bytes", candidate.payload);
@@ -278,7 +322,7 @@ test "QUIC recovery queue keeps initial packet number allocation-free" {
     // the overwhelmingly common original packet number stays inline.
     try queue.pending.ensureTotalCapacity(allocator, 1);
     const allocations_before = counting.allocations;
-    try queue.trackSent(42, "owned recovery payload");
+    _ = try queue.trackSent(42, "owned recovery payload");
     try std.testing.expectEqual(@as(usize, 1), counting.allocations - allocations_before);
     try std.testing.expectEqual(@as(?u64, 42), queue.pending.items[0].original_packet_number);
     try std.testing.expectEqual(@as(usize, 0), queue.pending.items[0].retransmission_packet_numbers.capacity);
@@ -289,13 +333,34 @@ test "QUIC recovery queue keeps initial packet number allocation-free" {
     try std.testing.expect(queue.pending.items[0].retransmission_packet_numbers.capacity > 0);
 }
 
+test "QUIC recovery queue keeps stable group identity across retransmissions" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    const group_id = try queue.trackSent(4, "control");
+    try std.testing.expectEqual(
+        group_id,
+        queue.groupIdForPacketNumber(4).?,
+    );
+    try std.testing.expect(queue.containsGroupId(group_id));
+
+    try queue.recordRetransmission(0, 8);
+    try std.testing.expectEqual(
+        group_id,
+        queue.groupIdForPacketNumber(8).?,
+    );
+    try std.testing.expect(queue.acknowledgePacketNumber(8));
+    try std.testing.expect(!queue.containsGroupId(group_id));
+}
+
 test "QUIC recovery queue selects PTO candidates by pending group" {
     const allocator = std.testing.allocator;
     var queue = Queue.init(allocator);
     defer queue.deinit();
 
-    try queue.trackSent(0, "zero");
-    try queue.trackSent(1, "one");
+    _ = try queue.trackSent(0, "zero");
+    _ = try queue.trackSent(1, "one");
 
     const first = queue.ptoCandidateAt(0).?;
     try std.testing.expectEqual(@as(usize, 0), first.group_index);
@@ -312,9 +377,9 @@ test "QUIC recovery queue applies ACK ranges" {
     var queue = Queue.init(allocator);
     defer queue.deinit();
 
-    try queue.trackSent(1, "one");
-    try queue.trackSent(5, "five");
-    try queue.trackSent(9, "nine");
+    _ = try queue.trackSent(1, "one");
+    _ = try queue.trackSent(5, "five");
+    _ = try queue.trackSent(9, "nine");
 
     const ranges = [_]quic.AckRange{
         .{ .gap = 2, .ack_range_length = 0 }, // acknowledges packet 5 after largest 9.
@@ -335,9 +400,9 @@ test "QUIC recovery queue schedules packet-threshold loss once per newest copy" 
     var queue = Queue.init(allocator);
     defer queue.deinit();
 
-    try queue.trackSent(0, "zero");
-    try queue.trackSent(2, "two");
-    try queue.trackSent(6, "six");
+    _ = try queue.trackSent(0, "zero");
+    _ = try queue.trackSent(2, "two");
+    _ = try queue.trackSent(6, "six");
 
     const candidate = queue.packetThresholdCandidate(4, quic.packet_space.default_packet_threshold).?;
     try std.testing.expectEqual(@as(usize, 0), candidate.group_index);
@@ -362,7 +427,7 @@ test "QUIC recovery queue locates candidate by any packet number copy" {
     var queue = Queue.init(allocator);
     defer queue.deinit();
 
-    try queue.trackSent(1, "payload");
+    _ = try queue.trackSent(1, "payload");
     try queue.recordRetransmission(0, 5);
 
     const original = queue.packetNumberCandidate(1).?;

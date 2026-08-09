@@ -202,8 +202,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   0-RTT, CertificateVerify/Finished, NSS key logging, and suite-specific RFC
   9001 usage limits,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
-  client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
-  role validation for both frames,
+  client-side NEW_TOKEN storage plus non-blocking TLS-completion state,
+  application-order-preserving HANDSHAKE_DONE scheduling, ACK confirmation and
+  PTO retransmission with server-only role validation for both frames,
   transport-parameter-derived idle timeout deadline tracking and explicit
   peer-address validation hooks with RFC 9000 3x anti-amplification send
   budget enforcement for unvalidated server paths,
