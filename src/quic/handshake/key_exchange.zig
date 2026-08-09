@@ -8,11 +8,13 @@ const std = @import("std");
 const tls = @import("../tls_client_hello.zig");
 
 pub const Error = tls.Error || std.Io.RandomSecureError;
+const Hybrid = tls_key_exchange.x25519_mlkem768;
 
 const PrivateKey = union(tls.NamedGroup) {
     secp256r1: [tls_key_exchange.p256.secret_len]u8,
     secp384r1: [tls_key_exchange.p384.secret_len]u8,
     x25519: [32]u8,
+    x25519_mlkem768: void,
 
     fn sharedSecret(
         self: PrivateKey,
@@ -40,6 +42,7 @@ const PrivateKey = union(tls.NamedGroup) {
                 );
                 break :p384 SharedSecret.init(&shared);
             },
+            .x25519_mlkem768 => unreachable,
         };
     }
 };
@@ -50,12 +53,12 @@ const tls_key_exchange = @import("../tls/mod.zig").key_exchange;
 /// The explicit length prevents a P-384 secret from being truncated to the
 /// historical 32-byte X25519/P-256 size before HKDF-Extract.
 pub const SharedSecret = struct {
-    storage: [tls_key_exchange.p384.shared_len]u8 = undefined,
+    storage: [Hybrid.shared_len]u8 = undefined,
     len: usize,
 
     fn init(secret_bytes: []const u8) SharedSecret {
         std.debug.assert(
-            secret_bytes.len <= tls_key_exchange.p384.shared_len,
+            secret_bytes.len <= Hybrid.shared_len,
         );
         var result = SharedSecret{ .len = secret_bytes.len };
         @memcpy(result.storage[0..secret_bytes.len], secret_bytes);
@@ -65,24 +68,39 @@ pub const SharedSecret = struct {
     pub fn bytes(self: *const SharedSecret) []const u8 {
         return self.storage[0..self.len];
     }
+
+    pub fn wipe(self: *SharedSecret) void {
+        std.crypto.secureZero(u8, &self.storage);
+        self.len = 0;
+    }
 };
 
 pub const LocalKeyShares = struct {
     x25519_secret: ?[32]u8 = null,
     p256_secret: ?[tls_key_exchange.p256.secret_len]u8 = null,
     p384_secret: ?[tls_key_exchange.p384.secret_len]u8 = null,
-    shares: [3]tls.KeyShare = undefined,
+    hybrid_secret: ?Hybrid.ClientSecret = null,
+    shares: [4]tls.KeyShare = undefined,
     len: usize = 0,
 
     pub fn slice(self: *const LocalKeyShares) []const tls.KeyShare {
         return self.shares[0..self.len];
     }
 
-    pub fn sharedSecret(
-        self: LocalKeyShares,
+    pub fn clientSharedSecret(
+        self: *const LocalKeyShares,
         group: tls.NamedGroup,
         peer_public: []const u8,
     ) Error!SharedSecret {
+        if (group == .x25519_mlkem768) {
+            const secret = self.hybrid_secret orelse
+                return error.MissingKeyShare;
+            const shared = try tls.x25519MlKem768ClientSharedSecret(
+                &secret,
+                peer_public,
+            );
+            return SharedSecret.init(&shared);
+        }
         const private: PrivateKey = switch (group) {
             .x25519 => .{
                 .x25519 = self.x25519_secret orelse
@@ -96,8 +114,14 @@ pub const LocalKeyShares = struct {
                 .secp384r1 = self.p384_secret orelse
                     return error.MissingKeyShare,
             },
+            .x25519_mlkem768 => unreachable,
         };
         return private.sharedSecret(peer_public);
+    }
+
+    pub fn deinit(self: *LocalKeyShares) void {
+        if (self.hybrid_secret) |*secret| secret.wipe();
+        self.* = undefined;
     }
 };
 
@@ -107,9 +131,12 @@ pub fn make(
     x25519_provided: ?[32]u8,
     p256_provided: ?[tls_key_exchange.p256.secret_len]u8,
     p384_provided: ?[tls_key_exchange.p384.secret_len]u8,
+    hybrid_x25519_provided: ?[Hybrid.x25519_secret_len]u8,
+    hybrid_mlkem_seed_provided: ?[Hybrid.mlkem_seed_len]u8,
 ) Error!LocalKeyShares {
-    if (groups.len == 0 or groups.len > 3) return error.MissingKeyShare;
+    if (groups.len == 0 or groups.len > 4) return error.MissingKeyShare;
     var result = LocalKeyShares{};
+    errdefer result.deinit();
     for (groups, 0..) |group, index| {
         for (groups[0..index]) |previous| {
             if (group == previous) return error.InvalidClientHello;
@@ -136,10 +163,97 @@ pub fn make(
                     .secp384r1 = try tls.p384PublicKey(private),
                 };
             },
+            .x25519_mlkem768 => {
+                const x25519_secret = try x25519SecretKey(
+                    io,
+                    hybrid_x25519_provided,
+                );
+                const mlkem_seed = hybrid_mlkem_seed_provided orelse
+                    try randomArray(Hybrid.mlkem_seed_len, io);
+                var started = try tls.x25519MlKem768ClientStart(
+                    x25519_secret,
+                    mlkem_seed,
+                );
+                result.hybrid_secret = started.secret;
+                started.secret.wipe();
+                result.shares[result.len] = .{
+                    .x25519_mlkem768_client = started.share,
+                };
+            },
         }
         result.len += 1;
     }
     return result;
+}
+
+pub fn serverRespond(
+    io: std.Io,
+    group: tls.NamedGroup,
+    client_share: []const u8,
+    x25519_provided: ?[32]u8,
+    p256_provided: ?[tls_key_exchange.p256.secret_len]u8,
+    p384_provided: ?[tls_key_exchange.p384.secret_len]u8,
+    hybrid_x25519_provided: ?[Hybrid.x25519_secret_len]u8,
+    hybrid_encaps_seed_provided: ?[Hybrid.encaps_seed_len]u8,
+) Error!ServerResult {
+    return switch (group) {
+        .x25519 => classicalServerResult(
+            .{ .x25519 = try x25519SecretKey(io, x25519_provided) },
+            client_share,
+        ),
+        .secp256r1 => classicalServerResult(
+            .{ .secp256r1 = try p256SecretKey(io, p256_provided) },
+            client_share,
+        ),
+        .secp384r1 => classicalServerResult(
+            .{ .secp384r1 = try p384SecretKey(io, p384_provided) },
+            client_share,
+        ),
+        .x25519_mlkem768 => hybrid: {
+            var response = try tls.x25519MlKem768ServerRespond(
+                client_share,
+                try x25519SecretKey(io, hybrid_x25519_provided),
+                hybrid_encaps_seed_provided orelse
+                    try randomArray(Hybrid.encaps_seed_len, io),
+            );
+            defer response.wipeSharedSecret();
+            break :hybrid .{
+                .share = .{
+                    .x25519_mlkem768_server = response.share,
+                },
+                .shared_secret = SharedSecret.init(
+                    &response.shared_secret,
+                ),
+            };
+        },
+    };
+}
+
+pub const ServerResult = struct {
+    share: tls.KeyShare,
+    shared_secret: SharedSecret,
+};
+
+fn classicalServerResult(
+    private: PrivateKey,
+    client_share: []const u8,
+) Error!ServerResult {
+    const share: tls.KeyShare = switch (private) {
+        .x25519 => |secret| .{
+            .x25519 = try tls.x25519PublicKey(secret),
+        },
+        .secp256r1 => |secret| .{
+            .secp256r1 = try tls.p256PublicKey(secret),
+        },
+        .secp384r1 => |secret| .{
+            .secp384r1 = try tls.p384PublicKey(secret),
+        },
+        .x25519_mlkem768 => unreachable,
+    };
+    return .{
+        .share = share,
+        .shared_secret = try private.sharedSecret(client_share),
+    };
 }
 
 fn randomArray(

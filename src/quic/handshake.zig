@@ -42,6 +42,14 @@ pub const ClientOptions = struct {
     x25519_secret_key: ?[32]u8 = null,
     p256_secret_key: ?[32]u8 = null,
     p384_secret_key: ?[quic.tls.key_exchange.p384.secret_len]u8 = null,
+    x25519_mlkem768_secret_key: ?[
+        quic.tls.key_exchange
+            .x25519_mlkem768.x25519_secret_len
+    ]u8 = null,
+    x25519_mlkem768_seed: ?[
+        quic.tls.key_exchange
+            .x25519_mlkem768.mlkem_seed_len
+    ]u8 = null,
     key_exchange_groups: []const quic.tls_client_hello.NamedGroup =
         &.{ .x25519, .secp256r1, .secp384r1 },
     keylog: ?*quic.keylog.Log = null,
@@ -109,6 +117,14 @@ pub const ServerOptions = struct {
     x25519_secret_key: ?[32]u8 = null,
     p256_secret_key: ?[32]u8 = null,
     p384_secret_key: ?[quic.tls.key_exchange.p384.secret_len]u8 = null,
+    x25519_mlkem768_secret_key: ?[
+        quic.tls.key_exchange
+            .x25519_mlkem768.x25519_secret_len
+    ]u8 = null,
+    x25519_mlkem768_encaps_seed: ?[
+        quic.tls.key_exchange
+            .x25519_mlkem768.encaps_seed_len
+    ]u8 = null,
     key_exchange_groups: []const quic.tls_client_hello.NamedGroup =
         &.{ .x25519, .secp256r1, .secp384r1 },
     keylog: ?*quic.keylog.Log = null,
@@ -323,17 +339,19 @@ fn connectAttempt(
         return error.InvalidPacket;
     }
 
-    const client_key_shares = try key_exchange.make(
+    var client_key_shares = try key_exchange.make(
         endpoint.io,
         options.key_exchange_groups,
         options.x25519_secret_key,
         options.p256_secret_key,
         options.p384_secret_key,
+        options.x25519_mlkem768_secret_key,
+        options.x25519_mlkem768_seed,
     );
+    defer client_key_shares.deinit();
     const legacy_x25519_public = switch (client_key_shares.shares[0]) {
         .x25519 => |key| key,
-        .secp256r1 => [_]u8{0} ** 32,
-        .secp384r1 => [_]u8{0} ** 32,
+        else => [_]u8{0} ** 32,
     };
     const client_random = try random32(endpoint.io, options.random);
     const initial_destination_connection_id = clientInitialDestinationConnectionId(options);
@@ -532,10 +550,11 @@ fn connectAttempt(
         }
     }
     if (!offered_selected_group) return error.InvalidServerHello;
-    const shared = try client_key_shares.sharedSecret(
+    var shared = try client_key_shares.clientSharedSecret(
         parsed_server.selected_group,
         parsed_server.keyShare(),
     );
+    defer shared.wipe();
     const hs_hash = hashPartsForSuite(
         parsed_server.cipher_suite,
         &.{ client_hello.items, server_initial.crypto_data },
@@ -898,23 +917,24 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         parsed_client,
         options.key_exchange_groups,
     );
-    const server_key_shares = try key_exchange.make(
+    const server_key_exchange = try key_exchange.serverRespond(
         endpoint.io,
-        &.{selected_group},
+        selected_group,
+        parsed_client.keyShare(selected_group).?,
         options.x25519_secret_key,
         options.p256_secret_key,
         options.p384_secret_key,
+        options.x25519_mlkem768_secret_key,
+        options.x25519_mlkem768_encaps_seed,
     );
-    const selected_server_share = server_key_shares.shares[0];
+    const selected_server_share = server_key_exchange.share;
     const legacy_server_public = if (selected_group == .x25519)
         selected_server_share.x25519
     else
         [_]u8{0} ** 32;
     const server_random = try random32(endpoint.io, options.random);
-    const shared = try server_key_shares.sharedSecret(
-        selected_group,
-        parsed_client.keyShare(selected_group).?,
-    );
+    var shared = server_key_exchange.shared_secret;
+    defer shared.wipe();
     var selected_psk: ?quic.tls.secret.Secret = null;
     var early_data_accepted = false;
     var early_data_keys: ?quic.zero_rtt.handshake.ClientKeys = null;

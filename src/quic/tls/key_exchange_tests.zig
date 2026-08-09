@@ -127,3 +127,135 @@ test "QUIC TLS secp384r1 key shares round-trip without truncation" {
         ),
     );
 }
+
+test "QUIC TLS X25519MLKEM768 codecs enforce asymmetric share lengths" {
+    const allocator = std.testing.allocator;
+    const Hybrid = quic.tls.key_exchange.x25519_mlkem768;
+    var client = try target.x25519MlKem768ClientStart(
+        [_]u8{0x61} ** Hybrid.x25519_secret_len,
+        [_]u8{0x62} ** Hybrid.mlkem_seed_len,
+    );
+    defer client.secret.wipe();
+    var response = try target.x25519MlKem768ServerRespond(
+        &client.share,
+        [_]u8{0x63} ** Hybrid.x25519_secret_len,
+        [_]u8{0x64} ** Hybrid.encaps_seed_len,
+    );
+    defer response.wipeSharedSecret();
+    const client_shared = try target.x25519MlKem768ClientSharedSecret(
+        &client.secret,
+        &response.share,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &response.shared_secret,
+        &client_shared,
+    );
+
+    const shares = [_]target.KeyShare{
+        .{ .x25519_mlkem768_client = client.share },
+    };
+    var client_hello: std.ArrayList(u8) = .empty;
+    defer client_hello.deinit(allocator);
+    try target.writeClientHello(&client_hello, allocator, .{
+        .random = [_]u8{0x65} ** 32,
+        .x25519_public_key = [_]u8{0} ** 32,
+        .key_shares = &shares,
+        .transport_parameters = &.{},
+    });
+    var parsed_client = try target.parseClientHello(
+        allocator,
+        client_hello.items,
+    );
+    defer parsed_client.deinit(allocator);
+    try std.testing.expect(parsed_client.supports_x25519_mlkem768);
+    try std.testing.expectEqualSlices(
+        u8,
+        &client.share,
+        parsed_client.keyShare(.x25519_mlkem768).?,
+    );
+
+    var server_hello: std.ArrayList(u8) = .empty;
+    defer server_hello.deinit(allocator);
+    try target.writeServerHello(&server_hello, allocator, .{
+        .random = [_]u8{0x66} ** 32,
+        .x25519_public_key = [_]u8{0} ** 32,
+        .key_share = .{ .x25519_mlkem768_server = response.share },
+    });
+    const parsed_server = try target.parseServerHello(server_hello.items);
+    try std.testing.expectEqual(
+        target.NamedGroup.x25519_mlkem768,
+        parsed_server.selected_group,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &response.share,
+        parsed_server.keyShare(),
+    );
+
+    // The two role-specific shares have different lengths. Writers reject a
+    // share in the wrong Hello instead of producing a locally consistent but
+    // non-interoperable handshake.
+    const wrong_client_share = [_]target.KeyShare{
+        .{ .x25519_mlkem768_server = response.share },
+    };
+    var wrong_client: std.ArrayList(u8) = .empty;
+    defer wrong_client.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        target.writeClientHello(&wrong_client, allocator, .{
+            .random = [_]u8{0x67} ** 32,
+            .x25519_public_key = [_]u8{0} ** 32,
+            .key_shares = &wrong_client_share,
+            .transport_parameters = &.{},
+        }),
+    );
+    var wrong_server: std.ArrayList(u8) = .empty;
+    defer wrong_server.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidServerHello,
+        target.writeServerHello(&wrong_server, allocator, .{
+            .random = [_]u8{0x68} ** 32,
+            .x25519_public_key = [_]u8{0} ** 32,
+            .key_share = .{ .x25519_mlkem768_client = client.share },
+        }),
+    );
+
+    var malformed_client = try client_hello.clone(allocator);
+    defer malformed_client.deinit(allocator);
+    const client_share_offset = std.mem.indexOf(
+        u8,
+        malformed_client.items,
+        &client.share,
+    ) orelse return error.TestUnexpectedResult;
+    const client_share_length_offset = client_share_offset - 2;
+    std.mem.writeInt(
+        u16,
+        malformed_client.items[client_share_length_offset..][0..2],
+        Hybrid.client_share_len - 1,
+        .big,
+    );
+    try std.testing.expectError(
+        error.InvalidClientHello,
+        target.parseClientHello(allocator, malformed_client.items),
+    );
+
+    var malformed_server = try server_hello.clone(allocator);
+    defer malformed_server.deinit(allocator);
+    const server_share_offset = std.mem.indexOf(
+        u8,
+        malformed_server.items,
+        &response.share,
+    ) orelse return error.TestUnexpectedResult;
+    const server_share_length_offset = server_share_offset - 2;
+    std.mem.writeInt(
+        u16,
+        malformed_server.items[server_share_length_offset..][0..2],
+        Hybrid.server_share_len - 1,
+        .big,
+    );
+    try std.testing.expectError(
+        error.InvalidServerHello,
+        target.parseServerHello(malformed_server.items),
+    );
+}

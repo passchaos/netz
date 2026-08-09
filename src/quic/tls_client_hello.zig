@@ -1,5 +1,6 @@
 const std = @import("std");
 const quic = @import("mod.zig");
+const key_exchange = @import("tls/key_exchange.zig");
 const wire = @import("../internal/wire.zig");
 
 pub const Error = error{
@@ -35,23 +36,46 @@ pub const NamedGroup = enum(u16) {
     secp256r1 = 0x0017,
     secp384r1 = 0x0018,
     x25519 = 0x001d,
+    x25519_mlkem768 =
+        quic.tls.key_exchange.x25519_mlkem768.named_group,
 };
 
-pub const KeyShare = union(NamedGroup) {
+pub const KeyShare = union(enum) {
     secp256r1: [quic.tls.key_exchange.p256.public_len]u8,
     secp384r1: [quic.tls.key_exchange.p384.public_len]u8,
     x25519: [quic.tls.key_exchange.public_len]u8,
+    x25519_mlkem768_client: [
+        quic.tls.key_exchange
+            .x25519_mlkem768.client_share_len
+    ]u8,
+    x25519_mlkem768_server: [
+        quic.tls.key_exchange
+            .x25519_mlkem768.server_share_len
+    ]u8,
 
     pub fn group(self: KeyShare) NamedGroup {
-        return std.meta.activeTag(self);
+        return switch (self) {
+            .secp256r1 => .secp256r1,
+            .secp384r1 => .secp384r1,
+            .x25519 => .x25519,
+            .x25519_mlkem768_client,
+            .x25519_mlkem768_server,
+            => .x25519_mlkem768,
+        };
     }
 
     pub fn bytes(self: *const KeyShare) []const u8 {
         return switch (self.*) {
-            .secp256r1 => |*key| key,
-            .secp384r1 => |*key| key,
-            .x25519 => |*key| key,
+            inline else => |*key| key,
         };
+    }
+
+    fn validForClientHello(self: KeyShare) bool {
+        return self != .x25519_mlkem768_server;
+    }
+
+    fn validForServerHello(self: KeyShare) bool {
+        return self != .x25519_mlkem768_client;
     }
 };
 
@@ -82,6 +106,7 @@ pub const ParsedClientHello = struct {
     x25519_public_key: []const u8,
     secp256r1_public_key: ?[]const u8 = null,
     secp384r1_public_key: ?[]const u8 = null,
+    x25519_mlkem768_public_key: ?[]const u8 = null,
     transport_parameters: []const u8,
     cipher_suites: []const u8,
     supports_ed25519: bool = false,
@@ -91,6 +116,7 @@ pub const ParsedClientHello = struct {
     supports_x25519: bool = false,
     supports_secp256r1: bool = false,
     supports_secp384r1: bool = false,
+    supports_x25519_mlkem768: bool = false,
     psk_offer: ?quic.resumption.tls_psk.Offer = null,
 
     pub fn keyShare(
@@ -104,6 +130,7 @@ pub const ParsedClientHello = struct {
                 self.x25519_public_key,
             .secp256r1 => self.secp256r1_public_key,
             .secp384r1 => self.secp384r1_public_key,
+            .x25519_mlkem768 => self.x25519_mlkem768_public_key,
         };
     }
 
@@ -340,12 +367,14 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var x25519: ?[]const u8 = null;
     var secp256r1: ?[]const u8 = null;
     var secp384r1: ?[]const u8 = null;
+    var x25519_mlkem768: ?[]const u8 = null;
     var transport_parameters: ?[]const u8 = null;
     var saw_supported_versions = false;
     var saw_supported_groups = false;
     var supports_x25519 = false;
     var supports_secp256r1 = false;
     var supports_secp384r1 = false;
+    var supports_x25519_mlkem768 = false;
     var supports_ed25519 = false;
     var supports_ecdsa_p256_sha256 = false;
     var supports_ecdsa_p384_sha384 = false;
@@ -367,6 +396,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                 supports_x25519 = groups.x25519;
                 supports_secp256r1 = groups.secp256r1;
                 supports_secp384r1 = groups.secp384r1;
+                supports_x25519_mlkem768 = groups.x25519_mlkem768;
                 saw_supported_groups = true;
             },
             ext_alpn => try parseAlpn(allocator, &alpn_list, payload),
@@ -401,6 +431,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                 x25519 = shares.x25519;
                 secp256r1 = shares.secp256r1;
                 secp384r1 = shares.secp384r1;
+                x25519_mlkem768 = shares.x25519_mlkem768;
             },
             ext_quic_transport_parameters => transport_parameters = payload,
             else => {},
@@ -409,12 +440,17 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
 
     if (!saw_supported_versions) return error.MissingSupportedVersions;
     if (!saw_supported_groups) return error.MissingKeyShare;
-    if (x25519 == null and secp256r1 == null and secp384r1 == null) {
+    if (x25519 == null and
+        secp256r1 == null and
+        secp384r1 == null and
+        x25519_mlkem768 == null)
+    {
         return error.MissingKeyShare;
     }
     if ((x25519 != null and !supports_x25519) or
         (secp256r1 != null and !supports_secp256r1) or
-        (secp384r1 != null and !supports_secp384r1))
+        (secp384r1 != null and !supports_secp384r1) or
+        (x25519_mlkem768 != null and !supports_x25519_mlkem768))
     {
         return error.InvalidClientHello;
     }
@@ -432,6 +468,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .x25519_public_key = x25519 orelse &.{},
         .secp256r1_public_key = secp256r1,
         .secp384r1_public_key = secp384r1,
+        .x25519_mlkem768_public_key = x25519_mlkem768,
         .transport_parameters = transport_parameters.?,
         .cipher_suites = cipher_suites,
         .supports_ed25519 = supports_ed25519,
@@ -441,6 +478,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .supports_x25519 = supports_x25519,
         .supports_secp256r1 = supports_secp256r1,
         .supports_secp384r1 = supports_secp384r1,
+        .supports_x25519_mlkem768 = supports_x25519_mlkem768,
         .psk_offer = psk_offer,
     };
 }
@@ -619,59 +657,95 @@ pub fn parseFinishedForHash(
 }
 
 pub fn x25519PublicKey(secret_key: [32]u8) Error![32]u8 {
-    return quic.tls.key_exchange.publicKey(secret_key) catch
-        return error.KeyExchangeFailed;
+    return key_exchange.x25519PublicKey(secret_key);
 }
 
 pub fn x25519SharedSecret(secret_key: [32]u8, peer_public_key: []const u8) Error![32]u8 {
-    return quic.tls.key_exchange.sharedSecret(
+    return key_exchange.x25519SharedSecret(
         secret_key,
         peer_public_key,
-    ) catch |err| switch (err) {
-        error.InvalidSecretKey => error.KeyExchangeFailed,
-        error.InvalidPublicKey => error.MissingKeyShare,
-        error.KeyExchangeFailed => error.KeyExchangeFailed,
-    };
+    );
 }
 
 pub fn p256PublicKey(secret_key: [32]u8) Error![65]u8 {
-    return quic.tls.key_exchange.p256.publicKey(secret_key) catch
-        return error.KeyExchangeFailed;
+    return key_exchange.p256PublicKey(secret_key);
 }
 
 pub fn p256SharedSecret(
     secret_key: [32]u8,
     peer_public_key: []const u8,
 ) Error![32]u8 {
-    return quic.tls.key_exchange.p256.sharedSecret(
+    return key_exchange.p256SharedSecret(
         secret_key,
         peer_public_key,
-    ) catch |err| switch (err) {
-        error.InvalidSecretKey => error.KeyExchangeFailed,
-        error.InvalidPublicKey => error.MissingKeyShare,
-        error.KeyExchangeFailed => error.KeyExchangeFailed,
-    };
+    );
 }
 
 pub fn p384PublicKey(
     secret_key: [quic.tls.key_exchange.p384.secret_len]u8,
 ) Error![quic.tls.key_exchange.p384.public_len]u8 {
-    return quic.tls.key_exchange.p384.publicKey(secret_key) catch
-        return error.KeyExchangeFailed;
+    return key_exchange.p384PublicKey(secret_key);
 }
 
 pub fn p384SharedSecret(
     secret_key: [quic.tls.key_exchange.p384.secret_len]u8,
     peer_public_key: []const u8,
 ) Error![quic.tls.key_exchange.p384.shared_len]u8 {
-    return quic.tls.key_exchange.p384.sharedSecret(
+    return key_exchange.p384SharedSecret(
         secret_key,
         peer_public_key,
-    ) catch |err| switch (err) {
-        error.InvalidSecretKey => error.KeyExchangeFailed,
-        error.InvalidPublicKey => error.MissingKeyShare,
-        error.KeyExchangeFailed => error.KeyExchangeFailed,
-    };
+    );
+}
+
+pub const X25519MlKem768ClientStart =
+    key_exchange.X25519MlKem768ClientStart;
+pub const X25519MlKem768ClientSecret =
+    key_exchange.X25519MlKem768ClientSecret;
+pub const X25519MlKem768ServerResponse =
+    key_exchange.X25519MlKem768ServerResponse;
+
+pub fn x25519MlKem768ClientStart(
+    x25519_secret: [
+        quic.tls.key_exchange.x25519_mlkem768
+            .x25519_secret_len
+    ]u8,
+    mlkem_seed: [
+        quic.tls.key_exchange.x25519_mlkem768
+            .mlkem_seed_len
+    ]u8,
+) Error!X25519MlKem768ClientStart {
+    return key_exchange.x25519MlKem768ClientStart(
+        x25519_secret,
+        mlkem_seed,
+    );
+}
+
+pub fn x25519MlKem768ServerRespond(
+    client_share: []const u8,
+    x25519_secret: [
+        quic.tls.key_exchange.x25519_mlkem768
+            .x25519_secret_len
+    ]u8,
+    encaps_seed: [
+        quic.tls.key_exchange.x25519_mlkem768
+            .encaps_seed_len
+    ]u8,
+) Error!X25519MlKem768ServerResponse {
+    return key_exchange.x25519MlKem768ServerRespond(
+        client_share,
+        x25519_secret,
+        encaps_seed,
+    );
+}
+
+pub fn x25519MlKem768ClientSharedSecret(
+    secret: *const X25519MlKem768ClientSecret,
+    server_share: []const u8,
+) Error![quic.tls.key_exchange.x25519_mlkem768.shared_len]u8 {
+    return key_exchange.x25519MlKem768ClientSharedSecret(
+        secret,
+        server_share,
+    );
 }
 
 pub fn transcriptHash(client_hello: []const u8, server_hello: []const u8) [32]u8 {
@@ -1062,6 +1136,9 @@ fn writeKeyShareExtension(
     var shares: std.ArrayList(u8) = .empty;
     defer shares.deinit(allocator);
     for (key_shares) |*share| {
+        if (!share.validForClientHello()) {
+            return error.InvalidClientHello;
+        }
         try appendInt(
             &shares,
             allocator,
@@ -1091,6 +1168,7 @@ fn writeServerKeyShareExtension(
     allocator: std.mem.Allocator,
     share: KeyShare,
 ) Error!void {
+    if (!share.validForServerHello()) return error.InvalidServerHello;
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
     try appendInt(
@@ -1144,6 +1222,7 @@ const ParsedSupportedGroups = struct {
     x25519: bool = false,
     secp256r1: bool = false,
     secp384r1: bool = false,
+    x25519_mlkem768: bool = false,
 };
 
 fn parseSupportedGroups(
@@ -1180,6 +1259,7 @@ fn parseSupportedGroups(
             .x25519 => result.x25519 = true,
             .secp256r1 => result.secp256r1 = true,
             .secp384r1 => result.secp384r1 = true,
+            .x25519_mlkem768 => result.x25519_mlkem768 = true,
         }
     }
     return result;
@@ -1215,6 +1295,7 @@ const ParsedClientKeyShares = struct {
     x25519: ?[]const u8 = null,
     secp256r1: ?[]const u8 = null,
     secp384r1: ?[]const u8 = null,
+    x25519_mlkem768: ?[]const u8 = null,
 };
 
 const ParsedKeyShare = struct {
@@ -1266,11 +1347,21 @@ fn parseClientKeyShares(
                 }
                 result.secp384r1 = key;
             },
+            .x25519_mlkem768 => {
+                if (result.x25519_mlkem768 != null or
+                    key.len != quic.tls.key_exchange
+                        .x25519_mlkem768.client_share_len)
+                {
+                    return error.InvalidClientHello;
+                }
+                result.x25519_mlkem768 = key;
+            },
         }
     }
     if (result.x25519 == null and
         result.secp256r1 == null and
-        result.secp384r1 == null)
+        result.secp384r1 == null and
+        result.x25519_mlkem768 == null)
     {
         return error.MissingKeyShare;
     }
@@ -1293,6 +1384,8 @@ fn parseServerKeyShare(payload: []const u8) Error!ParsedKeyShare {
             quic.tls.key_exchange.p256.public_len and key[0] == 0x04,
         .secp384r1 => key.len ==
             quic.tls.key_exchange.p384.public_len and key[0] == 0x04,
+        .x25519_mlkem768 => key.len == quic.tls.key_exchange
+            .x25519_mlkem768.server_share_len,
     };
     if (!valid) return error.MissingKeyShare;
     return .{ .group = group, .key = key };
