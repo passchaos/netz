@@ -71,6 +71,12 @@ pub const ClientVerifier = struct {
     context: ?*anyopaque = null,
     pinned_ed25519_public_key: ?[Ed25519.PublicKey.encoded_length]u8 = null,
 
+    pub fn fromBundle(
+        verifier: *const @import("trust.zig").BundleVerifier,
+    ) ClientVerifier {
+        return verifier.clientVerifier();
+    }
+
     pub fn verifyTrust(
         self: ClientVerifier,
         server_name: ?[]const u8,

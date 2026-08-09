@@ -170,6 +170,45 @@ test "QUIC integrated handshake rejects a mismatched pinned identity" {
     try std.testing.expect(result.server_err != null);
 }
 
+test "TLS X509 bundle verifies chain hostname and validity" {
+    const server_der = @embedFile("testdata/server.der");
+    const ca_der = @embedFile("testdata/ca.der");
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(std.testing.allocator);
+    try bundle.bytes.appendSlice(std.testing.allocator, ca_der);
+    try bundle.parseCert(
+        std.testing.allocator,
+        0,
+        1_900_000_000,
+    );
+    const verifier = tls.trust.BundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = 1_900_000_000,
+    };
+    try verifier.verify(.{
+        .server_name = "localhost",
+        .chain = &.{server_der},
+    });
+    try std.testing.expectError(
+        error.CertificateHostMismatch,
+        verifier.verify(.{
+            .server_name = "other.example",
+            .chain = &.{server_der},
+        }),
+    );
+    const expired = tls.trust.BundleVerifier{
+        .bundle = &bundle,
+        .now_seconds = 2_200_000_000,
+    };
+    try std.testing.expectError(
+        error.CertificateExpired,
+        expired.verify(.{
+            .server_name = "localhost",
+            .chain = &.{server_der},
+        }),
+    );
+}
+
 const IntegratedMode = enum {
     valid,
     wrong_pin,

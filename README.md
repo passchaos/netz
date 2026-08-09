@@ -160,6 +160,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   optional non-PSK TLS 1.3 server authentication with Certificate and
   Ed25519 CertificateVerify, pinned raw-key verification or an application
   X.509 trust-policy callback, and transcript/signature tamper rejection,
+  together with a built-in zero-allocation X.509 chain/hostname/time verifier
+  over caller or platform CA bundles and a system-CA loader for production
+  clients,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,
