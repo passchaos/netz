@@ -441,6 +441,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "sendZeroRttFrames"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "receiveZeroRtt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "openZeroRttBytes"));
+    try std.testing.expect(@hasDecl(netz.quic, "zero_rtt"));
+    try std.testing.expect(@hasDecl(netz.quic.zero_rtt, "sendFrames"));
+    try std.testing.expect(@hasDecl(netz.quic.zero_rtt, "EarlyDataSender"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "receiveWithKeyUpdate"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "openReceivedBytesWithKeyUpdate"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "Connection"));
