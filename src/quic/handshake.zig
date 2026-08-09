@@ -483,16 +483,24 @@ fn connectAttempt(
         );
         early_data.cache.consumeEarlyData(early_data.lease) catch unreachable;
     } else {
-        try quic.initial_exchange.sendInitialCrypto(endpoint, peer, initial_secrets.client, .{
-            .version = options.version.wireValue(),
-            .destination_connection_id = initial_destination_connection_id,
-            .source_connection_id = options.local_connection_id,
-            .token = options.address_validation_token,
-            .packet_number = options.client_initial_packet_number,
-            .crypto_data = client_hello.items,
-            .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
-            .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
-        });
+        _ = try quic.initial_exchange.sendInitialCryptoFlight(
+            endpoint,
+            peer,
+            initial_secrets.client,
+            .{
+                .initial = .{
+                    .version = options.version.wireValue(),
+                    .destination_connection_id = initial_destination_connection_id,
+                    .source_connection_id = options.local_connection_id,
+                    .token = options.address_validation_token,
+                    .packet_number = options.client_initial_packet_number,
+                    .crypto_data = client_hello.items,
+                    .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+                    .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+                },
+                .max_datagram_size = endpoint.limits.max_datagram_size,
+            },
+        );
     }
 
     var server_datagram = try endpoint.receiveBytes();
@@ -520,16 +528,26 @@ fn connectAttempt(
     const server_initial_info = try quic.protection.peekProtectedLongPacketInfo(server_datagram.bytes);
     if (server_initial_info.packet_type != .initial) return error.InvalidHandshakeFlight;
 
-    var server_initial = try quic.initial_exchange.openInitialCrypto(
-        endpoint,
-        server_datagram.from,
-        server_datagram.bytes[0..server_initial_info.len],
-        initial_secrets.server,
-        0,
-        options.max_crypto_buffer,
+    var server_initial_flight =
+        try quic.initial_exchange.openInitialCryptoFlight(
+            endpoint,
+            server_datagram.from,
+            server_datagram.bytes[0..server_initial_info.len],
+            initial_secrets.server,
+            .{
+                .expected_packet_number = 0,
+                .max_crypto_buffer = options.max_crypto_buffer,
+            },
+        );
+    defer server_initial_flight.deinit(endpoint.allocator);
+    const server_initial = quic.initial_exchange.ReceivedInitialCrypto{
+        .from = server_initial_flight.from,
+        .packet = server_initial_flight.first_packet,
+        .crypto_data = server_initial_flight.crypto_data,
+    };
+    const parsed_server = try quic.tls_client_hello.parseServerHello(
+        server_initial.crypto_data,
     );
-    defer server_initial.deinit(endpoint.allocator);
-    const parsed_server = try quic.tls_client_hello.parseServerHello(server_initial.crypto_data);
     if (!cipherSuiteEnabled(
         options.cipher_suites,
         parsed_server.cipher_suite,
@@ -1150,18 +1168,21 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         server_verify,
     );
     try server_flight.appendSlice(endpoint.allocator, server_finished.items);
-    try quic.initial_exchange.sendCoalescedInitialHandshakeCrypto(
+    _ = try quic.initial_exchange.sendInitialThenHandshakeCrypto(
         endpoint,
         client_initial.from,
         client_initial.initial_secrets.server,
         .{
-            .version = options.version.wireValue(),
-            .destination_connection_id = client_initial.packet.source_connection_id,
-            .source_connection_id = options.local_connection_id,
-            .packet_number = options.server_initial_packet_number,
-            .crypto_data = server_hello.items,
-            .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
-            .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+            .initial = .{
+                .version = options.version.wireValue(),
+                .destination_connection_id = client_initial.packet.source_connection_id,
+                .source_connection_id = options.local_connection_id,
+                .packet_number = options.server_initial_packet_number,
+                .crypto_data = server_hello.items,
+                .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+                .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+            },
+            .max_datagram_size = endpoint.limits.max_datagram_size,
         },
         handshake.server_quic,
         .{
@@ -1362,40 +1383,27 @@ fn receiveClientInitial(
         datagram.bytes,
     );
     if (initial_info.packet_type != .initial) return error.InvalidInitialPacket;
-    var packet = try quic.protection.openInitialPacket(
-        endpoint.allocator,
-        initial_secrets.client,
+    var flight = try quic.initial_exchange.openInitialCryptoFlight(
+        endpoint,
+        datagram.from,
         datagram.bytes[0..initial_info.len],
-        expected_packet_number,
+        initial_secrets.client,
+        .{
+            .expected_packet_number = expected_packet_number,
+            .max_crypto_buffer = max_crypto_buffer,
+            .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+        },
     );
-    errdefer packet.deinit(endpoint.allocator);
+    errdefer flight.deinit(endpoint.allocator);
     const coalesced_tail = try endpoint.allocator.dupe(
         u8,
         datagram.bytes[initial_info.len..],
     );
     errdefer endpoint.allocator.free(coalesced_tail);
-
-    var reassembler = quic.crypto_stream.Reassembler.init(endpoint.allocator, max_crypto_buffer);
-    defer reassembler.deinit();
-    var pos: usize = 0;
-    var saw_crypto = false;
-    while (pos < packet.payload.len) {
-        var parsed = try quic.parseFrameOwned(endpoint.allocator, packet.payload[pos..]);
-        defer parsed.deinitOwned(endpoint.allocator);
-        try quic.validateFrameForPacketType(parsed.frame, .initial);
-        if (parsed.frame == .crypto) {
-            saw_crypto = true;
-            try reassembler.insert(parsed.frame.crypto);
-        }
-        pos += parsed.consumed;
-    }
-    if (!saw_crypto) return error.MissingCryptoFrame;
-    const crypto_data = try reassembler.readAllAvailable(endpoint.allocator);
-    errdefer endpoint.allocator.free(crypto_data);
     return .{
         .from = datagram.from,
-        .packet = packet,
-        .crypto_data = crypto_data,
+        .packet = flight.first_packet,
+        .crypto_data = flight.crypto_data,
         .initial_secrets = initial_secrets,
         .coalesced_tail = coalesced_tail,
     };

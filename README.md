@@ -110,7 +110,12 @@ starts with deterministic parsers, serializers, and state helpers for:
   max UDP payload 1200..65527/idle-timeout/ACK delay/stream-count bounds), Retry packet codec
   with version-specific integrity-tag verification, plus CRYPTO stream reassembly with empty-frame no-op handling and duplicate-overlap conflict detection,
   v1/v2 Initial key/header/payload protection with version-aware salts, HKDF labels, long-header type bits, fixed-bit, connection-ID length, supported-version, and header-protection sample-bound validation, version-specific TLS QUIC packet-protection labels, protected Initial packet seal/open, long-header packet boundary peeking for coalesced datagrams, Version Negotiation packet codec with randomized response first byte and reserved-version greasing tolerance, RFC 9368 `version_information` transport parameters, endpoint-level unsupported-version responses, client-side Version Negotiation selection/restart helpers, and automatic handshake restart on negotiated versions,
-  Initial CRYPTO byte exchange over UDP with RFC 9000 1200-byte Initial datagram padding/validation, client-carried Initial address tokens, server-side token validation hooks, and server-issued address-validation NEW_TOKEN frames, coalesced Initial+Handshake CRYPTO datagram helpers, HMAC-based
+  Initial CRYPTO byte exchange over UDP with RFC 9000 1200-byte Initial
+  datagram padding/validation, MTU-bounded multi-Initial CRYPTO packetization
+  and cross-datagram TLS-message reassembly for large post-quantum
+  ClientHello/ServerHello flights, client-carried Initial address tokens,
+  server-side token validation hooks, and server-issued address-validation
+  NEW_TOKEN frames, coalesced Initial+Handshake CRYPTO datagram helpers, HMAC-based
   address-validation token helpers for Retry/NEW_TOKEN with lifetime, version,
   peer-address binding, Retry ODCID/RSCID binding, secret rotation, replay
   filtering, Retry datagram issue/validate helpers, client-side Retry

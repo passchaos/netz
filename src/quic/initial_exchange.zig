@@ -1,5 +1,6 @@
 const std = @import("std");
 const quic = @import("mod.zig");
+const flight = @import("initial_exchange/flight.zig");
 
 const net = std.Io.net;
 
@@ -7,23 +8,13 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_str
     MissingCryptoFrame,
 };
 
-pub const min_initial_udp_datagram_size: usize = 1200;
-
-pub const SendInitialOptions = struct {
-    version: u32 = quic.Version.version_1.wireValue(),
-    destination_connection_id: []const u8,
-    source_connection_id: []const u8,
-    token: []const u8 = &.{},
-    packet_number: u64,
-    packet_number_len: u8 = 4,
-    crypto_offset: u64 = 0,
-    max_crypto_frame_data_len: usize = 1024,
-    /// Minimum UDP datagram size for an Initial packet. RFC 9000 requires
-    /// clients to send Initial UDP datagrams of at least 1200 bytes; server
-    /// callers can also set this when coalescing an Initial with Handshake data.
-    min_datagram_size: usize = 0,
-    crypto_data: []const u8,
-};
+pub const min_initial_udp_datagram_size =
+    flight.min_initial_udp_datagram_size;
+pub const SendInitialOptions = flight.SendInitialOptions;
+pub const SendInitialFlightOptions = flight.SendOptions;
+pub const SentInitialFlight = flight.Sent;
+pub const ReceiveInitialFlightOptions = flight.ReceiveOptions;
+pub const ReceivedInitialFlight = flight.Received;
 
 pub const ReceivedInitialCrypto = struct {
     from: net.IpAddress,
@@ -67,10 +58,16 @@ pub fn sendInitialCrypto(
     keys: quic.protection.PacketProtectionKeys,
     options: SendInitialOptions,
 ) Error!void {
-    const packet = try sealInitialCryptoPacket(endpoint.allocator, keys, options);
+    const packet = try flight.sealPacket(
+        endpoint.allocator,
+        keys,
+        options,
+    );
     defer endpoint.allocator.free(packet);
     try endpoint.sendBytes(to, packet);
 }
+
+pub const sendInitialCryptoFlight = flight.send;
 
 pub fn sendCoalescedInitialHandshakeCrypto(
     endpoint: *quic.runtime.Endpoint,
@@ -80,7 +77,11 @@ pub fn sendCoalescedInitialHandshakeCrypto(
     handshake_keys: quic.protection.PacketProtectionKeys,
     handshake_options: SendInitialOptions,
 ) Error!void {
-    const initial_packet = try sealInitialCryptoPacket(endpoint.allocator, initial_keys, initial_options);
+    const initial_packet = try flight.sealPacket(
+        endpoint.allocator,
+        initial_keys,
+        initial_options,
+    );
     defer endpoint.allocator.free(initial_packet);
 
     var handshake_payload: std.ArrayList(u8) = .empty;
@@ -107,6 +108,33 @@ pub fn sendCoalescedInitialHandshakeCrypto(
     try coalesced.appendSlice(endpoint.allocator, initial_packet);
     try coalesced.appendSlice(endpoint.allocator, handshake_packet);
     try endpoint.sendBytes(to, coalesced.items);
+}
+
+/// Send the server Initial CRYPTO flight under a per-datagram MTU bound, then
+/// send the Handshake flight separately. Separating encryption levels keeps
+/// the common one-packet ClientHello response simple while allowing a large
+/// ServerHello (for example an ML-KEM ciphertext) to span Initial packets.
+pub fn sendInitialThenHandshakeCrypto(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    initial_keys: quic.protection.PacketProtectionKeys,
+    initial_options: SendInitialFlightOptions,
+    handshake_keys: quic.protection.PacketProtectionKeys,
+    handshake_options: SendInitialOptions,
+) Error!SentInitialFlight {
+    const sent = try flight.send(
+        endpoint,
+        to,
+        initial_keys,
+        initial_options,
+    );
+    try sendHandshakeCrypto(
+        endpoint,
+        to,
+        handshake_keys,
+        handshake_options,
+    );
+    return sent;
 }
 
 pub fn sendCoalescedInitialZeroRtt(
@@ -142,7 +170,7 @@ pub fn sendCoalescedInitialZeroRtt(
 
     var unpadded_initial_options = initial_options;
     unpadded_initial_options.min_datagram_size = 0;
-    var initial_packet = try sealInitialCryptoPacket(
+    var initial_packet = try flight.sealPacket(
         endpoint.allocator,
         initial_keys,
         unpadded_initial_options,
@@ -157,7 +185,7 @@ pub fn sendCoalescedInitialZeroRtt(
     if (unpadded_len < initial_options.min_datagram_size) {
         unpadded_initial_options.min_datagram_size =
             initial_options.min_datagram_size - zero_rtt_packet.len;
-        const padded_initial_packet = try sealInitialCryptoPacket(
+        const padded_initial_packet = try flight.sealPacket(
             endpoint.allocator,
             initial_keys,
             unpadded_initial_options,
@@ -182,41 +210,6 @@ pub fn sendCoalescedInitialZeroRtt(
     try endpoint.sendBytes(to, coalesced.items);
 }
 
-fn sealInitialCryptoPacket(
-    allocator: std.mem.Allocator,
-    keys: quic.protection.PacketProtectionKeys,
-    options: SendInitialOptions,
-) Error![]u8 {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try quic.crypto_stream.writeCryptoFrames(
-        &payload,
-        allocator,
-        options.crypto_offset,
-        options.crypto_data,
-        options.max_crypto_frame_data_len,
-    );
-
-    while (true) {
-        const packet = try quic.protection.sealInitialPacket(allocator, keys, .{
-            .version = options.version,
-            .destination_connection_id = options.destination_connection_id,
-            .source_connection_id = options.source_connection_id,
-            .token = options.token,
-            .packet_number = options.packet_number,
-            .packet_number_len = options.packet_number_len,
-            .payload = payload.items,
-        });
-        if (packet.len >= options.min_datagram_size) return packet;
-        const missing = options.min_datagram_size - packet.len;
-        allocator.free(packet);
-        // PADDING frames are encrypted payload bytes.  Adding at least the
-        // observed shortfall converges quickly even when the long-header Length
-        // varint grows by a byte at a boundary.
-        try payload.appendNTimes(allocator, @intFromEnum(quic.FrameType.padding), missing);
-    }
-}
-
 pub fn receiveInitialCrypto(
     endpoint: *quic.runtime.Endpoint,
     keys: quic.protection.PacketProtectionKeys,
@@ -227,6 +220,9 @@ pub fn receiveInitialCrypto(
     defer datagram.deinit(endpoint.allocator);
     return openInitialCrypto(endpoint, datagram.from, datagram.bytes, keys, expected_packet_number, max_crypto_buffer);
 }
+
+pub const receiveInitialCryptoFlight = flight.receive;
+pub const openInitialCryptoFlight = flight.open;
 
 pub fn sendHandshakeCrypto(
     endpoint: *quic.runtime.Endpoint,
@@ -377,19 +373,12 @@ fn cryptoDataFromPayload(
     var reassembler = quic.crypto_stream.Reassembler.init(allocator, max_crypto_buffer);
     defer reassembler.deinit();
 
-    var pos: usize = 0;
-    var saw_crypto = false;
-    while (pos < payload.len) {
-        var parsed = try quic.parseFrameOwned(allocator, payload[pos..]);
-        defer parsed.deinitOwned(allocator);
-        try quic.validateFrameForPacketType(parsed.frame, packet_type);
-        if (parsed.frame == .crypto) {
-            saw_crypto = true;
-            try reassembler.insert(parsed.frame.crypto);
-        }
-        pos += parsed.consumed;
-    }
-    if (!saw_crypto) return error.MissingCryptoFrame;
+    try flight.insertCryptoPayload(
+        allocator,
+        &reassembler,
+        payload,
+        packet_type,
+    );
     return reassembler.readAllAvailable(allocator);
 }
 

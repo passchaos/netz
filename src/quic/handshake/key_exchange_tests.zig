@@ -11,14 +11,14 @@ test "QUIC integrated secp384r1-only handshake exchanges 1-RTT" {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
+        .{ .max_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size },
     );
     defer server_endpoint.deinit();
     var client_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
+        .{ .max_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size },
     );
     defer client_endpoint.deinit();
 
@@ -93,14 +93,14 @@ test "QUIC integrated X25519MLKEM768-only handshake exchanges 1-RTT" {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
+        .{ .max_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size },
     );
     defer server_endpoint.deinit();
     var client_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
+        .{ .max_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size },
     );
     defer client_endpoint.deinit();
 
