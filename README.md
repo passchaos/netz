@@ -60,7 +60,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   also expose two-phase GOAWAY initiation/completion and drain-completion
   tracking over queued and application-owned requests. Clients can send
   pre-request or live RFC 9218 PRIORITY_UPDATE frames on persistent control
-  streams, with received priority field values owned by connection state.
+  streams, including promised-push priorities. Received priority fields are
+  owned and retained per request stream or push ID rather than collapsing
+  unrelated elements into one connection-global value.
   Protected clients also expose split `sendRequest`/`receiveResponse` APIs with
   bounded per-stream response reassembly, preserving interleaved responses and
   resets instead of discarding non-target streams. `receiveNextResponse`

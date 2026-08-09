@@ -299,6 +299,23 @@ pub const SettingsState = struct {
 };
 
 pub const ControlState = struct {
+    pub const StoredPriorityUpdate = struct {
+        frame_type: u64,
+        payload: PriorityUpdatePayload,
+
+        pub fn priority(self: StoredPriorityUpdate) Priority {
+            return self.payload.priority();
+        }
+
+        fn deinit(
+            self: *StoredPriorityUpdate,
+            allocator: std.mem.Allocator,
+        ) void {
+            allocator.free(self.payload.field_value);
+            self.* = undefined;
+        }
+    };
+
     settings: SettingsState = .{},
     peer_goaway_id: ?u64 = null,
     local_goaway_id: ?u64 = null,
@@ -312,12 +329,17 @@ pub const ControlState = struct {
     peer_cancelled_push_id: ?u64 = null,
     peer_control_stream_id: ?u64 = null,
     latest_priority_update: ?PriorityUpdatePayload = null,
-    priority_update_storage: ?[]u8 = null,
+    latest_priority_update_type: ?u64 = null,
+    priority_updates: std.ArrayList(StoredPriorityUpdate) = .empty,
+    priority_update_generation: u64 = 0,
     peer_qpack_encoder_stream_id: ?u64 = null,
     peer_qpack_decoder_stream_id: ?u64 = null,
 
     pub fn deinit(self: *ControlState, allocator: std.mem.Allocator) void {
-        if (self.priority_update_storage) |storage| allocator.free(storage);
+        for (self.priority_updates.items) |*update| {
+            update.deinit(allocator);
+        }
+        self.priority_updates.deinit(allocator);
         self.* = undefined;
     }
 
@@ -327,14 +349,30 @@ pub const ControlState = struct {
     ) std.mem.Allocator.Error!ControlState {
         var copy = self;
         copy.latest_priority_update = null;
-        copy.priority_update_storage = null;
-        if (self.latest_priority_update) |update| {
-            const owned = try allocator.dupe(u8, update.field_value);
-            copy.priority_update_storage = owned;
-            copy.latest_priority_update = .{
-                .prioritized_element_id = update.prioritized_element_id,
-                .field_value = owned,
-            };
+        copy.priority_updates = .empty;
+        errdefer copy.deinit(allocator);
+        try copy.priority_updates.ensureTotalCapacity(
+            allocator,
+            self.priority_updates.items.len,
+        );
+        for (self.priority_updates.items) |update| {
+            const owned = try allocator.dupe(
+                u8,
+                update.payload.field_value,
+            );
+            copy.priority_updates.appendAssumeCapacity(.{
+                .frame_type = update.frame_type,
+                .payload = .{
+                    .prioritized_element_id = update.payload.prioritized_element_id,
+                    .field_value = owned,
+                },
+            });
+        }
+        if (copy.priority_updates.items.len != 0) {
+            copy.latest_priority_update =
+                copy.priority_updates.items[
+                    copy.priority_updates.items.len - 1
+                ].payload;
         }
         return copy;
     }
@@ -435,11 +473,16 @@ pub const ControlState = struct {
             FrameType.priority_update_request => {
                 const priority_update = try parsePriorityUpdatePayload(frame.payload);
                 try validateRequestStreamId(priority_update.prioritized_element_id);
-                try self.storePriorityUpdate(allocator, priority_update);
+                try self.storePriorityUpdate(
+                    allocator,
+                    frame.frame_type,
+                    priority_update,
+                );
             },
             FrameType.priority_update_push => {
                 try self.storePriorityUpdate(
                     allocator,
+                    frame.frame_type,
                     try parsePriorityUpdatePayload(frame.payload),
                 );
             },
@@ -458,18 +501,86 @@ pub const ControlState = struct {
         return stream_id < goaway_id;
     }
 
+    pub fn requestPriorityUpdate(
+        self: ControlState,
+        stream_id: u64,
+    ) ?PriorityUpdatePayload {
+        return self.priorityUpdate(
+            FrameType.priority_update_request,
+            stream_id,
+        );
+    }
+
+    pub fn pushPriorityUpdate(
+        self: ControlState,
+        push_id: u64,
+    ) ?PriorityUpdatePayload {
+        return self.priorityUpdate(
+            FrameType.priority_update_push,
+            push_id,
+        );
+    }
+
+    pub fn priorityUpdate(
+        self: ControlState,
+        frame_type: u64,
+        prioritized_element_id: u64,
+    ) ?PriorityUpdatePayload {
+        for (self.priority_updates.items) |update| {
+            if (update.frame_type == frame_type and
+                update.payload.prioritized_element_id ==
+                    prioritized_element_id)
+            {
+                return update.payload;
+            }
+        }
+        return null;
+    }
+
     fn storePriorityUpdate(
         self: *ControlState,
         allocator: std.mem.Allocator,
+        frame_type: u64,
         update: PriorityUpdatePayload,
-    ) std.mem.Allocator.Error!void {
+    ) Error!void {
+        const next_generation = std.math.add(
+            u64,
+            self.priority_update_generation,
+            1,
+        ) catch return error.InvalidPriorityUpdate;
         const owned = try allocator.dupe(u8, update.field_value);
-        if (self.priority_update_storage) |storage| allocator.free(storage);
-        self.priority_update_storage = owned;
+        errdefer allocator.free(owned);
+
+        var existing_index: ?usize = null;
+        for (self.priority_updates.items, 0..) |stored, index| {
+            if (stored.frame_type == frame_type and
+                stored.payload.prioritized_element_id ==
+                    update.prioritized_element_id)
+            {
+                existing_index = index;
+                break;
+            }
+        }
+        if (existing_index == null) {
+            try self.priority_updates.ensureUnusedCapacity(allocator, 1);
+        }
+        if (existing_index) |index| {
+            var replaced = self.priority_updates.orderedRemove(index);
+            replaced.deinit(allocator);
+        }
+        self.priority_updates.appendAssumeCapacity(.{
+            .frame_type = frame_type,
+            .payload = .{
+                .prioritized_element_id = update.prioritized_element_id,
+                .field_value = owned,
+            },
+        });
+        self.latest_priority_update_type = frame_type;
         self.latest_priority_update = .{
             .prioritized_element_id = update.prioritized_element_id,
             .field_value = owned,
         };
+        self.priority_update_generation = next_generation;
     }
 };
 
@@ -702,6 +813,23 @@ pub fn writePriorityUpdateFrame(
     var field_value_buf: [16]u8 = undefined;
     const field_value = priority.serialize(&field_value_buf);
     try writePriorityUpdateFrameRaw(list, allocator, FrameType.priority_update_request, request_stream_id, field_value);
+}
+
+pub fn writePushPriorityUpdateFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    push_id: u64,
+    priority: Priority,
+) Error!void {
+    var field_value_buf: [16]u8 = undefined;
+    const field_value = priority.serialize(&field_value_buf);
+    try writePriorityUpdateFrameRaw(
+        list,
+        allocator,
+        FrameType.priority_update_push,
+        push_id,
+        field_value,
+    );
 }
 
 pub fn writePriorityUpdateFrameRaw(
@@ -4347,6 +4475,51 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
     try control.applyControlStreamBytes(allocator, settings_payload.items);
     try control.applyFrame(allocator, frame);
     try std.testing.expectEqual(@as(u64, 8), control.latest_priority_update.?.prioritized_element_id);
+    try std.testing.expectEqual(
+        @as(u3, 1),
+        control.requestPriorityUpdate(8).?.priority().urgency,
+    );
+
+    var second_request: std.ArrayList(u8) = .empty;
+    defer second_request.deinit(allocator);
+    try writePriorityUpdateFrame(
+        &second_request,
+        allocator,
+        12,
+        .{ .urgency = 5 },
+    );
+    try control.applyFrame(
+        allocator,
+        try Frame.parse(second_request.items),
+    );
+    try std.testing.expectEqual(
+        @as(u3, 1),
+        control.requestPriorityUpdate(8).?.priority().urgency,
+    );
+    try std.testing.expectEqual(
+        @as(u3, 5),
+        control.requestPriorityUpdate(12).?.priority().urgency,
+    );
+
+    var push_priority: std.ArrayList(u8) = .empty;
+    defer push_priority.deinit(allocator);
+    try writePushPriorityUpdateFrame(
+        &push_priority,
+        allocator,
+        3,
+        .{ .urgency = 2, .incremental = true },
+    );
+    try control.applyFrame(
+        allocator,
+        try Frame.parse(push_priority.items),
+    );
+    try std.testing.expectEqual(
+        @as(u3, 2),
+        control.pushPriorityUpdate(3).?.priority().urgency,
+    );
+    try std.testing.expect(
+        control.pushPriorityUpdate(3).?.priority().incremental,
+    );
 
     try std.testing.expectError(error.UnexpectedFrame, writePriorityUpdateFrame(&encoded, allocator, 1, parsed));
     var invalid_priority: std.ArrayList(u8) = .empty;
@@ -4354,6 +4527,54 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
     try writePriorityUpdateFrameRaw(&invalid_priority, allocator, FrameType.priority_update_request, 1, "u=1");
     const invalid_frame = try Frame.parse(invalid_priority.items);
     try std.testing.expectError(error.UnexpectedFrame, control.applyFrame(allocator, invalid_frame));
+}
+
+fn checkPriorityUpdateStateAllocationFailure(
+    allocator: std.mem.Allocator,
+) !void {
+    var control = ControlState{ .settings = .{ .received = true } };
+    defer control.deinit(allocator);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writePriorityUpdateFrame(
+        &encoded,
+        allocator,
+        0,
+        .{ .urgency = 1 },
+    );
+    try control.applyFrame(allocator, try Frame.parse(encoded.items));
+    encoded.clearRetainingCapacity();
+    try writePriorityUpdateFrame(
+        &encoded,
+        allocator,
+        4,
+        .{ .urgency = 5, .incremental = true },
+    );
+    try control.applyFrame(allocator, try Frame.parse(encoded.items));
+    encoded.clearRetainingCapacity();
+    try writePriorityUpdateFrame(
+        &encoded,
+        allocator,
+        0,
+        .{ .urgency = 2 },
+    );
+    try control.applyFrame(allocator, try Frame.parse(encoded.items));
+    try std.testing.expectEqual(
+        @as(u3, 2),
+        control.requestPriorityUpdate(0).?.priority().urgency,
+    );
+    try std.testing.expectEqual(
+        @as(u3, 5),
+        control.requestPriorityUpdate(4).?.priority().urgency,
+    );
+}
+
+test "HTTP/3 per-element priority state is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkPriorityUpdateStateAllocationFailure,
+        .{},
+    );
 }
 
 test "HTTP/3 control stream rejects request frames" {
