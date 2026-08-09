@@ -294,6 +294,7 @@ test "public modules are reachable" {
     );
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "encryptedPacketsWithCurrentKeys"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "authenticationFailureCount"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "takeQlogError"));
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "EncoderInstruction"));
@@ -602,6 +603,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "qlog"));
     try std.testing.expect(@hasDecl(netz.quic.qlog, "Trace"));
     try std.testing.expect(@hasDecl(netz.quic.qlog, "frame_adapter"));
+    try std.testing.expect(@hasDecl(netz.quic.qlog, "Observer"));
     try std.testing.expect(@hasDecl(netz.quic, "keylog"));
     try std.testing.expect(@hasDecl(netz.quic.keylog, "Log"));
     try std.testing.expect(@hasDecl(netz.quic, "quic_lb"));

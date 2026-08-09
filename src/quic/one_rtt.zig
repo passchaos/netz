@@ -200,6 +200,7 @@ pub const ConnectionConfig = struct {
     /// connection is closed with AEAD_LIMIT_REACHED. Also clamped to the RFC
     /// AES-128-GCM integrity limit.
     aead_integrity_limit: u64 = quic.protection.aes_128_gcm_integrity_limit,
+    qlog_observer: ?*quic.qlog.Observer = null,
 };
 
 const StreamFlowEntry = struct {
@@ -475,6 +476,16 @@ pub const Connection = struct {
         );
         self.receive_frame_buffer.deinit(self.endpoint.allocator);
         self.* = undefined;
+    }
+
+    pub fn takeQlogError(self: *Connection) ?anyerror {
+        const observer = self.config.qlog_observer orelse return null;
+        return observer.takeError();
+    }
+
+    pub fn qlogFailed(self: Connection) bool {
+        const observer = self.config.qlog_observer orelse return false;
+        return observer.failure != null;
     }
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
@@ -844,7 +855,10 @@ pub const Connection = struct {
         };
 
         if (needs_key_update) {
-            try self.prepareAeadForEncryption(self.next_packet_number);
+            try self.prepareAeadForEncryption(
+                self.next_packet_number,
+                sent_time_ns,
+            );
         }
         self.send_packet_buffer.items.len =
             self.send_packet_buffer.capacity;
@@ -974,6 +988,7 @@ pub const Connection = struct {
         }
         const prepared = try self.prepareFramesForSend(frames, sent_time_ns);
         defer self.send_frame_buffer.items.len = 0;
+        const qlog_now_ns = sent_time_ns orelse self.monotonicNowNs();
 
         // Pacing preflight above is deliberately mutation-free. Once it
         // succeeds, materialize any new stream entries before flow-control
@@ -1033,6 +1048,12 @@ pub const Connection = struct {
             reserved_streams.items[reserved_index].bytes = frame.stream.data.len;
         }
         try self.sendPreparedFramesEcnAtUnchecked(prepared, ecn, sent_time_ns);
+        self.observePacketSent(
+            qlog_now_ns,
+            self.next_packet_number - 1,
+            prepared.packet_len,
+            frames,
+        );
         self.noteSentStreams(frames);
     }
 
@@ -1215,12 +1236,20 @@ pub const Connection = struct {
         try self.validateNextPacketNumber();
         const prepared = try self.prepareFramesForSend(frames, sent_time_ns);
         defer self.send_frame_buffer.items.len = 0;
+        const qlog_now_ns = sent_time_ns orelse self.monotonicNowNs();
         try self.sendPreparedFramesEcnAtUnchecked(prepared, ecn, sent_time_ns);
+        self.observePacketSent(
+            qlog_now_ns,
+            self.next_packet_number - 1,
+            prepared.packet_len,
+            frames,
+        );
     }
 
     const PreparedFrames = struct {
         payload: []const u8,
         packet_number_len: u8,
+        packet_len: usize,
         is_ack_eliciting: bool,
         is_in_flight: bool,
     };
@@ -1253,6 +1282,7 @@ pub const Connection = struct {
         return .{
             .payload = payload,
             .packet_number_len = packet_number_len,
+            .packet_len = packet_len,
             .is_ack_eliciting = is_ack_eliciting,
             .is_in_flight = is_in_flight,
         };
@@ -1420,7 +1450,7 @@ pub const Connection = struct {
         sent_time_ns: ?u64,
         pace_packet: bool,
     ) Error!void {
-        try self.prepareAeadForEncryption(packet_number);
+        try self.prepareAeadForEncryption(packet_number, sent_time_ns);
         try self.reserveAntiAmplification(payload.len);
         errdefer self.releaseAntiAmplification(payload.len);
         const packet_options: quic.protection.ShortPacketOptions = .{
@@ -1480,24 +1510,40 @@ pub const Connection = struct {
         );
     }
 
-    fn prepareAeadForEncryption(self: *Connection, packet_number: u64) Error!void {
+    fn prepareAeadForEncryption(
+        self: *Connection,
+        packet_number: u64,
+        now_ns: ?u64,
+    ) Error!void {
         const limit = self.aeadConfidentialityLimit();
         if (self.send_key_generation_encrypted_packets < limit) return;
         if (limit == 0 or self.pending_key_update_ack_threshold != null) {
             try self.enterAeadLimitReached("confidentiality limit", null, false);
             return error.AeadLimitReached;
         }
-        self.advanceSendKeyPhase(packet_number);
+        self.advanceSendKeyPhase(packet_number, now_ns);
     }
 
     fn recordPacketEncrypted(self: *Connection) void {
         self.send_key_generation_encrypted_packets +|= 1;
     }
 
-    fn advanceSendKeyPhase(self: *Connection, first_packet_number: u64) void {
+    fn advanceSendKeyPhase(
+        self: *Connection,
+        first_packet_number: u64,
+        now_ns: ?u64,
+    ) void {
         self.send_key_phase.initiateKeyUpdate();
         self.pending_key_update_ack_threshold = first_packet_number;
         self.send_key_generation_encrypted_packets = 0;
+        if (self.config.qlog_observer) |observer| {
+            observer.keyUpdated(
+                self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
+                "local_update",
+                oneRttKeyType(self.config.local_endpoint),
+                self.send_key_phase.keyUpdateCount(),
+            );
+        }
     }
 
     fn recordAuthenticationFailureAt(self: *Connection, now_ns: ?u64) Error!void {
@@ -1770,7 +1816,10 @@ pub const Connection = struct {
         var datagrams: [max_batch_packets][]const u8 = undefined;
         var packet_offset: usize = 0;
         for (probes[0..count], 0..) |probe, i| {
-            try self.prepareAeadForEncryption(probe.packet_number);
+            try self.prepareAeadForEncryption(
+                probe.packet_number,
+                sent_time_ns,
+            );
             const packet = try quic.protection.sealShortPacketInto(
                 self.send_packet_buffer.items[packet_offset..][0..probe.packet_len],
                 self.send_key_phase.currentKeys(),
@@ -2409,7 +2458,7 @@ pub const Connection = struct {
     pub fn initiateKeyUpdate(self: *Connection) Error!void {
         if (self.close_info != null) return error.ConnectionClosed;
         if (self.pending_key_update_ack_threshold != null) return error.InvalidPacket;
-        self.advanceSendKeyPhase(self.next_packet_number);
+        self.advanceSendKeyPhase(self.next_packet_number, null);
     }
 
     pub fn encryptedPacketsWithCurrentKeys(self: Connection) u64 {
@@ -2573,6 +2622,12 @@ pub const Connection = struct {
             packet.destination_connection_id,
         );
         self.updateSpinBitAfterReceive(packet.spin_bit);
+        self.observePacketReceived(
+            now_ns,
+            packet.packet_number,
+            bytes.len,
+            frames,
+        );
     }
 
     fn parseServicePacketFramesOrClose(self: *Connection, payload: []const u8, now_ns: ?u64) Error![]quic.Frame {
@@ -2637,18 +2692,36 @@ pub const Connection = struct {
         try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
-            try self.acceptPeerKeyUpdate(packet.packet.key_phase);
+            try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
         }
+        self.observePacketReceived(
+            now_ns,
+            packet.packet.packet_number,
+            bytes.len,
+            packet.frames,
+        );
         return packet;
     }
 
-    fn acceptPeerKeyUpdate(self: *Connection, peer_key_phase: bool) Error!void {
+    fn acceptPeerKeyUpdate(
+        self: *Connection,
+        peer_key_phase: bool,
+        now_ns: ?u64,
+    ) Error!void {
         if (!self.receive_key_phase.updateAfterReceiving(peer_key_phase)) return;
+        if (self.config.qlog_observer) |observer| {
+            observer.keyUpdated(
+                self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
+                "remote_update",
+                peerOneRttKeyType(self.config.local_endpoint),
+                self.receive_key_phase.keyUpdateCount(),
+            );
+        }
         // RFC 9001 §6.2 requires sending keys to reach the corresponding phase
         // before acknowledging a peer's updated-key packet.
         if (self.send_key_phase.currentKeyPhase() != peer_key_phase) {
             if (self.pending_key_update_ack_threshold != null) return error.KeyUpdateError;
-            self.advanceSendKeyPhase(self.next_packet_number);
+            self.advanceSendKeyPhase(self.next_packet_number, now_ns);
         }
     }
 
@@ -2694,8 +2767,14 @@ pub const Connection = struct {
         try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, routed.datagram.ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
-            try self.acceptPeerKeyUpdate(packet.packet.key_phase);
+            try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
         }
+        self.observePacketReceived(
+            now_ns,
+            packet.packet.packet_number,
+            routed.datagram.bytes.len,
+            packet.frames,
+        );
         return packet;
     }
 
@@ -2714,8 +2793,14 @@ pub const Connection = struct {
         try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
-            try self.acceptPeerKeyUpdate(packet.packet.key_phase);
+            try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
         }
+        self.observePacketReceived(
+            now_ns,
+            packet.packet.packet_number,
+            routed.datagram.bytes.len,
+            packet.frames,
+        );
         return packet;
     }
 
@@ -2827,6 +2912,7 @@ pub const Connection = struct {
                             _ = self.applyPersistentCongestionIfDetected();
                         }
                     }
+                    self.observeRecoveryMetrics(now_ns);
                     _ = try self.recovery.applyAck(frame.ack);
                     if (self.pending_key_update_ack_threshold) |threshold| {
                         if (self.hasAcknowledgedPacketAtOrAbove(threshold)) {
@@ -3373,6 +3459,67 @@ pub const Connection = struct {
         return true;
     }
 
+    fn observePacketSent(
+        self: *Connection,
+        now_ns: u64,
+        packet_number: u64,
+        packet_length: usize,
+        frames: []const quic.Frame,
+    ) void {
+        const observer = self.config.qlog_observer orelse return;
+        observer.packetSent(
+            self.qlogEventTime(now_ns),
+            packet_number,
+            packet_length,
+            frames,
+            qlogAckDelayExponent(self.config.local_ack_delay_exponent),
+        );
+    }
+
+    fn observePacketReceived(
+        self: *Connection,
+        now_ns: ?u64,
+        packet_number: u64,
+        packet_length: usize,
+        frames: []const quic.Frame,
+    ) void {
+        const observer = self.config.qlog_observer orelse return;
+        observer.packetReceived(
+            self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
+            packet_number,
+            packet_length,
+            frames,
+            qlogAckDelayExponent(self.config.peer_ack_delay_exponent),
+        );
+    }
+
+    fn observeRecoveryMetrics(self: *Connection, now_ns: ?u64) void {
+        const observer = self.config.qlog_observer orelse return;
+        observer.metricsUpdated(
+            self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
+            .{
+                .min_rtt_ns = if (self.rtt_stats.has_measurement)
+                    self.rtt_stats.min_rtt
+                else
+                    null,
+                .smoothed_rtt_ns = if (self.rtt_stats.has_measurement)
+                    self.rtt_stats.smoothed_rtt
+                else
+                    null,
+                .latest_rtt_ns = if (self.rtt_stats.has_measurement)
+                    self.rtt_stats.latest_rtt
+                else
+                    null,
+                .rtt_variance_ns = if (self.rtt_stats.has_measurement)
+                    self.rtt_stats.rtt_var
+                else
+                    null,
+                .congestion_window = self.congestion.congestion_window,
+                .bytes_in_flight = self.congestion.bytes_in_flight,
+            },
+        );
+    }
+
     fn monotonicNowNs(self: Connection) u64 {
         // `awake` is monotonic and excludes suspend time where the platform can
         // distinguish it. Saturating at the u64 range keeps the existing
@@ -3380,6 +3527,14 @@ pub const Connection = struct {
         const timestamp = std.Io.Clock.awake.now(self.endpoint.io).nanoseconds;
         if (timestamp <= 0) return 0;
         return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
+    }
+
+    fn qlogEventTime(self: Connection, now_ns: u64) u64 {
+        const observer = self.config.qlog_observer orelse return now_ns;
+        return switch (observer.trace.options.time_format) {
+            .relative => @max(now_ns, observer.trace.options.reference_time_ns),
+            .absolute => now_ns,
+        };
     }
 
     fn waitForPacing(self: Connection, now_ns: u64) Error!void {
@@ -3647,6 +3802,28 @@ fn closeExpiryMillis(now_ms: ?u64, pto_ms: ?u64) ?u64 {
 fn nsToMs(now_ns: ?u64) ?u64 {
     const ns = now_ns orelse return null;
     return ns / 1_000_000;
+}
+
+fn qlogAckDelayExponent(exponent: u64) u6 {
+    return @intCast(@min(exponent, quic.rtt.max_ack_delay_exponent));
+}
+
+fn oneRttKeyType(
+    role: ConnectionConfig.EndpointRole,
+) []const u8 {
+    return switch (role) {
+        .client => "client_1rtt_secret",
+        .server => "server_1rtt_secret",
+    };
+}
+
+fn peerOneRttKeyType(
+    role: ConnectionConfig.EndpointRole,
+) []const u8 {
+    return switch (role) {
+        .client => "server_1rtt_secret",
+        .server => "client_1rtt_secret",
+    };
 }
 
 pub fn sendFrames(
@@ -9609,4 +9786,149 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
     try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), disabled2.close_info.?.error_code);
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.ack_frequency)), disabled2.close_info.?.frame_type);
     try std.testing.expectEqualStrings("ack frequency", disabled2.close_info.?.reason_phrase);
+}
+
+test "QUIC 1-RTT qlog observer records packet and recovery events" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    var client_output: std.Io.Writer.Allocating = .init(allocator);
+    defer client_output.deinit();
+    var client_trace = quic.qlog.Trace.init(&client_output.writer, .{});
+    var client_observer = quic.qlog.Observer.init(&client_trace);
+    var server_output: std.Io.Writer.Allocating = .init(allocator);
+    defer server_output.deinit();
+    var server_trace = quic.qlog.Trace.init(&server_output.writer, .{});
+    var server_observer = quic.qlog.Observer.init(&server_trace);
+
+    const client_cid = [_]u8{ 1, 2, 3, 4 };
+    const server_cid = [_]u8{ 5, 6, 7, 8 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd7} ** quic.protection.secret_len,
+    );
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .qlog_observer = &client_observer,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .qlog_observer = &server_observer,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    try client.sendAt(&ping, 1_000_000);
+    var received = try server.receivePacketAt(2_000_000);
+    defer received.deinit(allocator);
+    try std.testing.expect(try server.sendAckForPacketsIfNeeded(&.{received}));
+    var ack = try client.receivePacketAt(3_000_000);
+    defer ack.deinit(allocator);
+    try client.initiateKeyUpdate();
+
+    try std.testing.expect(client.takeQlogError() == null);
+    try std.testing.expect(server.takeQlogError() == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"name\":\"quic:packet_sent\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"name\":\"quic:packet_received\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"name\":\"recovery:metrics_updated\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"name\":\"security:key_updated\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"key_type\":\"client_1rtt_secret\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        server_output.written(),
+        "\"frame_type\":\"ping\"",
+    ) != null);
+}
+
+test "QUIC 1-RTT qlog observer reports sticky failures without rolling back send" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender_endpoint.deinit();
+
+    var failing: std.Io.Writer = .failing;
+    var trace = quic.qlog.Trace.init(&failing, .{});
+    var observer = quic.qlog.Observer.init(&trace);
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe8} ** quic.protection.secret_len,
+    );
+    var sender = try Connection.init(&sender_endpoint, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .qlog_observer = &observer,
+    });
+    defer sender.deinit();
+
+    try sender.sendAt(&.{.{ .ping = {} }}, 1);
+    try std.testing.expectEqual(@as(u64, 1), sender.next_packet_number);
+    try std.testing.expect(sender.qlogFailed());
+    try std.testing.expectEqualStrings(
+        "WriteFailed",
+        @errorName(sender.takeQlogError() orelse
+            return error.TestUnexpectedResult),
+    );
+    try std.testing.expect(!sender.qlogFailed());
 }

@@ -442,6 +442,25 @@ test "qlog encoder covers every event and frame variant" {
     try validateJsonSequence(writer.buffered(), 9);
 }
 
+test "qlog observer bounds packet scratch with a sticky error" {
+    var output_storage: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&output_storage);
+    var trace = qlog.Trace.init(&writer, .{});
+    var observer = qlog.Observer.init(&trace);
+    const too_many = [_]@import("../../mod.zig").Frame{
+        .{ .ping = {} },
+    } ** (qlog.observer.max_frames_per_packet + 1);
+
+    observer.packetSent(0, 0, 1200, &too_many, 3);
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    try std.testing.expectEqualStrings(
+        "TooManyFrames",
+        @errorName(observer.takeError() orelse
+            return error.TestUnexpectedResult),
+    );
+    try std.testing.expect(observer.takeError() == null);
+}
+
 fn validateJsonSequence(bytes: []const u8, expected_records: usize) !void {
     var records: usize = 0;
     var cursor: usize = 0;

@@ -200,7 +200,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   validation attempts, and validate the new path on a matching PATH_RESPONSE,
   streaming qlog 0.4 observability with RFC 7464 JSON-SEQ framing, strict JSON
   escaping, caller-visible sink failures, allocation-free event views, complete
-  ACK-range/ECN and packet-frame emission without fixed-size truncation,
+  ACK-range/ECN and packet-frame emission without fixed-size truncation, plus
+  optional 1-RTT connection observers that automatically emit successful
+  packet send/receive, recovery metrics, and key-update events with sticky,
+  caller-queryable diagnostics that never roll back network state,
   plus NSS SSLKEYLOGFILE-compatible handshake/application traffic-secret
   streaming from both integrated handshake roles with caller-visible sink
   failures,
