@@ -190,6 +190,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   anti-amplification and PMTUD path state, queue PATH_CHALLENGE,
   track path-validation deadlines, retry timed-out challenges, record failed
   validation attempts, and validate the new path on a matching PATH_RESPONSE,
+  streaming qlog 0.4 observability with RFC 7464 JSON-SEQ framing, strict JSON
+  escaping, caller-visible sink failures, allocation-free event views, complete
+  ACK-range/ECN and packet-frame emission without fixed-size truncation,
   plus a blocking UDP endpoint runtime for frame datagrams with a
   `std.Io.async` concurrent receive helper
 - WebSocket handshakes with Host authority, body-framing rejection, duplicate-subprotocol and nonce validation, frame masking, strict frame/control

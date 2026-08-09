@@ -594,6 +594,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "ClientState"));
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "ProcessedRetry"));
     try std.testing.expect(@hasDecl(netz.quic, "version_negotiation"));
+    try std.testing.expect(@hasDecl(netz.quic, "qlog"));
+    try std.testing.expect(@hasDecl(netz.quic.qlog, "Trace"));
+    try std.testing.expect(@hasDecl(netz.quic.qlog, "frame_adapter"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "processClient"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "ClientState"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "Processed"));
