@@ -123,6 +123,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveNextResponse"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "receiveResponseEvent"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "readResponseData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendRequestBody"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "finishRequestTrailers"));
