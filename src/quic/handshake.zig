@@ -401,10 +401,10 @@ fn connectAttempt(
         options.x25519_secret_key,
         options.p256_secret_key,
     );
-    const legacy_x25519_public = if (client_key_shares.x25519_secret) |private|
-        try quic.tls_client_hello.x25519PublicKey(private)
-    else
-        [_]u8{0} ** 32;
+    const legacy_x25519_public = switch (client_key_shares.shares[0]) {
+        .x25519 => |key| key,
+        .secp256r1 => [_]u8{0} ** 32,
+    };
     const client_random = try random32(endpoint.io, options.random);
     const initial_destination_connection_id = clientInitialDestinationConnectionId(options);
     const initial_secrets = try quic.protection.deriveInitialSecretsForVersion(options.version.wireValue(), initial_destination_connection_id);
