@@ -348,6 +348,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "tls"));
     try std.testing.expect(@hasDecl(netz.quic.tls, "auth"));
     try std.testing.expect(@hasDecl(netz.quic.tls, "trust"));
+    try std.testing.expect(@hasDecl(netz.quic.tls, "client_auth"));
     try std.testing.expect(@hasDecl(netz.quic.tls.auth, "ServerIdentity"));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "connect"));
     try std.testing.expect(@hasDecl(netz.quic.handshake, "accept"));

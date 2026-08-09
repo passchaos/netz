@@ -157,12 +157,14 @@ starts with deterministic parsers, serializers, and state helpers for:
   plus allocation-free AES-256-GCM stateless tickets with origin+ALPN
   associated-data binding, explicit key IDs, current+three-history key
   rotation, tamper/expiry enforcement, and a native seal/open benchmark,
-  optional non-PSK TLS 1.3 server authentication with Certificate and
-  Ed25519/ECDSA-P256 CertificateVerify, pinned raw-key verification or an application
-  X.509 trust-policy callback, and transcript/signature tamper rejection,
-  together with a built-in zero-allocation X.509 chain/hostname/time verifier
-  over caller or platform CA bundles and a system-CA loader for production
-  clients,
+  Vail-backed non-PSK TLS 1.3 server authentication with Certificate and
+  Ed25519/ECDSA-P256 CertificateVerify, pinned raw-key verification or an
+  application X.509 trust-policy callback, transcript/signature tamper
+  rejection, and optional mutual TLS with CertificateRequest plus client
+  possession proof,
+  together with Vail's zero-allocation X.509 chain/hostname/time verifier over
+  caller or platform CA bundles, its system-CA loader for production clients,
+  and CertificateRequest-driven mutual TLS with client possession proof,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,

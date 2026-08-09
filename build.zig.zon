@@ -3,7 +3,9 @@
     .version = "0.1.0",
     .fingerprint = 0x4f22723793fe4000,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .vail = .{ .path = "../vail" },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
