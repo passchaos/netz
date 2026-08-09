@@ -1,6 +1,6 @@
 //! TLS 1.3 session-ticket lifecycle for QUIC resumption.
 
-pub const codec = @import("codec.zig");
+pub const codec = @import("vail").tls.ticket;
 pub const store = @import("store.zig");
 pub const handshake = @import("handshake.zig");
 pub const keyring = @import("keyring.zig");

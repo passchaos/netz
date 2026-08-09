@@ -168,6 +168,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   with TLS 1.3 early/handshake/application/resumption HKDF, Finished, PSK
   binder, early-traffic, and traffic-update secrets centralized in Vail while
   netz retains only QUIC-specific packet-protection labels,
+  and Vail-owned PSK-DHE/early_data/NewSessionTicket wire codecs while netz
+  retains origin+ALPN caches, replay leases, and remembered QUIC parameters,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,

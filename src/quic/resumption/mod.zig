@@ -6,7 +6,7 @@
 
 pub const parameters = @import("parameters.zig");
 pub const cache = @import("cache.zig");
-pub const tls_psk = @import("tls_psk.zig");
+pub const tls_psk = @import("vail").tls.psk;
 pub const ticket = @import("ticket/mod.zig");
 
 pub const Snapshot = parameters.Snapshot;

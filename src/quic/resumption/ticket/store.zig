@@ -5,7 +5,7 @@
 //! resumed handshake. Expired entries are removed eagerly on issue/lookup.
 
 const std = @import("std");
-const codec = @import("codec.zig");
+const codec = @import("vail").tls.ticket;
 
 pub const Error = std.mem.Allocator.Error || error{
     InvalidCapacity,

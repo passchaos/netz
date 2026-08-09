@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const quic = @import("../../mod.zig");
-const codec = @import("codec.zig");
+const codec = @import("vail").tls.ticket;
 const keyring = @import("keyring.zig");
 const store = @import("store.zig");
 

@@ -6,7 +6,7 @@
 //! across application security contexts without storing every issued ticket.
 
 const std = @import("std");
-const codec = @import("codec.zig");
+const codec = @import("vail").tls.ticket;
 
 const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
 pub const key_len = Aes256Gcm.key_length;
