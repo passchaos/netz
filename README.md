@@ -123,9 +123,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   address-validation token helpers for Retry/NEW_TOKEN with lifetime, version,
   peer-address binding, Retry ODCID/RSCID binding, secret rotation, replay
   filtering, Retry datagram issue/validate helpers, client-side Retry
-  processing that enforces one-Retry/early-Retry rules and prepares retried
-  Initial inputs, plus server-side retried Initial token/transport-parameter
-  validation hooks, minimal TLS
+  processing that enforces one-Retry/early-Retry rules, automatically resends
+  the exact ClientHello under Retry-derived Initial keys, ignores invalid Retry
+  injection, suppresses 0-RTT replay, plus server-side retried Initial
+  token/transport-parameter validation hooks, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
   protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
   packet server/client Finished flights, and handshake/application secret

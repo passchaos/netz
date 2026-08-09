@@ -55,6 +55,10 @@ pub const SendFn = *const fn (
     retransmission: u8,
 ) anyerror!void;
 pub const AcceptFn = *const fn (datagram: []const u8) bool;
+pub const AcceptContextFn = *const fn (
+    context: *anyopaque,
+    datagram: []const u8,
+) bool;
 
 fn acceptAny(_: []const u8) bool {
     return true;
@@ -119,6 +123,56 @@ pub fn sendAndReceiveMatching(
                     else => |other| return @errorCast(other),
                 };
             if (accept_fn(datagram.bytes)) return datagram;
+            datagram.deinit(endpoint.allocator);
+        }
+    }
+}
+
+/// Context-aware counterpart for response classifiers that must validate
+/// connection-specific metadata before a datagram can advance the handshake.
+///
+/// QUIC Retry is the motivating case: integrity validation depends on the
+/// original DCID and the packet must be addressed to this attempt's Initial
+/// SCID. Invalid Retry datagrams are ignored inside the current PTO window
+/// rather than being surfaced as a fatal handshake response.
+pub fn sendAndReceiveMatchingContext(
+    endpoint: *quic.runtime.Endpoint,
+    config: Config,
+    context: *anyopaque,
+    send_fn: SendFn,
+    accept_context: *anyopaque,
+    accept_fn: AcceptContextFn,
+) Error!quic.runtime.OwnedBytes {
+    try config.validate();
+    var retransmission: u8 = 0;
+    var transmitted: u8 = 0;
+    while (true) {
+        const drop = if (config.should_drop) |should_drop|
+            should_drop(retransmission)
+        else
+            false;
+        if (!drop) {
+            send_fn(context, transmitted) catch
+                return error.HandshakeSendFailed;
+            transmitted +|= 1;
+        }
+        const deadline = config.timeout(retransmission).toDeadline(
+            endpoint.io,
+        );
+        while (true) {
+            var datagram = endpoint.receiveBytesTimeout(deadline) catch |err|
+                switch (err) {
+                    error.Timeout => {
+                        if (retransmission == config.max_retries) {
+                            return error.HandshakeTimeout;
+                        }
+                        retransmission += 1;
+                        break;
+                    },
+                    error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
+                    else => |other| return @errorCast(other),
+                };
+            if (accept_fn(accept_context, datagram.bytes)) return datagram;
             datagram.deinit(endpoint.allocator);
         }
     }

@@ -49,6 +49,16 @@ pub const ProcessOptions = struct {
     server_initial_processed: bool = false,
 };
 
+pub const ValidateClientPacketOptions = struct {
+    version: quic.Version = .version_1,
+    original_destination_connection_id: []const u8,
+    initial_source_connection_id: []const u8,
+};
+
+pub const ClientRetryPacket = struct {
+    packet: quic.RetryPacket,
+};
+
 pub const ValidatedRetry = struct {
     /// Parsed packet metadata.  Slices borrow from the datagram passed to
     /// validate()/validateAnySecret(); keep that datagram alive while reading
@@ -240,12 +250,12 @@ pub fn processClient(
     if (options.server_initial_processed) return error.InitialAlreadyProcessed;
     if (options.retry_already_processed or base_options.retry_source_connection_id.len != 0) return error.RetryAlreadyProcessed;
 
-    if (!try quic.verifyRetryIntegrityTag(allocator, options.original_destination_connection_id, datagram)) return error.InvalidToken;
-    const packet = try quic.parseRetryPacket(datagram);
-    if (packet.version != options.version.wireValue()) return error.InvalidToken;
-    if (!std.mem.eql(u8, packet.destination_connection_id, options.initial_source_connection_id)) return error.InvalidToken;
-    if (std.mem.eql(u8, packet.source_connection_id, options.original_destination_connection_id)) return error.InvalidToken;
-    try validateClientConnectionId(packet.source_connection_id, true);
+    const validated = try validateClientPacket(allocator, .{
+        .version = options.version,
+        .original_destination_connection_id = options.original_destination_connection_id,
+        .initial_source_connection_id = options.initial_source_connection_id,
+    }, datagram);
+    const packet = validated.packet;
 
     const owned_token = try allocator.dupe(u8, packet.token);
     errdefer allocator.free(owned_token);
@@ -269,6 +279,50 @@ pub fn processClient(
         .retry_initial_secrets = retry_initial_secrets,
         .retry_client_options = retry_options,
     };
+}
+
+/// Validate the client-visible Retry invariants that do not require decoding
+/// the opaque server token. The token's authenticity and address binding are
+/// checked by the server when the retried Initial returns.
+pub fn validateClientPacket(
+    allocator: std.mem.Allocator,
+    options: ValidateClientPacketOptions,
+    datagram: []const u8,
+) Error!ClientRetryPacket {
+    if (options.version == .negotiation) {
+        return error.InvalidVersionNegotiation;
+    }
+    try validateClientConnectionId(
+        options.original_destination_connection_id,
+        false,
+    );
+    try validateClientConnectionId(
+        options.initial_source_connection_id,
+        false,
+    );
+    if (!try quic.verifyRetryIntegrityTag(
+        allocator,
+        options.original_destination_connection_id,
+        datagram,
+    )) return error.InvalidToken;
+    const packet = try quic.parseRetryPacket(datagram);
+    if (packet.token.len == 0 or
+        packet.version != options.version.wireValue() or
+        !std.mem.eql(
+            u8,
+            packet.destination_connection_id,
+            options.initial_source_connection_id,
+        ) or
+        std.mem.eql(
+            u8,
+            packet.source_connection_id,
+            options.original_destination_connection_id,
+        ))
+    {
+        return error.InvalidToken;
+    }
+    try validateClientConnectionId(packet.source_connection_id, true);
+    return .{ .packet = packet };
 }
 
 fn validateClientConnectionId(cid: []const u8, require_non_empty: bool) Error!void {

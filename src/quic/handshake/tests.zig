@@ -1007,6 +1007,381 @@ test "QUIC integrated handshake succeeds after validated Retry" {
     try std.testing.expectEqualStrings("RETRIED", response.frames[0].stream.data);
 }
 
+test "QUIC integrated client automatically processes one valid Retry" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = "autoretry";
+    const client_cid = "client";
+    const retry_scid = "retry";
+    const server_cid = "server";
+    const secret: quic.address_validation_token.Secret =
+        [_]u8{0xa1} ** quic.address_validation_token.secret_len;
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var first = try receiveClientInitialForTest(
+                shared.endpoint,
+                0,
+                4096,
+                &.{},
+                .version_1,
+            );
+            defer first.deinit(shared.endpoint.allocator);
+            const retry = try quic.retry_flow.issue(
+                shared.endpoint.allocator,
+                .{
+                    .original_destination_connection_id = first.packet.destination_connection_id,
+                    .client_source_connection_id = first.packet.source_connection_id,
+                    .retry_source_connection_id = retry_scid,
+                    .peer_address = "client-path",
+                    .issued_ns = 1_000,
+                    .lifetime_ns = 5_000,
+                    .nonce = [_]u8{0xa2} **
+                        quic.address_validation_token.nonce_len,
+                    .secret = secret,
+                },
+            );
+            defer shared.endpoint.allocator.free(retry);
+            try shared.endpoint.sendBytes(first.from, retry);
+
+            // accept() now consumes the client's automatically retransmitted
+            // Initial and validates its Retry token/DCID bindings.
+            var established = try handshake.accept(shared.endpoint, .{
+                .local_connection_id = server_cid,
+                .address_validation_secrets = &.{secret},
+                .address_validation_peer = "client-path",
+                .address_validation_now_ns = 1_100,
+                .retry_original_destination_connection_id = original_dcid,
+                .retry_source_connection_id = retry_scid,
+                .random = [_]u8{0xa3} ** 32,
+                .x25519_secret_key = [_]u8{0xa4} ** 32,
+            });
+            defer established.deinit();
+            var request = try established.connection.receivePacket();
+            defer request.deinit(shared.endpoint.allocator);
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = original_dcid,
+            .local_connection_id = client_cid,
+            .random = [_]u8{0xa5} ** 32,
+            .x25519_secret_key = [_]u8{0xa6} ** 32,
+        },
+    );
+    defer established.deinit();
+    try established.connection.send(&.{.{ .ping = {} }});
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "QUIC automatic Retry suppresses replayed 0-RTT but resumes PSK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = "retry0rt";
+    const client_cid = "client";
+    const retry_scid = "retry";
+    const ticket = "retry-ticket";
+    const psk = [_]u8{0xc1} ** 32;
+    const secret: quic.address_validation_token.Secret =
+        [_]u8{0xc2} ** quic.address_validation_token.secret_len;
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = "localhost:443",
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1_000,
+        .lifetime_seconds = 3_600,
+        .age_add = 0,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var lease = (try cache.beginEarlyData(
+        "localhost:443",
+        "h3",
+        1_100,
+    )).?;
+    defer lease.deinit();
+    var replay_filter = try quic.zero_rtt.ReplayFilter.init(
+        allocator,
+        io,
+        8,
+    );
+    defer replay_filter.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        replay_filter: *quic.zero_rtt.ReplayFilter,
+        err: ?anyerror = null,
+        resumed: bool = false,
+        status: quic.zero_rtt.handshake.Status = .not_offered,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var first = try receiveClientInitialForTest(
+                shared.endpoint,
+                0,
+                4096,
+                &.{},
+                .version_1,
+            );
+            defer first.deinit(shared.endpoint.allocator);
+            // Initial and 0-RTT are separate datagrams. Consume the original
+            // 0-RTT packet before Retry; the client must suppress a second one.
+            var original_zero_rtt = try shared.endpoint.receiveBytes();
+            defer original_zero_rtt.deinit(shared.endpoint.allocator);
+            const zero_rtt_info =
+                try quic.protection.peekProtectedLongPacketInfo(
+                    original_zero_rtt.bytes,
+                );
+            try std.testing.expectEqual(
+                quic.protection.ProtectedLongPacketType.zero_rtt,
+                zero_rtt_info.packet_type,
+            );
+            const retry = try quic.retry_flow.issue(
+                shared.endpoint.allocator,
+                .{
+                    .original_destination_connection_id = first.packet.destination_connection_id,
+                    .client_source_connection_id = first.packet.source_connection_id,
+                    .retry_source_connection_id = retry_scid,
+                    .peer_address = "client-path",
+                    .issued_ns = 1_000,
+                    .lifetime_ns = 5_000,
+                    .nonce = [_]u8{0xc3} **
+                        quic.address_validation_token.nonce_len,
+                    .secret = secret,
+                },
+            );
+            defer shared.endpoint.allocator.free(retry);
+            try shared.endpoint.sendBytes(first.from, retry);
+
+            var established = try handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .address_validation_secrets = &.{secret},
+                .address_validation_peer = "client-path",
+                .address_validation_now_ns = 1_100,
+                .retry_original_destination_connection_id = original_dcid,
+                .retry_source_connection_id = retry_scid,
+                .psk = .{
+                    .identity = ticket,
+                    .secret = psk,
+                    .age_add = 0,
+                    .issued_at_ms = 1_000,
+                    .lifetime_seconds = 3_600,
+                    .now_ms = 1_100,
+                },
+                .early_data = .{
+                    .accept = true,
+                    .replay_filter = shared.replay_filter,
+                    .replay_key = "retry-request",
+                },
+                .random = [_]u8{0xc4} ** 32,
+                .x25519_secret_key = [_]u8{0xc5} ** 32,
+            });
+            defer established.deinit();
+            shared.resumed = established.resumed;
+            shared.status = established.early_data_status;
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .replay_filter = &replay_filter,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const early_frames = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "must-not-replay",
+    } }};
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = original_dcid,
+            .local_connection_id = client_cid,
+            .random = [_]u8{0xc6} ** 32,
+            .x25519_secret_key = [_]u8{0xc7} ** 32,
+            .resumption_now_ms = 1_100,
+            .resumption_server_id = "localhost:443",
+            .early_data = .{
+                .cache = &cache,
+                .lease = &lease,
+                .frames = &early_frames,
+            },
+        },
+    );
+    defer established.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(established.resumed);
+    try std.testing.expect(shared.resumed);
+    try std.testing.expectEqual(
+        quic.zero_rtt.handshake.Status.rejected,
+        established.early_data_status,
+    );
+    try std.testing.expectEqual(
+        quic.zero_rtt.handshake.Status.rejected,
+        shared.status,
+    );
+    try std.testing.expectEqual(.consumed, lease.state);
+}
+
+test "QUIC integrated client ignores an invalid Retry before a valid Retry" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = "badretry1";
+    const client_cid = "client";
+    const retry_scid = "retry";
+    const secret: quic.address_validation_token.Secret =
+        [_]u8{0xb1} ** quic.address_validation_token.secret_len;
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var first = try receiveClientInitialForTest(
+                shared.endpoint,
+                0,
+                4096,
+                &.{},
+                .version_1,
+            );
+            defer first.deinit(shared.endpoint.allocator);
+            const valid = try quic.retry_flow.issue(
+                shared.endpoint.allocator,
+                .{
+                    .original_destination_connection_id = first.packet.destination_connection_id,
+                    .client_source_connection_id = first.packet.source_connection_id,
+                    .retry_source_connection_id = retry_scid,
+                    .peer_address = "client-path",
+                    .issued_ns = 1_000,
+                    .lifetime_ns = 5_000,
+                    .nonce = [_]u8{0xb2} **
+                        quic.address_validation_token.nonce_len,
+                    .secret = secret,
+                },
+            );
+            defer shared.endpoint.allocator.free(valid);
+            const invalid = try shared.endpoint.allocator.dupe(u8, valid);
+            defer shared.endpoint.allocator.free(invalid);
+            invalid[invalid.len - 1] ^= 1;
+            try shared.endpoint.sendBytes(first.from, invalid);
+            try shared.endpoint.sendBytes(first.from, valid);
+
+            var established = try handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .address_validation_secrets = &.{secret},
+                .address_validation_peer = "client-path",
+                .address_validation_now_ns = 1_100,
+                .retry_original_destination_connection_id = original_dcid,
+                .retry_source_connection_id = retry_scid,
+                .random = [_]u8{0xb3} ** 32,
+                .x25519_secret_key = [_]u8{0xb4} ** 32,
+            });
+            defer established.deinit();
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = original_dcid,
+            .local_connection_id = client_cid,
+            .random = [_]u8{0xb5} ** 32,
+            .x25519_secret_key = [_]u8{0xb6} ** 32,
+        },
+    );
+    established.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "QUIC integrated server rejects invalid first client Initial datagrams" {
     const allocator = std.testing.allocator;
 

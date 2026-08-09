@@ -334,16 +334,17 @@ fn clientInitialDestinationConnectionId(options: ClientOptions) []const u8 {
     return options.original_destination_connection_id;
 }
 
+fn activeRetrySourceConnectionId(
+    options: ClientOptions,
+    automatic_retry_source_connection_id: ?[]u8,
+) []const u8 {
+    if (automatic_retry_source_connection_id) |cid| return cid;
+    return options.retry_source_connection_id;
+}
+
 fn isVersionNegotiationDatagram(bytes: []const u8) bool {
     if (bytes.len < 5 or (bytes[0] & 0x80) == 0) return false;
     return std.mem.readInt(u32, bytes[1..5], .big) == quic.Version.negotiation.wireValue();
-}
-
-fn isServerInitialResponse(bytes: []const u8) bool {
-    if (isVersionNegotiationDatagram(bytes)) return true;
-    const info = quic.protection.peekProtectedLongPacketInfo(bytes) catch
-        return false;
-    return info.packet_type == .initial;
 }
 
 fn isHandshakeDatagram(bytes: []const u8) bool {
@@ -351,6 +352,40 @@ fn isHandshakeDatagram(bytes: []const u8) bool {
         return false;
     return info.packet_type == .handshake;
 }
+
+const InitialResponseFilter = struct {
+    allocator: std.mem.Allocator,
+    version: quic.Version,
+    original_destination_connection_id: []const u8,
+    initial_source_connection_id: []const u8,
+    retry_already_processed: bool,
+
+    fn accept(context: *anyopaque, bytes: []const u8) bool {
+        const self: *const InitialResponseFilter =
+            @ptrCast(@alignCast(context));
+        if (isVersionNegotiationDatagram(bytes)) return true;
+        // Protected Initial type bits are header-protected, so the generic
+        // LongHeader parser cannot reliably classify them. Use the protected
+        // packet peeker first; Retry is the only accepted response here that
+        // remains unprotected.
+        if (quic.protection.peekProtectedLongPacketInfo(bytes)) |info| {
+            return info.version == self.version.wireValue() and
+                info.packet_type == .initial;
+        } else |_| {}
+        if (self.retry_already_processed) return false;
+        const valid = quic.retry_flow.validateClientPacket(
+            self.allocator,
+            .{
+                .version = self.version,
+                .original_destination_connection_id = self.original_destination_connection_id,
+                .initial_source_connection_id = self.initial_source_connection_id,
+            },
+            bytes,
+        ) catch return false;
+        _ = valid;
+        return true;
+    }
+};
 
 const EarlyDataFlight = struct {
     endpoint: *quic.runtime.Endpoint,
@@ -534,88 +569,156 @@ fn connectAttempt(
         }
     }
 
+    var retry_token: ?[]u8 = null;
+    defer if (retry_token) |token| endpoint.allocator.free(token);
+    var retry_source_connection_id: ?[]u8 = null;
+    defer if (retry_source_connection_id) |cid|
+        endpoint.allocator.free(cid);
+    var retry_processed = options.retry_source_connection_id.len != 0;
+    var active_destination_connection_id = initial_destination_connection_id;
+    var active_token = options.address_validation_token;
+    var active_initial_secrets = initial_secrets;
+    var active_initial_packet_number = options.client_initial_packet_number;
+    var send_early_data = options.early_data != null;
     var server_datagram: quic.runtime.OwnedBytes = undefined;
-    if (options.early_data) |early_data| {
-        const keys =
-            try quic.zero_rtt.handshake.clientKeysForSecretAndVersion(
-                options.version.wireValue(),
-                early_data.lease.session.cipher_suite,
-                early_data.lease.session.psk_secret,
-                client_hello.items,
-            );
-        var send_context = EarlyDataFlight{
-            .endpoint = endpoint,
-            .peer = peer,
-            .initial_keys = initial_secrets.client,
-            .initial_options = .{
-                .initial = .{
-                    .version = options.version.wireValue(),
-                    .destination_connection_id = initial_destination_connection_id,
-                    .source_connection_id = options.local_connection_id,
-                    .token = options.address_validation_token,
-                    .packet_number = options.client_initial_packet_number,
-                    .crypto_data = client_hello.items,
-                    .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
-                    .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
-                },
-                .max_datagram_size = endpoint.limits.max_datagram_size,
-            },
-            .zero_rtt_keys = keys.packet,
-            .zero_rtt_options = .{
-                .version = options.version.wireValue(),
-                .destination_connection_id = initial_destination_connection_id,
-                .source_connection_id = options.local_connection_id,
-                .packet_number = 0,
-                .packet_number_len = early_data.packet_number_len,
-                .frames = early_data.frames,
-            },
+
+    while (true) {
+        var response_filter = InitialResponseFilter{
+            .allocator = endpoint.allocator,
+            .version = options.version,
+            .original_destination_connection_id = options.original_destination_connection_id,
+            .initial_source_connection_id = options.local_connection_id,
+            .retry_already_processed = retry_processed,
         };
-        server_datagram = retransmit.sendAndReceiveMatching(
-            endpoint,
-            options.handshake_recovery,
-            &send_context,
-            EarlyDataFlight.send,
-            isServerInitialResponse,
-        ) catch |err| {
-            // A successful coalesced socket write consumes the exclusive
-            // early-data lease even if the peer subsequently rejects the
-            // handshake or the PTO budget expires.
+        if (send_early_data) {
+            const early_data = options.early_data.?;
+            const keys =
+                try quic.zero_rtt.handshake.clientKeysForSecretAndVersion(
+                    options.version.wireValue(),
+                    early_data.lease.session.cipher_suite,
+                    early_data.lease.session.psk_secret,
+                    client_hello.items,
+                );
+            var send_context = EarlyDataFlight{
+                .endpoint = endpoint,
+                .peer = peer,
+                .initial_keys = active_initial_secrets.client,
+                .initial_options = .{
+                    .initial = .{
+                        .version = options.version.wireValue(),
+                        .destination_connection_id = active_destination_connection_id,
+                        .source_connection_id = options.local_connection_id,
+                        .token = active_token,
+                        .packet_number = active_initial_packet_number,
+                        .crypto_data = client_hello.items,
+                        .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+                        .min_datagram_size = quic.initial_exchange
+                            .min_initial_udp_datagram_size,
+                    },
+                    .max_datagram_size = endpoint.limits.max_datagram_size,
+                },
+                .zero_rtt_keys = keys.packet,
+                .zero_rtt_options = .{
+                    .version = options.version.wireValue(),
+                    .destination_connection_id = active_destination_connection_id,
+                    .source_connection_id = options.local_connection_id,
+                    .packet_number = 0,
+                    .packet_number_len = early_data.packet_number_len,
+                    .frames = early_data.frames,
+                },
+            };
+            server_datagram =
+                retransmit.sendAndReceiveMatchingContext(
+                    endpoint,
+                    options.handshake_recovery,
+                    &send_context,
+                    EarlyDataFlight.send,
+                    &response_filter,
+                    InitialResponseFilter.accept,
+                ) catch |err| {
+                    // A successful coalesced socket write consumes the
+                    // exclusive lease even if the peer rejects the handshake.
+                    if (early_data.lease.state == .active) {
+                        early_data.cache.consumeEarlyData(
+                            early_data.lease,
+                        ) catch unreachable;
+                    }
+                    return err;
+                };
             if (early_data.lease.state == .active) {
-                early_data.cache.consumeEarlyData(early_data.lease) catch
-                    unreachable;
+                early_data.cache.consumeEarlyData(
+                    early_data.lease,
+                ) catch unreachable;
             }
-            return err;
-        };
-        if (early_data.lease.state == .active) {
-            early_data.cache.consumeEarlyData(early_data.lease) catch
-                unreachable;
-        }
-    } else {
-        var send_context = retransmit.InitialFlight{
-            .endpoint = endpoint,
-            .peer = peer,
-            .keys = initial_secrets.client,
-            .options = .{
-                .initial = .{
-                    .version = options.version.wireValue(),
-                    .destination_connection_id = initial_destination_connection_id,
-                    .source_connection_id = options.local_connection_id,
-                    .token = options.address_validation_token,
-                    .packet_number = options.client_initial_packet_number,
-                    .crypto_data = client_hello.items,
-                    .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
-                    .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+        } else {
+            var send_context = retransmit.InitialFlight{
+                .endpoint = endpoint,
+                .peer = peer,
+                .keys = active_initial_secrets.client,
+                .options = .{
+                    .initial = .{
+                        .version = options.version.wireValue(),
+                        .destination_connection_id = active_destination_connection_id,
+                        .source_connection_id = options.local_connection_id,
+                        .token = active_token,
+                        .packet_number = active_initial_packet_number,
+                        .crypto_data = client_hello.items,
+                        .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+                        .min_datagram_size = quic.initial_exchange
+                            .min_initial_udp_datagram_size,
+                    },
+                    .max_datagram_size = endpoint.limits.max_datagram_size,
                 },
-                .max_datagram_size = endpoint.limits.max_datagram_size,
+            };
+            server_datagram =
+                try retransmit.sendAndReceiveMatchingContext(
+                    endpoint,
+                    options.handshake_recovery,
+                    &send_context,
+                    retransmit.InitialFlight.send,
+                    &response_filter,
+                    InitialResponseFilter.accept,
+                );
+        }
+
+        const header = quic.LongHeader.parse(
+            server_datagram.bytes,
+        ) catch break;
+        if (header.packet_type != .retry) break;
+        const processed = quic.retry_flow.processClient(
+            endpoint.allocator,
+            .{
+                .version = options.version,
+                .original_destination_connection_id = options.original_destination_connection_id,
+                .initial_source_connection_id = options.local_connection_id,
+                .retry_already_processed = retry_processed,
             },
+            server_datagram.bytes,
+            options,
+        ) catch |err| switch (err) {
+            error.InvalidToken,
+            error.TokenExpired,
+            error.TokenNotYetValid,
+            error.TokenReplay,
+            error.RetryAlreadyProcessed,
+            error.InitialAlreadyProcessed,
+            => return error.InvalidHandshakeFlight,
+            else => |other| return @errorCast(other),
         };
-        server_datagram = try retransmit.sendAndReceiveMatching(
-            endpoint,
-            options.handshake_recovery,
-            &send_context,
-            retransmit.InitialFlight.send,
-            isServerInitialResponse,
-        );
+        server_datagram.deinit(endpoint.allocator);
+
+        retry_token = processed.token;
+        retry_source_connection_id =
+            processed.retry_source_connection_id;
+        active_destination_connection_id =
+            retry_source_connection_id.?;
+        active_token = retry_token.?;
+        active_initial_secrets = processed.retry_initial_secrets;
+        active_initial_packet_number = 0;
+        retry_processed = true;
+        // RFC 9001 §4.6 forbids replaying 0-RTT after Retry. PSK resumption
+        // continues with the exact same ClientHello/binder bytes.
+        send_early_data = false;
     }
     defer server_datagram.deinit(endpoint.allocator);
     if (isVersionNegotiationDatagram(server_datagram.bytes)) {
@@ -625,7 +728,7 @@ fn connectAttempt(
             .original_destination_connection_id = options.original_destination_connection_id,
             .initial_source_connection_id = options.local_connection_id,
             .initial_sent = true,
-            .retry_processed = options.retry_source_connection_id.len != 0,
+            .retry_processed = retry_processed,
             .version_negotiation_processed = version_negotiation_processed,
         }, server_datagram.bytes)) orelse return error.InvalidHandshakeFlight;
         defer negotiated.deinit(endpoint.allocator);
@@ -646,7 +749,7 @@ fn connectAttempt(
             endpoint,
             server_datagram.from,
             server_datagram.bytes[0..server_initial_info.len],
-            initial_secrets.server,
+            active_initial_secrets.server,
             .{
                 .expected_packet_number = 0,
                 .max_crypto_buffer = options.max_crypto_buffer,
@@ -731,21 +834,27 @@ fn connectAttempt(
         peer_transport_parameters,
         server_initial.packet.source_connection_id,
         options.original_destination_connection_id,
-        options.retry_source_connection_id,
+        activeRetrySourceConnectionId(
+            options,
+            retry_source_connection_id,
+        ),
         options.version,
         options.available_versions,
         version_negotiation_processed,
     );
-    const early_data_status = try quic.zero_rtt.handshake.validateClientAcceptance(
-        offer_early_data,
-        parsed_server.selected_psk,
-        encrypted_extensions.early_data_accepted,
-        if (options.early_data) |early_data|
-            early_data.lease.session.transport_parameters
-        else
-            quic.resumption.Snapshot.fromTransportParameters(.{}),
-        peer_transport_parameters,
-    );
+    const early_data_status = if (offer_early_data and retry_processed)
+        quic.zero_rtt.handshake.Status.rejected
+    else
+        try quic.zero_rtt.handshake.validateClientAcceptance(
+            offer_early_data,
+            parsed_server.selected_psk,
+            encrypted_extensions.early_data_accepted,
+            if (options.early_data) |early_data|
+                early_data.lease.session.transport_parameters
+            else
+                quic.resumption.Snapshot.fromTransportParameters(.{}),
+            peer_transport_parameters,
+        );
     if (parsed_server.selected_psk) {
         if (server_flight.certificate != null or
             server_flight.certificate_verify != null)
@@ -965,10 +1074,12 @@ fn connectAttempt(
     );
     errdefer established.deinit();
     if (options.early_data) |early_data| {
-        try established.connection.importSentEarlyData(
-            0,
-            early_data.frames,
-        );
+        if (!retry_processed) {
+            try established.connection.importSentEarlyData(
+                0,
+                early_data.frames,
+            );
+        }
     }
     return established;
 }
@@ -1125,6 +1236,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                 selected_psk = configured_secret;
                 const early_data_policy = options.early_data;
                 if (client_offered_early_data and
+                    options.retry_source_connection_id.len == 0 and
                     early_data_policy != null and
                     early_data_policy.?.accept and
                     configured_psk.cipher_suite == cipher_suite)
@@ -1180,6 +1292,16 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                 client_initial.packet.destination_connection_id,
                 client_initial.packet.source_connection_id,
             );
+        }
+    } else if (client_offered_early_data and
+        options.retry_source_connection_id.len != 0)
+    {
+        // The ClientHello is byte-for-byte identical across Retry and can
+        // still carry early_data, but RFC 9001 §4.6 forbids sending another
+        // 0-RTT packet. Do not block waiting for a packet that a conforming
+        // client must suppress.
+        if (client_initial.coalesced_tail.len != 0) {
+            return error.InvalidHandshakeFlight;
         }
     } else if (client_offered_early_data) {
         try discardClientEarlyData(
