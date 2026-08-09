@@ -1,4 +1,5 @@
 const std = @import("std");
+const vail = @import("vail");
 const varint = @import("varint.zig");
 const wire = @import("../internal/wire.zig");
 
@@ -13,18 +14,18 @@ pub const initial_salt_v2 = [_]u8{
 };
 
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
-const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+const traffic_crypto = vail.quic.traffic_crypto;
 
 const version_1_wire: u32 = 0x00000001;
 const version_2_wire: u32 = 0x6b3343cf;
 
 pub const secret_len = HkdfSha256.prk_length;
-pub const aes_128_key_len = Aes128Gcm.key_length;
-pub const iv_len = Aes128Gcm.nonce_length;
+pub const aes_128_key_len = 16;
+pub const iv_len = traffic_crypto.iv_len;
 pub const hp_key_len = aes_128_key_len;
-pub const aead_tag_len = Aes128Gcm.tag_length;
-pub const header_protection_sample_len = 16;
-pub const header_protection_mask_len = 5;
+pub const aead_tag_len = traffic_crypto.tag_len;
+pub const header_protection_sample_len = traffic_crypto.sample_len;
+pub const header_protection_mask_len = traffic_crypto.mask_len;
 pub const max_packet_number: u64 = varint.max_value;
 /// RFC 9001 Section 6.6 / Appendix B.1 limits for AEAD_AES_128_GCM.
 pub const aes_128_gcm_confidentiality_limit: u64 = @as(u64, 1) << 23;
@@ -359,11 +360,20 @@ pub fn deriveAes128KeysForVersion(version: u32, secret: [secret_len]u8) VersionE
 }
 
 fn deriveAes128KeysWithLabels(secret: [secret_len]u8, labels: HkdfLabels) PacketProtectionKeys {
+    const derived = traffic_crypto.Keys.derive(
+        .aes_128_gcm_sha256,
+        secret,
+        .{
+            .key = labels.key,
+            .iv = labels.iv,
+            .hp = labels.hp,
+        },
+    );
     return .{
         .secret = secret,
-        .key = hkdfExpandLabel(secret, labels.key, aes_128_key_len),
-        .iv = hkdfExpandLabel(secret, labels.iv, iv_len),
-        .hp = hkdfExpandLabel(secret, labels.hp, hp_key_len),
+        .key = derived.key[0..aes_128_key_len].*,
+        .iv = derived.iv,
+        .hp = derived.hp[0..hp_key_len].*,
     };
 }
 
@@ -397,20 +407,16 @@ pub fn hkdfExpandLabel(secret: [secret_len]u8, label: []const u8, comptime len: 
 }
 
 pub fn packetProtectionNonce(iv: [iv_len]u8, packet_number: u64) [iv_len]u8 {
-    var nonce = iv;
-    var packet_number_bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &packet_number_bytes, packet_number, .big);
-    for (packet_number_bytes, 0..) |byte, i| {
-        nonce[iv_len - packet_number_bytes.len + i] ^= byte;
-    }
-    return nonce;
+    return traffic_crypto.packetNonce(iv, packet_number);
 }
 
 pub fn aes128HeaderProtectionMask(hp_key: [hp_key_len]u8, sample: [header_protection_sample_len]u8) [header_protection_mask_len]u8 {
-    const aes = std.crypto.core.aes.Aes128.initEnc(hp_key);
-    var encrypted: [header_protection_sample_len]u8 = undefined;
-    aes.encrypt(&encrypted, &sample);
-    return encrypted[0..header_protection_mask_len].*;
+    return asVailKeys(.{
+        .secret = [_]u8{0} ** secret_len,
+        .key = [_]u8{0} ** aes_128_key_len,
+        .iv = [_]u8{0} ** iv_len,
+        .hp = hp_key,
+    }).headerProtectionMask(sample);
 }
 
 pub fn applyHeaderProtectionMask(
@@ -439,9 +445,13 @@ pub fn protectAes128Payload(
     tag: *[aead_tag_len]u8,
 ) Error!void {
     try validatePacketNumber(packet_number);
-    if (ciphertext.len != plaintext.len) return error.InvalidPayloadLength;
-    const nonce = packetProtectionNonce(keys.iv, packet_number);
-    Aes128Gcm.encrypt(ciphertext, tag, plaintext, associated_data, nonce, keys.key);
+    try asVailKeys(keys).protect(
+        packet_number,
+        associated_data,
+        plaintext,
+        ciphertext,
+        tag,
+    );
 }
 
 pub fn openAes128Payload(
@@ -453,9 +463,27 @@ pub fn openAes128Payload(
     plaintext: []u8,
 ) Error!void {
     try validatePacketNumber(packet_number);
-    if (plaintext.len != ciphertext.len) return error.InvalidPayloadLength;
-    const nonce = packetProtectionNonce(keys.iv, packet_number);
-    try Aes128Gcm.decrypt(plaintext, ciphertext, tag, associated_data, nonce, keys.key);
+    try asVailKeys(keys).open(
+        packet_number,
+        associated_data,
+        ciphertext,
+        tag,
+        plaintext,
+    );
+}
+
+fn asVailKeys(keys: PacketProtectionKeys) traffic_crypto.Keys {
+    var key = [_]u8{0} ** traffic_crypto.max_key_len;
+    key[0..aes_128_key_len].* = keys.key;
+    var hp = [_]u8{0} ** traffic_crypto.max_key_len;
+    hp[0..hp_key_len].* = keys.hp;
+    return .{
+        .suite = .aes_128_gcm_sha256,
+        .secret = keys.secret,
+        .key = key,
+        .iv = keys.iv,
+        .hp = hp,
+    };
 }
 
 pub fn packetNumberLen(packet_number: u64, largest_acknowledged: ?u64) u8 {

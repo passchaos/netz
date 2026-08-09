@@ -179,6 +179,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   retains their QUIC wire formats, lifetimes, replay policy, and key rotation,
   and Vail secure-memory/SHA-256 helpers for ticket caches and replay filters
   while netz retains cache eviction and single-use policy,
+  with existing AES-128-GCM traffic key derivation, nonce construction, AEAD,
+  and header-protection execution delegated to Vail behind source-compatible
+  QUIC packet APIs,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,
