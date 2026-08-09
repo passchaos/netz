@@ -303,6 +303,12 @@ pub const ControlState = struct {
     local_goaway_id: ?u64 = null,
     peer_max_push_id: ?u64 = null,
     local_max_push_id: ?u64 = null,
+    /// Most recent peer CANCEL_PUSH identifier.
+    ///
+    /// The full push runtime owns per-ID terminal state; retaining the latest
+    /// control value here lets the shared control-stream parser validate roles
+    /// and exposes cancellation even before a push stream is instantiated.
+    peer_cancelled_push_id: ?u64 = null,
     peer_control_stream_id: ?u64 = null,
     latest_priority_update: ?PriorityUpdatePayload = null,
     priority_update_storage: ?[]u8 = null,
@@ -421,7 +427,10 @@ pub const ControlState = struct {
                 }
                 self.peer_max_push_id = push_id;
             },
-            FrameType.cancel_push => _ = try parseSingleVarintPayload(frame.payload),
+            FrameType.cancel_push => {
+                self.peer_cancelled_push_id =
+                    try parseSingleVarintPayload(frame.payload);
+            },
             FrameType.priority_update_request => {
                 const priority_update = try parsePriorityUpdatePayload(frame.payload);
                 try validateRequestStreamId(priority_update.prioritized_element_id);
@@ -4396,6 +4405,12 @@ test "HTTP/3 push control frames and state" {
     try writeMaxPushIdFrame(&reduced, allocator, 1);
     const reduced_frame = try Frame.parse(reduced.items);
     try std.testing.expectError(error.MaxPushIdReduced, peer_control.applyFrame(allocator, reduced_frame));
+
+    try peer_control.applyFrame(allocator, cancel_frame);
+    try std.testing.expectEqual(
+        @as(?u64, 7),
+        peer_control.peer_cancelled_push_id,
+    );
 }
 
 test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
