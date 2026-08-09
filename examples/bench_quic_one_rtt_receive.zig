@@ -111,7 +111,15 @@ fn measure(
 
         const started = nowNs(io);
         if (enable_gro) {
-            if (try server.servicePacketBatchAt(started) != batch_size) {
+            var received = try server.receivePacketBatchAt(started);
+            defer received.deinit();
+            var consumed: usize = 0;
+            while (received.takeNext()) |packet_value| {
+                var packet = packet_value;
+                packet.deinit(allocator);
+                consumed += 1;
+            }
+            if (consumed != batch_size) {
                 return error.UnexpectedPacketCount;
             }
         } else {

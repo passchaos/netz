@@ -101,11 +101,29 @@ pub const ReceivedPacket = struct {
 pub const ReceivedPacketBatch = struct {
     allocator: std.mem.Allocator,
     packets: []ReceivedPacket,
+    next_index: usize = 0,
 
     pub fn deinit(self: *ReceivedPacketBatch) void {
-        for (self.packets) |*packet| packet.deinit(self.allocator);
+        for (self.packets[self.next_index..]) |*packet| {
+            packet.deinit(self.allocator);
+        }
         self.allocator.free(self.packets);
         self.* = undefined;
+    }
+
+    pub fn remaining(self: ReceivedPacketBatch) usize {
+        return self.packets.len - self.next_index;
+    }
+
+    /// Transfer one packet out of the owning GRO batch.
+    ///
+    /// HTTP/3 uses this cursor to amortize one kernel receive/decryption batch
+    /// while routing only one packet at a time into bounded stream windows.
+    pub fn takeNext(self: *ReceivedPacketBatch) ?ReceivedPacket {
+        if (self.next_index == self.packets.len) return null;
+        const packet = self.packets[self.next_index];
+        self.next_index += 1;
+        return packet;
     }
 };
 
@@ -4399,6 +4417,11 @@ test "QUIC 1-RTT connection receives a UDP GRO packet batch" {
     try std.testing.expectEqual(@as(u64, 1), received.packets[1].packet.packet_number);
     try std.testing.expect(received.packets[0].frames[0] == .ping);
     try std.testing.expect(received.packets[1].frames[0] == .ping);
+    try std.testing.expectEqual(@as(usize, 2), received.remaining());
+    var taken = received.takeNext() orelse return error.TestUnexpectedResult;
+    defer taken.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), taken.packet.packet_number);
+    try std.testing.expectEqual(@as(usize, 1), received.remaining());
 
     const ack = try server.received.ackFrame(allocator, 0);
     defer allocator.free(ack.ranges);

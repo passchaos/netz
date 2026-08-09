@@ -120,6 +120,138 @@ const ProtectedSendState = struct {
     }
 };
 
+/// Lazily drains one QUIC/GRO receive batch a packet at a time.
+///
+/// HTTP/3 stream readers intentionally observe only one packet before returning
+/// control to the application. Retaining the unconsumed suffix here preserves
+/// bounded DATA windows while still amortizing the kernel receive and QUIC
+/// decryption work across all GRO segments.
+const ConnectionPacketCursor = struct {
+    batch: ?quic.one_rtt.ReceivedPacketBatch = null,
+
+    fn deinit(self: *ConnectionPacketCursor) void {
+        if (self.batch) |*batch| batch.deinit();
+        self.* = undefined;
+    }
+
+    fn take(
+        self: *ConnectionPacketCursor,
+        connection: *quic.one_rtt.Connection,
+    ) Error!quic.one_rtt.ReceivedPacket {
+        if (self.batch) |*batch| {
+            if (batch.takeNext()) |packet| return packet;
+            batch.deinit();
+            self.batch = null;
+        }
+        if (!connection.endpoint.groReceiveEnabled()) {
+            return connection.receivePacket();
+        }
+        var batch = try connection.receivePacketBatch();
+        errdefer batch.deinit();
+        const packet = batch.takeNext() orelse return error.MissingStreamFrame;
+        self.batch = batch;
+        return packet;
+    }
+};
+
+/// Stateless-key counterpart used by the preconfigured protected runtime.
+const ProtectedPacketCursor = struct {
+    const Batch = struct {
+        allocator: std.mem.Allocator,
+        packets: []quic.one_rtt.ReceivedPacket,
+        next_index: usize = 0,
+
+        fn deinit(self: *Batch) void {
+            for (self.packets[self.next_index..]) |*packet| {
+                packet.deinit(self.allocator);
+            }
+            self.allocator.free(self.packets);
+            self.* = undefined;
+        }
+
+        fn takeNext(self: *Batch) ?quic.one_rtt.ReceivedPacket {
+            if (self.next_index == self.packets.len) return null;
+            const packet = self.packets[self.next_index];
+            self.next_index += 1;
+            return packet;
+        }
+    };
+
+    batch: ?Batch = null,
+
+    fn deinit(self: *ProtectedPacketCursor) void {
+        if (self.batch) |*batch| batch.deinit();
+        self.* = undefined;
+    }
+
+    fn take(
+        self: *ProtectedPacketCursor,
+        endpoint: *quic.runtime.Endpoint,
+        keys: quic.protection.PacketProtectionKeys,
+        destination_connection_id_len: usize,
+        expected_packet_number: *u64,
+        max_frames: usize,
+    ) Error!quic.one_rtt.ReceivedPacket {
+        if (self.batch) |*batch| {
+            if (batch.takeNext()) |packet| {
+                expected_packet_number.* = packet.packet.packet_number + 1;
+                return packet;
+            }
+            batch.deinit();
+            self.batch = null;
+        }
+
+        if (!endpoint.groReceiveEnabled()) {
+            const packet = try quic.one_rtt.receive(
+                endpoint,
+                keys,
+                destination_connection_id_len,
+                expected_packet_number.*,
+                max_frames,
+            );
+            expected_packet_number.* = packet.packet.packet_number + 1;
+            return packet;
+        }
+        var datagrams = try endpoint.receiveBytesBatch();
+        defer datagrams.deinit(endpoint.allocator);
+        const packets = try endpoint.allocator.alloc(
+            quic.one_rtt.ReceivedPacket,
+            datagrams.segment_count,
+        );
+        var completed: usize = 0;
+        errdefer {
+            for (packets[0..completed]) |*packet| {
+                packet.deinit(endpoint.allocator);
+            }
+            endpoint.allocator.free(packets);
+        }
+        var next_expected = expected_packet_number.*;
+        for (packets, 0..) |*packet, index| {
+            const bytes = datagrams.datagramAt(index) orelse
+                return error.InvalidPacket;
+            packet.* = try quic.one_rtt.openReceivedBytes(
+                endpoint,
+                datagrams.from,
+                bytes,
+                keys,
+                destination_connection_id_len,
+                next_expected,
+                max_frames,
+            );
+            next_expected = packet.packet.packet_number + 1;
+            completed += 1;
+        }
+        var batch = Batch{
+            .allocator = endpoint.allocator,
+            .packets = packets,
+        };
+        const packet = batch.takeNext() orelse return error.MissingStreamFrame;
+        expected_packet_number.* = packet.packet.packet_number + 1;
+        self.batch = batch;
+        return packet;
+    }
+};
+
 pub const Limits = struct {
     quic: quic.runtime.Limits = .{},
     /// Maximum bytes buffered while reassembling one HTTP/3 request/response
@@ -1572,11 +1704,13 @@ pub const HandshakeServerSession = struct {
     qpack_decoder_prefix_sent: bool = false,
     request_streams: RequestStreamSet,
     streaming_requests: StreamingRequestSet,
+    receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ServerRequestLifecycle,
     outbound_bodies: OutboundBodySet,
 
     pub fn deinit(self: *HandshakeServerSession) void {
         self.outbound_bodies.deinit();
+        self.receive_packets.deinit();
         self.control.deinit(self.established.connection.endpoint.allocator);
         self.request_lifecycle.deinit();
         self.streaming_requests.deinit();
@@ -1593,6 +1727,7 @@ pub const HandshakeServerSession = struct {
         }
         const assembled = receiveConnectionRequestStreamBytes(
             &self.established.connection,
+            &self.receive_packets,
             self.options,
             &self.control,
             &self.qpack_decode,
@@ -1871,7 +2006,9 @@ pub const HandshakeServerSession = struct {
     }
 
     fn receiveRequestPacket(self: *HandshakeServerSession) Error!void {
-        var packet = try self.established.connection.receivePacket();
+        var packet = try self.receive_packets.take(
+            &self.established.connection,
+        );
         defer packet.deinit(
             self.established.connection.endpoint.allocator,
         );
@@ -1943,6 +2080,7 @@ pub const HandshakeClient = struct {
     qpack_decoder_prefix_sent: bool = false,
     response_streams: ResponseStreamSet,
     streaming_responses: StreamingResponseSet,
+    receive_packets: ConnectionPacketCursor = .{},
     request_lifecycle: ClientRequestLifecycle,
     outbound_bodies: OutboundBodySet,
     next_stream_id: u62 = 0,
@@ -2003,6 +2141,7 @@ pub const HandshakeClient = struct {
 
     pub fn deinit(self: *HandshakeClient) void {
         self.outbound_bodies.deinit();
+        self.receive_packets.deinit();
         self.streaming_responses.deinit();
         self.request_lifecycle.deinit();
         self.response_streams.deinit();
@@ -2159,6 +2298,7 @@ pub const HandshakeClient = struct {
         }
         const assembled = receiveConnectionResponseStreamBytes(
             &self.established.connection,
+            &self.receive_packets,
             stream_id,
             self.options,
             &self.control,
@@ -2226,6 +2366,7 @@ pub const HandshakeClient = struct {
             }
             try receiveConnectionResponsePacket(
                 &self.established.connection,
+                &self.receive_packets,
                 &self.control,
                 &self.qpack_decode,
                 &self.qpack_encode,
@@ -2268,6 +2409,7 @@ pub const HandshakeClient = struct {
         }
         try receiveConnectionResponsePacket(
             &self.established.connection,
+            &self.receive_packets,
             &self.control,
             &self.qpack_decode,
             &self.qpack_encode,
@@ -2469,6 +2611,7 @@ pub const ProtectedServer = struct {
     protected_send: ProtectedSendState,
     request_streams: RequestStreamSet,
     streaming_requests: StreamingRequestSet,
+    receive_packets: ProtectedPacketCursor = .{},
     request_lifecycle: ServerRequestLifecycle,
     outbound_bodies: OutboundBodySet,
     next_packet_number: u64 = 0,
@@ -2517,6 +2660,7 @@ pub const ProtectedServer = struct {
 
     pub fn deinit(self: *ProtectedServer) void {
         self.outbound_bodies.deinit();
+        self.receive_packets.deinit();
         self.control.deinit(self.quic_server.endpoint.allocator);
         self.request_lifecycle.deinit();
         self.streaming_requests.deinit();
@@ -2881,15 +3025,14 @@ pub const ProtectedServer = struct {
         )) |ready| return ready;
 
         while (true) {
-            var packet = try quic.one_rtt.receive(
+            var packet = try self.receive_packets.take(
                 &self.quic_server.endpoint,
                 self.config.receive_keys,
                 self.config.local_connection_id.len,
-                self.expected_packet_number,
+                &self.expected_packet_number,
                 self.config.max_frames_per_packet,
             );
             defer packet.deinit(self.quic_server.endpoint.allocator);
-            self.expected_packet_number = packet.packet.packet_number + 1;
             if (try applyServerRequestPacketFrames(
                 packet.from,
                 packet.frames,
@@ -2913,15 +3056,14 @@ pub const ProtectedServer = struct {
     }
 
     fn receiveRequestPacket(self: *ProtectedServer) Error!void {
-        var packet = try quic.one_rtt.receive(
+        var packet = try self.receive_packets.take(
             &self.quic_server.endpoint,
             self.config.receive_keys,
             self.config.local_connection_id.len,
-            self.expected_packet_number,
+            &self.expected_packet_number,
             self.config.max_frames_per_packet,
         );
         defer packet.deinit(self.quic_server.endpoint.allocator);
-        self.expected_packet_number = packet.packet.packet_number + 1;
 
         _ = try applyServerRequestPacketFrames(
             packet.from,
@@ -2989,6 +3131,7 @@ pub const ProtectedClient = struct {
     protected_send: ProtectedSendState,
     response_streams: ResponseStreamSet,
     streaming_responses: StreamingResponseSet,
+    receive_packets: ProtectedPacketCursor = .{},
     request_lifecycle: ClientRequestLifecycle,
     outbound_bodies: OutboundBodySet,
     next_stream_id: u62 = 0,
@@ -3038,6 +3181,7 @@ pub const ProtectedClient = struct {
 
     pub fn deinit(self: *ProtectedClient) void {
         self.outbound_bodies.deinit();
+        self.receive_packets.deinit();
         self.streaming_responses.deinit();
         self.request_lifecycle.deinit();
         self.response_streams.deinit();
@@ -3450,15 +3594,14 @@ pub const ProtectedClient = struct {
     }
 
     fn receiveResponsePacket(self: *ProtectedClient) Error!void {
-        var packet = try quic.one_rtt.receive(
+        var packet = try self.receive_packets.take(
             &self.quic_client.endpoint,
             self.config.receive_keys,
             self.config.local_connection_id.len,
-            self.expected_packet_number,
+            &self.expected_packet_number,
             self.config.max_frames_per_packet,
         );
         defer packet.deinit(self.quic_client.endpoint.allocator);
-        self.expected_packet_number = packet.packet.packet_number + 1;
         for (packet.frames) |frame| {
             try rejectCriticalStreamClosureFrame(self.control, frame, .client);
             if (frame == .reset_stream and
@@ -4964,6 +5107,7 @@ fn sendConnectionFrames(connection: *quic.one_rtt.Connection, frames: []const qu
 
 fn receiveConnectionRequestStreamBytes(
     connection: *quic.one_rtt.Connection,
+    receive_packets: *ConnectionPacketCursor,
     options: HandshakeSessionOptions,
     control: *http3.ControlState,
     qpack_decode: *QpackDecodeState,
@@ -4976,7 +5120,7 @@ fn receiveConnectionRequestStreamBytes(
     )) |ready| return ready;
 
     while (true) {
-        var packet = try connection.receivePacket();
+        var packet = try receive_packets.take(connection);
         defer packet.deinit(connection.endpoint.allocator);
         if (try applyServerRequestPacketFrames(
             packet.from,
@@ -5140,6 +5284,7 @@ fn applyServerRequestPacketFrames(
 
 fn receiveConnectionResponseStreamBytes(
     connection: *quic.one_rtt.Connection,
+    receive_packets: *ConnectionPacketCursor,
     expected_stream_id: u62,
     options: HandshakeSessionOptions,
     control: *http3.ControlState,
@@ -5164,6 +5309,7 @@ fn receiveConnectionResponseStreamBytes(
     while (true) {
         try receiveConnectionResponsePacket(
             connection,
+            receive_packets,
             control,
             qpack_decode,
             qpack_encode,
@@ -5189,6 +5335,7 @@ fn receiveConnectionResponseStreamBytes(
 
 fn receiveConnectionResponsePacket(
     connection: *quic.one_rtt.Connection,
+    receive_packets: *ConnectionPacketCursor,
     control: *http3.ControlState,
     qpack_decode: *QpackDecodeState,
     qpack_encode: *QpackEncodeState,
@@ -5196,7 +5343,7 @@ fn receiveConnectionResponsePacket(
     streaming_responses: ?*StreamingResponseSet,
     request_lifecycle: ?*const ClientRequestLifecycle,
 ) Error!void {
-    var packet = try connection.receivePacket();
+    var packet = try receive_packets.take(connection);
     defer packet.deinit(connection.endpoint.allocator);
     for (packet.frames) |frame| {
         try rejectCriticalStreamClosureFrame(control.*, frame, .client);
@@ -7596,6 +7743,239 @@ test "HTTP/3 protected server retains interleaved request streams" {
     try std.testing.expectEqualStrings("/second", second.request.path);
     try std.testing.expectEqualStrings("second-body", second.request.body);
     try std.testing.expectEqual(@as(usize, 0), server.request_streams.entries.items.len);
+}
+
+test "HTTP/3 protected server drains GRO request batch one packet at a time" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0x89, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0x8a, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x8b} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x8c} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 1400,
+            .max_frames_per_datagram = 8,
+            .enable_gro_receive = true,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer client_endpoint.deinit();
+    if (!server.quic_server.endpoint.groReceiveEnabled() or
+        !client_endpoint.gsoSendEnabled())
+    {
+        return error.SkipZigTest;
+    }
+
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try (http3.Request{
+        .method = "GET",
+        .path = "/gro-one",
+        .authority = "localhost",
+    }).write(&first, allocator);
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try (http3.Request{
+        .method = "GET",
+        .path = "/gro-two",
+        .authority = "localhost",
+    }).write(&second, allocator);
+    try std.testing.expectEqual(first.items.len, second.items.len);
+
+    const frames0 = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = first.items,
+        .fin = true,
+    } }};
+    const frames1 = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 4,
+        .data = second.items,
+        .fin = true,
+    } }};
+    const packets = [_][]const quic.Frame{ &frames0, &frames1 };
+    try quic.one_rtt.sendFramesBatch(
+        &client_endpoint,
+        server.address(),
+        client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .first_packet_number = 0,
+            .packets = &packets,
+        },
+    );
+
+    var first_request = try server.receiveRequest();
+    defer first_request.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "/gro-one",
+        first_request.request.path,
+    );
+    try std.testing.expect(server.receive_packets.batch != null);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        server.receive_packets.batch.?.packets.len -
+            server.receive_packets.batch.?.next_index,
+    );
+    // The second packet was decrypted with the same GRO receive but has not
+    // entered HTTP/3 stream storage before the application asks for it.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.request_streams.entries.items.len,
+    );
+
+    var second_request = try server.receiveRequest();
+    defer second_request.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "/gro-two",
+        second_request.request.path,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        server.expected_packet_number,
+    );
+}
+
+test "HTTP/3 protected client drains GRO response batch one packet at a time" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0x8d, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0x8e, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x8f} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x90} ** quic.protection.secret_len,
+    );
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer server_endpoint.deinit();
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{
+            .max_datagram_size = 1400,
+            .max_frames_per_datagram = 8,
+            .enable_gro_receive = true,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+        },
+    );
+    defer client.deinit();
+    if (!client.quic_client.endpoint.groReceiveEnabled() or
+        !server_endpoint.gsoSendEnabled())
+    {
+        return error.SkipZigTest;
+    }
+
+    const first_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/gro-one",
+        .authority = "localhost",
+    });
+    const second_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/gro-two",
+        .authority = "localhost",
+    });
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try (http3.Response{
+        .status = 200,
+        .body = "one",
+    }).write(&first, allocator);
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try (http3.Response{
+        .status = 200,
+        .body = "two",
+    }).write(&second, allocator);
+    try std.testing.expectEqual(first.items.len, second.items.len);
+
+    const frames0 = [_]quic.Frame{.{ .stream = .{
+        .stream_id = first_id,
+        .data = first.items,
+        .fin = true,
+    } }};
+    const frames1 = [_]quic.Frame{.{ .stream = .{
+        .stream_id = second_id,
+        .data = second.items,
+        .fin = true,
+    } }};
+    const packets = [_][]const quic.Frame{ &frames0, &frames1 };
+    try quic.one_rtt.sendFramesBatch(
+        &server_endpoint,
+        client.quic_client.address(),
+        server_keys,
+        .{
+            .destination_connection_id = &client_cid,
+            .first_packet_number = 0,
+            .packets = &packets,
+        },
+    );
+
+    var first_event = try client.receiveNextResponse();
+    defer first_event.deinit(allocator);
+    try std.testing.expect(first_event == .response);
+    try std.testing.expectEqual(first_id, first_event.response.stream_id);
+    try std.testing.expectEqualStrings(
+        "one",
+        first_event.response.value.response.body,
+    );
+    try std.testing.expect(client.receive_packets.batch != null);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.receive_packets.batch.?.packets.len -
+            client.receive_packets.batch.?.next_index,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.response_streams.entries.items.len,
+    );
+
+    var second_event = try client.receiveNextResponse();
+    defer second_event.deinit(allocator);
+    try std.testing.expect(second_event == .response);
+    try std.testing.expectEqual(second_id, second_event.response.stream_id);
+    try std.testing.expectEqualStrings(
+        "two",
+        second_event.response.value.response.body,
+    );
 }
 
 test "HTTP/3 protected server bounds concurrent request streams" {
@@ -10481,6 +10861,190 @@ test "HTTP/3 handshake client retains interleaved responses" {
     try std.testing.expectEqual(
         @as(usize, 0),
         client.request_lifecycle.outstanding.items.len,
+    );
+}
+
+test "HTTP/3 handshake client drains GRO response batch one packet at a time" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc };
+    const client_cid = [_]u8{ 0xbd, 0xbe, 0xbf, 0xc0 };
+    const server_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 1400,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 1400,
+                    .enable_pacing = false,
+                },
+                .random = [_]u8{0xc7} ** 32,
+                .x25519_secret_key = [_]u8{0xc8} ** 32,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            var first = try session.receiveRequest();
+            defer first.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            var second = try session.receiveRequest();
+            defer second.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try sendConnectionSettings(
+                &session.established.connection,
+                &session.control,
+                &session.control_send,
+                &session.qpack_encoder_send,
+                &session.qpack_encoder_prefix_sent,
+                &session.qpack_decoder_send,
+                &session.qpack_decoder_prefix_sent,
+                session.options,
+                server_control_stream_id,
+            );
+
+            var first_bytes: std.ArrayList(u8) = .empty;
+            defer first_bytes.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try (http3.Response{
+                .status = 200,
+                .body = "response-one",
+            }).write(
+                &first_bytes,
+                session.established.connection.endpoint.allocator,
+            );
+            var second_bytes: std.ArrayList(u8) = .empty;
+            defer second_bytes.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try (http3.Response{
+                .status = 200,
+                .body = "response-two",
+            }).write(
+                &second_bytes,
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqual(
+                first_bytes.items.len,
+                second_bytes.items.len,
+            );
+            const second_frames = [_]quic.Frame{.{ .stream = .{
+                .stream_id = second.stream_id,
+                .data = second_bytes.items,
+                .fin = true,
+            } }};
+            const first_frames = [_]quic.Frame{.{ .stream = .{
+                .stream_id = first.stream_id,
+                .data = first_bytes.items,
+                .fin = true,
+            } }};
+            const packets = [_][]const quic.Frame{
+                &second_frames,
+                &first_frames,
+            };
+            try session.established.connection.sendMany(&packets);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 1400,
+            .max_frames_per_datagram = 8,
+            .enable_gro_receive = true,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 1400,
+                    .enable_pacing = false,
+                },
+                .random = [_]u8{0xc5} ** 32,
+                .x25519_secret_key = [_]u8{0xc6} ** 32,
+            },
+        },
+    );
+    defer client.deinit();
+    if (!client.endpoint.groReceiveEnabled()) {
+        thread.join();
+        if (shared.err) |err| return err;
+        return error.SkipZigTest;
+    }
+
+    const first_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/gro-one",
+        .authority = "localhost",
+    });
+    const second_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/gro-two",
+        .authority = "localhost",
+    });
+    var second_event = try client.receiveNextResponse();
+    defer second_event.deinit(allocator);
+    try std.testing.expect(second_event == .response);
+    try std.testing.expectEqual(
+        second_id,
+        second_event.response.stream_id,
+    );
+    try std.testing.expectEqualStrings(
+        "response-two",
+        second_event.response.value.response.body,
+    );
+    try std.testing.expect(client.receive_packets.batch != null);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.receive_packets.batch.?.remaining(),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.response_streams.entries.items.len,
+    );
+
+    var first_event = try client.receiveNextResponse();
+    defer first_event.deinit(allocator);
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(first_event == .response);
+    try std.testing.expectEqual(first_id, first_event.response.stream_id);
+    try std.testing.expectEqualStrings(
+        "response-one",
+        first_event.response.value.response.body,
     );
 }
 

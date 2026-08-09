@@ -263,6 +263,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receivePacketBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "servicePacketBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "ReceivedPacketBatch"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.ReceivedPacketBatch, "takeNext"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.ReceivedPacketBatch, "remaining"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "ConnectionBatchSendResult"));
     try std.testing.expectEqual(
         @as(u64, 1) << 23,
