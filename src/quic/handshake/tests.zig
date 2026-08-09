@@ -162,6 +162,88 @@ test "QUIC integrated handshake establishes 1-RTT stream exchange" {
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
 }
 
+test "QUIC integrated handshake recovers dropped client and server flights" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size },
+    );
+    defer client_endpoint.deinit();
+
+    const RecoveryConfig =
+        @import("../handshake/retransmit.zig").Config;
+    const dropFirst = struct {
+        fn drop(attempt: u8) bool {
+            return attempt == 0;
+        }
+    }.drop;
+    const recovery = RecoveryConfig{
+        .initial_pto_ms = 5,
+        .max_pto_ms = 10,
+        .max_retries = 3,
+        .should_drop = dropFirst,
+    };
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        recovery: RecoveryConfig,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .random = [_]u8{0xe1} ** 32,
+                .x25519_secret_key = [_]u8{0xe2} ** 32,
+                .handshake_recovery = shared.recovery,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer established.deinit();
+            var packet = established.connection.receivePacket() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer packet.deinit(shared.endpoint.allocator);
+            if (packet.frames.len != 1 or packet.frames[0] != .ping) {
+                shared.err = error.TestUnexpectedResult;
+            }
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .recovery = recovery,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = "losspto1",
+            .local_connection_id = "client",
+            .random = [_]u8{0xe3} ** 32,
+            .x25519_secret_key = [_]u8{0xe4} ** 32,
+            .handshake_recovery = recovery,
+        },
+    );
+    defer established.deinit();
+    try established.connection.send(&.{.{ .ping = {} }});
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "QUIC integrated AES-256 SHA-384 handshake exchanges 1-RTT" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

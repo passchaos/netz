@@ -115,7 +115,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   and cross-datagram TLS-message reassembly for large post-quantum
   ClientHello/ServerHello flights, client-carried Initial address tokens,
   server-side token validation hooks, and server-issued address-validation
-  NEW_TOKEN frames, coalesced Initial+Handshake CRYPTO datagram helpers, HMAC-based
+  NEW_TOKEN frames, coalesced Initial+Handshake CRYPTO datagram helpers,
+  bounded RFC 9002-style exponential PTO retries for synchronous client
+  Initial/0-RTT and server Initial+Handshake flights with fresh packet numbers,
+  plus configurable retry exhaustion and total wait bounds and deterministic
+  whole-flight loss injection tests, HMAC-based
   address-validation token helpers for Retry/NEW_TOKEN with lifetime, version,
   peer-address binding, Retry ODCID/RSCID binding, secret rotation, replay
   filtering, Retry datagram issue/validate helpers, client-side Retry

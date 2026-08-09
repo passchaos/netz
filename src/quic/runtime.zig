@@ -12,6 +12,9 @@ pub const Error = quic.Error || error{
     EcnUnavailable,
     InvalidGroSegment,
 } || quic.connection_router.Error || net.IpAddress.BindError || net.Socket.SendError || net.Socket.ReceiveError || std.Io.RandomSecureError || std.Io.Cancelable;
+pub const ReceiveTimeoutError = Error ||
+    std.Io.Timeout.Error ||
+    std.Io.ConcurrentError;
 
 pub const Limits = struct {
     max_datagram_size: usize = 65_535,
@@ -381,6 +384,21 @@ pub const Endpoint = struct {
         return self.receiveBytesWithEcn();
     }
 
+    /// Receive one datagram with a caller-supplied deadline.
+    ///
+    /// Pending GRO segments are consumed before arming a kernel timeout. This
+    /// keeps timed handshake loops compatible with the ordinary receive FIFO.
+    pub fn receiveBytesTimeout(
+        self: *Endpoint,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedBytes {
+        if (self.takePendingReceived()) |pending| return pending;
+        self.socket_receive_mutex.lockUncancelable(self.io);
+        defer self.socket_receive_mutex.unlock(self.io);
+        if (self.takePendingReceived()) |pending| return pending;
+        return self.receiveKernelBytesTimeout(timeout);
+    }
+
     /// Receive one kernel datagram, which may contain multiple UDP_GRO
     /// segments. The returned batch owns one allocation and exposes individual
     /// datagrams as borrowed slices through `datagramAt`.
@@ -507,6 +525,112 @@ pub const Endpoint = struct {
             .segment_size = segment_size,
             .segment_count = segment_count,
             .ecn = ecn,
+        };
+    }
+
+    fn receiveKernelBytesTimeout(
+        self: *Endpoint,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!OwnedBytes {
+        const receive_capacity = if (self.gro_receive_enabled)
+            std.math.maxInt(u16)
+        else
+            self.limits.max_datagram_size;
+        const buffer = try self.allocator.alloc(u8, receive_capacity);
+        errdefer self.allocator.free(buffer);
+        var control_buffer: [receive_control_buffer_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        @memset(&control_buffer, 0);
+        var incoming: net.IncomingMessage = .init;
+        incoming.control = &control_buffer;
+        const maybe_err, const count = (try self.io.operateTimeout(
+            .{ .net_receive = .{
+                .socket_handle = self.socket.handle,
+                .message_buffer = (&incoming)[0..1],
+                .data_buffer = buffer,
+                .flags = .{},
+            } },
+            timeout,
+        )).net_receive;
+        if (maybe_err) |err| return err;
+        std.debug.assert(count == 1);
+        if (incoming.data.len == 0) return error.EmptyDatagram;
+        if (incoming.flags.trunc or incoming.flags.ctrunc) {
+            return error.DatagramTooLarge;
+        }
+        const control = receiveControlFromBytes(incoming.control);
+        if (control.gro_segment_size) |segment_size| {
+            if (!self.gro_receive_enabled or
+                segment_size == 0 or
+                segment_size > self.limits.max_datagram_size or
+                incoming.data.len < segment_size)
+            {
+                return error.InvalidGroSegment;
+            }
+            // Timed handshake reads consume one logical datagram. Queue any
+            // additional GRO segments into the same FIFO used by normal reads.
+            const segment_count = std.math.divCeil(
+                usize,
+                incoming.data.len,
+                segment_size,
+            ) catch return error.InvalidGroSegment;
+            if (segment_count > 1) {
+                const storage = try self.allocator.realloc(
+                    buffer,
+                    incoming.data.len,
+                );
+                const shared = try self.allocator.create(
+                    SharedReceiveBuffer,
+                );
+                shared.* = .{
+                    .allocator = self.allocator,
+                    .storage = storage,
+                    .references = .init(segment_count),
+                };
+                self.pending_receive_mutex.lockUncancelable(self.io);
+                defer self.pending_receive_mutex.unlock(self.io);
+                try self.pending_received.ensureUnusedCapacity(
+                    self.allocator,
+                    segment_count - 1,
+                );
+                var index: usize = 1;
+                while (index < segment_count) : (index += 1) {
+                    const start = index * segment_size;
+                    const end = @min(start + segment_size, storage.len);
+                    self.pending_received.appendAssumeCapacity(.{
+                        .from = incoming.from,
+                        .bytes = storage[start..end],
+                        .ecn = if (self.receive_ecn_enabled)
+                            control.ecn
+                        else
+                            .not_ect,
+                        .shared_buffer = shared,
+                    });
+                }
+                return .{
+                    .from = incoming.from,
+                    .bytes = storage[0..segment_size],
+                    .ecn = if (self.receive_ecn_enabled)
+                        control.ecn
+                    else
+                        .not_ect,
+                    .shared_buffer = shared,
+                };
+            }
+        }
+        if (incoming.data.len > self.limits.max_datagram_size) {
+            return error.DatagramTooLarge;
+        }
+        const bytes = try self.allocator.realloc(
+            buffer,
+            incoming.data.len,
+        );
+        return .{
+            .from = incoming.from,
+            .bytes = bytes,
+            .ecn = if (self.receive_ecn_enabled)
+                control.ecn
+            else
+                .not_ect,
         };
     }
 

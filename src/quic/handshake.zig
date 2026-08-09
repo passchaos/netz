@@ -1,6 +1,7 @@
 const std = @import("std");
 const quic = @import("mod.zig");
 const key_exchange = @import("handshake/key_exchange.zig");
+const retransmit = @import("handshake/retransmit.zig");
 
 const net = std.Io.net;
 
@@ -8,6 +9,10 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_str
     InvalidHandshakeFlight,
     MissingCryptoFrame,
     MissingAlpn,
+    HandshakeTimeout,
+    InvalidHandshakeRecovery,
+    HandshakeSendFailed,
+    HandshakeReceiveFailed,
 };
 
 pub const ClientOptions = struct {
@@ -37,6 +42,8 @@ pub const ClientOptions = struct {
     max_crypto_frame_data_len: usize = 1024,
     client_initial_packet_number: u64 = 0,
     client_handshake_packet_number: u64 = 0,
+    /// Blocking-handshake PTO/backoff and optional fault-injection policy.
+    handshake_recovery: retransmit.Config = .{},
     initial_one_rtt_config: OneRttConfig = .{},
     random: ?[32]u8 = null,
     x25519_secret_key: ?[32]u8 = null,
@@ -112,6 +119,8 @@ pub const ServerOptions = struct {
     max_crypto_frame_data_len: usize = 1024,
     server_initial_packet_number: u64 = 0,
     server_handshake_packet_number: u64 = 0,
+    /// Blocking-handshake PTO/backoff and optional fault-injection policy.
+    handshake_recovery: retransmit.Config = .{},
     initial_one_rtt_config: OneRttConfig = .{},
     random: ?[32]u8 = null,
     x25519_secret_key: ?[32]u8 = null,
@@ -308,6 +317,52 @@ fn isVersionNegotiationDatagram(bytes: []const u8) bool {
     return std.mem.readInt(u32, bytes[1..5], .big) == quic.Version.negotiation.wireValue();
 }
 
+fn isServerInitialResponse(bytes: []const u8) bool {
+    if (isVersionNegotiationDatagram(bytes)) return true;
+    const info = quic.protection.peekProtectedLongPacketInfo(bytes) catch
+        return false;
+    return info.packet_type == .initial;
+}
+
+fn isHandshakeDatagram(bytes: []const u8) bool {
+    const info = quic.protection.peekProtectedLongPacketInfo(bytes) catch
+        return false;
+    return info.packet_type == .handshake;
+}
+
+const EarlyDataFlight = struct {
+    endpoint: *quic.runtime.Endpoint,
+    peer: net.IpAddress,
+    initial_keys: quic.protection.PacketProtectionKeys,
+    initial_options: quic.initial_exchange.SendInitialOptions,
+    zero_rtt_keys: quic.protection.PacketProtectionKeys,
+    zero_rtt_options: quic.zero_rtt.SendOptions,
+
+    fn send(context: *anyopaque, retransmission: u8) anyerror!void {
+        const self: *EarlyDataFlight = @ptrCast(@alignCast(context));
+        var initial_options = self.initial_options;
+        initial_options.packet_number = std.math.add(
+            u64,
+            self.initial_options.packet_number,
+            retransmission,
+        ) catch return error.InvalidPacketNumber;
+        var zero_rtt_options = self.zero_rtt_options;
+        zero_rtt_options.packet_number = std.math.add(
+            u64,
+            self.zero_rtt_options.packet_number,
+            retransmission,
+        ) catch return error.InvalidPacketNumber;
+        try quic.initial_exchange.sendCoalescedInitialZeroRtt(
+            self.endpoint,
+            self.peer,
+            self.initial_keys,
+            initial_options,
+            self.zero_rtt_keys,
+            zero_rtt_options,
+        );
+    }
+};
+
 pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: ClientOptions) Error!EstablishedConnection {
     if (options.resumption_session == null and
         options.early_data == null and
@@ -349,6 +404,7 @@ fn connectAttempt(
         options.x25519_mlkem768_seed,
     );
     defer client_key_shares.deinit();
+    try options.handshake_recovery.validate();
     const legacy_x25519_public = switch (client_key_shares.shares[0]) {
         .x25519 => |key| key,
         else => [_]u8{0} ** 32,
@@ -449,6 +505,7 @@ fn connectAttempt(
         }
     }
 
+    var server_datagram: quic.runtime.OwnedBytes = undefined;
     if (options.early_data) |early_data| {
         const keys =
             try quic.zero_rtt.handshake.clientKeysForSecretAndVersion(
@@ -457,11 +514,11 @@ fn connectAttempt(
                 early_data.lease.session.psk_secret,
                 client_hello.items,
             );
-        try quic.initial_exchange.sendCoalescedInitialZeroRtt(
-            endpoint,
-            peer,
-            initial_secrets.client,
-            .{
+        var send_context = EarlyDataFlight{
+            .endpoint = endpoint,
+            .peer = peer,
+            .initial_keys = initial_secrets.client,
+            .initial_options = .{
                 .version = options.version.wireValue(),
                 .destination_connection_id = initial_destination_connection_id,
                 .source_connection_id = options.local_connection_id,
@@ -471,8 +528,8 @@ fn connectAttempt(
                 .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
                 .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
             },
-            keys.packet,
-            .{
+            .zero_rtt_keys = keys.packet,
+            .zero_rtt_options = .{
                 .version = options.version.wireValue(),
                 .destination_connection_id = initial_destination_connection_id,
                 .source_connection_id = options.local_connection_id,
@@ -480,14 +537,33 @@ fn connectAttempt(
                 .packet_number_len = early_data.packet_number_len,
                 .frames = early_data.frames,
             },
-        );
-        early_data.cache.consumeEarlyData(early_data.lease) catch unreachable;
-    } else {
-        _ = try quic.initial_exchange.sendInitialCryptoFlight(
+        };
+        server_datagram = retransmit.sendAndReceiveMatching(
             endpoint,
-            peer,
-            initial_secrets.client,
-            .{
+            options.handshake_recovery,
+            &send_context,
+            EarlyDataFlight.send,
+            isServerInitialResponse,
+        ) catch |err| {
+            // A successful coalesced socket write consumes the exclusive
+            // early-data lease even if the peer subsequently rejects the
+            // handshake or the PTO budget expires.
+            if (early_data.lease.state == .active) {
+                early_data.cache.consumeEarlyData(early_data.lease) catch
+                    unreachable;
+            }
+            return err;
+        };
+        if (early_data.lease.state == .active) {
+            early_data.cache.consumeEarlyData(early_data.lease) catch
+                unreachable;
+        }
+    } else {
+        var send_context = retransmit.InitialFlight{
+            .endpoint = endpoint,
+            .peer = peer,
+            .keys = initial_secrets.client,
+            .options = .{
                 .initial = .{
                     .version = options.version.wireValue(),
                     .destination_connection_id = initial_destination_connection_id,
@@ -500,10 +576,15 @@ fn connectAttempt(
                 },
                 .max_datagram_size = endpoint.limits.max_datagram_size,
             },
+        };
+        server_datagram = try retransmit.sendAndReceiveMatching(
+            endpoint,
+            options.handshake_recovery,
+            &send_context,
+            retransmit.InitialFlight.send,
+            isServerInitialResponse,
         );
     }
-
-    var server_datagram = try endpoint.receiveBytes();
     defer server_datagram.deinit(endpoint.allocator);
     if (isVersionNegotiationDatagram(server_datagram.bytes)) {
         var negotiated = (try quic.version_negotiation.processClient(endpoint.allocator, .{
@@ -799,14 +880,24 @@ fn connectAttempt(
         endpoint.allocator,
         client_finished.items,
     );
-    try quic.initial_exchange.sendHandshakeCrypto(endpoint, server_initial.from, handshake.client_quic, .{
-        .version = options.version.wireValue(),
-        .destination_connection_id = server_initial.packet.source_connection_id,
-        .source_connection_id = options.local_connection_id,
-        .packet_number = options.client_handshake_packet_number,
-        .crypto_data = client_flight.items,
-        .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
-    });
+    var client_handshake_send = retransmit.HandshakeFlight{
+        .endpoint = endpoint,
+        .peer = server_initial.from,
+        .keys = handshake.client_quic,
+        .options = .{
+            .version = options.version.wireValue(),
+            .destination_connection_id = server_initial.packet.source_connection_id,
+            .source_connection_id = options.local_connection_id,
+            .packet_number = options.client_handshake_packet_number,
+            .crypto_data = client_flight.items,
+            .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
+        },
+    };
+    try retransmit.sendWithoutResponse(
+        options.handshake_recovery,
+        &client_handshake_send,
+        retransmit.HandshakeFlight.send,
+    );
 
     if (options.keylog) |keylog| {
         try keylog.writeApplicationSecrets(
@@ -852,6 +943,7 @@ fn connectAttempt(
 
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
     try validateConfiguredVersions(options.version, options.available_versions);
+    try options.handshake_recovery.validate();
     if (options.psk) |psk| {
         if (psk.identity.len == 0 or psk.lifetime_seconds == 0) {
             return error.InvalidClientHello;
@@ -1168,11 +1260,11 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         server_verify,
     );
     try server_flight.appendSlice(endpoint.allocator, server_finished.items);
-    _ = try quic.initial_exchange.sendInitialThenHandshakeCrypto(
-        endpoint,
-        client_initial.from,
-        client_initial.initial_secrets.server,
-        .{
+    var send_context = retransmit.InitialHandshakeFlight{
+        .endpoint = endpoint,
+        .peer = client_initial.from,
+        .initial_keys = client_initial.initial_secrets.server,
+        .initial_options = .{
             .initial = .{
                 .version = options.version.wireValue(),
                 .destination_connection_id = client_initial.packet.source_connection_id,
@@ -1184,8 +1276,8 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             },
             .max_datagram_size = endpoint.limits.max_datagram_size,
         },
-        handshake.server_quic,
-        .{
+        .handshake_keys = handshake.server_quic,
+        .handshake_options = .{
             .version = options.version.wireValue(),
             .destination_connection_id = client_initial.packet.source_connection_id,
             .source_connection_id = options.local_connection_id,
@@ -1193,9 +1285,23 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             .crypto_data = server_flight.items,
             .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
         },
+    };
+    var client_handshake_datagram = try retransmit.sendAndReceiveMatching(
+        endpoint,
+        options.handshake_recovery,
+        &send_context,
+        retransmit.InitialHandshakeFlight.send,
+        isHandshakeDatagram,
     );
-
-    var client_handshake = try quic.initial_exchange.receiveHandshakeCrypto(endpoint, handshake.client_quic, 0, options.max_crypto_buffer);
+    defer client_handshake_datagram.deinit(endpoint.allocator);
+    var client_handshake = try quic.initial_exchange.openHandshakeCrypto(
+        endpoint,
+        client_handshake_datagram.from,
+        client_handshake_datagram.bytes,
+        handshake.client_quic,
+        0,
+        options.max_crypto_buffer,
+    );
     defer client_handshake.deinit(endpoint.allocator);
     const client_flight = try splitClientFlight(
         client_handshake.crypto_data,

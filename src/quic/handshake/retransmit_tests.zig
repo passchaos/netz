@@ -1,0 +1,103 @@
+const std = @import("std");
+const quic = @import("../mod.zig");
+const target = @import("retransmit.zig");
+
+test "handshake PTO retries with fresh packet numbers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveInitialSecrets("retrypto").client;
+    const Context = struct {
+        endpoint: *quic.runtime.Endpoint,
+        peer: std.Io.net.IpAddress,
+        keys: quic.protection.PacketProtectionKeys,
+        calls: usize = 0,
+
+        fn send(context: *anyopaque, retransmission: u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            if (retransmission == 0) return; // deterministically drop first
+            try quic.initial_exchange.sendInitialCrypto(
+                self.endpoint,
+                self.peer,
+                self.keys,
+                .{
+                    .destination_connection_id = "retrypto",
+                    .source_connection_id = "peer",
+                    .packet_number = 40 + retransmission,
+                    .crypto_data = "response",
+                },
+            );
+        }
+    };
+    var context = Context{
+        .endpoint = &sender,
+        .peer = receiver.address(),
+        .keys = keys,
+    };
+    var datagram = try target.sendAndReceive(
+        &receiver,
+        .{ .initial_pto_ms = 1, .max_pto_ms = 2, .max_retries = 2 },
+        &context,
+        Context.send,
+    );
+    defer datagram.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), context.calls);
+    var opened = try quic.initial_exchange.openInitialCrypto(
+        &receiver,
+        datagram.from,
+        datagram.bytes,
+        keys,
+        41,
+        128,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 41), opened.packet.packet_number);
+    try std.testing.expectEqualStrings("response", opened.crypto_data);
+}
+
+test "handshake PTO exhausts a bounded retry budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        std.testing.allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer endpoint.deinit();
+    const Context = struct {
+        calls: usize = 0,
+        fn send(context: *anyopaque, _: u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+        }
+    };
+    var context = Context{};
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        target.sendAndReceive(
+            &endpoint,
+            .{ .initial_pto_ms = 1, .max_pto_ms = 2, .max_retries = 2 },
+            &context,
+            Context.send,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), context.calls);
+}
