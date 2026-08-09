@@ -68,18 +68,55 @@ pub const StreamType = enum(u64) {
 };
 
 pub const Frame = struct {
+    pub const Header = struct {
+        frame_type: u64,
+        payload_length: usize,
+        header_length: usize,
+
+        pub fn totalLength(self: Header) Error!usize {
+            return std.math.add(
+                usize,
+                self.header_length,
+                self.payload_length,
+            ) catch error.IntegerOverflow;
+        }
+    };
+
     frame_type: u64,
     payload: []const u8,
     consumed: usize,
 
-    pub fn parse(bytes: []const u8) Error!Frame {
+    /// Parse only type and payload length.
+    ///
+    /// This succeeds as soon as both varints are available, even when the
+    /// payload is split across later QUIC STREAM frames.
+    pub fn parseHeader(bytes: []const u8) Error!Header {
         var cursor = wire.Cursor.init(bytes);
         const frame_type = try quic.varint.decode(&cursor);
         try validateFrameType(frame_type);
-        const len = try quic.varint.decode(&cursor);
-        const payload_len = std.math.cast(usize, len) orelse return error.IntegerOverflow;
-        const payload = try cursor.readSlice(payload_len);
-        return .{ .frame_type = frame_type, .payload = payload, .consumed = cursor.pos };
+        const encoded_length = try quic.varint.decode(&cursor);
+        const payload_length = std.math.cast(
+            usize,
+            encoded_length,
+        ) orelse return error.IntegerOverflow;
+        const header: Header = .{
+            .frame_type = frame_type,
+            .payload_length = payload_length,
+            .header_length = cursor.pos,
+        };
+        _ = try header.totalLength();
+        return header;
+    }
+
+    pub fn parse(bytes: []const u8) Error!Frame {
+        const header = try parseHeader(bytes);
+        const total_length = try header.totalLength();
+        if (bytes.len < total_length) return error.BufferTooShort;
+        return .{
+            .frame_type = header.frame_type,
+            .payload = bytes[header.header_length..total_length],
+            .consumed = total_length,
+        };
     }
 
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
@@ -3347,6 +3384,34 @@ test "HTTP/3 frame settings and qpack literal block" {
     defer Qpack.freeDecodedFields(allocator, decoded);
     try std.testing.expectEqualStrings(":method", decoded[0].name);
     try std.testing.expectEqualStrings("GET", decoded[0].value);
+}
+
+test "HTTP/3 frame header parses before payload arrives" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try quic.varint.encode(&encoded, allocator, FrameType.data);
+    try quic.varint.encode(&encoded, allocator, 1_000_000);
+
+    const header = try Frame.parseHeader(encoded.items);
+    try std.testing.expectEqual(FrameType.data, header.frame_type);
+    try std.testing.expectEqual(@as(usize, 1_000_000), header.payload_length);
+    try std.testing.expectEqual(encoded.items.len, header.header_length);
+    try std.testing.expectEqual(
+        encoded.items.len + 1_000_000,
+        try header.totalLength(),
+    );
+    try std.testing.expectError(
+        error.BufferTooShort,
+        Frame.parse(encoded.items),
+    );
+
+    for (0..encoded.items.len) |len| {
+        try std.testing.expectError(
+            error.BufferTooShort,
+            Frame.parseHeader(encoded.items[0..len]),
+        );
+    }
 }
 
 test "HTTP/3 rejects reserved HTTP/2 frame types" {
