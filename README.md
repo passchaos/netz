@@ -182,11 +182,12 @@ starts with deterministic parsers, serializers, and state helpers for:
   retains origin+ALPN caches, replay leases, and remembered QUIC parameters,
   with stateless ticket AEAD formats and key rotation also owned by Vail while
   netz keeps only ticket issuance/storage policy and transport integration,
-  and Vail-owned X25519/secp256r1/secp384r1 ECDHE plus registered
-  X25519MLKEM768 hybrid post-quantum exchange and SHA-256/SHA-384 transcript
-  hashing, with X25519MLKEM768 preferred by default, ordered classical fallback,
-  and split multi-Initial plus standalone 0-RTT flights under a 1200-byte path
-  budget while netz supplies randomness and retains QUIC packet/transport
+  and Vail-owned X25519/secp256r1/secp384r1 ECDHE plus the registered
+  secp256r1MLKEM768, X25519MLKEM768, and secp384r1MLKEM1024 hybrid
+  post-quantum exchanges and SHA-256/SHA-384 transcript hashing, with
+  X25519MLKEM768 preferred by default, ordered classical fallback, and split
+  multi-Initial plus standalone 0-RTT flights under a 1200-byte path budget
+  while netz supplies randomness and retains QUIC packet/transport
   orchestration,
   plus Vail domain-separated HMAC and constant-time comparison primitives for
   Retry/NEW_TOKEN authentication and stateless reset derivation while netz

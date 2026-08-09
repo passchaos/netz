@@ -5,6 +5,11 @@ const retransmit = @import("handshake/retransmit.zig");
 
 const net = std.Io.net;
 
+pub const ClientNistHybridKeyMaterial =
+    key_exchange.ClientNistHybridKeyMaterial;
+pub const ServerNistHybridKeyMaterial =
+    key_exchange.ServerNistHybridKeyMaterial;
+
 pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.tls.auth.Error || quic.tls.client_auth.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.resumption.ticket.handshake.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
     InvalidHandshakeFlight,
     MissingCryptoFrame,
@@ -57,6 +62,9 @@ pub const ClientOptions = struct {
         quic.tls.key_exchange
             .x25519_mlkem768.mlkem_seed_len
     ]u8 = null,
+    /// Deterministic test/embedding inputs for NIST ECDHE-ML-KEM groups.
+    /// Production callers normally leave these null to use secure randomness.
+    nist_hybrid_key_material: ClientNistHybridKeyMaterial = .{},
     key_exchange_groups: []const quic.tls_client_hello.NamedGroup =
         &.{
             .x25519_mlkem768,
@@ -139,6 +147,9 @@ pub const ServerOptions = struct {
         quic.tls.key_exchange
             .x25519_mlkem768.encaps_seed_len
     ]u8 = null,
+    /// Deterministic test/embedding inputs for NIST ECDHE-ML-KEM groups.
+    /// Production callers normally leave these null to use secure randomness.
+    nist_hybrid_key_material: ServerNistHybridKeyMaterial = .{},
     key_exchange_groups: []const quic.tls_client_hello.NamedGroup =
         &.{
             .x25519_mlkem768,
@@ -411,11 +422,14 @@ fn connectAttempt(
     var client_key_shares = try key_exchange.make(
         endpoint.io,
         options.key_exchange_groups,
-        options.x25519_secret_key,
-        options.p256_secret_key,
-        options.p384_secret_key,
-        options.x25519_mlkem768_secret_key,
-        options.x25519_mlkem768_seed,
+        .{
+            .x25519_secret = options.x25519_secret_key,
+            .p256_secret = options.p256_secret_key,
+            .p384_secret = options.p384_secret_key,
+            .x25519_hybrid_curve_secret = options.x25519_mlkem768_secret_key,
+            .x25519_hybrid_mlkem_seed = options.x25519_mlkem768_seed,
+            .nist_hybrid = options.nist_hybrid_key_material,
+        },
     );
     defer client_key_shares.deinit();
     try options.handshake_recovery.validate();
@@ -1048,11 +1062,14 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         endpoint.io,
         selected_group,
         parsed_client.keyShare(selected_group).?,
-        options.x25519_secret_key,
-        options.p256_secret_key,
-        options.p384_secret_key,
-        options.x25519_mlkem768_secret_key,
-        options.x25519_mlkem768_encaps_seed,
+        .{
+            .x25519_secret = options.x25519_secret_key,
+            .p256_secret = options.p256_secret_key,
+            .p384_secret = options.p384_secret_key,
+            .x25519_hybrid_curve_secret = options.x25519_mlkem768_secret_key,
+            .x25519_hybrid_encaps_seed = options.x25519_mlkem768_encaps_seed,
+            .nist_hybrid = options.nist_hybrid_key_material,
+        },
     );
     const selected_server_share = server_key_exchange.share;
     const legacy_server_public = if (selected_group == .x25519)

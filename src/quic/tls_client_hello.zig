@@ -36,8 +36,12 @@ pub const NamedGroup = enum(u16) {
     secp256r1 = 0x0017,
     secp384r1 = 0x0018,
     x25519 = 0x001d,
+    secp256r1_mlkem768 =
+        quic.tls.key_exchange.secp256r1_mlkem768.named_group,
     x25519_mlkem768 =
         quic.tls.key_exchange.x25519_mlkem768.named_group,
+    secp384r1_mlkem1024 =
+        quic.tls.key_exchange.secp384r1_mlkem1024.named_group,
 };
 
 pub const KeyShare = union(enum) {
@@ -52,6 +56,22 @@ pub const KeyShare = union(enum) {
         quic.tls.key_exchange
             .x25519_mlkem768.server_share_len
     ]u8,
+    secp256r1_mlkem768_client: [
+        quic.tls.key_exchange
+            .secp256r1_mlkem768.client_share_len
+    ]u8,
+    secp256r1_mlkem768_server: [
+        quic.tls.key_exchange
+            .secp256r1_mlkem768.server_share_len
+    ]u8,
+    secp384r1_mlkem1024_client: [
+        quic.tls.key_exchange
+            .secp384r1_mlkem1024.client_share_len
+    ]u8,
+    secp384r1_mlkem1024_server: [
+        quic.tls.key_exchange
+            .secp384r1_mlkem1024.server_share_len
+    ]u8,
 
     pub fn group(self: KeyShare) NamedGroup {
         return switch (self) {
@@ -61,6 +81,12 @@ pub const KeyShare = union(enum) {
             .x25519_mlkem768_client,
             .x25519_mlkem768_server,
             => .x25519_mlkem768,
+            .secp256r1_mlkem768_client,
+            .secp256r1_mlkem768_server,
+            => .secp256r1_mlkem768,
+            .secp384r1_mlkem1024_client,
+            .secp384r1_mlkem1024_server,
+            => .secp384r1_mlkem1024,
         };
     }
 
@@ -71,11 +97,23 @@ pub const KeyShare = union(enum) {
     }
 
     fn validForClientHello(self: KeyShare) bool {
-        return self != .x25519_mlkem768_server;
+        return switch (self) {
+            .x25519_mlkem768_server,
+            .secp256r1_mlkem768_server,
+            .secp384r1_mlkem1024_server,
+            => false,
+            else => true,
+        };
     }
 
     fn validForServerHello(self: KeyShare) bool {
-        return self != .x25519_mlkem768_client;
+        return switch (self) {
+            .x25519_mlkem768_client,
+            .secp256r1_mlkem768_client,
+            .secp384r1_mlkem1024_client,
+            => false,
+            else => true,
+        };
     }
 };
 
@@ -107,6 +145,8 @@ pub const ParsedClientHello = struct {
     secp256r1_public_key: ?[]const u8 = null,
     secp384r1_public_key: ?[]const u8 = null,
     x25519_mlkem768_public_key: ?[]const u8 = null,
+    secp256r1_mlkem768_public_key: ?[]const u8 = null,
+    secp384r1_mlkem1024_public_key: ?[]const u8 = null,
     transport_parameters: []const u8,
     cipher_suites: []const u8,
     supports_ed25519: bool = false,
@@ -117,6 +157,8 @@ pub const ParsedClientHello = struct {
     supports_secp256r1: bool = false,
     supports_secp384r1: bool = false,
     supports_x25519_mlkem768: bool = false,
+    supports_secp256r1_mlkem768: bool = false,
+    supports_secp384r1_mlkem1024: bool = false,
     psk_offer: ?quic.resumption.tls_psk.Offer = null,
 
     pub fn keyShare(
@@ -131,6 +173,8 @@ pub const ParsedClientHello = struct {
             .secp256r1 => self.secp256r1_public_key,
             .secp384r1 => self.secp384r1_public_key,
             .x25519_mlkem768 => self.x25519_mlkem768_public_key,
+            .secp256r1_mlkem768 => self.secp256r1_mlkem768_public_key,
+            .secp384r1_mlkem1024 => self.secp384r1_mlkem1024_public_key,
         };
     }
 
@@ -368,6 +412,8 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var secp256r1: ?[]const u8 = null;
     var secp384r1: ?[]const u8 = null;
     var x25519_mlkem768: ?[]const u8 = null;
+    var secp256r1_mlkem768: ?[]const u8 = null;
+    var secp384r1_mlkem1024: ?[]const u8 = null;
     var transport_parameters: ?[]const u8 = null;
     var saw_supported_versions = false;
     var saw_supported_groups = false;
@@ -375,6 +421,8 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var supports_secp256r1 = false;
     var supports_secp384r1 = false;
     var supports_x25519_mlkem768 = false;
+    var supports_secp256r1_mlkem768 = false;
+    var supports_secp384r1_mlkem1024 = false;
     var supports_ed25519 = false;
     var supports_ecdsa_p256_sha256 = false;
     var supports_ecdsa_p384_sha384 = false;
@@ -397,6 +445,10 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                 supports_secp256r1 = groups.secp256r1;
                 supports_secp384r1 = groups.secp384r1;
                 supports_x25519_mlkem768 = groups.x25519_mlkem768;
+                supports_secp256r1_mlkem768 =
+                    groups.secp256r1_mlkem768;
+                supports_secp384r1_mlkem1024 =
+                    groups.secp384r1_mlkem1024;
                 saw_supported_groups = true;
             },
             ext_alpn => try parseAlpn(allocator, &alpn_list, payload),
@@ -432,6 +484,8 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                 secp256r1 = shares.secp256r1;
                 secp384r1 = shares.secp384r1;
                 x25519_mlkem768 = shares.x25519_mlkem768;
+                secp256r1_mlkem768 = shares.secp256r1_mlkem768;
+                secp384r1_mlkem1024 = shares.secp384r1_mlkem1024;
             },
             ext_quic_transport_parameters => transport_parameters = payload,
             else => {},
@@ -443,14 +497,20 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     if (x25519 == null and
         secp256r1 == null and
         secp384r1 == null and
-        x25519_mlkem768 == null)
+        x25519_mlkem768 == null and
+        secp256r1_mlkem768 == null and
+        secp384r1_mlkem1024 == null)
     {
         return error.MissingKeyShare;
     }
     if ((x25519 != null and !supports_x25519) or
         (secp256r1 != null and !supports_secp256r1) or
         (secp384r1 != null and !supports_secp384r1) or
-        (x25519_mlkem768 != null and !supports_x25519_mlkem768))
+        (x25519_mlkem768 != null and !supports_x25519_mlkem768) or
+        (secp256r1_mlkem768 != null and
+            !supports_secp256r1_mlkem768) or
+        (secp384r1_mlkem1024 != null and
+            !supports_secp384r1_mlkem1024))
     {
         return error.InvalidClientHello;
     }
@@ -469,6 +529,8 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .secp256r1_public_key = secp256r1,
         .secp384r1_public_key = secp384r1,
         .x25519_mlkem768_public_key = x25519_mlkem768,
+        .secp256r1_mlkem768_public_key = secp256r1_mlkem768,
+        .secp384r1_mlkem1024_public_key = secp384r1_mlkem1024,
         .transport_parameters = transport_parameters.?,
         .cipher_suites = cipher_suites,
         .supports_ed25519 = supports_ed25519,
@@ -479,6 +541,8 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .supports_secp256r1 = supports_secp256r1,
         .supports_secp384r1 = supports_secp384r1,
         .supports_x25519_mlkem768 = supports_x25519_mlkem768,
+        .supports_secp256r1_mlkem768 = supports_secp256r1_mlkem768,
+        .supports_secp384r1_mlkem1024 = supports_secp384r1_mlkem1024,
         .psk_offer = psk_offer,
     };
 }
@@ -1223,6 +1287,8 @@ const ParsedSupportedGroups = struct {
     secp256r1: bool = false,
     secp384r1: bool = false,
     x25519_mlkem768: bool = false,
+    secp256r1_mlkem768: bool = false,
+    secp384r1_mlkem1024: bool = false,
 };
 
 fn parseSupportedGroups(
@@ -1260,6 +1326,8 @@ fn parseSupportedGroups(
             .secp256r1 => result.secp256r1 = true,
             .secp384r1 => result.secp384r1 = true,
             .x25519_mlkem768 => result.x25519_mlkem768 = true,
+            .secp256r1_mlkem768 => result.secp256r1_mlkem768 = true,
+            .secp384r1_mlkem1024 => result.secp384r1_mlkem1024 = true,
         }
     }
     return result;
@@ -1296,6 +1364,8 @@ const ParsedClientKeyShares = struct {
     secp256r1: ?[]const u8 = null,
     secp384r1: ?[]const u8 = null,
     x25519_mlkem768: ?[]const u8 = null,
+    secp256r1_mlkem768: ?[]const u8 = null,
+    secp384r1_mlkem1024: ?[]const u8 = null,
 };
 
 const ParsedKeyShare = struct {
@@ -1356,12 +1426,34 @@ fn parseClientKeyShares(
                 }
                 result.x25519_mlkem768 = key;
             },
+            .secp256r1_mlkem768 => {
+                if (result.secp256r1_mlkem768 != null or
+                    key.len != quic.tls.key_exchange
+                        .secp256r1_mlkem768.client_share_len or
+                    key[0] != 0x04)
+                {
+                    return error.InvalidClientHello;
+                }
+                result.secp256r1_mlkem768 = key;
+            },
+            .secp384r1_mlkem1024 => {
+                if (result.secp384r1_mlkem1024 != null or
+                    key.len != quic.tls.key_exchange
+                        .secp384r1_mlkem1024.client_share_len or
+                    key[0] != 0x04)
+                {
+                    return error.InvalidClientHello;
+                }
+                result.secp384r1_mlkem1024 = key;
+            },
         }
     }
     if (result.x25519 == null and
         result.secp256r1 == null and
         result.secp384r1 == null and
-        result.x25519_mlkem768 == null)
+        result.x25519_mlkem768 == null and
+        result.secp256r1_mlkem768 == null and
+        result.secp384r1_mlkem1024 == null)
     {
         return error.MissingKeyShare;
     }
@@ -1386,6 +1478,10 @@ fn parseServerKeyShare(payload: []const u8) Error!ParsedKeyShare {
             quic.tls.key_exchange.p384.public_len and key[0] == 0x04,
         .x25519_mlkem768 => key.len == quic.tls.key_exchange
             .x25519_mlkem768.server_share_len,
+        .secp256r1_mlkem768 => key.len == quic.tls.key_exchange
+            .secp256r1_mlkem768.server_share_len and key[0] == 0x04,
+        .secp384r1_mlkem1024 => key.len == quic.tls.key_exchange
+            .secp384r1_mlkem1024.server_share_len and key[0] == 0x04,
     };
     if (!valid) return error.MissingKeyShare;
     return .{ .group = group, .key = key };

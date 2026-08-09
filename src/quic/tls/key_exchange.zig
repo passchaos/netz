@@ -17,6 +17,49 @@ pub const X25519MlKem768ClientSecret =
 pub const X25519MlKem768ServerResponse =
     quic.tls.key_exchange.x25519_mlkem768.ServerResponse;
 
+pub fn hybridClientStart(
+    comptime Hybrid: type,
+    curve_secret: [Hybrid.curve_secret_len]u8,
+    mlkem_seed: [Hybrid.mlkem_seed_len]u8,
+) Error!Hybrid.ClientStart {
+    return Hybrid.clientStart(curve_secret, mlkem_seed) catch
+        return error.KeyExchangeFailed;
+}
+
+pub fn hybridServerRespond(
+    comptime Hybrid: type,
+    client_share: []const u8,
+    curve_secret: [Hybrid.curve_secret_len]u8,
+    encaps_seed: [Hybrid.encaps_seed_len]u8,
+) Error!Hybrid.ServerResponse {
+    return Hybrid.serverRespond(
+        client_share,
+        curve_secret,
+        encaps_seed,
+    ) catch |err| switch (err) {
+        error.InvalidClientShare => error.MissingKeyShare,
+        error.InvalidServerShare,
+        error.InvalidSecretKey,
+        error.KeyExchangeFailed,
+        => error.KeyExchangeFailed,
+    };
+}
+
+pub fn hybridClientSharedSecret(
+    comptime Hybrid: type,
+    secret: *const Hybrid.ClientSecret,
+    server_share: []const u8,
+) Error![Hybrid.shared_len]u8 {
+    return Hybrid.clientSharedSecret(secret, server_share) catch |err|
+        switch (err) {
+            error.InvalidServerShare => error.MissingKeyShare,
+            error.InvalidClientShare,
+            error.InvalidSecretKey,
+            error.KeyExchangeFailed,
+            => error.KeyExchangeFailed,
+        };
+}
+
 pub fn x25519PublicKey(secret_key: [32]u8) Error![32]u8 {
     return quic.tls.key_exchange.publicKey(secret_key) catch
         return error.KeyExchangeFailed;
