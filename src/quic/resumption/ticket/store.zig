@@ -5,6 +5,7 @@
 //! resumed handshake. Expired entries are removed eagerly on issue/lookup.
 
 const std = @import("std");
+const vail = @import("vail");
 const codec = @import("vail").tls.ticket;
 
 pub const Error = std.mem.Allocator.Error || error{
@@ -30,9 +31,9 @@ pub const Lease = struct {
     lifetime_seconds: u32,
 
     pub fn deinit(self: *Lease) void {
-        std.crypto.secureZero(u8, self.identity);
+        vail.crypto.memory.zero(self.identity);
         self.allocator.free(self.identity);
-        std.crypto.secureZero(u8, &self.secret);
+        vail.crypto.memory.zeroValue(&self.secret);
         self.* = undefined;
     }
 };
@@ -46,9 +47,9 @@ const Entry = struct {
     sequence: u64,
 
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
-        std.crypto.secureZero(u8, self.identity);
+        vail.crypto.memory.zero(self.identity);
         allocator.free(self.identity);
-        std.crypto.secureZero(u8, &self.secret);
+        vail.crypto.memory.zeroValue(&self.secret);
         self.* = undefined;
     }
 

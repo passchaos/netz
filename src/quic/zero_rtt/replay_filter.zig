@@ -6,6 +6,7 @@
 //! evicted when the configured bound is reached.
 
 const std = @import("std");
+const vail = @import("vail");
 
 pub const Error = std.mem.Allocator.Error || error{
     InvalidCapacity,
@@ -60,7 +61,7 @@ pub const Filter = struct {
 
         self.pruneExpired(now_ms);
         for (self.entries.items) |entry| {
-            if (std.crypto.timing_safe.eql([32]u8, entry.key, digest)) {
+            if (vail.crypto.sha256.eql(entry.key, digest)) {
                 return error.ReplayedEarlyData;
             }
         }
@@ -108,9 +109,7 @@ pub const Filter = struct {
 };
 
 fn digestReplayKey(replay_key: []const u8) [32]u8 {
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(replay_key, &digest, .{});
-    return digest;
+    return vail.crypto.sha256.hash(replay_key);
 }
 
 test "0-RTT replay filter rejects duplicates and expires bounded entries" {

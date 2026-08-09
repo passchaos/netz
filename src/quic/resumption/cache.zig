@@ -6,6 +6,7 @@
 //! one ticket.
 
 const std = @import("std");
+const vail = @import("vail");
 const parameters = @import("parameters.zig");
 
 pub const max_ticket_lifetime_seconds: u32 = 7 * 24 * 60 * 60;
@@ -49,7 +50,7 @@ pub const Session = struct {
         self.allocator.free(self.server_id);
         self.allocator.free(self.alpn);
         wipeAndFree(self.allocator, self.ticket);
-        std.crypto.secureZero(u8, &self.psk);
+        vail.crypto.memory.zeroValue(&self.psk);
         self.* = undefined;
     }
 
@@ -103,7 +104,7 @@ const Entry = struct {
         allocator.free(self.server_id);
         allocator.free(self.alpn);
         wipeAndFree(allocator, self.ticket);
-        std.crypto.secureZero(u8, &self.psk);
+        vail.crypto.memory.zeroValue(&self.psk);
         self.* = undefined;
     }
 
@@ -410,6 +411,6 @@ fn validateTicket(ticket: Ticket) Error!void {
 }
 
 fn wipeAndFree(allocator: std.mem.Allocator, bytes: []u8) void {
-    std.crypto.secureZero(u8, bytes);
+    vail.crypto.memory.zero(bytes);
     allocator.free(bytes);
 }

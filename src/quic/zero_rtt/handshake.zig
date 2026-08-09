@@ -6,8 +6,9 @@
 
 const std = @import("std");
 const quic = @import("../mod.zig");
+const vail = @import("vail");
 
-const Sha256 = std.crypto.hash.sha2.Sha256;
+const Sha256 = vail.crypto.sha256;
 
 pub const Error = quic.resumption.tls_psk.Error ||
     quic.resumption.parameters.ValidationError ||
@@ -50,11 +51,10 @@ pub const ClientKeys = struct {
 
 pub fn clientKeysForVersion(
     version: u32,
-    psk: [Sha256.digest_length]u8,
+    psk: [Sha256.digest_len]u8,
     client_hello: []const u8,
 ) Error!ClientKeys {
-    var client_hello_hash: [Sha256.digest_length]u8 = undefined;
-    Sha256.hash(client_hello, &client_hello_hash, .{});
+    const client_hello_hash = Sha256.hash(client_hello);
     const traffic_secret =
         quic.resumption.tls_psk.deriveClientEarlyTrafficSecret(
             psk,
@@ -84,7 +84,7 @@ pub fn validateClientAcceptance(
 }
 
 test "0-RTT handshake keys are PSK and ClientHello bound" {
-    const psk = [_]u8{0x42} ** Sha256.digest_length;
+    const psk = [_]u8{0x42} ** Sha256.digest_len;
     const first = try clientKeysForVersion(
         quic.Version.version_1.wireValue(),
         psk,
