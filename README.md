@@ -63,8 +63,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   resets instead of discarding non-target streams. `receiveNextResponse`
   provides an event-style response/reset queue with explicit stream IDs, while
   outstanding request tracking rejects unknown or duplicate completion and
-  enforces the configured concurrency bound, plus a `std.Io.async` request
-  receive helper for the development runtime
+  enforces the configured concurrency bound. Protected clients and servers also
+  expose `startRequest`/`sendRequestBody` and
+  `startResponse`/`sendResponseBody`, preserving per-stream QUIC offsets across
+  multiple DATA chunks and enforcing declared Content-Length at FIN, plus a
+  `std.Io.async` request receive helper for the development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed

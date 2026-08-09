@@ -1125,6 +1125,10 @@ pub const HandshakeServer = struct {
             .request_lifecycle = .init(
                 established.connection.endpoint.allocator,
             ),
+            .outbound_bodies = .init(
+                established.connection.endpoint.allocator,
+                self.session_options.max_concurrent_request_streams,
+            ),
         };
     }
 };
@@ -1142,8 +1146,10 @@ pub const HandshakeServerSession = struct {
     qpack_decoder_prefix_sent: bool = false,
     request_streams: RequestStreamSet,
     request_lifecycle: ServerRequestLifecycle,
+    outbound_bodies: OutboundBodySet,
 
     pub fn deinit(self: *HandshakeServerSession) void {
+        self.outbound_bodies.deinit();
         self.control.deinit(self.established.connection.endpoint.allocator);
         self.request_lifecycle.deinit();
         self.request_streams.deinit();
@@ -1194,6 +1200,72 @@ pub const HandshakeServerSession = struct {
 
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
         try self.sendResponseWithInformational(stream_id, &.{}, response);
+    }
+
+    pub fn startResponse(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+    ) Error!void {
+        try sendConnectionSettings(
+            &self.established.connection,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            server_control_stream_id,
+        );
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        const streaming = try response.writeStreamingHeadDynamic(
+            &encoded,
+            self.established.connection.endpoint.allocator,
+            self.control.settings.peer,
+            stream_id,
+            body_length,
+            &self.qpack_encode,
+        );
+        errdefer self.qpack_encode.abandonStream(stream_id);
+        try sendConnectionStreamingHead(
+            &self.established.connection,
+            encoded.items,
+            stream_id,
+            streaming.expected_length,
+            streaming.body_allowed,
+            self.options,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.outbound_bodies,
+        );
+        if (!streaming.body_allowed or
+            streaming.expected_length == 0)
+        {
+            self.request_lifecycle.markFinished(stream_id);
+        }
+    }
+
+    pub fn sendResponseBody(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        try sendConnectionBodyChunk(
+            &self.established.connection,
+            &self.outbound_bodies,
+            stream_id,
+            data,
+            fin,
+            self.options,
+        );
+        if (fin) self.request_lifecycle.markFinished(stream_id);
     }
 
     pub fn sendResponseWithInformational(
@@ -1286,6 +1358,7 @@ pub const HandshakeServerSession = struct {
         );
         self.qpack_encode.abandonStream(stream_id);
         self.request_lifecycle.markFinished(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
     }
 
     pub fn rejectRequest(
@@ -1325,6 +1398,7 @@ pub const HandshakeClient = struct {
     qpack_decoder_prefix_sent: bool = false,
     response_streams: ResponseStreamSet,
     request_lifecycle: ClientRequestLifecycle,
+    outbound_bodies: OutboundBodySet,
     next_stream_id: u62 = 0,
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, options: HandshakeClientOptions) Error!HandshakeClient {
@@ -1367,10 +1441,15 @@ pub const HandshakeClient = struct {
                 allocator,
                 options.session.max_concurrent_request_streams,
             ),
+            .outbound_bodies = .init(
+                allocator,
+                options.session.max_concurrent_request_streams,
+            ),
         };
     }
 
     pub fn deinit(self: *HandshakeClient) void {
+        self.outbound_bodies.deinit();
         self.request_lifecycle.deinit();
         self.response_streams.deinit();
         self.control.deinit(self.allocator);
@@ -1425,6 +1504,74 @@ pub const HandshakeClient = struct {
         return stream_id;
     }
 
+    pub fn startRequest(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+    ) Error!u62 {
+        const stream_id = self.next_stream_id;
+        if (!self.control.acceptsRequestStream(stream_id)) {
+            return error.GoAwayReceived;
+        }
+        try self.request_lifecycle.open(stream_id);
+        errdefer _ = self.request_lifecycle.finish(stream_id);
+        self.next_stream_id += 4;
+        try sendConnectionSettings(
+            &self.established.connection,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            self.options,
+            client_control_stream_id,
+        );
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        const streaming = try request_options.writeStreamingHeadDynamic(
+            &encoded,
+            self.allocator,
+            self.control.settings.peer,
+            stream_id,
+            body_length,
+            &self.qpack_encode,
+        );
+        errdefer self.qpack_encode.abandonStream(stream_id);
+        try sendConnectionStreamingHead(
+            &self.established.connection,
+            encoded.items,
+            stream_id,
+            streaming.expected_length,
+            streaming.body_allowed,
+            self.options,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.outbound_bodies,
+        );
+        return stream_id;
+    }
+
+    pub fn sendRequestBody(
+        self: *HandshakeClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try sendConnectionBodyChunk(
+            &self.established.connection,
+            &self.outbound_bodies,
+            stream_id,
+            data,
+            fin,
+            self.options,
+        );
+    }
+
     pub fn receiveResponse(
         self: *HandshakeClient,
         stream_id: u62,
@@ -1464,6 +1611,7 @@ pub const HandshakeClient = struct {
         );
         try self.sendQpackFeedback();
         _ = self.request_lifecycle.finish(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
         return .{ .stream_bytes = assembled.bytes, .response = response };
     }
 
@@ -1542,6 +1690,7 @@ pub const HandshakeClient = struct {
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
         _ = self.request_lifecycle.finish(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
     }
 
     pub fn sendPriorityUpdate(
@@ -1644,6 +1793,7 @@ pub const ProtectedServer = struct {
     protected_send: ProtectedSendState,
     request_streams: RequestStreamSet,
     request_lifecycle: ServerRequestLifecycle,
+    outbound_bodies: OutboundBodySet,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
 
@@ -1674,10 +1824,15 @@ pub const ProtectedServer = struct {
                 limits.max_concurrent_request_streams,
             ),
             .request_lifecycle = .init(allocator),
+            .outbound_bodies = .init(
+                allocator,
+                limits.max_concurrent_request_streams,
+            ),
         };
     }
 
     pub fn deinit(self: *ProtectedServer) void {
+        self.outbound_bodies.deinit();
         self.control.deinit(self.quic_server.endpoint.allocator);
         self.request_lifecycle.deinit();
         self.request_streams.deinit();
@@ -1718,6 +1873,81 @@ pub const ProtectedServer = struct {
 
     pub fn sendResponse(self: *ProtectedServer, to: net.IpAddress, stream_id: u62, response: http3.Response) Error!void {
         try self.sendResponseWithInformational(to, stream_id, &.{}, response);
+    }
+
+    pub fn startResponse(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+    ) Error!void {
+        try sendProtectedSettings(
+            &self.quic_server.endpoint,
+            to,
+            self.config,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            &self.next_packet_number,
+            &self.protected_send,
+            server_control_stream_id,
+        );
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.quic_server.endpoint.allocator);
+        const streaming = try response.writeStreamingHeadDynamic(
+            &encoded,
+            self.quic_server.endpoint.allocator,
+            self.control.settings.peer,
+            stream_id,
+            body_length,
+            &self.qpack_encode,
+        );
+        errdefer self.qpack_encode.abandonStream(stream_id);
+        try sendProtectedStreamingHead(
+            &self.quic_server.endpoint,
+            to,
+            self.config,
+            encoded.items,
+            stream_id,
+            streaming.expected_length,
+            streaming.body_allowed,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+        );
+        if (!streaming.body_allowed or
+            streaming.expected_length == 0)
+        {
+            self.request_lifecycle.markFinished(stream_id);
+        }
+    }
+
+    pub fn sendResponseBody(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        try sendProtectedBodyChunk(
+            &self.quic_server.endpoint,
+            to,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+            stream_id,
+            data,
+            fin,
+        );
+        if (fin) self.request_lifecycle.markFinished(stream_id);
     }
 
     pub fn sendResponseWithInformational(
@@ -1864,6 +2094,7 @@ pub const ProtectedServer = struct {
         );
         self.qpack_encode.abandonStream(stream_id);
         self.request_lifecycle.markFinished(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
     }
 
     pub fn rejectRequest(
@@ -1999,6 +2230,7 @@ pub const ProtectedClient = struct {
     protected_send: ProtectedSendState,
     response_streams: ResponseStreamSet,
     request_lifecycle: ClientRequestLifecycle,
+    outbound_bodies: OutboundBodySet,
     next_stream_id: u62 = 0,
     next_packet_number: u64 = 0,
     expected_packet_number: u64 = 0,
@@ -2030,10 +2262,15 @@ pub const ProtectedClient = struct {
                 allocator,
                 limits.max_concurrent_request_streams,
             ),
+            .outbound_bodies = .init(
+                allocator,
+                limits.max_concurrent_request_streams,
+            ),
         };
     }
 
     pub fn deinit(self: *ProtectedClient) void {
+        self.outbound_bodies.deinit();
         self.request_lifecycle.deinit();
         self.response_streams.deinit();
         self.control.deinit(self.quic_client.endpoint.allocator);
@@ -2112,6 +2349,83 @@ pub const ProtectedClient = struct {
         return stream_id;
     }
 
+    pub fn startRequest(
+        self: *ProtectedClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+    ) Error!u62 {
+        const stream_id = self.next_stream_id;
+        if (!self.control.acceptsRequestStream(stream_id)) {
+            return error.GoAwayReceived;
+        }
+        try self.request_lifecycle.open(stream_id);
+        errdefer _ = self.request_lifecycle.finish(stream_id);
+        self.next_stream_id += 4;
+        try sendProtectedSettings(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.control,
+            &self.control_send,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.qpack_decoder_send,
+            &self.qpack_decoder_prefix_sent,
+            &self.next_packet_number,
+            &self.protected_send,
+            client_control_stream_id,
+        );
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.quic_client.endpoint.allocator);
+        const streaming = try request_options.writeStreamingHeadDynamic(
+            &encoded,
+            self.quic_client.endpoint.allocator,
+            self.control.settings.peer,
+            stream_id,
+            body_length,
+            &self.qpack_encode,
+        );
+        errdefer self.qpack_encode.abandonStream(stream_id);
+        try sendProtectedStreamingHead(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            encoded.items,
+            stream_id,
+            streaming.expected_length,
+            streaming.body_allowed,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+        );
+        return stream_id;
+    }
+
+    pub fn sendRequestBody(
+        self: *ProtectedClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try sendProtectedBodyChunk(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+            stream_id,
+            data,
+            fin,
+        );
+    }
+
     pub fn receiveResponse(
         self: *ProtectedClient,
         stream_id: u62,
@@ -2142,6 +2456,7 @@ pub const ProtectedClient = struct {
         );
         try self.sendQpackFeedback();
         _ = self.request_lifecycle.finish(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
         return .{ .stream_bytes = assembled.bytes, .response = response };
     }
 
@@ -2219,6 +2534,7 @@ pub const ProtectedClient = struct {
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
         _ = self.request_lifecycle.finish(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
     }
 
     pub fn sendPriorityUpdate(
@@ -2786,6 +3102,80 @@ const ClientRequestLifecycle = struct {
     }
 };
 
+const OutboundBodySet = struct {
+    const Entry = struct {
+        send: quic.stream_state.SendState,
+        expected_length: ?usize,
+        written: usize = 0,
+    };
+
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+    max_streams: usize,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        max_streams: usize,
+    ) OutboundBodySet {
+        return .{ .allocator = allocator, .max_streams = max_streams };
+    }
+
+    fn deinit(self: *OutboundBodySet) void {
+        self.entries.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn reserveOpen(
+        self: *OutboundBodySet,
+        stream_id: u62,
+    ) Error!void {
+        if (self.find(stream_id) != null) return error.UnexpectedStream;
+        if (self.entries.items.len >= self.max_streams) {
+            return error.ExcessiveLoad;
+        }
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    fn prepareChunk(
+        self: *OutboundBodySet,
+        stream_id: u62,
+        chunk_len: usize,
+        fin: bool,
+    ) Error!*Entry {
+        const entry = self.find(stream_id) orelse return error.UnexpectedStream;
+        const next_written = std.math.add(
+            usize,
+            entry.written,
+            chunk_len,
+        ) catch return error.InvalidContentLength;
+        if (entry.expected_length) |expected| {
+            if (next_written > expected) return error.InvalidContentLength;
+            if (fin and next_written != expected) {
+                return error.InvalidContentLength;
+            }
+        }
+        if (!fin and chunk_len == 0) return error.InvalidFrame;
+        entry.written = next_written;
+        return entry;
+    }
+
+    fn finish(self: *OutboundBodySet, stream_id: u62) bool {
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.send.stream_id != stream_id) continue;
+            _ = self.entries.swapRemove(index);
+            return true;
+        }
+        return false;
+    }
+
+    fn find(self: *OutboundBodySet, stream_id: u62) ?*Entry {
+        for (self.entries.items) |*entry| {
+            if (entry.send.stream_id == stream_id) return entry;
+        }
+        return null;
+    }
+};
+
 pub const ShutdownState = enum {
     active,
     initial_goaway,
@@ -2962,6 +3352,198 @@ fn sendConnectionResponseSequence(
     try send_state.appendFrames(&frames, connection.endpoint.allocator, encoded.items, options.max_stream_frame_data, true);
     try sendConnectionFrames(connection, frames.items, options.max_frames_per_packet);
     message_sent = true;
+}
+
+fn sendConnectionStreamingHead(
+    connection: *quic.one_rtt.Connection,
+    encoded: []const u8,
+    stream_id: u62,
+    expected_length: ?usize,
+    body_allowed: bool,
+    options: HandshakeSessionOptions,
+    qpack: *QpackEncodeState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    bodies: *OutboundBodySet,
+) Error!void {
+    const retain_body_state = body_allowed and
+        (expected_length == null or expected_length.? != 0);
+    if (retain_body_state) try bodies.reserveOpen(stream_id);
+    try sendConnectionQpackEncoderInstructions(
+        connection,
+        qpack,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        options,
+    );
+    var send = quic.stream_state.SendState.init(stream_id);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(connection.endpoint.allocator);
+    try send.appendFrames(
+        &frames,
+        connection.endpoint.allocator,
+        encoded,
+        options.max_stream_frame_data,
+        !body_allowed or
+            (expected_length != null and expected_length.? == 0),
+    );
+    try sendConnectionFrames(
+        connection,
+        frames.items,
+        options.max_frames_per_packet,
+    );
+    if (retain_body_state) {
+        var body_send = quic.stream_state.SendState.init(stream_id);
+        body_send.next_offset = send.next_offset;
+        bodies.entries.appendAssumeCapacity(.{
+            .send = body_send,
+            .expected_length = expected_length,
+        });
+    }
+}
+
+fn sendProtectedStreamingHead(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    encoded: []const u8,
+    stream_id: u62,
+    expected_length: ?usize,
+    body_allowed: bool,
+    qpack: *QpackEncodeState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    bodies: *OutboundBodySet,
+) Error!void {
+    const retain_body_state = body_allowed and
+        (expected_length == null or expected_length.? != 0);
+    if (retain_body_state) try bodies.reserveOpen(stream_id);
+    try sendProtectedQpackEncoderInstructions(
+        endpoint,
+        to,
+        config,
+        qpack,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        next_packet_number,
+        protected_send,
+    );
+    var send = quic.stream_state.SendState.init(stream_id);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(endpoint.allocator);
+    try send.appendFrames(
+        &frames,
+        endpoint.allocator,
+        encoded,
+        config.max_stream_frame_data,
+        !body_allowed or
+            (expected_length != null and expected_length.? == 0),
+    );
+    try sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        frames.items,
+        config.max_frames_per_packet,
+        protected_send,
+    );
+    if (retain_body_state) {
+        var body_send = quic.stream_state.SendState.init(stream_id);
+        body_send.next_offset = send.next_offset;
+        bodies.entries.appendAssumeCapacity(.{
+            .send = body_send,
+            .expected_length = expected_length,
+        });
+    }
+}
+
+fn writeDataFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    data: []const u8,
+) Error!void {
+    if (data.len == 0) return;
+    try (http3.Frame{
+        .frame_type = http3.FrameType.data,
+        .payload = data,
+        .consumed = 0,
+    }).write(list, allocator);
+}
+
+fn sendConnectionBodyChunk(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+    options: HandshakeSessionOptions,
+) Error!void {
+    const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
+    const previous = entry.*;
+    errdefer entry.* = previous;
+    _ = try bodies.prepareChunk(stream_id, data.len, fin);
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(connection.endpoint.allocator);
+    try writeDataFrame(&payload, connection.endpoint.allocator, data);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(connection.endpoint.allocator);
+    try entry.send.appendFrames(
+        &frames,
+        connection.endpoint.allocator,
+        payload.items,
+        options.max_stream_frame_data,
+        fin,
+    );
+    try sendConnectionFrames(
+        connection,
+        frames.items,
+        options.max_frames_per_packet,
+    );
+    if (fin) _ = bodies.finish(stream_id);
+}
+
+fn sendProtectedBodyChunk(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    data: []const u8,
+    fin: bool,
+) Error!void {
+    const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
+    const previous = entry.*;
+    errdefer entry.* = previous;
+    _ = try bodies.prepareChunk(stream_id, data.len, fin);
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(endpoint.allocator);
+    try writeDataFrame(&payload, endpoint.allocator, data);
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(endpoint.allocator);
+    try entry.send.appendFrames(
+        &frames,
+        endpoint.allocator,
+        payload.items,
+        config.max_stream_frame_data,
+        fin,
+    );
+    try sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        frames.items,
+        config.max_frames_per_packet,
+        protected_send,
+    );
+    if (fin) _ = bodies.finish(stream_id);
 }
 
 fn sendConnectionFrames(connection: *quic.one_rtt.Connection, frames: []const quic.Frame, max_frames_per_packet: usize) Error!void {
@@ -4899,7 +5481,7 @@ test "HTTP/3 streaming request head adds and validates content length" {
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
-    const expected = try (http3.Request{
+    const streaming = try (http3.Request{
         .method = "POST",
         .path = "/streaming",
         .authority = "example.test",
@@ -4911,7 +5493,11 @@ test "HTTP/3 streaming request head adds and validates content length" {
         11,
         &encoder,
     );
-    try std.testing.expectEqual(@as(?usize, 11), expected);
+    try std.testing.expectEqual(
+        @as(?usize, 11),
+        streaming.expected_length,
+    );
+    try std.testing.expect(streaming.body_allowed);
     const frame = try http3.Frame.parse(encoded.items);
     try std.testing.expectEqual(http3.FrameType.headers, frame.frame_type);
     try std.testing.expectEqual(frame.consumed, encoded.items.len);
@@ -4976,7 +5562,7 @@ test "HTTP/3 streaming response head enforces bodyless status" {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
 
-    const expected = try (http3.Response{
+    const streaming = try (http3.Response{
         .status = 200,
     }).writeStreamingHeadDynamic(
         &encoded,
@@ -4986,7 +5572,11 @@ test "HTTP/3 streaming response head enforces bodyless status" {
         null,
         &encoder,
     );
-    try std.testing.expectEqual(@as(?usize, null), expected);
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        streaming.expected_length,
+    );
+    try std.testing.expect(streaming.body_allowed);
     try std.testing.expectEqual(
         http3.FrameType.headers,
         (try http3.Frame.parse(encoded.items)).frame_type,
@@ -5982,6 +6572,140 @@ test "HTTP/3 protected client reports next response reset with stream id" {
     try std.testing.expectEqual(
         @as(usize, 0),
         client.request_lifecycle.outstanding.items.len,
+    );
+}
+
+test "HTTP/3 protected runtime streams request and response DATA chunks" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const client_cid = [_]u8{ 0xb1, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xb2, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb3} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb4} ** quic.protection.secret_len,
+    );
+    var server = try ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+            .max_stream_frame_data = 5,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *ProtectedServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *ProtectedServer) !void {
+            var request = try server_ptr.receiveRequest();
+            defer request.deinit(
+                server_ptr.quic_server.endpoint.allocator,
+            );
+            try std.testing.expectEqualStrings(
+                "request-chunks",
+                request.request.body,
+            );
+            try server_ptr.startResponse(
+                request.from,
+                request.stream_id,
+                .{ .status = 200 },
+                "response-chunks".len,
+            );
+            try server_ptr.sendResponseBody(
+                request.from,
+                request.stream_id,
+                "response-",
+                false,
+            );
+            try std.testing.expectError(
+                error.InvalidContentLength,
+                server_ptr.sendResponseBody(
+                    request.from,
+                    request.stream_id,
+                    "too-long-chunk",
+                    true,
+                ),
+            );
+            try server_ptr.sendResponseBody(
+                request.from,
+                request.stream_id,
+                "chunks",
+                true,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                server_ptr.outbound_bodies.entries.items.len,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try ProtectedClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = &client_cid,
+            .peer_connection_id = &server_cid,
+            .max_stream_frame_data = 5,
+        },
+    );
+    defer client.deinit();
+
+    const stream_id = try client.startRequest(
+        .{
+            .method = "POST",
+            .path = "/stream-body",
+            .authority = "localhost",
+        },
+        "request-chunks".len,
+    );
+    try client.sendRequestBody(stream_id, "request-", false);
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        client.sendRequestBody(stream_id, "short", true),
+    );
+    try client.sendRequestBody(stream_id, "chunks", true);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.outbound_bodies.entries.items.len,
+    );
+    var response = try client.receiveResponse(stream_id);
+    defer response.deinit(allocator);
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings(
+        "response-chunks",
+        response.response.body,
     );
 }
 
@@ -7599,6 +8323,117 @@ test "HTTP/3 handshake client retains interleaved responses" {
     try std.testing.expectEqual(
         @as(usize, 0),
         client.request_lifecycle.outstanding.items.len,
+    );
+}
+
+test "HTTP/3 handshake runtime streams request and response DATA chunks" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc };
+    const client_cid = [_]u8{ 0xbd, 0xbe, 0xbf, 0xc0 };
+    const server_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0xc7} ** 32,
+                .x25519_secret_key = [_]u8{0xc8} ** 32,
+            },
+            .session = .{ .max_stream_frame_data = 5 },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(
+                session.established.connection.endpoint.allocator,
+            );
+            try std.testing.expectEqualStrings(
+                "handshake-request",
+                request.request.body,
+            );
+            try session.startResponse(
+                request.stream_id,
+                .{ .status = 200 },
+                "handshake-response".len,
+            );
+            try session.sendResponseBody(
+                request.stream_id,
+                "handshake-",
+                false,
+            );
+            try session.sendResponseBody(
+                request.stream_id,
+                "response",
+                true,
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0xc5} ** 32,
+                .x25519_secret_key = [_]u8{0xc6} ** 32,
+            },
+            .session = .{ .max_stream_frame_data = 5 },
+        },
+    );
+    defer client.deinit();
+
+    const stream_id = try client.startRequest(
+        .{
+            .method = "POST",
+            .path = "/streaming",
+            .authority = "localhost",
+        },
+        "handshake-request".len,
+    );
+    try client.sendRequestBody(stream_id, "handshake-", false);
+    try client.sendRequestBody(stream_id, "request", true);
+    var response = try client.receiveResponse(stream_id);
+    defer response.deinit(allocator);
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings(
+        "handshake-response",
+        response.response.body,
     );
 }
 

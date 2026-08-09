@@ -2052,7 +2052,7 @@ pub const Request = struct {
         stream_id: u64,
         body_length: ?usize,
         encoder: anytype,
-    ) Error!?usize {
+    ) Error!struct { expected_length: ?usize, body_allowed: bool } {
         if (self.body.len != 0 or self.trailers.len != 0) {
             return error.InvalidContentLength;
         }
@@ -2079,7 +2079,7 @@ pub const Request = struct {
                 encoder,
             );
             try queueIndexableFields(encoder, fields);
-            return 0;
+            return .{ .expected_length = 0, .body_allowed = false };
         }
         const effective_length = try applyStreamingContentLength(
             &fields_buf,
@@ -2101,7 +2101,10 @@ pub const Request = struct {
             encoder,
         );
         try queueIndexableFields(encoder, fields);
-        return effective_length;
+        return .{
+            .expected_length = effective_length,
+            .body_allowed = true,
+        };
     }
 };
 
@@ -2234,7 +2237,7 @@ pub const Response = struct {
         stream_id: u64,
         body_length: ?usize,
         encoder: anytype,
-    ) Error!?usize {
+    ) Error!struct { expected_length: ?usize, body_allowed: bool } {
         if (self.body.len != 0 or self.trailers.len != 0) {
             return error.InvalidContentLength;
         }
@@ -2271,7 +2274,7 @@ pub const Response = struct {
                 encoder,
             );
             try queueIndexableFields(encoder, fields);
-            return 0;
+            return .{ .expected_length = 0, .body_allowed = false };
         }
         var content_length_buf: [32]u8 = undefined;
         const effective_length = try applyStreamingContentLength(
@@ -2294,7 +2297,10 @@ pub const Response = struct {
             encoder,
         );
         try queueIndexableFields(encoder, fields);
-        return effective_length;
+        return .{
+            .expected_length = effective_length,
+            .body_allowed = true,
+        };
     }
 };
 
