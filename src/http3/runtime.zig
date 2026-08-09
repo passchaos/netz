@@ -128,6 +128,7 @@ const ProtectedSendState = struct {
 /// decryption work across all GRO segments.
 const ConnectionPacketCursor = struct {
     batch: ?quic.one_rtt.ReceivedPacketBatch = null,
+    ack_pending: bool = false,
 
     fn deinit(self: *ConnectionPacketCursor) void {
         if (self.batch) |*batch| batch.deinit();
@@ -138,16 +139,35 @@ const ConnectionPacketCursor = struct {
         self: *ConnectionPacketCursor,
         connection: *quic.one_rtt.Connection,
     ) Error!quic.one_rtt.ReceivedPacket {
+        if (self.ack_pending) {
+            try connection.sendAck(0);
+            self.ack_pending = false;
+        }
         if (self.batch) |*batch| {
             if (batch.takeNext()) |packet| return packet;
             batch.deinit();
             self.batch = null;
         }
         if (!connection.endpoint.groReceiveEnabled()) {
-            return connection.receivePacket();
+            var packet = try connection.receivePacket();
+            errdefer packet.deinit(connection.endpoint.allocator);
+            _ = connection.sendAckForPacketsIfNeeded(
+                @as(*const [1]quic.one_rtt.ReceivedPacket, &packet),
+            ) catch {
+                // Transport state has already accepted this packet. Preserve
+                // application delivery and retry the cumulative ACK before
+                // reading another packet rather than dropping the HTTP/3 data.
+                self.ack_pending = true;
+            };
+            return packet;
         }
         var batch = try connection.receivePacketBatch();
         errdefer batch.deinit();
+        _ = connection.sendAckForPacketsIfNeeded(
+            batch.packets[batch.next_index..],
+        ) catch {
+            self.ack_pending = true;
+        };
         const packet = batch.takeNext() orelse return error.MissingStreamFrame;
         self.batch = batch;
         return packet;
@@ -356,6 +376,8 @@ pub const StreamingMessageReader = struct {
     content_length: ?usize = null,
     body_allowed: bool = true,
     final_observed: bool = false,
+    /// Absolute HTTP/3 stream offset already returned to QUIC flow control.
+    credited_offset: usize = 0,
 
     pub fn initRequest(
         allocator: std.mem.Allocator,
@@ -567,6 +589,16 @@ pub const StreamingMessageReader = struct {
             self.current_payload_read = 0;
         }
         return count;
+    }
+
+    fn uncreditedConsumed(self: StreamingMessageReader) usize {
+        std.debug.assert(self.receive.read_offset >= self.credited_offset);
+        return self.receive.read_offset - self.credited_offset;
+    }
+
+    fn markCredited(self: *StreamingMessageReader, amount: usize) void {
+        std.debug.assert(amount <= self.uncreditedConsumed());
+        self.credited_offset += amount;
     }
 
     fn finishAtStreamEnd(self: *StreamingMessageReader) Error!?StreamingEvent {
@@ -1770,6 +1802,7 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
     ) Error!StreamingRequestEvent {
         while (true) {
+            try self.releaseStreamingRequestCapacity();
             if (self.streaming_requests.takeFirstReset()) |reset| {
                 self.request_lifecycle.markFinished(reset.stream_id);
                 self.qpack_encode.abandonStream(reset.stream_id);
@@ -1801,6 +1834,10 @@ pub const HandshakeServerSession = struct {
     ) Error!usize {
         const entry = self.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
         return entry.reader.readData(out);
     }
 
@@ -2051,6 +2088,17 @@ pub const HandshakeServerSession = struct {
             .stream_id = stream_id,
             .value = event,
         } };
+    }
+
+    fn releaseStreamingRequestCapacity(
+        self: *HandshakeServerSession,
+    ) Error!void {
+        for (self.streaming_requests.entries.items) |*entry| {
+            try releaseStreamingReaderCapacity(
+                &self.established.connection,
+                &entry.reader,
+            );
+        }
     }
 
     fn sendQpackFeedback(self: *HandshakeServerSession) Error!void {
@@ -2390,6 +2438,12 @@ pub const HandshakeClient = struct {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
+        if (self.streaming_responses.find(stream_id)) |active| {
+            try releaseStreamingReaderCapacity(
+                &self.established.connection,
+                &active.reader,
+            );
+        }
         if (self.response_streams.takeReset(stream_id)) |code| {
             _ = self.request_lifecycle.finish(stream_id);
             self.qpack_encode.abandonStream(stream_id);
@@ -2447,6 +2501,10 @@ pub const HandshakeClient = struct {
     ) Error!usize {
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
         return entry.reader.readData(out);
     }
 
@@ -3732,6 +3790,19 @@ fn streamingRequestSectionAcknowledgments(
     };
 }
 
+fn releaseStreamingReaderCapacity(
+    connection: *quic.one_rtt.Connection,
+    reader: *StreamingMessageReader,
+) Error!void {
+    const amount = reader.uncreditedConsumed();
+    if (amount == 0) return;
+    try connection.releaseReceivedCapacity(
+        reader.receive.stream_id,
+        amount,
+    );
+    reader.markCredited(amount);
+}
+
 pub const OwnedProtectedRequest = struct {
     from: net.IpAddress,
     stream_id: u62,
@@ -4232,6 +4303,7 @@ const StreamingMessageSet = struct {
                     .receive = owned.receive,
                     .settings = self.settings,
                     .kind = .response,
+                    .credited_offset = owned.receive.read_offset,
                 },
                 .from = owned.from,
             });
@@ -4266,6 +4338,7 @@ const StreamingMessageSet = struct {
                     .receive = owned.receive,
                     .settings = self.settings,
                     .kind = .request,
+                    .credited_offset = owned.receive.read_offset,
                 },
                 .from = owned.from,
             });
@@ -11185,19 +11258,28 @@ test "HTTP/3 handshake server streams large request through small window" {
     const original_dcid = [_]u8{ 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7 };
     const client_cid = [_]u8{ 0xe8, 0xe9, 0xea, 0xeb };
     const server_cid = [_]u8{ 0xec, 0xed, 0xee, 0xef };
+    var server_transport = quic.practical_transport_parameters;
+    server_transport.initial_max_data = 16 * 1024;
+    server_transport.initial_max_stream_data_bidi_local = 16 * 1024;
+    server_transport.initial_max_stream_data_bidi_remote = 16 * 1024;
+    var client_transport = quic.practical_transport_parameters;
+    client_transport.initial_max_data = 16 * 1024;
+    client_transport.initial_max_stream_data_bidi_local = 16 * 1024;
+    client_transport.initial_max_stream_data_bidi_remote = 16 * 1024;
     var server = try HandshakeServer.bind(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
         .{ .quic = .{
-            .max_datagram_size = 65_535,
+            .max_datagram_size = 4096,
             .max_frames_per_datagram = 8,
         } },
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
+                .local_transport_parameters = server_transport,
                 .initial_one_rtt_config = .{
-                    .max_datagram_size = 65_535,
+                    .max_datagram_size = 1200,
                 },
                 .random = [_]u8{0xf3} ** 32,
                 .x25519_secret_key = [_]u8{0xf4} ** 32,
@@ -11312,7 +11394,7 @@ test "HTTP/3 handshake server streams large request through small window" {
         .{ .ip4 = .loopback(0) },
         server.address(),
         .{ .quic = .{
-            .max_datagram_size = 65_535,
+            .max_datagram_size = 4096,
             .max_frames_per_datagram = 8,
         } },
         .{
@@ -11320,8 +11402,9 @@ test "HTTP/3 handshake server streams large request through small window" {
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
                 .server_name = "localhost",
+                .local_transport_parameters = client_transport,
                 .initial_one_rtt_config = .{
-                    .max_datagram_size = 65_535,
+                    .max_datagram_size = 1200,
                 },
                 .random = [_]u8{0xf1} ** 32,
                 .x25519_secret_key = [_]u8{0xf2} ** 32,
@@ -11351,17 +11434,56 @@ test "HTTP/3 handshake server streams large request through small window" {
     var remaining = body_len;
     while (remaining != 0) {
         const count = @min(chunk.len, remaining);
-        try client.sendRequestBody(
-            stream_id,
-            chunk[0..count],
-            false,
-        );
+        while (true) {
+            client.sendRequestBody(
+                stream_id,
+                chunk[0..count],
+                false,
+            ) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    // Match an event loop's writable retry: process ACK and
+                    // MAX_* packets while preserving any HTTP/3 frames in the
+                    // normal response queues.
+                    try receiveConnectionResponsePacket(
+                        &client.established.connection,
+                        &client.receive_packets,
+                        &client.control,
+                        &client.qpack_decode,
+                        &client.qpack_encode,
+                        &client.response_streams,
+                        &client.streaming_responses,
+                        &client.request_lifecycle,
+                    );
+                    continue;
+                },
+                else => return err,
+            };
+            break;
+        }
         remaining -= count;
     }
-    try client.finishRequestTrailers(stream_id, &.{.{
-        .name = "x-request-finished",
-        .value = "yes",
-    }});
+    while (true) {
+        client.finishRequestTrailers(stream_id, &.{.{
+            .name = "x-request-finished",
+            .value = "yes",
+        }}) catch |err| switch (err) {
+            error.FlowControlBlocked, error.CongestionLimited => {
+                try receiveConnectionResponsePacket(
+                    &client.established.connection,
+                    &client.receive_packets,
+                    &client.control,
+                    &client.qpack_decode,
+                    &client.qpack_encode,
+                    &client.response_streams,
+                    &client.streaming_responses,
+                    &client.request_lifecycle,
+                );
+                continue;
+            },
+            else => return err,
+        };
+        break;
+    }
     var response = try client.receiveResponse(stream_id);
     defer response.deinit(allocator);
     thread.join();
@@ -11379,26 +11501,28 @@ test "HTTP/3 handshake client streams dynamic response through small window" {
     const original_dcid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7 };
     const client_cid = [_]u8{ 0xd8, 0xd9, 0xda, 0xdb };
     const server_cid = [_]u8{ 0xdc, 0xdd, 0xde, 0xdf };
+    var server_transport = quic.practical_transport_parameters;
+    server_transport.initial_max_data = 16 * 1024;
+    server_transport.initial_max_stream_data_bidi_local = 16 * 1024;
+    server_transport.initial_max_stream_data_bidi_remote = 16 * 1024;
+    var client_transport = quic.practical_transport_parameters;
+    client_transport.initial_max_data = 16 * 1024;
+    client_transport.initial_max_stream_data_bidi_local = 16 * 1024;
+    client_transport.initial_max_stream_data_bidi_remote = 16 * 1024;
     var server = try HandshakeServer.bind(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{
-            .quic = .{
-                // The fixture does not run a server-side packet pump to consume
-                // ACKs while the producer writes. A larger configured datagram
-                // budget raises the deterministic initial cwnd above 64 KiB;
-                // STREAM frames remain 480 bytes, so the receive-window
-                // behavior under test is unchanged.
-                .max_datagram_size = 65_535,
-                .max_frames_per_datagram = 8,
-            },
-        },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
+                .local_transport_parameters = server_transport,
                 .initial_one_rtt_config = .{
-                    .max_datagram_size = 65_535,
+                    .max_datagram_size = 1200,
                 },
                 .random = [_]u8{0xe3} ** 32,
                 .x25519_secret_key = [_]u8{0xe4} ** 32,
@@ -11475,17 +11599,39 @@ test "HTTP/3 handshake client streams dynamic response through small window" {
                 var remaining = body_len;
                 while (remaining != 0) {
                     const count = @min(chunk.len, remaining);
-                    try session.sendResponseBody(
-                        request.stream_id,
-                        chunk[0..count],
-                        false,
-                    );
+                    while (true) {
+                        session.sendResponseBody(
+                            request.stream_id,
+                            chunk[0..count],
+                            false,
+                        ) catch |err| switch (err) {
+                            error.FlowControlBlocked,
+                            error.CongestionLimited,
+                            => {
+                                try session.receiveRequestPacket();
+                                continue;
+                            },
+                            else => return err,
+                        };
+                        break;
+                    }
                     remaining -= count;
                 }
-                try session.finishResponseTrailers(
-                    request.stream_id,
-                    response.trailers,
-                );
+                while (true) {
+                    session.finishResponseTrailers(
+                        request.stream_id,
+                        response.trailers,
+                    ) catch |err| switch (err) {
+                        error.FlowControlBlocked,
+                        error.CongestionLimited,
+                        => {
+                            try session.receiveRequestPacket();
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    break;
+                }
                 return;
             }
         }
@@ -11499,7 +11645,7 @@ test "HTTP/3 handshake client streams dynamic response through small window" {
         .{ .ip4 = .loopback(0) },
         server.address(),
         .{ .quic = .{
-            .max_datagram_size = 65_535,
+            .max_datagram_size = 4096,
             .max_frames_per_datagram = 8,
         } },
         .{
@@ -11507,8 +11653,9 @@ test "HTTP/3 handshake client streams dynamic response through small window" {
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
                 .server_name = "localhost",
+                .local_transport_parameters = client_transport,
                 .initial_one_rtt_config = .{
-                    .max_datagram_size = 65_535,
+                    .max_datagram_size = 1200,
                 },
                 .random = [_]u8{0xe1} ** 32,
                 .x25519_secret_key = [_]u8{0xe2} ** 32,

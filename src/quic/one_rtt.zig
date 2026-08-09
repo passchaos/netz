@@ -1899,6 +1899,24 @@ pub const Connection = struct {
         try self.sendAckWithEcn(try self.encodedLocalAckDelayNanos(ack_delay_ns), ecn_counts);
     }
 
+    /// Immediately acknowledge a processed packet batch when required.
+    ///
+    /// HTTP/3's blocking packet pump uses one ACK for an entire GRO batch. ACK,
+    /// PADDING, and close-only batches do not elicit another ACK, preventing an
+    /// ACK loop while still releasing sender congestion credit for STREAM and
+    /// flow-control packets.
+    pub fn sendAckForPacketsIfNeeded(
+        self: *Connection,
+        packets: []const ReceivedPacket,
+    ) Error!bool {
+        for (packets) |packet| {
+            if (!ackEliciting(packet.frames)) continue;
+            try self.sendAck(0);
+            return true;
+        }
+        return false;
+    }
+
     pub fn encodedLocalAckDelayNanos(self: Connection, ack_delay_ns: u64) Error!u64 {
         return quic.rtt.encodeAckDelayNanos(ack_delay_ns, self.config.local_ack_delay_exponent) catch |err| switch (err) {
             error.InvalidAckDelayExponent => error.InvalidFrame,
@@ -3333,6 +3351,50 @@ pub const Connection = struct {
         var recv_stream = try self.recvStreamFlow(stream_id);
         if (recv_stream.flow.consume(amount)) |_| return recv_stream.flow.maxStreamDataFrame(stream_id);
         return null;
+    }
+
+    /// Return application-consumed bytes to both QUIC receive windows.
+    ///
+    /// The connection and stream windows advance as one transaction. If a
+    /// generated MAX_DATA/MAX_STREAM_DATA packet cannot be sent, both RecvFlow
+    /// snapshots are restored so the caller can retry without losing the
+    /// advertisement that unblocks its peer.
+    pub fn releaseReceivedCapacity(
+        self: *Connection,
+        stream_id: u64,
+        amount: u64,
+    ) Error!void {
+        if (amount == 0) return;
+        const recv_stream = self.findRecvStreamEntry(stream_id) orelse
+            return error.StreamStateError;
+        const consume_len = std.math.cast(usize, amount) orelse
+            return error.InvalidFrameLength;
+        // Preflight before sending an advertisement. Once MAX_* is visible to
+        // the peer, consuming the corresponding retained transport bytes must
+        // be infallible so local overlap/conflict state cannot diverge from the
+        // enlarged window.
+        if (consume_len > recv_stream.recv_state.available().len) {
+            return error.InvalidStreamRange;
+        }
+        const previous_connection = self.recv_flow;
+        const previous_stream = recv_stream.flow;
+        errdefer {
+            self.recv_flow = previous_connection;
+            recv_stream.flow = previous_stream;
+        }
+
+        var frames: [2]quic.Frame = undefined;
+        var count: usize = 0;
+        if (self.recv_flow.consume(amount) != null) {
+            frames[count] = self.recv_flow.maxDataFrame();
+            count += 1;
+        }
+        if (recv_stream.flow.consume(amount) != null) {
+            frames[count] = recv_stream.flow.maxStreamDataFrame(stream_id);
+            count += 1;
+        }
+        if (count != 0) try self.send(frames[0..count]);
+        try recv_stream.recv_state.consume(consume_len);
     }
 
     fn sendStreamFlow(self: *Connection, stream_id: u64) Error!*quic.flow_control.SendFlow {
@@ -8951,6 +9013,105 @@ test "QUIC 1-RTT connection handles stream-level flow control" {
     const max_stream = (try server.consumeStreamReceived(0, 4)).?;
     try std.testing.expectEqual(@as(u64, 0), max_stream.max_stream_data.stream_id);
     try std.testing.expectEqual(@as(u64, 10), max_stream.max_stream_data.maximum_stream_data);
+
+    // The combined helper advances retained overlap-validation storage and
+    // emits both connection- and stream-level credit transactionally.
+    var combined_server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer combined_server_endpoint.deinit();
+    var combined_client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer combined_client_endpoint.deinit();
+    const combined_client_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const combined_server_cid = [_]u8{ 0x35, 0x36, 0x37, 0x38 };
+    var combined_client = try Connection.init(&combined_client_endpoint, .{
+        .peer = combined_server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &combined_client_cid,
+        .peer_connection_id = &combined_server_cid,
+        .initial_send_max_data = 8,
+        .initial_send_max_stream_data = 8,
+    });
+    defer combined_client.deinit();
+    var combined_server = try Connection.init(&combined_server_endpoint, .{
+        .peer = combined_client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &combined_server_cid,
+        .peer_connection_id = &combined_client_cid,
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .initial_receive_max_stream_data = 8,
+        .stream_receive_window = 8,
+        .local_endpoint = .server,
+    });
+    defer combined_server.deinit();
+    try combined_client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "123456",
+    } }});
+    var combined_data = try combined_server.receivePacket();
+    defer combined_data.deinit(allocator);
+
+    var failed_credit_send = ObservedBatchSend{
+        .delegate = combined_server.endpoint.io,
+        .fail_after_prefix = 0,
+    };
+    var failed_credit_vtable = combined_server.endpoint.io.vtable.*;
+    failed_credit_vtable.netSend = ObservedBatchSend.netSend;
+    combined_server.endpoint.io = .{
+        .userdata = &failed_credit_send,
+        .vtable = &failed_credit_vtable,
+    };
+    try std.testing.expectError(
+        error.NetworkDown,
+        combined_server.releaseReceivedCapacity(0, 6),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        combined_server.recv_flow.limit,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        combined_server.recv_flow.consumed,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        combined_server.findRecvStreamEntry(0).?.flow.limit,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        combined_server.findRecvStreamEntry(0).?.recv_state.available().len,
+    );
+    combined_server.endpoint.io = failed_credit_send.delegate;
+
+    try combined_server.releaseReceivedCapacity(0, 6);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        combined_server.findRecvStreamEntry(0).?.recv_state.available().len,
+    );
+    var credit = try combined_client.receivePacket();
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), credit.frames.len);
+    try std.testing.expectEqual(@as(u64, 14), credit.frames[0].max_data.maximum_data);
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        credit.frames[1].max_stream_data.maximum_stream_data,
+    );
+    try std.testing.expectEqual(@as(u64, 14), combined_client.send_flow.limit);
+    try std.testing.expectEqual(
+        @as(u64, 14),
+        combined_client.findSendStreamEntry(0).?.flow.limit,
+    );
 
     var violating_server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
     defer violating_server_endpoint.deinit();
