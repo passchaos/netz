@@ -66,8 +66,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   enforces the configured concurrency bound. Protected clients and servers also
   expose `startRequest`/`sendRequestBody` and
   `startResponse`/`sendResponseBody`, preserving per-stream QUIC offsets across
-  multiple DATA chunks and enforcing declared Content-Length at FIN, plus a
-  `std.Io.async` request receive helper for the development runtime
+  multiple DATA chunks and enforcing declared Content-Length at FIN. Streaming
+  messages can instead finish with dynamic QPACK trailer HEADERS through
+  `finishRequestTrailers`/`finishResponseTrailers`, plus a `std.Io.async`
+  request receive helper for the development runtime
 - QUIC varints, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed

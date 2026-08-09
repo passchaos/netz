@@ -2688,6 +2688,30 @@ fn writeHeadersFrameDynamic(
     }).write(list, allocator);
 }
 
+pub fn writeTrailersDynamic(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    trailers: []const Qpack.HeaderField,
+    peer_settings: Settings,
+    stream_id: u64,
+    encoder: anytype,
+) Error!void {
+    if (trailers.len == 0) return error.InvalidHeader;
+    try validateHeaderBlock(trailers, .trailers);
+    try validateFieldSectionSize(
+        trailers,
+        peer_settings.max_field_section_size,
+    );
+    try writeHeadersFrameDynamic(
+        list,
+        allocator,
+        trailers,
+        stream_id,
+        encoder,
+    );
+    try queueIndexableFields(encoder, trailers);
+}
+
 fn writeHeadersAndData(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,

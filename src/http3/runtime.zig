@@ -599,6 +599,12 @@ pub const QpackEncodeState = struct {
         return self.findPendingSection(stream_id) != null;
     }
 
+    fn rollbackPendingSections(self: *QpackEncodeState, original_len: usize) void {
+        while (self.pending_sections.items.len > original_len) {
+            self.releaseSection(self.pending_sections.items.len - 1);
+        }
+    }
+
     fn applyDecoderInstruction(
         self: *QpackEncodeState,
         instruction: http3.Qpack.DecoderInstruction,
@@ -1268,6 +1274,25 @@ pub const HandshakeServerSession = struct {
         if (fin) self.request_lifecycle.markFinished(stream_id);
     }
 
+    pub fn finishResponseTrailers(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        try sendConnectionTrailers(
+            &self.established.connection,
+            &self.outbound_bodies,
+            stream_id,
+            trailers,
+            self.control.settings.peer,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+            self.options,
+        );
+        self.request_lifecycle.markFinished(stream_id);
+    }
+
     pub fn sendResponseWithInformational(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -1568,6 +1593,27 @@ pub const HandshakeClient = struct {
             stream_id,
             data,
             fin,
+            self.options,
+        );
+    }
+
+    pub fn finishRequestTrailers(
+        self: *HandshakeClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try sendConnectionTrailers(
+            &self.established.connection,
+            &self.outbound_bodies,
+            stream_id,
+            trailers,
+            self.control.settings.peer,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
             self.options,
         );
     }
@@ -1948,6 +1994,29 @@ pub const ProtectedServer = struct {
             fin,
         );
         if (fin) self.request_lifecycle.markFinished(stream_id);
+    }
+
+    pub fn finishResponseTrailers(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        try sendProtectedTrailers(
+            &self.quic_server.endpoint,
+            to,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+            stream_id,
+            trailers,
+            self.control.settings.peer,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
+        );
+        self.request_lifecycle.markFinished(stream_id);
     }
 
     pub fn sendResponseWithInformational(
@@ -2423,6 +2492,30 @@ pub const ProtectedClient = struct {
             stream_id,
             data,
             fin,
+        );
+    }
+
+    pub fn finishRequestTrailers(
+        self: *ProtectedClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try sendProtectedTrailers(
+            &self.quic_client.endpoint,
+            self.quic_client.peer,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &self.outbound_bodies,
+            stream_id,
+            trailers,
+            self.control.settings.peer,
+            &self.qpack_encode,
+            &self.qpack_encoder_send,
+            &self.qpack_encoder_prefix_sent,
         );
     }
 
@@ -3159,6 +3252,17 @@ const OutboundBodySet = struct {
         return entry;
     }
 
+    fn prepareTrailers(
+        self: *OutboundBodySet,
+        stream_id: u62,
+    ) Error!*Entry {
+        const entry = self.find(stream_id) orelse return error.UnexpectedStream;
+        if (entry.expected_length) |expected| {
+            if (entry.written != expected) return error.InvalidContentLength;
+        }
+        return entry;
+    }
+
     fn finish(self: *OutboundBodySet, stream_id: u62) bool {
         for (self.entries.items, 0..) |entry, index| {
             if (entry.send.stream_id != stream_id) continue;
@@ -3544,6 +3648,117 @@ fn sendProtectedBodyChunk(
         protected_send,
     );
     if (fin) _ = bodies.finish(stream_id);
+}
+
+fn sendConnectionTrailers(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    trailers: []const http3.Qpack.HeaderField,
+    peer_settings: http3.Settings,
+    qpack: *QpackEncodeState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    options: HandshakeSessionOptions,
+) Error!void {
+    const entry = try bodies.prepareTrailers(stream_id);
+    const previous = entry.*;
+    errdefer entry.* = previous;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(connection.endpoint.allocator);
+    const pending_sections_len = qpack.pending_sections.items.len;
+    errdefer qpack.rollbackPendingSections(pending_sections_len);
+    try http3.writeTrailersDynamic(
+        &encoded,
+        connection.endpoint.allocator,
+        trailers,
+        peer_settings,
+        stream_id,
+        qpack,
+    );
+    try sendConnectionQpackEncoderInstructions(
+        connection,
+        qpack,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        options,
+    );
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(connection.endpoint.allocator);
+    try entry.send.appendFrames(
+        &frames,
+        connection.endpoint.allocator,
+        encoded.items,
+        options.max_stream_frame_data,
+        true,
+    );
+    try sendConnectionFrames(
+        connection,
+        frames.items,
+        options.max_frames_per_packet,
+    );
+    _ = bodies.finish(stream_id);
+}
+
+fn sendProtectedTrailers(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    bodies: *OutboundBodySet,
+    stream_id: u62,
+    trailers: []const http3.Qpack.HeaderField,
+    peer_settings: http3.Settings,
+    qpack: *QpackEncodeState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+) Error!void {
+    const entry = try bodies.prepareTrailers(stream_id);
+    const previous = entry.*;
+    errdefer entry.* = previous;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(endpoint.allocator);
+    const pending_sections_len = qpack.pending_sections.items.len;
+    errdefer qpack.rollbackPendingSections(pending_sections_len);
+    try http3.writeTrailersDynamic(
+        &encoded,
+        endpoint.allocator,
+        trailers,
+        peer_settings,
+        stream_id,
+        qpack,
+    );
+    try sendProtectedQpackEncoderInstructions(
+        endpoint,
+        to,
+        config,
+        qpack,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        next_packet_number,
+        protected_send,
+    );
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(endpoint.allocator);
+    try entry.send.appendFrames(
+        &frames,
+        endpoint.allocator,
+        encoded.items,
+        config.max_stream_frame_data,
+        true,
+    );
+    try sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        frames.items,
+        config.max_frames_per_packet,
+        protected_send,
+    );
+    _ = bodies.finish(stream_id);
 }
 
 fn sendConnectionFrames(connection: *quic.one_rtt.Connection, frames: []const quic.Frame, max_frames_per_packet: usize) Error!void {
@@ -6626,6 +6841,10 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 "request-chunks",
                 request.request.body,
             );
+            try std.testing.expectEqualStrings(
+                "ok",
+                request.request.trailers[0].value,
+            );
             try server_ptr.startResponse(
                 request.from,
                 request.stream_id,
@@ -6651,7 +6870,12 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 request.from,
                 request.stream_id,
                 "chunks",
-                true,
+                false,
+            );
+            try server_ptr.finishResponseTrailers(
+                request.from,
+                request.stream_id,
+                &.{.{ .name = "x-response-checksum", .value = "ok" }},
             );
             try std.testing.expectEqual(
                 @as(usize, 0),
@@ -6694,7 +6918,11 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
         error.InvalidContentLength,
         client.sendRequestBody(stream_id, "short", true),
     );
-    try client.sendRequestBody(stream_id, "chunks", true);
+    try client.sendRequestBody(stream_id, "chunks", false);
+    try client.finishRequestTrailers(
+        stream_id,
+        &.{.{ .name = "x-request-checksum", .value = "ok" }},
+    );
     try std.testing.expectEqual(
         @as(usize, 0),
         client.outbound_bodies.entries.items.len,
@@ -6706,6 +6934,10 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     try std.testing.expectEqualStrings(
         "response-chunks",
         response.response.body,
+    );
+    try std.testing.expectEqualStrings(
+        "ok",
+        response.response.trailers[0].value,
     );
 }
 
@@ -8375,6 +8607,10 @@ test "HTTP/3 handshake runtime streams request and response DATA chunks" {
                 "handshake-request",
                 request.request.body,
             );
+            try std.testing.expectEqualStrings(
+                "ok",
+                request.request.trailers[0].value,
+            );
             try session.startResponse(
                 request.stream_id,
                 .{ .status = 200 },
@@ -8388,7 +8624,11 @@ test "HTTP/3 handshake runtime streams request and response DATA chunks" {
             try session.sendResponseBody(
                 request.stream_id,
                 "response",
-                true,
+                false,
+            );
+            try session.finishResponseTrailers(
+                request.stream_id,
+                &.{.{ .name = "x-response-checksum", .value = "ok" }},
             );
         }
     };
@@ -8426,7 +8666,11 @@ test "HTTP/3 handshake runtime streams request and response DATA chunks" {
         "handshake-request".len,
     );
     try client.sendRequestBody(stream_id, "handshake-", false);
-    try client.sendRequestBody(stream_id, "request", true);
+    try client.sendRequestBody(stream_id, "request", false);
+    try client.finishRequestTrailers(
+        stream_id,
+        &.{.{ .name = "x-request-checksum", .value = "ok" }},
+    );
     var response = try client.receiveResponse(stream_id);
     defer response.deinit(allocator);
     thread.join();
@@ -8434,6 +8678,10 @@ test "HTTP/3 handshake runtime streams request and response DATA chunks" {
     try std.testing.expectEqualStrings(
         "handshake-response",
         response.response.body,
+    );
+    try std.testing.expectEqualStrings(
+        "ok",
+        response.response.trailers[0].value,
     );
 }
 
