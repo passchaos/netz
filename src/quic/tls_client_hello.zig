@@ -96,6 +96,22 @@ pub const ApplicationSecrets = struct {
     server_quic: quic.protection.PacketProtectionKeys,
 };
 
+pub const RuntimeHandshakeSecrets = struct {
+    handshake_secret: quic.tls.secret.Secret,
+    client_handshake_traffic_secret: quic.tls.secret.Secret,
+    server_handshake_traffic_secret: quic.tls.secret.Secret,
+    client_quic: quic.protection.PacketProtectionKeys,
+    server_quic: quic.protection.PacketProtectionKeys,
+};
+
+pub const RuntimeApplicationSecrets = struct {
+    master_secret: quic.tls.secret.Secret,
+    client_application_traffic_secret: quic.tls.secret.Secret,
+    server_application_traffic_secret: quic.tls.secret.Secret,
+    client_quic: quic.protection.PacketProtectionKeys,
+    server_quic: quic.protection.PacketProtectionKeys,
+};
+
 pub const ParsedEncryptedExtensions = struct {
     alpn: []const u8,
     transport_parameters: []const u8,
@@ -435,6 +451,37 @@ pub fn parseFinished(bytes: []const u8) Error![32]u8 {
     return verify_data;
 }
 
+pub fn writeFinishedForHash(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    verify_data: quic.tls.secret.Secret,
+) Error!void {
+    try list.append(allocator, handshake_type_finished);
+    try appendU24Len(
+        list,
+        allocator,
+        verify_data.bytes().len,
+        error.InvalidFinished,
+    );
+    try list.appendSlice(allocator, verify_data.bytes());
+}
+
+pub fn parseFinishedForHash(
+    bytes: []const u8,
+    hash: quic.tls.secret.Hash,
+) Error!quic.tls.secret.Secret {
+    var cursor = wire.Cursor.init(bytes);
+    if (try cursor.readByte() != handshake_type_finished) {
+        return error.InvalidFinished;
+    }
+    const body_len = try readU24(&cursor);
+    if (body_len != hash.len()) return error.InvalidFinished;
+    const verify_data = try cursor.readSlice(body_len);
+    if (!cursor.eof()) return error.InvalidFinished;
+    return quic.tls.secret.Secret.init(hash, verify_data) catch
+        return error.InvalidFinished;
+}
+
 pub fn x25519PublicKey(secret_key: [32]u8) Error![32]u8 {
     return quic.tls.key_exchange.publicKey(secret_key) catch
         return error.KeyExchangeFailed;
@@ -511,6 +558,40 @@ pub fn deriveHandshakeSecretsWithPskAndSuiteForVersion(
     };
 }
 
+pub fn deriveRuntimeHandshakeSecretsForVersion(
+    version: u32,
+    cipher_suite: CipherSuite,
+    shared_secret: [32]u8,
+    transcript_hash: quic.tls.transcript.Digest,
+    psk: ?quic.tls.secret.Secret,
+) (quic.protection.VersionError ||
+    quic.tls.key_schedule.Error ||
+    error{HashMismatch})!RuntimeHandshakeSecrets {
+    const hash = cipher_suite.hash();
+    if (transcript_hash.hash != hash) return error.HashMismatch;
+    const secrets = try quic.tls.key_schedule.deriveHandshakeFor(
+        hash,
+        &shared_secret,
+        transcript_hash,
+        psk,
+    );
+    return .{
+        .handshake_secret = secrets.handshake_secret,
+        .client_handshake_traffic_secret = secrets.client_traffic_secret,
+        .server_handshake_traffic_secret = secrets.server_traffic_secret,
+        .client_quic = try quic.protection.deriveKeysForSecretForVersion(
+            version,
+            cipher_suite,
+            secrets.client_traffic_secret,
+        ),
+        .server_quic = try quic.protection.deriveKeysForSecretForVersion(
+            version,
+            cipher_suite,
+            secrets.server_traffic_secret,
+        ),
+    };
+}
+
 pub fn deriveApplicationSecrets(handshake_secret: [32]u8, transcript_hash: [32]u8) ApplicationSecrets {
     return deriveApplicationSecretsForVersion(quic.Version.version_1.wireValue(), handshake_secret, transcript_hash) catch unreachable;
 }
@@ -551,12 +632,68 @@ pub fn deriveApplicationSecretsWithSuiteForVersion(
     };
 }
 
+pub fn deriveRuntimeApplicationSecretsForVersion(
+    version: u32,
+    cipher_suite: CipherSuite,
+    handshake_secret: quic.tls.secret.Secret,
+    transcript_hash: quic.tls.transcript.Digest,
+) (quic.protection.VersionError ||
+    quic.tls.key_schedule.Error ||
+    error{HashMismatch})!RuntimeApplicationSecrets {
+    if (handshake_secret.hash != cipher_suite.hash() or
+        transcript_hash.hash != cipher_suite.hash())
+    {
+        return error.HashMismatch;
+    }
+    const secrets = try quic.tls.key_schedule.deriveApplicationFor(
+        handshake_secret,
+        transcript_hash,
+    );
+    return .{
+        .master_secret = secrets.master_secret,
+        .client_application_traffic_secret = secrets.client_traffic_secret,
+        .server_application_traffic_secret = secrets.server_traffic_secret,
+        .client_quic = try quic.protection.deriveKeysForSecretForVersion(
+            version,
+            cipher_suite,
+            secrets.client_traffic_secret,
+        ),
+        .server_quic = try quic.protection.deriveKeysForSecretForVersion(
+            version,
+            cipher_suite,
+            secrets.server_traffic_secret,
+        ),
+    };
+}
+
 pub fn computeFinishedVerifyData(base_key: [32]u8, transcript_hash: [32]u8) [32]u8 {
     return quic.tls.key_schedule.computeFinished(base_key, transcript_hash);
 }
 
 pub fn verifyFinished(base_key: [32]u8, transcript_hash: [32]u8, verify_data: [32]u8) Error!void {
     quic.tls.key_schedule.verifyFinished(
+        base_key,
+        transcript_hash,
+        verify_data,
+    ) catch return error.BadFinished;
+}
+
+pub fn computeFinishedVerifyDataForHash(
+    base_key: quic.tls.secret.Secret,
+    transcript_hash: quic.tls.transcript.Digest,
+) Error!quic.tls.secret.Secret {
+    return quic.tls.key_schedule.computeFinishedFor(
+        base_key,
+        transcript_hash,
+    ) catch return error.BadFinished;
+}
+
+pub fn verifyFinishedForHash(
+    base_key: quic.tls.secret.Secret,
+    transcript_hash: quic.tls.transcript.Digest,
+    verify_data: quic.tls.secret.Secret,
+) Error!void {
+    quic.tls.key_schedule.verifyFinishedFor(
         base_key,
         transcript_hash,
         verify_data,

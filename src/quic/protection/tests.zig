@@ -155,6 +155,43 @@ test "QUIC Initial packets reject a negotiated ChaCha traffic key" {
     );
 }
 
+test "QUIC AES-256-GCM SHA-384 short packet and key update roundtrip" {
+    const allocator = std.testing.allocator;
+    const traffic_secret =
+        vail.tls.secret.Secret.fromSha384([_]u8{0x56} ** 48);
+    const keys = try protection.deriveKeysForSecretForVersion(
+        version_1_wire_for_test,
+        .aes_256_gcm_sha384,
+        traffic_secret,
+    );
+    const packet = try protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = "aes256-cid",
+        .packet_number = 11,
+        .packet_number_len = 4,
+        .payload = "sha384 payload",
+    });
+    defer allocator.free(packet);
+    var opened = try protection.openShortPacket(
+        allocator,
+        keys,
+        packet,
+        "aes256-cid".len,
+        11,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqualStrings("sha384 payload", opened.payload);
+
+    const next = protection.nextPacketProtectionKeys(keys);
+    try std.testing.expectEqual(
+        vail.tls.secret.Hash.sha384,
+        next.traffic_secret.hash,
+    );
+    try std.testing.expect(!keys.traffic_secret.eql(
+        &next.traffic_secret,
+    ));
+    try std.testing.expectEqualSlices(u8, &keys.suite_hp, &next.suite_hp);
+}
+
 test "QUIC AES key update derives next traffic keys and retains header protection" {
     const keys = protection.deriveAes128Keys([_]u8{0x44} ** protection.secret_len);
     const next_secret = protection.nextAes128TrafficSecret(keys.secret);

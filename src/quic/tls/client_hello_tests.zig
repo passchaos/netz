@@ -473,6 +473,61 @@ test "QUIC TLS versioned packet-protection derivation rejects unsupported versio
     try std.testing.expectError(error.UnsupportedVersion, target.deriveApplicationSecretsForVersion(unsupported_version, handshake_secret, transcript));
 }
 
+test "QUIC TLS runtime SHA-384 secrets derive AES-256 packet keys and Finished" {
+    const shared = [_]u8{0x39} ** 32;
+    const handshake_hash = quic.tls.transcript.hashFor(
+        .sha384,
+        &.{ "client hello", "server hello" },
+    );
+    const handshake = try target.deriveRuntimeHandshakeSecretsForVersion(
+        quic.Version.version_1.wireValue(),
+        .aes_256_gcm_sha384,
+        shared,
+        handshake_hash,
+        null,
+    );
+    try std.testing.expectEqual(
+        quic.tls.secret.Hash.sha384,
+        handshake.handshake_secret.hash,
+    );
+    try std.testing.expectEqual(
+        target.CipherSuite.aes_256_gcm_sha384,
+        handshake.client_quic.suite,
+    );
+
+    const application_hash = quic.tls.transcript.hashFor(
+        .sha384,
+        &.{ "client hello", "server flight" },
+    );
+    const application =
+        try target.deriveRuntimeApplicationSecretsForVersion(
+            quic.Version.version_1.wireValue(),
+            .aes_256_gcm_sha384,
+            handshake.handshake_secret,
+            application_hash,
+        );
+    const finished = try target.computeFinishedVerifyDataForHash(
+        application.client_application_traffic_secret,
+        application_hash,
+    );
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try target.writeFinishedForHash(
+        &encoded,
+        std.testing.allocator,
+        finished,
+    );
+    const parsed = try target.parseFinishedForHash(
+        encoded.items,
+        .sha384,
+    );
+    try target.verifyFinishedForHash(
+        application.client_application_traffic_secret,
+        application_hash,
+        parsed,
+    );
+}
+
 test "QUIC TLS ClientHello and ServerHello exchange over protected Initial packets" {
     const allocator = std.testing.allocator;
 

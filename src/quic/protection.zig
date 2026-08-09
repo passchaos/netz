@@ -14,7 +14,11 @@ pub const initial_salt_v2 = [_]u8{
 };
 
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
+const HkdfSha384 = std.crypto.kdf.hkdf.Hkdf(
+    std.crypto.auth.hmac.sha2.HmacSha384,
+);
 const traffic_crypto = vail.quic.traffic_crypto;
+const TlsSecret = vail.tls.secret.Secret;
 
 const version_1_wire: u32 = 0x00000001;
 const version_2_wire: u32 = 0x6b3343cf;
@@ -56,7 +60,11 @@ pub const HeaderForm = enum {
 
 pub const PacketProtectionKeys = struct {
     suite: CipherSuite = .aes_128_gcm_sha256,
+    /// Source-compatible SHA-256 view. Suite-generic code uses
+    /// `traffic_secret`, which can carry SHA-384's 48 bytes.
     secret: [secret_len]u8,
+    traffic_secret: TlsSecret =
+        .fromSha256([_]u8{0} ** secret_len),
     /// Source-compatible AES-128 view. New suite-generic code must use the
     /// packet helpers below, which consume `suite_key` and `suite_hp`.
     key: [aes_128_key_len]u8,
@@ -384,15 +392,19 @@ pub fn deriveKeys(
     suite: CipherSuite,
     secret: [secret_len]u8,
 ) PacketProtectionKeys {
-    return deriveKeysWithLabels(suite, secret, hkdf_labels_v1);
+    return deriveKeysWithLabels(
+        suite,
+        .fromSha256(secret),
+        hkdf_labels_v1,
+    ) catch unreachable;
 }
 
 fn deriveAes128KeysWithLabels(secret: [secret_len]u8, labels: HkdfLabels) PacketProtectionKeys {
     return deriveKeysWithLabels(
         .aes_128_gcm_sha256,
-        secret,
+        .fromSha256(secret),
         labels,
-    );
+    ) catch unreachable;
 }
 
 pub fn deriveKeysForVersion(
@@ -402,24 +414,45 @@ pub fn deriveKeysForVersion(
 ) VersionError!PacketProtectionKeys {
     return deriveKeysWithLabels(
         suite,
-        secret,
+        .fromSha256(secret),
+        (try protectionProfile(version)).labels,
+    ) catch unreachable;
+}
+
+pub fn deriveKeysForSecretForVersion(
+    version: u32,
+    suite: CipherSuite,
+    traffic_secret: TlsSecret,
+) (VersionError || error{HashMismatch})!PacketProtectionKeys {
+    return deriveKeysWithLabels(
+        suite,
+        traffic_secret,
         (try protectionProfile(version)).labels,
     );
 }
 
 fn deriveKeysWithLabels(
     suite: CipherSuite,
-    secret: [secret_len]u8,
+    traffic_secret: TlsSecret,
     labels: HkdfLabels,
-) PacketProtectionKeys {
-    const derived = traffic_crypto.Keys.derive(suite, secret, .{
-        .key = labels.key,
-        .iv = labels.iv,
-        .hp = labels.hp,
-    });
+) error{HashMismatch}!PacketProtectionKeys {
+    const derived = try traffic_crypto.Keys.deriveChecked(
+        suite,
+        traffic_secret,
+        .{
+            .key = labels.key,
+            .iv = labels.iv,
+            .hp = labels.hp,
+        },
+    );
+    const compatibility_secret = if (traffic_secret.hash == .sha256)
+        traffic_secret.sha256() catch unreachable
+    else
+        [_]u8{0} ** secret_len;
     return .{
         .suite = suite,
-        .secret = secret,
+        .secret = compatibility_secret,
+        .traffic_secret = traffic_secret,
         .key = derived.key[0..aes_128_key_len].*,
         .iv = derived.iv,
         .hp = derived.hp[0..hp_key_len].*,
@@ -433,9 +466,9 @@ pub fn deriveChaCha20Keys(
 ) PacketProtectionKeys {
     return deriveKeysWithLabels(
         .chacha20_poly1305_sha256,
-        secret,
+        .fromSha256(secret),
         hkdf_labels_v1,
-    );
+    ) catch unreachable;
 }
 
 pub fn nextAes128TrafficSecret(secret: [secret_len]u8) [secret_len]u8 {
@@ -473,12 +506,16 @@ pub fn nextPacketProtectionKeys(current: PacketProtectionKeys) PacketProtectionK
 }
 
 pub fn nextPacketProtectionKeysForVersion(version: u32, current: PacketProtectionKeys) VersionError!PacketProtectionKeys {
-    const next_secret = try nextTrafficSecretForVersion(version, current.secret);
-    var next = try deriveKeysForVersion(
-        version,
+    const labels = (try protectionProfile(version)).labels;
+    const next_secret = nextTrafficSecretValue(
+        current.traffic_secret,
+        labels.ku,
+    );
+    var next = deriveKeysWithLabels(
         current.suite,
         next_secret,
-    );
+        labels,
+    ) catch unreachable;
     next.hp = current.hp;
     next.suite_hp = current.suite_hp;
     return next;
@@ -690,9 +727,32 @@ fn asVailKeys(keys: PacketProtectionKeys) traffic_crypto.Keys {
     return .{
         .suite = keys.suite,
         .secret = keys.secret,
+        .traffic_secret = keys.traffic_secret,
         .key = suite_key,
         .iv = keys.iv,
         .hp = suite_hp,
+    };
+}
+
+fn nextTrafficSecretValue(
+    current: TlsSecret,
+    label: []const u8,
+) TlsSecret {
+    return switch (current.hash) {
+        .sha256 => .fromSha256(std.crypto.tls.hkdfExpandLabel(
+            HkdfSha256,
+            current.sha256() catch unreachable,
+            label,
+            "",
+            32,
+        )),
+        .sha384 => .fromSha384(std.crypto.tls.hkdfExpandLabel(
+            HkdfSha384,
+            current.sha384() catch unreachable,
+            label,
+            "",
+            48,
+        )),
     };
 }
 
