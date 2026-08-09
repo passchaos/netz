@@ -4942,11 +4942,23 @@ fn sendProtectedTrailers(
 
 fn sendConnectionFrames(connection: *quic.one_rtt.Connection, frames: []const quic.Frame, max_frames_per_packet: usize) Error!void {
     const chunk_size = @max(@as(usize, 1), max_frames_per_packet);
+    if (frames.len <= chunk_size) {
+        try connection.send(frames);
+        return;
+    }
+    var packets: [quic.one_rtt.max_batch_packets][]const quic.Frame =
+        undefined;
+    var packet_count: usize = 0;
     var offset: usize = 0;
     while (offset < frames.len) {
         const end = @min(frames.len, offset + chunk_size);
-        try connection.send(frames[offset..end]);
+        packets[packet_count] = frames[offset..end];
+        packet_count += 1;
         offset = end;
+        if (packet_count == packets.len or offset == frames.len) {
+            try connection.sendMany(packets[0..packet_count]);
+            packet_count = 0;
+        }
     }
 }
 

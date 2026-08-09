@@ -147,10 +147,12 @@ starts with deterministic parsers, serializers, and state helpers for:
   a 1-RTT recovery queue for PTO plus packet-threshold and time-threshold
   retransmission of unacknowledged ack-eliciting frame payloads, exact frame
   wire-length prediction, allocation-free caller-storage multi-packet protection,
-  single-allocation batch wrappers, and portable UDP batch submission that maps
-  to Linux `sendmmsg` through Zig `std.Io`, including paced two-probe PTO batch
-  submission and transactional partial-send recovery that never reuses an
-  already-emitted packet number, plus zero-copy Linux `UDP_SEGMENT` offload for
+  single-allocation batch wrappers, and stateful connection batches that
+  transactionally commit flow control, congestion, recovery, pacing, stream
+  offsets, AEAD key phases, and socket-visible prefixes. Portable UDP batch
+  submission maps to Linux `sendmmsg` through Zig `std.Io`, including paced
+  two-probe PTO batches and nonce-safe partial-send recovery, plus zero-copy
+  Linux `UDP_SEGMENT` offload for
   contiguous equal-sized packet batches with one-shot capability fallback and
   opt-in Linux `UDP_GRO` receive coalescing with shared zero-copy segment
   ownership, in-place current-key 1-RTT decryption, reusable frame scratch,
@@ -279,8 +281,9 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   convenience wrapper,
 - QUIC Linux `UDP_SEGMENT` batching versus `sendmmsg`, plus `UDP_GRO`
   coalesced receive versus plain per-datagram receive,
-- QUIC 1-RTT sequential packet protection/send versus allocation-free batched
-  protection with reusable scratch and UDP GSO/sendmmsg submission,
+- QUIC 1-RTT stateful sequential send versus stateful batched protection with
+  reusable scratch, full recovery/flow accounting, and UDP GSO/sendmmsg
+  submission,
 - end-to-end QUIC 1-RTT UDP_GRO batch receive versus per-packet receive,
   including decryption, frame parsing, state application, and cleanup.
 - bounded QUIC receive-stream compaction across long absolute offsets, including
@@ -387,8 +390,10 @@ if (session.maxDatagramPayloadSize()) |limit| {
   automatically use peer-capacity-bounded, reference-safe dynamic compression
   for repeated request and response fields after either preconfigured 1-RTT or
   a full QUIC handshake. The preconfigured 1-RTT runtime also reuses protected
-  packet scratch and batches multi-packet STREAM sends through UDP GSO or
-  sendmmsg while preserving packet-number progress on partial socket writes.
+  packet scratch. Both preconfigured and handshake-backed runtimes batch
+  multi-packet STREAM sends through UDP GSO or sendmmsg while preserving
+  flow/recovery state and consuming every protected packet number on partial
+  socket writes.
   Both runtimes keep outbound encoding non-blocking: newly inserted fields stay
   literal until acknowledged. On receive they can advertise
   non-zero `SETTINGS_QPACK_BLOCKED_STREAMS` up to the bounded concurrent-stream

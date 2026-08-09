@@ -263,6 +263,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receivePacketBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "servicePacketBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "ReceivedPacketBatch"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt, "ConnectionBatchSendResult"));
     try std.testing.expectEqual(
         @as(u64, 1) << 23,
         netz.quic.protection.aes_128_gcm_confidentiality_limit,
@@ -420,6 +421,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receiveRoutedDatagramAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receiveRoutedDatagramWithEcnAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closeTransport"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendMany"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendManyProgressAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendWithEcn"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "retransmitPacketThresholdLoss"));

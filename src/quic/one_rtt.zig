@@ -50,6 +50,19 @@ pub const BatchSendResult = struct {
     send_error: ?net.Socket.SendError = null,
 };
 
+pub const ConnectionBatchSendResult = struct {
+    /// Datagrams accepted by the socket, always a prefix of the protected
+    /// packet batch.
+    sent_count: usize,
+    /// Input packet groups protected by this call.
+    ///
+    /// This can exceed `sent_count` after a partial send. Every protected QUIC
+    /// packet number is consumed even when its datagram was not accepted:
+    /// reusing an AEAD nonce with different plaintext would be unsafe.
+    protected_count: usize,
+    send_error: ?net.Socket.SendError = null,
+};
+
 pub const max_batch_packets: usize = 64;
 
 const PayloadSendOptions = struct {
@@ -390,6 +403,14 @@ pub const Connection = struct {
     /// Reused protected-datagram storage. Packet protection writes directly
     /// into this buffer, avoiding one heap allocation/free pair per 1-RTT send.
     send_packet_buffer: std.ArrayList(u8) = .empty,
+    /// Reused flow-credit aggregation for stateful packet batches.
+    ///
+    /// A packet may carry STREAM frames for several streams, and later packets
+    /// may continue any of them. Keeping both aggregate levels on the
+    /// connection makes steady-state HTTP/3 batching allocation-free outside
+    /// recovery's required stable payload ownership.
+    send_batch_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
+    send_batch_packet_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
     /// Borrowed frame views used only by `servicePacketBatch`. They never
     /// outlive the current decrypted GRO segment and therefore avoid one frame
     /// slice allocation per packet on the event-loop fast path.
@@ -444,12 +465,478 @@ pub const Connection = struct {
         self.datagram_recv_queue.deinit(self.endpoint.allocator);
         self.send_frame_buffer.deinit(self.endpoint.allocator);
         self.send_packet_buffer.deinit(self.endpoint.allocator);
+        self.send_batch_stream_scratch.deinit(self.endpoint.allocator);
+        self.send_batch_packet_stream_scratch.deinit(
+            self.endpoint.allocator,
+        );
         self.receive_frame_buffer.deinit(self.endpoint.allocator);
         self.* = undefined;
     }
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
         try self.sendWithEcn(frames, .not_ect);
+    }
+
+    /// Send one frame slice per QUIC packet through a stateful socket batch.
+    ///
+    /// Pacing can split the input into several batches transparently. Flow or
+    /// congestion exhaustion remains observable, as with repeated `send`
+    /// calls, because this compact connection does not own an application send
+    /// queue that could wait for MAX_DATA or ACK processing.
+    pub fn sendMany(
+        self: *Connection,
+        packets: []const []const quic.Frame,
+    ) Error!void {
+        var offset: usize = 0;
+        while (offset < packets.len) {
+            const now_ns = self.monotonicNowNs();
+            const result = self.sendManyProgressAt(
+                packets[offset..],
+                now_ns,
+            ) catch |err| switch (err) {
+                error.PacingLimited => {
+                    try self.waitForPacing(now_ns);
+                    continue;
+                },
+                else => return err,
+            };
+            if (result.protected_count == 0) return error.MissingFrame;
+            offset += result.protected_count;
+            if (result.send_error) |err| return err;
+            if (result.sent_count != result.protected_count) {
+                return error.Unexpected;
+            }
+            if (offset < packets.len and
+                self.pacing_blocked_until_ns != null)
+            {
+                try self.waitForPacing(now_ns);
+            }
+        }
+    }
+
+    /// Protect and submit one stateful packet batch with explicit progress.
+    ///
+    /// All fallible transport bookkeeping is completed before the socket call.
+    /// On a partial send, recovery, congestion, flow-control, pacing, and
+    /// highest-stream-offset state retain only the socket-visible prefix. AEAD
+    /// usage and packet numbers retain the entire protected batch.
+    pub fn sendManyProgressAt(
+        self: *Connection,
+        packets: []const []const quic.Frame,
+        sent_time_ns: ?u64,
+    ) Error!ConnectionBatchSendResult {
+        if (packets.len == 0) {
+            return .{ .sent_count = 0, .protected_count = 0 };
+        }
+        self.pacing_blocked_until_ns = null;
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+        try self.validateNextPacketNumber();
+
+        const batch_limit = @min(packets.len, max_batch_packets);
+        const confidentiality_limit = self.aeadConfidentialityLimit();
+        const encrypted = self.send_key_generation_encrypted_packets;
+        const needs_key_update = encrypted >= confidentiality_limit;
+        const encryptable_u64 = if (!needs_key_update)
+            confidentiality_limit - encrypted
+        else blk: {
+            if (confidentiality_limit == 0 or
+                self.pending_key_update_ack_threshold != null)
+            {
+                try self.enterAeadLimitReached(
+                    "confidentiality limit",
+                    null,
+                    false,
+                );
+                return error.AeadLimitReached;
+            }
+            break :blk confidentiality_limit;
+        };
+        const encryptable = @min(
+            batch_limit,
+            std.math.cast(usize, encryptable_u64) orelse batch_limit,
+        );
+        if (encryptable == 0) return error.AeadLimitReached;
+
+        const last_packet_number = std.math.add(
+            u64,
+            self.next_packet_number,
+            encryptable - 1,
+        ) catch return error.InvalidPacketNumber;
+        if (last_packet_number > quic.protection.max_packet_number) {
+            return error.InvalidPacketNumber;
+        }
+
+        // Stream-limit checks can emit STREAMS_BLOCKED through the ordinary
+        // one-packet path, so perform all of them while batch scratch is empty.
+        for (packets[0..encryptable]) |frames| {
+            try self.validateOutboundFrames(frames);
+            for (frames) |frame| {
+                if (frame != .stream) continue;
+                try self.validateStreamFrameForSend(frame.stream);
+            }
+        }
+
+        const PreparedPacket = struct {
+            frames: []const quic.Frame,
+            packet_number: u64,
+            packet_number_len: u8,
+            payload_offset: usize,
+            payload_len: usize,
+            packet_len: usize,
+            ack_eliciting: bool,
+            in_flight: bool,
+            stream_bytes: u64,
+        };
+        var prepared: [max_batch_packets]PreparedPacket = undefined;
+        std.debug.assert(self.send_batch_stream_scratch.items.len == 0);
+        std.debug.assert(
+            self.send_batch_packet_stream_scratch.items.len == 0,
+        );
+        const planned_streams = &self.send_batch_stream_scratch;
+        defer planned_streams.clearRetainingCapacity();
+        const packet_streams = &self.send_batch_packet_stream_scratch;
+        defer packet_streams.clearRetainingCapacity();
+        var simulated_pacer = self.pacer;
+        const now_ns = sent_time_ns orelse self.monotonicNowNs();
+        const smoothed_rtt = self.rtt_stats.smoothedOrInitial();
+        var next_pacing_deadline: ?u64 = null;
+        var count: usize = 0;
+        var total_stream_bytes: u64 = 0;
+        var total_in_flight: usize = 0;
+        var total_payload_len: usize = 0;
+        var total_packet_len: usize = 0;
+        std.debug.assert(self.send_frame_buffer.items.len == 0);
+        defer self.send_frame_buffer.items.len = 0;
+
+        while (count < encryptable) {
+            const frames = packets[count];
+            var payload_len: usize = 0;
+            for (frames) |frame| {
+                payload_len = std.math.add(
+                    usize,
+                    payload_len,
+                    try frame.wireLen(),
+                ) catch return error.InvalidFrameLength;
+            }
+            const packet_number = self.next_packet_number + count;
+            const packet_number_len =
+                quic.protection.packetNumberLenForPayload(
+                    packet_number,
+                    self.sent.largestAcknowledged(),
+                    payload_len,
+                );
+            const overhead = try quic.protection.shortPacketLen(.{
+                .destination_connection_id = self.config.peer_connection_id,
+                .packet_number = packet_number,
+                .packet_number_len = packet_number_len,
+                .payload = &.{},
+            });
+            const packet_len = std.math.add(
+                usize,
+                overhead,
+                payload_len,
+            ) catch return error.InvalidPayloadLength;
+            if (packet_len > self.endpoint.limits.max_datagram_size) {
+                return error.DatagramTooLarge;
+            }
+
+            const in_flight = packetInFlight(frames);
+            if (in_flight) {
+                if (simulated_pacer.deadlineAt(
+                    now_ns,
+                    packet_len,
+                    self.congestion.congestion_window,
+                    smoothed_rtt,
+                )) |deadline| {
+                    self.pacing_blocked_until_ns = deadline;
+                    if (count == 0) return error.PacingLimited;
+                    next_pacing_deadline = deadline;
+                    break;
+                }
+                if (payload_len > self.congestion.available() -
+                    @min(self.congestion.available(), total_in_flight))
+                {
+                    if (count == 0) return error.CongestionLimited;
+                    break;
+                }
+            }
+
+            packet_streams.clearRetainingCapacity();
+            var packet_stream_bytes: u64 = 0;
+            for (frames) |frame| {
+                if (frame != .stream) continue;
+                const bytes = std.math.cast(
+                    u64,
+                    frame.stream.data.len,
+                ) orelse return error.InvalidFrameLength;
+                packet_stream_bytes = std.math.add(
+                    u64,
+                    packet_stream_bytes,
+                    bytes,
+                ) catch return error.InvalidFrameLength;
+                try addReservedStreamCredit(
+                    packet_streams,
+                    self.endpoint.allocator,
+                    frame.stream.stream_id,
+                    bytes,
+                );
+            }
+            if (packet_stream_bytes > self.send_flow.available() -
+                @min(self.send_flow.available(), total_stream_bytes))
+            {
+                if (count == 0) {
+                    try self.sendDataBlocked();
+                    return error.FlowControlBlocked;
+                }
+                break;
+            }
+            var blocked_stream: ?struct { id: u64, limit: u64 } = null;
+            for (packet_streams.items) |credit| {
+                const planned = reservedStreamBytes(
+                    planned_streams.items,
+                    credit.stream_id,
+                );
+                const available = if (self.findSendStreamEntry(
+                    credit.stream_id,
+                )) |entry|
+                    entry.flow.available()
+                else
+                    self.initialSendStreamDataLimit(credit.stream_id);
+                if (credit.bytes > available - @min(available, planned)) {
+                    blocked_stream = .{
+                        .id = credit.stream_id,
+                        .limit = available,
+                    };
+                    break;
+                }
+            }
+            if (blocked_stream) |blocked| {
+                if (count == 0) {
+                    try self.sendStreamDataBlocked(
+                        blocked.id,
+                        blocked.limit,
+                    );
+                    return error.FlowControlBlocked;
+                }
+                break;
+            }
+
+            for (packet_streams.items) |credit| {
+                try addReservedStreamCredit(
+                    planned_streams,
+                    self.endpoint.allocator,
+                    credit.stream_id,
+                    credit.bytes,
+                );
+            }
+            const payload_offset = self.send_frame_buffer.items.len;
+            for (frames) |frame| {
+                try frame.write(
+                    &self.send_frame_buffer,
+                    self.endpoint.allocator,
+                );
+            }
+            std.debug.assert(
+                self.send_frame_buffer.items.len - payload_offset ==
+                    payload_len,
+            );
+            prepared[count] = .{
+                .frames = frames,
+                .packet_number = packet_number,
+                .packet_number_len = packet_number_len,
+                .payload_offset = payload_offset,
+                .payload_len = payload_len,
+                .packet_len = packet_len,
+                .ack_eliciting = ackEliciting(frames),
+                .in_flight = in_flight,
+                .stream_bytes = packet_stream_bytes,
+            };
+            total_stream_bytes += packet_stream_bytes;
+            total_payload_len += payload_len;
+            total_packet_len += packet_len;
+            if (in_flight) {
+                total_in_flight += payload_len;
+                simulated_pacer.onPacketSentAt(
+                    now_ns,
+                    packet_len,
+                    self.congestion.congestion_window,
+                    smoothed_rtt,
+                );
+            }
+            count += 1;
+        }
+        if (count == 0) return error.MissingFrame;
+
+        try self.send_packet_buffer.ensureTotalCapacity(
+            self.endpoint.allocator,
+            total_packet_len,
+        );
+        for (planned_streams.items) |credit| {
+            _ = try self.sendStreamEntry(credit.stream_id);
+        }
+
+        var connection_flow_reserved = false;
+        var reserved_stream_count: usize = 0;
+        errdefer {
+            if (connection_flow_reserved) {
+                self.send_flow.used -|= total_stream_bytes;
+            }
+            for (planned_streams.items[0..reserved_stream_count]) |credit| {
+                const entry =
+                    self.findSendStreamEntry(credit.stream_id) orelse continue;
+                entry.flow.used -|= credit.bytes;
+            }
+        }
+        if (total_stream_bytes != 0) {
+            try self.send_flow.reserve(total_stream_bytes);
+            connection_flow_reserved = true;
+        }
+        for (planned_streams.items) |credit| {
+            const entry = self.findSendStreamEntry(credit.stream_id).?;
+            try entry.flow.reserve(credit.bytes);
+            reserved_stream_count += 1;
+        }
+
+        var congestion_reserved = false;
+        errdefer if (congestion_reserved) {
+            self.congestion.discard(total_in_flight);
+        };
+        if (total_in_flight != 0) {
+            try self.congestion.reserve(total_in_flight);
+        }
+        congestion_reserved = true;
+
+        var tracked_recovery_count: usize = 0;
+        errdefer for (prepared[0..tracked_recovery_count]) |packet| {
+            _ = self.recovery.forgetPacketNumber(packet.packet_number);
+        };
+        var tracked_sent_count: usize = 0;
+        errdefer for (prepared[0..tracked_sent_count]) |packet| {
+            _ = self.sent.forget(packet.packet_number);
+        };
+        for (prepared[0..count]) |packet| {
+            const payload = self.send_frame_buffer.items[packet.payload_offset..][0..packet.payload_len];
+            if (packet.ack_eliciting) {
+                try self.recovery.trackSent(packet.packet_number, payload);
+            }
+            tracked_recovery_count += 1;
+            try self.sent.sentInFlightAt(
+                packet.packet_number,
+                packet.ack_eliciting,
+                packet.in_flight,
+                packet.payload_len,
+                .not_ect,
+                sent_time_ns,
+            );
+            tracked_sent_count += 1;
+        }
+
+        try self.reserveAntiAmplification(total_payload_len);
+        var anti_amplification_reserved = true;
+        errdefer if (anti_amplification_reserved) {
+            self.releaseAntiAmplification(total_payload_len);
+        };
+
+        if (needs_key_update) {
+            try self.prepareAeadForEncryption(self.next_packet_number);
+        }
+        self.send_packet_buffer.items.len =
+            self.send_packet_buffer.capacity;
+        defer self.send_packet_buffer.items.len = 0;
+        var datagrams: [max_batch_packets][]const u8 = undefined;
+        var packet_offset: usize = 0;
+        var protected_count: usize = 0;
+        errdefer if (protected_count != 0) {
+            self.next_packet_number += protected_count;
+            if (needs_key_update) {
+                self.pending_key_update_ack_threshold =
+                    self.next_packet_number;
+            }
+        };
+        for (prepared[0..count], 0..) |packet, i| {
+            const payload = self.send_frame_buffer.items[packet.payload_offset..][0..packet.payload_len];
+            const sealed = try quic.protection.sealShortPacketInto(
+                self.send_packet_buffer.items[packet_offset..][0..packet.packet_len],
+                self.send_key_phase.currentKeys(),
+                .{
+                    .destination_connection_id = self.config.peer_connection_id,
+                    .packet_number = packet.packet_number,
+                    .packet_number_len = packet.packet_number_len,
+                    .spin_bit = self.nextSpinBit(),
+                    .key_phase = self.send_key_phase.currentKeyPhase(),
+                    .payload = payload,
+                },
+            );
+            self.recordPacketEncrypted();
+            protected_count += 1;
+            datagrams[i] = sealed;
+            packet_offset += sealed.len;
+        }
+
+        const send_result = try self.endpoint.sendManyBytesProgress(
+            self.config.peer,
+            datagrams[0..count],
+        );
+        std.debug.assert(send_result.sent_count <= count);
+
+        var sent_payload_len: usize = 0;
+        var sent_in_flight: usize = 0;
+        var sent_stream_bytes: u64 = 0;
+        for (prepared[0..send_result.sent_count]) |packet| {
+            sent_payload_len += packet.payload_len;
+            sent_stream_bytes += packet.stream_bytes;
+            if (packet.in_flight) {
+                sent_in_flight += packet.payload_len;
+                self.pacer.onPacketSentAt(
+                    now_ns,
+                    packet.packet_len,
+                    self.congestion.congestion_window,
+                    smoothed_rtt,
+                );
+                self.congestion.onPacketSent(packet.packet_number);
+            }
+            self.noteSentStreams(packet.frames);
+        }
+        self.releaseAntiAmplification(
+            total_payload_len - sent_payload_len,
+        );
+        anti_amplification_reserved = false;
+        self.congestion.discard(total_in_flight - sent_in_flight);
+        congestion_reserved = false;
+
+        self.send_flow.used -|= total_stream_bytes - sent_stream_bytes;
+        for (prepared[send_result.sent_count..count]) |packet| {
+            for (packet.frames) |frame| {
+                if (frame != .stream or frame.stream.data.len == 0) continue;
+                const entry = self.findSendStreamEntry(
+                    frame.stream.stream_id,
+                ) orelse continue;
+                entry.flow.used -|= frame.stream.data.len;
+            }
+            _ = self.recovery.forgetPacketNumber(packet.packet_number);
+            _ = self.sent.forget(packet.packet_number);
+        }
+        connection_flow_reserved = false;
+        reserved_stream_count = 0;
+        tracked_recovery_count = 0;
+        tracked_sent_count = 0;
+
+        // Protection itself consumes the nonce even if sendmmsg accepts only a
+        // prefix. QUIC permits packet-number gaps, so skip the unsent suffix.
+        self.next_packet_number += protected_count;
+        protected_count = 0;
+        if (needs_key_update and send_result.sent_count == 0) {
+            self.pending_key_update_ack_threshold =
+                self.next_packet_number;
+        }
+        self.pacing_blocked_until_ns = next_pacing_deadline;
+        return .{
+            .sent_count = send_result.sent_count,
+            .protected_count = count,
+            .send_error = send_result.send_error,
+        };
     }
 
     pub fn sendWithEcn(self: *Connection, frames: []const quic.Frame, ecn: quic.packet_space.EcnCodepoint) Error!void {
@@ -3287,6 +3774,34 @@ fn countStreamBytes(frames: []const quic.Frame) u64 {
         if (frame == .stream) total += frame.stream.data.len;
     }
     return total;
+}
+
+fn addReservedStreamCredit(
+    credits: *std.ArrayList(ReservedStreamCredit),
+    allocator: std.mem.Allocator,
+    stream_id: u64,
+    bytes: u64,
+) Error!void {
+    for (credits.items) |*credit| {
+        if (credit.stream_id != stream_id) continue;
+        credit.bytes = std.math.add(u64, credit.bytes, bytes) catch
+            return error.InvalidFrameLength;
+        return;
+    }
+    try credits.append(allocator, .{
+        .stream_id = stream_id,
+        .bytes = bytes,
+    });
+}
+
+fn reservedStreamBytes(
+    credits: []const ReservedStreamCredit,
+    stream_id: u64,
+) u64 {
+    for (credits) |credit| {
+        if (credit.stream_id == stream_id) return credit.bytes;
+    }
+    return 0;
 }
 
 fn datagramFrameWireSize(datagram: quic.DatagramFrame) ?usize {
@@ -7426,6 +7941,247 @@ test "QUIC 1-RTT PTO batch sends pacing-limited prefix" {
     try std.testing.expectEqual(@as(u64, 2), probe0.packet.packet_number);
 }
 
+test "QUIC 1-RTT stateful batch commits stream flow and recovery" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const server_cid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb9} ** quic.protection.secret_len,
+    );
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const first = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "first",
+    } }};
+    const second = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .data = "second",
+        .fin = true,
+    } }};
+    const packets = [_][]const quic.Frame{ &first, &second };
+    try client.sendMany(&packets);
+
+    try std.testing.expectEqual(@as(u64, 2), client.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 11), client.send_flow.used);
+    try std.testing.expectEqual(
+        @as(u64, 11),
+        client.findSendStreamEntry(0).?.flow.used,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 11),
+        client.findSendStreamEntry(0).?.highest_sent_end,
+    );
+    try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 2), client.sent.packets.items.len);
+
+    var received0 = try server.receivePacket();
+    defer received0.deinit(allocator);
+    var received1 = try server.receivePacket();
+    defer received1.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), received0.packet.packet_number);
+    try std.testing.expectEqualStrings(
+        "first",
+        received0.frames[0].stream.data,
+    );
+    try std.testing.expectEqual(@as(u64, 1), received1.packet.packet_number);
+    try std.testing.expectEqualStrings(
+        "second",
+        received1.frames[0].stream.data,
+    );
+    try std.testing.expect(received1.frames[0].stream.fin);
+}
+
+test "QUIC 1-RTT stateful batch splits at AEAD key generation boundary" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd };
+    const server_cid = [_]u8{ 0xbe, 0xbf, 0xc0, 0xc1 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc2} ** quic.protection.secret_len,
+    );
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .aead_confidentiality_limit = 2,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .aead_confidentiality_limit = 2,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    const packets = [_][]const quic.Frame{ &ping, &ping, &ping };
+    try client.sendMany(&packets);
+    try std.testing.expectEqual(@as(u64, 3), client.next_packet_number);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        client.localOneRttKeyUpdateCount(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        client.encryptedPacketsWithCurrentKeys(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 2),
+        client.pendingOneRttKeyUpdateAckThreshold(),
+    );
+
+    var packet0 = try server.receivePacket();
+    defer packet0.deinit(allocator);
+    var packet1 = try server.receivePacket();
+    defer packet1.deinit(allocator);
+    var packet2 = try server.receivePacket();
+    defer packet2.deinit(allocator);
+    try std.testing.expect(!packet0.packet.key_phase);
+    try std.testing.expect(!packet1.packet.key_phase);
+    try std.testing.expect(packet2.packet.key_phase);
+    try std.testing.expect(packet2.peer_initiated_key_update);
+}
+
+test "QUIC 1-RTT stateful batch stops at pacing deadline" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xc3, 0xc4, 0xc5, 0xc6 };
+    const server_cid = [_]u8{ 0xc7, 0xc8, 0xc9, 0xca };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcb} ** quic.protection.secret_len,
+    );
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    const payload_len = try ping[0].wireLen();
+    const packet_number_len =
+        quic.protection.packetNumberLenForPayload(0, null, payload_len);
+    const packet_len = try quic.protection.shortPacketLen(.{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .packet_number_len = packet_number_len,
+        .payload = &.{0},
+    });
+    client.pacer.budget = packet_len;
+    client.pacer.last_sent_time_ns = 0;
+
+    const packets = [_][]const quic.Frame{ &ping, &ping };
+    const result = try client.sendManyProgressAt(&packets, 0);
+    try std.testing.expectEqual(@as(usize, 1), result.sent_count);
+    try std.testing.expectEqual(@as(usize, 1), result.protected_count);
+    try std.testing.expect(result.send_error == null);
+    try std.testing.expect(client.pacing_blocked_until_ns != null);
+    try std.testing.expectEqual(@as(u64, 1), client.next_packet_number);
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+
+    var received = try server.receivePacket();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), received.packet.packet_number);
+}
+
 const ObservedBatchSend = struct {
     delegate: std.Io,
     fail_after_prefix: ?usize = null,
@@ -7466,6 +8222,125 @@ const ObservedBatchSend = struct {
         return .{ error.NetworkDown, prefix_len };
     }
 };
+
+test "QUIC 1-RTT stateful batch rolls back unsent suffix and skips nonces" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_cid = [_]u8{ 0xc5, 0xc6, 0xc7, 0xc8 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc9} ** quic.protection.secret_len,
+    );
+    var client = try Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    client.endpoint.gso_send_enabled = false;
+    var partial_send = ObservedBatchSend{
+        .delegate = client.endpoint.io,
+        .fail_after_prefix = 1,
+    };
+    var partial_vtable = client.endpoint.io.vtable.*;
+    partial_vtable.netSend = ObservedBatchSend.netSend;
+    client.endpoint.io = .{
+        .userdata = &partial_send,
+        .vtable = &partial_vtable,
+    };
+    defer client.endpoint.io = partial_send.delegate;
+
+    const first = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "first",
+    } }};
+    const second = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .data = "second",
+    } }};
+    const packets = [_][]const quic.Frame{ &first, &second };
+    const result = try client.sendManyProgressAt(&packets, 1_000);
+    try std.testing.expectEqual(@as(usize, 1), result.sent_count);
+    try std.testing.expectEqual(@as(usize, 2), result.protected_count);
+    try std.testing.expectEqual(error.NetworkDown, result.send_error.?);
+    try std.testing.expectEqual(@as(u64, 2), client.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 5), client.send_flow.used);
+    try std.testing.expectEqual(
+        @as(u64, 5),
+        client.findSendStreamEntry(0).?.flow.used,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 5),
+        client.findSendStreamEntry(0).?.highest_sent_end,
+    );
+    try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
+    try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        client.encryptedPacketsWithCurrentKeys(),
+    );
+
+    var received = try server.receivePacket();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), received.packet.packet_number);
+    try std.testing.expectEqualStrings(
+        "first",
+        received.frames[0].stream.data,
+    );
+
+    // Retry the unsent application suffix under packet number 2. The receiver
+    // accepts the gap at packet 1, while flow/recovery state advances only now.
+    client.endpoint.io = partial_send.delegate;
+    try client.send(&second);
+    try std.testing.expectEqual(@as(u64, 3), client.next_packet_number);
+    try std.testing.expectEqual(@as(u64, 11), client.send_flow.used);
+    try std.testing.expectEqual(
+        @as(u64, 11),
+        client.findSendStreamEntry(0).?.highest_sent_end,
+    );
+    var retried = try server.receivePacket();
+    defer retried.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), retried.packet.packet_number);
+    try std.testing.expectEqualStrings(
+        "second",
+        retried.frames[0].stream.data,
+    );
+}
 
 test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" {
     const allocator = std.testing.allocator;
