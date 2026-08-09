@@ -256,6 +256,7 @@ zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
+zig build bench-quic-stream-window -Doptimize=ReleaseFast
 ```
 
 The aggregate `bench` step runs the current protocol microbenchmarks:
@@ -273,6 +274,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   protection with reusable scratch and UDP GSO/sendmmsg submission,
 - end-to-end QUIC 1-RTT UDP_GRO batch receive versus per-packet receive,
   including decryption, frame parsing, state application, and cleanup.
+- bounded QUIC receive-stream compaction across long absolute offsets, including
+  retained-memory reduction versus the previous absolute-offset buffer model.
 
 The build script pins the package to Zig `0.16.0`.
 

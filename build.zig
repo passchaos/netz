@@ -120,6 +120,12 @@ pub fn build(b: *std.Build) void {
             .run_step = "bench-quic-one-rtt-receive",
             .description = "Benchmark QUIC 1-RTT UDP_GRO batch receive",
         },
+        .{
+            .exe_name = "netz-bench-quic-stream-window",
+            .path = "examples/bench_quic_stream_window.zig",
+            .run_step = "bench-quic-stream-window",
+            .description = "Benchmark bounded QUIC receive stream compaction",
+        },
     };
     const linux_example_specs = [_]struct {
         exe_name: []const u8,

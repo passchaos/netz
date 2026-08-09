@@ -87,11 +87,17 @@ pub const SendState = struct {
 pub const RecvState = struct {
     allocator: std.mem.Allocator,
     stream_id: u64,
+    /// Absolute stream offset represented by buffer[0].
+    storage_offset: usize = 0,
     buffer: std.ArrayList(u8) = .empty,
     received: std.ArrayList(bool) = .empty,
+    /// Absolute application read offset.
     read_offset: usize = 0,
+    /// Absolute first not-yet-contiguous stream offset.
     contiguous_end: usize = 0,
     final_size: ?usize = null,
+    received_total: u64 = 0,
+    highest_received_end: usize = 0,
     max_buffered: usize,
 
     pub fn init(allocator: std.mem.Allocator, stream_id: u64, max_buffered: usize) RecvState {
@@ -109,9 +115,12 @@ pub const RecvState = struct {
         errdefer copy.deinit();
         try copy.buffer.appendSlice(allocator, self.buffer.items);
         try copy.received.appendSlice(allocator, self.received.items);
+        copy.storage_offset = self.storage_offset;
         copy.read_offset = self.read_offset;
         copy.contiguous_end = self.contiguous_end;
         copy.final_size = self.final_size;
+        copy.received_total = self.received_total;
+        copy.highest_received_end = self.highest_received_end;
         return copy;
     }
 
@@ -121,60 +130,117 @@ pub const RecvState = struct {
 
     pub fn insertTracked(self: *RecvState, frame: quic.StreamFrame) Error!u64 {
         if (frame.stream_id != self.stream_id) return error.WrongStream;
-        const offset = std.math.cast(usize, frame.offset) orelse return error.InvalidStreamRange;
-        const end = std.math.add(usize, offset, frame.data.len) catch return error.InvalidStreamRange;
-        if (end > self.max_buffered) return error.StreamBufferTooLarge;
+        const absolute_offset = std.math.cast(usize, frame.offset) orelse return error.InvalidStreamRange;
+        const absolute_end = std.math.add(usize, absolute_offset, frame.data.len) catch return error.InvalidStreamRange;
         if (self.final_size) |final_size| {
-            if (end > final_size) return error.FinalSizeMismatch;
-            if (frame.fin and end != final_size) return error.FinalSizeMismatch;
+            if (absolute_end > final_size) return error.FinalSizeMismatch;
+            if (frame.fin and absolute_end != final_size) return error.FinalSizeMismatch;
         }
+        // Bytes below storage_offset were already delivered. QUIC permits
+        // retransmitting them; ignore that prefix without growing the window.
+        if (absolute_end <= self.storage_offset) {
+            if (frame.fin and absolute_end < self.highest_received_end) {
+                return error.FinalSizeMismatch;
+            }
+            if (frame.fin) self.final_size = absolute_end;
+            return 0;
+        }
+        const retained_offset = @max(absolute_offset, self.storage_offset);
+        const skipped = retained_offset - absolute_offset;
+        const data = frame.data[skipped..];
+        const relative_offset = retained_offset - self.storage_offset;
+        const relative_end = std.math.add(usize, relative_offset, data.len) catch
+            return error.InvalidStreamRange;
+        if (relative_end > self.max_buffered) return error.StreamBufferTooLarge;
 
         var newly_received: u64 = 0;
-        for (frame.data, 0..) |byte, i| {
-            const absolute = offset + i;
-            if (absolute < self.received.items.len and self.received.items[absolute]) {
-                if (self.buffer.items[absolute] != byte) return error.ConflictingStreamData;
+        for (data, 0..) |byte, i| {
+            const relative = relative_offset + i;
+            if (relative < self.received.items.len and self.received.items[relative]) {
+                if (self.buffer.items[relative] != byte) return error.ConflictingStreamData;
             } else {
                 newly_received += 1;
             }
         }
-
-        if (end > self.buffer.items.len) {
-            const old_len = self.buffer.items.len;
-            try self.buffer.resize(self.allocator, end);
-            @memset(self.buffer.items[old_len..end], 0);
-            try self.received.resize(self.allocator, end);
-            @memset(self.received.items[old_len..end], false);
+        // Preserve the existing conflict-first error classification when a
+        // FIN both overlaps inconsistent buffered bytes and shrinks the known
+        // stream extent. Neither final_size nor storage mutates on failure.
+        if (frame.fin and absolute_end < self.highest_received_end) {
+            return error.FinalSizeMismatch;
         }
-        @memcpy(self.buffer.items[offset..end], frame.data);
-        @memset(self.received.items[offset..end], true);
-        while (self.contiguous_end < self.received.items.len and self.received.items[self.contiguous_end]) {
+
+        if (relative_end > self.buffer.items.len) {
+            const old_len = self.buffer.items.len;
+            try self.buffer.resize(self.allocator, relative_end);
+            @memset(self.buffer.items[old_len..relative_end], 0);
+            try self.received.resize(self.allocator, relative_end);
+            @memset(self.received.items[old_len..relative_end], false);
+        }
+        @memcpy(self.buffer.items[relative_offset..relative_end], data);
+        @memset(self.received.items[relative_offset..relative_end], true);
+        var contiguous_relative = self.contiguous_end - self.storage_offset;
+        while (contiguous_relative < self.received.items.len and
+            self.received.items[contiguous_relative])
+        {
+            contiguous_relative += 1;
             self.contiguous_end += 1;
         }
-        if (frame.fin) self.final_size = end;
+        self.highest_received_end = @max(
+            self.highest_received_end,
+            absolute_end,
+        );
+        self.received_total = std.math.add(
+            u64,
+            self.received_total,
+            newly_received,
+        ) catch std.math.maxInt(u64);
+        if (frame.fin) self.final_size = absolute_end;
         return newly_received;
     }
 
     pub fn receivedByteCount(self: RecvState) u64 {
-        var count: u64 = 0;
-        for (self.received.items) |received| {
-            if (received) count += 1;
-        }
-        return count;
+        return self.received_total;
     }
 
     pub fn available(self: RecvState) []const u8 {
-        return self.buffer.items[self.read_offset..self.contiguous_end];
+        const relative_start = self.read_offset - self.storage_offset;
+        const relative_end = self.contiguous_end - self.storage_offset;
+        return self.buffer.items[relative_start..relative_end];
     }
 
     pub fn consume(self: *RecvState, len: usize) Error!void {
         if (len > self.available().len) return error.NothingAvailable;
         self.read_offset += len;
+        self.compactConsumedPrefix();
     }
 
     pub fn complete(self: RecvState) bool {
         const final_size = self.final_size orelse return false;
         return self.contiguous_end >= final_size and self.read_offset >= final_size;
+    }
+
+    fn compactConsumedPrefix(self: *RecvState) void {
+        const consumed = self.read_offset - self.storage_offset;
+        if (consumed == 0) return;
+        // Avoid memmove on tiny reads, but never retain more than max_buffered
+        // behind the application cursor.
+        if (consumed < self.buffer.items.len / 2 and
+            consumed < self.max_buffered / 2)
+        {
+            return;
+        }
+        const remaining = self.buffer.items.len - consumed;
+        @memmove(
+            self.buffer.items[0..remaining],
+            self.buffer.items[consumed..],
+        );
+        @memmove(
+            self.received.items[0..remaining],
+            self.received.items[consumed..],
+        );
+        self.buffer.items.len = remaining;
+        self.received.items.len = remaining;
+        self.storage_offset = self.read_offset;
     }
 };
 
@@ -263,4 +329,77 @@ test "QUIC receive stream keeps final size transactional on conflict" {
 
     try recv.insert(.{ .stream_id = 0, .offset = 3, .data = &.{}, .fin = true });
     try std.testing.expectEqual(@as(?usize, 3), recv.final_size);
+}
+
+test "QUIC receive stream slides consumed storage across large offsets" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 16);
+    defer recv.deinit();
+
+    try recv.insert(.{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "abcdefgh",
+    });
+    try std.testing.expectEqualStrings("abcdefgh", recv.available());
+    try recv.consume(8);
+    try std.testing.expectEqual(@as(usize, 8), recv.storage_offset);
+    try std.testing.expectEqual(@as(usize, 0), recv.buffer.items.len);
+
+    // Absolute offset exceeds max_buffered, but the live retained window does
+    // not. This is the key invariant needed by streaming protocol parsers.
+    try recv.insert(.{
+        .stream_id = 0,
+        .offset = 8,
+        .data = "ijklmnop",
+    });
+    try std.testing.expectEqualStrings("ijklmnop", recv.available());
+    try recv.consume(8);
+    try recv.insert(.{
+        .stream_id = 0,
+        .offset = 16,
+        .data = "qrstuvwx",
+        .fin = true,
+    });
+    try std.testing.expectEqualStrings("qrstuvwx", recv.available());
+    try std.testing.expectEqual(@as(?usize, 24), recv.final_size);
+    try recv.consume(8);
+    try std.testing.expect(recv.complete());
+    try std.testing.expectEqual(@as(u64, 24), recv.receivedByteCount());
+
+    // Fully-consumed retransmissions do not regrow storage or double-count
+    // flow-control bytes.
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 0,
+            .data = "abcdefgh",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), recv.buffer.items.len);
+    try std.testing.expectEqual(@as(u64, 24), recv.receivedByteCount());
+}
+
+test "QUIC receive stream clips overlap at sliding window boundary" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 16);
+    defer recv.deinit();
+    try recv.insert(.{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "abcdefgh",
+    });
+    try recv.consume(8);
+
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 4,
+            .data = "efghijkl",
+        }),
+    );
+    try std.testing.expectEqualStrings("ijkl", recv.available());
+    try std.testing.expectEqual(@as(u64, 12), recv.receivedByteCount());
 }
