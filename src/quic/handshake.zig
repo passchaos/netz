@@ -677,10 +677,15 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         }
     }
     const alpn = try chooseAlpn(options.alpn_protocol, parsed_client.alpn_protocols);
-    if (effective_psk == null and options.identity != null and
-        !parsed_client.supports_ed25519)
-    {
-        return error.UnsupportedSignatureScheme;
+    if (effective_psk == null) {
+        if (options.identity) |identity| {
+            const supported = switch (identity.signer.scheme()) {
+                quic.tls.auth.signature_scheme_ed25519 => parsed_client.supports_ed25519,
+                quic.tls.auth.signature_scheme_ecdsa_secp256r1_sha256 => parsed_client.supports_ecdsa_p256_sha256,
+                else => false,
+            };
+            if (!supported) return error.UnsupportedSignatureScheme;
+        }
     }
     const peer_transport_parameters = try quic.parseTransportParametersTyped(
         endpoint.allocator,
@@ -837,14 +842,13 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         try quic.tls.auth.writeCertificateVerify(
             &certificate_verify,
             endpoint.allocator,
-            identity.signing_key,
+            identity.signer,
             hashParts(&.{
                 client_initial.crypto_data,
                 server_hello.items,
                 encrypted_extensions.items,
                 certificate.items,
             }),
-            identity.signing_noise,
         );
         try server_flight.appendSlice(
             endpoint.allocator,

@@ -49,6 +49,7 @@ pub const ParsedClientHello = struct {
     x25519_public_key: []const u8,
     transport_parameters: []const u8,
     supports_ed25519: bool = false,
+    supports_ecdsa_p256_sha256: bool = false,
     psk_offer: ?quic.resumption.tls_psk.Offer = null,
 
     pub fn deinit(self: *ParsedClientHello, allocator: std.mem.Allocator) void {
@@ -238,6 +239,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var transport_parameters: ?[]const u8 = null;
     var saw_supported_versions = false;
     var supports_ed25519 = false;
+    var supports_ecdsa_p256_sha256 = false;
     var alpn_list: std.ArrayList([]const u8) = .empty;
     errdefer alpn_list.deinit(allocator);
     var seen_extensions = SeenExtensions{};
@@ -259,6 +261,11 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                 supports_ed25519 = try signatureAlgorithmsContain(
                     payload,
                     quic.tls.auth.signature_scheme_ed25519,
+                );
+                supports_ecdsa_p256_sha256 = try signatureAlgorithmsContain(
+                    payload,
+                    quic.tls.auth
+                        .signature_scheme_ecdsa_secp256r1_sha256,
                 );
             },
             ext_key_share => x25519 = try parseX25519KeyShare(payload),
@@ -283,6 +290,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .x25519_public_key = x25519.?,
         .transport_parameters = transport_parameters.?,
         .supports_ed25519 = supports_ed25519,
+        .supports_ecdsa_p256_sha256 = supports_ecdsa_p256_sha256,
         .psk_offer = psk_offer,
     };
 }

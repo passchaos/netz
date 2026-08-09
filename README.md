@@ -158,7 +158,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   associated-data binding, explicit key IDs, current+three-history key
   rotation, tamper/expiry enforcement, and a native seal/open benchmark,
   optional non-PSK TLS 1.3 server authentication with Certificate and
-  Ed25519 CertificateVerify, pinned raw-key verification or an application
+  Ed25519/ECDSA-P256 CertificateVerify, pinned raw-key verification or an application
   X.509 trust-policy callback, and transcript/signature tamper rejection,
   together with a built-in zero-allocation X.509 chain/hostname/time verifier
   over caller or platform CA bundles and a system-CA loader for production

@@ -3,6 +3,7 @@ const tls = @import("mod.zig");
 const quic = @import("../mod.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
+const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
 pub const IntegratedResult = struct {
     client_err: ?anyerror,
@@ -41,9 +42,8 @@ test "TLS Certificate and Ed25519 CertificateVerify round-trip" {
     try tls.auth.writeCertificateVerify(
         &certificate_verify,
         allocator,
-        key_pair,
+        .{ .ed25519 = .{ .key_pair = key_pair } },
         transcript_hash,
-        null,
     );
     const parsed_verify = try tls.auth.parseCertificateVerify(
         certificate_verify.items,
@@ -75,6 +75,47 @@ test "TLS Certificate and Ed25519 CertificateVerify round-trip" {
                 .signature = &tampered_signature,
             },
             transcript_hash,
+        ),
+    );
+}
+
+test "TLS ECDSA P256 CertificateVerify round-trip" {
+    const allocator = std.testing.allocator;
+    const key_pair = try EcdsaP256Sha256.KeyPair.generateDeterministic(
+        [_]u8{0x43} ** EcdsaP256Sha256.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const transcript_hash = [_]u8{0x34} ** 32;
+
+    var certificate_verify: std.ArrayList(u8) = .empty;
+    defer certificate_verify.deinit(allocator);
+    try tls.auth.writeCertificateVerify(
+        &certificate_verify,
+        allocator,
+        .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        transcript_hash,
+    );
+    const parsed = try tls.auth.parseCertificateVerify(
+        certificate_verify.items,
+    );
+    try std.testing.expectEqual(
+        tls.auth.signature_scheme_ecdsa_secp256r1_sha256,
+        parsed.scheme,
+    );
+    try tls.auth.verifyCertificateVerify(
+        &public_key,
+        parsed,
+        transcript_hash,
+    );
+
+    var tampered_hash = transcript_hash;
+    tampered_hash[0] ^= 1;
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        tls.auth.verifyCertificateVerify(
+            &public_key,
+            parsed,
+            tampered_hash,
         ),
     );
 }
@@ -170,6 +211,83 @@ test "QUIC integrated handshake rejects a mismatched pinned identity" {
     try std.testing.expect(result.server_err != null);
 }
 
+test "QUIC integrated handshake authenticates ECDSA P256 CertificateVerify" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const key_pair = try EcdsaP256Sha256.KeyPair.generateDeterministic(
+        [_]u8{0x73} ** EcdsaP256Sha256.KeyPair.seed_length,
+    );
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        public_key: *const [
+            EcdsaP256Sha256.PublicKey
+                .uncompressed_sec1_encoded_length
+        ]u8,
+        key_pair: EcdsaP256Sha256.KeyPair,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = quic.handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .random = [_]u8{0x74} ** 32,
+                .x25519_secret_key = [_]u8{0x75} ** 32,
+                .identity = .{
+                    .certificate_chain = &.{shared.public_key},
+                    .signer = .{
+                        .ecdsa_p256_sha256 = .{
+                            .key_pair = shared.key_pair,
+                        },
+                    },
+                },
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            established.deinit();
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .public_key = &public_key,
+        .key_pair = key_pair,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try quic.handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = "ecdsa001",
+            .local_connection_id = "client",
+            .random = [_]u8{0x76} ** 32,
+            .x25519_secret_key = [_]u8{0x77} ** 32,
+            .server_auth = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+        },
+    );
+    client.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "TLS X509 bundle verifies chain hostname and validity" {
     const server_der = @embedFile("testdata/server.der");
     const ca_der = @embedFile("testdata/ca.der");
@@ -246,7 +364,7 @@ fn runIntegratedAuth(mode: IntegratedMode) !IntegratedResult {
     const Shared = struct {
         endpoint: *quic.runtime.Endpoint,
         certificate: *const [Ed25519.PublicKey.encoded_length]u8,
-        signing_key: Ed25519.KeyPair,
+        signer: tls.auth.Signer,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -256,7 +374,7 @@ fn runIntegratedAuth(mode: IntegratedMode) !IntegratedResult {
                 .x25519_secret_key = [_]u8{0x74} ** 32,
                 .identity = .{
                     .certificate_chain = &.{shared.certificate},
-                    .signing_key = shared.signing_key,
+                    .signer = shared.signer,
                 },
             }) catch |err| {
                 shared.err = err;
@@ -268,7 +386,7 @@ fn runIntegratedAuth(mode: IntegratedMode) !IntegratedResult {
     var shared = Shared{
         .endpoint = &server_endpoint,
         .certificate = &trusted_public,
-        .signing_key = trusted,
+        .signer = .{ .ed25519 = .{ .key_pair = trusted } },
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
