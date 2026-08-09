@@ -149,6 +149,55 @@ pub const ReceivedZeroRttPacket = struct {
     }
 };
 
+pub const EarlyDataSender = struct {
+    cache: *quic.resumption.Cache,
+    lease: *quic.resumption.EarlyDataLease,
+    packet_number: u64 = 0,
+    offered: bool = false,
+
+    pub fn send(
+        self: *EarlyDataSender,
+        endpoint: *quic.runtime.Endpoint,
+        to: net.IpAddress,
+        keys: quic.protection.PacketProtectionKeys,
+        options: struct {
+            version: u32 = quic.Version.version_1.wireValue(),
+            destination_connection_id: []const u8,
+            source_connection_id: []const u8,
+            packet_number_len: u8 = 4,
+            frames: []const quic.Frame,
+        },
+    ) Error!void {
+        if (!self.offered) {
+            if (!self.cache.ownsActiveLease(self.lease.*)) {
+                return error.InvalidPacket;
+            }
+        } else if (self.lease.state != .consumed) {
+            return error.InvalidPacket;
+        }
+        if (!self.lease.session.permitsEarlyData()) return error.InvalidPacket;
+        if (self.packet_number > quic.protection.max_packet_number) {
+            return error.InvalidPacketNumber;
+        }
+        const send_options = ZeroRttSendOptions{
+            .version = options.version,
+            .destination_connection_id = options.destination_connection_id,
+            .source_connection_id = options.source_connection_id,
+            .packet_number = self.packet_number,
+            .packet_number_len = options.packet_number_len,
+            .frames = options.frames,
+        };
+        try sendZeroRttFrames(endpoint, to, keys, send_options);
+        // The first successful socket write makes this ticket unavailable to
+        // every future 0-RTT attempt, regardless of handshake acceptance.
+        if (!self.offered) {
+            self.cache.consumeEarlyData(self.lease) catch unreachable;
+            self.offered = true;
+        }
+        self.packet_number += 1;
+    }
+};
+
 pub const ConnectionConfig = struct {
     pub const EndpointRole = enum { client, server };
 
@@ -4622,6 +4671,164 @@ test "QUIC 0-RTT long-header frame exchange enforces packet context" {
     });
     defer allocator.free(invalid_packet);
     try std.testing.expectError(error.InvalidFrame, openZeroRttBytes(&server.endpoint, client.address(), invalid_packet, keys, 1, 8));
+}
+
+test "QUIC early-data sender consumes lease after first successful packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try quic.runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server.deinit();
+    var client = try quic.runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client.deinit();
+
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = "server",
+        .alpn = "h3",
+        .ticket = "ticket",
+        .psk = [_]u8{0xaa} ** 32,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 100,
+        .age_add = 0,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var lease = (try cache.beginEarlyData("server", "h3", 1001)).?;
+    defer lease.deinit();
+    var sender = EarlyDataSender{ .cache = &cache, .lease = &lease };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x77} ** quic.protection.secret_len,
+    );
+    const stream = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "early",
+    } }};
+    try sender.send(
+        &client.endpoint,
+        server.address(),
+        keys,
+        .{
+            .destination_connection_id = "server-cid",
+            .source_connection_id = "client-cid",
+            .frames = &stream,
+        },
+    );
+    try std.testing.expect(sender.offered);
+    try std.testing.expectEqual(@as(u64, 1), sender.packet_number);
+    try std.testing.expectEqual(.consumed, lease.state);
+    try std.testing.expect(
+        (try cache.beginEarlyData("server", "h3", 1002)) == null,
+    );
+
+    var first = try server.endpoint.receiveBytes();
+    defer first.deinit(allocator);
+    var opened_first = try openZeroRttBytes(
+        &server.endpoint,
+        first.from,
+        first.bytes,
+        keys,
+        0,
+        8,
+    );
+    defer opened_first.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), opened_first.packet.packet_number);
+
+    // The same attempt may send more packets with increasing packet numbers.
+    try sender.send(
+        &client.endpoint,
+        server.address(),
+        keys,
+        .{
+            .destination_connection_id = "server-cid",
+            .source_connection_id = "client-cid",
+            .frames = &stream,
+        },
+    );
+    var second = try server.endpoint.receiveBytes();
+    defer second.deinit(allocator);
+    var opened_second = try openZeroRttBytes(
+        &server.endpoint,
+        second.from,
+        second.bytes,
+        keys,
+        1,
+        8,
+    );
+    defer opened_second.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), opened_second.packet.packet_number);
+}
+
+test "QUIC early-data sender preserves lease when send validation fails" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    try cache.store(.{
+        .server_id = "server",
+        .alpn = "h3",
+        .ticket = "ticket",
+        .psk = [_]u8{0xaa} ** 32,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 100,
+        .age_add = 0,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    var lease = (try cache.beginEarlyData("server", "h3", 1001)).?;
+    defer lease.deinit();
+    var sender = EarlyDataSender{ .cache = &cache, .lease = &lease };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x88} ** quic.protection.secret_len,
+    );
+    try std.testing.expectError(
+        error.InvalidFrame,
+        sender.send(
+            &endpoint,
+            endpoint.address(),
+            keys,
+            .{
+                .destination_connection_id = "server-cid",
+                .source_connection_id = "client-cid",
+                .frames = &.{.{ .ack = .{
+                    .largest_acknowledged = 0,
+                    .ack_delay = 0,
+                    .first_ack_range = 0,
+                } }},
+            },
+        ),
+    );
+    try std.testing.expect(!sender.offered);
+    try std.testing.expectEqual(.active, lease.state);
+    try std.testing.expect(cache.ownsActiveLease(lease));
 }
 
 test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {

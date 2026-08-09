@@ -137,7 +137,11 @@ starts with deterministic parsers, serializers, and state helpers for:
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling,
   protected 0-RTT long-header packet seal/open and frame datagram helpers with
-  0-RTT packet-type restrictions,
+  0-RTT packet-type restrictions, an owning origin+ALPN session cache with
+  transactional LRU eviction, expiry, independent TLS session copies,
+  exclusive single-use early-data leases, RFC 9000 §7.4.1 remembered-parameter
+  filtering/reduction checks, RFC 9221 DATAGRAM restoration, and a lease-backed
+  sender that consumes a ticket after the first successful 0-RTT packet,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,

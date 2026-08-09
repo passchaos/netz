@@ -27,6 +27,7 @@ pub const retry_flow = @import("retry_flow.zig");
 pub const version_negotiation = @import("version_negotiation.zig");
 pub const qlog = @import("observability/qlog/mod.zig");
 pub const quic_lb = @import("load_balancing/quic_lb/mod.zig");
+pub const resumption = @import("resumption/mod.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
@@ -1849,6 +1850,7 @@ test {
     _ = version_negotiation;
     _ = qlog;
     _ = quic_lb;
+    _ = resumption;
 }
 
 test "QUIC long initial header parse" {
