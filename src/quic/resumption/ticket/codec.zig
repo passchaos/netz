@@ -5,7 +5,7 @@
 
 const std = @import("std");
 
-const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
+const vail = @import("vail");
 
 pub const handshake_type_new_session_ticket: u8 = 0x04;
 pub const ext_early_data: u16 = 0x002a;
@@ -133,12 +133,9 @@ pub fn deriveResumptionMasterSecret(
     master_secret: [32]u8,
     transcript_hash: [32]u8,
 ) [32]u8 {
-    return std.crypto.tls.hkdfExpandLabel(
-        HkdfSha256,
+    return vail.tls.key_schedule.deriveResumptionMasterSecret(
         master_secret,
-        "res master",
-        &transcript_hash,
-        32,
+        transcript_hash,
     );
 }
 
@@ -146,12 +143,9 @@ pub fn derivePsk(
     resumption_master_secret: [32]u8,
     ticket_nonce: []const u8,
 ) [32]u8 {
-    return std.crypto.tls.hkdfExpandLabel(
-        HkdfSha256,
+    return vail.tls.key_schedule.deriveResumptionPsk(
         resumption_master_secret,
-        "resumption",
         ticket_nonce,
-        32,
     );
 }
 

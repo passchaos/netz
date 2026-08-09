@@ -165,6 +165,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   together with Vail's zero-allocation X.509 chain/hostname/time verifier over
   caller or platform CA bundles, its system-CA loader for production clients,
   and CertificateRequest-driven mutual TLS with client possession proof,
+  with TLS 1.3 early/handshake/application/resumption HKDF, Finished, PSK
+  binder, early-traffic, and traffic-update secrets centralized in Vail while
+  netz retains only QUIC-specific packet-protection labels,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,

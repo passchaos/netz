@@ -7,8 +7,6 @@
 const std = @import("std");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
-const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 
 pub const ext_pre_shared_key: u16 = 0x0029;
 pub const ext_early_data: u16 = 0x002a;
@@ -346,52 +344,26 @@ pub fn computeBinder(
     psk: [Sha256.digest_length]u8,
     truncated_client_hello_hash: [Sha256.digest_length]u8,
 ) [Sha256.digest_length]u8 {
-    const zero = [_]u8{0} ** Sha256.digest_length;
-    const early_secret = HkdfSha256.extract(&zero, &psk);
-    const empty_hash = std.crypto.tls.emptyHash(Sha256);
-    const binder_key = std.crypto.tls.hkdfExpandLabel(
-        HkdfSha256,
-        early_secret,
-        "res binder",
-        &empty_hash,
-        Sha256.digest_length,
+    return @import("../mod.zig").tls.key_schedule.computeBinder(
+        psk,
+        truncated_client_hello_hash,
     );
-    const finished_key = std.crypto.tls.hkdfExpandLabel(
-        HkdfSha256,
-        binder_key,
-        "finished",
-        "",
-        Sha256.digest_length,
-    );
-    var binder: [Sha256.digest_length]u8 = undefined;
-    HmacSha256.create(
-        &binder,
-        &truncated_client_hello_hash,
-        &finished_key,
-    );
-    return binder;
 }
 
 pub fn earlySecret(
     psk: ?[Sha256.digest_length]u8,
 ) [Sha256.digest_length]u8 {
-    const zero = [_]u8{0} ** Sha256.digest_length;
-    // RFC 8446 §7.1 defines an absent PSK as Hash.length zero octets, not an
-    // empty input. Keeping that distinction here makes the ordinary and
-    // resumed key schedules interoperable with independent TLS 1.3 stacks.
-    return HkdfSha256.extract(&zero, if (psk) |value| &value else &zero);
+    return @import("../mod.zig").tls.key_schedule.earlySecret(psk);
 }
 
 pub fn deriveClientEarlyTrafficSecret(
     psk: [Sha256.digest_length]u8,
     client_hello_hash: [Sha256.digest_length]u8,
 ) [Sha256.digest_length]u8 {
-    return std.crypto.tls.hkdfExpandLabel(
-        HkdfSha256,
-        earlySecret(psk),
-        "c e traffic",
-        &client_hello_hash,
-        Sha256.digest_length,
+    return @import("../mod.zig").tls.key_schedule
+        .deriveClientEarlyTrafficSecret(
+        psk,
+        client_hello_hash,
     );
 }
 
@@ -657,12 +629,11 @@ test "TLS PSK changes handshake key schedule" {
     const psk = [_]u8{0x55} ** Sha256.digest_length;
     const with_psk = earlySecret(psk);
     const without_psk = earlySecret(null);
-    const zero = [_]u8{0} ** Sha256.digest_length;
     try std.testing.expect(!std.mem.eql(u8, &with_psk, &without_psk));
     try std.testing.expectEqualSlices(u8, &with_psk, &earlySecret(psk));
     try std.testing.expectEqualSlices(
         u8,
-        &HkdfSha256.extract(&zero, &zero),
+        &@import("../mod.zig").tls.key_schedule.earlySecret(null),
         &without_psk,
     );
     const early = deriveClientEarlyTrafficSecret(

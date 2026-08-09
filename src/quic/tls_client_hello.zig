@@ -434,19 +434,23 @@ pub fn deriveHandshakeSecretsWithPskForVersion(
     transcript_hash: [32]u8,
     psk: ?[32]u8,
 ) quic.protection.VersionError!HandshakeSecrets {
-    const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
-    const early_secret = quic.resumption.tls_psk.earlySecret(psk);
-    const empty_hash = std.crypto.tls.emptyHash(std.crypto.hash.sha2.Sha256);
-    const derived_secret = std.crypto.tls.hkdfExpandLabel(HkdfSha256, early_secret, "derived", &empty_hash, quic.protection.secret_len);
-    const handshake_secret = HkdfSha256.extract(&derived_secret, &shared_secret);
-    const client_hs = std.crypto.tls.hkdfExpandLabel(HkdfSha256, handshake_secret, "c hs traffic", &transcript_hash, quic.protection.secret_len);
-    const server_hs = std.crypto.tls.hkdfExpandLabel(HkdfSha256, handshake_secret, "s hs traffic", &transcript_hash, quic.protection.secret_len);
+    const secrets = quic.tls.key_schedule.deriveHandshake(
+        shared_secret,
+        transcript_hash,
+        psk,
+    );
     return .{
-        .handshake_secret = handshake_secret,
-        .client_handshake_traffic_secret = client_hs,
-        .server_handshake_traffic_secret = server_hs,
-        .client_quic = try quic.protection.deriveAes128KeysForVersion(version, client_hs),
-        .server_quic = try quic.protection.deriveAes128KeysForVersion(version, server_hs),
+        .handshake_secret = secrets.handshake_secret,
+        .client_handshake_traffic_secret = secrets.client_traffic_secret,
+        .server_handshake_traffic_secret = secrets.server_traffic_secret,
+        .client_quic = try quic.protection.deriveAes128KeysForVersion(
+            version,
+            secrets.client_traffic_secret,
+        ),
+        .server_quic = try quic.protection.deriveAes128KeysForVersion(
+            version,
+            secrets.server_traffic_secret,
+        ),
     };
 }
 
@@ -455,33 +459,35 @@ pub fn deriveApplicationSecrets(handshake_secret: [32]u8, transcript_hash: [32]u
 }
 
 pub fn deriveApplicationSecretsForVersion(version: u32, handshake_secret: [32]u8, transcript_hash: [32]u8) quic.protection.VersionError!ApplicationSecrets {
-    const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
-    const zero_secret = [_]u8{0} ** quic.protection.secret_len;
-    const empty_hash = std.crypto.tls.emptyHash(std.crypto.hash.sha2.Sha256);
-    const derived_secret = std.crypto.tls.hkdfExpandLabel(HkdfSha256, handshake_secret, "derived", &empty_hash, quic.protection.secret_len);
-    const master_secret = HkdfSha256.extract(&derived_secret, &zero_secret);
-    const client_ap = std.crypto.tls.hkdfExpandLabel(HkdfSha256, master_secret, "c ap traffic", &transcript_hash, quic.protection.secret_len);
-    const server_ap = std.crypto.tls.hkdfExpandLabel(HkdfSha256, master_secret, "s ap traffic", &transcript_hash, quic.protection.secret_len);
+    const secrets = quic.tls.key_schedule.deriveApplication(
+        handshake_secret,
+        transcript_hash,
+    );
     return .{
-        .master_secret = master_secret,
-        .client_application_traffic_secret = client_ap,
-        .server_application_traffic_secret = server_ap,
-        .client_quic = try quic.protection.deriveAes128KeysForVersion(version, client_ap),
-        .server_quic = try quic.protection.deriveAes128KeysForVersion(version, server_ap),
+        .master_secret = secrets.master_secret,
+        .client_application_traffic_secret = secrets.client_traffic_secret,
+        .server_application_traffic_secret = secrets.server_traffic_secret,
+        .client_quic = try quic.protection.deriveAes128KeysForVersion(
+            version,
+            secrets.client_traffic_secret,
+        ),
+        .server_quic = try quic.protection.deriveAes128KeysForVersion(
+            version,
+            secrets.server_traffic_secret,
+        ),
     };
 }
 
 pub fn computeFinishedVerifyData(base_key: [32]u8, transcript_hash: [32]u8) [32]u8 {
-    const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
-    const finished_key = std.crypto.tls.hkdfExpandLabel(HkdfSha256, base_key, "finished", "", 32);
-    var out: [32]u8 = undefined;
-    std.crypto.auth.hmac.sha2.HmacSha256.create(&out, &transcript_hash, &finished_key);
-    return out;
+    return quic.tls.key_schedule.computeFinished(base_key, transcript_hash);
 }
 
 pub fn verifyFinished(base_key: [32]u8, transcript_hash: [32]u8, verify_data: [32]u8) Error!void {
-    const expected = computeFinishedVerifyData(base_key, transcript_hash);
-    if (!std.crypto.timing_safe.eql([32]u8, expected, verify_data)) return error.BadFinished;
+    quic.tls.key_schedule.verifyFinished(
+        base_key,
+        transcript_hash,
+        verify_data,
+    ) catch return error.BadFinished;
 }
 
 const SeenExtensions = struct {
