@@ -170,7 +170,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   rotation, tamper/expiry enforcement, and a native seal/open benchmark,
   Vail-backed non-PSK TLS 1.3 server authentication with Certificate and
   Ed25519/ECDSA-P256/ECDSA-P384 CertificateVerify signing and verification,
-  RSA-PSS/RSAE SHA-256 X.509 CertificateVerify verification, pinned raw-key
+  RSA-PSS/RSAE SHA-256/SHA-384/SHA-512 X.509 CertificateVerify verification,
+  pinned raw-key
   verification or an application X.509 trust-policy callback, transcript/signature tamper
   rejection, and optional mutual TLS with CertificateRequest plus client
   possession proof,
