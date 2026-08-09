@@ -39,6 +39,9 @@ pub const ClientOptions = struct {
     initial_one_rtt_config: OneRttConfig = .{},
     random: ?[32]u8 = null,
     x25519_secret_key: ?[32]u8 = null,
+    p256_secret_key: ?[32]u8 = null,
+    key_exchange_groups: []const quic.tls_client_hello.NamedGroup =
+        &.{ .x25519, .secp256r1 },
     keylog: ?*quic.keylog.Log = null,
     resumption_session: ?*const quic.resumption.Session = null,
     resumption_now_ms: ?u64 = null,
@@ -102,6 +105,9 @@ pub const ServerOptions = struct {
     initial_one_rtt_config: OneRttConfig = .{},
     random: ?[32]u8 = null,
     x25519_secret_key: ?[32]u8 = null,
+    p256_secret_key: ?[32]u8 = null,
+    key_exchange_groups: []const quic.tls_client_hello.NamedGroup =
+        &.{ .x25519, .secp256r1 },
     keylog: ?*quic.keylog.Log = null,
     psk: ?ServerPsk = null,
     auto_resumption: ?quic.resumption.ticket.handshake.ServerAutoResume = null,
@@ -283,6 +289,81 @@ fn isVersionNegotiationDatagram(bytes: []const u8) bool {
     return std.mem.readInt(u32, bytes[1..5], .big) == quic.Version.negotiation.wireValue();
 }
 
+const LocalKeyShares = struct {
+    x25519_secret: ?[32]u8 = null,
+    p256_secret: ?[32]u8 = null,
+    shares: [2]quic.tls_client_hello.KeyShare = undefined,
+    len: usize = 0,
+
+    fn slice(self: *const LocalKeyShares) []const quic.tls_client_hello.KeyShare {
+        return self.shares[0..self.len];
+    }
+
+    fn secret(
+        self: LocalKeyShares,
+        group: quic.tls_client_hello.NamedGroup,
+    ) ?[32]u8 {
+        return switch (group) {
+            .x25519 => self.x25519_secret,
+            .secp256r1 => self.p256_secret,
+        };
+    }
+};
+
+fn makeLocalKeyShares(
+    io: std.Io,
+    groups: []const quic.tls_client_hello.NamedGroup,
+    x25519_provided: ?[32]u8,
+    p256_provided: ?[32]u8,
+) Error!LocalKeyShares {
+    if (groups.len == 0 or groups.len > 2) return error.MissingKeyShare;
+    var result = LocalKeyShares{};
+    for (groups, 0..) |group, index| {
+        for (groups[0..index]) |previous| {
+            if (group == previous) return error.InvalidClientHello;
+        }
+        switch (group) {
+            .x25519 => {
+                const private = try secretKey(io, x25519_provided);
+                result.x25519_secret = private;
+                result.shares[result.len] = .{
+                    .x25519 = try quic.tls_client_hello.x25519PublicKey(
+                        private,
+                    ),
+                };
+            },
+            .secp256r1 => {
+                const private = try p256SecretKey(io, p256_provided);
+                result.p256_secret = private;
+                result.shares[result.len] = .{
+                    .secp256r1 = try quic.tls_client_hello.p256PublicKey(
+                        private,
+                    ),
+                };
+            },
+        }
+        result.len += 1;
+    }
+    return result;
+}
+
+fn sharedSecretForGroup(
+    group: quic.tls_client_hello.NamedGroup,
+    private: [32]u8,
+    peer_public: []const u8,
+) Error![32]u8 {
+    return switch (group) {
+        .x25519 => quic.tls_client_hello.x25519SharedSecret(
+            private,
+            peer_public,
+        ),
+        .secp256r1 => quic.tls_client_hello.p256SharedSecret(
+            private,
+            peer_public,
+        ),
+    };
+}
+
 pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: ClientOptions) Error!EstablishedConnection {
     if (options.resumption_session == null and
         options.early_data == null and
@@ -314,8 +395,16 @@ fn connectAttempt(
         return error.InvalidPacket;
     }
 
-    const client_secret = try secretKey(endpoint.io, options.x25519_secret_key);
-    const client_public = try quic.tls_client_hello.x25519PublicKey(client_secret);
+    const client_key_shares = try makeLocalKeyShares(
+        endpoint.io,
+        options.key_exchange_groups,
+        options.x25519_secret_key,
+        options.p256_secret_key,
+    );
+    const legacy_x25519_public = if (client_key_shares.x25519_secret) |private|
+        try quic.tls_client_hello.x25519PublicKey(private)
+    else
+        [_]u8{0} ** 32;
     const client_random = try random32(endpoint.io, options.random);
     const initial_destination_connection_id = clientInitialDestinationConnectionId(options);
     const initial_secrets = try quic.protection.deriveInitialSecretsForVersion(options.version.wireValue(), initial_destination_connection_id);
@@ -334,7 +423,8 @@ fn connectAttempt(
     defer client_hello.deinit(endpoint.allocator);
     try quic.tls_client_hello.writeClientHello(&client_hello, endpoint.allocator, .{
         .random = client_random,
-        .x25519_public_key = client_public,
+        .x25519_public_key = legacy_x25519_public,
+        .key_shares = client_key_shares.slice(),
         .server_name = options.server_name,
         .alpn_protocols = options.alpn_protocols,
         .transport_parameters = transport_parameters,
@@ -504,7 +594,22 @@ fn connectAttempt(
         resumption_session.?.psk_secret
     else
         null;
-    const shared = try quic.tls_client_hello.x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
+    const selected_private = client_key_shares.secret(
+        parsed_server.selected_group,
+    ) orelse return error.MissingKeyShare;
+    var offered_selected_group = false;
+    for (options.key_exchange_groups) |group| {
+        if (group == parsed_server.selected_group) {
+            offered_selected_group = true;
+            break;
+        }
+    }
+    if (!offered_selected_group) return error.InvalidServerHello;
+    const shared = try sharedSecretForGroup(
+        parsed_server.selected_group,
+        selected_private,
+        parsed_server.keyShare(),
+    );
     const hs_hash = hashPartsForSuite(
         parsed_server.cipher_suite,
         &.{ client_hello.items, server_initial.crypto_data },
@@ -861,10 +966,29 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         options.available_versions,
     );
 
-    const server_secret = try secretKey(endpoint.io, options.x25519_secret_key);
-    const server_public = try quic.tls_client_hello.x25519PublicKey(server_secret);
+    const selected_group = try quic.tls_client_hello.selectKeyShare(
+        parsed_client,
+        options.key_exchange_groups,
+    );
+    const server_key_shares = try makeLocalKeyShares(
+        endpoint.io,
+        &.{selected_group},
+        options.x25519_secret_key,
+        options.p256_secret_key,
+    );
+    const server_private = server_key_shares.secret(selected_group) orelse
+        return error.MissingKeyShare;
+    const selected_server_share = server_key_shares.shares[0];
+    const legacy_server_public = if (selected_group == .x25519)
+        selected_server_share.x25519
+    else
+        [_]u8{0} ** 32;
     const server_random = try random32(endpoint.io, options.random);
-    const shared = try quic.tls_client_hello.x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
+    const shared = try sharedSecretForGroup(
+        selected_group,
+        server_private,
+        parsed_client.keyShare(selected_group).?,
+    );
     var selected_psk: ?quic.tls.secret.Secret = null;
     var early_data_accepted = false;
     var early_data_keys: ?quic.zero_rtt.handshake.ClientKeys = null;
@@ -963,7 +1087,8 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     defer server_hello.deinit(endpoint.allocator);
     try quic.tls_client_hello.writeServerHello(&server_hello, endpoint.allocator, .{
         .random = server_random,
-        .x25519_public_key = server_public,
+        .x25519_public_key = legacy_server_public,
+        .key_share = selected_server_share,
         .select_psk = selected_psk != null,
         .cipher_suite = cipher_suite,
     });
@@ -1705,6 +1830,22 @@ fn secretKey(io: std.Io, provided: ?[32]u8) std.Io.RandomSecureError![32]u8 {
     secret[31] &= 127;
     secret[31] |= 64;
     return secret;
+}
+
+fn p256SecretKey(
+    io: std.Io,
+    provided: ?[32]u8,
+) Error![32]u8 {
+    if (provided) |value| {
+        _ = try quic.tls_client_hello.p256PublicKey(value);
+        return value;
+    }
+    while (true) {
+        const candidate = try random32(io, null);
+        _ = quic.tls_client_hello.p256PublicKey(candidate) catch
+            continue;
+        return candidate;
+    }
 }
 
 fn chooseAlpn(server_protocol: []const u8, client_protocols: []const []const u8) Error![]const u8 {

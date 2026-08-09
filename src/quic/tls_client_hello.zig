@@ -25,12 +25,32 @@ const handshake_type_encrypted_extensions: u8 = 0x08;
 const handshake_type_finished: u8 = 0x14;
 const tls_1_2: u16 = 0x0303;
 const tls_1_3: u16 = 0x0304;
-const group_x25519: u16 = 0x001d;
 pub const CipherSuite = quic.tls.cipher_suite.Suite;
 pub const CipherSuiteSelectionPolicy =
     quic.tls.cipher_suite.SelectionPolicy;
 pub const default_cipher_suites =
     quic.tls.cipher_suite.default_preference;
+
+pub const NamedGroup = enum(u16) {
+    secp256r1 = 0x0017,
+    x25519 = 0x001d,
+};
+
+pub const KeyShare = union(NamedGroup) {
+    secp256r1: [quic.tls.key_exchange.p256.public_len]u8,
+    x25519: [quic.tls.key_exchange.public_len]u8,
+
+    pub fn group(self: KeyShare) NamedGroup {
+        return std.meta.activeTag(self);
+    }
+
+    pub fn bytes(self: *const KeyShare) []const u8 {
+        return switch (self.*) {
+            .secp256r1 => |*key| key,
+            .x25519 => |*key| key,
+        };
+    }
+};
 
 const ext_server_name: u16 = 0x0000;
 const ext_supported_groups: u16 = 0x000a;
@@ -44,6 +64,8 @@ const ext_pre_shared_key = quic.resumption.tls_psk.ext_pre_shared_key;
 pub const ClientHelloOptions = struct {
     random: [32]u8,
     x25519_public_key: [32]u8,
+    /// When null, emit only the source-compatible X25519 share above.
+    key_shares: ?[]const KeyShare = null,
     server_name: ?[]const u8 = null,
     alpn_protocols: []const []const u8 = &.{"h3"},
     transport_parameters: []const u8 = &.{},
@@ -55,12 +77,28 @@ pub const ParsedClientHello = struct {
     server_name: ?[]const u8,
     alpn_protocols: [][]const u8,
     x25519_public_key: []const u8,
+    secp256r1_public_key: ?[]const u8 = null,
     transport_parameters: []const u8,
     cipher_suites: []const u8,
     supports_ed25519: bool = false,
     supports_ecdsa_p256_sha256: bool = false,
     supports_rsa_pss_rsae_sha256: bool = false,
+    supports_x25519: bool = false,
+    supports_secp256r1: bool = false,
     psk_offer: ?quic.resumption.tls_psk.Offer = null,
+
+    pub fn keyShare(
+        self: ParsedClientHello,
+        group: NamedGroup,
+    ) ?[]const u8 {
+        return switch (group) {
+            .x25519 => if (self.x25519_public_key.len == 0)
+                null
+            else
+                self.x25519_public_key,
+            .secp256r1 => self.secp256r1_public_key,
+        };
+    }
 
     pub fn deinit(self: *ParsedClientHello, allocator: std.mem.Allocator) void {
         allocator.free(self.alpn_protocols);
@@ -71,6 +109,8 @@ pub const ParsedClientHello = struct {
 pub const ServerHelloOptions = struct {
     random: [32]u8,
     x25519_public_key: [32]u8,
+    /// When present, this selected share replaces the legacy X25519 field.
+    key_share: ?KeyShare = null,
     select_psk: bool = false,
     cipher_suite: CipherSuite = .aes_128_gcm_sha256,
 };
@@ -78,8 +118,17 @@ pub const ServerHelloOptions = struct {
 pub const ParsedServerHello = struct {
     random: [32]u8,
     x25519_public_key: []const u8,
+    selected_group: NamedGroup = .x25519,
+    selected_key_share: []const u8 = &.{},
     selected_psk: bool = false,
     cipher_suite: CipherSuite,
+
+    pub fn keyShare(self: ParsedServerHello) []const u8 {
+        return if (self.selected_key_share.len != 0)
+            self.selected_key_share
+        else
+            self.x25519_public_key;
+    }
 };
 
 pub const HandshakeSecrets = struct {
@@ -137,12 +186,21 @@ pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
 
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
+    const legacy_share = KeyShare{
+        .x25519 = options.x25519_public_key,
+    };
+    const key_shares = options.key_shares orelse
+        @as([]const KeyShare, &.{legacy_share});
     if (options.server_name) |name| try writeServerNameExtension(&extensions, allocator, name);
-    try writeSupportedGroupsExtension(&extensions, allocator);
+    try writeSupportedGroupsExtension(
+        &extensions,
+        allocator,
+        key_shares,
+    );
     try writeSignatureAlgorithmsExtension(&extensions, allocator);
     try writeAlpnExtension(&extensions, allocator, options.alpn_protocols);
     try writeSupportedVersionsExtension(&extensions, allocator);
-    try writeKeyShareExtension(&extensions, allocator, options.x25519_public_key);
+    try writeKeyShareExtension(&extensions, allocator, key_shares);
     try writeExtension(&extensions, allocator, ext_quic_transport_parameters, options.transport_parameters);
 
     try appendU16Len(&body, allocator, extensions.items.len, error.InvalidClientHello);
@@ -173,12 +231,14 @@ pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     const supported_versions = [_]u8{ 0x03, 0x04 };
     try writeExtension(&extensions, allocator, ext_supported_versions, &supported_versions);
 
-    var key_share: std.ArrayList(u8) = .empty;
-    defer key_share.deinit(allocator);
-    try appendInt(&key_share, allocator, u16, group_x25519);
-    try appendInt(&key_share, allocator, u16, options.x25519_public_key.len);
-    try key_share.appendSlice(allocator, &options.x25519_public_key);
-    try writeExtension(&extensions, allocator, ext_key_share, key_share.items);
+    const legacy_share = KeyShare{
+        .x25519 = options.x25519_public_key,
+    };
+    try writeServerKeyShareExtension(
+        &extensions,
+        allocator,
+        options.key_share orelse legacy_share,
+    );
     if (options.select_psk) {
         try quic.resumption.tls_psk.appendServerSelection(
             &extensions,
@@ -271,8 +331,12 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
 
     var server_name: ?[]const u8 = null;
     var x25519: ?[]const u8 = null;
+    var secp256r1: ?[]const u8 = null;
     var transport_parameters: ?[]const u8 = null;
     var saw_supported_versions = false;
+    var saw_supported_groups = false;
+    var supports_x25519 = false;
+    var supports_secp256r1 = false;
     var supports_ed25519 = false;
     var supports_ecdsa_p256_sha256 = false;
     var supports_rsa_pss_rsae_sha256 = false;
@@ -288,6 +352,12 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         try seen_extensions.note(typ, error.InvalidClientHello);
         switch (typ) {
             ext_server_name => server_name = try parseServerName(payload),
+            ext_supported_groups => {
+                const groups = try parseSupportedGroups(payload);
+                supports_x25519 = groups.x25519;
+                supports_secp256r1 = groups.secp256r1;
+                saw_supported_groups = true;
+            },
             ext_alpn => try parseAlpn(allocator, &alpn_list, payload),
             ext_supported_versions => {
                 try validateClientSupportedVersions(payload);
@@ -310,14 +380,26 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                             .signature_scheme_rsa_pss_rsae_sha256,
                     );
             },
-            ext_key_share => x25519 = try parseX25519KeyShare(payload),
+            ext_key_share => {
+                const shares = try parseClientKeyShares(payload);
+                x25519 = shares.x25519;
+                secp256r1 = shares.secp256r1;
+            },
             ext_quic_transport_parameters => transport_parameters = payload,
             else => {},
         }
     }
 
     if (!saw_supported_versions) return error.MissingSupportedVersions;
-    if (x25519 == null) return error.MissingKeyShare;
+    if (!saw_supported_groups) return error.MissingKeyShare;
+    if (x25519 == null and secp256r1 == null) {
+        return error.MissingKeyShare;
+    }
+    if ((x25519 != null and !supports_x25519) or
+        (secp256r1 != null and !supports_secp256r1))
+    {
+        return error.InvalidClientHello;
+    }
     if (transport_parameters == null) return error.MissingTransportParameters;
     if (alpn_list.items.len == 0) return error.MissingAlpn;
     const psk_offer = quic.resumption.tls_psk.parseClientOffer(bytes) catch |err| switch (err) {
@@ -329,12 +411,15 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .random = random,
         .server_name = server_name,
         .alpn_protocols = try alpn_list.toOwnedSlice(allocator),
-        .x25519_public_key = x25519.?,
+        .x25519_public_key = x25519 orelse &.{},
+        .secp256r1_public_key = secp256r1,
         .transport_parameters = transport_parameters.?,
         .cipher_suites = cipher_suites,
         .supports_ed25519 = supports_ed25519,
         .supports_ecdsa_p256_sha256 = supports_ecdsa_p256_sha256,
         .supports_rsa_pss_rsae_sha256 = supports_rsa_pss_rsae_sha256,
+        .supports_x25519 = supports_x25519,
+        .supports_secp256r1 = supports_secp256r1,
         .psk_offer = psk_offer,
     };
 }
@@ -360,7 +445,7 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
     if (!body_cursor.eof()) return error.InvalidServerHello;
 
     var saw_supported_versions = false;
-    var x25519: ?[]const u8 = null;
+    var selected_share: ?ParsedKeyShare = null;
     var selected_psk = false;
     var seen_extensions = SeenExtensions{};
     var ext_cursor = wire.Cursor.init(extensions);
@@ -374,7 +459,8 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
                 if (payload.len != 2 or std.mem.readInt(u16, payload[0..2], .big) != tls_1_3) return error.InvalidServerHello;
                 saw_supported_versions = true;
             },
-            ext_key_share => x25519 = try parseServerX25519KeyShare(payload),
+            ext_key_share => selected_share =
+                try parseServerKeyShare(payload),
             ext_pre_shared_key => {
                 _ = quic.resumption.tls_psk.parseServerSelection(payload) catch
                     return error.InvalidServerHello;
@@ -384,10 +470,15 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
         }
     }
     if (!saw_supported_versions) return error.MissingSupportedVersions;
-    if (x25519 == null) return error.MissingKeyShare;
+    const key_share = selected_share orelse return error.MissingKeyShare;
     return .{
         .random = random,
-        .x25519_public_key = x25519.?,
+        .x25519_public_key = if (key_share.group == .x25519)
+            key_share.key
+        else
+            &.{},
+        .selected_group = key_share.group,
+        .selected_key_share = key_share.key,
         .selected_psk = selected_psk,
         .cipher_suite = cipher_suite,
     };
@@ -408,6 +499,20 @@ pub fn selectCipherSuite(
         error.InvalidServerPreference,
         => error.InvalidCipherSuite,
     };
+}
+
+pub fn selectKeyShare(
+    client: ParsedClientHello,
+    server_preference: []const NamedGroup,
+) Error!NamedGroup {
+    if (server_preference.len == 0) return error.MissingKeyShare;
+    for (server_preference, 0..) |group, index| {
+        for (server_preference[0..index]) |previous| {
+            if (group == previous) return error.InvalidServerHello;
+        }
+        if (client.keyShare(group) != null) return group;
+    }
+    return error.MissingKeyShare;
 }
 
 pub fn parseEncryptedExtensions(bytes: []const u8) Error!ParsedEncryptedExtensions {
@@ -502,6 +607,26 @@ pub fn x25519SharedSecret(secret_key: [32]u8, peer_public_key: []const u8) Error
         secret_key,
         peer_public_key,
     ) catch |err| switch (err) {
+        error.InvalidSecretKey => error.KeyExchangeFailed,
+        error.InvalidPublicKey => error.MissingKeyShare,
+        error.KeyExchangeFailed => error.KeyExchangeFailed,
+    };
+}
+
+pub fn p256PublicKey(secret_key: [32]u8) Error![65]u8 {
+    return quic.tls.key_exchange.p256.publicKey(secret_key) catch
+        return error.KeyExchangeFailed;
+}
+
+pub fn p256SharedSecret(
+    secret_key: [32]u8,
+    peer_public_key: []const u8,
+) Error![32]u8 {
+    return quic.tls.key_exchange.p256.sharedSecret(
+        secret_key,
+        peer_public_key,
+    ) catch |err| switch (err) {
+        error.InvalidSecretKey => error.KeyExchangeFailed,
         error.InvalidPublicKey => error.MissingKeyShare,
         error.KeyExchangeFailed => error.KeyExchangeFailed,
     };
@@ -767,11 +892,43 @@ fn writeServerNameExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocat
     try writeExtension(list, allocator, ext_server_name, payload.items);
 }
 
-fn writeSupportedGroupsExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-    var payload: [4]u8 = undefined;
-    std.mem.writeInt(u16, payload[0..2], 2, .big);
-    std.mem.writeInt(u16, payload[2..4], group_x25519, .big);
-    try writeExtension(list, allocator, ext_supported_groups, &payload);
+fn writeSupportedGroupsExtension(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    key_shares: []const KeyShare,
+) Error!void {
+    if (key_shares.len == 0 or
+        key_shares.len > std.math.maxInt(u16) / 2)
+    {
+        return error.InvalidClientHello;
+    }
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try appendInt(
+        &payload,
+        allocator,
+        u16,
+        @intCast(key_shares.len * 2),
+    );
+    for (key_shares, 0..) |share, index| {
+        for (key_shares[0..index]) |previous| {
+            if (share.group() == previous.group()) {
+                return error.InvalidClientHello;
+            }
+        }
+        try appendInt(
+            &payload,
+            allocator,
+            u16,
+            @intFromEnum(share.group()),
+        );
+    }
+    try writeExtension(
+        list,
+        allocator,
+        ext_supported_groups,
+        payload.items,
+    );
 }
 
 fn writeSignatureAlgorithmsExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
@@ -831,13 +988,60 @@ fn writeSupportedVersionsExtension(list: *std.ArrayList(u8), allocator: std.mem.
     try writeExtension(list, allocator, ext_supported_versions, &payload);
 }
 
-fn writeKeyShareExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, key: [32]u8) Error!void {
+fn writeKeyShareExtension(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    key_shares: []const KeyShare,
+) Error!void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
-    try appendInt(&payload, allocator, u16, 2 + 2 + key.len);
-    try appendInt(&payload, allocator, u16, group_x25519);
-    try appendInt(&payload, allocator, u16, key.len);
-    try payload.appendSlice(allocator, &key);
+    var shares: std.ArrayList(u8) = .empty;
+    defer shares.deinit(allocator);
+    for (key_shares) |*share| {
+        try appendInt(
+            &shares,
+            allocator,
+            u16,
+            @intFromEnum(share.group()),
+        );
+        try appendU16Len(
+            &shares,
+            allocator,
+            share.bytes().len,
+            error.InvalidClientHello,
+        );
+        try shares.appendSlice(allocator, share.bytes());
+    }
+    try appendU16Len(
+        &payload,
+        allocator,
+        shares.items.len,
+        error.InvalidClientHello,
+    );
+    try payload.appendSlice(allocator, shares.items);
+    try writeExtension(list, allocator, ext_key_share, payload.items);
+}
+
+fn writeServerKeyShareExtension(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    share: KeyShare,
+) Error!void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try appendInt(
+        &payload,
+        allocator,
+        u16,
+        @intFromEnum(share.group()),
+    );
+    try appendU16Len(
+        &payload,
+        allocator,
+        share.bytes().len,
+        error.InvalidServerHello,
+    );
+    try payload.appendSlice(allocator, share.bytes());
     try writeExtension(list, allocator, ext_key_share, payload.items);
 }
 
@@ -872,6 +1076,49 @@ fn validateClientSupportedVersions(payload: []const u8) Error!void {
     return error.InvalidClientHello;
 }
 
+const ParsedSupportedGroups = struct {
+    x25519: bool = false,
+    secp256r1: bool = false,
+};
+
+fn parseSupportedGroups(
+    payload: []const u8,
+) Error!ParsedSupportedGroups {
+    if (payload.len < 4) return error.InvalidClientHello;
+    const list_len = std.mem.readInt(u16, payload[0..2], .big);
+    if (list_len == 0 or list_len % 2 != 0 or
+        list_len + 2 != payload.len)
+    {
+        return error.InvalidClientHello;
+    }
+    var result = ParsedSupportedGroups{};
+    var pos: usize = 2;
+    while (pos < payload.len) : (pos += 2) {
+        const group_wire = std.mem.readInt(
+            u16,
+            payload[pos..][0..2],
+            .big,
+        );
+        var previous: usize = 2;
+        while (previous < pos) : (previous += 2) {
+            if (std.mem.readInt(
+                u16,
+                payload[previous..][0..2],
+                .big,
+            ) == group_wire) return error.InvalidClientHello;
+        }
+        const group = std.enums.fromInt(
+            NamedGroup,
+            group_wire,
+        ) orelse continue;
+        switch (group) {
+            .x25519 => result.x25519 = true,
+            .secp256r1 => result.secp256r1 = true,
+        }
+    }
+    return result;
+}
+
 fn parseAlpn(allocator: std.mem.Allocator, out: *std.ArrayList([]const u8), payload: []const u8) Error!void {
     var cursor = wire.Cursor.init(payload);
     const list_len = try cursor.readInt(u16, .big);
@@ -898,32 +1145,76 @@ fn parseSingleAlpn(payload: []const u8) Error![]const u8 {
     return protocol;
 }
 
-fn parseX25519KeyShare(payload: []const u8) Error![]const u8 {
+const ParsedClientKeyShares = struct {
+    x25519: ?[]const u8 = null,
+    secp256r1: ?[]const u8 = null,
+};
+
+const ParsedKeyShare = struct {
+    group: NamedGroup,
+    key: []const u8,
+};
+
+fn parseClientKeyShares(
+    payload: []const u8,
+) Error!ParsedClientKeyShares {
     var cursor = wire.Cursor.init(payload);
     const shares_len = try cursor.readInt(u16, .big);
     const shares = try cursor.readSlice(shares_len);
     if (!cursor.eof()) return error.InvalidClientHello;
     var shares_cursor = wire.Cursor.init(shares);
+    var result = ParsedClientKeyShares{};
     while (!shares_cursor.eof()) {
-        const group = try shares_cursor.readInt(u16, .big);
+        const group_wire = try shares_cursor.readInt(u16, .big);
         const key_len = try shares_cursor.readInt(u16, .big);
         const key = try shares_cursor.readSlice(key_len);
-        if (group == group_x25519) {
-            if (key.len != 32) return error.InvalidClientHello;
-            return key;
+        const group = std.enums.fromInt(
+            NamedGroup,
+            group_wire,
+        ) orelse continue;
+        switch (group) {
+            .x25519 => {
+                if (result.x25519 != null or
+                    key.len != quic.tls.key_exchange.public_len)
+                {
+                    return error.InvalidClientHello;
+                }
+                result.x25519 = key;
+            },
+            .secp256r1 => {
+                if (result.secp256r1 != null or
+                    key.len != quic.tls.key_exchange.p256.public_len or
+                    key[0] != 0x04)
+                {
+                    return error.InvalidClientHello;
+                }
+                result.secp256r1 = key;
+            },
         }
     }
-    return error.MissingKeyShare;
+    if (result.x25519 == null and result.secp256r1 == null) {
+        return error.MissingKeyShare;
+    }
+    return result;
 }
 
-fn parseServerX25519KeyShare(payload: []const u8) Error![]const u8 {
+fn parseServerKeyShare(payload: []const u8) Error!ParsedKeyShare {
     var cursor = wire.Cursor.init(payload);
-    const group = try cursor.readInt(u16, .big);
+    const group_wire = try cursor.readInt(u16, .big);
     const key_len = try cursor.readInt(u16, .big);
     const key = try cursor.readSlice(key_len);
     if (!cursor.eof()) return error.InvalidServerHello;
-    if (group != group_x25519 or key.len != 32) return error.MissingKeyShare;
-    return key;
+    const group = std.enums.fromInt(
+        NamedGroup,
+        group_wire,
+    ) orelse return error.MissingKeyShare;
+    const valid = switch (group) {
+        .x25519 => key.len == quic.tls.key_exchange.public_len,
+        .secp256r1 => key.len ==
+            quic.tls.key_exchange.p256.public_len and key[0] == 0x04,
+    };
+    if (!valid) return error.MissingKeyShare;
+    return .{ .group = group, .key = key };
 }
 
 fn appendInt(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime T: type, value: T) !void {

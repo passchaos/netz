@@ -242,6 +242,71 @@ test "QUIC integrated AES-256 SHA-384 handshake exchanges 1-RTT" {
     );
 }
 
+test "QUIC integrated secp256r1-only handshake exchanges 1-RTT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var established = handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .random = [_]u8{0xb2} ** 32,
+                .p256_secret_key = [_]u8{0} ** 31 ++ [_]u8{2},
+                .key_exchange_groups = &.{.secp256r1},
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer established.deinit();
+            var packet = established.connection.receivePacket() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer packet.deinit(shared.endpoint.allocator);
+            if (packet.frames.len != 1 or packet.frames[0] != .ping) {
+                shared.err = error.TestUnexpectedResult;
+            }
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = "p2560001",
+            .local_connection_id = "client",
+            .random = [_]u8{0xb3} ** 32,
+            .p256_secret_key = [_]u8{0} ** 31 ++ [_]u8{1},
+            .key_exchange_groups = &.{.secp256r1},
+        },
+    );
+    defer established.deinit();
+    try established.connection.send(&.{.{ .ping = {} }});
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "QUIC integrated handshake emits matching NSS key logs on both roles" {
     try runMatchingKeylog(.aes_128_gcm_sha256, 32);
 }

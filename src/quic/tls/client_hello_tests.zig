@@ -461,6 +461,97 @@ test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
     try std.testing.expect(!std.mem.eql(u8, &client_keys.client_quic.key, &client_keys.server_quic.key));
 }
 
+test "QUIC TLS ClientHello offers X25519 and P-256 and server selects P-256" {
+    const allocator = std.testing.allocator;
+    const x25519_secret = [_]u8{0x41} ** 32;
+    const x25519_public = try target.x25519PublicKey(x25519_secret);
+    const client_p256_secret = [_]u8{0} ** 31 ++ [_]u8{1};
+    const server_p256_secret = [_]u8{0} ** 31 ++ [_]u8{2};
+    const client_p256_public =
+        try quic.tls.key_exchange.p256.publicKey(
+            client_p256_secret,
+        );
+    const server_p256_public =
+        try quic.tls.key_exchange.p256.publicKey(
+            server_p256_secret,
+        );
+    const shares = [_]target.KeyShare{
+        .{ .x25519 = x25519_public },
+        .{ .secp256r1 = client_p256_public },
+    };
+
+    var client_hello: std.ArrayList(u8) = .empty;
+    defer client_hello.deinit(allocator);
+    try target.writeClientHello(&client_hello, allocator, .{
+        .random = [_]u8{0x42} ** 32,
+        .x25519_public_key = x25519_public,
+        .key_shares = &shares,
+        .transport_parameters = &.{},
+    });
+    var parsed_client = try target.parseClientHello(
+        allocator,
+        client_hello.items,
+    );
+    defer parsed_client.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &x25519_public,
+        parsed_client.keyShare(.x25519).?,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &client_p256_public,
+        parsed_client.keyShare(.secp256r1).?,
+    );
+
+    var server_hello: std.ArrayList(u8) = .empty;
+    defer server_hello.deinit(allocator);
+    try target.writeServerHello(&server_hello, allocator, .{
+        .random = [_]u8{0x43} ** 32,
+        .x25519_public_key = [_]u8{0} ** 32,
+        .key_share = .{ .secp256r1 = server_p256_public },
+    });
+    const parsed_server = try target.parseServerHello(
+        server_hello.items,
+    );
+    try std.testing.expectEqual(
+        target.NamedGroup.secp256r1,
+        parsed_server.selected_group,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &server_p256_public,
+        parsed_server.keyShare(),
+    );
+    const client_shared = try quic.tls.key_exchange.p256.sharedSecret(
+        client_p256_secret,
+        parsed_server.keyShare(),
+    );
+    const server_shared = try quic.tls.key_exchange.p256.sharedSecret(
+        server_p256_secret,
+        parsed_client.keyShare(.secp256r1).?,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &client_shared,
+        &server_shared,
+    );
+    try std.testing.expectEqual(
+        target.NamedGroup.secp256r1,
+        try target.selectKeyShare(
+            parsed_client,
+            &.{.secp256r1},
+        ),
+    );
+    try std.testing.expectError(
+        error.MissingKeyShare,
+        target.selectKeyShare(
+            parsed_client,
+            &.{},
+        ),
+    );
+}
+
 test "QUIC TLS QUIC keys use version-specific packet-protection labels" {
     const shared = [_]u8{0x33} ** 32;
     const transcript = [_]u8{0x44} ** 32;
