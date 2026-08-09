@@ -19,6 +19,7 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.packet_spa
     AckFrequencyDisabled,
     PacingLimited,
     AeadLimitReached,
+    InvalidPostHandshakeCrypto,
 };
 
 pub const SendOptions = struct {
@@ -490,6 +491,32 @@ pub const Connection = struct {
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
         try self.sendWithEcn(frames, .not_ect);
+    }
+
+    /// Send TLS post-handshake CRYPTO bytes in the application packet-number
+    /// space. Generic `send` intentionally rejects CRYPTO in 1-RTT packets so
+    /// applications cannot bypass the monotonic TLS stream-offset invariant.
+    pub fn sendPostHandshakeCrypto(
+        self: *Connection,
+        crypto_offset: *u64,
+        data: []const u8,
+    ) Error!void {
+        if (data.len == 0) return error.InvalidPostHandshakeCrypto;
+        const next_offset = std.math.add(
+            u64,
+            crypto_offset.*,
+            data.len,
+        ) catch return error.InvalidPostHandshakeCrypto;
+        const frame = [_]quic.Frame{.{ .crypto = .{
+            .offset = crypto_offset.*,
+            .data = data,
+        } }};
+        try self.sendTrackedFramesEcnAtUnchecked(
+            &frame,
+            .not_ect,
+            self.monotonicNowNs(),
+        );
+        crypto_offset.* = next_offset;
     }
 
     /// Send one frame slice per QUIC packet through a stateful socket batch.

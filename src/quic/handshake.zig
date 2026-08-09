@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.resumption.ticket.handshake.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
     InvalidHandshakeFlight,
     MissingCryptoFrame,
     MissingAlpn,
@@ -43,6 +43,7 @@ pub const ClientOptions = struct {
     resumption_session: ?*const quic.resumption.Session = null,
     resumption_now_ms: ?u64 = null,
     resumption_server_id: ?[]const u8 = null,
+    auto_resumption: ?quic.resumption.ticket.handshake.ClientAutoResume = null,
     early_data: ?quic.zero_rtt.handshake.ClientOffer = null,
 };
 
@@ -95,6 +96,7 @@ pub const ServerOptions = struct {
     x25519_secret_key: ?[32]u8 = null,
     keylog: ?*quic.keylog.Log = null,
     psk: ?ServerPsk = null,
+    auto_resumption: ?quic.resumption.ticket.handshake.ServerAutoResume = null,
     early_data: ?ServerEarlyDataPolicy = null,
 };
 
@@ -187,6 +189,42 @@ pub const EstablishedConnection = struct {
     alpn: []u8,
     resumed: bool = false,
     early_data_status: quic.zero_rtt.handshake.Status = .not_offered,
+    resumption_master_secret: [32]u8,
+    peer_transport_parameters: quic.resumption.Snapshot,
+    post_handshake_send_crypto_offset: u64 = 0,
+    post_handshake_receive_crypto_offset: u64 = 0,
+
+    /// Issue one post-handshake TLS 1.3 ticket and register it in the bounded
+    /// server store before sending it in 1-RTT CRYPTO.
+    pub fn issueSessionTicket(
+        self: *EstablishedConnection,
+        io: std.Io,
+        config: quic.resumption.ticket.handshake.ServerConfig,
+    ) Error!quic.resumption.ticket.handshake.Issued {
+        return quic.resumption.ticket.handshake.issue(
+            &self.connection,
+            io,
+            config,
+            self.resumption_master_secret,
+            &self.post_handshake_send_crypto_offset,
+        );
+    }
+
+    /// Receive one post-handshake NewSessionTicket and atomically insert an
+    /// origin+ALPN-bound owned session into the client's cache.
+    pub fn receiveAndCacheSessionTicket(
+        self: *EstablishedConnection,
+        config: quic.resumption.ticket.handshake.ClientConfig,
+    ) Error!void {
+        try quic.resumption.ticket.handshake.receiveAndCache(
+            &self.connection,
+            config,
+            self.resumption_master_secret,
+            self.alpn,
+            self.peer_transport_parameters,
+            &self.post_handshake_receive_crypto_offset,
+        );
+    }
 
     pub fn deinit(self: *EstablishedConnection) void {
         const allocator = self.connection.endpoint.allocator;
@@ -220,6 +258,22 @@ fn isVersionNegotiationDatagram(bytes: []const u8) bool {
 }
 
 pub fn connect(endpoint: *quic.runtime.Endpoint, peer: net.IpAddress, options: ClientOptions) Error!EstablishedConnection {
+    if (options.resumption_session == null and
+        options.early_data == null and
+        options.auto_resumption != null)
+    {
+        const automatic = options.auto_resumption.?;
+        var session = (try quic.resumption.ticket.handshake.acquireFirst(
+            automatic,
+            options.alpn_protocols,
+        )) orelse return connectAttempt(endpoint, peer, options, false);
+        defer session.deinit();
+        var resumed_options = options;
+        resumed_options.resumption_session = &session;
+        resumed_options.resumption_now_ms = automatic.now_ms;
+        resumed_options.resumption_server_id = automatic.server_id;
+        return connectAttempt(endpoint, peer, resumed_options, false);
+    }
     return connectAttempt(endpoint, peer, options, false);
 }
 
@@ -460,9 +514,22 @@ fn connectAttempt(
     const server_finished = try quic.tls_client_hello.parseFinished(server_flight.finished);
     const server_finished_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions });
     try quic.tls_client_hello.verifyFinished(handshake.server_handshake_traffic_secret, server_finished_hash, server_finished);
+    const application_transcript_hash = hashParts(&.{
+        client_hello.items,
+        server_initial.crypto_data,
+        server_flight.encrypted_extensions,
+        server_flight.finished,
+    });
+    const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(
+        options.version.wireValue(),
+        handshake.handshake_secret,
+        application_transcript_hash,
+    );
 
-    const client_finished_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions, server_flight.finished });
-    const client_verify = quic.tls_client_hello.computeFinishedVerifyData(handshake.client_handshake_traffic_secret, client_finished_hash);
+    const client_verify = quic.tls_client_hello.computeFinishedVerifyData(
+        handshake.client_handshake_traffic_secret,
+        application_transcript_hash,
+    );
     var client_finished: std.ArrayList(u8) = .empty;
     defer client_finished.deinit(endpoint.allocator);
     try quic.tls_client_hello.writeFinished(&client_finished, endpoint.allocator, client_verify);
@@ -476,8 +543,6 @@ fn connectAttempt(
         .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
     });
 
-    const app_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data, server_flight.encrypted_extensions, server_flight.finished, client_finished.items });
-    const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
     if (options.keylog) |keylog| {
         try keylog.writeApplicationSecrets(
             client_random,
@@ -499,6 +564,16 @@ fn connectAttempt(
         encrypted_extensions.alpn,
         parsed_server.selected_psk,
         early_data_status,
+        quic.resumption.ticket.codec.deriveResumptionMasterSecret(
+            application.master_secret,
+            hashParts(&.{
+                client_hello.items,
+                server_initial.crypto_data,
+                server_flight.encrypted_extensions,
+                server_flight.finished,
+                client_finished.items,
+            }),
+        ),
     );
     errdefer established.deinit();
     if (options.early_data) |early_data| {
@@ -531,6 +606,30 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
 
     var parsed_client = try quic.tls_client_hello.parseClientHello(endpoint.allocator, client_initial.crypto_data);
     defer parsed_client.deinit(endpoint.allocator);
+    var automatic_psk_lease: ?quic.resumption.ticket.store.Lease = null;
+    defer if (automatic_psk_lease) |*lease| lease.deinit();
+    var effective_psk = options.psk;
+    if (effective_psk == null) {
+        if (options.auto_resumption) |automatic| {
+            if (parsed_client.psk_offer) |offer| {
+                automatic_psk_lease = try automatic.store.lookup(
+                    offer.identity,
+                    automatic.now_ms,
+                );
+                if (automatic_psk_lease) |*lease| {
+                    effective_psk = .{
+                        .identity = lease.identity,
+                        .secret = lease.secret,
+                        .age_add = lease.age_add,
+                        .issued_at_ms = lease.issued_at_ms,
+                        .lifetime_seconds = lease.lifetime_seconds,
+                        .now_ms = automatic.now_ms,
+                        .age_tolerance_ms = automatic.age_tolerance_ms,
+                    };
+                }
+            }
+        }
+    }
     const alpn = try chooseAlpn(options.alpn_protocol, parsed_client.alpn_protocols);
     const peer_transport_parameters = try quic.parseTransportParametersTyped(
         endpoint.allocator,
@@ -559,7 +658,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         return error.UnexpectedEarlyData;
     }
     if (parsed_client.psk_offer) |offer| {
-        if (options.psk) |configured_psk| {
+        if (effective_psk) |configured_psk| {
             if (std.mem.eql(u8, offer.identity, configured_psk.identity)) {
                 try quic.resumption.tls_psk.verifyClientOffer(
                     client_initial.crypto_data,
@@ -707,8 +806,11 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     const client_finished_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items, server_finished.items });
     try quic.tls_client_hello.verifyFinished(handshake.client_handshake_traffic_secret, client_finished_hash, client_verify);
 
-    const app_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items, encrypted_extensions.items, server_finished.items, client_finished.crypto_data });
-    const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(options.version.wireValue(), handshake.handshake_secret, app_hash);
+    const application = try quic.tls_client_hello.deriveApplicationSecretsForVersion(
+        options.version.wireValue(),
+        handshake.handshake_secret,
+        client_finished_hash,
+    );
     if (options.keylog) |keylog| {
         try keylog.writeApplicationSecrets(
             parsed_client.random,
@@ -730,6 +832,16 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         alpn,
         selected_psk != null,
         if (early_data_accepted) .accepted else if (client_offered_early_data) .rejected else .not_offered,
+        quic.resumption.ticket.codec.deriveResumptionMasterSecret(
+            application.master_secret,
+            hashParts(&.{
+                client_initial.crypto_data,
+                server_hello.items,
+                encrypted_extensions.items,
+                server_finished.items,
+                client_finished.crypto_data,
+            }),
+        ),
     );
     errdefer established.deinit();
     if (pending_early_data) |*early_data| {
@@ -953,6 +1065,7 @@ fn establishedConnection(
     alpn: []const u8,
     resumed: bool,
     early_data_status: quic.zero_rtt.handshake.Status,
+    resumption_master_secret: [32]u8,
 ) Error!EstablishedConnection {
     const local_owned = try endpoint.allocator.dupe(u8, local_connection_id);
     errdefer endpoint.allocator.free(local_owned);
@@ -978,6 +1091,10 @@ fn establishedConnection(
         .alpn = alpn_owned,
         .resumed = resumed,
         .early_data_status = early_data_status,
+        .resumption_master_secret = resumption_master_secret,
+        .peer_transport_parameters = .fromTransportParameters(
+            peer_transport_parameters,
+        ),
     };
 }
 

@@ -150,6 +150,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   sessions, mandatory-last pre_shared_key binders, constant-time binder
   verification, selected-identity signaling, unknown-identity full-handshake
   fallback, and matching-identity bad-binder rejection,
+  post-handshake NewSessionTicket issue/parse over 1-RTT CRYPTO, transcript-
+  bound resumption PSK derivation, bounded owning server ticket storage,
+  client cache insertion, and origin+ALPN automatic ticket selection on both
+  sides of the next connection,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,
