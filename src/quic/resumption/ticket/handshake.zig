@@ -3,7 +3,7 @@
 const std = @import("std");
 const quic = @import("../../mod.zig");
 const codec = @import("vail").tls.ticket;
-const keyring = @import("keyring.zig");
+const keyring = @import("vail").tls.ticket_keyring;
 const store = @import("store.zig");
 
 pub const Error = codec.Error || store.Error || quic.resumption.cache.Error ||

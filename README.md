@@ -170,6 +170,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   netz retains only QUIC-specific packet-protection labels,
   and Vail-owned PSK-DHE/early_data/NewSessionTicket wire codecs while netz
   retains origin+ALPN caches, replay leases, and remembered QUIC parameters,
+  with stateless ticket AEAD formats and key rotation also owned by Vail while
+  netz keeps only ticket issuance/storage policy and transport integration,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,
