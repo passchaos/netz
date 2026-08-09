@@ -382,6 +382,7 @@ pub const Connection = struct {
     receive_authentication_failures: u64 = 0,
     stored_new_tokens: std.ArrayList([]u8) = .empty,
     handshake_status: handshake_status.Status = .in_progress,
+    lowest_one_rtt_packet_number: ?u64 = null,
     peer_max_streams_bidi: u64,
     peer_max_streams_uni: u64,
     recv_max_streams_bidi: u64,
@@ -960,6 +961,7 @@ pub const Connection = struct {
         var sent_in_flight: usize = 0;
         var sent_stream_bytes: u64 = 0;
         for (prepared[0..send_result.sent_count]) |packet| {
+            self.noteOneRttPacketSent(packet.packet_number);
             sent_payload_len += packet.payload_len;
             sent_stream_bytes += packet.stream_bytes;
             if (packet.in_flight) {
@@ -1640,6 +1642,7 @@ pub const Connection = struct {
             }
         }
         try self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn);
+        self.noteOneRttPacketSent(packet_number);
         if (pace_packet) {
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -2003,6 +2006,7 @@ pub const Connection = struct {
         // and transactionally discard the unsent suffix.
         var sent_payload_len: usize = 0;
         for (probes[0..send_result.sent_count]) |probe| {
+            self.noteOneRttPacketSent(probe.packet_number);
             sent_payload_len += probe.candidate.payload.len;
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -2631,6 +2635,10 @@ pub const Connection = struct {
         return self.handshake_status.awaitingHandshakeDoneAck();
     }
 
+    pub fn lowestOneRttPacketNumber(self: Connection) ?u64 {
+        return self.lowest_one_rtt_packet_number;
+    }
+
     /// Transition a manually keyed connection to the same state installed by
     /// the integrated TLS handshake. This never writes to the socket.
     pub fn markTlsHandshakeComplete(self: *Connection) void {
@@ -3202,6 +3210,14 @@ pub const Connection = struct {
                         error.InvalidAckFrame => try self.applyAckWithEcnFailure(frame.ack),
                         else => return err,
                     };
+                    self.handshake_status.onOneRttAcknowledged(
+                        switch (self.config.local_endpoint) {
+                            .client => .client,
+                            .server => .server,
+                        },
+                        self.lowest_one_rtt_packet_number,
+                        frame.ack.largest_acknowledged,
+                    );
                     if (acked.ack_eliciting_packets > 0) self.pto_count = 0;
                     if (acked.largest_pmtu_probe_size) |probe_size| {
                         self.pmtud.onProbeAcked(probe_size, self.config.max_datagram_size);
@@ -3605,6 +3621,17 @@ pub const Connection = struct {
             .client => .client,
             .server => .server,
         });
+    }
+
+    fn noteOneRttPacketSent(
+        self: *Connection,
+        packet_number: u64,
+    ) void {
+        if (self.lowest_one_rtt_packet_number == null or
+            packet_number < self.lowest_one_rtt_packet_number.?)
+        {
+            self.lowest_one_rtt_packet_number = packet_number;
+        }
     }
 
     fn receiveDatagramFrame(self: *Connection, datagram: quic.DatagramFrame) Error!void {

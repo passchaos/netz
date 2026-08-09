@@ -169,3 +169,119 @@ test "QUIC HANDSHAKE_DONE survives PTO loss and confirms on ACK" {
     try std.testing.expect(!server.handshakeDoneAwaitingAck());
     try std.testing.expectEqual(@as(usize, 0), server.pendingRecoveryCount());
 }
+
+test "QUIC client confirms when a valid ACK reaches its first 1-RTT packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc5} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .local_endpoint = .client,
+        .tls_handshake_complete = true,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        client.lowestOneRttPacketNumber(),
+    );
+    try std.testing.expect(!client.handshakeConfirmed());
+
+    var ping = try server.receivePacket();
+    defer ping.deinit(allocator);
+    try server.sendAck(0);
+    var ack = try client.receivePacket();
+    defer ack.deinit(allocator);
+    try std.testing.expect(client.handshakeConfirmed());
+}
+
+test "QUIC client ignores reordered ACK below its first 1-RTT packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe5} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &cid,
+        .peer_connection_id = &cid,
+        .local_endpoint = .client,
+        .tls_handshake_complete = true,
+    });
+    defer client.deinit();
+
+    // Simulate packet-number consumption before 1-RTT keys become available.
+    client.next_packet_number = 4;
+    try client.send(&.{.{ .ping = {} }});
+    try std.testing.expectEqual(
+        @as(?u64, 4),
+        client.lowestOneRttPacketNumber(),
+    );
+    const stale = quic.AckFrame{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    // An ACK for an unsent packet is rejected before it can alter handshake
+    // state. The direct status test above covers a valid below-threshold ACK.
+    try std.testing.expectError(
+        error.InvalidAckFrame,
+        one_rtt.testing.applyReceivedFrames(
+            &client,
+            0,
+            &.{.{ .ack = stale }},
+            100,
+            .not_ect,
+        ),
+    );
+    try std.testing.expect(!client.handshakeConfirmed());
+}

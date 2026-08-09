@@ -203,8 +203,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   9001 usage limits,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus non-blocking TLS-completion state,
-  application-order-preserving HANDSHAKE_DONE scheduling, ACK confirmation and
-  PTO retransmission with server-only role validation for both frames,
+  application-order-preserving HANDSHAKE_DONE scheduling, client confirmation
+  from either HANDSHAKE_DONE or a validated 1-RTT ACK, ACK delivery tracking,
+  and PTO retransmission with server-only role validation for both frames,
   transport-parameter-derived idle timeout deadline tracking and explicit
   peer-address validation hooks with RFC 9000 3x anti-amplification send
   budget enforcement for unvalidated server paths,

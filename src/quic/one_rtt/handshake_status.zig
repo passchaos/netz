@@ -90,6 +90,23 @@ pub const Status = union(enum) {
         }
     }
 
+    /// Apply RFC 9001 §4.1.2's optional client confirmation shortcut.
+    ///
+    /// A valid ACK whose Largest Acknowledged reaches the first packet sent
+    /// with 1-RTT keys proves that the peer received and processed 1-RTT
+    /// protection. The ACK frame itself is validated by the packet-space
+    /// tracker before this transition is called.
+    pub fn onOneRttAcknowledged(
+        self: *Status,
+        role: Role,
+        lowest_one_rtt_packet_number: ?u64,
+        largest_acknowledged: u64,
+    ) void {
+        if (role != .client or self.* != .client_complete) return;
+        const lowest = lowest_one_rtt_packet_number orelse return;
+        if (largest_acknowledged >= lowest) self.* = .confirmed;
+    }
+
     pub fn recoveryGroupId(self: Status) ?u64 {
         return switch (self) {
             .server_pending => |group_id| group_id,
@@ -123,6 +140,8 @@ test "QUIC handshake status tracks reliable HANDSHAKE_DONE delivery" {
     client.onTlsComplete(.client);
     try std.testing.expect(client.isComplete());
     try std.testing.expect(!client.isConfirmed());
-    try client.onHandshakeDoneReceived(.client);
+    client.onOneRttAcknowledged(.client, 4, 3);
+    try std.testing.expect(!client.isConfirmed());
+    client.onOneRttAcknowledged(.client, 4, 4);
     try std.testing.expectEqual(Status.confirmed, client);
 }
