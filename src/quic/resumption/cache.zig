@@ -35,14 +35,19 @@ pub const Ticket = struct {
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
+    server_id: []u8,
+    alpn: []u8,
     ticket: []u8,
     psk: [32]u8,
     issued_at_ms: u64,
+    lifetime_seconds: u32,
     age_add: u32,
     max_early_data_size: ?u32,
     transport_parameters: parameters.Snapshot,
 
     pub fn deinit(self: *Session) void {
+        self.allocator.free(self.server_id);
+        self.allocator.free(self.alpn);
         wipeAndFree(self.allocator, self.ticket);
         std.crypto.secureZero(u8, &self.psk);
         self.* = undefined;
@@ -343,11 +348,19 @@ pub const Cache = struct {
     }
 
     fn copySession(self: Cache, entry: Entry) Error!Session {
+        const server_id = try self.allocator.dupe(u8, entry.server_id);
+        errdefer self.allocator.free(server_id);
+        const alpn = try self.allocator.dupe(u8, entry.alpn);
+        errdefer self.allocator.free(alpn);
+        const ticket_data = try self.allocator.dupe(u8, entry.ticket);
         return .{
             .allocator = self.allocator,
-            .ticket = try self.allocator.dupe(u8, entry.ticket),
+            .server_id = server_id,
+            .alpn = alpn,
+            .ticket = ticket_data,
             .psk = entry.psk,
             .issued_at_ms = entry.issued_at_ms,
+            .lifetime_seconds = entry.lifetime_seconds,
             .age_add = entry.age_add,
             .max_early_data_size = entry.max_early_data_size,
             .transport_parameters = entry.transport_parameters,

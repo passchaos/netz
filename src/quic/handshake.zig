@@ -3,7 +3,7 @@ const quic = @import("mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.one_rtt.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
+pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.one_rtt.Error || quic.resumption.tls_psk.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
     InvalidHandshakeFlight,
     MissingCryptoFrame,
     MissingAlpn,
@@ -40,6 +40,19 @@ pub const ClientOptions = struct {
     random: ?[32]u8 = null,
     x25519_secret_key: ?[32]u8 = null,
     keylog: ?*quic.keylog.Log = null,
+    resumption_session: ?*const quic.resumption.Session = null,
+    resumption_now_ms: ?u64 = null,
+    resumption_server_id: ?[]const u8 = null,
+};
+
+pub const ServerPsk = struct {
+    identity: []const u8,
+    secret: [32]u8,
+    age_add: u32,
+    issued_at_ms: u64,
+    lifetime_seconds: u32,
+    now_ms: u64,
+    age_tolerance_ms: u32 = 10_000,
 };
 
 pub const ServerOptions = struct {
@@ -72,6 +85,7 @@ pub const ServerOptions = struct {
     random: ?[32]u8 = null,
     x25519_secret_key: ?[32]u8 = null,
     keylog: ?*quic.keylog.Log = null,
+    psk: ?ServerPsk = null,
 };
 
 pub const OneRttConfig = struct {
@@ -161,6 +175,7 @@ pub const EstablishedConnection = struct {
     local_connection_id: []u8,
     peer_connection_id: []u8,
     alpn: []u8,
+    resumed: bool = false,
 
     pub fn deinit(self: *EstablishedConnection) void {
         const allocator = self.connection.endpoint.allocator;
@@ -233,6 +248,37 @@ fn connectAttempt(
         .alpn_protocols = options.alpn_protocols,
         .transport_parameters = transport_parameters,
     });
+    if (options.resumption_session) |session| {
+        const now_ms = options.resumption_now_ms orelse
+            return error.InvalidClientHello;
+        if (now_ms < session.issued_at_ms) return error.InvalidClientHello;
+        const expected_server_id = options.resumption_server_id orelse
+            return error.InvalidClientHello;
+        if (!std.mem.eql(u8, session.server_id, expected_server_id)) {
+            return error.InvalidClientHello;
+        }
+        var offered_alpn = false;
+        for (options.alpn_protocols) |protocol| {
+            if (std.mem.eql(u8, protocol, session.alpn)) {
+                offered_alpn = true;
+                break;
+            }
+        }
+        if (!offered_alpn) return error.InvalidClientHello;
+        const age = now_ms - session.issued_at_ms;
+        if (age > @as(u64, session.lifetime_seconds) * std.time.ms_per_s or
+            age > std.math.maxInt(u32))
+        {
+            return error.ExpiredPsk;
+        }
+        try quic.resumption.tls_psk.appendClientOffer(
+            &client_hello,
+            endpoint.allocator,
+            session.ticket,
+            session.obfuscatedTicketAge(now_ms),
+            session.psk,
+        );
+    }
 
     try quic.initial_exchange.sendInitialCrypto(endpoint, peer, initial_secrets.client, .{
         .version = options.version.wireValue(),
@@ -274,9 +320,20 @@ fn connectAttempt(
     );
     defer server_initial.deinit(endpoint.allocator);
     const parsed_server = try quic.tls_client_hello.parseServerHello(server_initial.crypto_data);
+    const offered_psk = options.resumption_session != null;
+    if (parsed_server.selected_psk and !offered_psk) return error.InvalidServerHello;
+    const selected_psk: ?[32]u8 = if (parsed_server.selected_psk)
+        options.resumption_session.?.psk
+    else
+        null;
     const shared = try quic.tls_client_hello.x25519SharedSecret(client_secret, parsed_server.x25519_public_key);
     const hs_hash = hashParts(&.{ client_hello.items, server_initial.crypto_data });
-    const handshake = try quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
+    const handshake = try quic.tls_client_hello.deriveHandshakeSecretsWithPskForVersion(
+        options.version.wireValue(),
+        shared,
+        hs_hash,
+        selected_psk,
+    );
     if (options.keylog) |keylog| {
         try keylog.writeHandshakeSecrets(
             client_random,
@@ -351,11 +408,17 @@ fn connectAttempt(
         local_transport_parameters,
         peer_transport_parameters,
         encrypted_extensions.alpn,
+        parsed_server.selected_psk,
     );
 }
 
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
     try validateConfiguredVersions(options.version, options.available_versions);
+    if (options.psk) |psk| {
+        if (psk.identity.len == 0 or psk.lifetime_seconds == 0) {
+            return error.InvalidClientHello;
+        }
+    }
     if ((options.retry_original_destination_connection_id.len == 0) != (options.retry_source_connection_id.len == 0)) {
         return error.InvalidPacket;
     }
@@ -387,15 +450,42 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     const server_public = try quic.tls_client_hello.x25519PublicKey(server_secret);
     const server_random = try random32(endpoint.io, options.random);
     const shared = try quic.tls_client_hello.x25519SharedSecret(server_secret, parsed_client.x25519_public_key);
+    var selected_psk: ?[32]u8 = null;
+    if (parsed_client.psk_offer) |offer| {
+        if (options.psk) |configured_psk| {
+            if (std.mem.eql(u8, offer.identity, configured_psk.identity)) {
+                try quic.resumption.tls_psk.verifyClientOffer(
+                    client_initial.crypto_data,
+                    offer,
+                    configured_psk.identity,
+                    configured_psk.secret,
+                );
+                try quic.resumption.tls_psk.validateTicketAge(offer, .{
+                    .age_add = configured_psk.age_add,
+                    .issued_at_ms = configured_psk.issued_at_ms,
+                    .lifetime_seconds = configured_psk.lifetime_seconds,
+                    .now_ms = configured_psk.now_ms,
+                    .tolerance_ms = configured_psk.age_tolerance_ms,
+                });
+                selected_psk = configured_psk.secret;
+            }
+        }
+    }
 
     var server_hello: std.ArrayList(u8) = .empty;
     defer server_hello.deinit(endpoint.allocator);
     try quic.tls_client_hello.writeServerHello(&server_hello, endpoint.allocator, .{
         .random = server_random,
         .x25519_public_key = server_public,
+        .select_psk = selected_psk != null,
     });
     const hs_hash = hashParts(&.{ client_initial.crypto_data, server_hello.items });
-    const handshake = try quic.tls_client_hello.deriveHandshakeSecretsForVersion(options.version.wireValue(), shared, hs_hash);
+    const handshake = try quic.tls_client_hello.deriveHandshakeSecretsWithPskForVersion(
+        options.version.wireValue(),
+        shared,
+        hs_hash,
+        selected_psk,
+    );
     if (options.keylog) |keylog| {
         try keylog.writeHandshakeSecrets(
             parsed_client.random,
@@ -480,6 +570,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         local_transport_parameters,
         peer_transport_parameters,
         alpn,
+        selected_psk != null,
     );
     return established;
 }
@@ -628,6 +719,7 @@ fn establishedConnection(
     local_transport_parameters: quic.TransportParameters,
     peer_transport_parameters: quic.TransportParameters,
     alpn: []const u8,
+    resumed: bool,
 ) Error!EstablishedConnection {
     const local_owned = try endpoint.allocator.dupe(u8, local_connection_id);
     errdefer endpoint.allocator.free(local_owned);
@@ -651,6 +743,7 @@ fn establishedConnection(
         .local_connection_id = local_owned,
         .peer_connection_id = peer_owned,
         .alpn = alpn_owned,
+        .resumed = resumed,
     };
 }
 
@@ -995,6 +1088,10 @@ test "QUIC integrated handshake emits matching NSS key logs on both roles" {
         client_output.written(),
         "SERVER_TRAFFIC_SECRET_0 " ++ ("a5" ** 32),
     ) != null);
+}
+
+test {
+    _ = @import("resumption/handshake_tests.zig");
 }
 
 test "QUIC integrated handshake propagates keylog sink failures" {

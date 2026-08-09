@@ -142,6 +142,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   exclusive single-use early-data leases, RFC 9000 §7.4.1 remembered-parameter
   filtering/reduction checks, RFC 9221 DATAGRAM restoration, and a lease-backed
   sender that consumes a ticket after the first successful 0-RTT packet,
+  plus integrated TLS 1.3 PSK-DHE resumption with origin/ALPN/age-bound owned
+  sessions, mandatory-last pre_shared_key binders, constant-time binder
+  verification, selected-identity signaling, unknown-identity full-handshake
+  fallback, and matching-identity bad-binder rejection,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,

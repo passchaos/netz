@@ -13,7 +13,8 @@ pub const Error = error{
     MissingAlpn,
     KeyExchangeFailed,
     BadFinished,
-} || wire.Error || quic.protection.VersionError || std.mem.Allocator.Error;
+} || wire.Error || quic.protection.VersionError ||
+    quic.resumption.tls_psk.Error || std.mem.Allocator.Error;
 
 const handshake_type_client_hello: u8 = 0x01;
 const handshake_type_server_hello: u8 = 0x02;
@@ -31,6 +32,7 @@ const ext_alpn: u16 = 0x0010;
 const ext_supported_versions: u16 = 0x002b;
 const ext_key_share: u16 = 0x0033;
 const ext_quic_transport_parameters: u16 = 0x0039;
+const ext_pre_shared_key = quic.resumption.tls_psk.ext_pre_shared_key;
 
 pub const ClientHelloOptions = struct {
     random: [32]u8,
@@ -46,6 +48,7 @@ pub const ParsedClientHello = struct {
     alpn_protocols: [][]const u8,
     x25519_public_key: []const u8,
     transport_parameters: []const u8,
+    psk_offer: ?quic.resumption.tls_psk.Offer = null,
 
     pub fn deinit(self: *ParsedClientHello, allocator: std.mem.Allocator) void {
         allocator.free(self.alpn_protocols);
@@ -56,11 +59,13 @@ pub const ParsedClientHello = struct {
 pub const ServerHelloOptions = struct {
     random: [32]u8,
     x25519_public_key: [32]u8,
+    select_psk: bool = false,
 };
 
 pub const ParsedServerHello = struct {
     random: [32]u8,
     x25519_public_key: []const u8,
+    selected_psk: bool = false,
 };
 
 pub const HandshakeSecrets = struct {
@@ -135,6 +140,12 @@ pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try appendInt(&key_share, allocator, u16, options.x25519_public_key.len);
     try key_share.appendSlice(allocator, &options.x25519_public_key);
     try writeExtension(&extensions, allocator, ext_key_share, key_share.items);
+    if (options.select_psk) {
+        try quic.resumption.tls_psk.appendServerSelection(
+            &extensions,
+            allocator,
+        );
+    }
 
     try appendU16Len(&body, allocator, extensions.items.len, error.InvalidServerHello);
     try body.appendSlice(allocator, extensions.items);
@@ -227,6 +238,10 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     if (x25519 == null) return error.MissingKeyShare;
     if (transport_parameters == null) return error.MissingTransportParameters;
     if (alpn_list.items.len == 0) return error.MissingAlpn;
+    const psk_offer = quic.resumption.tls_psk.parseClientOffer(bytes) catch |err| switch (err) {
+        error.MissingPskOffer => null,
+        else => return error.InvalidClientHello,
+    };
 
     return .{
         .random = random,
@@ -234,6 +249,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .alpn_protocols = try alpn_list.toOwnedSlice(allocator),
         .x25519_public_key = x25519.?,
         .transport_parameters = transport_parameters.?,
+        .psk_offer = psk_offer,
     };
 }
 
@@ -257,6 +273,7 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
 
     var saw_supported_versions = false;
     var x25519: ?[]const u8 = null;
+    var selected_psk = false;
     var seen_extensions = SeenExtensions{};
     var ext_cursor = wire.Cursor.init(extensions);
     while (!ext_cursor.eof()) {
@@ -270,12 +287,21 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
                 saw_supported_versions = true;
             },
             ext_key_share => x25519 = try parseServerX25519KeyShare(payload),
+            ext_pre_shared_key => {
+                _ = quic.resumption.tls_psk.parseServerSelection(payload) catch
+                    return error.InvalidServerHello;
+                selected_psk = true;
+            },
             else => {},
         }
     }
     if (!saw_supported_versions) return error.MissingSupportedVersions;
     if (x25519 == null) return error.MissingKeyShare;
-    return .{ .random = random, .x25519_public_key = x25519.? };
+    return .{
+        .random = random,
+        .x25519_public_key = x25519.?,
+        .selected_psk = selected_psk,
+    };
 }
 
 pub fn parseEncryptedExtensions(bytes: []const u8) Error!ParsedEncryptedExtensions {
@@ -346,9 +372,22 @@ pub fn deriveHandshakeSecrets(shared_secret: [32]u8, transcript_hash: [32]u8) Ha
 }
 
 pub fn deriveHandshakeSecretsForVersion(version: u32, shared_secret: [32]u8, transcript_hash: [32]u8) quic.protection.VersionError!HandshakeSecrets {
+    return deriveHandshakeSecretsWithPskForVersion(
+        version,
+        shared_secret,
+        transcript_hash,
+        null,
+    );
+}
+
+pub fn deriveHandshakeSecretsWithPskForVersion(
+    version: u32,
+    shared_secret: [32]u8,
+    transcript_hash: [32]u8,
+    psk: ?[32]u8,
+) quic.protection.VersionError!HandshakeSecrets {
     const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
-    const zero_secret = [_]u8{0} ** quic.protection.secret_len;
-    const early_secret = HkdfSha256.extract(&zero_secret, &.{});
+    const early_secret = quic.resumption.tls_psk.earlySecret(psk);
     const empty_hash = std.crypto.tls.emptyHash(std.crypto.hash.sha2.Sha256);
     const derived_secret = std.crypto.tls.hkdfExpandLabel(HkdfSha256, early_secret, "derived", &empty_hash, quic.protection.secret_len);
     const handshake_secret = HkdfSha256.extract(&derived_secret, &shared_secret);
