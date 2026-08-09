@@ -839,10 +839,16 @@ pub const Qpack = struct {
 
     pub const dynamic_entry_overhead: usize = 32;
 
+    fn dynamicStringHash(bytes: []const u8) u64 {
+        return std.hash.Wyhash.hash(0, bytes);
+    }
+
     pub const DynamicEntry = struct {
         absolute_index: u64,
         name: []u8,
         value: []u8,
+        name_hash: u64,
+        value_hash: u64,
 
         pub fn size(self: DynamicEntry) usize {
             return self.name.len + self.value.len + dynamic_entry_overhead;
@@ -923,6 +929,8 @@ pub const Qpack = struct {
                 .absolute_index = absolute_index,
                 .name = name_copy,
                 .value = value_copy,
+                .name_hash = dynamicStringHash(name),
+                .value_hash = dynamicStringHash(value),
             });
             self.current_size += entry_size;
             self.insert_count = next_insert_count;
@@ -996,14 +1004,19 @@ pub const Qpack = struct {
             value: []const u8,
             absolute_index_limit: u64,
         ) ?Match {
+            const name_hash = dynamicStringHash(name);
+            const value_hash = dynamicStringHash(value);
             var name_match: ?u64 = null;
             var index = self.entries.items.len;
             while (index > self.head) {
                 index -= 1;
                 const entry = self.entries.items[index];
                 if (entry.absolute_index >= absolute_index_limit) continue;
+                if (entry.name_hash != name_hash) continue;
                 if (!std.mem.eql(u8, entry.name, name)) continue;
-                if (std.mem.eql(u8, entry.value, value)) {
+                if (entry.value_hash == value_hash and
+                    std.mem.eql(u8, entry.value, value))
+                {
                     return .{
                         .absolute_index = entry.absolute_index,
                         .full_match = true,
@@ -1026,11 +1039,13 @@ pub const Qpack = struct {
             name: []const u8,
             absolute_index_limit: u64,
         ) ?u64 {
+            const name_hash = dynamicStringHash(name);
             var index = self.entries.items.len;
             while (index > self.head) {
                 index -= 1;
                 const entry = self.entries.items[index];
                 if (entry.absolute_index >= absolute_index_limit) continue;
+                if (entry.name_hash != name_hash) continue;
                 if (std.mem.eql(u8, entry.name, name)) return entry.absolute_index;
             }
             return null;
@@ -1406,14 +1421,26 @@ pub const Qpack = struct {
         reference_limit: u64,
         references: *std.ArrayList(u64),
     ) !void {
+        const stack_match_capacity = 64;
+        var stack_matches: [stack_match_capacity]?DynamicTable.Match =
+            undefined;
+        const dynamic_matches = if (fields.len <= stack_matches.len)
+            stack_matches[0..fields.len]
+        else
+            try allocator.alloc(?DynamicTable.Match, fields.len);
+        defer if (fields.len > stack_matches.len) {
+            allocator.free(dynamic_matches);
+        };
+
         const base = table.insert_count;
         var required_insert_count: u64 = 0;
-        for (fields) |field| {
-            if (table.findMatchBefore(
+        for (fields, dynamic_matches) |field, *dynamic_match| {
+            dynamic_match.* = table.findMatchBefore(
                 field.name,
                 field.value,
                 reference_limit,
-            )) |match| {
+            );
+            if (dynamic_match.*) |match| {
                 required_insert_count = @max(
                     required_insert_count,
                     match.absolute_index + 1,
@@ -1437,12 +1464,7 @@ pub const Qpack = struct {
             base - required_insert_count,
         );
 
-        for (fields) |field| {
-            const dynamic_match = table.findMatchBefore(
-                field.name,
-                field.value,
-                reference_limit,
-            );
+        for (fields, dynamic_matches) |field, dynamic_match| {
             if (!field.never_indexed) {
                 if (dynamic_match) |match| {
                     if (match.full_match) {
@@ -3968,6 +3990,40 @@ test "HTTP/3 QPACK dynamic match prefers exact then newest name before limit" {
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expect(limited_exact.full_match);
     try std.testing.expectEqual(@as(u64, 0), limited_exact.absolute_index);
+}
+
+fn checkLargeDynamicQpackEncodeAllocationFailure(
+    allocator: std.mem.Allocator,
+) !void {
+    var table = Qpack.DynamicTable.init(allocator, 4096);
+    defer table.deinit();
+    try table.setCapacity(4096);
+    _ = try table.insert("x-large-block", "repeated");
+    var fields: [65]Qpack.HeaderField = undefined;
+    for (&fields) |*field| {
+        field.* = .{ .name = "x-large-block", .value = "repeated" };
+    }
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var references: std.ArrayList(u64) = .empty;
+    defer references.deinit(allocator);
+    try Qpack.encodeDynamicBlockKnownReceived(
+        &encoded,
+        allocator,
+        &fields,
+        table,
+        table.insert_count,
+        &references,
+    );
+    try std.testing.expectEqual(@as(usize, 1), references.items.len);
+}
+
+test "HTTP/3 QPACK large encode scratch is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkLargeDynamicQpackEncodeAllocationFailure,
+        .{},
+    );
 }
 
 test "HTTP/3 QPACK dynamic table evicts by capacity and rejects invalid instructions" {
