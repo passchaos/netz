@@ -677,6 +677,11 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         }
     }
     const alpn = try chooseAlpn(options.alpn_protocol, parsed_client.alpn_protocols);
+    if (effective_psk == null and options.identity != null and
+        !parsed_client.supports_ed25519)
+    {
+        return error.UnsupportedSignatureScheme;
+    }
     const peer_transport_parameters = try quic.parseTransportParametersTyped(
         endpoint.allocator,
         parsed_client.transport_parameters,

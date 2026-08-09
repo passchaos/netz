@@ -48,6 +48,7 @@ pub const ParsedClientHello = struct {
     alpn_protocols: [][]const u8,
     x25519_public_key: []const u8,
     transport_parameters: []const u8,
+    supports_ed25519: bool = false,
     psk_offer: ?quic.resumption.tls_psk.Offer = null,
 
     pub fn deinit(self: *ParsedClientHello, allocator: std.mem.Allocator) void {
@@ -236,6 +237,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var x25519: ?[]const u8 = null;
     var transport_parameters: ?[]const u8 = null;
     var saw_supported_versions = false;
+    var supports_ed25519 = false;
     var alpn_list: std.ArrayList([]const u8) = .empty;
     errdefer alpn_list.deinit(allocator);
     var seen_extensions = SeenExtensions{};
@@ -252,6 +254,12 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
             ext_supported_versions => {
                 try validateClientSupportedVersions(payload);
                 saw_supported_versions = true;
+            },
+            ext_signature_algorithms => {
+                supports_ed25519 = try signatureAlgorithmsContain(
+                    payload,
+                    quic.tls.auth.signature_scheme_ed25519,
+                );
             },
             ext_key_share => x25519 = try parseX25519KeyShare(payload),
             ext_quic_transport_parameters => transport_parameters = payload,
@@ -274,6 +282,7 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .alpn_protocols = try alpn_list.toOwnedSlice(allocator),
         .x25519_public_key = x25519.?,
         .transport_parameters = transport_parameters.?,
+        .supports_ed25519 = supports_ed25519,
         .psk_offer = psk_offer,
     };
 }
@@ -509,12 +518,39 @@ fn writeSupportedGroupsExtension(list: *std.ArrayList(u8), allocator: std.mem.Al
 }
 
 fn writeSignatureAlgorithmsExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-    // ecdsa_secp256r1_sha256 + rsa_pss_rsae_sha256 are enough for a minimal offer.
-    var payload: [6]u8 = undefined;
-    std.mem.writeInt(u16, payload[0..2], 4, .big);
+    // Ed25519 is the built-in CertificateVerify implementation. Keep ECDSA
+    // and RSA-PSS advertised for future/custom authenticators.
+    var payload: [8]u8 = undefined;
+    std.mem.writeInt(u16, payload[0..2], 6, .big);
     std.mem.writeInt(u16, payload[2..4], 0x0403, .big);
     std.mem.writeInt(u16, payload[4..6], 0x0804, .big);
+    std.mem.writeInt(u16, payload[6..8], 0x0807, .big);
     try writeExtension(list, allocator, ext_signature_algorithms, &payload);
+}
+
+fn signatureAlgorithmsContain(payload: []const u8, wanted: u16) Error!bool {
+    if (payload.len < 4) return error.InvalidClientHello;
+    const list_len = std.mem.readInt(u16, payload[0..2], .big);
+    if (list_len == 0 or list_len % 2 != 0 or
+        list_len + 2 != payload.len)
+    {
+        return error.InvalidClientHello;
+    }
+    var found = false;
+    var pos: usize = 2;
+    while (pos < payload.len) : (pos += 2) {
+        const scheme = std.mem.readInt(u16, payload[pos..][0..2], .big);
+        var previous: usize = 2;
+        while (previous < pos) : (previous += 2) {
+            if (std.mem.readInt(
+                u16,
+                payload[previous..][0..2],
+                .big,
+            ) == scheme) return error.InvalidClientHello;
+        }
+        if (scheme == wanted) found = true;
+    }
+    return found;
 }
 
 fn writeAlpnExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, protocols: []const []const u8) Error!void {
