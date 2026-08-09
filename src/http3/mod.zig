@@ -321,12 +321,11 @@ pub const ControlState = struct {
     local_goaway_id: ?u64 = null,
     peer_max_push_id: ?u64 = null,
     local_max_push_id: ?u64 = null,
-    /// Most recent peer CANCEL_PUSH identifier.
-    ///
-    /// The full push runtime owns per-ID terminal state; retaining the latest
-    /// control value here lets the shared control-stream parser validate roles
-    /// and exposes cancellation even before a push stream is instantiated.
+    /// Most recent peer CANCEL_PUSH identifier, retained for compatibility.
     peer_cancelled_push_id: ?u64 = null,
+    /// Every distinct peer-cancelled push ID in receive order.
+    peer_cancelled_push_ids: std.ArrayList(u64) = .empty,
+    push_cancellation_generation: u64 = 0,
     peer_control_stream_id: ?u64 = null,
     latest_priority_update: ?PriorityUpdatePayload = null,
     latest_priority_update_type: ?u64 = null,
@@ -340,6 +339,7 @@ pub const ControlState = struct {
             update.deinit(allocator);
         }
         self.priority_updates.deinit(allocator);
+        self.peer_cancelled_push_ids.deinit(allocator);
         self.* = undefined;
     }
 
@@ -350,7 +350,12 @@ pub const ControlState = struct {
         var copy = self;
         copy.latest_priority_update = null;
         copy.priority_updates = .empty;
+        copy.peer_cancelled_push_ids = .empty;
         errdefer copy.deinit(allocator);
+        try copy.peer_cancelled_push_ids.appendSlice(
+            allocator,
+            self.peer_cancelled_push_ids.items,
+        );
         try copy.priority_updates.ensureTotalCapacity(
             allocator,
             self.priority_updates.items.len,
@@ -467,8 +472,8 @@ pub const ControlState = struct {
                 self.peer_max_push_id = push_id;
             },
             FrameType.cancel_push => {
-                self.peer_cancelled_push_id =
-                    try parseSingleVarintPayload(frame.payload);
+                const push_id = try parseSingleVarintPayload(frame.payload);
+                try self.storePushCancellation(allocator, push_id);
             },
             FrameType.priority_update_request => {
                 const priority_update = try parsePriorityUpdatePayload(frame.payload);
@@ -535,6 +540,32 @@ pub const ControlState = struct {
             }
         }
         return null;
+    }
+
+    pub fn pushCancelled(self: ControlState, push_id: u64) bool {
+        for (self.peer_cancelled_push_ids.items) |cancelled| {
+            if (cancelled == push_id) return true;
+        }
+        return false;
+    }
+
+    fn storePushCancellation(
+        self: *ControlState,
+        allocator: std.mem.Allocator,
+        push_id: u64,
+    ) Error!void {
+        if (self.pushCancelled(push_id)) {
+            self.peer_cancelled_push_id = push_id;
+            return;
+        }
+        const next_generation = std.math.add(
+            u64,
+            self.push_cancellation_generation,
+            1,
+        ) catch return error.InvalidFrame;
+        try self.peer_cancelled_push_ids.append(allocator, push_id);
+        self.peer_cancelled_push_id = push_id;
+        self.push_cancellation_generation = next_generation;
     }
 
     fn storePriorityUpdate(
@@ -4728,6 +4759,7 @@ test "HTTP/3 push control frames and state" {
     var max_push: std.ArrayList(u8) = .empty;
     defer max_push.deinit(allocator);
     var control = ControlState{};
+    defer control.deinit(allocator);
     try control.writeMaxPushId(&max_push, allocator, 4);
     try std.testing.expectEqual(@as(?u64, 4), control.local_max_push_id);
     try control.writeMaxPushId(&max_push, allocator, 8);
@@ -4735,6 +4767,7 @@ test "HTTP/3 push control frames and state" {
     try std.testing.expectError(error.MaxPushIdReduced, control.writeMaxPushId(&max_push, allocator, 2));
 
     var peer_control = ControlState{ .settings = .{ .received = true } };
+    defer peer_control.deinit(allocator);
     const first = try Frame.parse(max_push.items);
     try peer_control.applyFrame(allocator, first);
     try std.testing.expectEqual(@as(?u64, 4), peer_control.peer_max_push_id);
@@ -4752,6 +4785,21 @@ test "HTTP/3 push control frames and state" {
     try std.testing.expectEqual(
         @as(?u64, 7),
         peer_control.peer_cancelled_push_id,
+    );
+    var second_cancel: std.ArrayList(u8) = .empty;
+    defer second_cancel.deinit(allocator);
+    try writeCancelPushFrame(&second_cancel, allocator, 3);
+    try peer_control.applyFrame(
+        allocator,
+        try Frame.parse(second_cancel.items),
+    );
+    // Duplicate cancellation is idempotent; distinct IDs remain queryable.
+    try peer_control.applyFrame(allocator, cancel_frame);
+    try std.testing.expect(peer_control.pushCancelled(7));
+    try std.testing.expect(peer_control.pushCancelled(3));
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        peer_control.peer_cancelled_push_ids.items.len,
     );
 }
 
@@ -4856,6 +4904,35 @@ test "HTTP/3 enforces SETTINGS_MAX_FIELD_SECTION_SIZE" {
     }, .{
         .max_field_section_size = 41,
     }));
+}
+
+fn checkPushCancellationStateAllocationFailure(
+    allocator: std.mem.Allocator,
+) !void {
+    var control = ControlState{ .settings = .{ .received = true } };
+    defer control.deinit(allocator);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeCancelPushFrame(&encoded, allocator, 1);
+    try control.applyFrame(allocator, try Frame.parse(encoded.items));
+    encoded.clearRetainingCapacity();
+    try writeCancelPushFrame(&encoded, allocator, 3);
+    try control.applyFrame(allocator, try Frame.parse(encoded.items));
+    try control.applyFrame(allocator, try Frame.parse(encoded.items));
+    try std.testing.expect(control.pushCancelled(1));
+    try std.testing.expect(control.pushCancelled(3));
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        control.peer_cancelled_push_ids.items.len,
+    );
+}
+
+test "HTTP/3 per-ID push cancellation is allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkPushCancellationStateAllocationFailure,
+        .{},
+    );
 }
 
 test "HTTP/3 rejects malformed structured frame payloads" {

@@ -3048,6 +3048,8 @@ pub const HandshakeClient = struct {
             .cancel_push,
             push_id,
         );
+        try self.push_streams.observePeerCancellation(push_id);
+        try self.applyPendingPushCancellations();
     }
 
     pub fn cancelRequest(
@@ -4430,6 +4432,8 @@ pub const ProtectedClient = struct {
             .cancel_push,
             push_id,
         );
+        try self.push_streams.observePeerCancellation(push_id);
+        try self.applyPendingPushCancellations();
     }
 
     pub fn cancelRequest(
@@ -5961,7 +5965,8 @@ const PushStreamSet = struct {
         self: *PushStreamSet,
         push_id: u64,
     ) Error!void {
-        const promise = self.findPromise(push_id) orelse return;
+        const promise = self.findPromise(push_id) orelse
+            return error.UnexpectedStream;
         if (promise.state == .finished) return;
         promise.state = .finished;
         if (self.findByPushId(push_id)) |entry| {
@@ -7392,7 +7397,7 @@ fn validateNewServerPush(
     if (control.peer_goaway_id) |goaway_id| {
         if (push_id >= goaway_id) return error.GoAwayReceived;
     }
-    if (control.peer_cancelled_push_id == push_id) {
+    if (control.pushCancelled(push_id)) {
         return error.RequestCancelled;
     }
     for (sent_push_ids) |existing| {
@@ -8184,6 +8189,11 @@ fn applyControlStreamFrameForRoleWithPushes(
     if (role == .server and (stream.stream_id & 0x02) != 0 and stream.offset == 0) {
         if (peekUniStreamType(stream) == .push) return error.StreamCreationError;
     }
+    if (role == .client and
+        try controlStreamContainsClientOnlyFrame(control.*, stream))
+    {
+        return error.UnexpectedFrame;
+    }
     var previous = try control.clone(allocator);
     var previous_owned = true;
     defer if (previous_owned) previous.deinit(allocator);
@@ -8215,8 +8225,8 @@ fn applyControlStreamFrameForRoleWithPushes(
             return error.UnexpectedFrame;
         }
         // CANCEL_PUSH is also client-to-server only.
-        if (control.peer_cancelled_push_id !=
-            previous.peer_cancelled_push_id)
+        if (control.push_cancellation_generation !=
+            previous.push_cancellation_generation)
         {
             control.deinit(allocator);
             control.* = previous;
@@ -8231,6 +8241,25 @@ fn applyControlStreamFrameForRoleWithPushes(
             previous_owned = false;
             return err;
         };
+    }
+    if (handled and role == .server and
+        control.push_cancellation_generation !=
+            previous.push_cancellation_generation)
+    {
+        const max_push_id = control.peer_max_push_id orelse {
+            control.deinit(allocator);
+            control.* = previous;
+            previous_owned = false;
+            return error.PushIdExceeded;
+        };
+        for (control.peer_cancelled_push_ids.items[previous.peer_cancelled_push_ids.items.len..]) |push_id| {
+            if (push_id > max_push_id) {
+                control.deinit(allocator);
+                control.* = previous;
+                previous_owned = false;
+                return error.PushIdExceeded;
+            }
+        }
     }
     if (handled and role == .server and
         control.priority_update_generation !=
@@ -8260,6 +8289,37 @@ fn applyControlStreamFrameForRoleWithPushes(
         }
     }
     return handled;
+}
+
+fn controlStreamContainsClientOnlyFrame(
+    control: http3.ControlState,
+    stream: quic.StreamFrame,
+) Error!bool {
+    const payload = if (stream.offset == 0) blk: {
+        var cursor = @import("../internal/wire.zig").Cursor.init(stream.data);
+        const stream_type: http3.StreamType = @enumFromInt(
+            quic.varint.decode(&cursor) catch return false,
+        );
+        if (stream_type != .control) return false;
+        break :blk stream.data[cursor.pos..];
+    } else blk: {
+        if (control.peer_control_stream_id != stream.stream_id) return false;
+        break :blk stream.data;
+    };
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        const frame = try http3.Frame.parse(payload[offset..]);
+        offset += frame.consumed;
+        switch (frame.frame_type) {
+            http3.FrameType.max_push_id,
+            http3.FrameType.cancel_push,
+            http3.FrameType.priority_update_request,
+            http3.FrameType.priority_update_push,
+            => return true,
+            else => {},
+        }
+    }
+    return false;
 }
 
 fn peekUniStreamType(stream: quic.StreamFrame) ?http3.StreamType {
@@ -10864,10 +10924,14 @@ test "HTTP/3 protected client advertises and cancels server push IDs" {
         client.sendMaxPushId(7),
     );
     try std.testing.expectError(error.PushIdExceeded, client.cancelPush(9));
+    try client.push_streams.registerPromise(7, 0);
+    try client.push_streams.registerPromise(3, 0);
     try client.cancelPush(7);
+    try client.cancelPush(3);
 
     while (server.control.peer_max_push_id != 8 or
-        server.control.peer_cancelled_push_id != 7)
+        !server.control.pushCancelled(7) or
+        !server.control.pushCancelled(3))
     {
         var packet = try quic.one_rtt.receive(
             &server.quic_server.endpoint,
@@ -10898,8 +10962,8 @@ test "HTTP/3 protected client advertises and cancels server push IDs" {
         server.control.peer_max_push_id,
     );
     try std.testing.expectEqual(
-        @as(?u64, 7),
-        server.control.peer_cancelled_push_id,
+        @as(usize, 2),
+        server.control.peer_cancelled_push_ids.items.len,
     );
 }
 
@@ -14120,7 +14184,8 @@ test "HTTP/3 handshake client advertises and cancels server push IDs" {
             var session = try server_ptr.accept();
             defer session.deinit();
             while (session.control.peer_max_push_id != 8 or
-                session.control.peer_cancelled_push_id != 7)
+                !session.control.pushCancelled(7) or
+                !session.control.pushCancelled(3))
             {
                 var packet = try session.established.connection.receivePacket();
                 defer packet.deinit(
@@ -14174,7 +14239,10 @@ test "HTTP/3 handshake client advertises and cancels server push IDs" {
         client.sendMaxPushId(7),
     );
     try std.testing.expectError(error.PushIdExceeded, client.cancelPush(9));
+    try client.push_streams.registerPromise(7, 0);
+    try client.push_streams.registerPromise(3, 0);
     try client.cancelPush(7);
+    try client.cancelPush(3);
     thread.join();
     if (shared.err) |err| return err;
 }
