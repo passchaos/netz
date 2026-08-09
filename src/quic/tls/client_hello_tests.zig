@@ -66,18 +66,23 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     try std.testing.expectError(error.InvalidClientHello, target.parseClientHello(allocator, duplicate_transport_parameters.items));
 
     const offsets = try clientHelloOffsetsForTest(hello.items);
-    var unsupported_cipher = try hello.clone(allocator);
-    defer unsupported_cipher.deinit(allocator);
-    std.mem.writeInt(u16, unsupported_cipher.items[offsets.cipher_suites_start..][0..2], 0x1302, .big);
-    var unsupported_parsed = try target.parseClientHello(
-        allocator,
-        unsupported_cipher.items,
+    var aes256_first = try hello.clone(allocator);
+    defer aes256_first.deinit(allocator);
+    std.mem.writeInt(
+        u16,
+        aes256_first.items[offsets.cipher_suites_start..][0..2],
+        0x1302,
+        .big,
     );
-    defer unsupported_parsed.deinit(allocator);
+    var aes256_parsed = try target.parseClientHello(
+        allocator,
+        aes256_first.items,
+    );
+    defer aes256_parsed.deinit(allocator);
     try std.testing.expectEqual(
-        target.CipherSuite.chacha20_poly1305_sha256,
+        target.CipherSuite.aes_256_gcm_sha384,
         try target.selectCipherSuite(
-            unsupported_parsed.cipher_suites,
+            aes256_parsed.cipher_suites,
             &target.default_cipher_suites,
             .server_order,
         ),
@@ -88,13 +93,19 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     std.mem.writeInt(
         u16,
         no_shared_cipher.items[offsets.cipher_suites_start..][0..2],
-        0x1302,
+        0x1304,
         .big,
     );
     std.mem.writeInt(
         u16,
         no_shared_cipher.items[offsets.cipher_suites_start + 2 ..][0..2],
         0x00ff,
+        .big,
+    );
+    std.mem.writeInt(
+        u16,
+        no_shared_cipher.items[offsets.cipher_suites_start + 4 ..][0..2],
+        0x1305,
         .big,
     );
     var no_shared_parsed = try target.parseClientHello(

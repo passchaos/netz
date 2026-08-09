@@ -4,13 +4,28 @@ const quic = @import("../mod.zig");
 const Ed25519 = std.crypto.sign.Ed25519;
 
 test "QUIC integrated mutual TLS proves both Ed25519 identities" {
-    const result = try runMutualTls(false);
+    const result = try runMutualTls(
+        false,
+        .aes_128_gcm_sha256,
+    );
+    if (result.client_err) |err| return err;
+    if (result.server_err) |err| return err;
+}
+
+test "QUIC AES-256 SHA-384 mutual TLS proves both Ed25519 identities" {
+    const result = try runMutualTls(
+        false,
+        .aes_256_gcm_sha384,
+    );
     if (result.client_err) |err| return err;
     if (result.server_err) |err| return err;
 }
 
 test "QUIC integrated mutual TLS requires a client certificate" {
-    const result = try runMutualTls(true);
+    const result = try runMutualTls(
+        true,
+        .aes_128_gcm_sha256,
+    );
     try std.testing.expectEqualStrings(
         "ClientCertificateRequired",
         @errorName(result.client_err orelse return error.TestUnexpectedResult),
@@ -23,7 +38,10 @@ const Result = struct {
     server_err: ?anyerror,
 };
 
-fn runMutualTls(omit_client_identity: bool) !Result {
+fn runMutualTls(
+    omit_client_identity: bool,
+    cipher_suite: quic.tls_client_hello.CipherSuite,
+) !Result {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -57,6 +75,7 @@ fn runMutualTls(omit_client_identity: bool) !Result {
         server_key: Ed25519.KeyPair,
         server_public: *const [32]u8,
         client_public: [32]u8,
+        cipher_suite: quic.tls_client_hello.CipherSuite,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -64,6 +83,7 @@ fn runMutualTls(omit_client_identity: bool) !Result {
                 .local_connection_id = "server",
                 .random = [_]u8{0x23} ** 32,
                 .x25519_secret_key = [_]u8{0x24} ** 32,
+                .cipher_suites = &.{shared.cipher_suite},
                 .identity = .{
                     .certificate_chain = &.{shared.server_public},
                     .signer = .{
@@ -87,6 +107,7 @@ fn runMutualTls(omit_client_identity: bool) !Result {
         .server_key = server_key,
         .server_public = &server_public,
         .client_public = client_public,
+        .cipher_suite = cipher_suite,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
@@ -96,6 +117,7 @@ fn runMutualTls(omit_client_identity: bool) !Result {
         .local_connection_id = "client",
         .random = [_]u8{0x25} ** 32,
         .x25519_secret_key = [_]u8{0x26} ** 32,
+        .cipher_suites = &.{cipher_suite},
         .server_auth = .{
             .pinned_ed25519_public_key = server_public,
         },

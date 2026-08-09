@@ -11,6 +11,10 @@ test "QUIC integrated handshake accepts ChaCha20 0-RTT and 1-RTT data" {
     try runAcceptedEarlyData(.chacha20_poly1305_sha256);
 }
 
+test "QUIC integrated handshake accepts AES-256 SHA-384 0-RTT and 1-RTT" {
+    try runAcceptedEarlyData(.aes_256_gcm_sha384);
+}
+
 fn runAcceptedEarlyData(
     cipher_suite: quic.tls_client_hello.CipherSuite,
 ) !void {
@@ -35,7 +39,7 @@ fn runAcceptedEarlyData(
     defer client_endpoint.deinit();
 
     const ticket = "early-ticket";
-    const psk = [_]u8{0xb1} ** 32;
+    const psk = pskForSuite(cipher_suite);
     var cache = try quic.resumption.Cache.init(allocator, 1);
     defer cache.deinit();
     try cache.store(earlyTicket(ticket, psk, cipher_suite));
@@ -53,6 +57,7 @@ fn runAcceptedEarlyData(
         replay_filter: *quic.zero_rtt.ReplayFilter,
         ticket: []const u8,
         psk: [32]u8,
+        psk_secret: quic.tls.secret.Secret,
         cipher_suite: quic.tls_client_hello.CipherSuite,
         err: ?anyerror = null,
         resumed: bool = false,
@@ -67,6 +72,7 @@ fn runAcceptedEarlyData(
                 .psk = .{
                     .identity = shared.ticket,
                     .secret = shared.psk,
+                    .secret_value = shared.psk_secret,
                     .age_add = 17,
                     .issued_at_ms = 1000,
                     .lifetime_seconds = 3600,
@@ -99,7 +105,11 @@ fn runAcceptedEarlyData(
         .endpoint = &server_endpoint,
         .replay_filter = &replay_filter,
         .ticket = ticket,
-        .psk = psk,
+        .psk = if (psk.hash == .sha256)
+            psk.sha256() catch unreachable
+        else
+            [_]u8{0} ** 32,
+        .psk_secret = psk,
         .cipher_suite = cipher_suite,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
@@ -187,7 +197,7 @@ test "QUIC integrated handshake rejects 0-RTT but resumes with PSK" {
     defer cache.deinit();
     try cache.store(earlyTicket(
         ticket,
-        psk,
+        .fromSha256(psk),
         .aes_128_gcm_sha256,
     ));
     var lease = (try cache.beginEarlyData("localhost:443", "h3", 1500)).?;
@@ -316,7 +326,7 @@ test "QUIC integrated server replay gate rejects a repeated early-data key" {
     defer cache.deinit();
     try cache.store(earlyTicket(
         ticket,
-        psk,
+        .fromSha256(psk),
         .aes_128_gcm_sha256,
     ));
     var lease = (try cache.beginEarlyData("localhost:443", "h3", 1500)).?;
@@ -424,14 +434,18 @@ test "QUIC integrated server replay gate rejects a repeated early-data key" {
 
 fn earlyTicket(
     ticket: []const u8,
-    psk: [32]u8,
+    psk: quic.tls.secret.Secret,
     cipher_suite: quic.tls_client_hello.CipherSuite,
 ) quic.resumption.Ticket {
     return .{
         .server_id = "localhost:443",
         .alpn = "h3",
         .ticket = ticket,
-        .psk = psk,
+        .psk = if (psk.hash == .sha256)
+            psk.sha256() catch unreachable
+        else
+            [_]u8{0} ** 32,
+        .psk_secret = psk,
         .issued_at_ms = 1000,
         .lifetime_seconds = 3600,
         .age_add = 17,
@@ -440,6 +454,15 @@ fn earlyTicket(
         .transport_parameters = .fromTransportParameters(
             quic.practical_transport_parameters,
         ),
+    };
+}
+
+fn pskForSuite(
+    suite: quic.tls_client_hello.CipherSuite,
+) quic.tls.secret.Secret {
+    return switch (suite.hash()) {
+        .sha256 => .fromSha256([_]u8{0xb1} ** 32),
+        .sha384 => .fromSha384([_]u8{0xb1} ** 48),
     };
 }
 

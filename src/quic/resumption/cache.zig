@@ -10,6 +10,7 @@ const vail = @import("vail");
 const parameters = @import("parameters.zig");
 
 const CipherSuite = vail.tls.cipher_suite.Suite;
+const Secret = vail.tls.secret.Secret;
 
 pub const max_ticket_lifetime_seconds: u32 = 7 * 24 * 60 * 60;
 pub const quic_early_data_size: u32 = std.math.maxInt(u32);
@@ -29,6 +30,9 @@ pub const Ticket = struct {
     alpn: []const u8,
     ticket: []const u8,
     psk: [32]u8,
+    /// Canonical PSK for SHA-384 suites. When absent, `psk` is interpreted as
+    /// the source-compatible SHA-256 value.
+    psk_secret: ?Secret = null,
     issued_at_ms: u64,
     lifetime_seconds: u32,
     age_add: u32,
@@ -43,6 +47,7 @@ pub const Session = struct {
     alpn: []u8,
     ticket: []u8,
     psk: [32]u8,
+    psk_secret: Secret,
     issued_at_ms: u64,
     lifetime_seconds: u32,
     age_add: u32,
@@ -55,6 +60,7 @@ pub const Session = struct {
         self.allocator.free(self.alpn);
         wipeAndFree(self.allocator, self.ticket);
         vail.crypto.memory.zeroValue(&self.psk);
+        self.psk_secret.deinit();
         self.* = undefined;
     }
 
@@ -95,6 +101,7 @@ const Entry = struct {
     alpn: []u8,
     ticket: []u8,
     psk: [32]u8,
+    psk_secret: Secret,
     issued_at_ms: u64,
     lifetime_seconds: u32,
     age_add: u32,
@@ -110,6 +117,7 @@ const Entry = struct {
         allocator.free(self.alpn);
         wipeAndFree(allocator, self.ticket);
         vail.crypto.memory.zeroValue(&self.psk);
+        self.psk_secret.deinit();
         self.* = undefined;
     }
 
@@ -339,11 +347,13 @@ pub const Cache = struct {
         errdefer self.allocator.free(alpn);
         const ticket_data = try self.allocator.dupe(u8, ticket.ticket);
         errdefer wipeAndFree(self.allocator, ticket_data);
+        const psk_secret = effectiveTicketSecret(ticket);
         return .{
             .server_id = server_id,
             .alpn = alpn,
             .ticket = ticket_data,
             .psk = ticket.psk,
+            .psk_secret = psk_secret,
             .issued_at_ms = ticket.issued_at_ms,
             .lifetime_seconds = ticket.lifetime_seconds,
             .age_add = ticket.age_add,
@@ -366,6 +376,7 @@ pub const Cache = struct {
             .alpn = alpn,
             .ticket = ticket_data,
             .psk = entry.psk,
+            .psk_secret = entry.psk_secret,
             .issued_at_ms = entry.issued_at_ms,
             .lifetime_seconds = entry.lifetime_seconds,
             .age_add = entry.age_add,
@@ -409,12 +420,19 @@ fn validateTicket(ticket: Ticket) Error!void {
     {
         return error.InvalidTicketLifetime;
     }
+    if (effectiveTicketSecret(ticket).hash != ticket.cipher_suite.hash()) {
+        return error.InvalidTicket;
+    }
     // RFC 9001 Section 4.6.1 requires QUIC NewSessionTicket early_data to
     // advertise exactly 0xffffffff. Any other present value is a TLS error,
     // not a signal to silently downgrade this cached ticket.
     if (ticket.max_early_data_size) |size| {
         if (size != quic_early_data_size) return error.InvalidEarlyDataSize;
     }
+}
+
+fn effectiveTicketSecret(ticket: Ticket) Secret {
+    return ticket.psk_secret orelse Secret.fromSha256(ticket.psk);
 }
 
 fn wipeAndFree(allocator: std.mem.Allocator, bytes: []u8) void {

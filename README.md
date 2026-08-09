@@ -179,10 +179,13 @@ starts with deterministic parsers, serializers, and state helpers for:
   retains their QUIC wire formats, lifetimes, replay policy, and key rotation,
   and Vail secure-memory/SHA-256 helpers for ticket caches and replay filters
   while netz retains cache eviction and single-use policy,
-  with TLS 1.3 AES-128-GCM/ChaCha20-Poly1305 negotiation, traffic-key
-  derivation, nonce construction, AEAD, and header-protection execution
+  with TLS 1.3 AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305 negotiation,
+  SHA-256/SHA-384 traffic-key derivation, nonce construction, AEAD, and
+  header-protection execution
   delegated to Vail behind source-compatible QUIC packet APIs, including
-  suite-bound tickets/0-RTT and suite-specific RFC 9001 usage limits,
+  suite/hash-bound stateful and stateless tickets, PSK binders, resumption,
+  0-RTT, CertificateVerify/Finished, NSS key logging, and suite-specific RFC
+  9001 usage limits,
   short-header spin-bit preservation plus an opt-in single-path spin policy,
   client-side NEW_TOKEN storage plus HANDSHAKE_DONE confirmation with server-only
   role validation for both frames,

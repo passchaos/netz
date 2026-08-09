@@ -9,6 +9,7 @@ const vail = @import("vail");
 const codec = @import("vail").tls.ticket;
 
 const CipherSuite = vail.tls.cipher_suite.Suite;
+const Secret = vail.tls.secret.Secret;
 
 pub const Error = std.mem.Allocator.Error || error{
     InvalidCapacity,
@@ -19,6 +20,7 @@ pub const Error = std.mem.Allocator.Error || error{
 pub const Issued = struct {
     identity: []const u8,
     secret: [32]u8,
+    secret_value: ?Secret = null,
     age_add: u32,
     cipher_suite: CipherSuite = .aes_128_gcm_sha256,
     issued_at_ms: u64,
@@ -29,6 +31,7 @@ pub const Lease = struct {
     allocator: std.mem.Allocator,
     identity: []u8,
     secret: [32]u8,
+    secret_value: Secret,
     age_add: u32,
     cipher_suite: CipherSuite,
     issued_at_ms: u64,
@@ -38,6 +41,7 @@ pub const Lease = struct {
         vail.crypto.memory.zero(self.identity);
         self.allocator.free(self.identity);
         vail.crypto.memory.zeroValue(&self.secret);
+        self.secret_value.deinit();
         self.* = undefined;
     }
 };
@@ -45,6 +49,7 @@ pub const Lease = struct {
 const Entry = struct {
     identity: []u8,
     secret: [32]u8,
+    secret_value: Secret,
     age_add: u32,
     cipher_suite: CipherSuite,
     issued_at_ms: u64,
@@ -55,6 +60,7 @@ const Entry = struct {
         vail.crypto.memory.zero(self.identity);
         allocator.free(self.identity);
         vail.crypto.memory.zeroValue(&self.secret);
+        self.secret_value.deinit();
         self.* = undefined;
     }
 
@@ -95,6 +101,8 @@ pub const Store = struct {
 
     pub fn issue(self: *Store, issued: Issued) Error!void {
         try validateIssued(issued);
+        const secret_value =
+            issued.secret_value orelse Secret.fromSha256(issued.secret);
         const identity = try self.allocator.dupe(u8, issued.identity);
         errdefer self.allocator.free(identity);
 
@@ -107,6 +115,7 @@ pub const Store = struct {
             const replacement = Entry{
                 .identity = identity,
                 .secret = issued.secret,
+                .secret_value = secret_value,
                 .age_add = issued.age_add,
                 .cipher_suite = issued.cipher_suite,
                 .issued_at_ms = issued.issued_at_ms,
@@ -135,6 +144,7 @@ pub const Store = struct {
         self.entries.appendAssumeCapacity(.{
             .identity = identity,
             .secret = issued.secret,
+            .secret_value = secret_value,
             .age_add = issued.age_add,
             .cipher_suite = issued.cipher_suite,
             .issued_at_ms = issued.issued_at_ms,
@@ -159,6 +169,7 @@ pub const Store = struct {
                 .allocator = self.allocator,
                 .identity = identity_copy,
                 .secret = entry.secret,
+                .secret_value = entry.secret_value,
                 .age_add = entry.age_add,
                 .cipher_suite = entry.cipher_suite,
                 .issued_at_ms = entry.issued_at_ms,
@@ -201,5 +212,10 @@ fn validateIssued(issued: Issued) Error!void {
         issued.lifetime_seconds > codec.max_lifetime_seconds)
     {
         return error.InvalidTicketLifetime;
+    }
+    const secret_value =
+        issued.secret_value orelse Secret.fromSha256(issued.secret);
+    if (secret_value.hash != issued.cipher_suite.hash()) {
+        return error.InvalidTicket;
     }
 }

@@ -7,6 +7,7 @@ const keyring = @import("vail").tls.ticket_keyring;
 const store = @import("store.zig");
 
 pub const Error = codec.Error || store.Error || quic.resumption.cache.Error ||
+    quic.tls.key_schedule.Error ||
     keyring.Error || quic.one_rtt.Error || std.Io.RandomSecureError || error{
     InvalidNewSessionTicket,
     MissingTicketBackend,
@@ -62,6 +63,7 @@ pub const Issued = struct {
     identity_len: usize,
     age_add: u32,
     psk: [32]u8,
+    psk_secret: quic.tls.secret.Secret,
     cipher_suite: quic.tls.cipher_suite.Suite,
 };
 
@@ -69,7 +71,7 @@ pub fn issue(
     connection: *quic.one_rtt.Connection,
     io: std.Io,
     config: ServerConfig,
-    resumption_master_secret: [32]u8,
+    resumption_master_secret: quic.tls.secret.Secret,
     crypto_offset: *u64,
 ) Error!Issued {
     const cipher_suite = connection.config.send_keys.suite;
@@ -87,7 +89,14 @@ pub fn issue(
     // ages and catches broken entropy providers in tests/integrations.
     if (age_add == 0 and config.age_add == null) age_add = 1;
 
-    const psk = codec.derivePsk(resumption_master_secret, &nonce);
+    const psk_secret = try quic.tls.key_schedule.deriveResumptionPskFor(
+        resumption_master_secret,
+        &nonce,
+    );
+    const psk = if (psk_secret.hash == .sha256)
+        psk_secret.sha256() catch unreachable
+    else
+        [_]u8{0} ** 32;
     var identity_storage: [keyring.sealed_len]u8 = undefined;
     const identity: []const u8 = if (config.stateless) |stateless| blk: {
         const seal_nonce = stateless.nonce orelse random: {
@@ -95,16 +104,16 @@ pub fn issue(
             try std.Io.randomSecure(io, &value);
             break :random value;
         };
-        const sealed = try stateless.keyring.seal(
+        const sealed = try stateless.keyring.sealSecret(
             seal_nonce,
             stateless.server_id,
             stateless.alpn,
             .{
-                .secret = psk,
+                .secret = psk_secret,
                 .age_add = age_add,
                 .issued_at_ms = config.now_ms,
                 .lifetime_seconds = config.lifetime_seconds,
-                .cipher_suite = cipher_suite,
+                .cipher_suite_wire = cipher_suite.wireValue(),
             },
         );
         @memcpy(&identity_storage, &sealed);
@@ -132,6 +141,7 @@ pub fn issue(
         try server_store.issue(.{
             .identity = identity,
             .secret = psk,
+            .secret_value = psk_secret,
             .age_add = age_add,
             .cipher_suite = cipher_suite,
             .issued_at_ms = config.now_ms,
@@ -147,6 +157,7 @@ pub fn issue(
         .identity_len = identity.len,
         .age_add = age_add,
         .psk = psk,
+        .psk_secret = psk_secret,
         .cipher_suite = cipher_suite,
     };
 }
@@ -154,7 +165,7 @@ pub fn issue(
 pub fn receiveAndCache(
     connection: *quic.one_rtt.Connection,
     config: ClientConfig,
-    resumption_master_secret: [32]u8,
+    resumption_master_secret: quic.tls.secret.Secret,
     alpn: []const u8,
     peer_transport_parameters: quic.resumption.Snapshot,
     expected_crypto_offset: *u64,
@@ -173,12 +184,20 @@ pub fn receiveAndCache(
         return error.InvalidNewSessionTicket;
     }
     const parsed = try codec.parse(crypto.data);
-    const psk = codec.derivePsk(resumption_master_secret, parsed.nonce);
+    const psk_secret = try quic.tls.key_schedule.deriveResumptionPskFor(
+        resumption_master_secret,
+        parsed.nonce,
+    );
+    const psk = if (psk_secret.hash == .sha256)
+        psk_secret.sha256() catch unreachable
+    else
+        [_]u8{0} ** 32;
     try config.cache.store(.{
         .server_id = config.server_id,
         .alpn = alpn,
         .ticket = parsed.ticket,
         .psk = psk,
+        .psk_secret = psk_secret,
         .issued_at_ms = config.now_ms,
         .lifetime_seconds = parsed.lifetime_seconds,
         .age_add = parsed.age_add,
@@ -214,7 +233,7 @@ pub fn lookupServer(
     identity: []const u8,
 ) Error!?store.Lease {
     if (config.stateless) |stateless| {
-        const opened = stateless.keyring.open(
+        const opened = stateless.keyring.openSecret(
             identity,
             stateless.server_id,
             stateless.alpn,
@@ -231,9 +250,15 @@ pub fn lookupServer(
         return .{
             .allocator = config.allocator,
             .identity = identity_copy,
-            .secret = opened.secret,
+            .secret = if (opened.secret.hash == .sha256)
+                opened.secret.sha256() catch unreachable
+            else
+                [_]u8{0} ** 32,
+            .secret_value = opened.secret,
             .age_add = opened.age_add,
-            .cipher_suite = opened.cipher_suite,
+            .cipher_suite = quic.tls.cipher_suite.Suite.fromWire(
+                opened.cipher_suite_wire,
+            ) orelse return null,
             .issued_at_ms = opened.issued_at_ms,
             .lifetime_seconds = opened.lifetime_seconds,
         };

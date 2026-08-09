@@ -12,6 +12,12 @@ pub fn main() !void {
 
     const secret = [_]u8{0x51} ** netz.quic.protection.secret_len;
     const aes_keys = netz.quic.protection.deriveAes128Keys(secret);
+    const aes256_keys =
+        try netz.quic.protection.deriveKeysForSecretForVersion(
+            netz.quic.Version.version_1.wireValue(),
+            .aes_256_gcm_sha384,
+            .fromSha384([_]u8{0x51} ** 48),
+        );
     const chacha_keys = netz.quic.protection.deriveChaCha20Keys(secret);
     const options: netz.quic.protection.ShortPacketOptions = .{
         .destination_connection_id = "bench-dcid",
@@ -35,6 +41,12 @@ pub fn main() !void {
         chacha_keys,
         options,
     );
+    const aes256 = try benchSuite(
+        allocator,
+        io,
+        aes256_keys,
+        options,
+    );
     const aes_in_place_ratio_x100 = ratioTimes100(
         aes.allocating_ns,
         aes.in_place_ns,
@@ -42,6 +54,10 @@ pub fn main() !void {
     const chacha_in_place_ratio_x100 = ratioTimes100(
         chacha.allocating_ns,
         chacha.in_place_ns,
+    );
+    const aes256_in_place_ratio_x100 = ratioTimes100(
+        aes256.allocating_ns,
+        aes256.in_place_ns,
     );
 
     std.debug.print(
@@ -51,6 +67,9 @@ pub fn main() !void {
         \\  AES in-place total: {d}, ns/op: {d}
         \\  AES allocating total: {d}, ns/op: {d}
         \\  AES in-place relative throughput: {d}.{d:0>2}x
+        \\  AES-256 in-place total: {d}, ns/op: {d}
+        \\  AES-256 allocating total: {d}, ns/op: {d}
+        \\  AES-256 in-place relative throughput: {d}.{d:0>2}x
         \\  ChaCha in-place total: {d}, ns/op: {d}
         \\  ChaCha allocating total: {d}, ns/op: {d}
         \\  ChaCha in-place relative throughput: {d}.{d:0>2}x
@@ -64,6 +83,12 @@ pub fn main() !void {
         aes.allocating_ns / iterations,
         aes_in_place_ratio_x100 / 100,
         aes_in_place_ratio_x100 % 100,
+        aes256.in_place_total,
+        aes256.in_place_ns / iterations,
+        aes256.allocating_total,
+        aes256.allocating_ns / iterations,
+        aes256_in_place_ratio_x100 / 100,
+        aes256_in_place_ratio_x100 % 100,
         chacha.in_place_total,
         chacha.in_place_ns / iterations,
         chacha.allocating_total,

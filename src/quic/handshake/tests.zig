@@ -162,7 +162,98 @@ test "QUIC integrated handshake establishes 1-RTT stream exchange" {
     try std.testing.expectEqualStrings("OK", response.frames[0].stream.data);
 }
 
+test "QUIC integrated AES-256 SHA-384 handshake exchanges 1-RTT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        err: ?anyerror = null,
+        suite: ?quic.tls_client_hello.CipherSuite = null,
+
+        fn run(shared: *@This()) void {
+            var established = handshake.accept(shared.endpoint, .{
+                .local_connection_id = "server",
+                .random = [_]u8{0xa2} ** 32,
+                .x25519_secret_key = [_]u8{0xa3} ** 32,
+                .cipher_suites = &.{.aes_256_gcm_sha384},
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer established.deinit();
+            shared.suite = established.connection.config.send_keys.suite;
+            var packet = established.connection.receivePacket() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer packet.deinit(shared.endpoint.allocator);
+            if (packet.frames.len != 1 or packet.frames[0] != .ping) {
+                shared.err = error.TestUnexpectedResult;
+            }
+        }
+    };
+    var shared = Shared{ .endpoint = &server_endpoint };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = "aes25601",
+            .local_connection_id = "client",
+            .random = [_]u8{0xa4} ** 32,
+            .x25519_secret_key = [_]u8{0xa5} ** 32,
+            .cipher_suites = &.{.aes_256_gcm_sha384},
+        },
+    );
+    defer established.deinit();
+    try std.testing.expectEqual(
+        quic.tls_client_hello.CipherSuite.aes_256_gcm_sha384,
+        established.connection.config.send_keys.suite,
+    );
+    try std.testing.expectEqual(
+        quic.tls.secret.Hash.sha384,
+        established.connection.config.send_keys.traffic_secret.hash,
+    );
+    try established.connection.send(&.{.{ .ping = {} }});
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        quic.tls_client_hello.CipherSuite.aes_256_gcm_sha384,
+        shared.suite.?,
+    );
+}
+
 test "QUIC integrated handshake emits matching NSS key logs on both roles" {
+    try runMatchingKeylog(.aes_128_gcm_sha256, 32);
+}
+
+test "QUIC AES-256 SHA-384 key logs preserve 48-byte traffic secrets" {
+    try runMatchingKeylog(.aes_256_gcm_sha384, 48);
+}
+
+fn runMatchingKeylog(
+    cipher_suite: quic.tls_client_hello.CipherSuite,
+    secret_len: usize,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -198,6 +289,7 @@ test "QUIC integrated handshake emits matching NSS key logs on both roles" {
         endpoint: *quic.runtime.Endpoint,
         cid: []const u8,
         keylog: *quic.keylog.Log,
+        cipher_suite: quic.tls_client_hello.CipherSuite,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -206,6 +298,7 @@ test "QUIC integrated handshake emits matching NSS key logs on both roles" {
                 .random = [_]u8{0xb6} ** 32,
                 .x25519_secret_key = [_]u8{0xc7} ** 32,
                 .keylog = shared.keylog,
+                .cipher_suites = &.{shared.cipher_suite},
             }) catch |err| {
                 shared.err = err;
                 return;
@@ -217,6 +310,7 @@ test "QUIC integrated handshake emits matching NSS key logs on both roles" {
         .endpoint = &server_endpoint,
         .cid = &server_cid,
         .keylog = &server_log,
+        .cipher_suite = cipher_suite,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
@@ -229,6 +323,7 @@ test "QUIC integrated handshake emits matching NSS key logs on both roles" {
             .random = client_random,
             .x25519_secret_key = [_]u8{0xd8} ** 32,
             .keylog = &client_log,
+            .cipher_suites = &.{cipher_suite},
         },
     );
     established.deinit();
@@ -254,6 +349,23 @@ test "QUIC integrated handshake emits matching NSS key logs on both roles" {
         client_output.written(),
         "SERVER_TRAFFIC_SECRET_0 " ++ ("a5" ** 32),
     ) != null);
+    var line_iterator = std.mem.splitScalar(
+        u8,
+        client_output.written(),
+        '\n',
+    );
+    while (line_iterator.next()) |line| {
+        if (line.len == 0) continue;
+        const secret_separator = std.mem.lastIndexOfScalar(
+            u8,
+            line,
+            ' ',
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            secret_len * 2,
+            line.len - secret_separator - 1,
+        );
+    }
 }
 
 test {

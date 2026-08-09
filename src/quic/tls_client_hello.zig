@@ -16,7 +16,8 @@ pub const Error = error{
     KeyExchangeFailed,
     BadFinished,
 } || wire.Error || quic.protection.VersionError ||
-    quic.resumption.tls_psk.Error || std.mem.Allocator.Error;
+    quic.resumption.tls_psk.Error || quic.tls.key_schedule.Error ||
+    std.mem.Allocator.Error;
 
 const handshake_type_client_hello: u8 = 0x01;
 const handshake_type_server_hello: u8 = 0x02;
