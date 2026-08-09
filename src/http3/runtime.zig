@@ -1729,6 +1729,7 @@ pub const HandshakeClient = struct {
     qpack_decoder_send: quic.stream_state.SendState = quic.stream_state.SendState.init(client_qpack_decoder_stream_id),
     qpack_decoder_prefix_sent: bool = false,
     response_streams: ResponseStreamSet,
+    streaming_responses: StreamingResponseSet,
     request_lifecycle: ClientRequestLifecycle,
     outbound_bodies: OutboundBodySet,
     next_stream_id: u62 = 0,
@@ -1769,6 +1770,12 @@ pub const HandshakeClient = struct {
                 options.session.max_stream_buffer,
                 options.session.max_concurrent_request_streams,
             ),
+            .streaming_responses = .init(
+                allocator,
+                options.session.max_concurrent_request_streams,
+                options.session.max_stream_buffer,
+                options.session.local_settings,
+            ),
             .request_lifecycle = .init(
                 allocator,
                 options.session.max_concurrent_request_streams,
@@ -1782,6 +1789,7 @@ pub const HandshakeClient = struct {
 
     pub fn deinit(self: *HandshakeClient) void {
         self.outbound_bodies.deinit();
+        self.streaming_responses.deinit();
         self.request_lifecycle.deinit();
         self.response_streams.deinit();
         self.control.deinit(self.allocator);
@@ -1932,6 +1940,9 @@ pub const HandshakeClient = struct {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
+        if (self.streaming_responses.find(stream_id) != null) {
+            return error.UnexpectedStream;
+        }
         const assembled = receiveConnectionResponseStreamBytes(
             &self.established.connection,
             stream_id,
@@ -1940,6 +1951,7 @@ pub const HandshakeClient = struct {
             &self.qpack_decode,
             &self.qpack_encode,
             &self.response_streams,
+            &self.streaming_responses,
             &self.request_lifecycle,
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
@@ -2004,9 +2016,82 @@ pub const HandshakeClient = struct {
                 &self.qpack_decode,
                 &self.qpack_encode,
                 &self.response_streams,
+                &self.streaming_responses,
                 &self.request_lifecycle,
             );
         }
+    }
+
+    /// Advance one response stream without assembling its DATA payload.
+    ///
+    /// The first call transfers any already-buffered STREAM ranges into the
+    /// incremental reader without copying. Subsequent packet pumping keeps
+    /// other active response streams in their own bounded windows, so callers
+    /// may interleave this API across multiple outstanding requests.
+    pub fn receiveResponseEvent(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!?StreamingEvent {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        if (self.response_streams.takeReset(stream_id)) |code| {
+            _ = self.request_lifecycle.finish(stream_id);
+            self.qpack_encode.abandonStream(stream_id);
+            self.streaming_responses.remove(stream_id);
+            return if (code == http3.ApplicationErrorCode.request_rejected)
+                error.RequestRejected
+            else
+                error.RequestCancelled;
+        }
+        const entry = try self.streaming_responses.activate(
+            &self.response_streams,
+            stream_id,
+        );
+        if (try entry.reader.next(self.qpack_decode.table)) |event| {
+            try self.applyStreamingResponseEvent(stream_id, event);
+            return event;
+        }
+        try receiveConnectionResponsePacket(
+            &self.established.connection,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.response_streams,
+            &self.streaming_responses,
+            &self.request_lifecycle,
+        );
+        if (self.response_streams.takeReset(stream_id)) |code| {
+            _ = self.request_lifecycle.finish(stream_id);
+            self.qpack_encode.abandonStream(stream_id);
+            self.streaming_responses.remove(stream_id);
+            return if (code == http3.ApplicationErrorCode.request_rejected)
+                error.RequestRejected
+            else
+                error.RequestCancelled;
+        }
+        const active = self.streaming_responses.find(stream_id) orelse
+            return error.UnexpectedStream;
+        const event = try active.reader.next(self.qpack_decode.table);
+        if (event) |value| try self.applyStreamingResponseEvent(
+            stream_id,
+            value,
+        );
+        return event;
+    }
+
+    /// Copy currently available DATA bytes into caller-owned storage.
+    ///
+    /// Returning zero means the current DATA frame needs more STREAM bytes;
+    /// call `receiveResponseEvent` again to pump another packet.
+    pub fn readResponseData(
+        self: *HandshakeClient,
+        stream_id: u62,
+        out: []u8,
+    ) Error!usize {
+        const entry = self.streaming_responses.find(stream_id) orelse
+            return error.UnexpectedStream;
+        return entry.reader.readData(out);
     }
 
     pub fn sendGoAway(self: *HandshakeClient, stream_id: u64) Error!void {
@@ -2042,6 +2127,7 @@ pub const HandshakeClient = struct {
         );
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
+        self.streaming_responses.remove(stream_id);
         _ = self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
     }
@@ -2083,6 +2169,29 @@ pub const HandshakeClient = struct {
             &self.qpack_decoder_prefix_sent,
             self.options,
         );
+    }
+
+    fn applyStreamingResponseEvent(
+        self: *HandshakeClient,
+        stream_id: u62,
+        event: StreamingEvent,
+    ) Error!void {
+        const section = try streamingResponseSectionAcknowledgments(event);
+        if (section) |acknowledgments| {
+            try self.qpack_decode.acknowledgeSections(
+                stream_id,
+                acknowledgments,
+            );
+            // Encoder-stream insert count increments are also queued in the
+            // decoder feedback buffer. Flush on every decoded field section,
+            // even when that section itself used only static entries.
+            try self.sendQpackFeedback();
+        }
+        if (event == .finished) {
+            _ = self.request_lifecycle.finish(stream_id);
+            self.qpack_encode.abandonStream(stream_id);
+            self.streaming_responses.remove(stream_id);
+        }
     }
 };
 
@@ -3148,19 +3257,14 @@ pub const ProtectedClient = struct {
         stream_id: u62,
         event: StreamingEvent,
     ) Error!void {
-        const acknowledgments: usize = switch (event) {
-            .head => |head| switch (head) {
-                .request => return error.UnexpectedFrame,
-                .response => |response| response.qpack_section_acknowledgments,
-            },
-            .trailers => |trailers| trailers.qpack_section_acknowledgments,
-            .data_available, .finished => 0,
-        };
-        if (acknowledgments != 0) {
+        const section = try streamingResponseSectionAcknowledgments(event);
+        if (section) |acknowledgments| {
             try self.qpack_decode.acknowledgeSections(
                 stream_id,
                 acknowledgments,
             );
+            // This also flushes Insert Count Increment instructions produced
+            // while pumping the peer's encoder stream.
             try self.sendQpackFeedback();
         }
         if (event == .finished) {
@@ -3183,6 +3287,19 @@ pub const ProtectedClient = struct {
         );
     }
 };
+
+fn streamingResponseSectionAcknowledgments(
+    event: StreamingEvent,
+) Error!?usize {
+    return switch (event) {
+        .head => |head| switch (head) {
+            .request => error.UnexpectedFrame,
+            .response => |response| response.qpack_section_acknowledgments,
+        },
+        .trailers => |trailers| trailers.qpack_section_acknowledgments,
+        .data_available, .finished => null,
+    };
+}
 
 pub const OwnedProtectedRequest = struct {
     from: net.IpAddress,
@@ -4509,6 +4626,7 @@ fn receiveConnectionResponseStreamBytes(
     qpack_decode: *QpackDecodeState,
     qpack_encode: *QpackEncodeState,
     response_streams: *ResponseStreamSet,
+    streaming_responses: *StreamingResponseSet,
     request_lifecycle: *const ClientRequestLifecycle,
 ) Error!AssembledStream {
     if (response_streams.takeReset(expected_stream_id)) |code| {
@@ -4530,6 +4648,7 @@ fn receiveConnectionResponseStreamBytes(
             qpack_decode,
             qpack_encode,
             response_streams,
+            streaming_responses,
             request_lifecycle,
         );
         if (response_streams.takeReset(expected_stream_id)) |code| {
@@ -4554,6 +4673,7 @@ fn receiveConnectionResponsePacket(
     qpack_decode: *QpackDecodeState,
     qpack_encode: *QpackEncodeState,
     response_streams: *ResponseStreamSet,
+    streaming_responses: ?*StreamingResponseSet,
     request_lifecycle: ?*const ClientRequestLifecycle,
 ) Error!void {
     var packet = try connection.receivePacket();
@@ -4614,6 +4734,9 @@ fn receiveConnectionResponsePacket(
         const stream_id: u62 = @intCast(frame.stream.stream_id);
         if (request_lifecycle) |lifecycle| {
             if (!lifecycle.contains(stream_id)) return error.UnexpectedStream;
+        }
+        if (streaming_responses) |streaming| {
+            if (try streaming.insert(packet.from, frame.stream)) continue;
         }
         try response_streams.insert(packet.from, frame.stream);
     }
@@ -9626,6 +9749,267 @@ test "HTTP/3 handshake runtime streams request and response DATA chunks" {
     try std.testing.expectEqualStrings(
         "ok",
         response.response.trailers[0].value,
+    );
+}
+
+test "HTTP/3 handshake client streams dynamic response through small window" {
+    const allocator = std.testing.allocator;
+    const body_len: usize = 64 * 1024;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7 };
+    const client_cid = [_]u8{ 0xd8, 0xd9, 0xda, 0xdb };
+    const server_cid = [_]u8{ 0xdc, 0xdd, 0xde, 0xdf };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .quic = .{
+                // The fixture does not run a server-side packet pump to consume
+                // ACKs while the producer writes. A larger configured datagram
+                // budget raises the deterministic initial cwnd above 64 KiB;
+                // STREAM frames remain 480 bytes, so the receive-window
+                // behavior under test is unchanged.
+                .max_datagram_size = 65_535,
+                .max_frames_per_datagram = 8,
+            },
+        },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 65_535,
+                },
+                .random = [_]u8{0xe3} ** 32,
+                .x25519_secret_key = [_]u8{0xe4} ** 32,
+            },
+            .session = .{
+                .local_settings = .{
+                    .qpack_max_table_capacity = 512,
+                    .qpack_blocked_streams = 2,
+                },
+                .max_stream_frame_data = 480,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            for (0..3) |exchange| {
+                var request = try session.receiveRequest();
+                defer request.deinit(
+                    session.established.connection.endpoint.allocator,
+                );
+                try std.testing.expectEqualStrings(
+                    "/large-handshake-stream",
+                    request.request.path,
+                );
+                if (exchange != 0) {
+                    // The first response inserts both repeated fields. Reading
+                    // the next request pumps the client's Insert Count
+                    // Increment, allowing later response sections to reference
+                    // those entries without blocking.
+                    try std.testing.expect(
+                        session.qpack_encode.known_received_count >= 2,
+                    );
+                }
+                const response: http3.Response = .{
+                    .status = 200,
+                    .headers = &.{.{
+                        .name = "x-stream-kind",
+                        .value = "bounded-handshake",
+                    }},
+                    .trailers = &.{.{
+                        .name = "x-stream-finished",
+                        .value = "yes",
+                    }},
+                };
+                if (exchange < 2) {
+                    var warmup = response;
+                    warmup.body = "warmup";
+                    try session.sendResponse(request.stream_id, warmup);
+                    continue;
+                }
+                try session.startResponse(
+                    request.stream_id,
+                    .{
+                        .status = response.status,
+                        .headers = response.headers,
+                    },
+                    body_len,
+                );
+                var chunk: [400]u8 = undefined;
+                for (&chunk, 0..) |*byte, index| byte.* = @truncate(index);
+                var remaining = body_len;
+                while (remaining != 0) {
+                    const count = @min(chunk.len, remaining);
+                    try session.sendResponseBody(
+                        request.stream_id,
+                        chunk[0..count],
+                        false,
+                    );
+                    remaining -= count;
+                }
+                try session.finishResponseTrailers(
+                    request.stream_id,
+                    response.trailers,
+                );
+                return;
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 65_535,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 65_535,
+                },
+                .random = [_]u8{0xe1} ** 32,
+                .x25519_secret_key = [_]u8{0xe2} ** 32,
+            },
+            .session = .{
+                .local_settings = .{
+                    .qpack_max_table_capacity = 512,
+                    .qpack_blocked_streams = 2,
+                },
+                .max_stream_buffer = 512,
+                .max_stream_frame_data = 480,
+            },
+        },
+    );
+    defer client.deinit();
+
+    for (0..2) |exchange| {
+        var warmup = try client.request(.{
+            .method = "GET",
+            .path = "/large-handshake-stream",
+            .authority = "localhost",
+        });
+        defer warmup.deinit(allocator);
+        try std.testing.expectEqualStrings("warmup", warmup.response.body);
+        if (exchange == 1) {
+            try std.testing.expect(
+                warmup.response.qpack_section_acknowledgments != 0,
+            );
+        }
+    }
+
+    const stream_id = try client.sendRequest(.{
+        .method = "GET",
+        .path = "/large-handshake-stream",
+        .authority = "localhost",
+    });
+    var saw_head = false;
+    var saw_trailers = false;
+    var body_read: usize = 0;
+    var checksum: u64 = 0;
+    var read_buf: [113]u8 = undefined;
+    while (client.request_lifecycle.contains(stream_id)) {
+        const event = (try client.receiveResponseEvent(stream_id)) orelse
+            continue;
+        var owned_event = event;
+        defer owned_event.deinit(allocator);
+        switch (owned_event) {
+            .head => |head| {
+                try std.testing.expectEqual(
+                    @as(u16, 200),
+                    head.response.status,
+                );
+                try std.testing.expectEqual(
+                    @as(?usize, body_len),
+                    head.response.content_length,
+                );
+                try std.testing.expect(
+                    head.response.qpack_section_acknowledgments != 0,
+                );
+                saw_head = true;
+            },
+            .data_available => {
+                while (true) {
+                    const active = client.streaming_responses.find(
+                        stream_id,
+                    ).?;
+                    if (active.reader.current_frame == null) break;
+                    const read = try client.readResponseData(
+                        stream_id,
+                        &read_buf,
+                    );
+                    if (read == 0) break;
+                    for (read_buf[0..read]) |byte| checksum +%= byte;
+                    body_read += read;
+                }
+                const active = client.streaming_responses.find(stream_id).?;
+                try std.testing.expect(
+                    active.reader.receive.buffer.items.len <= 512,
+                );
+            },
+            .trailers => |trailers| {
+                try std.testing.expectEqualStrings(
+                    "yes",
+                    trailers.fields[0].value,
+                );
+                try std.testing.expect(
+                    trailers.qpack_section_acknowledgments != 0,
+                );
+                saw_trailers = true;
+            },
+            .finished => {},
+        }
+    }
+    thread.join();
+    if (shared.err) |err| return err;
+
+    var chunk: [400]u8 = undefined;
+    var chunk_checksum: u64 = 0;
+    for (&chunk, 0..) |*byte, index| {
+        byte.* = @truncate(index);
+        chunk_checksum += byte.*;
+    }
+    var expected_checksum =
+        chunk_checksum * (body_len / chunk.len);
+    for (chunk[0 .. body_len % chunk.len]) |byte| {
+        expected_checksum += byte;
+    }
+    try std.testing.expect(saw_head);
+    try std.testing.expect(saw_trailers);
+    try std.testing.expectEqual(body_len, body_read);
+    try std.testing.expectEqual(expected_checksum, checksum);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.streaming_responses.entries.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        client.request_lifecycle.outstanding.items.len,
     );
 }
 
