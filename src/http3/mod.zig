@@ -79,6 +79,27 @@ pub const Origin = struct {
     port: u16,
 };
 
+pub const OriginKey = struct {
+    allocator: std.mem.Allocator,
+    scheme: []u8,
+    host: []u8,
+    port: u16,
+
+    pub fn deinit(self: *OriginKey) void {
+        self.allocator.free(self.scheme);
+        self.allocator.free(self.host);
+        self.* = undefined;
+    }
+
+    pub fn origin(self: OriginKey) Origin {
+        return .{
+            .scheme = self.scheme,
+            .host = self.host,
+            .port = self.port,
+        };
+    }
+};
+
 /// Build an RFC 6454-style origin key from HTTP/3 pseudo-header inputs.
 ///
 /// This helper is intentionally certificate-agnostic: callers that coalesce
@@ -93,6 +114,30 @@ pub fn requestOrigin(scheme: []const u8, authority: []const u8) Error!Origin {
         .scheme = scheme,
         .host = try altSvcAuthorityHost(authority),
         .port = altSvcPort(authority) orelse default_port,
+    };
+}
+
+/// Allocate a stable lowercase origin key for connection pools.
+///
+/// `requestOrigin` intentionally borrows slices from decoded request headers or
+/// caller URI storage.  Pooling/reuse code often needs the normalized key to
+/// outlive that decode buffer, so this helper owns lowercase scheme/host bytes
+/// while keeping IPv6 literals bracket-free just like `Origin`.
+pub fn requestOriginKey(
+    allocator: std.mem.Allocator,
+    scheme: []const u8,
+    authority: []const u8,
+) Error!OriginKey {
+    const parsed = try requestOrigin(scheme, authority);
+    const owned_scheme = try asciiLowerAlloc(allocator, parsed.scheme);
+    errdefer allocator.free(owned_scheme);
+    const owned_host = try asciiLowerAlloc(allocator, parsed.host);
+    errdefer allocator.free(owned_host);
+    return .{
+        .allocator = allocator,
+        .scheme = owned_scheme,
+        .host = owned_host,
+        .port = parsed.port,
     };
 }
 
@@ -311,6 +356,12 @@ fn normalizeAltSvcHost(host: []const u8) Error![]const u8 {
         return error.InvalidHeader;
     }
     return host;
+}
+
+fn asciiLowerAlloc(allocator: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error![]u8 {
+    const owned = try allocator.dupe(u8, value);
+    for (owned) |*byte| byte.* = std.ascii.toLower(byte.*);
+    return owned;
 }
 
 fn altSvcAuthorityHost(authority: []const u8) Error![]const u8 {
@@ -2929,6 +2980,31 @@ test "HTTP/3 normalizes request origins for reuse policy" {
     try std.testing.expectError(error.InvalidHeader, requestOrigin("ftp", "example.com"));
     try std.testing.expectError(error.InvalidHeader, requestOrigin("https", "user@example.com"));
     try std.testing.expectError(error.InvalidHeader, requestOrigin("https", "example.com:bad"));
+}
+
+test "HTTP/3 owns canonical origin keys for connection pools" {
+    const allocator = std.testing.allocator;
+
+    var key = try requestOriginKey(allocator, "HTTPS", "Example.COM:443");
+    defer key.deinit();
+    try std.testing.expectEqualStrings("https", key.scheme);
+    try std.testing.expectEqualStrings("example.com", key.host);
+    try std.testing.expectEqual(@as(u16, 443), key.port);
+
+    var sibling = try requestOriginKey(allocator, "https", "api.example.com");
+    defer sibling.deinit();
+    try std.testing.expectEqual(
+        ReuseDecision.requires_authority_validation,
+        connectionReuseDecision(key.origin(), sibling.origin()),
+    );
+
+    var ipv6 = try requestOriginKey(allocator, "HTTPS", "[2001:DB8::1]:443");
+    defer ipv6.deinit();
+    try std.testing.expectEqualStrings("2001:db8::1", ipv6.host);
+    try std.testing.expect(sameOrigin(
+        ipv6.origin(),
+        try requestOrigin("https", "[2001:db8::1]"),
+    ));
 }
 
 test "HTTP/3 frame settings and qpack literal block" {
