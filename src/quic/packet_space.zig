@@ -328,6 +328,7 @@ pub const SentPacketStats = struct {
 pub const SentPacketTracker = struct {
     allocator: std.mem.Allocator,
     packets: std.ArrayList(SentPacket) = .empty,
+    packets_sorted_ascending: bool = true,
     /// Packet-number lookups feed RTT sampling, ack bookkeeping, and send
     /// rollback after partial writes. `packets` remains ordered for ACK/loss
     /// range scans; this index keeps exact packet operations from walking the
@@ -384,6 +385,11 @@ pub const SentPacketTracker = struct {
         // helpers fall back to the ordered packet list if the map is also full.
         if (!packet_storage_available) {
             try self.packet_index.ensureUnusedCapacity(self.allocator, 1);
+        }
+        if (self.packets.items.len != 0 and
+            packet_number <= self.packets.items[self.packets.items.len - 1].packet_number)
+        {
+            self.packets_sorted_ascending = false;
         }
         try self.packets.append(self.allocator, .{
             .packet_number = packet_number,
@@ -1007,13 +1013,7 @@ pub const SentPacketTracker = struct {
     }
 
     fn packetsSortedAscending(self: SentPacketTracker) bool {
-        if (self.packets.items.len < 2) return true;
-        var previous = self.packets.items[0].packet_number;
-        for (self.packets.items[1..]) |packet| {
-            if (packet.packet_number <= previous) return false;
-            previous = packet.packet_number;
-        }
-        return true;
+        return self.packets_sorted_ascending;
     }
 
     fn findSentPacket(self: SentPacketTracker, packet_number: u64) ?SentPacket {
@@ -1250,6 +1250,7 @@ test "QUIC sent packet tracker applies ACK ranges" {
     var sent = SentPacketTracker.init(allocator);
     defer sent.deinit();
     for (0..12) |pn| try sent.sent(@intCast(pn), true, 1200);
+    try std.testing.expect(sent.packetsSortedAscending());
     const before = sent.stats();
     try std.testing.expectEqual(@as(usize, 12), before.tracked_packets);
     try std.testing.expectEqual(@as(usize, 12), before.ack_eliciting_packets);
@@ -1332,6 +1333,7 @@ test "QUIC sent packet tracker falls back for unsorted packet metadata" {
     try sent.sent(2, true, 300);
     try sent.sent(0, true, 100);
     try sent.sent(1, true, 200);
+    try std.testing.expect(!sent.packetsSortedAscending());
 
     const ack = quic.AckFrame{
         .largest_acknowledged = 2,
