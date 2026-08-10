@@ -522,6 +522,8 @@ pub const Connection = struct {
     packets_lost_count: u64 = 0,
     bytes_sent_count: u64 = 0,
     bytes_received_count: u64 = 0,
+    outgoing_streams_created_count: u64 = 0,
+    incoming_streams_created_count: u64 = 0,
     datagram_recv_queue: DatagramRecvQueue = .{},
     datagrams_sent_count: u64 = 0,
     datagrams_received_count: u64 = 0,
@@ -1372,8 +1374,8 @@ pub const Connection = struct {
             .bytes_in_flight = self.congestion.bytes_in_flight,
             .congestion_window = self.congestion.congestion_window,
             .congestion_available = self.congestion.available(),
-            .outgoing_streams_created = self.outgoingStreamsCreated(),
-            .incoming_streams_created = self.incomingStreamsCreated(),
+            .outgoing_streams_created = self.outgoing_streams_created_count,
+            .incoming_streams_created = self.incoming_streams_created_count,
             .datagrams_sent = self.datagrams_sent_count,
             .datagrams_received = self.datagrams_received_count,
             .datagrams_dropped_incoming = self.datagrams_dropped_incoming_count,
@@ -4470,28 +4472,6 @@ pub const Connection = struct {
         self.packets_lost_count +|= packets_u64;
     }
 
-    fn outgoingStreamsCreated(self: Connection) u64 {
-        var count: u64 = 0;
-        for (self.stream_send_flows.items) |entry| {
-            if (streamInitiatedByLocal(
-                self.config.local_endpoint,
-                entry.stream_id,
-            )) count += 1;
-        }
-        return count;
-    }
-
-    fn incomingStreamsCreated(self: Connection) u64 {
-        var count: u64 = 0;
-        for (self.stream_recv_flows.items) |entry| {
-            if (!streamInitiatedByLocal(
-                self.config.local_endpoint,
-                entry.stream_id,
-            )) count += 1;
-        }
-        return count;
-    }
-
     fn setCloseInfo(self: *Connection, close: struct {
         application: bool,
         error_code: u64,
@@ -4815,6 +4795,9 @@ pub const Connection = struct {
             .flow = .init(self.initialSendStreamDataLimit(stream_id)),
         });
         self.last_send_stream_index = self.stream_send_flows.items.len - 1;
+        if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            self.outgoing_streams_created_count +|= 1;
+        }
         return &self.stream_send_flows.items[self.stream_send_flows.items.len - 1];
     }
 
@@ -4912,6 +4895,9 @@ pub const Connection = struct {
             ),
         });
         self.last_recv_stream_index = self.stream_recv_flows.items.len - 1;
+        if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
+            self.incoming_streams_created_count +|= 1;
+        }
         return &self.stream_recv_flows.items[self.stream_recv_flows.items.len - 1];
     }
 
