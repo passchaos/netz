@@ -370,16 +370,21 @@ test "QUIC 1-RTT PMTUD gates ordinary sends until probe succeeds" {
         .enable_pmtud = true,
         .pmtud_max_probe_size = 1300,
         .max_datagram_size = 1400,
+        .peer_max_datagram_frame_size = 1400,
         .enable_pacing = false,
     });
     defer connection.deinit();
 
     try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, connection.currentSendDatagramSize());
+    const initial_datagram_payload = connection.maxDatagramPayloadSize() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(initial_datagram_payload < 1250);
     try std.testing.expectError(error.DatagramTooLarge, connection.sendAt(&.{.{ .padding = .{ .len = 1250 } }}, 10));
     try std.testing.expectEqual(@as(u64, 0), connection.next_packet_number);
 
     connection.pmtud.onProbeAcked(1300, 1400);
     try std.testing.expectEqual(@as(usize, 1300), connection.currentSendDatagramSize());
+    const raised_datagram_payload = connection.maxDatagramPayloadSize() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(raised_datagram_payload >= 1250);
     try connection.sendAt(&.{.{ .padding = .{ .len = 1250 } }}, 20);
     try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
 }

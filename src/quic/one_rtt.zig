@@ -1324,7 +1324,7 @@ pub const Connection = struct {
 
     pub fn maxDatagramPayloadSize(self: Connection) ?usize {
         const frame_limit = self.config.peer_max_datagram_frame_size orelse return null;
-        return maxDatagramPayloadForFrameSize(@min(frame_limit, self.config.max_datagram_size));
+        return maxDatagramPayloadForFrameSize(@min(frame_limit, self.currentSendDatagramSize()));
     }
 
     pub fn sendDatagram(self: *Connection, data: []const u8) Error!void {
