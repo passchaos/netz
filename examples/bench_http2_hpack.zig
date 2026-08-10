@@ -28,13 +28,40 @@ pub fn main() !void {
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(allocator);
 
+    const encode_start = nowNs(io);
+    var encode_total: usize = 0;
+    for (0..iterations) |_| {
+        block.clearRetainingCapacity();
+        try stateful_encoder.encodeBlock(&block, allocator, &headers);
+        encode_total += block.items.len;
+    }
+    const encode_ns = nowNs(io) -| encode_start;
+
+    var decode_block: std.ArrayList(u8) = .empty;
+    defer decode_block.deinit(allocator);
+    var decode_encoder = netz.http2.Hpack.Encoder{};
+    defer decode_encoder.deinit(allocator);
+    try decode_encoder.encodeBlock(&decode_block, allocator, &headers);
+    const decode_start = nowNs(io);
+    var decode_total: usize = 0;
+    for (0..iterations) |_| {
+        const decoded = try stateful_decoder.decodeBlock(allocator, decode_block.items);
+        decode_total += decoded.len;
+        netz.http2.Hpack.freeDecodedFields(allocator, decoded);
+    }
+    const decode_ns = nowNs(io) -| decode_start;
+
+    var roundtrip_encoder = netz.http2.Hpack.Encoder{};
+    defer roundtrip_encoder.deinit(allocator);
+    var roundtrip_decoder = netz.http2.Hpack.Decoder{};
+    defer roundtrip_decoder.deinit(allocator);
     const stateful_start = nowNs(io);
     var stateful_total: usize = 0;
     for (0..iterations) |_| {
         block.clearRetainingCapacity();
-        try stateful_encoder.encodeBlock(&block, allocator, &headers);
+        try roundtrip_encoder.encodeBlock(&block, allocator, &headers);
         stateful_total += block.items.len;
-        const decoded = try stateful_decoder.decodeBlock(allocator, block.items);
+        const decoded = try roundtrip_decoder.decodeBlock(allocator, block.items);
         netz.http2.Hpack.freeDecodedFields(allocator, decoded);
     }
     const stateful_ns = nowNs(io) -| stateful_start;
@@ -55,6 +82,8 @@ pub fn main() !void {
     std.debug.print(
         \\HTTP/2 HPACK benchmark
         \\  iterations: {d}
+        \\  stateful encode-only total bytes: {d}, ns/op: {d}
+        \\  stateful decode-only fields: {d}, ns/op: {d}
         \\  stateful total bytes: {d}, ns/op: {d}
         \\  stateless total bytes: {d}, ns/op: {d}
         \\  stateful speedup: {d}.{d:0>2}x
@@ -62,6 +91,10 @@ pub fn main() !void {
         \\
     , .{
         iterations,
+        encode_total,
+        encode_ns / iterations,
+        decode_total,
+        decode_ns / iterations,
         stateful_total,
         stateful_ns / iterations,
         stateless_total,
