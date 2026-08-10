@@ -301,7 +301,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   caller-queryable diagnostics that never roll back network state, plus a
   no-allocation 1-RTT `stats`/`getStats` snapshot with lifetime packet/byte,
   loss, stream, DATAGRAM, RTT, congestion, recovery, sent/received-packet
-  including retained ACK-history size, ECN,
+  including retained ACK-history and ack-eliciting in-flight size, ECN,
   authentication, and key-update counters plus per-stream send/receive stat snapshots with
   remaining credit for fast telemetry loops,
   plus NSS SSLKEYLOGFILE-compatible handshake/application traffic-secret

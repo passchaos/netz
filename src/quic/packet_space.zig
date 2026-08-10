@@ -315,6 +315,7 @@ pub const SentPacketStats = struct {
     tracked_packets: usize,
     ack_eliciting_packets: usize,
     in_flight_packets: usize,
+    ack_eliciting_in_flight_packets: usize,
     acknowledged_packets: usize,
     lost_packets: usize,
     bytes_in_flight: usize,
@@ -413,6 +414,7 @@ pub const SentPacketTracker = struct {
     pub fn stats(self: SentPacketTracker) SentPacketStats {
         var ack_eliciting_packets: usize = 0;
         var in_flight_packets: usize = 0;
+        var ack_eliciting_in_flight_packets: usize = 0;
         var acknowledged_packets: usize = 0;
         var lost_packets: usize = 0;
         var bytes_in_flight: usize = 0;
@@ -421,6 +423,7 @@ pub const SentPacketTracker = struct {
             if (packet.in_flight and !packet.acknowledged and !packet.lost) {
                 in_flight_packets += 1;
                 bytes_in_flight += packet.bytes;
+                if (packet.ack_eliciting) ack_eliciting_in_flight_packets += 1;
             }
             if (packet.acknowledged) acknowledged_packets += 1;
             if (packet.lost) lost_packets += 1;
@@ -429,6 +432,7 @@ pub const SentPacketTracker = struct {
             .tracked_packets = self.packets.items.len,
             .ack_eliciting_packets = ack_eliciting_packets,
             .in_flight_packets = in_flight_packets,
+            .ack_eliciting_in_flight_packets = ack_eliciting_in_flight_packets,
             .acknowledged_packets = acknowledged_packets,
             .lost_packets = lost_packets,
             .bytes_in_flight = bytes_in_flight,
@@ -1040,6 +1044,7 @@ test "QUIC sent packet tracker applies ACK ranges" {
     try std.testing.expectEqual(@as(usize, 12), before.tracked_packets);
     try std.testing.expectEqual(@as(usize, 12), before.ack_eliciting_packets);
     try std.testing.expectEqual(@as(usize, 12), before.in_flight_packets);
+    try std.testing.expectEqual(@as(usize, 12), before.ack_eliciting_in_flight_packets);
     try std.testing.expectEqual(@as(usize, 12 * 1200), before.bytes_in_flight);
 
     const ranges = [_]quic.AckRange{
@@ -1064,6 +1069,7 @@ test "QUIC sent packet tracker applies ACK ranges" {
     const after = sent.getStats();
     try std.testing.expectEqual(@as(usize, 6), after.acknowledged_packets);
     try std.testing.expectEqual(@as(usize, 6), after.in_flight_packets);
+    try std.testing.expectEqual(@as(usize, 6), after.ack_eliciting_in_flight_packets);
     try std.testing.expectEqual(@as(usize, 6 * 1200), after.bytes_in_flight);
     try std.testing.expectEqual(@as(usize, 0), after.lost_packets);
 }
