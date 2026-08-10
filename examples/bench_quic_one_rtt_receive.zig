@@ -15,14 +15,17 @@ pub fn main() !void {
     const client_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
     const server_cid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
 
-    const gro_ns = try measure(
+    const gro_ns = measure(
         allocator,
         io,
         keys,
         client_cid,
         server_cid,
         true,
-    );
+    ) catch |err| switch (err) {
+        error.GroUnavailable => null,
+        else => |e| return e,
+    };
     const plain_ns = try measure(
         allocator,
         io,
@@ -32,27 +35,45 @@ pub fn main() !void {
         false,
     );
     const total_packets = iterations * batch_size;
-    const ratio_x100 = ratioTimes100(plain_ns, gro_ns);
-    std.debug.print(
-        \\QUIC 1-RTT receive benchmark
-        \\  iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
-        \\  GRO batch:    {d} ns/batch, {d} ns/packet
-        \\  plain packet: {d} ns/batch, {d} ns/packet
-        \\  GRO relative packet throughput: {d}.{d:0>2}x
-        \\  total packets/path: {d}
-        \\
-    , .{
-        iterations,
-        batch_size,
-        payload_size,
-        gro_ns / iterations,
-        gro_ns / total_packets,
-        plain_ns / iterations,
-        plain_ns / total_packets,
-        ratio_x100 / 100,
-        ratio_x100 % 100,
-        total_packets,
-    });
+    if (gro_ns) |gro| {
+        const ratio_x100 = ratioTimes100(plain_ns, gro);
+        std.debug.print(
+            \\QUIC 1-RTT receive benchmark
+            \\  iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
+            \\  GRO batch:    {d} ns/batch, {d} ns/packet
+            \\  plain packet: {d} ns/batch, {d} ns/packet
+            \\  GRO relative packet throughput: {d}.{d:0>2}x
+            \\  total packets/path: {d}
+            \\
+        , .{
+            iterations,
+            batch_size,
+            payload_size,
+            gro / iterations,
+            gro / total_packets,
+            plain_ns / iterations,
+            plain_ns / total_packets,
+            ratio_x100 / 100,
+            ratio_x100 % 100,
+            total_packets,
+        });
+    } else {
+        std.debug.print(
+            \\QUIC 1-RTT receive benchmark
+            \\  iterations: {d}, packets/batch: {d}, payload bytes/packet: {d}
+            \\  GRO batch:    unavailable on this endpoint
+            \\  plain packet: {d} ns/batch, {d} ns/packet
+            \\  total packets/path: {d}
+            \\
+        , .{
+            iterations,
+            batch_size,
+            payload_size,
+            plain_ns / iterations,
+            plain_ns / total_packets,
+            total_packets,
+        });
+    }
 }
 
 fn measure(
