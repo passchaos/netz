@@ -50,6 +50,13 @@ pub const UriEndpoint = struct {
     }
 };
 
+pub const UriRequestOptions = struct {
+    method: []const u8 = "GET",
+    headers: []const http3.Qpack.HeaderField = &.{},
+    body: []const u8 = &.{},
+    trailers: []const http3.Qpack.HeaderField = &.{},
+};
+
 pub fn uriEndpoint(allocator: std.mem.Allocator, uri: std.Uri) Error!UriEndpoint {
     if (uri.user != null or uri.password != null) return error.InvalidUri;
     if (uri.scheme.len == 0 or !std.ascii.eqlIgnoreCase(uri.scheme, "https")) {
@@ -120,6 +127,21 @@ fn resolveHostName(io: std.Io, host: net.HostName, port: u16) Error!net.IpAddres
         error.Canceled => return error.Canceled,
     }
     return first orelse error.NoAddressReturned;
+}
+
+fn uriPathAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
+    const path_value = uriComponentBytes(uri.path);
+    const path = if (path_value.len == 0) "/" else path_value;
+    if (uri.query) |query| {
+        return try std.fmt.allocPrint(allocator, "{s}?{s}", .{ path, uriComponentBytes(query) });
+    }
+    return try allocator.dupe(u8, path);
+}
+
+fn uriComponentBytes(component: std.Uri.Component) []const u8 {
+    return switch (component) {
+        .raw, .percent_encoded => |value| value,
+    };
 }
 
 test "HTTP/3 URI endpoint parses authorities for handshake clients" {
@@ -2555,6 +2577,41 @@ pub const HandshakeClient = struct {
             limits,
             connect_options,
         );
+    }
+
+    pub fn requestUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+    ) Error!OwnedHandshakeResponse {
+        var endpoint = try uriEndpoint(allocator, uri);
+        defer endpoint.deinit();
+        const path = try uriPathAlloc(allocator, uri);
+        defer allocator.free(path);
+
+        var client = try connectUri(
+            allocator,
+            io,
+            local_address,
+            uri,
+            limits,
+            options,
+        );
+        defer client.deinit();
+
+        return try client.request(.{
+            .method = request_options.method,
+            .path = path,
+            .scheme = "https",
+            .authority = endpoint.authority,
+            .headers = request_options.headers,
+            .body = request_options.body,
+            .trailers = request_options.trailers,
+        });
     }
 
     pub fn deinit(self: *HandshakeClient) void {
@@ -13898,7 +13955,7 @@ test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" 
     try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
 }
 
-test "HTTP/3 handshake client connects from URI endpoint" {
+test "HTTP/3 handshake client requests from URI endpoint" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -13951,7 +14008,7 @@ test "HTTP/3 handshake client connects from URI endpoint" {
     var uri_buf: [64]u8 = undefined;
     const uri_text = try std.fmt.bufPrint(&uri_buf, "https://127.0.0.1:{d}/uri", .{server.address().ip4.port});
     const uri = try std.Uri.parse(uri_text);
-    var client = try HandshakeClient.connectUri(allocator, io, .{ .ip4 = .loopback(0) }, uri, .{
+    var response = try HandshakeClient.requestUri(allocator, io, .{ .ip4 = .loopback(0) }, uri, .{}, .{
         .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
     }, .{
         .handshake = .{
@@ -13960,16 +14017,6 @@ test "HTTP/3 handshake client connects from URI endpoint" {
             .random = [_]u8{0xa6} ** 32,
             .x25519_secret_key = [_]u8{0xa7} ** 32,
         },
-    });
-    defer client.deinit();
-    try std.testing.expectEqualStrings("h3", client.established.alpn);
-
-    var endpoint = try uriEndpoint(allocator, uri);
-    defer endpoint.deinit();
-    var response = try client.request(.{
-        .method = "GET",
-        .path = "/uri",
-        .authority = endpoint.authority,
     });
     defer response.deinit(allocator);
 

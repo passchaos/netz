@@ -60,7 +60,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   negotiation, and automatic non-blocking dynamic request/response compression
   after decoder feedback, and a handshake-backed protected client/server
   runtime with `https://` URI endpoint parsing/DNS/literal target resolution
-  and `HandshakeClient.connectUri` for public H3 client tooling; both server paths retain bounded per-request-stream reassembly state
+  plus `HandshakeClient.connectUri` / `requestUri` for public H3 client
+  tooling; both server paths retain bounded per-request-stream reassembly state
   so interleaved streams are not dropped, surface RESET_STREAM request
   cancellation, and expose client/server cancel helpers that send
   RESET_STREAM+STOP_SENDING with conditional QPACK stream cancellation. Servers
