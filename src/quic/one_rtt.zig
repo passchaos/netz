@@ -546,11 +546,11 @@ pub const Connection = struct {
     /// Reused protected-datagram storage. Packet protection writes directly
     /// into this buffer, avoiding one heap allocation/free pair per 1-RTT send.
     send_packet_buffer: std.ArrayList(u8) = .empty,
-    /// Reused flow-credit aggregation for stateful packet batches.
+    /// Reused flow-credit aggregation for stateful packet sends and batches.
     ///
-    /// A packet may carry STREAM frames for several streams, and later packets
-    /// may continue any of them. Keeping both aggregate levels on the
-    /// connection makes steady-state HTTP/3 batching allocation-free outside
+    /// A packet may carry multiple STREAM frames for one stream and later
+    /// packets may continue any of them. Keeping both aggregate levels on the
+    /// connection makes steady-state HTTP/3 sends allocation-free outside
     /// recovery's required stable payload ownership.
     send_batch_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
     send_batch_packet_stream_scratch: std.ArrayList(ReservedStreamCredit) = .empty,
@@ -1236,11 +1236,13 @@ pub const Connection = struct {
         if (ecn != .not_ect and self.sent.ecnDisabled()) return error.EcnDisabled;
         try self.validateNextPacketNumber();
         try self.validateOutboundFrames(frames);
-        const stream_bytes = countStreamBytes(frames);
-        for (frames) |frame| {
-            if (frame != .stream) continue;
-            try self.validateStreamFrameForSend(frame.stream);
-        }
+        const packet_streams = &self.send_batch_packet_stream_scratch;
+        std.debug.assert(packet_streams.items.len == 0);
+        defer packet_streams.clearRetainingCapacity();
+        const stream_bytes = try self.collectOutboundStreamCredits(
+            frames,
+            packet_streams,
+        );
         const prepared = try self.prepareFramesForSend(frames, sent_time_ns);
         defer self.send_frame_buffer.items.len = 0;
         const qlog_now_ns = sent_time_ns orelse self.monotonicNowNs();
@@ -1249,25 +1251,25 @@ pub const Connection = struct {
         // succeeds, materialize any new stream entries before flow-control
         // checks so MAX_STREAM_DATA can subsequently refer to a stream whose
         // first attempted write was flow-control blocked.
-        for (frames) |frame| {
-            if (frame != .stream) continue;
-            _ = try self.sendStreamEntry(frame.stream.stream_id);
+        for (packet_streams.items) |credit| {
+            _ = try self.sendStreamEntry(credit.stream_id);
         }
 
         if (stream_bytes > self.send_flow.available()) {
             self.send_frame_buffer.items.len = 0;
+            packet_streams.clearRetainingCapacity();
             try self.sendDataBlocked();
             return error.FlowControlBlocked;
         }
-        for (frames) |frame| {
-            if (frame != .stream or frame.stream.data.len == 0) continue;
-            const available = if (self.findSendStreamEntry(frame.stream.stream_id)) |entry|
+        for (packet_streams.items) |credit| {
+            const available = if (self.findSendStreamEntry(credit.stream_id)) |entry|
                 entry.flow.available()
             else
-                self.initialSendStreamDataLimit(frame.stream.stream_id);
-            if (frame.stream.data.len > available) {
+                self.initialSendStreamDataLimit(credit.stream_id);
+            if (credit.bytes > available) {
                 self.send_frame_buffer.items.len = 0;
-                try self.sendStreamDataBlocked(frame.stream.stream_id);
+                packet_streams.clearRetainingCapacity();
+                try self.sendStreamDataBlocked(credit.stream_id);
                 return error.FlowControlBlocked;
             }
         }
@@ -1288,19 +1290,19 @@ pub const Connection = struct {
             try self.send_flow.reserve(stream_bytes);
             reserved_connection = stream_bytes;
         }
-        for (frames) |frame| {
-            if (frame != .stream or frame.stream.data.len == 0) continue;
-            const entry = (self.findSendStreamEntry(frame.stream.stream_id) orelse unreachable);
+        for (packet_streams.items) |credit| {
+            if (credit.bytes == 0) continue;
+            const entry = (self.findSendStreamEntry(credit.stream_id) orelse unreachable);
             // Record a zero-sized reservation before mutating stream flow so an
             // allocator failure cannot leave `entry.flow.used` inflated.  Once
             // reserve succeeds, update the rollback byte count in place.
             try reserved_streams.append(self.endpoint.allocator, .{
-                .stream_id = frame.stream.stream_id,
+                .stream_id = credit.stream_id,
                 .bytes = 0,
             });
             const reserved_index = reserved_streams.items.len - 1;
-            try entry.flow.reserve(frame.stream.data.len);
-            reserved_streams.items[reserved_index].bytes = frame.stream.data.len;
+            try entry.flow.reserve(credit.bytes);
+            reserved_streams.items[reserved_index].bytes = credit.bytes;
         }
         try self.sendPreparedFramesEcnAtUnchecked(prepared, ecn, sent_time_ns);
         self.observePacketSent(
@@ -1310,6 +1312,39 @@ pub const Connection = struct {
             frames,
         );
         self.noteSentStreams(frames);
+    }
+
+    fn collectOutboundStreamCredits(
+        self: *Connection,
+        frames: []const quic.Frame,
+        credits: *std.ArrayList(ReservedStreamCredit),
+    ) Error!u64 {
+        std.debug.assert(credits.items.len == 0);
+        errdefer credits.clearRetainingCapacity();
+
+        var stream_bytes: u64 = 0;
+        for (frames) |frame| {
+            if (frame != .stream) continue;
+            try self.validateStreamFrameForSend(frame.stream);
+            const bytes = std.math.cast(
+                u64,
+                frame.stream.data.len,
+            ) orelse return error.InvalidFrameLength;
+            stream_bytes = std.math.add(u64, stream_bytes, bytes) catch
+                return error.InvalidFrameLength;
+            // Aggregate by stream before consulting flow-control state. HTTP/3
+            // writers can split one logical body into several STREAM frames in
+            // the same packet; checking each fragment against the same
+            // pre-reservation limit would otherwise let the packet exceed the
+            // stream's remaining credit.
+            try addReservedStreamCredit(
+                credits,
+                self.endpoint.allocator,
+                frame.stream.stream_id,
+                bytes,
+            );
+        }
+        return stream_bytes;
     }
 
     pub fn datagramSendEnabled(self: Connection) bool {

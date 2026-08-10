@@ -719,6 +719,36 @@ test "QUIC 1-RTT connection handles stream-level flow control" {
     try std.testing.expectEqual(@as(u64, 0), max_stream.max_stream_data.stream_id);
     try std.testing.expectEqual(@as(u64, 10), max_stream.max_stream_data.maximum_stream_data);
 
+    const split_blocked = [_]quic.Frame{
+        .{ .stream = .{
+            .stream_id = 4,
+            .data = "abc",
+        } },
+        .{ .stream = .{
+            .stream_id = 4,
+            .offset = 3,
+            .data = "def",
+        } },
+    };
+    try std.testing.expectError(
+        error.FlowControlBlocked,
+        client.send(&split_blocked),
+    );
+    var split_blocked_packet = try server.receivePacket();
+    defer split_blocked_packet.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        split_blocked_packet.frames[0].stream_data_blocked.stream_id,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        split_blocked_packet.frames[0].stream_data_blocked.maximum_stream_data,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        one_rtt.testing.sendStreamUsed(&client, 4).?,
+    );
+
     // The combined helper advances retained overlap-validation storage and
     // emits both connection- and stream-level credit transactionally.
     var combined_server_endpoint = try quic.runtime.Endpoint.bind(
