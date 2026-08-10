@@ -4,6 +4,7 @@ const netz = @import("netz");
 const iterations: usize = 500_000;
 const tracked_ranges: usize = netz.quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity;
 const packet_number_base: u64 = 10_000;
+const sent_packets: usize = 4096;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
@@ -34,6 +35,10 @@ pub fn main() !void {
         received,
     );
     const stale_ns, const stale_checksum = try measureStaleReject(io, received);
+    const sent_validate_ns, const sent_validate_checksum = try measureSentAckValidation(
+        allocator,
+        io,
+    );
     const speedup_x100 = ratioTimes100(allocating_ns, stack_ns);
 
     std.debug.print(
@@ -43,6 +48,7 @@ pub fn main() !void {
         \\  caller-storage ackFrame:  {d} ns/op
         \\  caller-storage speedup:   {d}.{d:0>2}x
         \\  stale wouldRecordFresh:   {d} ns/op
+        \\  sent ACK validation ({d} packets): {d} ns/op
         \\  checksum: {d}
         \\
     , .{
@@ -54,7 +60,9 @@ pub fn main() !void {
         speedup_x100 / 100,
         speedup_x100 % 100,
         stale_ns / iterations,
-        allocating_checksum +% stack_checksum +% stale_checksum,
+        sent_packets,
+        sent_validate_ns / iterations,
+        allocating_checksum +% stack_checksum +% stale_checksum +% sent_validate_checksum,
     });
 }
 
@@ -102,6 +110,31 @@ fn measureStaleReject(
     const started = nowNs(io);
     for (0..iterations) |_| {
         checksum +%= @intFromBool(try received.wouldRecordFresh(packet_number_base - 2));
+    }
+    return .{ nowNs(io) -| started, checksum };
+}
+
+fn measureSentAckValidation(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) !struct { u64, u64 } {
+    var sent = netz.quic.packet_space.SentPacketTracker.init(allocator);
+    defer sent.deinit();
+    for (0..sent_packets) |packet_number| {
+        try sent.sent(@intCast(packet_number), true, 1200);
+    }
+
+    const ack = netz.quic.AckFrame{
+        .largest_acknowledged = sent_packets - 1,
+        .ack_delay = 0,
+        .first_ack_range = sent_packets - 1,
+    };
+    var checksum: u64 = 0;
+    const started = nowNs(io);
+    for (0..iterations) |_| {
+        try sent.validateAckCoversSentPackets(ack);
+        checksum +%= ack.largest_acknowledged;
+        checksum +%= ack.first_ack_range;
     }
     return .{ nowNs(io) -| started, checksum };
 }

@@ -1474,13 +1474,15 @@ pub const Connection = struct {
                 // Commit the control-frame state only after every remaining
                 // fallible allocation has succeeded. A socket error will then
                 // roll the group back through the errdefer below.
-                try self.sent.sentInFlightAt(
+                try self.sent.sentInFlightAtWithMetadata(
                     packet_number,
                     prepared.is_ack_eliciting,
                     prepared.is_in_flight,
                     payload.len,
                     ecn,
                     sent_time_ns,
+                    null,
+                    largestAckFrameSent(frames),
                 );
                 var tracked_sent = true;
                 errdefer if (tracked_sent) {
@@ -1503,7 +1505,7 @@ pub const Connection = struct {
                 return;
             }
         }
-        try self.sent.sentInFlightAt(packet_number, prepared.is_ack_eliciting, prepared.is_in_flight, payload.len, ecn, sent_time_ns);
+        try self.sent.sentInFlightAtWithMetadata(packet_number, prepared.is_ack_eliciting, prepared.is_in_flight, payload.len, ecn, sent_time_ns, null, largestAckFrameSent(frames));
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacketWithPacketNumberLenAt(
             packet_number,

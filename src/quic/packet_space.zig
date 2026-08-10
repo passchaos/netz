@@ -175,6 +175,22 @@ pub const ReceivedPacketTracker = struct {
         return if (self.saw_ecn) self.ecn_counts else null;
     }
 
+    pub fn pruneAckedRanges(self: *ReceivedPacketTracker, largest_acknowledged: u64) void {
+        self.forgetThrough(largest_acknowledged);
+        while (self.ranges.items.len != 0) {
+            const last_index = self.ranges.items.len - 1;
+            const oldest = &self.ranges.items[last_index];
+            if (oldest.end <= largest_acknowledged) {
+                _ = self.ranges.orderedRemove(last_index);
+                continue;
+            }
+            if (oldest.start <= largest_acknowledged) {
+                oldest.start = largest_acknowledged + 1;
+            }
+            break;
+        }
+    }
+
     fn insertRange(self: *ReceivedPacketTracker, index: usize, range: PacketRange) Error!bool {
         if (self.max_ranges == 0) return false;
 
@@ -242,6 +258,7 @@ pub const SentPacket = struct {
     ecn: EcnCodepoint = .not_ect,
     sent_time_ns: ?u64 = null,
     pmtu_probe_size: ?usize = null,
+    largest_acknowledged_sent: ?u64 = null,
 };
 
 pub const EcnCodepoint = enum {
@@ -291,6 +308,10 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn sentInFlightAtWithPmtu(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize) !void {
+        try self.sentInFlightAtWithMetadata(packet_number, ack_eliciting, in_flight, bytes, ecn, sent_time_ns, pmtu_probe_size, null);
+    }
+
+    pub fn sentInFlightAtWithMetadata(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, largest_acknowledged_sent: ?u64) !void {
         try self.packets.append(self.allocator, .{
             .packet_number = packet_number,
             .ack_eliciting = ack_eliciting,
@@ -299,6 +320,7 @@ pub const SentPacketTracker = struct {
             .ecn = ecn,
             .sent_time_ns = sent_time_ns,
             .pmtu_probe_size = pmtu_probe_size,
+            .largest_acknowledged_sent = largest_acknowledged_sent,
         });
         switch (ecn) {
             .not_ect => {},
@@ -343,6 +365,7 @@ pub const SentPacketTracker = struct {
         largest_sent_time_ns: ?u64 = null,
         ecn_ce_delta: u64 = 0,
         largest_pmtu_probe_size: ?usize = null,
+        largest_acknowledged_sent: ?u64 = null,
 
         fn add(self: *AckResult, other: AckResult) void {
             self.packets += other.packets;
@@ -351,6 +374,11 @@ pub const SentPacketTracker = struct {
             self.ect0_packets += other.ect0_packets;
             self.ect1_packets += other.ect1_packets;
             if (other.largest_packet_number) |packet_number| self.observe(packet_number, other.largest_sent_time_ns, other.largest_pmtu_probe_size);
+            if (other.largest_acknowledged_sent) |largest_acknowledged| {
+                if (self.largest_acknowledged_sent == null or largest_acknowledged > self.largest_acknowledged_sent.?) {
+                    self.largest_acknowledged_sent = largest_acknowledged;
+                }
+            }
         }
 
         fn observe(self: *AckResult, packet_number: u64, sent_time_ns: ?u64, pmtu_probe_size: ?usize) void {
@@ -680,6 +708,11 @@ pub const SentPacketTracker = struct {
                 if (packet.ack_eliciting) {
                     result.ack_eliciting_packets += 1;
                 }
+                if (packet.largest_acknowledged_sent) |largest_acknowledged| {
+                    if (result.largest_acknowledged_sent == null or largest_acknowledged > result.largest_acknowledged_sent.?) {
+                        result.largest_acknowledged_sent = largest_acknowledged;
+                    }
+                }
                 switch (packet.ecn) {
                     .not_ect => {},
                     .ect0 => result.ect0_packets += 1,
@@ -696,12 +729,12 @@ pub const SentPacketTracker = struct {
         const span = std.math.add(u64, end - start, 1) catch return error.InvalidAckFrame;
         if (span > self.packets.items.len) return error.InvalidAckFrame;
 
-        var packet_number = start;
-        while (true) {
-            if (!self.hasSentPacketNumber(packet_number)) return error.InvalidAckFrame;
-            if (packet_number == end) break;
-            packet_number += 1;
+        var found: u64 = 0;
+        for (self.packets.items) |packet| {
+            if (packet.packet_number < start or packet.packet_number > end) continue;
+            found += 1;
         }
+        if (found != span) return error.InvalidAckFrame;
     }
 
     fn hasSentPacketNumber(self: SentPacketTracker, packet_number: u64) bool {
