@@ -768,6 +768,61 @@ pub const Hpack = struct {
         .{ .name = "www-authenticate", .value = "" },
     };
 
+    const static_name_index = std.StaticStringMap([]const u8).initComptime(.{
+        .{ ":authority", &[_]u8{1} },
+        .{ ":method", &[_]u8{ 2, 3 } },
+        .{ ":path", &[_]u8{ 4, 5 } },
+        .{ ":scheme", &[_]u8{ 6, 7 } },
+        .{ ":status", &[_]u8{ 8, 9, 10, 11, 12, 13, 14 } },
+        .{ "accept-charset", &[_]u8{15} },
+        .{ "accept-encoding", &[_]u8{16} },
+        .{ "accept-language", &[_]u8{17} },
+        .{ "accept-ranges", &[_]u8{18} },
+        .{ "accept", &[_]u8{19} },
+        .{ "access-control-allow-origin", &[_]u8{20} },
+        .{ "age", &[_]u8{21} },
+        .{ "allow", &[_]u8{22} },
+        .{ "authorization", &[_]u8{23} },
+        .{ "cache-control", &[_]u8{24} },
+        .{ "content-disposition", &[_]u8{25} },
+        .{ "content-encoding", &[_]u8{26} },
+        .{ "content-language", &[_]u8{27} },
+        .{ "content-length", &[_]u8{28} },
+        .{ "content-location", &[_]u8{29} },
+        .{ "content-range", &[_]u8{30} },
+        .{ "content-type", &[_]u8{31} },
+        .{ "cookie", &[_]u8{32} },
+        .{ "date", &[_]u8{33} },
+        .{ "etag", &[_]u8{34} },
+        .{ "expect", &[_]u8{35} },
+        .{ "expires", &[_]u8{36} },
+        .{ "from", &[_]u8{37} },
+        .{ "host", &[_]u8{38} },
+        .{ "if-match", &[_]u8{39} },
+        .{ "if-modified-since", &[_]u8{40} },
+        .{ "if-none-match", &[_]u8{41} },
+        .{ "if-range", &[_]u8{42} },
+        .{ "if-unmodified-since", &[_]u8{43} },
+        .{ "last-modified", &[_]u8{44} },
+        .{ "link", &[_]u8{45} },
+        .{ "location", &[_]u8{46} },
+        .{ "max-forwards", &[_]u8{47} },
+        .{ "proxy-authenticate", &[_]u8{48} },
+        .{ "proxy-authorization", &[_]u8{49} },
+        .{ "range", &[_]u8{50} },
+        .{ "referer", &[_]u8{51} },
+        .{ "refresh", &[_]u8{52} },
+        .{ "retry-after", &[_]u8{53} },
+        .{ "server", &[_]u8{54} },
+        .{ "set-cookie", &[_]u8{55} },
+        .{ "strict-transport-security", &[_]u8{56} },
+        .{ "transfer-encoding", &[_]u8{57} },
+        .{ "user-agent", &[_]u8{58} },
+        .{ "vary", &[_]u8{59} },
+        .{ "via", &[_]u8{60} },
+        .{ "www-authenticate", &[_]u8{61} },
+    });
+
     pub const HeaderField = struct {
         name: []const u8,
         value: []const u8,
@@ -983,19 +1038,23 @@ pub const Hpack = struct {
     };
 
     pub fn findStaticIndex(name: []const u8, value: []const u8) ?u64 {
-        for (static_table, 0..) |entry, i| {
-            if (std.mem.eql(u8, entry.name, name) and std.mem.eql(u8, entry.value, value)) {
-                return @intCast(i + 1);
+        const indexes = static_name_index.get(name) orelse return null;
+        // HPACK field encoding queries the static table for every header.  The
+        // Work reference implementations scan the whole 61-entry table; this
+        // comptime name index narrows exact probes to only the candidate
+        // entries while preserving HPACK's one-indexed RFC order.
+        for (indexes) |index| {
+            const entry = static_table[index - 1];
+            if (std.mem.eql(u8, entry.value, value)) {
+                return index;
             }
         }
         return null;
     }
 
     pub fn findStaticNameIndex(name: []const u8) ?u64 {
-        for (static_table, 0..) |entry, i| {
-            if (std.mem.eql(u8, entry.name, name)) return @intCast(i + 1);
-        }
-        return null;
+        const indexes = static_name_index.get(name) orelse return null;
+        return indexes[0];
     }
 
     pub fn sensitiveHeaderName(name: []const u8) bool {
@@ -1786,6 +1845,30 @@ test "HTTP/2 HPACK static-only encode roundtrip" {
         try std.testing.expectEqualStrings(expected.value, actual.value);
         try std.testing.expectEqual(expected.never_index, actual.never_index);
     }
+}
+
+test "HTTP/2 HPACK static lookup index preserves one-indexed table order" {
+    for (Hpack.static_table, 0..) |entry, zero_index| {
+        const wire_index: u64 = @intCast(zero_index + 1);
+        try std.testing.expectEqual(wire_index, Hpack.findStaticIndex(entry.name, entry.value).?);
+        try std.testing.expectEqual(
+            Hpack.findStaticNameIndex(entry.name).?,
+            (blk: {
+                for (Hpack.static_table, 0..) |candidate, first_zero_index| {
+                    if (std.mem.eql(u8, candidate.name, entry.name)) {
+                        break :blk @as(u64, @intCast(first_zero_index + 1));
+                    }
+                }
+                unreachable;
+            }),
+        );
+    }
+
+    try std.testing.expectEqual(@as(?u64, 2), Hpack.findStaticNameIndex(":method"));
+    try std.testing.expectEqual(@as(?u64, 8), Hpack.findStaticNameIndex(":status"));
+    try std.testing.expectEqual(@as(?u64, 31), Hpack.findStaticNameIndex("content-type"));
+    try std.testing.expect(Hpack.findStaticIndex(":status", "418") == null);
+    try std.testing.expect(Hpack.findStaticNameIndex("x-not-static") == null);
 }
 
 test "HTTP/2 HPACK never-indexes sensitive fields automatically" {
