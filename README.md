@@ -96,7 +96,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   interleaved-stream and reset identity preservation, Content-Length
   validation, and no full-body aggregation. When UDP_GRO is enabled, protected
   and handshake packet pumps retain the decrypted batch behind a one-packet
-  cursor, amortizing recvmsg/decryption without bulk-inserting the whole GRO
+  cursor, and reuse compacted pending receive slots, amortizing recvmsg/decryption without bulk-inserting the whole GRO
   payload into a small HTTP/3 stream window. Handshake streaming readers return
   consumed protocol offsets to both QUIC flow-control levels, compact the
   transport overlap-validation window, keep reset and cancelled-push FIFO queues

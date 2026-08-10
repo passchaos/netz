@@ -442,7 +442,7 @@ pub const Endpoint = struct {
 
         self.pending_receive_mutex.lockUncancelable(self.io);
         defer self.pending_receive_mutex.unlock(self.io);
-        try self.pending_received.ensureUnusedCapacity(self.allocator, batch.segment_count - 1);
+        try self.ensurePendingReceivedCapacity(batch.segment_count - 1);
         const shared = try self.allocator.create(SharedReceiveBuffer);
         shared.* = .{
             .allocator = self.allocator,
@@ -588,10 +588,7 @@ pub const Endpoint = struct {
                 };
                 self.pending_receive_mutex.lockUncancelable(self.io);
                 defer self.pending_receive_mutex.unlock(self.io);
-                try self.pending_received.ensureUnusedCapacity(
-                    self.allocator,
-                    segment_count - 1,
-                );
+                try self.ensurePendingReceivedCapacity(segment_count - 1);
                 var index: usize = 1;
                 while (index < segment_count) : (index += 1) {
                     const start = index * segment_size;
@@ -641,11 +638,50 @@ pub const Endpoint = struct {
 
         const pending = self.pending_received.items[self.pending_receive_index];
         self.pending_receive_index += 1;
-        if (self.pending_receive_index == self.pending_received.items.len) {
-            self.pending_received.clearRetainingCapacity();
-            self.pending_receive_index = 0;
-        }
+        self.compactPendingReceivedIfSparse();
         return pending;
+    }
+
+    fn pendingReceivedCount(self: *const Endpoint) usize {
+        return self.pending_received.items.len - self.pending_receive_index;
+    }
+
+    fn ensurePendingReceivedCapacity(
+        self: *Endpoint,
+        additional_count: usize,
+    ) std.mem.Allocator.Error!void {
+        if (self.pending_receive_index != 0 and
+            self.pending_received.items.len + additional_count >
+                self.pending_received.capacity)
+        {
+            self.compactPendingReceived();
+        }
+        try self.pending_received.ensureUnusedCapacity(
+            self.allocator,
+            additional_count,
+        );
+    }
+
+    fn compactPendingReceivedIfSparse(self: *Endpoint) void {
+        if (self.pending_receive_index == 0) return;
+        if (self.pending_receive_index == self.pending_received.items.len or
+            self.pending_receive_index >= self.pending_received.items.len / 2)
+        {
+            self.compactPendingReceived();
+        }
+    }
+
+    fn compactPendingReceived(self: *Endpoint) void {
+        if (self.pending_receive_index == 0) return;
+        const remaining = self.pendingReceivedCount();
+        if (remaining != 0) {
+            @memmove(
+                self.pending_received.items[0..remaining],
+                self.pending_received.items[self.pending_receive_index..],
+            );
+        }
+        self.pending_received.items.len = remaining;
+        self.pending_receive_index = 0;
     }
 
     fn enableEcnReceive(self: *Endpoint) void {
@@ -1751,6 +1787,47 @@ const RejectFirstGsoSend = struct {
         );
     }
 };
+
+test "QUIC endpoint pending receive queue reuses consumed slots" {
+    const allocator = std.testing.allocator;
+    var endpoint = Endpoint{
+        .io = undefined,
+        .allocator = allocator,
+        .socket = undefined,
+    };
+    defer endpoint.pending_received.deinit(allocator);
+
+    try endpoint.pending_received.ensureTotalCapacityPrecise(allocator, 4);
+    for (0..4) |index| {
+        const byte = try allocator.alloc(u8, 1);
+        byte[0] = @intCast(index);
+        endpoint.pending_received.appendAssumeCapacity(.{
+            .from = .{ .ip4 = .loopback(443) },
+            .bytes = byte,
+        });
+    }
+
+    endpoint.pending_received.items[0].deinit(allocator);
+    endpoint.pending_receive_index = 1;
+    try std.testing.expectEqual(@as(usize, 3), endpoint.pendingReceivedCount());
+
+    try endpoint.ensurePendingReceivedCapacity(1);
+    try std.testing.expectEqual(@as(usize, 0), endpoint.pending_receive_index);
+    try std.testing.expectEqual(@as(usize, 3), endpoint.pending_received.items.len);
+    try std.testing.expectEqual(@as(usize, 4), endpoint.pending_received.capacity);
+    try std.testing.expectEqual(@as(u8, 1), endpoint.pending_received.items[0].bytes[0]);
+
+    const replacement = try allocator.alloc(u8, 1);
+    replacement[0] = 9;
+    endpoint.pending_received.appendAssumeCapacity(.{
+        .from = .{ .ip4 = .loopback(443) },
+        .bytes = replacement,
+    });
+    try std.testing.expectEqual(@as(usize, 4), endpoint.pending_received.items.len);
+
+    for (endpoint.pending_received.items) |*pending| pending.deinit(allocator);
+    endpoint.pending_received.clearRetainingCapacity();
+}
 
 test "QUIC UDP endpoint disables rejected GSO and retries send-many" {
     if (!udpGsoSupported()) return error.SkipZigTest;
