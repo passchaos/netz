@@ -125,6 +125,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.origin_pool, "Pool"));
     try std.testing.expect(@hasDecl(netz.http3.origin_pool, "Config"));
     try std.testing.expect(@hasDecl(netz.http3.origin_pool, "Stats"));
+    try std.testing.expect(@hasDecl(netz.http3.origin_pool.Pool(usize), "pruneExpired"));
     try std.testing.expect(@hasDecl(netz.http3, "capsule"));
     try std.testing.expect(@hasDecl(netz.http3.capsule, "Iterator"));
     try std.testing.expect(@hasDecl(netz.http3.capsule, "writeInto"));

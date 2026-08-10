@@ -19,6 +19,7 @@ pub const Stats = struct {
     idle: usize,
     total_reused: u64,
     total_misses: u64,
+    total_dropped: u64,
 
     pub fn hitRate(self: Stats) f64 {
         const total = self.total_reused + self.total_misses;
@@ -36,6 +37,7 @@ pub fn Pool(comptime Handle: type) type {
         entries: std.ArrayList(Entry) = .empty,
         total_reused: u64 = 0,
         total_misses: u64 = 0,
+        total_dropped: u64 = 0,
 
         const Self = @This();
 
@@ -72,6 +74,7 @@ pub fn Pool(comptime Handle: type) type {
                 .idle = self.entries.items.len,
                 .total_reused = self.total_reused,
                 .total_misses = self.total_misses,
+                .total_dropped = self.total_dropped,
             };
         }
 
@@ -85,6 +88,21 @@ pub fn Pool(comptime Handle: type) type {
                 if (http3.sameOrigin(entry.key.origin(), origin)) count += 1;
             }
             return count;
+        }
+
+        pub fn pruneExpired(self: *Self, now_ms: u64) usize {
+            var removed: usize = 0;
+            var index: usize = 0;
+            while (index < self.entries.items.len) {
+                if (!self.expired(self.entries.items[index], now_ms)) {
+                    index += 1;
+                    continue;
+                }
+                var expired_entry = self.entries.orderedRemove(index);
+                self.destroyEntry(&expired_entry);
+                removed += 1;
+            }
+            return removed;
         }
 
         pub fn acquire(self: *Self, origin: http3.Origin, now_ms: u64) ?Handle {
@@ -147,6 +165,7 @@ pub fn Pool(comptime Handle: type) type {
         fn destroyEntry(self: *Self, entry: *Entry) void {
             entry.key.deinit();
             self.drop_fn(self.allocator, entry.handle);
+            self.total_dropped +|= 1;
         }
     };
 }
@@ -226,4 +245,24 @@ test "HTTP/3 origin pool enforces expiry and capacity" {
     // Expired b is removed while searching, then c is returned.
     try std.testing.expectEqual(@as(?usize, 4), pool.acquire(c, 20));
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+    try std.testing.expectEqual(@as(u64, 3), pool.stats().total_dropped);
+}
+
+test "HTTP/3 origin pool prunes expired idle handles explicitly" {
+    const allocator = std.testing.allocator;
+    const IntPool = Pool(usize);
+    var pool = IntPool.init(allocator, .{ .idle_timeout_ms = 10 }, dropInt);
+    defer pool.deinit();
+
+    try pool.release(1, try http3.requestOrigin("https", "a.example"), 0);
+    try pool.release(2, try http3.requestOrigin("https", "b.example"), 20);
+    try std.testing.expectEqual(@as(usize, 2), pool.idleCount());
+
+    try std.testing.expectEqual(@as(usize, 1), pool.pruneExpired(11));
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+    try std.testing.expectEqual(@as(u64, 1), pool.stats().total_dropped);
+    try std.testing.expectEqual(@as(?usize, 2), pool.acquire(
+        try http3.requestOrigin("https", "b.example"),
+        21,
+    ));
 }
