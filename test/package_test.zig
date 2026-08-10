@@ -330,6 +330,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "getRecvStreamStats"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "sent_packet_stats"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "received_packet_stats"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "recovery_queue_stats"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "takeQlogError"));
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DynamicTable"));

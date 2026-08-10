@@ -332,6 +332,7 @@ pub const ConnectionStats = struct {
     failed_path_validations: usize,
     sent_packet_stats: quic.packet_space.SentPacketStats,
     received_packet_stats: quic.packet_space.ReceivedPacketStats,
+    recovery_queue_stats: quic.recovery.QueueStats,
 
     pub fn lossRate(self: ConnectionStats) f64 {
         if (self.packets_sent == 0) return 0.0;
@@ -1435,6 +1436,7 @@ pub const Connection = struct {
             .failed_path_validations = self.failedPathValidationCount(),
             .sent_packet_stats = self.sent.stats(),
             .received_packet_stats = self.received.stats(),
+            .recovery_queue_stats = self.recovery.stats(),
         };
     }
 

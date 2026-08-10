@@ -679,6 +679,8 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expect(client_after_send.bytes_sent > 0);
     try std.testing.expectEqual(@as(u64, 1), client_after_send.outgoing_streams_created);
     try std.testing.expectEqual(@as(usize, 1), client_after_send.pending_recovery_count);
+    try std.testing.expectEqual(@as(usize, 1), client_after_send.recovery_queue_stats.pending_groups);
+    try std.testing.expectEqual(@as(usize, 1), client_after_send.recovery_queue_stats.packet_number_copies);
     try std.testing.expect(client_after_send.bytes_in_flight > 0);
     try std.testing.expectEqual(@as(usize, 1), client_after_send.sent_packet_stats.tracked_packets);
     try std.testing.expectEqual(@as(usize, 1), client_after_send.sent_packet_stats.ack_eliciting_packets);
@@ -732,6 +734,7 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expectEqual(@as(u64, 1), client_after_ack.packets_received);
     try std.testing.expectEqual(server_after_ack.bytes_sent, client_after_ack.bytes_received);
     try std.testing.expectEqual(@as(usize, 0), client_after_ack.pending_recovery_count);
+    try std.testing.expectEqual(@as(usize, 0), client_after_ack.recovery_queue_stats.pending_groups);
     try std.testing.expectEqual(@as(usize, 1), client_after_ack.sent_packet_stats.acknowledged_packets);
     try std.testing.expectEqual(@as(u64, 0), client_after_ack.packets_lost);
     try std.testing.expectEqual(@as(f64, 0.0), client_after_ack.lossRate());
