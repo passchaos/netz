@@ -1152,6 +1152,9 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
     try std.testing.expectEqual(@as(u64, 12_000), server.requestedMaxAckDelay());
     try std.testing.expectEqual(@as(u64, 5), server.ackReorderingThreshold());
 
+    try std.testing.expectError(error.InvalidFrame, client.sendAckFrequency(0, 12_000, 5));
+    try std.testing.expectEqual(@as(u64, 1), client.ack_frequency_send_next_sequence);
+
     const reverse_sequence = try server.sendAckFrequency(6, 34_000, 7);
     try std.testing.expectEqual(@as(u64, 0), reverse_sequence);
     var reverse_frequency = try client.receivePacket();

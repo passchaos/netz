@@ -1631,7 +1631,6 @@ pub const Connection = struct {
         if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
         try self.validateNextPacketNumber();
         const sequence_number = self.ack_frequency_send_next_sequence;
-        self.ack_frequency_send_next_sequence +|= 1;
         const frames = [_]quic.Frame{.{ .ack_frequency = .{
             .sequence_number = sequence_number,
             .ack_eliciting_threshold = ack_eliciting_threshold,
@@ -1639,6 +1638,12 @@ pub const Connection = struct {
             .reordering_threshold = reordering_threshold,
         } }};
         try self.send(&frames);
+        // ACK_FREQUENCY sequence numbers are part of the peer-visible state
+        // machine.  Only advance after the packet is successfully staged/sent;
+        // otherwise a transient validation or transport error would create a
+        // local gap and make the next retry appear newer than what actually
+        // reached the peer.
+        self.ack_frequency_send_next_sequence +|= 1;
         return sequence_number;
     }
 
