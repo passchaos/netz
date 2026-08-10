@@ -337,6 +337,26 @@ pub const ConnectionStats = struct {
     }
 };
 
+pub const SendStreamStats = struct {
+    bytes_sent: u64,
+    highest_sent_offset: u64,
+    send_limit: u64,
+    blocked: bool,
+    stopped: ?StopSendingInfo,
+    reset: ?StreamResetInfo,
+};
+
+pub const RecvStreamStats = struct {
+    bytes_received: u64,
+    bytes_read: u64,
+    highest_received_offset: u64,
+    available_bytes: usize,
+    receive_limit: u64,
+    final_size: ?u64,
+    reset: ?StreamResetInfo,
+    stop_sending_sent: ?StopSendingInfo,
+};
+
 const DatagramRecvQueue = struct {
     slots: std.ArrayList(?[]u8) = .empty,
     head: usize = 0,
@@ -1342,6 +1362,47 @@ pub const Connection = struct {
 
     pub fn getStats(self: Connection) ConnectionStats {
         return self.stats();
+    }
+
+    pub fn sendStreamStats(self: Connection, stream_id: u64) ?SendStreamStats {
+        for (self.stream_send_flows.items) |entry| {
+            if (entry.stream_id != stream_id) continue;
+            return .{
+                .bytes_sent = entry.flow.used,
+                .highest_sent_offset = entry.highest_sent_end,
+                .send_limit = entry.flow.limit,
+                .blocked = entry.flow.available() == 0,
+                .stopped = entry.stopped,
+                .reset = entry.reset_sent,
+            };
+        }
+        return null;
+    }
+
+    pub fn getSendStreamStats(self: Connection, stream_id: u64) ?SendStreamStats {
+        return self.sendStreamStats(stream_id);
+    }
+
+    pub fn recvStreamStats(self: Connection, stream_id: u64) ?RecvStreamStats {
+        for (self.stream_recv_flows.items) |entry| {
+            if (entry.stream_id != stream_id) continue;
+            return .{
+                .bytes_received = entry.recv_state.receivedByteCount(),
+                .bytes_read = std.math.cast(u64, entry.recv_state.read_offset) orelse
+                    std.math.maxInt(u64),
+                .highest_received_offset = entry.highest_received_end,
+                .available_bytes = entry.recv_state.available().len,
+                .receive_limit = entry.flow.limit,
+                .final_size = entry.final_size,
+                .reset = entry.reset,
+                .stop_sending_sent = entry.stop_sending_sent,
+            };
+        }
+        return null;
+    }
+
+    pub fn getRecvStreamStats(self: Connection, stream_id: u64) ?RecvStreamStats {
+        return self.recvStreamStats(stream_id);
     }
 
     pub fn keepAliveEnabled(self: Connection) bool {

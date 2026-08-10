@@ -680,6 +680,11 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expectEqual(@as(u64, 1), client_after_send.outgoing_streams_created);
     try std.testing.expectEqual(@as(usize, 1), client_after_send.pending_recovery_count);
     try std.testing.expect(client_after_send.bytes_in_flight > 0);
+    const send_stream_stats = client.getSendStreamStats(0).?;
+    try std.testing.expectEqual(@as(u64, 5), send_stream_stats.bytes_sent);
+    try std.testing.expectEqual(@as(u64, 5), send_stream_stats.highest_sent_offset);
+    try std.testing.expect(send_stream_stats.send_limit > 5);
+    try std.testing.expect(client.getSendStreamStats(4) == null);
 
     var received = try server.receivePacketAt(150_000_000);
     defer received.deinit(allocator);
@@ -688,6 +693,16 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expectEqual(client_after_send.bytes_sent, server_after_receive.bytes_received);
     try std.testing.expectEqual(@as(u64, 1), server_after_receive.incoming_streams_created);
     try std.testing.expectEqual(@as(u64, 0), server_after_receive.packets_lost);
+    var recv_stream_stats = server.getRecvStreamStats(0).?;
+    try std.testing.expectEqual(@as(u64, 5), recv_stream_stats.bytes_received);
+    try std.testing.expectEqual(@as(u64, 0), recv_stream_stats.bytes_read);
+    try std.testing.expectEqual(@as(u64, 5), recv_stream_stats.highest_received_offset);
+    try std.testing.expectEqual(@as(usize, 5), recv_stream_stats.available_bytes);
+    try std.testing.expect(server.getRecvStreamStats(4) == null);
+    try server.releaseReceivedCapacity(0, 5);
+    recv_stream_stats = server.getRecvStreamStats(0).?;
+    try std.testing.expectEqual(@as(u64, 5), recv_stream_stats.bytes_read);
+    try std.testing.expectEqual(@as(usize, 0), recv_stream_stats.available_bytes);
 
     try server.sendAck(0);
     const server_after_ack = server.stats();
