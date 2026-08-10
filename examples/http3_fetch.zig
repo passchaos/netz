@@ -13,14 +13,23 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next(); // executable name
     var uri_text: []const u8 = default_uri;
     var verify_server = false;
+    var discover = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--verify")) {
             verify_server = true;
+        } else if (std.mem.eql(u8, arg, "--discover")) {
+            discover = true;
         } else {
             uri_text = arg;
         }
     }
     const uri = try std.Uri.parse(uri_text);
+
+    if (discover) {
+        discoverAltSvc(allocator, io, uri_text, uri) catch |err| {
+            std.debug.print("Alt-Svc discovery skipped: {s}\n", .{@errorName(err)});
+        };
+    }
 
     // This is a protocol smoke tool, not a production WebPKI client: the QUIC
     // handshake path accepts the certificate chain unless callers provide a
@@ -104,5 +113,33 @@ fn fetchOnce(
             },
             .session = .{ .max_stream_buffer = 512 * 1024 },
         },
+    );
+}
+
+fn discoverAltSvc(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    uri_text: []const u8,
+    uri: std.Uri,
+) !void {
+    var endpoint = try netz.http3.runtime.uriEndpoint(allocator, uri);
+    defer endpoint.deinit();
+
+    var response = try netz.http1.runtime.Client.requestUri(allocator, io, uri_text, .{
+        .method = .HEAD,
+    }, .{
+        .max_head_bytes = 64 * 1024,
+        .max_body_bytes = 0,
+    });
+    defer response.deinit(allocator);
+
+    const alt = (try netz.http3.firstHttp3AltSvcHeader(response.response.headers)) orelse {
+        std.debug.print("Alt-Svc: no HTTP/3 endpoint advertised\n", .{});
+        return;
+    };
+    const target = try netz.http3.altSvcTarget(endpoint.tls_host, alt, endpoint.port);
+    std.debug.print(
+        "Alt-Svc: {s} authority={s} -> {s}:{d} ma={?d}\n",
+        .{ target.alpn, alt.authority, target.connect_host, target.port, target.max_age },
     );
 }
