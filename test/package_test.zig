@@ -544,6 +544,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendKeepAliveAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "nextTimerDeadline"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "serviceNextTimerAt"));
+    try std.testing.expect(@hasDecl(netz.quic, "endpoint_timers"));
+    try std.testing.expect(@hasDecl(netz.quic.endpoint_timers, "EndpointTimers"));
+    try std.testing.expect(@hasDecl(netz.quic.endpoint_timers.EndpointTimers, "armFromConnection"));
+    try std.testing.expect(@hasDecl(netz.quic.endpoint_timers.EndpointTimers, "earliestDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.endpoint_timers.EndpointTimers, "serviceConnection"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closing"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "draining"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkCloseExpired"));
