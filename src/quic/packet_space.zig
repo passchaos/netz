@@ -267,6 +267,14 @@ pub const SentPacket = struct {
     largest_acknowledged_sent: ?u64 = null,
 };
 
+test "QUIC sent packet metadata stays compact" {
+    // Work/quic-zig's historic ACK tracker stored per-stream frame arrays
+    // inline, making each sent-packet record cache-unfriendly.  netz stores
+    // stable recovery payloads separately; keep this metadata object small so
+    // packet-number scans remain L1-cache friendly.
+    try std.testing.expect(@sizeOf(SentPacket) <= 128);
+}
+
 pub const EcnCodepoint = enum {
     not_ect,
     ect0,
