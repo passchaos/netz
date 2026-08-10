@@ -2958,9 +2958,13 @@ fn cloneDecodedHeaders(
     limits: Limits,
     decoder: *http2.Hpack.Decoder,
 ) Error![]http2.Hpack.HeaderField {
-    const decoded = try decoder.decodeBlock(allocator, block);
-    defer http2.Hpack.freeDecodedFields(allocator, decoded);
-    if (decoded.len > limits.max_header_fields) return error.MessageTooLarge;
+    const scratch = try allocator.alloc(http2.Hpack.HeaderField, limits.max_header_fields);
+    defer allocator.free(scratch);
+    const decoded = decoder.decodeBlockInto(allocator, block, scratch) catch |err| switch (err) {
+        error.BufferTooShort => return error.MessageTooLarge,
+        else => |e| return e,
+    };
+    defer http2.Hpack.freeDecodedFieldStorages(allocator, decoded);
     try validateHeaderListSize(decoded, limits.max_header_list_size);
     const cloned = try allocator.alloc(http2.Hpack.HeaderField, decoded.len);
     var initialized: usize = 0;
