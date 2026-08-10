@@ -4356,6 +4356,13 @@ pub const Connection = struct {
                 existing.state = .draining;
                 existing.started_ms = close.now_ms;
                 existing.expires_ms = closeExpiryMillis(close.now_ms, close.pto_ms);
+                self.observeConnectionClosed(
+                    close.now_ms,
+                    close.application,
+                    close.error_code,
+                    close.reason_phrase,
+                    close.state,
+                );
             }
             return;
         }
@@ -4369,6 +4376,13 @@ pub const Connection = struct {
             .started_ms = close.now_ms,
             .expires_ms = expires_ms,
         };
+        self.observeConnectionClosed(
+            close.now_ms,
+            close.application,
+            close.error_code,
+            close.reason_phrase,
+            close.state,
+        );
     }
 
     fn enterStatelessResetDraining(self: *Connection, now_ms: ?u64, pto_ms: ?u64) Error!void {
@@ -4473,6 +4487,32 @@ pub const Connection = struct {
             observer.packetLost(event_time, packet.packet_number, trigger);
             packet.loss_reported = true;
         }
+    }
+
+    fn observeConnectionClosed(
+        self: *Connection,
+        now_ms: ?u64,
+        application: bool,
+        error_code: u64,
+        reason_phrase: []const u8,
+        state: CloseState,
+    ) void {
+        const observer = self.config.qlog_observer orelse return;
+        const event_time = self.qlogEventTime(if (now_ms) |ms|
+            millisToNanos(ms)
+        else
+            self.monotonicNowNs());
+        observer.connectionClosed(
+            event_time,
+            closeQlogTrigger(state, reason_phrase),
+            switch (state) {
+                .closing => .local,
+                .draining, .closed => .remote,
+            },
+            if (application) .application else .transport,
+            error_code,
+            reason_phrase,
+        );
     }
 
     fn monotonicNowNs(self: Connection) u64 {
@@ -4822,6 +4862,19 @@ fn nanosToMillisCeil(ns: u64) u64 {
 
 fn millisToNanos(ms: u64) u64 {
     return std.math.mul(u64, ms, 1_000_000) catch std.math.maxInt(u64);
+}
+
+fn closeQlogTrigger(state: CloseState, reason_phrase: []const u8) []const u8 {
+    if (state == .draining and
+        std.mem.eql(u8, reason_phrase, "stateless reset"))
+    {
+        return "stateless_reset";
+    }
+    return switch (state) {
+        .closing => "local_close",
+        .draining => "remote_close",
+        .closed => "closed",
+    };
 }
 
 fn considerTimerDeadline(next: *?TimerDeadline, candidate: TimerDeadline) void {

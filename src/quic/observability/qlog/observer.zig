@@ -108,6 +108,27 @@ pub const Observer = struct {
         };
     }
 
+    pub fn connectionClosed(
+        self: *Observer,
+        now_ns: u64,
+        trigger: []const u8,
+        owner: ?events.Owner,
+        error_space: events.ErrorSpace,
+        error_code: u64,
+        reason: []const u8,
+    ) void {
+        if (self.failure != null) return;
+        self.trace.writeEvent(now_ns, .{ .connection_closed = .{
+            .trigger = trigger,
+            .owner = owner,
+            .error_space = error_space,
+            .error_code = error_code,
+            .reason = reason,
+        } }) catch |err| {
+            self.failure = err;
+        };
+    }
+
     pub fn keyUpdated(
         self: *Observer,
         now_ns: u64,

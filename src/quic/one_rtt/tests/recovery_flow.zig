@@ -1295,6 +1295,7 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
     var ack = try client.receivePacketAt(3_000_000);
     defer ack.deinit(allocator);
     try client.initiateKeyUpdate();
+    try client.closeApplicationAt(42, "done", null, null);
 
     try std.testing.expect(client.takeQlogError() == null);
     try std.testing.expect(server.takeQlogError() == null);
@@ -1332,6 +1333,26 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
         u8,
         client_output.written(),
         "\"key_type\":\"client_1rtt_secret\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"name\":\"connectivity:connection_closed\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"trigger\":\"local_close\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"application_code\":42",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"reason\":\"done\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
