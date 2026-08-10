@@ -493,6 +493,37 @@ pub const SentPacketTracker = struct {
         ect1: u64 = 0,
     };
 
+    const AckedRange = struct {
+        start: u64,
+        end: u64,
+    };
+
+    const DecodedAckRanges = struct {
+        ranges: []AckedRange,
+        heap_allocated: bool,
+
+        fn deinit(self: DecodedAckRanges, allocator: std.mem.Allocator) void {
+            if (self.heap_allocated) allocator.free(self.ranges);
+        }
+    };
+
+    const AckPrecheck = struct {
+        total_span: u64 = 0,
+        sent_packets: u64 = 0,
+        newly_acked_ect: NewlyAckedEctCounts = .{},
+
+        fn observeSentPacket(self: *AckPrecheck, packet: SentPacket) void {
+            self.sent_packets += 1;
+            if (packet.acknowledged) return;
+            switch (packet.ecn) {
+                .not_ect => {},
+                .ect0 => self.newly_acked_ect.ect0 += 1,
+                .ect1 => self.newly_acked_ect.ect1 += 1,
+                .ce => {},
+            }
+        }
+    };
+
     pub const RttSample = struct {
         latest_rtt_ns: u64,
         ack_delay_ns: u64,
@@ -535,22 +566,17 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn applyAckDetailed(self: *SentPacketTracker, ack: quic.AckFrame) Error!AckResult {
-        try self.validateAckCoversSentPackets(ack);
-        const ecn_validation = try self.validateAckEcnFrameDetailed(ack);
+        var stack_ranges: [32]AckedRange = undefined;
+        const decoded = try decodeAckRanges(self.allocator, ack, &stack_ranges);
+        defer decoded.deinit(self.allocator);
+        const sorted = self.packetsSortedAscending();
+        const precheck = try self.precheckAckRanges(decoded.ranges, sorted);
+        const ecn_validation = try self.validateAckEcnFrameDetailedForPrecheck(
+            ack,
+            precheck,
+        );
 
-        var acked: AckResult = .{};
-        var start = ack.largest_acknowledged - ack.first_ack_range;
-        var end = ack.largest_acknowledged;
-        acked.add(self.markRange(start, end));
-
-        for (ack.ranges) |range| {
-            const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidAckFrame;
-            if (start < skipped) return error.InvalidAckFrame;
-            end = start - skipped;
-            if (end < range.ack_range_length) return error.InvalidAckFrame;
-            start = end - range.ack_range_length;
-            acked.add(self.markRange(start, end));
-        }
+        var acked = self.markRanges(decoded.ranges, sorted);
         if (ack.ecn_counts) |ecn_counts| {
             if (ecn_validation.update_counts) {
                 self.latest_ecn_counts = ecn_counts;
@@ -580,20 +606,17 @@ pub const SentPacketTracker = struct {
     /// mirrors mature stacks such as quicz/tquic and keeps malicious ACK ranges
     /// from advancing local state.
     pub fn validateAckCoversSentPackets(self: SentPacketTracker, ack: quic.AckFrame) Error!void {
-        if (ack.largest_acknowledged < ack.first_ack_range) return error.InvalidAckFrame;
-
-        var start = ack.largest_acknowledged - ack.first_ack_range;
-        var end = ack.largest_acknowledged;
-        try self.validateSentRange(start, end);
-
-        for (ack.ranges) |range| {
-            const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidAckFrame;
-            if (start < skipped) return error.InvalidAckFrame;
-            end = start - skipped;
-            if (end < range.ack_range_length) return error.InvalidAckFrame;
-            start = end - range.ack_range_length;
-            try self.validateSentRange(start, end);
-        }
+        var stack_ranges: [32]AckedRange = undefined;
+        const decoded = try decodeAckRanges(
+            self.allocator,
+            ack,
+            &stack_ranges,
+        );
+        defer decoded.deinit(self.allocator);
+        _ = try self.precheckAckRanges(
+            decoded.ranges,
+            self.packetsSortedAscending(),
+        );
     }
 
     pub fn validateAckEcnCounters(self: SentPacketTracker, counts: quic.EcnCounts) Error!void {
@@ -623,6 +646,25 @@ pub const SentPacketTracker = struct {
     }
 
     fn validateAckEcnFrameDetailed(self: SentPacketTracker, ack: quic.AckFrame) Error!EcnAckValidation {
+        var stack_ranges: [32]AckedRange = undefined;
+        const decoded = try decodeAckRanges(
+            self.allocator,
+            ack,
+            &stack_ranges,
+        );
+        defer decoded.deinit(self.allocator);
+        const precheck = try self.precheckAckRanges(
+            decoded.ranges,
+            self.packetsSortedAscending(),
+        );
+        return self.validateAckEcnFrameDetailedForPrecheck(ack, precheck);
+    }
+
+    fn validateAckEcnFrameDetailedForPrecheck(
+        self: SentPacketTracker,
+        ack: quic.AckFrame,
+        precheck: AckPrecheck,
+    ) Error!EcnAckValidation {
         const counts = ack.ecn_counts orelse return .{};
         if (self.ecn_validation_failed) return error.InvalidAckFrame;
 
@@ -635,7 +677,7 @@ pub const SentPacketTracker = struct {
         }
 
         try self.validateAckEcnCounters(counts);
-        const newly_acked = try self.newlyAckedEctCounts(ack);
+        const newly_acked = precheck.newly_acked_ect;
 
         const previous = self.latest_ecn_counts;
         const ect0_delta = counts.ect0_count - previous.ect0_count;
@@ -787,51 +829,177 @@ pub const SentPacketTracker = struct {
         return best;
     }
 
-    fn markRange(self: *SentPacketTracker, start: u64, end: u64) AckResult {
+    fn decodeAckRanges(
+        allocator: std.mem.Allocator,
+        ack: quic.AckFrame,
+        stack_ranges: *[32]AckedRange,
+    ) Error!DecodedAckRanges {
+        if (ack.largest_acknowledged < ack.first_ack_range) {
+            return error.InvalidAckFrame;
+        }
+        const range_count = std.math.add(usize, ack.ranges.len, 1) catch
+            return error.InvalidAckFrame;
+        const ranges = if (range_count <= stack_ranges.len)
+            stack_ranges[0..range_count]
+        else
+            try allocator.alloc(AckedRange, range_count);
+        errdefer if (range_count > stack_ranges.len) allocator.free(ranges);
+
+        var start = ack.largest_acknowledged - ack.first_ack_range;
+        var end = ack.largest_acknowledged;
+        ranges[0] = .{ .start = start, .end = end };
+        for (ack.ranges, 1..) |range, range_index| {
+            const skipped = std.math.add(u64, range.gap, 2) catch
+                return error.InvalidAckFrame;
+            if (start < skipped) return error.InvalidAckFrame;
+            end = start - skipped;
+            if (end < range.ack_range_length) return error.InvalidAckFrame;
+            start = end - range.ack_range_length;
+            ranges[range_index] = .{ .start = start, .end = end };
+        }
+        return .{
+            .ranges = ranges,
+            .heap_allocated = range_count > stack_ranges.len,
+        };
+    }
+
+    fn precheckAckRanges(
+        self: SentPacketTracker,
+        ranges: []const AckedRange,
+        sorted_packets: bool,
+    ) Error!AckPrecheck {
+        var precheck: AckPrecheck = .{};
+        for (ranges) |range| {
+            precheck.total_span = std.math.add(
+                u64,
+                precheck.total_span,
+                range.end - range.start + 1,
+            ) catch return error.InvalidAckFrame;
+        }
+        if (precheck.total_span > self.packets.items.len) {
+            return error.InvalidAckFrame;
+        }
+
+        if (sorted_packets) {
+            var packet_index: usize = 0;
+            var range_index = ranges.len;
+            while (range_index > 0) {
+                range_index -= 1;
+                const range = ranges[range_index];
+                while (packet_index < self.packets.items.len and
+                    self.packets.items[packet_index].packet_number < range.start)
+                {
+                    packet_index += 1;
+                }
+                while (packet_index < self.packets.items.len and
+                    self.packets.items[packet_index].packet_number <= range.end)
+                {
+                    precheck.observeSentPacket(self.packets.items[packet_index]);
+                    packet_index += 1;
+                }
+            }
+        } else {
+            for (self.packets.items) |packet| {
+                if (!ackRangesContain(ranges, packet.packet_number)) continue;
+                precheck.observeSentPacket(packet);
+            }
+        }
+
+        if (precheck.sent_packets != precheck.total_span) {
+            return error.InvalidAckFrame;
+        }
+        return precheck;
+    }
+
+    fn markRanges(
+        self: *SentPacketTracker,
+        ranges: []const AckedRange,
+        sorted_packets: bool,
+    ) AckResult {
         var result: AckResult = .{};
+        if (sorted_packets) {
+            var packet_index: usize = 0;
+            var range_index = ranges.len;
+            while (range_index > 0) {
+                range_index -= 1;
+                const range = ranges[range_index];
+                while (packet_index < self.packets.items.len and
+                    self.packets.items[packet_index].packet_number < range.start)
+                {
+                    packet_index += 1;
+                }
+                while (packet_index < self.packets.items.len and
+                    self.packets.items[packet_index].packet_number <= range.end)
+                {
+                    self.markPacketAcknowledged(
+                        &self.packets.items[packet_index],
+                        &result,
+                    );
+                    packet_index += 1;
+                }
+            }
+            return result;
+        }
+
         for (self.packets.items) |*packet| {
-            if (packet.packet_number >= start and packet.packet_number <= end) {
-                self.observeAcknowledged(packet.packet_number);
-            }
-            if (!packet.acknowledged and packet.packet_number >= start and packet.packet_number <= end) {
-                packet.acknowledged = true;
-                result.packets += 1;
-                result.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
-                if (packet.in_flight and !packet.lost) result.bytes += packet.bytes;
-                if (packet.ack_eliciting) {
-                    result.ack_eliciting_packets += 1;
-                }
-                if (packet.largest_acknowledged_sent) |largest_acknowledged| {
-                    if (result.largest_acknowledged_sent == null or largest_acknowledged > result.largest_acknowledged_sent.?) {
-                        result.largest_acknowledged_sent = largest_acknowledged;
-                    }
-                }
-                switch (packet.ecn) {
-                    .not_ect => {},
-                    .ect0 => result.ect0_packets += 1,
-                    .ect1 => result.ect1_packets += 1,
-                    .ce => {},
-                }
-            }
+            if (!ackRangesContain(ranges, packet.packet_number)) continue;
+            self.markPacketAcknowledged(packet, &result);
         }
         return result;
     }
 
-    fn validateSentRange(self: SentPacketTracker, start: u64, end: u64) Error!void {
-        if (start > end) return error.InvalidAckFrame;
-        const span = std.math.add(u64, end - start, 1) catch return error.InvalidAckFrame;
-        if (span > self.packets.items.len) return error.InvalidAckFrame;
-
-        var found: u64 = 0;
-        for (self.packets.items) |packet| {
-            if (packet.packet_number < start or packet.packet_number > end) continue;
-            found += 1;
+    fn markPacketAcknowledged(
+        self: *SentPacketTracker,
+        packet: *SentPacket,
+        result: *AckResult,
+    ) void {
+        self.observeAcknowledged(packet.packet_number);
+        if (packet.acknowledged) return;
+        packet.acknowledged = true;
+        result.packets += 1;
+        result.observe(
+            packet.packet_number,
+            packet.sent_time_ns,
+            packet.pmtu_probe_size,
+        );
+        if (packet.in_flight and !packet.lost) result.bytes += packet.bytes;
+        if (packet.ack_eliciting) {
+            result.ack_eliciting_packets += 1;
         }
-        if (found != span) return error.InvalidAckFrame;
+        if (packet.largest_acknowledged_sent) |largest_acknowledged| {
+            if (result.largest_acknowledged_sent == null or
+                largest_acknowledged > result.largest_acknowledged_sent.?)
+            {
+                result.largest_acknowledged_sent = largest_acknowledged;
+            }
+        }
+        switch (packet.ecn) {
+            .not_ect => {},
+            .ect0 => result.ect0_packets += 1,
+            .ect1 => result.ect1_packets += 1,
+            .ce => {},
+        }
     }
 
-    fn hasSentPacketNumber(self: SentPacketTracker, packet_number: u64) bool {
-        return self.findSentPacket(packet_number) != null;
+    fn ackRangesContain(ranges: []const AckedRange, packet_number: u64) bool {
+        for (ranges) |range| {
+            if (packet_number >= range.start and
+                packet_number <= range.end)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn packetsSortedAscending(self: SentPacketTracker) bool {
+        if (self.packets.items.len < 2) return true;
+        var previous = self.packets.items[0].packet_number;
+        for (self.packets.items[1..]) |packet| {
+            if (packet.packet_number <= previous) return false;
+            previous = packet.packet_number;
+        }
+        return true;
     }
 
     fn findSentPacket(self: SentPacketTracker, packet_number: u64) ?SentPacket {
@@ -869,42 +1037,9 @@ pub const SentPacketTracker = struct {
         return false;
     }
 
-    fn newlyAckedEctCounts(self: SentPacketTracker, ack: quic.AckFrame) Error!NewlyAckedEctCounts {
-        if (ack.largest_acknowledged < ack.first_ack_range) return error.InvalidAckFrame;
-
-        var counts: NewlyAckedEctCounts = .{};
-        var start = ack.largest_acknowledged - ack.first_ack_range;
-        var end = ack.largest_acknowledged;
-        self.addNewlyAckedEctInRange(start, end, &counts);
-
-        for (ack.ranges) |range| {
-            const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidAckFrame;
-            if (start < skipped) return error.InvalidAckFrame;
-            end = start - skipped;
-            if (end < range.ack_range_length) return error.InvalidAckFrame;
-            start = end - range.ack_range_length;
-            self.addNewlyAckedEctInRange(start, end, &counts);
-        }
-
-        return counts;
-    }
-
     fn ackDoesNotAdvanceEcnLargest(self: SentPacketTracker, largest_acknowledged: u64) bool {
         if (self.ecn_largest_acknowledged) |previous| return largest_acknowledged <= previous;
         return false;
-    }
-
-    fn addNewlyAckedEctInRange(self: SentPacketTracker, start: u64, end: u64, counts: *NewlyAckedEctCounts) void {
-        for (self.packets.items) |packet| {
-            if (packet.packet_number < start or packet.packet_number > end) continue;
-            if (packet.acknowledged) continue;
-            switch (packet.ecn) {
-                .not_ect => {},
-                .ect0 => counts.ect0 += 1,
-                .ect1 => counts.ect1 += 1,
-                .ce => {},
-            }
-        }
     }
 
     fn observeAcknowledged(self: *SentPacketTracker, packet_number: u64) void {
@@ -1074,6 +1209,68 @@ test "QUIC sent packet tracker applies ACK ranges" {
     try std.testing.expectEqual(@as(usize, 6), after.ack_eliciting_in_flight_packets);
     try std.testing.expectEqual(@as(usize, 6 * 1200), after.bytes_in_flight);
     try std.testing.expectEqual(@as(usize, 0), after.lost_packets);
+}
+
+test "QUIC sent packet tracker applies many ACK ranges in one decoded set" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    for (0..81) |pn| {
+        try sent.sentWithEcn(
+            @intCast(pn),
+            true,
+            100,
+            if (pn % 2 == 0) .ect0 else .not_ect,
+        );
+    }
+    const ranges = [_]quic.AckRange{
+        .{ .gap = 0, .ack_range_length = 0 },
+    } ** 40;
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 80,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+        .ecn_counts = .{
+            .ect0_count = 41,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    };
+
+    const result = try sent.applyAckDetailed(ack);
+    try std.testing.expectEqual(@as(usize, 41), result.packets);
+    try std.testing.expectEqual(@as(usize, 41), result.ack_eliciting_packets);
+    try std.testing.expectEqual(@as(usize, 41 * 100), result.bytes);
+    try std.testing.expectEqual(@as(usize, 41), result.ect0_packets);
+    try std.testing.expectEqual(@as(u64, 41), sent.latest_ecn_counts.ect0_count);
+    try std.testing.expectEqual(@as(?u64, 80), sent.largestAcknowledged());
+    for (sent.packets.items, 0..) |packet, index| {
+        try std.testing.expectEqual(index % 2 == 0, packet.acknowledged);
+    }
+}
+
+test "QUIC sent packet tracker falls back for unsorted packet metadata" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sent(2, true, 300);
+    try sent.sent(0, true, 100);
+    try sent.sent(1, true, 200);
+
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 2,
+        .ack_delay = 0,
+        .first_ack_range = 2,
+    };
+    const result = try sent.applyAckDetailed(ack);
+    try std.testing.expectEqual(@as(usize, 3), result.packets);
+    try std.testing.expectEqual(@as(usize, 600), result.bytes);
+    for (sent.packets.items) |packet| {
+        try std.testing.expect(packet.acknowledged);
+    }
 }
 
 test "QUIC sent packet tracker rejects ACK for never-sent packets" {
