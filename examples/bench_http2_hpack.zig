@@ -2,6 +2,7 @@ const std = @import("std");
 const netz = @import("netz");
 
 const iterations: usize = 100_000;
+const churn_iterations: usize = 50_000;
 
 const headers = [_]netz.http2.Hpack.HeaderField{
     .{ .name = ":method", .value = "GET" },
@@ -49,6 +50,7 @@ pub fn main() !void {
     }
     const stateless_ns = nowNs(io) -| stateless_start;
     const speedup_x100 = ratioTimes100(stateless_ns, stateful_ns);
+    const churn_ns = try measureDynamicTableChurn(allocator, io);
 
     std.debug.print(
         \\HTTP/2 HPACK benchmark
@@ -56,6 +58,7 @@ pub fn main() !void {
         \\  stateful total bytes: {d}, ns/op: {d}
         \\  stateless total bytes: {d}, ns/op: {d}
         \\  stateful speedup: {d}.{d:0>2}x
+        \\  dynamic table churn iterations: {d}, ns/insert: {d}
         \\
     , .{
         iterations,
@@ -65,7 +68,33 @@ pub fn main() !void {
         stateless_ns / iterations,
         speedup_x100 / 100,
         speedup_x100 % 100,
+        churn_iterations,
+        churn_ns / churn_iterations,
     });
+}
+
+fn measureDynamicTableChurn(allocator: std.mem.Allocator, io: std.Io) !u64 {
+    var table = netz.http2.Hpack.DynamicTable{};
+    defer table.deinit(allocator);
+    table.setLimit(allocator, 4096);
+
+    var names: [churn_iterations][24]u8 = undefined;
+    var values: [churn_iterations][24]u8 = undefined;
+    const started = nowNs(io);
+    for (0..churn_iterations) |index| {
+        const name = try std.fmt.bufPrint(
+            &names[index],
+            "x-hpack-churn-{d:0>5}",
+            .{index},
+        );
+        const value = try std.fmt.bufPrint(
+            &values[index],
+            "value-{d:0>8}",
+            .{index},
+        );
+        try table.add(allocator, name, value);
+    }
+    return nowNs(io) -| started;
 }
 
 fn ratioTimes100(numerator: u64, denominator: u64) u64 {

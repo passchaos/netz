@@ -838,6 +838,7 @@ pub const Hpack = struct {
         entries: std.ArrayList(HeaderField) = .empty,
         size_limit: usize = default_dynamic_table_size,
         used: usize = 0,
+        head: usize = 0,
 
         pub fn deinit(self: *DynamicTable, allocator: std.mem.Allocator) void {
             self.clear(allocator);
@@ -846,12 +847,13 @@ pub const Hpack = struct {
         }
 
         pub fn clear(self: *DynamicTable, allocator: std.mem.Allocator) void {
-            for (self.entries.items) |item| {
+            for (self.entries.items[self.head..]) |item| {
                 allocator.free(item.name);
                 allocator.free(item.value);
             }
             self.entries.clearRetainingCapacity();
             self.used = 0;
+            self.head = 0;
         }
 
         pub fn setLimit(self: *DynamicTable, allocator: std.mem.Allocator, new_limit: usize) void {
@@ -874,44 +876,64 @@ pub const Hpack = struct {
             const value_copy = try allocator.dupe(u8, value);
             errdefer allocator.free(value_copy);
 
-            try self.entries.append(allocator, undefined);
-            var index = self.entries.items.len - 1;
-            while (index > 0) : (index -= 1) {
-                self.entries.items[index] = self.entries.items[index - 1];
-            }
-            self.entries.items[0] = .{ .name = name_copy, .value = value_copy };
+            self.compactIfNeeded();
+            try self.entries.append(allocator, .{ .name = name_copy, .value = value_copy });
             self.used += size;
             self.evictToLimit(allocator);
         }
 
         fn get(self: DynamicTable, dynamic_index: usize) ?HeaderField {
-            if (dynamic_index >= self.entries.items.len) return null;
-            return self.entries.items[dynamic_index];
+            const count = self.entryCount();
+            if (dynamic_index >= count) return null;
+            return self.entries.items[self.entries.items.len - 1 - dynamic_index];
         }
 
         fn findIndex(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
-            for (self.entries.items, 0..) |item, i| {
+            var item_index = self.entries.items.len;
+            var dynamic_index: usize = 0;
+            while (item_index > self.head) : (dynamic_index += 1) {
+                item_index -= 1;
+                const item = self.entries.items[item_index];
                 if (std.mem.eql(u8, item.name, name) and std.mem.eql(u8, item.value, value)) {
-                    return @intCast(static_table.len + i + 1);
+                    return @intCast(static_table.len + dynamic_index + 1);
                 }
             }
             return null;
         }
 
         fn findNameIndex(self: DynamicTable, name: []const u8) ?u64 {
-            for (self.entries.items, 0..) |item, i| {
-                if (std.mem.eql(u8, item.name, name)) return @intCast(static_table.len + i + 1);
+            var item_index = self.entries.items.len;
+            var dynamic_index: usize = 0;
+            while (item_index > self.head) : (dynamic_index += 1) {
+                item_index -= 1;
+                const item = self.entries.items[item_index];
+                if (std.mem.eql(u8, item.name, name)) return @intCast(static_table.len + dynamic_index + 1);
             }
             return null;
         }
 
         fn evictToLimit(self: *DynamicTable, allocator: std.mem.Allocator) void {
-            while (self.used > self.size_limit and self.entries.items.len != 0) {
-                const removed = self.entries.orderedRemove(self.entries.items.len - 1);
+            while (self.used > self.size_limit and self.entryCount() != 0) {
+                const removed = &self.entries.items[self.head];
                 self.used -= entrySize(removed.name, removed.value);
                 allocator.free(removed.name);
                 allocator.free(removed.value);
+                self.head += 1;
             }
+            self.compactIfNeeded();
+        }
+
+        fn entryCount(self: DynamicTable) usize {
+            return self.entries.items.len - self.head;
+        }
+
+        fn compactIfNeeded(self: *DynamicTable) void {
+            if (self.head == 0) return;
+            if (self.head < self.entries.items.len / 2 and self.entryCount() != 0) return;
+            const remaining = self.entryCount();
+            @memmove(self.entries.items[0..remaining], self.entries.items[self.head..]);
+            self.entries.items.len = remaining;
+            self.head = 0;
         }
     };
 
@@ -1869,6 +1891,24 @@ test "HTTP/2 HPACK static lookup index preserves one-indexed table order" {
     try std.testing.expectEqual(@as(?u64, 31), Hpack.findStaticNameIndex("content-type"));
     try std.testing.expect(Hpack.findStaticIndex(":status", "418") == null);
     try std.testing.expect(Hpack.findStaticNameIndex("x-not-static") == null);
+}
+
+test "HTTP/2 HPACK dynamic table keeps newest-index order without shifts" {
+    const allocator = std.testing.allocator;
+    var table = Hpack.DynamicTable{};
+    defer table.deinit(allocator);
+    table.setLimit(allocator, 80);
+
+    try table.add(allocator, "x-a", "1");
+    try table.add(allocator, "x-b", "2");
+    try table.add(allocator, "x-c", "3");
+
+    try std.testing.expectEqual(@as(usize, 2), table.entries.items.len);
+    try std.testing.expectEqualStrings("x-c", table.get(0).?.name);
+    try std.testing.expectEqualStrings("x-b", table.get(1).?.name);
+    try std.testing.expectEqual(@as(?u64, Hpack.static_table.len + 1), table.findIndex("x-c", "3"));
+    try std.testing.expectEqual(@as(?u64, Hpack.static_table.len + 2), table.findNameIndex("x-b"));
+    try std.testing.expect(table.findNameIndex("x-a") == null);
 }
 
 test "HTTP/2 HPACK never-indexes sensitive fields automatically" {
