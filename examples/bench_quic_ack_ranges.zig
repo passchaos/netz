@@ -70,10 +70,10 @@ fn measureAllocating(
     const started = nowNs(io);
     for (0..iterations) |_| {
         const ack = try received.ackFrame(allocator, 0);
-        defer allocator.free(ack.ranges);
         checksum +%= ack.largest_acknowledged;
         checksum +%= ack.first_ack_range;
         checksum +%= ack.ranges.len;
+        allocator.free(ack.ranges);
     }
     return .{ nowNs(io) -| started, checksum };
 }
