@@ -506,6 +506,7 @@ pub const Connection = struct {
     fixed_bit_generator: fixed_bit.Generator = .{},
     last_activity_ms: ?u64 = null,
     last_peer_activity_ms: ?u64 = null,
+    sent_ack_eliciting_since_peer_activity: bool = false,
     idle_timed_out: bool = false,
     keep_alive_ping_sent: bool = false,
     last_persistent_congestion_packet_number: ?u64 = null,
@@ -1118,6 +1119,7 @@ pub const Connection = struct {
                 packet.packet_number,
                 packet.packet_len,
                 now_ns,
+                packet.ack_eliciting,
             );
             sent_payload_len += packet.payload_len;
             sent_stream_bytes += packet.stream_bytes;
@@ -1862,6 +1864,7 @@ pub const Connection = struct {
                     prepared.packet_number_len,
                     ecn,
                     sent_time_ns,
+                    prepared.is_ack_eliciting,
                     prepared.is_in_flight,
                 );
                 self.handshake_status.onHandshakeDoneTracked(
@@ -1881,6 +1884,7 @@ pub const Connection = struct {
             prepared.packet_number_len,
             ecn,
             sent_time_ns,
+            prepared.is_ack_eliciting,
             prepared.is_in_flight,
         );
         tracked_recovery = false;
@@ -1953,7 +1957,15 @@ pub const Connection = struct {
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
         try self.sent.sentAtWithPmtu(packet_number, true, payload.items.len, .not_ect, sent_time_ns, probe_size);
         errdefer _ = self.sent.forget(packet_number);
-        try self.sendPayloadPacketWithPacketNumberLenAt(packet_number, payload.items, packet_number_len, .not_ect, sent_time_ns, true);
+        try self.sendPayloadPacketWithPacketNumberLenAt(
+            packet_number,
+            payload.items,
+            packet_number_len,
+            .not_ect,
+            sent_time_ns,
+            true,
+            true,
+        );
         self.next_packet_number += 1;
         self.pmtud.onProbeSent(probe_size);
         return probe_size;
@@ -2008,6 +2020,7 @@ pub const Connection = struct {
             quic.protection.packetNumberLenForPayload(packet_number, self.sent.largestAcknowledged(), payload.len),
             .not_ect,
             sent_time_ns,
+            true,
             pace_packet,
         );
     }
@@ -2019,6 +2032,7 @@ pub const Connection = struct {
         packet_number_len: u8,
         ecn: quic.packet_space.EcnCodepoint,
         sent_time_ns: ?u64,
+        ack_eliciting: bool,
         pace_packet: bool,
     ) Error!void {
         try self.prepareAeadForEncryption(packet_number, sent_time_ns);
@@ -2056,7 +2070,7 @@ pub const Connection = struct {
             }
         }
         try self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn);
-        self.noteOneRttPacketSent(packet_number, packet.len, now_ns);
+        self.noteOneRttPacketSent(packet_number, packet.len, now_ns, ack_eliciting);
         if (pace_packet) {
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -2431,6 +2445,7 @@ pub const Connection = struct {
                 probe.packet_number,
                 probe.packet_len,
                 now_ns,
+                true,
             );
             sent_payload_len += probe.candidate.payload.len;
             self.pacer.onPacketSentAt(
@@ -2937,7 +2952,14 @@ pub const Connection = struct {
         if (self.idle_timed_out) return;
         self.last_activity_ms = now_ms;
         self.last_peer_activity_ms = now_ms;
+        self.sent_ack_eliciting_since_peer_activity = false;
         self.keep_alive_ping_sent = false;
+    }
+
+    fn markAckElicitingActivity(self: *Connection, now_ms: u64) void {
+        if (self.idle_timed_out or self.sent_ack_eliciting_since_peer_activity) return;
+        self.last_activity_ms = now_ms;
+        self.sent_ack_eliciting_since_peer_activity = true;
     }
 
     pub fn idleTimeoutDeadlineMillis(self: Connection) ?u64 {
@@ -4305,12 +4327,13 @@ pub const Connection = struct {
         packet_number: u64,
         packet_len: usize,
         now_ns: u64,
+        ack_eliciting: bool,
     ) void {
         self.packets_sent_count +|= 1;
         const packet_len_u64 = std.math.cast(u64, packet_len) orelse
             std.math.maxInt(u64);
         self.bytes_sent_count +|= packet_len_u64;
-        self.markActivity(nanosToMillisFloor(now_ns));
+        if (ack_eliciting) self.markAckElicitingActivity(nanosToMillisFloor(now_ns));
         if (self.lowest_one_rtt_packet_number == null or
             packet_number < self.lowest_one_rtt_packet_number.?)
         {

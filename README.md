@@ -220,7 +220,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   application-order-preserving HANDSHAKE_DONE scheduling, client confirmation
   from either HANDSHAKE_DONE or a validated 1-RTT ACK, ACK delivery tracking,
   and PTO retransmission with server-only role validation for both frames,
-  transport-parameter-derived idle timeout deadline tracking,
+  transport-parameter-derived idle timeout deadline tracking with RFC-style
+  ack-eliciting send restart semantics,
   handshake-confirmed keep-alive PING scheduling with idle-timeout caps,
   PTO-flooring, one-shot outstanding probes, and peer-activity reset, plus
   a single next-timer selector across loss/PTO/path-validation/keep-alive/idle/close/key-discard

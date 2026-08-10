@@ -1548,6 +1548,46 @@ test "QUIC 1-RTT connection models idle timeout deadlines" {
     try std.testing.expectError(error.ConnectionClosed, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
 }
 
+test "QUIC 1-RTT idle timeout restarts only on first ack-eliciting send" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x74} ** quic.protection.secret_len);
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .local_max_idle_timeout_ms = 100,
+        .peer_max_idle_timeout_ms = 250,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    connection.markPeerActivity(0);
+    try std.testing.expectEqual(@as(?u64, 100), connection.idleTimeoutDeadlineMillis());
+
+    try connection.sendAt(&.{.{ .padding = .{ .len = 1 } }}, 10_000_000);
+    try std.testing.expectEqual(@as(?u64, 100), connection.idleTimeoutDeadlineMillis());
+
+    try connection.sendAt(&.{.{ .ping = {} }}, 20_000_000);
+    try std.testing.expectEqual(@as(?u64, 120), connection.idleTimeoutDeadlineMillis());
+
+    try connection.sendAt(&.{.{ .ping = {} }}, 30_000_000);
+    try std.testing.expectEqual(@as(?u64, 120), connection.idleTimeoutDeadlineMillis());
+
+    connection.markPeerActivity(40);
+    try connection.sendAt(&.{.{ .ping = {} }}, 50_000_000);
+    try std.testing.expectEqual(@as(?u64, 150), connection.idleTimeoutDeadlineMillis());
+}
+
 test "QUIC 1-RTT keep-alive sends one PING after peer silence" {
     const allocator = std.testing.allocator;
 
