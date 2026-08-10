@@ -528,6 +528,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendPendingPathChallengeAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "pathValidationDeadline"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "checkPathValidationTimeouts"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "failedPathValidationCount"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "recordPeerAddressBytesReceived"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "recordPeerAddressDatagramReceived"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "antiAmplificationLimitRemaining"));

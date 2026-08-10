@@ -329,6 +329,7 @@ pub const ConnectionStats = struct {
     authentication_failures: u64,
     local_key_update_count: u64,
     peer_key_update_count: u64,
+    failed_path_validations: usize,
 
     pub fn lossRate(self: ConnectionStats) f64 {
         if (self.packets_sent == 0) return 0.0;
@@ -1427,6 +1428,7 @@ pub const Connection = struct {
             .authentication_failures = self.receive_authentication_failures,
             .local_key_update_count = self.send_key_phase.keyUpdateCount(),
             .peer_key_update_count = self.receive_key_phase.keyUpdateCount(),
+            .failed_path_validations = self.failedPathValidationCount(),
         };
     }
 
@@ -2833,6 +2835,10 @@ pub const Connection = struct {
 
     pub fn checkPathValidationTimeouts(self: *Connection, now_ns: u64) Error!usize {
         return try self.path_validation.checkTimeouts(now_ns);
+    }
+
+    pub fn failedPathValidationCount(self: Connection) usize {
+        return self.path_validation.failedChallengeCount();
     }
 
     pub fn sendPendingPathResponse(self: *Connection) Error!void {

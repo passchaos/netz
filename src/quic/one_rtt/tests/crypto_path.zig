@@ -741,7 +741,11 @@ test "QUIC 1-RTT path validation timeout retries then fails" {
     try std.testing.expectEqual(@as(?u64, 250), client.pathValidationDeadline());
     try std.testing.expectEqual(@as(usize, 1), try client.checkPathValidationTimeouts(250));
     try std.testing.expectEqual(@as(usize, 0), client.path_validation.pendingChallengeCount());
-    try std.testing.expectEqual(@as(usize, 1), client.path_validation.failedChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), client.failedPathValidationCount());
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        client.stats().failed_path_validations,
+    );
 }
 
 test "QUIC 1-RTT beginPeerMigration obeys disable_active_migration" {

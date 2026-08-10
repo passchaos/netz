@@ -282,8 +282,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   that honor disable_active_migration, preserve congestion/PMTU state for NAT
   rebinding, apply a server preferred_address by selecting its CID/reset token
   and peer IP/port, reset anti-amplification and PMTUD path state, queue PATH_CHALLENGE,
-  track path-validation deadlines, retry timed-out challenges, record failed
-  validation attempts, and validate the new path on a matching PATH_RESPONSE,
+  track path-validation deadlines, retry timed-out challenges, expose failed
+  validation attempts in connection stats, and validate the new path on a matching PATH_RESPONSE,
   streaming qlog 0.4 observability with RFC 7464 JSON-SEQ framing, strict JSON
   escaping, caller-visible sink failures, allocation-free event views, complete
   ACK-range/ECN and packet-frame emission without fixed-size truncation, plus
