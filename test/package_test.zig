@@ -596,6 +596,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketTracker"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketStats"));
+    try std.testing.expect(@hasField(netz.quic.packet_space.ReceivedPacketStats, "retained_packets"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "wouldRecordFresh"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "recordFresh"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "recordWithEcn"));

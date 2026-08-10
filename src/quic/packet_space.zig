@@ -21,6 +21,7 @@ pub const PacketRange = struct {
 
 pub const ReceivedPacketStats = struct {
     ack_ranges: usize,
+    retained_packets: u64,
     largest_received: ?u64,
     oldest_retained: ?u64,
     forgotten_through: ?u64,
@@ -189,8 +190,11 @@ pub const ReceivedPacketTracker = struct {
     }
 
     pub fn stats(self: ReceivedPacketTracker) ReceivedPacketStats {
+        var retained_packets: u64 = 0;
+        for (self.ranges.items) |range| retained_packets +|= range.len();
         return .{
             .ack_ranges = self.ranges.items.len,
+            .retained_packets = retained_packets,
             .largest_received = self.largestReceived(),
             .oldest_retained = if (self.ranges.items.len == 0)
                 null
@@ -999,6 +1003,7 @@ test "QUIC packet space drops duplicate and too-old packet numbers" {
     try std.testing.expectEqual(@as(?u64, 6), received.forgotten_through);
     const stats = received.stats();
     try std.testing.expectEqual(@as(usize, 2), stats.ack_ranges);
+    try std.testing.expectEqual(@as(u64, 2), stats.retained_packets);
     try std.testing.expectEqual(@as(?u64, 10), stats.largest_received);
     try std.testing.expectEqual(@as(?u64, 8), stats.oldest_retained);
     try std.testing.expectEqual(@as(?u64, 6), stats.forgotten_through);
