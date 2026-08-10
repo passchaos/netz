@@ -2540,20 +2540,29 @@ pub const Connection = struct {
         }
     }
 
+    fn applyInitialWindowSize(self: *Connection, value: u32) Error!void {
+        if (value > std.math.maxInt(i31)) return error.InvalidSetting;
+        const new_window: i64 = value;
+        const delta = new_window - self.peer_initial_stream_window;
+        var adjusted: usize = 0;
+        errdefer {
+            var index: usize = 0;
+            while (index < adjusted) : (index += 1) {
+                self.send_stream_windows.items[index].window.adjust(-delta) catch unreachable;
+            }
+        }
+
+        for (self.send_stream_windows.items) |*entry| {
+            try entry.window.adjust(delta);
+            adjusted += 1;
+        }
+        self.peer_initial_stream_window = new_window;
+    }
+
     fn applySettings(self: *Connection, settings: []const http2.Setting) Error!void {
         for (settings) |setting| {
             switch (setting.id) {
-                .initial_window_size => {
-                    if (setting.value > std.math.maxInt(i31)) return error.InvalidSetting;
-                    const new_window: i64 = setting.value;
-                    const delta = new_window - self.peer_initial_stream_window;
-                    for (self.send_stream_windows.items) |entry| {
-                        const next = std.math.add(i64, entry.window.value, delta) catch return error.FlowControlViolation;
-                        if (next > max_flow_window) return error.FlowControlViolation;
-                    }
-                    self.peer_initial_stream_window = new_window;
-                    for (self.send_stream_windows.items) |*entry| try entry.window.adjust(delta);
-                },
+                .initial_window_size => try self.applyInitialWindowSize(setting.value),
                 .max_frame_size => {
                     if (setting.value < default_max_frame_size or setting.value > max_max_frame_size) return error.InvalidSetting;
                     self.peer_max_frame_size = setting.value;
@@ -8736,6 +8745,15 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     }));
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(1)).value);
+
+    (try connection.sendStreamWindow(1)).value = 100;
+    (try connection.sendStreamWindow(3)).value = max_flow_window;
+    try std.testing.expectError(error.FlowControlViolation, connection.applySettings(&.{
+        .{ .id = .initial_window_size, .value = std.math.maxInt(i31) },
+    }));
+    try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
+    try std.testing.expectEqual(@as(i64, 100), (try connection.sendStreamWindow(1)).value);
+    try std.testing.expectEqual(max_flow_window, (try connection.sendStreamWindow(3)).value);
 }
 
 test "HTTP/2 client connect handles interleaved PING before settings" {
