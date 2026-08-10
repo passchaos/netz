@@ -34,6 +34,7 @@ const LocalReservation = struct {
 pub const State = struct {
     /// Client-side notifications whose header ownership is still queued.
     pending: std.ArrayList(PromisedRequest) = .empty,
+    pending_head: usize = 0,
     /// Server-created streams between PUSH_PROMISE and response/cancellation.
     local: std.ArrayList(LocalReservation) = .empty,
     /// Client-observed streams awaiting acceptance or refusal by the caller.
@@ -42,7 +43,9 @@ pub const State = struct {
     last_peer_stream_id: ?u31 = null,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
-        for (self.pending.items) |*promise| promise.deinit(allocator);
+        for (self.pending.items[self.pending_head..]) |*promise| {
+            promise.deinit(allocator);
+        }
         self.pending.deinit(allocator);
         self.local.deinit(allocator);
         self.remote.deinit(allocator);
@@ -123,17 +126,28 @@ pub const State = struct {
             promise.promised_stream_id,
         );
         errdefer _ = self.remote.pop();
+        if (self.pending_head != 0 and
+            self.pending.items.len == self.pending.capacity)
+        {
+            self.compactPending();
+        }
         try self.pending.append(allocator, promise);
         self.last_peer_stream_id = promise.promised_stream_id;
     }
 
     pub fn take(self: *State) ?PromisedRequest {
-        if (self.pending.items.len == 0) return null;
-        return self.pending.orderedRemove(0);
+        if (self.pendingCount() == 0) return null;
+        const promise = self.pending.items[self.pending_head];
+        self.pending_head += 1;
+        // PUSH_PROMISE delivery is FIFO.  Advancing a cursor makes each pop
+        // O(1); occasional compaction reclaims stale slots whose header
+        // ownership has already moved to the caller.
+        self.compactPendingIfSparse();
+        return promise;
     }
 
     pub fn hasPending(self: State, stream_id: u31) bool {
-        for (self.pending.items) |promise| {
+        for (self.pending.items[self.pending_head..]) |promise| {
             if (promise.promised_stream_id == stream_id) return true;
         }
         return false;
@@ -164,14 +178,41 @@ pub const State = struct {
         stream_id: u31,
     ) bool {
         if (!self.releaseRemote(stream_id)) return false;
-        for (self.pending.items, 0..) |promise, index| {
+        for (self.pending.items[self.pending_head..], self.pending_head..) |promise, index| {
             if (promise.promised_stream_id == stream_id) {
                 var removed = self.pending.orderedRemove(index);
                 removed.deinit(allocator);
+                self.compactPendingIfSparse();
                 break;
             }
         }
         return true;
+    }
+
+    fn pendingCount(self: State) usize {
+        return self.pending.items.len - self.pending_head;
+    }
+
+    fn compactPendingIfSparse(self: *State) void {
+        if (self.pending_head == 0) return;
+        if (self.pending_head == self.pending.items.len or
+            self.pending_head >= self.pending.items.len / 2)
+        {
+            self.compactPending();
+        }
+    }
+
+    fn compactPending(self: *State) void {
+        if (self.pending_head == 0) return;
+        const remaining = self.pendingCount();
+        if (remaining != 0) {
+            @memmove(
+                self.pending.items[0..remaining],
+                self.pending.items[self.pending_head..],
+            );
+        }
+        self.pending.items.len = remaining;
+        self.pending_head = 0;
     }
 };
 
@@ -243,4 +284,67 @@ test "canceling a queued remote reservation frees its request" {
     try std.testing.expect(!state.hasPending(2));
     try std.testing.expect(!state.isRemoteReserved(2));
     try std.testing.expect(!state.cancelRemote(allocator, 2));
+}
+
+test "pending push notifications reuse consumed FIFO slots" {
+    const allocator = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(allocator);
+
+    try state.pending.ensureTotalCapacity(allocator, 4);
+    try state.remote.ensureTotalCapacity(allocator, 5);
+    for ([_]u31{ 2, 4, 6, 8 }) |stream_id| {
+        try queueTestPromise(&state, allocator, allocator, stream_id);
+    }
+
+    var first = state.take() orelse return error.TestUnexpectedResult;
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 2), first.promised_stream_id);
+    try std.testing.expectEqual(@as(usize, 3), state.pendingCount());
+
+    // The notification queue is at capacity with one consumed head element.
+    // Adding another promise must compact/reuse that stale slot rather than
+    // allocating or reporting pressure during a server-push burst.
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try queueTestPromise(&state, allocator, no_alloc.allocator(), 10);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 4), state.pendingCount());
+
+    for ([_]u31{ 4, 6, 8, 10 }) |stream_id| {
+        var promise = state.take() orelse return error.TestUnexpectedResult;
+        defer promise.deinit(allocator);
+        try std.testing.expectEqual(stream_id, promise.promised_stream_id);
+    }
+    try std.testing.expect(state.take() == null);
+    try std.testing.expectEqual(@as(usize, 0), state.pendingCount());
+}
+
+fn queueTestPromise(
+    state: *State,
+    header_allocator: std.mem.Allocator,
+    queue_allocator: std.mem.Allocator,
+    promised_stream_id: u31,
+) !void {
+    const headers = try header_allocator.alloc(http2.Hpack.HeaderField, 1);
+    errdefer header_allocator.free(headers);
+    const name = try header_allocator.dupe(u8, ":path");
+    errdefer header_allocator.free(name);
+    const value = try std.fmt.allocPrint(
+        header_allocator,
+        "/push/{d}",
+        .{promised_stream_id},
+    );
+    errdefer header_allocator.free(value);
+    headers[0] = .{
+        .name = name,
+        .value = value,
+    };
+    try state.queue(queue_allocator, .{
+        .parent_stream_id = 1,
+        .promised_stream_id = promised_stream_id,
+        .headers = headers,
+    });
 }
