@@ -102,6 +102,29 @@ pub fn sameOrigin(a: Origin, b: Origin) bool {
         a.port == b.port;
 }
 
+pub const ReuseDecision = enum {
+    /// Same scheme/host/port: RFC 9114 allows reuse without cross-origin
+    /// coalescing policy beyond the already-established connection state.
+    same_origin,
+    /// Scheme and port match but host differs.  A caller may still coalesce
+    /// HTTP/3 requests here, but only after proving the TLS certificate and
+    /// server authority cover the requested host.
+    requires_authority_validation,
+    /// Scheme or port differs, so this connection is not a conservative reuse
+    /// candidate.
+    different_scheme_or_port,
+};
+
+pub fn connectionReuseDecision(existing: Origin, request: Origin) ReuseDecision {
+    if (sameOrigin(existing, request)) return .same_origin;
+    if (std.ascii.eqlIgnoreCase(existing.scheme, request.scheme) and
+        existing.port == request.port)
+    {
+        return .requires_authority_validation;
+    }
+    return .different_scheme_or_port;
+}
+
 /// Parse the first HTTP/3 alternative from any header list containing Alt-Svc.
 pub fn firstHttp3AltSvcHeader(headers: anytype) Error!?AltSvcEndpoint {
     for (headers) |header| {
@@ -2877,9 +2900,23 @@ test "HTTP/3 normalizes request origins for reuse policy" {
 
     const explicit_https = try requestOrigin("https", "example.com:443");
     try std.testing.expect(sameOrigin(https_default, explicit_https));
+    try std.testing.expectEqual(
+        ReuseDecision.same_origin,
+        connectionReuseDecision(https_default, explicit_https),
+    );
 
     const different_port = try requestOrigin("https", "example.com:8443");
     try std.testing.expect(!sameOrigin(https_default, different_port));
+    try std.testing.expectEqual(
+        ReuseDecision.different_scheme_or_port,
+        connectionReuseDecision(https_default, different_port),
+    );
+
+    const sibling_origin = try requestOrigin("https", "api.example.com");
+    try std.testing.expectEqual(
+        ReuseDecision.requires_authority_validation,
+        connectionReuseDecision(https_default, sibling_origin),
+    );
 
     const ipv6 = try requestOrigin("https", "[2001:db8::1]:443");
     try std.testing.expectEqualStrings("2001:db8::1", ipv6.host);
