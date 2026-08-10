@@ -492,8 +492,10 @@ pub const Connection = struct {
     recv_flow: quic.flow_control.RecvFlow,
     recv_data_total: u64 = 0,
     stream_send_flows: std.ArrayList(StreamFlowEntry) = .empty,
+    stream_send_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     last_send_stream_index: ?usize = null,
     stream_recv_flows: std.ArrayList(StreamRecvFlowEntry) = .empty,
+    stream_recv_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     last_recv_stream_index: ?usize = null,
     close_info: ?CloseInfo = null,
     send_key_phase: quic.protection.Aes128KeyPhaseState,
@@ -625,8 +627,10 @@ pub const Connection = struct {
         for (self.stored_new_tokens.items) |token| self.endpoint.allocator.free(token);
         self.stored_new_tokens.deinit(self.endpoint.allocator);
         self.stream_send_flows.deinit(self.endpoint.allocator);
+        self.stream_send_index.deinit(self.endpoint.allocator);
         for (self.stream_recv_flows.items) |*entry| entry.deinit();
         self.stream_recv_flows.deinit(self.endpoint.allocator);
+        self.stream_recv_index.deinit(self.endpoint.allocator);
         self.path_response_targets.deinit(self.endpoint.allocator);
         self.datagram_recv_queue.deinit(self.endpoint.allocator);
         self.send_frame_buffer.deinit(self.endpoint.allocator);
@@ -4912,11 +4916,15 @@ pub const Connection = struct {
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             try self.validateLocalStreamCount(stream_id);
         }
-        try self.stream_send_flows.append(self.endpoint.allocator, .{
+        try self.stream_send_flows.ensureUnusedCapacity(self.endpoint.allocator, 1);
+        try self.stream_send_index.ensureUnusedCapacity(self.endpoint.allocator, 1);
+        const index = self.stream_send_flows.items.len;
+        self.stream_send_flows.appendAssumeCapacity(.{
             .stream_id = stream_id,
             .flow = .init(self.initialSendStreamDataLimit(stream_id)),
         });
-        self.last_send_stream_index = self.stream_send_flows.items.len - 1;
+        self.stream_send_index.putAssumeCapacity(stream_id, index);
+        self.last_send_stream_index = index;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             self.outgoing_streams_created_count +|= 1;
         }
@@ -4984,13 +4992,11 @@ pub const Connection = struct {
                 return &self.stream_send_flows.items[index];
             }
         }
-        for (self.stream_send_flows.items, 0..) |*entry, index| {
-            if (entry.stream_id == stream_id) {
-                self.last_send_stream_index = index;
-                return entry;
-            }
-        }
-        return null;
+        const index = self.stream_send_index.get(stream_id) orelse return null;
+        if (index >= self.stream_send_flows.items.len) return null;
+        if (self.stream_send_flows.items[index].stream_id != stream_id) return null;
+        self.last_send_stream_index = index;
+        return &self.stream_send_flows.items[index];
     }
 
     fn recvStreamFlow(self: *Connection, stream_id: u64) Error!*StreamRecvFlowEntry {
@@ -5003,7 +5009,10 @@ pub const Connection = struct {
             self.config.max_stream_receive_window orelse
                 self.config.stream_receive_window,
         );
-        try self.stream_recv_flows.append(self.endpoint.allocator, .{
+        try self.stream_recv_flows.ensureUnusedCapacity(self.endpoint.allocator, 1);
+        try self.stream_recv_index.ensureUnusedCapacity(self.endpoint.allocator, 1);
+        const index = self.stream_recv_flows.items.len;
+        self.stream_recv_flows.appendAssumeCapacity(.{
             .stream_id = stream_id,
             .flow = try .initWithMaxWindow(
                 initial_limit,
@@ -5016,7 +5025,8 @@ pub const Connection = struct {
                 maxBufferedForLimit(max_buffered),
             ),
         });
-        self.last_recv_stream_index = self.stream_recv_flows.items.len - 1;
+        self.stream_recv_index.putAssumeCapacity(stream_id, index);
+        self.last_recv_stream_index = index;
         if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             self.incoming_streams_created_count +|= 1;
         }
@@ -5031,13 +5041,11 @@ pub const Connection = struct {
                 return &self.stream_recv_flows.items[index];
             }
         }
-        for (self.stream_recv_flows.items, 0..) |*entry, index| {
-            if (entry.stream_id == stream_id) {
-                self.last_recv_stream_index = index;
-                return entry;
-            }
-        }
-        return null;
+        const index = self.stream_recv_index.get(stream_id) orelse return null;
+        if (index >= self.stream_recv_flows.items.len) return null;
+        if (self.stream_recv_flows.items[index].stream_id != stream_id) return null;
+        self.last_recv_stream_index = index;
+        return &self.stream_recv_flows.items[index];
     }
 
     fn validateStreamReceiveFrameId(self: *Connection, stream_id: u64) Error!void {
