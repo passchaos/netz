@@ -1459,14 +1459,7 @@ pub const QpackEncodeState = struct {
     }
 
     pub fn abandonStream(self: *QpackEncodeState, stream_id: u64) void {
-        var index: usize = 0;
-        while (index < self.pending_sections.items.len) {
-            if (self.pending_sections.items[index].stream_id != stream_id) {
-                index += 1;
-                continue;
-            }
-            self.releaseSection(index);
-        }
+        _ = self.releaseSectionsForStream(stream_id);
     }
 
     pub fn hasPendingSections(self: QpackEncodeState, stream_id: u64) bool {
@@ -1506,17 +1499,9 @@ pub const QpackEncodeState = struct {
                 );
             },
             .stream_cancellation => |stream_id| {
-                var index: usize = 0;
-                var found = false;
-                while (index < self.pending_sections.items.len) {
-                    if (self.pending_sections.items[index].stream_id != stream_id) {
-                        index += 1;
-                        continue;
-                    }
-                    self.releaseSection(index);
-                    found = true;
+                if (self.releaseSectionsForStream(stream_id) == 0) {
+                    return error.QpackDecoderStreamError;
                 }
-                if (!found) return error.QpackDecoderStreamError;
             },
         }
     }
@@ -1530,12 +1515,46 @@ pub const QpackEncodeState = struct {
 
     fn releaseSection(self: *QpackEncodeState, index: usize) void {
         var section = self.pending_sections.orderedRemove(index);
+        self.releaseSectionReferences(&section);
+    }
+
+    fn releaseSectionReferences(
+        self: *QpackEncodeState,
+        section: *PendingSection,
+    ) void {
         for (section.references) |absolute_index| {
             const count = self.reference_counts.getPtr(absolute_index).?;
             count.* -= 1;
             if (count.* == 0) _ = self.reference_counts.remove(absolute_index);
         }
         section.deinit(self.allocator);
+    }
+
+    fn releaseSectionsForStream(
+        self: *QpackEncodeState,
+        stream_id: u64,
+    ) usize {
+        var write_index: usize = 0;
+        var released: usize = 0;
+        for (self.pending_sections.items, 0..) |section, read_index| {
+            if (section.stream_id == stream_id) {
+                // QPACK Section Acknowledgment identifies only the stream, so
+                // multiple outstanding header/trailer sections on the same
+                // stream must retain FIFO order.  Compact in one stable pass
+                // instead of repeated `orderedRemove` memmoves or
+                // `swapRemove`-based reordering.
+                var removed = section;
+                self.releaseSectionReferences(&removed);
+                released += 1;
+                continue;
+            }
+            if (write_index != read_index) {
+                self.pending_sections.items[write_index] = section;
+            }
+            write_index += 1;
+        }
+        self.pending_sections.items.len = write_index;
+        return released;
     }
 
     fn canEvictForInsert(
@@ -1589,10 +1608,7 @@ pub const QpackEncodeState = struct {
 };
 
 fn findQpackStaticName(name: []const u8) ?u64 {
-    for (http3.Qpack.static_table, 0..) |entry, index| {
-        if (std.mem.eql(u8, entry.name, name)) return @intCast(index);
-    }
-    return null;
+    return http3.Qpack.findStaticName(name);
 }
 
 pub const Server = struct {
@@ -9417,6 +9433,65 @@ test "HTTP/3 QPACK encoder state protects referenced entries from eviction" {
     );
     try std.testing.expect(encoder.table.absolute(0) == null);
     try std.testing.expectEqualStrings("b", encoder.table.relative(0).?.name);
+}
+
+test "HTTP/3 QPACK stream cancellation compacts pending sections stably" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.init(allocator, 512, 4096);
+    defer encoder.deinit();
+    try encoder.setCapacity(512);
+    _ = try encoder.insertField("x-one", "one");
+    _ = try encoder.insertField("x-two", "two");
+    _ = try encoder.insertField("x-three", "three");
+    encoder.known_received_count = encoder.table.insert_count;
+
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try encoder.encodeFieldSection(&first, 4, &.{
+        .{ .name = "x-one", .value = "one" },
+    });
+    var canceled: std.ArrayList(u8) = .empty;
+    defer canceled.deinit(allocator);
+    try encoder.encodeFieldSection(&canceled, 8, &.{
+        .{ .name = "x-one", .value = "one" },
+    });
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try encoder.encodeFieldSection(&second, 4, &.{
+        .{ .name = "x-two", .value = "two" },
+    });
+    var third: std.ArrayList(u8) = .empty;
+    defer third.deinit(allocator);
+    try encoder.encodeFieldSection(&third, 4, &.{
+        .{ .name = "x-three", .value = "three" },
+    });
+    try std.testing.expectEqual(@as(usize, 4), encoder.pending_sections.items.len);
+
+    var feedback: std.ArrayList(u8) = .empty;
+    defer feedback.deinit(allocator);
+    try http3.writeQpackDecoderStreamPrefix(&feedback, allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &feedback,
+        allocator,
+        .{ .stream_cancellation = 8 },
+    );
+    var control = http3.ControlState{};
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = 0,
+        .data = feedback.items,
+    });
+
+    try std.testing.expectEqual(@as(usize, 3), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(u64, 4), encoder.pending_sections.items[0].stream_id);
+    try std.testing.expectEqual(@as(u64, 1), encoder.pending_sections.items[0].required_insert_count);
+    try std.testing.expectEqual(@as(u64, 4), encoder.pending_sections.items[1].stream_id);
+    try std.testing.expectEqual(@as(u64, 2), encoder.pending_sections.items[1].required_insert_count);
+    try std.testing.expectEqual(@as(u64, 4), encoder.pending_sections.items[2].stream_id);
+    try std.testing.expectEqual(@as(u64, 3), encoder.pending_sections.items[2].required_insert_count);
+    try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(0));
+    try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(1));
+    try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(2));
 }
 
 test "HTTP/3 QPACK encoder state rejects invalid decoder feedback" {

@@ -648,6 +648,8 @@ pub fn staticEntry(index: usize) ?HeaderField {
     return .{ .name = entry.name, .value = entry.value };
 }
 
+pub const findStaticName = static_table_module.findName;
+
 pub fn encodePrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator, required_insert_count: u64, base: u64) !void {
     try varint.encode(list, allocator, required_insert_count);
     try varint.encode(list, allocator, base);

@@ -186,3 +186,8 @@ pub fn findMatch(name: []const u8, value: []const u8) ?struct { index: u64, full
     }
     return .{ .index = indexes[0], .full_match = false };
 }
+
+pub fn findName(name: []const u8) ?u64 {
+    const indexes = name_index.get(name) orelse return null;
+    return indexes[0];
+}

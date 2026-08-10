@@ -335,6 +335,7 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DynamicTable"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "EncoderInstruction"));
+    try std.testing.expect(@hasDecl(netz.http3.Qpack, "findStaticName"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "applyEncoderInstructions"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "decodeRequiredInsertCount"));
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "encodeDynamicBlock"));

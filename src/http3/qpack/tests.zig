@@ -63,6 +63,12 @@ test "HTTP/3 QPACK static table name index preserves RFC lookup order" {
         // encoded index becomes observable wire output.
         try std.testing.expectEqual(first_indexes.get(name).?, match.index);
     }
+    try std.testing.expectEqual(@as(?u64, 24), Qpack.findStaticName(":status"));
+    try std.testing.expectEqual(
+        @as(?u64, 33),
+        Qpack.findStaticName("access-control-allow-headers"),
+    );
+    try std.testing.expect(Qpack.findStaticName("x-not-static") == null);
 }
 
 test "HTTP/3 QPACK dynamic table applies RFC 9204 Appendix B encoder stream" {
