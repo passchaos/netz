@@ -133,6 +133,7 @@ pub fn Pool(comptime Handle: type) type {
             origin: http3.Origin,
             now_ms: u64,
         ) !void {
+            _ = self.pruneExpired(now_ms);
             if (self.config.max_idle_per_origin == 0 or
                 self.config.max_idle_total == 0)
             {
@@ -261,7 +262,7 @@ test "HTTP/3 origin pool prunes expired idle handles explicitly" {
     defer pool.deinit();
 
     try pool.release(1, try http3.requestOrigin("https", "a.example"), 0);
-    try pool.release(2, try http3.requestOrigin("https", "b.example"), 20);
+    try pool.release(2, try http3.requestOrigin("https", "b.example"), 5);
     try std.testing.expectEqual(@as(usize, 2), pool.idleCount());
 
     try std.testing.expectEqual(@as(usize, 1), pool.pruneExpired(11));
@@ -269,6 +270,24 @@ test "HTTP/3 origin pool prunes expired idle handles explicitly" {
     try std.testing.expectEqual(@as(u64, 1), pool.stats().total_dropped);
     try std.testing.expectEqual(@as(?usize, 2), pool.acquire(
         try http3.requestOrigin("https", "b.example"),
-        21,
+        12,
     ));
+}
+
+test "HTTP/3 origin pool release ignores expired capacity occupants" {
+    const allocator = std.testing.allocator;
+    const IntPool = Pool(usize);
+    var pool = IntPool.init(allocator, .{
+        .max_idle_per_origin = 1,
+        .max_idle_total = 1,
+        .idle_timeout_ms = 10,
+    }, dropInt);
+    defer pool.deinit();
+
+    const origin = try http3.requestOrigin("https", "slot.example");
+    try pool.release(1, origin, 0);
+    try pool.release(2, origin, 11);
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+    try std.testing.expectEqual(@as(u64, 1), pool.stats().total_dropped);
+    try std.testing.expectEqual(@as(?usize, 2), pool.acquire(origin, 12));
 }
