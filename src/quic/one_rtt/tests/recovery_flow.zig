@@ -895,6 +895,9 @@ test "QUIC 1-RTT connection enforces stream count limits and MAX_STREAMS" {
     var blocked = try server.receivePacket();
     defer blocked.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 1), blocked.frames[0].streams_blocked_bidi.maximum_streams);
+    const blocked_stats = client.stats();
+    try std.testing.expectError(error.StreamLimitExceeded, client.send(&[_]quic.Frame{.{ .stream = .{ .stream_id = 4, .data = "blocked", .fin = false } }}));
+    try std.testing.expectEqual(blocked_stats.packets_sent, client.stats().packets_sent);
 
     try server.send(&[_]quic.Frame{.{ .max_streams_bidi = .{ .maximum_streams = 2 } }});
     var grant = try client.receivePacket();
@@ -907,6 +910,9 @@ test "QUIC 1-RTT connection enforces stream count limits and MAX_STREAMS" {
     try std.testing.expectEqualStrings("second", second.frames[0].stream.data);
 
     try std.testing.expectError(error.StreamLimitExceeded, client.send(&[_]quic.Frame{.{ .stream = .{ .stream_id = 8, .data = "third", .fin = false } }}));
+    var blocked_again = try server.receivePacket();
+    defer blocked_again.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), blocked_again.frames[0].streams_blocked_bidi.maximum_streams);
 }
 
 test "QUIC 1-RTT connection rejects peer-created streams beyond receive limit" {

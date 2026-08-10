@@ -456,6 +456,8 @@ pub const Connection = struct {
     lowest_one_rtt_packet_number: ?u64 = null,
     peer_max_streams_bidi: u64,
     peer_max_streams_uni: u64,
+    streams_blocked_bidi_at: ?u64 = null,
+    streams_blocked_uni_at: ?u64 = null,
     recv_max_streams_bidi: u64,
     recv_max_streams_uni: u64,
     spin_bit_value: bool = false,
@@ -3898,8 +3900,18 @@ pub const Connection = struct {
     fn receiveMaxStreams(self: *Connection, maximum_streams: u64, direction: StreamDirection) Error!void {
         if (maximum_streams > quic.max_stream_count) return error.InvalidFrame;
         switch (direction) {
-            .bidirectional => self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, maximum_streams),
-            .unidirectional => self.peer_max_streams_uni = @max(self.peer_max_streams_uni, maximum_streams),
+            .bidirectional => {
+                if (maximum_streams > self.peer_max_streams_bidi) {
+                    self.peer_max_streams_bidi = maximum_streams;
+                    self.streams_blocked_bidi_at = null;
+                }
+            },
+            .unidirectional => {
+                if (maximum_streams > self.peer_max_streams_uni) {
+                    self.peer_max_streams_uni = maximum_streams;
+                    self.streams_blocked_uni_at = null;
+                }
+            },
         }
     }
 
@@ -4393,11 +4405,25 @@ pub const Connection = struct {
     }
 
     fn sendStreamsBlocked(self: *Connection, direction: StreamDirection) Error!void {
-        const frame = switch (direction) {
-            .bidirectional => quic.Frame{ .streams_blocked_bidi = .{ .maximum_streams = self.peer_max_streams_bidi } },
-            .unidirectional => quic.Frame{ .streams_blocked_uni = .{ .maximum_streams = self.peer_max_streams_uni } },
+        const frame: quic.Frame = switch (direction) {
+            .bidirectional => blk: {
+                if (self.streams_blocked_bidi_at) |blocked_at| {
+                    if (blocked_at == self.peer_max_streams_bidi) return;
+                }
+                break :blk .{ .streams_blocked_bidi = .{ .maximum_streams = self.peer_max_streams_bidi } };
+            },
+            .unidirectional => blk: {
+                if (self.streams_blocked_uni_at) |blocked_at| {
+                    if (blocked_at == self.peer_max_streams_uni) return;
+                }
+                break :blk .{ .streams_blocked_uni = .{ .maximum_streams = self.peer_max_streams_uni } };
+            },
         };
         try self.sendTrackedFrames(&[_]quic.Frame{frame});
+        switch (direction) {
+            .bidirectional => self.streams_blocked_bidi_at = self.peer_max_streams_bidi,
+            .unidirectional => self.streams_blocked_uni_at = self.peer_max_streams_uni,
+        }
     }
 
     fn findSendStreamEntry(self: *Connection, stream_id: u64) ?*StreamFlowEntry {

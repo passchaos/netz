@@ -151,7 +151,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling
   with one advisory BLOCKED emission per unchanged limit to avoid retry-loop
   packet storms,
-  stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling,
+  stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling plus
+  the same per-limit duplicate suppression for stream-count exhaustion,
   protected 0-RTT long-header packet seal/open and frame datagram helpers with
   0-RTT packet-type restrictions, an owning origin+ALPN session cache with
   transactional LRU eviction, expiry, independent TLS session copies,
