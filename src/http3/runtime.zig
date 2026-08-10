@@ -5703,6 +5703,7 @@ const StreamingMessageSet = struct {
     entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     resets: std.ArrayList(Reset) = .empty,
     reset_head: usize = 0,
+    reset_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     max_streams: usize,
     max_stream_buffer: usize,
     settings: http3.Settings,
@@ -5729,6 +5730,7 @@ const StreamingMessageSet = struct {
         self.entries.deinit(self.allocator);
         self.entry_index.deinit(self.allocator);
         self.resets.deinit(self.allocator);
+        self.reset_index.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -5873,11 +5875,14 @@ const StreamingMessageSet = struct {
 
     fn remove(self: *StreamingMessageSet, stream_id: u62) void {
         self.removeEntry(stream_id);
-        for (self.resets.items[self.reset_head..], self.reset_head..) |reset, index| {
-            if (reset.stream_id != stream_id) continue;
+        if (self.reset_index.get(stream_id)) |index| {
             _ = self.resets.swapRemove(index);
+            _ = self.reset_index.remove(stream_id);
+            if (index < self.resets.items.len) {
+                const moved = self.resets.items[index];
+                self.reset_index.getPtr(moved.stream_id).?.* = index;
+            }
             self.compactResetQueueIfSparse();
-            break;
         }
     }
 
@@ -5928,8 +5933,8 @@ const StreamingMessageSet = struct {
         replaces_stream: bool,
     ) Error!void {
         if (self.kind != .request) return error.UnexpectedStream;
-        for (self.resets.items[self.reset_head..]) |reset| {
-            if (reset.stream_id != stream_id) continue;
+        if (self.reset_index.get(stream_id)) |index| {
+            const reset = self.resets.items[index];
             if (!reset.from.eql(&from)) return error.UnexpectedStream;
             return;
         }
@@ -5946,6 +5951,7 @@ const StreamingMessageSet = struct {
             self.compactResetQueue();
         }
         try self.resets.ensureUnusedCapacity(self.allocator, 1);
+        try self.reset_index.ensureUnusedCapacity(self.allocator, 1);
     }
 
     fn recordResetAssumeCapacity(
@@ -5954,8 +5960,8 @@ const StreamingMessageSet = struct {
         stream_id: u62,
         application_error_code: u64,
     ) void {
-        for (self.resets.items[self.reset_head..]) |*reset| {
-            if (reset.stream_id != stream_id) continue;
+        if (self.reset_index.get(stream_id)) |index| {
+            const reset = &self.resets.items[index];
             reset.application_error_code = application_error_code;
             return;
         }
@@ -5970,12 +5976,17 @@ const StreamingMessageSet = struct {
             .stream_id = stream_id,
             .application_error_code = application_error_code,
         });
+        self.reset_index.putAssumeCapacityNoClobber(
+            stream_id,
+            self.resets.items.len - 1,
+        );
         if (removed_entry) |*entry| entry.deinit();
     }
 
     fn takeFirstReset(self: *StreamingMessageSet) ?Reset {
         if (self.resetCount() == 0) return null;
         const reset = self.resets.items[self.reset_head];
+        _ = self.reset_index.remove(reset.stream_id);
         self.reset_head += 1;
         // Reset delivery is FIFO but may happen in bursts. Advancing a cursor
         // keeps each pop O(1); occasional compaction reclaims consumed slots
@@ -5986,10 +5997,7 @@ const StreamingMessageSet = struct {
 
     fn contains(self: StreamingMessageSet, stream_id: u62) bool {
         if (self.entry_index.contains(stream_id)) return true;
-        for (self.resets.items[self.reset_head..]) |reset| {
-            if (reset.stream_id == stream_id) return true;
-        }
-        return false;
+        return self.reset_index.contains(stream_id);
     }
 
     fn retainedCount(self: StreamingMessageSet) usize {
@@ -6079,6 +6087,14 @@ const StreamingMessageSet = struct {
         }
         self.resets.items.len = remaining;
         self.reset_head = 0;
+        self.rebuildResetIndexAssumeCapacity();
+    }
+
+    fn rebuildResetIndexAssumeCapacity(self: *StreamingMessageSet) void {
+        self.reset_index.clearRetainingCapacity();
+        for (self.resets.items[self.reset_head..], self.reset_head..) |reset, index| {
+            self.reset_index.putAssumeCapacityNoClobber(reset.stream_id, index);
+        }
     }
 };
 
@@ -10621,11 +10637,15 @@ test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
         );
     }
     try std.testing.expectEqual(@as(usize, 3), requests.resetCount());
+    try std.testing.expectEqual(@as(usize, 3), requests.reset_index.count());
+    try std.testing.expect(requests.contains(4));
 
     const first = requests.takeFirstReset() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u62, 0), first.stream_id);
     try std.testing.expectEqual(@as(usize, 2), requests.resetCount());
+    try std.testing.expectEqual(@as(usize, 2), requests.reset_index.count());
+    try std.testing.expect(!requests.contains(0));
 
     // The queue has consumed a head element. Adding a replacement must reuse
     // that FIFO space rather than reporting max-stream exhaustion.
@@ -10635,14 +10655,21 @@ test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
         12,
         http3.ApplicationErrorCode.request_cancelled,
     );
+    try std.testing.expectEqual(@as(usize, 3), requests.reset_index.count());
+    try std.testing.expect(requests.contains(12));
 
-    for ([_]u62{ 4, 8, 12 }) |stream_id| {
+    requests.remove(8);
+    try std.testing.expect(!requests.contains(8));
+    try std.testing.expectEqual(@as(usize, 2), requests.reset_index.count());
+
+    for ([_]u62{ 4, 12 }) |stream_id| {
         const reset = requests.takeFirstReset() orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(stream_id, reset.stream_id);
     }
     try std.testing.expect(requests.takeFirstReset() == null);
     try std.testing.expectEqual(@as(usize, 0), requests.resetCount());
+    try std.testing.expectEqual(@as(usize, 0), requests.reset_index.count());
 }
 
 test "HTTP/3 streaming message set indexes active readers" {

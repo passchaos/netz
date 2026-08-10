@@ -78,7 +78,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   Protected clients also expose split `sendRequest`/`receiveResponse` APIs with
   indexed bounded per-stream response reassembly, preserving interleaved responses and
   resets instead of discarding non-target streams. `receiveNextResponse`
-  provides an event-style response/reset queue with explicit stream IDs, while
+  provides an indexed event-style response/reset queue with explicit stream IDs, while
   outstanding request tracking rejects unknown or duplicate completion and
   enforces the configured concurrency bound. Protected clients and servers also
   expose `startRequest`/`sendRequestBody` and
