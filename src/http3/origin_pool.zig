@@ -148,7 +148,7 @@ pub fn Pool(comptime Handle: type) type {
                 self.dropHandle(handle);
                 return;
             }
-            const key = try originKeyFromOrigin(self.allocator, origin);
+            const key = try http3.originKeyFromOrigin(self.allocator, origin);
             try self.releaseKey(handle, key, now_ms);
         }
 
@@ -215,31 +215,6 @@ pub fn Pool(comptime Handle: type) type {
             self.total_dropped +|= 1;
         }
     };
-}
-
-fn originKeyFromOrigin(
-    allocator: std.mem.Allocator,
-    origin: http3.Origin,
-) !http3.OriginKey {
-    const scheme = try asciiLowerAlloc(allocator, origin.scheme);
-    errdefer allocator.free(scheme);
-    const host = try asciiLowerAlloc(allocator, origin.host);
-    errdefer allocator.free(host);
-    return .{
-        .allocator = allocator,
-        .scheme = scheme,
-        .host = host,
-        .port = origin.port,
-    };
-}
-
-fn asciiLowerAlloc(
-    allocator: std.mem.Allocator,
-    value: []const u8,
-) std.mem.Allocator.Error![]u8 {
-    const owned = try allocator.dupe(u8, value);
-    for (owned) |*byte| byte.* = std.ascii.toLower(byte.*);
-    return owned;
 }
 
 fn dropInt(_: std.mem.Allocator, _: usize) void {}

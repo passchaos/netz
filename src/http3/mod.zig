@@ -130,15 +130,27 @@ pub fn requestOriginKey(
     authority: []const u8,
 ) Error!OriginKey {
     const parsed = try requestOrigin(scheme, authority);
-    const owned_scheme = try asciiLowerAlloc(allocator, parsed.scheme);
+    return try originKeyFromOrigin(allocator, parsed);
+}
+
+/// Allocate a stable lowercase key from an already parsed origin.
+///
+/// This avoids re-rendering `scheme://authority` just to call
+/// `requestOriginKey` when a caller has already validated and normalized the
+/// origin for reuse/coalescing decisions.
+pub fn originKeyFromOrigin(
+    allocator: std.mem.Allocator,
+    origin: Origin,
+) Error!OriginKey {
+    const owned_scheme = try asciiLowerAlloc(allocator, origin.scheme);
     errdefer allocator.free(owned_scheme);
-    const owned_host = try asciiLowerAlloc(allocator, parsed.host);
+    const owned_host = try asciiLowerAlloc(allocator, origin.host);
     errdefer allocator.free(owned_host);
     return .{
         .allocator = allocator,
         .scheme = owned_scheme,
         .host = owned_host,
-        .port = parsed.port,
+        .port = origin.port,
     };
 }
 
@@ -2991,6 +3003,10 @@ test "HTTP/3 owns canonical origin keys for connection pools" {
     try std.testing.expectEqualStrings("https", key.scheme);
     try std.testing.expectEqualStrings("example.com", key.host);
     try std.testing.expectEqual(@as(u16, 443), key.port);
+
+    var from_origin = try originKeyFromOrigin(allocator, try requestOrigin("HTTPS", "Example.COM"));
+    defer from_origin.deinit();
+    try std.testing.expect(sameOrigin(key.origin(), from_origin.origin()));
 
     var sibling = try requestOriginKey(allocator, "https", "api.example.com");
     defer sibling.deinit();
