@@ -212,7 +212,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   application-order-preserving HANDSHAKE_DONE scheduling, client confirmation
   from either HANDSHAKE_DONE or a validated 1-RTT ACK, ACK delivery tracking,
   and PTO retransmission with server-only role validation for both frames,
-  transport-parameter-derived idle timeout deadline tracking and explicit
+  transport-parameter-derived idle timeout deadline tracking,
+  handshake-confirmed keep-alive PING scheduling with idle-timeout caps,
+  PTO-flooring, one-shot outstanding probes, and peer-activity reset, plus
   peer-address validation hooks with RFC 9000 3x anti-amplification send
   budget enforcement for unvalidated server paths,
   1-RTT key-update derivation and key-phase state with ACK gating and retained

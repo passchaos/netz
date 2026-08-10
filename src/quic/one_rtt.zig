@@ -187,6 +187,13 @@ pub const ConnectionConfig = struct {
     active_connection_id_limit: usize = quic.default_active_connection_id_limit,
     local_max_idle_timeout_ms: u64 = 0,
     peer_max_idle_timeout_ms: u64 = 0,
+    /// Optional keep-alive PING cadence in milliseconds.
+    ///
+    /// When enabled, the runtime schedules at most one PING after peer silence
+    /// exceeds this interval, capped to half the negotiated idle timeout and
+    /// floored at 1.5x the base PTO like quic-zig/tquic-style production
+    /// loops. A received packet clears the outstanding keep-alive flag.
+    keep_alive_period_ms: u64 = 0,
     local_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
     peer_ack_delay_exponent: u64 = quic.default_ack_delay_exponent,
     peer_max_ack_delay_ms: u64 = quic.default_max_ack_delay_ms,
@@ -439,7 +446,9 @@ pub const Connection = struct {
     spin_bit_value: bool = false,
     fixed_bit_generator: fixed_bit.Generator = .{},
     last_activity_ms: ?u64 = null,
+    last_peer_activity_ms: ?u64 = null,
     idle_timed_out: bool = false,
+    keep_alive_ping_sent: bool = false,
     last_persistent_congestion_packet_number: ?u64 = null,
     pto_count: u8 = 0,
     peer_address_validated: bool = true,
@@ -1044,6 +1053,7 @@ pub const Connection = struct {
             self.noteOneRttPacketSent(
                 packet.packet_number,
                 packet.packet_len,
+                now_ns,
             );
             sent_payload_len += packet.payload_len;
             sent_stream_bytes += packet.stream_bytes;
@@ -1315,6 +1325,62 @@ pub const Connection = struct {
 
     pub fn getStats(self: Connection) ConnectionStats {
         return self.stats();
+    }
+
+    pub fn keepAliveEnabled(self: Connection) bool {
+        return self.config.keep_alive_period_ms != 0;
+    }
+
+    /// Effective keep-alive interval in milliseconds.
+    ///
+    /// The configured period is first capped to half the negotiated idle
+    /// timeout when one exists, then raised to at least 1.5x PTO so a keep-alive
+    /// PING does not race normal loss recovery on high-latency paths.
+    pub fn keepAliveIntervalMillis(self: Connection) ?u64 {
+        if (!self.keepAliveEnabled()) return null;
+        var interval = self.config.keep_alive_period_ms;
+        if (self.effectiveIdleTimeoutMillis()) |idle_timeout| {
+            interval = @min(interval, @max(@as(u64, 1), idle_timeout / 2));
+        }
+        const base_pto_ns = self.rtt_stats.pto(true);
+        const floor_ns = std.math.add(
+            u64,
+            base_pto_ns,
+            base_pto_ns / 2,
+        ) catch std.math.maxInt(u64);
+        return @max(interval, nanosToMillisCeil(floor_ns));
+    }
+
+    pub fn keepAliveDeadlineMillis(self: Connection) ?u64 {
+        if (self.close_info != null or self.idle_timed_out) return null;
+        if (!self.handshakeConfirmed() or self.keep_alive_ping_sent) return null;
+        const interval = self.keepAliveIntervalMillis() orelse return null;
+        const anchor = self.last_peer_activity_ms orelse
+            (self.last_activity_ms orelse return null);
+        return std.math.add(u64, anchor, interval) catch std.math.maxInt(u64);
+    }
+
+    pub fn keepAlivePingOutstanding(self: Connection) bool {
+        return self.keep_alive_ping_sent;
+    }
+
+    pub fn sendKeepAlive(self: *Connection) Error!bool {
+        return self.sendKeepAliveAt(nanosToMillisFloor(self.monotonicNowNs()));
+    }
+
+    pub fn sendKeepAliveAt(self: *Connection, now_ms: u64) Error!bool {
+        if (self.close_info != null or self.idle_timed_out) return false;
+        if (!self.handshakeConfirmed()) return false;
+        const frames = [_]quic.Frame{.{ .ping = {} }};
+        try self.sendTrackedFramesEcnAt(&frames, .not_ect, millisToNanos(now_ms));
+        self.keep_alive_ping_sent = true;
+        return true;
+    }
+
+    pub fn serviceKeepAliveAt(self: *Connection, now_ms: u64) Error!bool {
+        const deadline = self.keepAliveDeadlineMillis() orelse return false;
+        if (now_ms < deadline) return false;
+        return try self.sendKeepAliveAt(now_ms);
     }
 
     pub fn congestionAlgorithm(self: Connection) quic.congestion.Algorithm {
@@ -1768,7 +1834,7 @@ pub const Connection = struct {
             }
         }
         try self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn);
-        self.noteOneRttPacketSent(packet_number, packet.len);
+        self.noteOneRttPacketSent(packet_number, packet.len, now_ns);
         if (pace_packet) {
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -2134,7 +2200,11 @@ pub const Connection = struct {
         // and transactionally discard the unsent suffix.
         var sent_payload_len: usize = 0;
         for (probes[0..send_result.sent_count]) |probe| {
-            self.noteOneRttPacketSent(probe.packet_number, probe.packet_len);
+            self.noteOneRttPacketSent(
+                probe.packet_number,
+                probe.packet_len,
+                now_ns,
+            );
             sent_payload_len += probe.candidate.payload.len;
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -2557,6 +2627,13 @@ pub const Connection = struct {
     pub fn markActivity(self: *Connection, now_ms: u64) void {
         if (self.idle_timed_out) return;
         self.last_activity_ms = now_ms;
+    }
+
+    pub fn markPeerActivity(self: *Connection, now_ms: u64) void {
+        if (self.idle_timed_out) return;
+        self.last_activity_ms = now_ms;
+        self.last_peer_activity_ms = now_ms;
+        self.keep_alive_ping_sent = false;
     }
 
     pub fn idleTimeoutDeadlineMillis(self: Connection) ?u64 {
@@ -3786,11 +3863,13 @@ pub const Connection = struct {
         self: *Connection,
         packet_number: u64,
         packet_len: usize,
+        now_ns: u64,
     ) void {
         self.packets_sent_count +|= 1;
         const packet_len_u64 = std.math.cast(u64, packet_len) orelse
             std.math.maxInt(u64);
         self.bytes_sent_count +|= packet_len_u64;
+        self.markActivity(nanosToMillisFloor(now_ns));
         if (self.lowest_one_rtt_packet_number == null or
             packet_number < self.lowest_one_rtt_packet_number.?)
         {
@@ -4035,9 +4114,11 @@ pub const Connection = struct {
         const packet_length_u64 = std.math.cast(u64, packet_length) orelse
             std.math.maxInt(u64);
         self.bytes_received_count +|= packet_length_u64;
+        const event_time = now_ns orelse self.monotonicNowNs();
+        self.markPeerActivity(nanosToMillisFloor(event_time));
         const observer = self.config.qlog_observer orelse return;
         observer.packetReceived(
-            self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
+            self.qlogEventTime(event_time),
             packet_number,
             packet_length,
             frames,
@@ -4354,6 +4435,18 @@ fn closeExpiryMillis(now_ms: ?u64, pto_ms: ?u64) ?u64 {
 fn nsToMs(now_ns: ?u64) ?u64 {
     const ns = now_ns orelse return null;
     return ns / 1_000_000;
+}
+
+fn nanosToMillisFloor(ns: u64) u64 {
+    return ns / 1_000_000;
+}
+
+fn nanosToMillisCeil(ns: u64) u64 {
+    return ns / 1_000_000 + @intFromBool((ns % 1_000_000) != 0);
+}
+
+fn millisToNanos(ms: u64) u64 {
+    return std.math.mul(u64, ms, 1_000_000) catch std.math.maxInt(u64);
 }
 
 fn qlogAckDelayExponent(exponent: u64) u6 {

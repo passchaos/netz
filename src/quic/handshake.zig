@@ -198,6 +198,7 @@ pub const OneRttConfig = struct {
     enable_hystart: bool = true,
     enable_pacing: bool = true,
     pacing_max_burst_packets: usize = quic.pacing.Pacer.default_max_burst_packets,
+    keep_alive_period_ms: u64 = 0,
 
     fn apply(
         self: OneRttConfig,
@@ -247,6 +248,7 @@ pub const OneRttConfig = struct {
             .peer_active_connection_id_limit = std.math.cast(usize, peer_transport_parameters.active_connection_id_limit) orelse std.math.maxInt(usize),
             .local_max_idle_timeout_ms = local_transport_parameters.max_idle_timeout,
             .peer_max_idle_timeout_ms = peer_transport_parameters.max_idle_timeout,
+            .keep_alive_period_ms = self.keep_alive_period_ms,
             .local_ack_delay_exponent = local_transport_parameters.ack_delay_exponent,
             .peer_ack_delay_exponent = peer_transport_parameters.ack_delay_exponent,
             .peer_max_ack_delay_ms = peer_transport_parameters.max_ack_delay,

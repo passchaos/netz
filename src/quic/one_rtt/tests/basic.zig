@@ -1533,6 +1533,98 @@ test "QUIC 1-RTT connection models idle timeout deadlines" {
     try std.testing.expectError(error.ConnectionClosed, connection.send(&[_]quic.Frame{.{ .ping = {} }}));
 }
 
+test "QUIC 1-RTT keep-alive sends one PING after peer silence" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xa9} ** quic.protection.secret_len);
+
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .local_max_idle_timeout_ms = 1000,
+        .keep_alive_period_ms = 900,
+        .tls_handshake_complete = true,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    try std.testing.expect(server.keepAliveEnabled());
+    // 900ms is capped to half of the 1000ms idle timeout. The initial PTO
+    // floor is 300ms, so the idle-timeout cap remains the effective interval.
+    try std.testing.expectEqual(@as(?u64, 500), server.keepAliveIntervalMillis());
+    try std.testing.expectEqual(@as(?u64, null), server.keepAliveDeadlineMillis());
+
+    server.markPeerActivity(10);
+    try std.testing.expectEqual(@as(?u64, 510), server.keepAliveDeadlineMillis());
+    try std.testing.expect(!try server.serviceKeepAliveAt(509));
+    try std.testing.expect(try server.serviceKeepAliveAt(510));
+    try std.testing.expect(server.keepAlivePingOutstanding());
+    try std.testing.expectEqual(@as(?u64, null), server.keepAliveDeadlineMillis());
+    try std.testing.expectEqual(@as(u64, 1), server.stats().packets_sent);
+
+    var keep_alive = try one_rtt.receive(&client_endpoint, keys, client_cid.len, 0, 4);
+    defer keep_alive.deinit(allocator);
+    try std.testing.expectEqual(quic.Frame.ping, std.meta.activeTag(keep_alive.frames[0]));
+    // A server that has just completed TLS can coalesce HANDSHAKE_DONE with
+    // the keep-alive PING without delaying either reliability requirement.
+    try std.testing.expectEqual(quic.Frame.handshake_done, std.meta.activeTag(keep_alive.frames[1]));
+
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &.{.{ .ping = {} }},
+    });
+    var peer_packet = try server.receivePacketAt(700_000_000);
+    defer peer_packet.deinit(allocator);
+    try std.testing.expect(!server.keepAlivePingOutstanding());
+    try std.testing.expectEqual(@as(?u64, 1200), server.keepAliveDeadlineMillis());
+}
+
+test "QUIC 1-RTT keep-alive waits for handshake confirmation" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xab} ** quic.protection.secret_len);
+    var client = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "ka-local",
+        .peer_connection_id = "ka-peer",
+        .keep_alive_period_ms = 1,
+        .tls_handshake_complete = true,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+
+    try std.testing.expect(client.handshakeComplete());
+    try std.testing.expect(!client.handshakeConfirmed());
+    client.markPeerActivity(5);
+    try std.testing.expectEqual(@as(?u64, null), client.keepAliveDeadlineMillis());
+    try std.testing.expect(!try client.serviceKeepAliveAt(1_000));
+}
+
 test "QUIC 1-RTT connection selects and exposes CUBIC congestion control" {
     const allocator = std.testing.allocator;
 
