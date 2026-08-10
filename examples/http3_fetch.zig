@@ -8,12 +8,14 @@ const DiscoveredTarget = struct {
     allocator: std.mem.Allocator,
     alpn: []u8,
     connect_host: []u8,
+    origin_host: []u8,
     port: u16,
     max_age: ?u64,
 
     fn deinit(self: *DiscoveredTarget) void {
         self.allocator.free(self.alpn);
         self.allocator.free(self.connect_host);
+        self.allocator.free(self.origin_host);
         self.* = undefined;
     }
 };
@@ -112,14 +114,34 @@ fn fetchOnce(
     } else null;
 
     if (discovered) |target| {
-        return try fetchOnceViaAltSvc(
+        return try netz.http3.runtime.HandshakeClient.requestUriAltSvc(
             allocator,
             io,
+            .{ .ip4 = .unspecified(0) },
             uri,
-            target.*,
-            server_auth,
-            &original_dcid,
-            &local_cid,
+            .{
+                .alpn = target.alpn,
+                .connect_host = target.connect_host,
+                .origin_host = target.origin_host,
+                .port = target.port,
+                .max_age = target.max_age,
+            },
+            .{ .method = "GET" },
+            .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 16 } },
+            .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &local_cid,
+                    .max_crypto_buffer = 64 * 1024,
+                    .handshake_recovery = .{
+                        .initial_pto_ms = 750,
+                        .max_pto_ms = 6000,
+                        .max_retries = 5,
+                    },
+                    .server_auth = server_auth,
+                },
+                .session = .{ .max_stream_buffer = 512 * 1024 },
+            },
         );
     }
 
@@ -177,89 +199,14 @@ fn discoverAltSvc(
     errdefer allocator.free(alpn);
     const connect_host = try allocator.dupe(u8, target.connect_host);
     errdefer allocator.free(connect_host);
+    const origin_host = try allocator.dupe(u8, target.origin_host);
+    errdefer allocator.free(origin_host);
     return .{
         .allocator = allocator,
         .alpn = alpn,
         .connect_host = connect_host,
+        .origin_host = origin_host,
         .port = target.port,
         .max_age = target.max_age,
-    };
-}
-
-fn fetchOnceViaAltSvc(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    uri: std.Uri,
-    target: DiscoveredTarget,
-    server_auth: ?netz.quic.tls.auth.ClientVerifier,
-    original_dcid: []const u8,
-    local_cid: []const u8,
-) !netz.http3.runtime.OwnedHandshakeResponse {
-    var origin = try netz.http3.runtime.uriEndpoint(allocator, uri);
-    defer origin.deinit();
-    const server = try resolveHostPort(io, target.connect_host, target.port);
-    const path = try uriPathAlloc(allocator, uri);
-    defer allocator.free(path);
-
-    var client = try netz.http3.runtime.HandshakeClient.connect(
-        allocator,
-        io,
-        .{ .ip4 = .unspecified(0) },
-        server,
-        .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 16 } },
-        .{
-            .handshake = .{
-                .original_destination_connection_id = original_dcid,
-                .local_connection_id = local_cid,
-                .server_name = origin.tls_host,
-                .alpn_protocols = &.{target.alpn},
-                .max_crypto_buffer = 64 * 1024,
-                .handshake_recovery = .{
-                    .initial_pto_ms = 750,
-                    .max_pto_ms = 6000,
-                    .max_retries = 5,
-                },
-                .server_auth = server_auth,
-            },
-            .session = .{ .max_stream_buffer = 512 * 1024 },
-        },
-    );
-    defer client.deinit();
-    return try client.request(.{
-        .method = "GET",
-        .path = path,
-        .scheme = "https",
-        .authority = origin.authority,
-    });
-}
-
-fn resolveHostPort(io: std.Io, host: []const u8, port: u16) !std.Io.net.IpAddress {
-    if (std.Io.net.IpAddress.parse(host, port)) |address| return address else |_| {}
-    const host_name = try std.Io.net.HostName.init(host);
-    var lookup_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
-    var lookup_queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&lookup_buffer);
-    try std.Io.net.HostName.lookup(host_name, io, &lookup_queue, .{ .port = port });
-    while (lookup_queue.getOne(io)) |result| switch (result) {
-        .address => |address| return address,
-        .canonical_name => {},
-    } else |err| switch (err) {
-        error.Closed => {},
-        error.Canceled => return error.Canceled,
-    }
-    return error.NoAddressReturned;
-}
-
-fn uriPathAlloc(allocator: std.mem.Allocator, uri: std.Uri) ![]u8 {
-    const path_value = uriComponentBytes(uri.path);
-    const path = if (path_value.len == 0) "/" else path_value;
-    if (uri.query) |query| {
-        return try std.fmt.allocPrint(allocator, "{s}?{s}", .{ path, uriComponentBytes(query) });
-    }
-    return try allocator.dupe(u8, path);
-}
-
-fn uriComponentBytes(component: std.Uri.Component) []const u8 {
-    return switch (component) {
-        .raw, .percent_encoded => |value| value,
     };
 }

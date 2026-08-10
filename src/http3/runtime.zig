@@ -129,6 +129,12 @@ fn resolveHostName(io: std.Io, host: net.HostName, port: u16) Error!net.IpAddres
     return first orelse error.NoAddressReturned;
 }
 
+fn resolveHostPort(io: std.Io, host: []const u8, port: u16) Error!net.IpAddress {
+    if (net.IpAddress.parse(host, port)) |address| return address else |_| {}
+    const host_name = try net.HostName.init(host);
+    return try resolveHostName(io, host_name, port);
+}
+
 fn uriPathAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
     const path_value = uriComponentBytes(uri.path);
     const path = if (path_value.len == 0) "/" else path_value;
@@ -2608,6 +2614,46 @@ pub const HandshakeClient = struct {
             .path = path,
             .scheme = "https",
             .authority = endpoint.authority,
+            .headers = request_options.headers,
+            .body = request_options.body,
+            .trailers = request_options.trailers,
+        });
+    }
+
+    pub fn requestUriAltSvc(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+    ) Error!OwnedHandshakeResponse {
+        var origin = try uriEndpoint(allocator, uri);
+        defer origin.deinit();
+        const path = try uriPathAlloc(allocator, uri);
+        defer allocator.free(path);
+        const server = try resolveHostPort(io, target.connect_host, target.port);
+
+        var connect_options = options;
+        connect_options.handshake.server_name = origin.tls_host;
+        connect_options.handshake.alpn_protocols = &.{target.alpn};
+        var client = try connect(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            connect_options,
+        );
+        defer client.deinit();
+
+        return try client.request(.{
+            .method = request_options.method,
+            .path = path,
+            .scheme = "https",
+            .authority = origin.authority,
             .headers = request_options.headers,
             .body = request_options.body,
             .trailers = request_options.trailers,

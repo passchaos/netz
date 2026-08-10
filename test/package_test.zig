@@ -173,6 +173,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "connectUri"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "requestUri"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "requestUriAltSvc"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveResponseEvent"));
