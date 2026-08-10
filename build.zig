@@ -108,6 +108,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark HTTP/3 QPACK dynamic field-section encoding",
         },
         .{
+            .exe_name = "netz-bench-webtransport-datagram",
+            .path = "examples/bench_webtransport_datagram.zig",
+            .run_step = "bench-webtransport-datagram",
+            .description = "Benchmark WebTransport datagram round trips over HTTP/3",
+        },
+        .{
             .exe_name = "netz-bench-quic-short-packet",
             .path = "examples/bench_quic_short_packet.zig",
             .run_step = "bench-quic-short-packet",
