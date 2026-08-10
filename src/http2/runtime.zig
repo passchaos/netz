@@ -591,7 +591,9 @@ pub const Connection = struct {
     send_connection_window: FlowWindow = .{},
     recv_connection_window: FlowWindow = .{},
     send_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
+    send_stream_window_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
+    recv_stream_window_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     active_local_streams: std.ArrayList(u31) = .empty,
     active_local_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     active_peer_streams: std.ArrayList(u31) = .empty,
@@ -627,7 +629,9 @@ pub const Connection = struct {
     pub fn close(self: *Connection) void {
         if (self.default_authority) |authority| self.allocator.free(authority);
         self.send_stream_windows.deinit(self.allocator);
+        self.send_stream_window_index.deinit(self.allocator);
         self.recv_stream_windows.deinit(self.allocator);
+        self.recv_stream_window_index.deinit(self.allocator);
         self.active_local_streams.deinit(self.allocator);
         self.active_local_index.deinit(self.allocator);
         self.active_peer_streams.deinit(self.allocator);
@@ -2579,30 +2583,38 @@ pub const Connection = struct {
 
     fn sendStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
         if (stream_id == 0) return error.InvalidStreamId;
-        for (self.send_stream_windows.items) |*entry| {
-            if (entry.stream_id == stream_id) return &entry.window;
+        if (self.send_stream_window_index.get(stream_id)) |index| {
+            return &self.send_stream_windows.items[index].window;
         }
-        try self.send_stream_windows.append(self.allocator, .{ .stream_id = stream_id, .window = .{ .value = self.peer_initial_stream_window } });
-        return &self.send_stream_windows.items[self.send_stream_windows.items.len - 1].window;
+        try self.send_stream_windows.ensureUnusedCapacity(self.allocator, 1);
+        try self.send_stream_window_index.ensureUnusedCapacity(self.allocator, 1);
+        const index = self.send_stream_windows.items.len;
+        self.send_stream_windows.appendAssumeCapacity(.{
+            .stream_id = stream_id,
+            .window = .{ .value = self.peer_initial_stream_window },
+        });
+        self.send_stream_window_index.putAssumeCapacity(stream_id, index);
+        return &self.send_stream_windows.items[index].window;
     }
 
     fn recvStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
         if (stream_id == 0) return error.InvalidStreamId;
-        for (self.recv_stream_windows.items) |*entry| {
-            if (entry.stream_id == stream_id) return &entry.window;
+        if (self.recv_stream_window_index.get(stream_id)) |index| {
+            return &self.recv_stream_windows.items[index].window;
         }
-        try self.recv_stream_windows.append(self.allocator, .{
+        try self.recv_stream_windows.ensureUnusedCapacity(self.allocator, 1);
+        try self.recv_stream_window_index.ensureUnusedCapacity(self.allocator, 1);
+        const index = self.recv_stream_windows.items.len;
+        self.recv_stream_windows.appendAssumeCapacity(.{
             .stream_id = stream_id,
             .window = .{ .value = @intCast(self.limits.initial_window_size) },
         });
-        return &self.recv_stream_windows.items[self.recv_stream_windows.items.len - 1].window;
+        self.recv_stream_window_index.putAssumeCapacity(stream_id, index);
+        return &self.recv_stream_windows.items[index].window;
     }
 
     fn hasRecvStreamWindow(self: Connection, stream_id: u31) bool {
-        for (self.recv_stream_windows.items) |entry| {
-            if (entry.stream_id == stream_id) return true;
-        }
-        return false;
+        return self.recv_stream_window_index.contains(stream_id);
     }
 };
 
@@ -4528,7 +4540,9 @@ test "HTTP/2 wait helpers reject unbuffered application frames" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -4843,7 +4857,9 @@ test "HTTP/2 sendResetStream rejects idle streams" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
         connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
@@ -4873,7 +4889,9 @@ test "HTTP/2 writeData rejects idle streams" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
         connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
@@ -4904,7 +4922,9 @@ test "HTTP/2 writeHeaders rejects wrong-direction idle streams" {
     };
     defer {
         client.send_stream_windows.deinit(std.testing.allocator);
+        client.send_stream_window_index.deinit(std.testing.allocator);
         client.recv_stream_windows.deinit(std.testing.allocator);
+        client.recv_stream_window_index.deinit(std.testing.allocator);
         client.active_local_streams.deinit(std.testing.allocator);
         client.active_local_index.deinit(std.testing.allocator);
         client.active_peer_streams.deinit(std.testing.allocator);
@@ -4923,7 +4943,9 @@ test "HTTP/2 writeHeaders rejects wrong-direction idle streams" {
     };
     defer {
         server.send_stream_windows.deinit(std.testing.allocator);
+        server.send_stream_window_index.deinit(std.testing.allocator);
         server.recv_stream_windows.deinit(std.testing.allocator);
+        server.recv_stream_window_index.deinit(std.testing.allocator);
         server.active_local_streams.deinit(std.testing.allocator);
         server.active_local_index.deinit(std.testing.allocator);
         server.active_peer_streams.deinit(std.testing.allocator);
@@ -6035,7 +6057,9 @@ test "HTTP/2 validates PUSH_PROMISE parent and promised stream ids" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
         connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
@@ -8023,7 +8047,9 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8168,7 +8194,9 @@ test "HTTP/2 extended CONNECT requires peer opt-in" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8262,7 +8290,9 @@ test "HTTP/2 padded DATA charges full frame payload to receive windows" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8479,12 +8509,15 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
 
     const first = try connection.sendStreamWindow(1);
+    try std.testing.expectEqual(@as(?usize, 0), connection.send_stream_window_index.get(1));
     try first.reserve(1024);
     try std.testing.expectEqual(@as(i64, default_flow_window - 1024), first.value);
 
@@ -8493,6 +8526,7 @@ test "HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE updates stream send windows" {
     try std.testing.expectEqual(@as(i64, 70_000), connection.peer_initial_stream_window);
     try std.testing.expectEqual(@as(i64, 70_000 - 1024), (try connection.sendStreamWindow(1)).value);
     try std.testing.expectEqual(@as(i64, 70_000), (try connection.sendStreamWindow(3)).value);
+    try std.testing.expectEqual(@as(?usize, 1), connection.send_stream_window_index.get(3));
 
     (try connection.sendStreamWindow(1)).value = max_flow_window;
     try std.testing.expectError(error.FlowControlViolation, connection.applySettings(&.{
@@ -8653,7 +8687,9 @@ test "HTTP/2 rejects unexpected SETTINGS ACK" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8678,7 +8714,9 @@ test "HTTP/2 sendGoAway enforces non-increasing boundaries" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8700,7 +8738,9 @@ test "HTTP/2 readGoAway records monotonic peer boundary" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8722,7 +8762,9 @@ test "HTTP/2 ignores WINDOW_UPDATE for inactive streams" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
         connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
@@ -8761,7 +8803,9 @@ test "HTTP/2 stream window helpers reject connection stream id" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8781,7 +8825,9 @@ test "HTTP/2 sendWindowUpdate rejects idle streams" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
         connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
@@ -8807,12 +8853,15 @@ test "HTTP/2 local initial window config seeds receive stream windows" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
 
     try std.testing.expectEqual(@as(i64, 1024), (try connection.recvStreamWindow(1)).value);
+    try std.testing.expectEqual(@as(?usize, 0), connection.recv_stream_window_index.get(1));
 }
 
 test "HTTP/2 peer max concurrent streams limits locally opened streams" {
@@ -8825,7 +8874,9 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
         connection.active_local_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
@@ -8875,7 +8926,9 @@ test "HTTP/2 client stream id allocation detects overflow" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
         connection.active_local_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
@@ -8900,7 +8953,9 @@ test "HTTP/2 local max concurrent streams limits peer opened streams" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
         connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
@@ -9123,7 +9178,9 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -9199,7 +9256,9 @@ test "HTTP/2 runtime applies local HPACK decoder table limit" {
     };
     defer {
         connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -9306,7 +9365,9 @@ test "HTTP/2 runtime enforces header list size limits" {
     };
     defer {
         connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
         connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
