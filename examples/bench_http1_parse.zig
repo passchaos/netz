@@ -41,14 +41,25 @@ pub fn main() !void {
         request.deinit(allocator);
     }
     const owned_ns = nowNs(io) -| owned_start;
-    const speedup_x100 = ratioTimes100(owned_ns, borrowed_ns);
+
+    const owned_checked_start = nowNs(io);
+    var owned_checked_total: usize = 0;
+    for (0..iterations) |_| {
+        var request = try netz.http1.parseRequest(allocator, raw_request, .{});
+        try netz.http1.validateRequestHost(request);
+        owned_checked_total += request.consumed;
+        request.deinit(allocator);
+    }
+    const owned_checked_ns = nowNs(io) -| owned_checked_start;
+    const speedup_x100 = ratioTimes100(owned_checked_ns, borrowed_ns);
 
     std.debug.print(
         \\HTTP/1 parse benchmark
         \\  iterations: {d}
         \\  borrowed total: {d}, ns/op: {d}
         \\  owned total: {d}, ns/op: {d}
-        \\  borrowed speedup: {d}.{d:0>2}x
+        \\  owned+host total: {d}, ns/op: {d}
+        \\  strict borrowed speedup: {d}.{d:0>2}x
         \\
     , .{
         iterations,
@@ -56,6 +67,8 @@ pub fn main() !void {
         borrowed_ns / iterations,
         owned_total,
         owned_ns / iterations,
+        owned_checked_total,
+        owned_checked_ns / iterations,
         speedup_x100 / 100,
         speedup_x100 % 100,
     });
