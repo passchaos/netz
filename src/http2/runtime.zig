@@ -2984,10 +2984,16 @@ fn cloneDecodedHeaders(
         }
         allocator.free(cloned);
     }
-    for (decoded, cloned) |field, *out| {
-        const name = try allocator.dupe(u8, field.name);
+    for (decoded, cloned) |*field, *out| {
+        const name = if (field.name_storage) |name_storage| blk: {
+            field.name_storage = null;
+            break :blk name_storage;
+        } else try allocator.dupe(u8, field.name);
         errdefer allocator.free(name);
-        const value = try allocator.dupe(u8, field.value);
+        const value = if (field.value_storage) |value_storage| blk: {
+            field.value_storage = null;
+            break :blk value_storage;
+        } else try allocator.dupe(u8, field.value);
         out.* = .{
             .name = name,
             .value = value,
