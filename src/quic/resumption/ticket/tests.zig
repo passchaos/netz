@@ -170,6 +170,7 @@ test "server ticket store owns, expires, and evicts LRU entries" {
         .issued_at_ms = 1000,
         .lifetime_seconds = 10,
     });
+    try std.testing.expectEqual(@as(usize, 1), store.identity_index.count());
     @memset(&first_identity, 'x');
     try store.issue(.{
         .identity = "two",
@@ -178,6 +179,7 @@ test "server ticket store owns, expires, and evicts LRU entries" {
         .issued_at_ms = 1000,
         .lifetime_seconds = 10,
     });
+    try std.testing.expectEqual(@as(usize, 2), store.identity_index.count());
     var first = (try store.lookup("one", 1001)).?;
     first.deinit();
     try store.issue(.{
@@ -188,11 +190,47 @@ test "server ticket store owns, expires, and evicts LRU entries" {
         .lifetime_seconds = 10,
     });
     try std.testing.expect((try store.lookup("two", 1002)) == null);
+    try std.testing.expectEqual(@as(?usize, null), store.identity_index.get("two"));
+    try std.testing.expectEqual(@as(usize, 2), store.identity_index.count());
     var one = (try store.lookup("one", 1002)).?;
     one.deinit();
     var three = (try store.lookup("three", 1002)).?;
     three.deinit();
     try std.testing.expectEqual(@as(usize, 0), store.count(12_001));
+    try std.testing.expectEqual(@as(usize, 0), store.identity_index.count());
+}
+
+test "server ticket store index tracks replacements" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var store = try ticket.ServerStore.init(
+        std.testing.allocator,
+        threaded.io(),
+        2,
+    );
+    defer store.deinit();
+
+    try store.issue(.{
+        .identity = "same",
+        .secret = [_]u8{0x11} ** 32,
+        .age_add = 11,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 10,
+    });
+    try store.issue(.{
+        .identity = "same",
+        .secret = [_]u8{0x22} ** 32,
+        .age_add = 22,
+        .issued_at_ms = 1001,
+        .lifetime_seconds = 10,
+    });
+    try std.testing.expectEqual(@as(usize, 1), store.identity_index.count());
+    try std.testing.expect(store.identity_index.get("same") != null);
+
+    var lease = (try store.lookup("same", 1002)).?;
+    defer lease.deinit();
+    try std.testing.expectEqual(@as(u8, 0x22), lease.secret[0]);
+    try std.testing.expectEqual(@as(u32, 22), lease.age_add);
 }
 
 fn checkCodecAllocationFailure(allocator: std.mem.Allocator) !void {
