@@ -104,11 +104,12 @@ pub const State = struct {
         try self.pending_challenges.append(self.allocator, .{ .data = data });
     }
 
-    pub fn receiveChallenge(self: *State, data: [8]u8) Error!void {
+    pub fn receiveChallenge(self: *State, data: [8]u8) Error!bool {
         for (self.pending_responses.activeConst()) |existing| {
-            if (std.mem.eql(u8, &existing, &data)) return;
+            if (std.mem.eql(u8, &existing, &data)) return false;
         }
         try self.pending_responses.append(self.allocator, data);
+        return true;
     }
 
     pub fn nextResponseFrame(self: *State) Error!quic.Frame {
@@ -247,8 +248,8 @@ test "QUIC path validation state queues responses and validates challenges" {
     defer state.deinit();
 
     const challenge = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
-    try state.receiveChallenge(challenge);
-    try state.receiveChallenge(challenge);
+    _ = try state.receiveChallenge(challenge);
+    _ = try state.receiveChallenge(challenge);
     try std.testing.expectEqual(@as(usize, 1), state.pendingResponseCount());
     const response = try state.nextResponseFrame();
     try std.testing.expectEqualSlices(u8, &challenge, &response.path_response.data);
@@ -271,11 +272,11 @@ test "QUIC path validation pending queues pop FIFO without shifting" {
     const b = [_]u8{ 'b', 0, 0, 0, 0, 0, 0, 2 };
     const c = [_]u8{ 'c', 0, 0, 0, 0, 0, 0, 3 };
 
-    try state.receiveChallenge(a);
-    try state.receiveChallenge(b);
+    _ = try state.receiveChallenge(a);
+    _ = try state.receiveChallenge(b);
     try std.testing.expectEqual(@as(usize, 2), state.pendingResponseCount());
     try std.testing.expectEqualSlices(u8, &a, &(try state.nextResponseFrame()).path_response.data);
-    try state.receiveChallenge(c);
+    _ = try state.receiveChallenge(c);
     try std.testing.expectEqualSlices(u8, &b, &(try state.nextResponseFrame()).path_response.data);
     try std.testing.expectEqualSlices(u8, &c, &(try state.nextResponseFrame()).path_response.data);
     try std.testing.expectError(error.NoPendingPathResponse, state.nextResponseFrame());
@@ -300,9 +301,9 @@ test "QUIC path validation drains response frames into caller storage" {
     const a = [_]u8{ 0xaa, 0, 0, 0, 0, 0, 0, 1 };
     const b = [_]u8{ 0xbb, 0, 0, 0, 0, 0, 0, 2 };
     const c = [_]u8{ 0xcc, 0, 0, 0, 0, 0, 0, 3 };
-    try state.receiveChallenge(a);
-    try state.receiveChallenge(b);
-    try state.receiveChallenge(c);
+    _ = try state.receiveChallenge(a);
+    _ = try state.receiveChallenge(b);
+    _ = try state.receiveChallenge(c);
 
     var first_batch: [2]quic.Frame = undefined;
     const first_count = state.nextResponseFrames(&first_batch);
@@ -325,8 +326,8 @@ test "QUIC path validation peeks responses without consuming" {
 
     const a = [_]u8{ 'a', 0, 0, 0, 0, 0, 0, 1 };
     const b = [_]u8{ 'b', 0, 0, 0, 0, 0, 0, 2 };
-    try state.receiveChallenge(a);
-    try state.receiveChallenge(b);
+    _ = try state.receiveChallenge(a);
+    _ = try state.receiveChallenge(b);
 
     var frames: [2]quic.Frame = undefined;
     try std.testing.expectEqual(@as(usize, 2), state.peekResponseFrames(&frames));

@@ -528,6 +528,7 @@ pub const Connection = struct {
     datagrams_sent_count: u64 = 0,
     datagrams_received_count: u64 = 0,
     datagrams_dropped_incoming_count: u64 = 0,
+    path_response_targets: std.ArrayList(?net.IpAddress) = .empty,
     ack_frequency_send_next_sequence: u64 = 0,
     ack_frequency_recv_next_sequence: u64 = 0,
     ack_eliciting_threshold: u64 = 1,
@@ -620,6 +621,7 @@ pub const Connection = struct {
         self.stream_send_flows.deinit(self.endpoint.allocator);
         for (self.stream_recv_flows.items) |*entry| entry.deinit();
         self.stream_recv_flows.deinit(self.endpoint.allocator);
+        self.path_response_targets.deinit(self.endpoint.allocator);
         self.datagram_recv_queue.deinit(self.endpoint.allocator);
         self.send_frame_buffer.deinit(self.endpoint.allocator);
         self.send_packet_buffer.deinit(self.endpoint.allocator);
@@ -2806,8 +2808,10 @@ pub const Connection = struct {
         }
         const frame = frame_storage[0];
         const frames = [_]quic.Frame{frame};
-        try self.send(&frames);
+        const target = self.peekPathResponseTarget() orelse self.config.peer;
+        try self.sendToPeer(target, &frames);
         self.path_validation.discardResponses(1);
+        self.discardPathResponseTargets(1);
     }
 
     pub fn sendPendingPathResponses(self: *Connection) Error!usize {
@@ -2815,9 +2819,44 @@ pub const Connection = struct {
         var frames: [8]quic.Frame = undefined;
         const count = self.path_validation.peekResponseFrames(&frames);
         if (count == 0) return 0;
+        if (!self.pathResponseTargetsAllDefault(count)) {
+            var sent: usize = 0;
+            while (sent < count) : (sent += 1) {
+                try self.sendPendingPathResponse();
+            }
+            return sent;
+        }
         try self.send(frames[0..count]);
         self.path_validation.discardResponses(count);
+        self.discardPathResponseTargets(count);
         return count;
+    }
+
+    fn sendToPeer(self: *Connection, peer: net.IpAddress, frames: []const quic.Frame) Error!void {
+        const previous = self.config.peer;
+        self.config.peer = peer;
+        defer self.config.peer = previous;
+        try self.send(frames);
+    }
+
+    fn peekPathResponseTarget(self: Connection) ?net.IpAddress {
+        if (self.path_response_targets.items.len == 0) return null;
+        return self.path_response_targets.items[0];
+    }
+
+    fn pathResponseTargetsAllDefault(self: Connection, count: usize) bool {
+        if (self.path_response_targets.items.len < count) return false;
+        for (self.path_response_targets.items[0..count]) |target| {
+            if (target != null) return false;
+        }
+        return true;
+    }
+
+    fn discardPathResponseTargets(self: *Connection, count: usize) void {
+        var discarded: usize = 0;
+        while (discarded < count and self.path_response_targets.items.len != 0) : (discarded += 1) {
+            _ = self.path_response_targets.orderedRemove(0);
+        }
     }
 
     pub fn closeTransport(self: *Connection, error_code: u64, frame_type: u64, reason_phrase: []const u8) Error!void {
@@ -3534,6 +3573,7 @@ pub const Connection = struct {
             now_ns,
             ecn,
             packet.destination_connection_id,
+            from,
         );
         self.updateSpinBitAfterReceive(packet.spin_bit);
         self.commitPeerAddressUpdate(&peer_address_update);
@@ -3610,7 +3650,7 @@ pub const Connection = struct {
             packet.frames,
         );
         defer peer_address_update.deinit();
-        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
+        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id, from);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
@@ -3692,7 +3732,7 @@ pub const Connection = struct {
             packet.frames,
         );
         defer peer_address_update.deinit();
-        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, routed.datagram.ecn, packet.packet.destination_connection_id);
+        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, routed.datagram.ecn, packet.packet.destination_connection_id, routed.datagram.from);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
@@ -3725,7 +3765,7 @@ pub const Connection = struct {
             packet.frames,
         );
         defer peer_address_update.deinit();
-        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
+        try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id, routed.datagram.from);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
@@ -3853,7 +3893,7 @@ pub const Connection = struct {
     }
 
     fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!void {
-        try self.applyReceivedFramesForDestination(packet_number, frames, now_ns, ecn, null);
+        try self.applyReceivedFramesForDestination(packet_number, frames, now_ns, ecn, null, null);
     }
 
     fn applyReceivedFramesForDestinationOrClose(
@@ -3863,8 +3903,9 @@ pub const Connection = struct {
         now_ns: ?u64,
         ecn: quic.packet_space.EcnCodepoint,
         packet_destination_connection_id: ?[]const u8,
+        path_response_peer: ?net.IpAddress,
     ) Error!void {
-        self.applyReceivedFramesForDestination(packet_number, frames, now_ns, ecn, packet_destination_connection_id) catch |err| {
+        self.applyReceivedFramesForDestination(packet_number, frames, now_ns, ecn, packet_destination_connection_id, path_response_peer) catch |err| {
             if (self.classifySemanticCloseError(frames, err)) |close| {
                 try self.closeTransportAt(@intFromEnum(close.code), close.frame_type, close.reason_phrase, nsToMs(now_ns), null);
             }
@@ -3879,12 +3920,20 @@ pub const Connection = struct {
         now_ns: ?u64,
         ecn: quic.packet_space.EcnCodepoint,
         packet_destination_connection_id: ?[]const u8,
+        path_response_peer: ?net.IpAddress,
     ) Error!void {
         if (!try self.received.wouldRecordFresh(packet_number)) return error.DuplicatePacket;
         try self.validateReceivedFramePreconditions(frames, packet_destination_connection_id);
         if (!try self.received.recordWithEcn(packet_number, ecn)) return error.DuplicatePacket;
         if (packet_number >= self.expected_packet_number) {
             self.expected_packet_number = packet_number + 1;
+        }
+        const path_challenge_count = countPathChallenges(frames);
+        if (path_challenge_count != 0) {
+            try self.path_response_targets.ensureUnusedCapacity(
+                self.endpoint.allocator,
+                path_challenge_count,
+            );
         }
         for (frames) |frame| {
             switch (frame) {
@@ -3972,7 +4021,16 @@ pub const Connection = struct {
                     );
                 },
                 .retire_connection_id => |retire| try self.local_connection_ids.retireExceptPacketDestination(retire.sequence_number, packet_destination_connection_id),
-                .path_challenge => |path_challenge| try self.path_validation.receiveChallenge(path_challenge.data),
+                .path_challenge => |path_challenge| {
+                    if (try self.path_validation.receiveChallenge(path_challenge.data)) {
+                        self.path_response_targets.appendAssumeCapacity(
+                            if (path_response_peer) |peer|
+                                if (peer.eql(&self.config.peer)) null else peer
+                            else
+                                null,
+                        );
+                    }
+                },
                 .path_response => |path_response| {
                     if (!self.path_validation.receiveResponseValidated(path_response.data)) return error.UnknownPathResponse;
                     self.setPeerAddressValidated(true);
@@ -4064,7 +4122,7 @@ pub const Connection = struct {
                     );
                 },
                 .retire_connection_id => |retire| try local_connection_ids.retireExceptPacketDestination(retire.sequence_number, packet_destination_connection_id),
-                .path_challenge => |path_challenge| try path_validation.receiveChallenge(path_challenge.data),
+                .path_challenge => |path_challenge| _ = try path_validation.receiveChallenge(path_challenge.data),
                 .path_response => |path_response| try path_validation.receiveResponse(path_response.data),
                 .new_token => |new_token| {
                     if (self.config.local_endpoint == .server) return error.InvalidFrame;
@@ -5030,6 +5088,14 @@ fn hasNonProbingFrame(frames: []const quic.Frame) bool {
         if (!isProbingFrame(frame)) return true;
     }
     return false;
+}
+
+fn countPathChallenges(frames: []const quic.Frame) usize {
+    var count: usize = 0;
+    for (frames) |frame| {
+        if (frame == .path_challenge) count += 1;
+    }
+    return count;
 }
 
 fn maxBufferedForLimit(limit: u64) usize {

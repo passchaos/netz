@@ -1077,6 +1077,54 @@ test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {
     try std.testing.expectEqual(@as(usize, 0), client.path_validation.outstandingChallengeCount());
 }
 
+test "QUIC 1-RTT PATH_RESPONSE returns to probing source address" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var original_client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer original_client_endpoint.deinit();
+    var probing_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer probing_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const server_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x81} ** quic.protection.secret_len);
+
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = original_client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const challenge = [_]u8{ 9, 8, 7, 6, 5, 4, 3, 2 };
+    try one_rtt.sendFrames(&probing_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &.{.{ .path_challenge = .{ .data = challenge } }},
+    });
+
+    var packet = try server.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqual(original_client_endpoint.address(), server.config.peer);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 1), server.path_validation.pendingResponseCount());
+
+    try server.sendPendingPathResponse();
+    var response = try one_rtt.receive(&probing_endpoint, keys, client_cid.len, 0, 8);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(quic.Frame.path_response, std.meta.activeTag(response.frames[0]));
+    try std.testing.expectEqualSlices(u8, &challenge, &response.frames[0].path_response.data);
+}
+
 test "QUIC 1-RTT connection batches PATH_CHALLENGE and PATH_RESPONSE frames" {
     const allocator = std.testing.allocator;
 
