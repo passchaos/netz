@@ -329,6 +329,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "getSendStreamStats"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "getRecvStreamStats"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "sent_packet_stats"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "received_packet_stats"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "takeQlogError"));
     try std.testing.expectEqual(@as(usize, 16), netz.quic.protection.aes_128_key_len);
     try std.testing.expect(@hasDecl(netz.http3.Qpack, "DynamicTable"));
@@ -593,11 +594,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StreamResetInfo"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "StopSendingInfo"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketTracker"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space, "ReceivedPacketStats"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "wouldRecordFresh"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "recordFresh"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "recordWithEcn"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "latestEcnCounts"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "largestReceived"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "stats"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.ReceivedPacketTracker, "getStats"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "EcnCodepoint"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space, "default_packet_threshold"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "largestAcknowledged"));

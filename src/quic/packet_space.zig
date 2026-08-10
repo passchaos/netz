@@ -19,6 +19,14 @@ pub const PacketRange = struct {
     }
 };
 
+pub const ReceivedPacketStats = struct {
+    ack_ranges: usize,
+    largest_received: ?u64,
+    oldest_retained: ?u64,
+    forgotten_through: ?u64,
+    ecn_counts: ?quic.EcnCounts,
+};
+
 pub const ReceivedPacketTracker = struct {
     pub const stack_ack_range_capacity: usize = 64;
 
@@ -178,6 +186,23 @@ pub const ReceivedPacketTracker = struct {
     pub fn largestReceived(self: ReceivedPacketTracker) ?u64 {
         if (self.ranges.items.len == 0) return null;
         return self.ranges.items[0].end;
+    }
+
+    pub fn stats(self: ReceivedPacketTracker) ReceivedPacketStats {
+        return .{
+            .ack_ranges = self.ranges.items.len,
+            .largest_received = self.largestReceived(),
+            .oldest_retained = if (self.ranges.items.len == 0)
+                null
+            else
+                self.ranges.items[self.ranges.items.len - 1].start,
+            .forgotten_through = self.forgotten_through,
+            .ecn_counts = self.latestEcnCounts(),
+        };
+    }
+
+    pub fn getStats(self: ReceivedPacketTracker) ReceivedPacketStats {
+        return self.stats();
     }
 
     pub fn pruneAckedRanges(self: *ReceivedPacketTracker, largest_acknowledged: u64) void {
@@ -972,6 +997,11 @@ test "QUIC packet space drops duplicate and too-old packet numbers" {
     try std.testing.expectEqual(@as(u64, 10), received.ranges.items[0].start);
     try std.testing.expectEqual(@as(u64, 8), received.ranges.items[1].start);
     try std.testing.expectEqual(@as(?u64, 6), received.forgotten_through);
+    const stats = received.stats();
+    try std.testing.expectEqual(@as(usize, 2), stats.ack_ranges);
+    try std.testing.expectEqual(@as(?u64, 10), stats.largest_received);
+    try std.testing.expectEqual(@as(?u64, 8), stats.oldest_retained);
+    try std.testing.expectEqual(@as(?u64, 6), stats.forgotten_through);
 
     try std.testing.expect(!(try received.recordFresh(6)));
     try std.testing.expect(try received.recordFresh(7));

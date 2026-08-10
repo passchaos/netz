@@ -700,6 +700,8 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expectEqual(client_after_send.bytes_sent, server_after_receive.bytes_received);
     try std.testing.expectEqual(@as(u64, 1), server_after_receive.incoming_streams_created);
     try std.testing.expectEqual(@as(u64, 0), server_after_receive.packets_lost);
+    try std.testing.expectEqual(@as(usize, 1), server_after_receive.received_packet_stats.ack_ranges);
+    try std.testing.expectEqual(@as(?u64, 0), server_after_receive.received_packet_stats.largest_received);
     var recv_stream_stats = server.getRecvStreamStats(0).?;
     try std.testing.expectEqual(@as(u64, 5), recv_stream_stats.bytes_received);
     try std.testing.expectEqual(@as(u64, 0), recv_stream_stats.bytes_read);
