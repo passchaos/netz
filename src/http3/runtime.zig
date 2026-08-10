@@ -5579,6 +5579,7 @@ const ResponseStreamSet = struct {
             }
             if (ready_stream_id == null) {
                 ready_stream_id = @intCast(entry.receive.stream_id);
+                if (max_blocked_streams == 0) return ready_stream_id;
             }
         }
         return ready_stream_id;
@@ -10855,6 +10856,7 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     });
     var table = http3.Qpack.DynamicTable.init(allocator, 0);
     defer table.deinit();
+    try std.testing.expectEqual(@as(?u62, 12), try responses.firstReadyStream(table, 0));
     const ready = (try responses.takeReady(12, table, 0)) orelse
         return error.TestUnexpectedResult;
     defer allocator.free(ready.bytes);
