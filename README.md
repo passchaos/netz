@@ -130,7 +130,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   whole-flight loss injection tests, HMAC-based
   address-validation token helpers for Retry/NEW_TOKEN with lifetime, version,
   peer-address binding, Retry ODCID/RSCID binding, secret rotation, replay
-  filtering, Retry datagram issue/validate helpers, client-side Retry
+  filtering with export/restore snapshots, Retry datagram issue/validate helpers, client-side Retry
   processing that enforces one-Retry/early-Retry rules, automatically resends
   the exact ClientHello under Retry-derived Initial keys, ignores invalid Retry
   injection, suppresses 0-RTT replay, plus an integrated server Retry policy

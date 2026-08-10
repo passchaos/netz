@@ -16,6 +16,15 @@ pub const Secret = [secret_len]u8;
 pub const Nonce = [nonce_len]u8;
 pub const Fingerprint = [fingerprint_len]u8;
 
+pub const ReplayFilterSnapshot = struct {
+    fingerprints: []Fingerprint,
+
+    pub fn deinit(self: *ReplayFilterSnapshot, allocator: std.mem.Allocator) void {
+        allocator.free(self.fingerprints);
+        self.* = undefined;
+    }
+};
+
 pub const Kind = enum(u8) {
     retry = 0,
     new_token = 1,
@@ -172,9 +181,38 @@ pub const ReplayFilter = struct {
         return .{ .allocator = allocator, .max_entries = max_entries };
     }
 
+    pub fn initWithSnapshot(
+        allocator: std.mem.Allocator,
+        max_entries: usize,
+        snapshot: ReplayFilterSnapshot,
+    ) Error!ReplayFilter {
+        var filter = ReplayFilter.init(allocator, max_entries);
+        errdefer filter.deinit();
+        try filter.appendSnapshotFingerprints(snapshot.fingerprints);
+        return filter;
+    }
+
     pub fn deinit(self: *ReplayFilter) void {
         self.fingerprints.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    pub fn entryCount(self: ReplayFilter) usize {
+        return self.len;
+    }
+
+    pub fn exportSnapshot(
+        self: ReplayFilter,
+        allocator: std.mem.Allocator,
+    ) Error!ReplayFilterSnapshot {
+        const fingerprints = try allocator.alloc(Fingerprint, self.len);
+        errdefer allocator.free(fingerprints);
+        var copied: usize = 0;
+        while (copied < self.len) : (copied += 1) {
+            const index = (self.head + copied) % self.fingerprints.items.len;
+            fingerprints[copied] = self.fingerprints.items[index];
+        }
+        return .{ .fingerprints = fingerprints };
     }
 
     pub fn contains(self: ReplayFilter, token: []const u8) Error!bool {
@@ -217,7 +255,40 @@ pub const ReplayFilter = struct {
         self.fingerprints.items[self.head] = fp;
         self.head = (self.head + 1) % self.fingerprints.items.len;
     }
+
+    fn appendSnapshotFingerprints(
+        self: *ReplayFilter,
+        fingerprints: []const Fingerprint,
+    ) Error!void {
+        if (self.max_entries == 0 or fingerprints.len == 0) return;
+        var retained: std.ArrayList(Fingerprint) = .empty;
+        defer retained.deinit(self.allocator);
+
+        var index = fingerprints.len;
+        while (index != 0 and retained.items.len < self.max_entries) {
+            index -= 1;
+            const candidate = fingerprints[index];
+            if (containsFingerprint(retained.items, candidate)) continue;
+            try retained.append(self.allocator, candidate);
+        }
+
+        try self.fingerprints.ensureUnusedCapacity(self.allocator, retained.items.len);
+        var out = retained.items.len;
+        while (out != 0) {
+            out -= 1;
+            self.fingerprints.appendAssumeCapacity(retained.items[out]);
+        }
+        self.head = 0;
+        self.len = retained.items.len;
+    }
 };
+
+fn containsFingerprint(fingerprints: []const Fingerprint, wanted: Fingerprint) bool {
+    for (fingerprints) |existing| {
+        if (vail.crypto.mac.verify(existing, wanted)) return true;
+    }
+    return false;
+}
 
 pub fn validateAnySecretAndRemember(secrets: []const Secret, expected_kind: Kind, expected_version: quic.Version, now_ns: i64, peer_address: []const u8, token: []const u8, replay: *ReplayFilter) Error!Validation {
     const validation = try validateAnySecret(secrets, expected_kind, expected_version, now_ns, peer_address, token);
@@ -380,4 +451,39 @@ test "QUIC address validation replay filter evicts oldest fingerprint" {
     try std.testing.expect(try replay.contains(d));
     try std.testing.expectEqual(@as(usize, 2), replay.len);
     try std.testing.expectEqual(@as(usize, 2), replay.fingerprints.items.len);
+}
+
+test "QUIC address validation replay filter exports and restores snapshots" {
+    const allocator = std.testing.allocator;
+    const secret: Secret = [_]u8{0x88} ** secret_len;
+    const a = try encode(allocator, secret, .{ .kind = .new_token, .issued_ns = 1, .lifetime_ns = 100, .peer_address = "peer", .nonce = [_]u8{0x0a} ** nonce_len });
+    defer allocator.free(a);
+    const b = try encode(allocator, secret, .{ .kind = .new_token, .issued_ns = 2, .lifetime_ns = 100, .peer_address = "peer", .nonce = [_]u8{0x0b} ** nonce_len });
+    defer allocator.free(b);
+    const c = try encode(allocator, secret, .{ .kind = .new_token, .issued_ns = 3, .lifetime_ns = 100, .peer_address = "peer", .nonce = [_]u8{0x0c} ** nonce_len });
+    defer allocator.free(c);
+
+    var replay = ReplayFilter.init(allocator, 2);
+    defer replay.deinit();
+    try replay.rememberValidated(a);
+    try replay.rememberValidated(b);
+    try replay.rememberValidated(c);
+
+    var snapshot = try replay.exportSnapshot(allocator);
+    defer snapshot.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.fingerprints.len);
+
+    var restored = try ReplayFilter.initWithSnapshot(allocator, 2, snapshot);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 2), restored.entryCount());
+    try std.testing.expect(!try restored.contains(a));
+    try std.testing.expect(try restored.contains(b));
+    try std.testing.expect(try restored.contains(c));
+    try std.testing.expectError(error.TokenReplay, restored.rememberValidated(b));
+
+    var trimmed = try ReplayFilter.initWithSnapshot(allocator, 1, snapshot);
+    defer trimmed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), trimmed.entryCount());
+    try std.testing.expect(!try trimmed.contains(b));
+    try std.testing.expect(try trimmed.contains(c));
 }
