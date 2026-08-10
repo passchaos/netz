@@ -1966,17 +1966,21 @@ fn receiveServerHandshakeCrypto(
         var owned_datagram: ?quic.runtime.OwnedBytes = null;
         defer if (owned_datagram) |*datagram| datagram.deinit(endpoint.allocator);
         const bytes = if (pending_tail.len != 0) blk: {
-            const info =
-                try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
-                    pending_tail,
-                    allow_zero_fixed_bit,
-                );
-            if (info.packet_type != .handshake or info.len != pending_tail.len) return error.InvalidHandshakeFlight;
+            const info = try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+                pending_tail,
+                allow_zero_fixed_bit,
+            );
+            if (info.packet_type != .handshake) return error.InvalidHandshakeFlight;
             break :blk pending_tail[0..info.len];
         } else blk: {
             owned_datagram = try receiveNextServerDatagramWithTimeout(endpoint, recovery);
             response_from = owned_datagram.?.from;
-            break :blk owned_datagram.?.bytes;
+            const info = quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+                owned_datagram.?.bytes,
+                allow_zero_fixed_bit,
+            ) catch continue;
+            if (info.packet_type != .handshake) continue;
+            break :blk owned_datagram.?.bytes[0..info.len];
         };
         pending_tail = &.{};
 
