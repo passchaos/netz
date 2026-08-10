@@ -548,8 +548,9 @@ if (session.maxDatagramPayloadSize()) |limit| {
 - Public structs expose decoded wire values and avoid hidden allocation; objects
   that allocate provide explicit `deinit` methods.
 - The HTTP/2 HPACK helper maintains per-connection dynamic table state and RFC
-  7541 Huffman strings; the stateless literal convenience helpers accept legal
-  leading table-size updates while keeping dynamic state scoped to one block.
+  7541 Huffman strings with collision-verified exact/name hash indexes for
+  current dynamic entries; the stateless literal convenience helpers accept
+  legal leading table-size updates while keeping dynamic state scoped to one block.
   HTTP/3 QPACK now provides RFC 9204 dynamic-table state with single-pass
   exact/name matching, dynamic field
   sections, both instruction stream codecs, and Protected plus handshake-backed

@@ -823,6 +823,15 @@ pub const Hpack = struct {
         .{ "www-authenticate", &[_]u8{61} },
     });
 
+    fn dynamicStringHash(bytes: []const u8) u64 {
+        return std.hash.Wyhash.hash(0, bytes);
+    }
+
+    const DynamicExactKey = struct {
+        name_hash: u64,
+        value_hash: u64,
+    };
+
     pub const HeaderField = struct {
         name: []const u8,
         value: []const u8,
@@ -836,6 +845,13 @@ pub const Hpack = struct {
 
     pub const DynamicTable = struct {
         entries: std.ArrayList(HeaderField) = .empty,
+        /// Hash indexes point at the latest physical entry for a name or
+        /// name/value hash pair.  Entries own their strings and can move during
+        /// compaction, so every hit is byte-verified and indexes are rebuilt
+        /// after compaction.  Collisions preserve correctness by falling back
+        /// to the reverse scan.
+        latest_name: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+        latest_exact: std.AutoHashMapUnmanaged(DynamicExactKey, usize) = .empty,
         size_limit: usize = default_dynamic_table_size,
         used: usize = 0,
         head: usize = 0,
@@ -843,6 +859,8 @@ pub const Hpack = struct {
         pub fn deinit(self: *DynamicTable, allocator: std.mem.Allocator) void {
             self.clear(allocator);
             self.entries.deinit(allocator);
+            self.latest_name.deinit(allocator);
+            self.latest_exact.deinit(allocator);
             self.* = undefined;
         }
 
@@ -852,6 +870,8 @@ pub const Hpack = struct {
                 allocator.free(item.value);
             }
             self.entries.clearRetainingCapacity();
+            self.latest_name.clearRetainingCapacity();
+            self.latest_exact.clearRetainingCapacity();
             self.used = 0;
             self.head = 0;
         }
@@ -871,13 +891,32 @@ pub const Hpack = struct {
                 return;
             }
 
+            self.compactIfNeeded();
+            try self.entries.ensureUnusedCapacity(allocator, 1);
+            const name_hash = dynamicStringHash(name);
+            const value_hash = dynamicStringHash(value);
+            const exact_key = DynamicExactKey{
+                .name_hash = name_hash,
+                .value_hash = value_hash,
+            };
+            if (self.latest_name.get(name_hash) == null) {
+                try self.latest_name.ensureUnusedCapacity(allocator, 1);
+            }
+            if (self.latest_exact.get(exact_key) == null) {
+                try self.latest_exact.ensureUnusedCapacity(allocator, 1);
+            }
             const name_copy = try allocator.dupe(u8, name);
             errdefer allocator.free(name_copy);
             const value_copy = try allocator.dupe(u8, value);
             errdefer allocator.free(value_copy);
 
-            self.compactIfNeeded();
-            try self.entries.append(allocator, .{ .name = name_copy, .value = value_copy });
+            const physical_index = self.entries.items.len;
+            self.entries.appendAssumeCapacity(.{
+                .name = name_copy,
+                .value = value_copy,
+            });
+            self.latest_name.putAssumeCapacity(name_hash, physical_index);
+            self.latest_exact.putAssumeCapacity(exact_key, physical_index);
             self.used += size;
             self.evictToLimit(allocator);
         }
@@ -889,6 +928,27 @@ pub const Hpack = struct {
         }
 
         fn findIndex(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
+            const name_hash = dynamicStringHash(name);
+            const value_hash = dynamicStringHash(value);
+            const exact_key = DynamicExactKey{
+                .name_hash = name_hash,
+                .value_hash = value_hash,
+            };
+            if (self.latest_exact.get(exact_key)) |physical_index| {
+                if (self.validPhysicalIndex(physical_index)) {
+                    const item = self.entries.items[physical_index];
+                    if (std.mem.eql(u8, item.name, name) and
+                        std.mem.eql(u8, item.value, value))
+                    {
+                        return self.wireIndexForPhysical(physical_index);
+                    }
+                }
+                return self.findIndexLinear(name, value);
+            }
+            return null;
+        }
+
+        fn findIndexLinear(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
             var item_index = self.entries.items.len;
             var dynamic_index: usize = 0;
             while (item_index > self.head) : (dynamic_index += 1) {
@@ -902,6 +962,20 @@ pub const Hpack = struct {
         }
 
         fn findNameIndex(self: DynamicTable, name: []const u8) ?u64 {
+            const name_hash = dynamicStringHash(name);
+            if (self.latest_name.get(name_hash)) |physical_index| {
+                if (self.validPhysicalIndex(physical_index)) {
+                    const item = self.entries.items[physical_index];
+                    if (std.mem.eql(u8, item.name, name)) {
+                        return self.wireIndexForPhysical(physical_index);
+                    }
+                }
+                return self.findNameIndexLinear(name);
+            }
+            return null;
+        }
+
+        fn findNameIndexLinear(self: DynamicTable, name: []const u8) ?u64 {
             var item_index = self.entries.items.len;
             var dynamic_index: usize = 0;
             while (item_index > self.head) : (dynamic_index += 1) {
@@ -916,6 +990,7 @@ pub const Hpack = struct {
             while (self.used > self.size_limit and self.entryCount() != 0) {
                 const removed = &self.entries.items[self.head];
                 self.used -= entrySize(removed.name, removed.value);
+                self.removeLatestIndexes(removed.*, self.head);
                 allocator.free(removed.name);
                 allocator.free(removed.value);
                 self.head += 1;
@@ -927,6 +1002,58 @@ pub const Hpack = struct {
             return self.entries.items.len - self.head;
         }
 
+        fn validPhysicalIndex(self: DynamicTable, physical_index: usize) bool {
+            return physical_index >= self.head and
+                physical_index < self.entries.items.len;
+        }
+
+        fn wireIndexForPhysical(
+            self: DynamicTable,
+            physical_index: usize,
+        ) u64 {
+            const dynamic_index = self.entries.items.len - 1 - physical_index;
+            return @intCast(static_table.len + dynamic_index + 1);
+        }
+
+        fn removeLatestIndexes(
+            self: *DynamicTable,
+            entry: HeaderField,
+            physical_index: usize,
+        ) void {
+            const name_hash = dynamicStringHash(entry.name);
+            if (self.latest_name.get(name_hash) == physical_index) {
+                _ = self.latest_name.remove(name_hash);
+                var index = self.entries.items.len;
+                while (index > self.head + 1) {
+                    index -= 1;
+                    const candidate = self.entries.items[index];
+                    if (dynamicStringHash(candidate.name) == name_hash) {
+                        self.latest_name.putAssumeCapacity(name_hash, index);
+                        break;
+                    }
+                }
+            }
+
+            const exact_key = DynamicExactKey{
+                .name_hash = name_hash,
+                .value_hash = dynamicStringHash(entry.value),
+            };
+            if (self.latest_exact.get(exact_key) == physical_index) {
+                _ = self.latest_exact.remove(exact_key);
+                var index = self.entries.items.len;
+                while (index > self.head + 1) {
+                    index -= 1;
+                    const candidate = self.entries.items[index];
+                    if (dynamicStringHash(candidate.name) == exact_key.name_hash and
+                        dynamicStringHash(candidate.value) == exact_key.value_hash)
+                    {
+                        self.latest_exact.putAssumeCapacity(exact_key, index);
+                        break;
+                    }
+                }
+            }
+        }
+
         fn compactIfNeeded(self: *DynamicTable) void {
             if (self.head == 0) return;
             if (self.head < self.entries.items.len / 2 and self.entryCount() != 0) return;
@@ -934,6 +1061,21 @@ pub const Hpack = struct {
             @memmove(self.entries.items[0..remaining], self.entries.items[self.head..]);
             self.entries.items.len = remaining;
             self.head = 0;
+            self.rebuildIndexes();
+        }
+
+        fn rebuildIndexes(self: *DynamicTable) void {
+            self.latest_name.clearRetainingCapacity();
+            self.latest_exact.clearRetainingCapacity();
+            for (self.entries.items, 0..) |entry, index| {
+                const name_hash = dynamicStringHash(entry.name);
+                const value_hash = dynamicStringHash(entry.value);
+                self.latest_name.putAssumeCapacity(name_hash, index);
+                self.latest_exact.putAssumeCapacity(.{
+                    .name_hash = name_hash,
+                    .value_hash = value_hash,
+                }, index);
+            }
         }
     };
 
@@ -1996,6 +2138,46 @@ test "HTTP/2 HPACK dynamic table keeps newest-index order without shifts" {
     try std.testing.expectEqual(@as(?u64, Hpack.static_table.len + 1), table.findIndex("x-c", "3"));
     try std.testing.expectEqual(@as(?u64, Hpack.static_table.len + 2), table.findNameIndex("x-b"));
     try std.testing.expect(table.findNameIndex("x-a") == null);
+}
+
+test "HTTP/2 HPACK dynamic lookup indexes survive eviction and clear" {
+    const allocator = std.testing.allocator;
+    var table = Hpack.DynamicTable{};
+    defer table.deinit(allocator);
+    table.setLimit(allocator, 68);
+
+    try table.add(allocator, "x", "a");
+    try table.add(allocator, "x", "b");
+    try table.add(allocator, "y", "c");
+    try std.testing.expectEqual(@as(usize, 2), table.entryCount());
+    try std.testing.expectEqual(
+        @as(?u64, Hpack.static_table.len + 2),
+        table.findNameIndex("x"),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, Hpack.static_table.len + 2),
+        table.findIndex("x", "b"),
+    );
+    try std.testing.expect(table.findIndex("x", "a") == null);
+
+    try table.add(allocator, "z", "d");
+    try std.testing.expect(table.findNameIndex("x") == null);
+    try std.testing.expect(table.findIndex("x", "b") == null);
+    try std.testing.expectEqual(
+        @as(?u64, Hpack.static_table.len + 1),
+        table.findIndex("z", "d"),
+    );
+
+    try table.add(allocator, "too-large", "012345678901234567890123456789");
+    try std.testing.expectEqual(@as(usize, 0), table.entryCount());
+    try std.testing.expect(table.findNameIndex("z") == null);
+    try std.testing.expect(table.findIndex("z", "d") == null);
+
+    try table.add(allocator, "n", "v");
+    try std.testing.expectEqual(
+        @as(?u64, Hpack.static_table.len + 1),
+        table.findIndex("n", "v"),
+    );
 }
 
 test "HTTP/2 HPACK never-indexes sensitive fields automatically" {
