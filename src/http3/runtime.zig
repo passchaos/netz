@@ -5280,6 +5280,7 @@ const RequestStreamSet = struct {
 
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
+    entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     max_stream_buffer: usize,
     max_streams: usize,
 
@@ -5298,6 +5299,7 @@ const RequestStreamSet = struct {
     fn deinit(self: *RequestStreamSet) void {
         for (self.entries.items) |*entry| entry.deinit();
         self.entries.deinit(self.allocator);
+        self.entry_index.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -5342,7 +5344,7 @@ const RequestStreamSet = struct {
         );
         const from = entry.from;
         const stream_id: u62 = @intCast(entry.receive.stream_id);
-        var removed = self.entries.swapRemove(index);
+        var removed = self.takeEntry(stream_id).?;
         removed.deinit();
         return .{ .from = from, .stream_id = stream_id, .bytes = owned };
     }
@@ -5352,19 +5354,21 @@ const RequestStreamSet = struct {
         from: net.IpAddress,
         stream_id: u64,
     ) Error!*Entry {
-        for (self.entries.items) |*entry| {
-            if (entry.receive.stream_id == stream_id) {
-                // A single HTTP/3 connection has one peer address in these
-                // runtimes; accepting one stream from multiple sources would
-                // merge unrelated connection state.
-                if (!entry.from.eql(&from)) return error.UnexpectedStream;
-                return entry;
-            }
+        const key: u62 = @intCast(stream_id);
+        if (self.entry_index.get(key)) |index| {
+            const entry = &self.entries.items[index];
+            // A single HTTP/3 connection has one peer address in these
+            // runtimes; accepting one stream from multiple sources would
+            // merge unrelated connection state.
+            if (!entry.from.eql(&from)) return error.UnexpectedStream;
+            return entry;
         }
         if (self.entries.items.len >= self.max_streams) {
             return error.ExcessiveLoad;
         }
-        try self.entries.append(self.allocator, .{
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
+        return self.appendEntryAssumeCapacity(.{
             .receive = .init(
                 self.allocator,
                 stream_id,
@@ -5372,7 +5376,30 @@ const RequestStreamSet = struct {
             ),
             .from = from,
         });
-        return &self.entries.items[self.entries.items.len - 1];
+    }
+
+    fn appendEntryAssumeCapacity(
+        self: *RequestStreamSet,
+        entry: Entry,
+    ) *Entry {
+        const index = self.entries.items.len;
+        const stream_id: u62 = @intCast(entry.receive.stream_id);
+        self.entries.appendAssumeCapacity(entry);
+        self.entry_index.putAssumeCapacity(stream_id, index);
+        return &self.entries.items[index];
+    }
+
+    fn takeEntry(self: *RequestStreamSet, stream_id: u62) ?Entry {
+        const index = self.entry_index.get(stream_id) orelse return null;
+        const last_index = self.entries.items.len - 1;
+        const removed = self.entries.swapRemove(index);
+        _ = self.entry_index.remove(@intCast(removed.receive.stream_id));
+        if (index != last_index) {
+            const moved = self.entries.items[index];
+            self.entry_index.getPtr(@intCast(moved.receive.stream_id)).?.* =
+                index;
+        }
+        return removed;
     }
 
     fn cancel(
@@ -5391,23 +5418,18 @@ const RequestStreamSet = struct {
         stream_id: u64,
         table: http3.Qpack.DynamicTable,
     ) Error!bool {
-        for (self.entries.items) |entry| {
-            if (entry.receive.stream_id != stream_id) continue;
-            return try bufferedReceiveUsesDynamicQpack(
-                entry.receive,
-                table,
-            );
-        }
-        return false;
+        const key = std.math.cast(u62, stream_id) orelse return false;
+        const index = self.entry_index.get(key) orelse return false;
+        return try bufferedReceiveUsesDynamicQpack(
+            self.entries.items[index].receive,
+            table,
+        );
     }
 
     fn remove(self: *RequestStreamSet, stream_id: u64) void {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.receive.stream_id != stream_id) continue;
-            var removed = self.entries.swapRemove(index);
-            removed.deinit();
-            return;
-        }
+        const key = std.math.cast(u62, stream_id) orelse return;
+        var removed = self.takeEntry(key) orelse return;
+        removed.deinit();
     }
 
     fn takeReceive(
@@ -5417,22 +5439,15 @@ const RequestStreamSet = struct {
         receive: quic.stream_state.RecvState,
         from: net.IpAddress,
     } {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.receive.stream_id != stream_id) continue;
-            const removed = self.entries.swapRemove(index);
-            return .{
-                .receive = removed.receive,
-                .from = removed.from,
-            };
-        }
-        return null;
+        const removed = self.takeEntry(stream_id) orelse return null;
+        return .{
+            .receive = removed.receive,
+            .from = removed.from,
+        };
     }
 
     fn contains(self: RequestStreamSet, stream_id: u62) bool {
-        for (self.entries.items) |entry| {
-            if (entry.receive.stream_id == stream_id) return true;
-        }
-        return false;
+        return self.entry_index.contains(stream_id);
     }
 };
 
@@ -5449,6 +5464,7 @@ const ResponseStreamSet = struct {
 
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
+    entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     resets: std.AutoHashMapUnmanaged(u62, u64) = .empty,
     max_stream_buffer: usize,
     max_streams: usize,
@@ -5468,6 +5484,7 @@ const ResponseStreamSet = struct {
     fn deinit(self: *ResponseStreamSet) void {
         for (self.entries.items) |*entry| entry.deinit();
         self.entries.deinit(self.allocator);
+        self.entry_index.deinit(self.allocator);
         self.resets.deinit(self.allocator);
         self.* = undefined;
     }
@@ -5576,26 +5593,38 @@ const ResponseStreamSet = struct {
             entry.receive.buffer.items[0..final_size],
         );
         const from = entry.from;
-        var removed = self.entries.swapRemove(index);
+        var removed = self.takeEntry(stream_id).?;
         removed.deinit();
         return .{ .from = from, .stream_id = stream_id, .bytes = owned };
     }
 
+    fn appendEntryAssumeCapacity(
+        self: *ResponseStreamSet,
+        entry: Entry,
+    ) *Entry {
+        const index = self.entries.items.len;
+        const stream_id: u62 = @intCast(entry.receive.stream_id);
+        self.entries.appendAssumeCapacity(entry);
+        self.entry_index.putAssumeCapacity(stream_id, index);
+        return &self.entries.items[index];
+    }
+
     fn remove(self: *ResponseStreamSet, stream_id: u62) void {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.receive.stream_id != stream_id) continue;
-            var removed = self.entries.swapRemove(index);
-            removed.deinit();
-            return;
-        }
+        var removed = self.takeEntry(stream_id) orelse return;
+        removed.deinit();
     }
 
     fn takeEntry(self: *ResponseStreamSet, stream_id: u62) ?Entry {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.receive.stream_id != stream_id) continue;
-            return self.entries.swapRemove(index);
+        const index = self.entry_index.get(stream_id) orelse return null;
+        const last_index = self.entries.items.len - 1;
+        const removed = self.entries.swapRemove(index);
+        _ = self.entry_index.remove(@intCast(removed.receive.stream_id));
+        if (index != last_index) {
+            const moved = self.entries.items[index];
+            self.entry_index.getPtr(@intCast(moved.receive.stream_id)).?.* =
+                index;
         }
-        return null;
+        return removed;
     }
 
     fn takeReceive(
@@ -5605,15 +5634,11 @@ const ResponseStreamSet = struct {
         receive: quic.stream_state.RecvState,
         from: net.IpAddress,
     } {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.receive.stream_id != stream_id) continue;
-            const removed = self.entries.swapRemove(index);
-            return .{
-                .receive = removed.receive,
-                .from = removed.from,
-            };
-        }
-        return null;
+        const removed = self.takeEntry(stream_id) orelse return null;
+        return .{
+            .receive = removed.receive,
+            .from = removed.from,
+        };
     }
 
     fn requiresQpackCancellation(
@@ -5621,14 +5646,11 @@ const ResponseStreamSet = struct {
         stream_id: u62,
         table: http3.Qpack.DynamicTable,
     ) Error!bool {
-        for (self.entries.items) |entry| {
-            if (entry.receive.stream_id != stream_id) continue;
-            return try bufferedReceiveUsesDynamicQpack(
-                entry.receive,
-                table,
-            );
-        }
-        return false;
+        const index = self.entry_index.get(stream_id) orelse return false;
+        return try bufferedReceiveUsesDynamicQpack(
+            self.entries.items[index].receive,
+            table,
+        );
     }
 
     fn getOrCreate(
@@ -5636,15 +5658,17 @@ const ResponseStreamSet = struct {
         from: net.IpAddress,
         stream_id: u62,
     ) Error!*Entry {
-        for (self.entries.items) |*entry| {
-            if (entry.receive.stream_id != stream_id) continue;
+        if (self.entry_index.get(stream_id)) |index| {
+            const entry = &self.entries.items[index];
             if (!entry.from.eql(&from)) return error.UnexpectedStream;
             return entry;
         }
         if (self.entries.items.len >= self.max_streams) {
             return error.ExcessiveLoad;
         }
-        try self.entries.append(self.allocator, .{
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
+        return self.appendEntryAssumeCapacity(.{
             .receive = .init(
                 self.allocator,
                 stream_id,
@@ -5652,7 +5676,6 @@ const ResponseStreamSet = struct {
             ),
             .from = from,
         });
-        return &self.entries.items[self.entries.items.len - 1];
     }
 };
 
@@ -10530,6 +10553,46 @@ test "HTTP/3 streaming message set indexes active readers" {
     try std.testing.expectEqual(@as(usize, 1), responses.entry_index.count());
     responses.removeEntry(0);
     try std.testing.expectEqual(@as(usize, 0), responses.entry_index.count());
+}
+
+test "HTTP/3 buffered stream sets index reassembly entries" {
+    const allocator = std.testing.allocator;
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+
+    var requests = RequestStreamSet.init(allocator, 512, 3);
+    defer requests.deinit();
+    inline for (.{ @as(u62, 0), @as(u62, 4), @as(u62, 8) }) |stream_id| {
+        try requests.insert(from, .{
+            .stream_id = stream_id,
+            .data = "x",
+        });
+    }
+    try std.testing.expect(requests.contains(4));
+    var taken_request = requests.takeReceive(4) orelse
+        return error.TestUnexpectedResult;
+    taken_request.receive.deinit();
+    try std.testing.expect(!requests.contains(4));
+    try std.testing.expect(requests.contains(8));
+    requests.remove(8);
+    try std.testing.expect(!requests.contains(8));
+    try std.testing.expectEqual(@as(usize, 1), requests.entry_index.count());
+
+    var responses = ResponseStreamSet.init(allocator, 512, 3);
+    defer responses.deinit();
+    inline for (.{ @as(u62, 0), @as(u62, 4), @as(u62, 8) }) |stream_id| {
+        try responses.insert(from, .{
+            .stream_id = stream_id,
+            .data = "x",
+        });
+    }
+    var taken_response = responses.takeReceive(4) orelse
+        return error.TestUnexpectedResult;
+    taken_response.receive.deinit();
+    try std.testing.expect(responses.entry_index.get(4) == null);
+    try std.testing.expect(responses.entry_index.get(8) != null);
+    responses.remove(8);
+    try std.testing.expect(responses.entry_index.get(8) == null);
+    try std.testing.expectEqual(@as(usize, 1), responses.entry_index.count());
 }
 
 test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {

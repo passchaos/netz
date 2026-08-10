@@ -65,7 +65,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   after decoder feedback, and a handshake-backed protected client/server
   runtime with `https://` URI endpoint parsing/DNS/literal target resolution
   plus `HandshakeClient.connectUri` / `requestUri` for public H3 client
-  tooling; both server paths retain bounded per-request-stream reassembly state
+  tooling; both server paths retain indexed bounded per-request-stream reassembly state
   so interleaved streams are not dropped, surface RESET_STREAM request
   cancellation, and expose client/server cancel helpers that send
   RESET_STREAM+STOP_SENDING with conditional QPACK stream cancellation. Servers
@@ -76,7 +76,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   owned and retained per request stream or push ID rather than collapsing
   unrelated elements into one connection-global value.
   Protected clients also expose split `sendRequest`/`receiveResponse` APIs with
-  bounded per-stream response reassembly, preserving interleaved responses and
+  indexed bounded per-stream response reassembly, preserving interleaved responses and
   resets instead of discarding non-target streams. `receiveNextResponse`
   provides an event-style response/reset queue with explicit stream IDs, while
   outstanding request tracking rejects unknown or duplicate completion and
