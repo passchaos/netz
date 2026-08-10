@@ -6142,6 +6142,7 @@ const OutboundBodySet = struct {
 
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
+    last_entry_index: ?usize = null,
     max_streams: usize,
 
     fn init(
@@ -6205,14 +6206,25 @@ const OutboundBodySet = struct {
         for (self.entries.items, 0..) |entry, index| {
             if (entry.send.stream_id != stream_id) continue;
             _ = self.entries.swapRemove(index);
+            self.last_entry_index = null;
             return true;
         }
         return false;
     }
 
     fn find(self: *OutboundBodySet, stream_id: u62) ?*Entry {
-        for (self.entries.items) |*entry| {
-            if (entry.send.stream_id == stream_id) return entry;
+        if (self.last_entry_index) |index| {
+            if (index < self.entries.items.len and
+                self.entries.items[index].send.stream_id == stream_id)
+            {
+                return &self.entries.items[index];
+            }
+        }
+        for (self.entries.items, 0..) |*entry, index| {
+            if (entry.send.stream_id == stream_id) {
+                self.last_entry_index = index;
+                return entry;
+            }
         }
         return null;
     }
@@ -6685,6 +6697,7 @@ fn sendConnectionStreamingHead(
             .send = body_send,
             .expected_length = expected_length,
         });
+        bodies.last_entry_index = bodies.entries.items.len - 1;
     }
 }
 
@@ -6744,6 +6757,7 @@ fn sendProtectedStreamingHead(
             .send = body_send,
             .expected_length = expected_length,
         });
+        bodies.last_entry_index = bodies.entries.items.len - 1;
     }
 }
 
