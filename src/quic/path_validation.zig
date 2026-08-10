@@ -183,7 +183,7 @@ pub const State = struct {
     pub fn receiveResponseValidated(self: *State, data: [8]u8) bool {
         for (self.outstanding_challenges.items, 0..) |challenge, i| {
             if (std.mem.eql(u8, &challenge.data, &data)) {
-                _ = self.outstanding_challenges.orderedRemove(i);
+                _ = self.outstanding_challenges.swapRemove(i);
                 return true;
             }
         }
@@ -228,7 +228,7 @@ pub const State = struct {
                 continue;
             }
 
-            var challenge = self.outstanding_challenges.orderedRemove(i);
+            var challenge = self.outstanding_challenges.swapRemove(i);
             challenge.sent_time_ns = null;
             challenge.deadline_ns = null;
             expired += 1;
@@ -388,6 +388,56 @@ test "QUIC path validation retries and fails timed-out challenges" {
     try std.testing.expectEqual(@as(usize, 1), try state.checkTimeouts(250));
     try std.testing.expectEqual(@as(usize, 0), state.pendingChallengeCount());
     try std.testing.expectEqual(@as(usize, 1), state.failedChallengeCount());
+}
+
+test "QUIC path validation removes matched responses without preserving order" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+
+    const first = [_]u8{ '1', 0, 0, 0, 0, 0, 0, 1 };
+    const second = [_]u8{ '2', 0, 0, 0, 0, 0, 0, 2 };
+    const third = [_]u8{ '3', 0, 0, 0, 0, 0, 0, 3 };
+    try state.queueChallenge(first);
+    try state.queueChallenge(second);
+    try state.queueChallenge(third);
+
+    var frames: [3]quic.Frame = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        try state.nextChallengeFramesAt(&frames, 10, 100),
+    );
+    try std.testing.expect(state.receiveResponseValidated(second));
+    try std.testing.expectEqual(@as(usize, 2), state.outstandingChallengeCount());
+    try std.testing.expect(!state.receiveResponseValidated(second));
+    try std.testing.expect(state.receiveResponseValidated(first));
+    try std.testing.expect(state.receiveResponseValidated(third));
+    try std.testing.expectEqual(@as(usize, 0), state.outstandingChallengeCount());
+}
+
+test "QUIC path validation timeout scan handles swapped challenges" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+
+    const due = [_]u8{ 'd', 0, 0, 0, 0, 0, 0, 1 };
+    const later = [_]u8{ 'l', 0, 0, 0, 0, 0, 0, 2 };
+    try state.queueChallenge(due);
+    try state.queueChallenge(later);
+    var frames: [2]quic.Frame = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try state.nextChallengeFramesAt(&frames, 100, 50),
+    );
+    // Make the second challenge expire later so removing the first with
+    // swapRemove leaves a not-yet-due challenge at the scanned index.
+    state.outstanding_challenges.items[1].deadline_ns = 1_000;
+
+    try std.testing.expectEqual(@as(usize, 1), try state.checkTimeouts(150));
+    try std.testing.expectEqual(@as(usize, 1), state.pendingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), state.outstandingChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), try state.checkTimeouts(999));
+    try std.testing.expectEqual(@as(usize, 1), try state.checkTimeouts(1_000));
 }
 
 test "QUIC path validation suppresses duplicate pending and outstanding challenges" {
