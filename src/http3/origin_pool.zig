@@ -168,7 +168,12 @@ pub fn Pool(comptime Handle: type) type {
                 owned_key.deinit();
                 return;
             }
-            if (self.entries.items.len >= self.config.max_idle_total) {
+            if (self.entries.items.len < self.config.max_idle_total) {
+                // Reserve the new slot before any capacity eviction below.
+                // If allocation fails, neither an existing pooled handle nor
+                // the caller's handle has been dropped.
+                try self.entries.ensureUnusedCapacity(self.allocator, 1);
+            } else {
                 // Idle pool entries are interchangeable for reuse decisions;
                 // avoid preserving insertion order so capacity eviction stays
                 // O(1) instead of memmoving the rest of the pool.
@@ -176,7 +181,7 @@ pub fn Pool(comptime Handle: type) type {
                 self.destroyEntry(&evicted);
             }
 
-            try self.entries.append(self.allocator, .{
+            self.entries.appendAssumeCapacity(.{
                 .key = owned_key,
                 .handle = handle,
                 .pooled_at_ms = now_ms,
@@ -228,6 +233,10 @@ fn asciiLowerAlloc(
 
 fn dropInt(_: std.mem.Allocator, _: usize) void {}
 
+fn countDrop(_: std.mem.Allocator, counter: *usize) void {
+    counter.* += 1;
+}
+
 test "HTTP/3 origin pool releases and acquires by normalized origin" {
     const allocator = std.testing.allocator;
     const IntPool = Pool(usize);
@@ -272,6 +281,24 @@ test "HTTP/3 origin pool accepts owned origin keys" {
     try disabled.releaseKey(9, disabled_key, 0);
     try std.testing.expectEqual(@as(usize, 0), disabled.idleCount());
     try std.testing.expectEqual(@as(u64, 1), disabled.stats().total_dropped);
+}
+
+test "HTTP/3 origin pool releaseKey is transactional on allocation failure" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const CounterPool = Pool(*usize);
+    var pool = CounterPool.init(failing.allocator(), .{}, countDrop);
+    defer pool.deinit();
+
+    var drops: usize = 0;
+    const key = try http3.requestOriginKey(allocator, "https", "oom.example");
+    try std.testing.expectError(
+        error.OutOfMemory,
+        pool.releaseKey(&drops, key, 0),
+    );
+    try std.testing.expectEqual(@as(usize, 0), drops);
+    try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
+    try std.testing.expectEqual(@as(u64, 0), pool.stats().total_dropped);
 }
 
 test "HTTP/3 origin pool enforces expiry and capacity" {
