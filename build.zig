@@ -221,6 +221,7 @@ pub fn build(b: *std.Build) void {
         examples_step.dependOn(&exe.step);
 
         const run = b.addRunArtifact(exe);
+        if (b.args) |args| run.addArgs(args);
         const run_step = b.step(spec.run_step, spec.description);
         run_step.dependOn(&run.step);
         if (std.mem.startsWith(u8, spec.run_step, "bench-")) {
@@ -241,6 +242,7 @@ pub fn build(b: *std.Build) void {
             examples_step.dependOn(&exe.step);
 
             const run = b.addRunArtifact(exe);
+            if (b.args) |args| run.addArgs(args);
             const run_step = b.step(spec.run_step, spec.description);
             run_step.dependOn(&run.step);
         }
