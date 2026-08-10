@@ -1996,7 +1996,7 @@ pub const Connection = struct {
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(self.endpoint.allocator);
         try (quic.Frame{ .ping = {} }).write(&payload, self.endpoint.allocator);
-        try payload.appendNTimes(self.endpoint.allocator, @intFromEnum(quic.FrameType.padding), target_payload_len - payload.items.len);
+        try quic.appendPadding(&payload, self.endpoint.allocator, target_payload_len - payload.items.len);
 
         try self.congestion.reserve(payload.items.len);
         errdefer self.congestion.discard(payload.items.len);

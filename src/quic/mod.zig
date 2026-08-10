@@ -1243,7 +1243,7 @@ pub const Frame = union(enum) {
 
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         switch (self) {
-            .padding => |padding| try list.appendNTimes(allocator, @intFromEnum(FrameType.padding), padding.len),
+            .padding => |padding| try appendPadding(list, allocator, padding.len),
             .ping => try varint.encode(list, allocator, @intFromEnum(FrameType.ping)),
             .ack => |ack| {
                 try validateAckFrame(ack);
@@ -1787,6 +1787,14 @@ fn validateAckFrequencyFrame(ack_frequency: AckFrequencyFrame) Error!void {
     try validateQuicVarint(ack_frequency.request_max_ack_delay);
     try validateQuicVarint(ack_frequency.reordering_threshold);
     if (ack_frequency.ack_eliciting_threshold == 0) return error.InvalidFrame;
+}
+
+pub fn appendPadding(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len: usize) Error!void {
+    if (len == 0) return;
+    const start = list.items.len;
+    try list.ensureUnusedCapacity(allocator, len);
+    list.items.len = start + len;
+    @memset(list.items[start..], @intFromEnum(FrameType.padding));
 }
 
 fn writeAckFields(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: AckFrame) Error!void {
@@ -2439,6 +2447,13 @@ test "QUIC ack close datagram and padding frames" {
     const padding = try parseFrame(&.{ 0, 0, 0, @intFromEnum(FrameType.ping) });
     try std.testing.expectEqual(@as(usize, 3), padding.frame.padding.len);
     try std.testing.expectEqual(@as(usize, 3), padding.consumed);
+
+    var padding_bytes: std.ArrayList(u8) = .empty;
+    defer padding_bytes.deinit(allocator);
+    try appendPadding(&padding_bytes, allocator, 4);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, padding_bytes.items);
+    try (Frame{ .padding = .{ .len = 2 } }).write(&padding_bytes, allocator);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0 }, padding_bytes.items);
 }
 
 test "QUIC ACK_FREQUENCY and IMMEDIATE_ACK frames" {

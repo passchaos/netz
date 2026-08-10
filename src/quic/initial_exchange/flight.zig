@@ -380,11 +380,7 @@ pub fn sealPacket(
         if (packet.len >= options.min_datagram_size) return packet;
         const missing = options.min_datagram_size - packet.len;
         allocator.free(packet);
-        try payload.appendNTimes(
-            allocator,
-            @intFromEnum(quic.FrameType.padding),
-            missing,
-        );
+        try quic.appendPadding(&payload, allocator, missing);
     }
 }
 
