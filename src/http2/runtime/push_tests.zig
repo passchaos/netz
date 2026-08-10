@@ -136,3 +136,94 @@ test "HTTP/2 push promises require monotonic server stream IDs" {
         runtime.testing.receivePushPromise(&connection, frame),
     );
 }
+
+test "HTTP/2 server push fragments large promised request headers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 128,
+            .max_body_bytes = 4096,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            var request = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer request.deinit(shared.server.allocator);
+            const large_value = [_]u8{'x'} ** 512;
+            const pushed_stream = connection.promisePush(
+                request.stream_id,
+                &.{
+                    .{ .name = ":method", .value = "GET" },
+                    .{ .name = ":path", .value = "/large.css" },
+                    .{ .name = ":scheme", .value = "http" },
+                    .{ .name = "x-large", .value = &large_value },
+                },
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            connection.writeResponse(request.stream_id, .{
+                .body = "parent",
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            connection.writePushedResponse(pushed_stream, .{
+                .body = "large",
+            }) catch |err| {
+                shared.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .max_frame_payload = 128,
+            .max_body_bytes = 4096,
+            .enable_push = true,
+        },
+    );
+    defer client.close();
+    var parent = try client.request(.{
+        .path = "/",
+        .authority = "localhost",
+    });
+    defer parent.deinit(allocator);
+    var promise = client.takePromisedRequest() orelse
+        return error.TestUnexpectedResult;
+    defer promise.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 512),
+        runtime.testing.findHeader(promise.headers, "x-large").?.len,
+    );
+    var pushed = try client.readPushedResponse(promise);
+    defer pushed.deinit(allocator);
+    try std.testing.expectEqualStrings("large", pushed.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}

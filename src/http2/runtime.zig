@@ -1041,17 +1041,11 @@ pub const Connection = struct {
             self.allocator,
             request_headers,
         );
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try http2.PushPromisePayload.write(
-            &encoded,
-            self.allocator,
+        try self.writePushPromiseBlock(
             parent_stream_id,
             promised_stream_id,
             block.items,
-            .{},
         );
-        try writeAll(self.io, self.stream, encoded.items);
         self.push_state.commitLocalStream();
         try self.rememberResponseSemantics(
             promised_stream_id,
@@ -1084,6 +1078,7 @@ pub const Connection = struct {
             );
         }
         try self.writeResponse(promised_stream_id, response);
+        self.releaseLocalStream(promised_stream_id);
     }
 
     fn peerPushEnabled(self: Connection) bool {
@@ -1697,12 +1692,38 @@ pub const Connection = struct {
         frame: http2.Frame,
     ) Error!void {
         const promise = try self.validatePushPromiseForClientStream(frame);
-        if ((frame.header.flags & flag_end_headers) == 0) {
-            return error.UnexpectedFrame;
+        var block: std.ArrayList(u8) = .empty;
+        defer block.deinit(self.allocator);
+        try block.appendSlice(self.allocator, promise.header_block);
+        var flags = frame.header.flags;
+        var continuation_count: usize = 0;
+        const max_continuations = self.maxContinuationFrames();
+        while ((flags & flag_end_headers) == 0) {
+            var continuation = try readFrame(
+                self.allocator,
+                self.io,
+                self.stream,
+                self.limits,
+            );
+            defer continuation.deinit(self.allocator);
+            if (continuation.frame.header.frame_type != .continuation or
+                continuation.frame.header.stream_id != promise.stream_id)
+            {
+                return error.UnexpectedFrame;
+            }
+            continuation_count += 1;
+            if (continuation_count > max_continuations) {
+                return error.MessageTooLarge;
+            }
+            try block.appendSlice(
+                self.allocator,
+                continuation.frame.payload,
+            );
+            flags = continuation.frame.header.flags;
         }
         const headers = try cloneDecodedHeaders(
             self.allocator,
-            promise.header_block,
+            block.items,
             self.limits,
             &self.hpack_decoder,
         );
@@ -1947,6 +1968,42 @@ pub const Connection = struct {
             flags = frame.frame.header.flags;
         }
         return cloneDecodedHeaders(self.allocator, block.items, self.limits, &self.hpack_decoder);
+    }
+
+    fn writePushPromiseBlock(
+        self: *Connection,
+        parent_stream_id: u31,
+        promised_stream_id: u31,
+        block: []const u8,
+    ) Error!void {
+        const chunk_size = self.outboundFramePayloadLimit();
+        if (chunk_size <= 4) return error.InvalidFrame;
+        const first_len = @min(block.len, chunk_size - 4);
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try http2.PushPromisePayload.write(
+            &encoded,
+            self.allocator,
+            parent_stream_id,
+            promised_stream_id,
+            block[0..first_len],
+            .{ .end_headers = first_len == block.len },
+        );
+        try writeAll(self.io, self.stream, encoded.items);
+        var offset = first_len;
+        while (offset < block.len) {
+            const end = @min(block.len, offset + chunk_size);
+            try writeFrame(
+                self.allocator,
+                self.io,
+                self.stream,
+                .continuation,
+                if (end == block.len) flag_end_headers else 0,
+                parent_stream_id,
+                block[offset..end],
+            );
+            offset = end;
+        }
     }
 
     fn maxContinuationFrames(self: Connection) usize {
