@@ -690,6 +690,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.quic.zero_rtt, "handshake"));
     try std.testing.expect(@hasDecl(netz.quic.zero_rtt, "ReplayFilter"));
+    try std.testing.expect(@hasDecl(netz.quic.zero_rtt, "replay_filter"));
+    try std.testing.expect(@hasDecl(netz.quic.zero_rtt.replay_filter, "Snapshot"));
+    try std.testing.expect(@hasDecl(netz.quic.zero_rtt.ReplayFilter, "exportSnapshot"));
+    try std.testing.expect(@hasDecl(netz.quic.zero_rtt.ReplayFilter, "initWithSnapshot"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "EarlyDataSender"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "processClient"));
     try std.testing.expect(@hasDecl(netz.quic.version_negotiation, "ClientState"));
