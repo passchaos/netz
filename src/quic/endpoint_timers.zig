@@ -70,10 +70,7 @@ pub const EndpointTimers = struct {
             }
             return;
         }
-        if (index) |existing| {
-            _ = self.entries.orderedRemove(existing);
-            self.refreshEarliestAfterRemove(existing);
-        }
+        if (index) |existing| self.removeEntry(existing);
     }
 
     pub fn disarmConnection(
@@ -81,8 +78,7 @@ pub const EndpointTimers = struct {
         connection_id: u64,
     ) bool {
         const index = self.findIndex(connection_id) orelse return false;
-        _ = self.entries.orderedRemove(index);
-        self.refreshEarliestAfterRemove(index);
+        self.removeEntry(index);
         return true;
     }
 
@@ -147,9 +143,16 @@ pub const EndpointTimers = struct {
         }
     }
 
-    fn refreshEarliestAfterRemove(
+    fn removeEntry(self: *EndpointTimers, index: usize) void {
+        const old_len = self.entries.items.len;
+        _ = self.entries.swapRemove(index);
+        self.refreshEarliestAfterSwapRemove(index, old_len);
+    }
+
+    fn refreshEarliestAfterSwapRemove(
         self: *EndpointTimers,
         removed_index: usize,
+        old_len: usize,
     ) void {
         if (self.entries.items.len == 0) {
             self.earliest_index = null;
@@ -159,10 +162,15 @@ pub const EndpointTimers = struct {
             self.recomputeEarliest();
             return;
         };
+        const old_last = old_len - 1;
         if (earliest == removed_index) {
             self.recomputeEarliest();
-        } else if (earliest > removed_index) {
-            self.earliest_index = earliest - 1;
+        } else if (earliest == old_last) {
+            // swapRemove moved the previously-last (and cached-earliest) entry
+            // into the removed slot.  Other indices remain stable because pool
+            // timer ordering is maintained by `earliest_index`, not array
+            // position.
+            self.earliest_index = removed_index;
         }
     }
 
@@ -239,9 +247,10 @@ test "QUIC endpoint timers arm update earliest and disarm" {
     try timers.update(30, .{ .kind = .path_validation, .deadline_ns = 600 });
     try timers.update(40, .{ .kind = .keep_alive, .deadline_ns = 700 });
     try timers.update(10, null);
-    // Removing an entry before the cached earliest shifts the cached index.
+    // Removing the cached earliest recomputes over the unordered storage left
+    // by swapRemove.
     try std.testing.expectEqual(@as(u64, 30), timers.earliestDeadline().?.connection_id);
-    try std.testing.expectEqual(@as(?usize, 1), timers.earliest_index);
+    try std.testing.expectEqual(@as(?usize, 2), timers.earliest_index);
     try std.testing.expectEqual(@as(usize, 3), timers.count());
     try timers.update(30, .{ .kind = .path_validation, .deadline_ns = 900 });
     try std.testing.expectEqual(@as(u64, 40), timers.earliestDeadline().?.connection_id);
@@ -250,6 +259,21 @@ test "QUIC endpoint timers arm update earliest and disarm" {
     try std.testing.expect(timers.disarmConnection(40));
     try std.testing.expect(!timers.disarmConnection(20));
     try std.testing.expect(timers.earliestDeadline() == null);
+}
+
+test "QUIC endpoint timers retain cached earliest moved by swapRemove" {
+    const allocator = std.testing.allocator;
+    var timers = EndpointTimers.init(allocator);
+    defer timers.deinit();
+
+    try timers.update(1, .{ .kind = .pto, .deadline_ns = 300 });
+    try timers.update(2, .{ .kind = .idle_timeout, .deadline_ns = 200 });
+    try timers.update(3, .{ .kind = .ack_delay, .deadline_ns = 100 });
+    try std.testing.expectEqual(@as(?usize, 2), timers.earliest_index);
+
+    try std.testing.expect(timers.disarmConnection(1));
+    try std.testing.expectEqual(@as(u64, 3), timers.earliestDeadline().?.connection_id);
+    try std.testing.expectEqual(@as(?usize, 0), timers.earliest_index);
 }
 
 test "QUIC endpoint timers service connection and refresh deadline" {
