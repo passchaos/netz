@@ -2,15 +2,17 @@ const std = @import("std");
 const netz = @import("netz");
 
 const default_uri = "https://robotics.bytedance.com/";
-const max_attempts = 3;
+const max_attempts = 5;
 
-pub fn main() !void {
-    const allocator = std.heap.smp_allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const uri = try std.Uri.parse(default_uri);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args.deinit();
+    _ = args.next(); // executable name
+    const uri_text = if (args.next()) |arg| arg else default_uri;
+    const uri = try std.Uri.parse(uri_text);
 
     // This is a protocol smoke tool, not a production WebPKI client: the QUIC
     // handshake path accepts the certificate chain unless callers provide a
@@ -19,7 +21,7 @@ pub fn main() !void {
     var response = try fetchWithRetries(allocator, io, uri);
     defer response.deinit(allocator);
 
-    std.debug.print("HTTP/3 {s} -> {d}\n", .{ default_uri, response.response.status });
+    std.debug.print("HTTP/3 {s} -> {d}\n", .{ uri_text, response.response.status });
     for (response.response.headers) |header| {
         std.debug.print("{s}: {s}\n", .{ header.name, header.value });
     }
