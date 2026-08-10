@@ -24,6 +24,7 @@ pub const SendInitialOptions = struct {
     token: []const u8 = &.{},
     packet_number: u64,
     packet_number_len: u8 = 4,
+    fixed_bit: bool = true,
     crypto_offset: u64 = 0,
     max_crypto_frame_data_len: usize = 1024,
     /// Minimum UDP datagram size for an Initial packet. RFC 9000 requires
@@ -54,6 +55,7 @@ pub const ReceiveOptions = struct {
     /// Minimum length for each standalone received datagram.
     min_datagram_size: usize = 0,
     max_datagrams: usize = 64,
+    allow_zero_fixed_bit: bool = false,
 };
 
 pub const Received = struct {
@@ -252,17 +254,19 @@ pub fn open(
             peer = datagram_from;
         }
 
-        const info = try quic.protection.peekProtectedLongPacketInfo(
+        const info = try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
             datagram_bytes,
+            options.allow_zero_fixed_bit,
         );
         if (info.packet_type != .initial or info.len != datagram_bytes.len) {
             return error.InvalidInitialPacket;
         }
-        var packet = try quic.protection.openInitialPacket(
+        var packet = try quic.protection.openInitialPacketWithFixedBitPolicy(
             endpoint.allocator,
             keys,
             datagram_bytes,
             next_expected,
+            options.allow_zero_fixed_bit,
         );
         var packet_owned = true;
         errdefer if (packet_owned) packet.deinit(endpoint.allocator);
@@ -369,6 +373,7 @@ pub fn sealPacket(
                 .token = options.token,
                 .packet_number = options.packet_number,
                 .packet_number_len = options.packet_number_len,
+                .fixed_bit = options.fixed_bit,
                 .payload = payload.items,
             },
         );

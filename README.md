@@ -141,6 +141,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,
   receive queues, max-payload calculation, queue overflow/drop counters, and
   oversized/disabled DATAGRAM rejection,
+  RFC 9287 `grease_quic_bit` transport-parameter negotiation with strict
+  pre-negotiation fixed-bit validation, negotiated zero-bit receive routing,
+  and connection-seeded unpredictable 1-RTT QUIC Bit emission,
   draft ACK_FREQUENCY and IMMEDIATE_ACK frame codecs with `min_ack_delay`
   transport-parameter negotiation and opt-in 1-RTT state updates for requested
   ACK threshold/max-delay/reordering behavior,

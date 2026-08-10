@@ -35,12 +35,16 @@ pub const InitialResponseFilter = struct {
     original_destination_connection_id: []const u8,
     initial_source_connection_id: []const u8,
     retry_already_processed: bool,
+    allow_zero_fixed_bit: bool = false,
 
     pub fn accept(context: *anyopaque, bytes: []const u8) bool {
         const self: *const InitialResponseFilter =
             @ptrCast(@alignCast(context));
         if (isVersionNegotiationDatagram(bytes)) return true;
-        if (quic.protection.peekProtectedLongPacketInfo(bytes)) |info| {
+        if (quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+            bytes,
+            self.allow_zero_fixed_bit,
+        )) |info| {
             return info.version == self.version.wireValue() and
                 info.packet_type == .initial and
                 std.mem.eql(

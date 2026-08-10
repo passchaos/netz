@@ -99,6 +99,7 @@ pub fn sendCoalescedInitialHandshakeCrypto(
         .source_connection_id = handshake_options.source_connection_id,
         .packet_number = handshake_options.packet_number,
         .packet_number_len = handshake_options.packet_number_len,
+        .fixed_bit = handshake_options.fixed_bit,
         .payload = handshake_payload.items,
     });
     defer endpoint.allocator.free(handshake_packet);
@@ -163,6 +164,7 @@ pub fn sendCoalescedInitialZeroRtt(
             .source_connection_id = zero_rtt_options.source_connection_id,
             .packet_number = zero_rtt_options.packet_number,
             .packet_number_len = zero_rtt_options.packet_number_len,
+            .fixed_bit = zero_rtt_options.fixed_bit,
             .payload = zero_rtt_payload,
         },
     );
@@ -274,6 +276,7 @@ pub fn sendHandshakeCrypto(
         .source_connection_id = options.source_connection_id,
         .packet_number = options.packet_number,
         .packet_number_len = options.packet_number_len,
+        .fixed_bit = options.fixed_bit,
         .payload = payload.items,
     });
     defer endpoint.allocator.free(packet);
@@ -371,7 +374,33 @@ pub fn openInitialCrypto(
     expected_packet_number: u64,
     max_crypto_buffer: usize,
 ) Error!ReceivedInitialCrypto {
-    var packet = try quic.protection.openInitialPacket(endpoint.allocator, keys, bytes, expected_packet_number);
+    return openInitialCryptoWithFixedBitPolicy(
+        endpoint,
+        from,
+        bytes,
+        keys,
+        expected_packet_number,
+        max_crypto_buffer,
+        false,
+    );
+}
+
+pub fn openInitialCryptoWithFixedBitPolicy(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    bytes: []const u8,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_crypto_buffer: usize,
+    allow_zero_fixed_bit: bool,
+) Error!ReceivedInitialCrypto {
+    var packet = try quic.protection.openInitialPacketWithFixedBitPolicy(
+        endpoint.allocator,
+        keys,
+        bytes,
+        expected_packet_number,
+        allow_zero_fixed_bit,
+    );
     errdefer packet.deinit(endpoint.allocator);
     const crypto_data = try cryptoDataFromPayload(endpoint.allocator, packet.payload, max_crypto_buffer, .initial);
     errdefer endpoint.allocator.free(crypto_data);
@@ -386,7 +415,33 @@ pub fn openHandshakeCrypto(
     expected_packet_number: u64,
     max_crypto_buffer: usize,
 ) Error!ReceivedHandshakeCrypto {
-    var packet = try quic.protection.openHandshakePacket(endpoint.allocator, keys, bytes, expected_packet_number);
+    return openHandshakeCryptoWithFixedBitPolicy(
+        endpoint,
+        from,
+        bytes,
+        keys,
+        expected_packet_number,
+        max_crypto_buffer,
+        false,
+    );
+}
+
+pub fn openHandshakeCryptoWithFixedBitPolicy(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    bytes: []const u8,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_crypto_buffer: usize,
+    allow_zero_fixed_bit: bool,
+) Error!ReceivedHandshakeCrypto {
+    var packet = try quic.protection.openHandshakePacketWithFixedBitPolicy(
+        endpoint.allocator,
+        keys,
+        bytes,
+        expected_packet_number,
+        allow_zero_fixed_bit,
+    );
     errdefer packet.deinit(endpoint.allocator);
     const crypto_data = try cryptoDataFromPayload(endpoint.allocator, packet.payload, max_crypto_buffer, .handshake);
     errdefer endpoint.allocator.free(crypto_data);

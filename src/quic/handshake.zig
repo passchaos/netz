@@ -3,6 +3,7 @@ const quic = @import("mod.zig");
 const key_exchange = @import("handshake/key_exchange.zig");
 const retransmit = @import("handshake/retransmit.zig");
 const retry = @import("handshake/retry.zig");
+const fixed_bit = @import("one_rtt/fixed_bit.zig");
 
 const net = std.Io.net;
 
@@ -253,6 +254,8 @@ pub const OneRttConfig = struct {
             .peer_preferred_address = peer_transport_parameters.preferred_address,
             .local_max_datagram_frame_size = if (local_transport_parameters.max_datagram_frame_size) |size| std.math.cast(usize, size) orelse std.math.maxInt(usize) else null,
             .peer_max_datagram_frame_size = if (peer_transport_parameters.max_datagram_frame_size) |size| std.math.cast(usize, size) orelse std.math.maxInt(usize) else null,
+            .accept_zero_fixed_bit = local_transport_parameters.grease_quic_bit,
+            .grease_fixed_bit = peer_transport_parameters.grease_quic_bit,
             .enable_ack_frequency = local_transport_parameters.min_ack_delay != null or peer_transport_parameters.min_ack_delay != null,
             .local_min_ack_delay = local_transport_parameters.min_ack_delay,
             .peer_min_ack_delay = peer_transport_parameters.min_ack_delay,
@@ -336,6 +339,44 @@ fn cipherSuiteEnabled(
     return false;
 }
 
+fn configuredGreaseQuicBit(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+    typed: quic.TransportParameters,
+    source: quic.TransportParameterSource,
+) Error!bool {
+    if (encoded.len == 0) return typed.grease_quic_bit;
+    return (try quic.parseTransportParametersTyped(
+        allocator,
+        encoded,
+        source,
+    )).grease_quic_bit;
+}
+
+test "raw transport parameters configure QUIC Bit greasing" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try quic.encodeTransportParametersForSource(
+        &encoded,
+        allocator,
+        .{ .grease_quic_bit = true },
+        .client,
+    );
+    try std.testing.expect(try configuredGreaseQuicBit(
+        allocator,
+        encoded.items,
+        .{},
+        .client,
+    ));
+    try std.testing.expect(!try configuredGreaseQuicBit(
+        allocator,
+        &.{},
+        .{},
+        .client,
+    ));
+}
+
 fn clientInitialDestinationConnectionId(options: ClientOptions) []const u8 {
     if (options.retry_source_connection_id.len != 0) return options.retry_source_connection_id;
     return options.original_destination_connection_id;
@@ -355,8 +396,11 @@ fn isVersionNegotiationDatagram(bytes: []const u8) bool {
 }
 
 fn isHandshakeDatagram(bytes: []const u8) bool {
-    const info = quic.protection.peekProtectedLongPacketInfo(bytes) catch
-        return false;
+    const info =
+        quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+            bytes,
+            true,
+        ) catch return false;
     return info.packet_type == .handshake;
 }
 
@@ -562,6 +606,7 @@ fn connectAttempt(
             .original_destination_connection_id = options.original_destination_connection_id,
             .initial_source_connection_id = options.local_connection_id,
             .retry_already_processed = retry_processed,
+            .allow_zero_fixed_bit = local_transport_parameters.grease_quic_bit,
         };
         if (send_early_data) {
             const early_data = options.early_data.?;
@@ -719,7 +764,11 @@ fn connectAttempt(
         return connectAttempt(endpoint, peer, next, true);
     }
 
-    const server_initial_info = try quic.protection.peekProtectedLongPacketInfo(server_datagram.bytes);
+    const server_initial_info =
+        try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+            server_datagram.bytes,
+            options.local_transport_parameters.grease_quic_bit,
+        );
     if (server_initial_info.packet_type != .initial) return error.InvalidHandshakeFlight;
 
     var server_initial_flight =
@@ -731,6 +780,7 @@ fn connectAttempt(
             .{
                 .expected_packet_number = 0,
                 .max_crypto_buffer = options.max_crypto_buffer,
+                .allow_zero_fixed_bit = local_transport_parameters.grease_quic_bit,
             },
         );
     defer server_initial_flight.deinit(endpoint.allocator);
@@ -795,6 +845,7 @@ fn connectAttempt(
         handshake.server_quic,
         0,
         options.max_crypto_buffer,
+        local_transport_parameters.grease_quic_bit,
     );
     defer server_handshake.deinit(endpoint.allocator);
     const server_flight = try splitServerFlight(
@@ -1008,6 +1059,10 @@ fn connectAttempt(
             .destination_connection_id = server_initial.packet.source_connection_id,
             .source_connection_id = options.local_connection_id,
             .packet_number = options.client_handshake_packet_number,
+            .fixed_bit = try fixed_bit.randomValue(
+                endpoint.io,
+                peer_transport_parameters.grease_quic_bit,
+            ),
             .crypto_data = client_flight.items,
             .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
         },
@@ -1092,6 +1147,12 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
     defer if (owned_retry_source_connection_id) |cid|
         endpoint.allocator.free(cid);
     var automatic_retry_secrets: [1]quic.address_validation_token.Secret = undefined;
+    const accept_zero_fixed_bit = try configuredGreaseQuicBit(
+        endpoint.allocator,
+        options.transport_parameters,
+        options.local_transport_parameters,
+        .server,
+    );
 
     var client_initial = try receiveClientInitial(
         endpoint,
@@ -1100,6 +1161,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         options.retry_source_connection_id,
         options.version,
         options.available_versions,
+        accept_zero_fixed_bit,
     );
     if (options.retry) |policy| {
         const odcid = try endpoint.allocator.dupe(
@@ -1147,6 +1209,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             options.max_crypto_buffer,
             rscid,
             options.version,
+            accept_zero_fixed_bit,
         );
         owned_retry_original_destination_connection_id = odcid;
         owned_retry_source_connection_id = rscid;
@@ -1343,6 +1406,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             options.initial_one_rtt_config.max_frames_per_packet,
             client_initial.packet.destination_connection_id,
             client_initial.packet.source_connection_id,
+            options.local_transport_parameters.grease_quic_bit,
         );
         if (pending_early_data == null) {
             pending_early_data = try receiveStandaloneClientEarlyData(
@@ -1353,6 +1417,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                 options.initial_one_rtt_config.max_frames_per_packet,
                 client_initial.packet.destination_connection_id,
                 client_initial.packet.source_connection_id,
+                options.local_transport_parameters.grease_quic_bit,
             );
         }
     } else if (client_offered_early_data and
@@ -1505,6 +1570,10 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                 .destination_connection_id = client_initial.packet.source_connection_id,
                 .source_connection_id = options.local_connection_id,
                 .packet_number = options.server_initial_packet_number,
+                .fixed_bit = try fixed_bit.randomValue(
+                    endpoint.io,
+                    peer_transport_parameters.grease_quic_bit,
+                ),
                 .crypto_data = server_hello.items,
                 .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
                 .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
@@ -1517,6 +1586,10 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
             .destination_connection_id = client_initial.packet.source_connection_id,
             .source_connection_id = options.local_connection_id,
             .packet_number = options.server_handshake_packet_number,
+            .fixed_bit = try fixed_bit.randomValue(
+                endpoint.io,
+                peer_transport_parameters.grease_quic_bit,
+            ),
             .crypto_data = server_flight.items,
             .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
         },
@@ -1529,14 +1602,16 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
         isHandshakeDatagram,
     );
     defer client_handshake_datagram.deinit(endpoint.allocator);
-    var client_handshake = try quic.initial_exchange.openHandshakeCrypto(
-        endpoint,
-        client_handshake_datagram.from,
-        client_handshake_datagram.bytes,
-        handshake.client_quic,
-        0,
-        options.max_crypto_buffer,
-    );
+    var client_handshake =
+        try quic.initial_exchange.openHandshakeCryptoWithFixedBitPolicy(
+            endpoint,
+            client_handshake_datagram.from,
+            client_handshake_datagram.bytes,
+            handshake.client_quic,
+            0,
+            options.max_crypto_buffer,
+            local_transport_parameters.grease_quic_bit,
+        );
     defer client_handshake.deinit(endpoint.allocator);
     const client_flight = try splitClientFlight(
         client_handshake.crypto_data,
@@ -1702,6 +1777,7 @@ fn receiveClientInitial(
     retry_destination_connection_id: []const u8,
     version: quic.Version,
     available_versions: []const quic.Version,
+    allow_zero_fixed_bit: bool,
 ) Error!ReceivedClientInitial {
     const supported_wire_versions = try endpoint.allocator.alloc(
         u32,
@@ -1718,7 +1794,10 @@ fn receiveClientInitial(
     defer datagram.deinit(endpoint.allocator);
     if (datagram.bytes.len < quic.initial_exchange.min_initial_udp_datagram_size) return error.InvalidInitialPacket;
 
-    const header = try quic.LongHeader.parse(datagram.bytes);
+    const header = try quic.LongHeader.parseWithFixedBitPolicy(
+        datagram.bytes,
+        allow_zero_fixed_bit,
+    );
     if (header.packet_type != .initial) return error.InvalidInitialPacket;
     if (retry_destination_connection_id.len == 0) {
         // RFC 9000 Section 7.2 requires a first client Initial to use a random
@@ -1732,9 +1811,11 @@ fn receiveClientInitial(
 
     if (header.version != version.wireValue()) return error.InvalidInitialPacket;
     const initial_secrets = try quic.protection.deriveInitialSecretsForVersion(version.wireValue(), header.destination_connection_id);
-    const initial_info = try quic.protection.peekProtectedLongPacketInfo(
-        datagram.bytes,
-    );
+    const initial_info =
+        try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+            datagram.bytes,
+            allow_zero_fixed_bit,
+        );
     if (initial_info.packet_type != .initial) return error.InvalidInitialPacket;
     var flight = try quic.initial_exchange.openInitialCryptoFlight(
         endpoint,
@@ -1745,6 +1826,7 @@ fn receiveClientInitial(
             .expected_packet_number = expected_packet_number,
             .max_crypto_buffer = max_crypto_buffer,
             .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+            .allow_zero_fixed_bit = allow_zero_fixed_bit,
         },
     );
     errdefer flight.deinit(endpoint.allocator);
@@ -1767,6 +1849,7 @@ fn receiveRetriedClientInitial(
     max_crypto_buffer: usize,
     retry_destination_connection_id: []const u8,
     version: quic.Version,
+    allow_zero_fixed_bit: bool,
 ) Error!ReceivedClientInitial {
     while (true) {
         var datagram = try endpoint.receiveBytes();
@@ -1778,9 +1861,11 @@ fn receiveRetriedClientInitial(
             // belongs to the discarded pre-Retry flight.
             continue;
         }
-        const info = quic.protection.peekProtectedLongPacketInfo(
-            datagram.bytes,
-        ) catch continue;
+        const info =
+            quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+                datagram.bytes,
+                allow_zero_fixed_bit,
+            ) catch continue;
         if (info.version != version.wireValue() or
             info.packet_type != .initial or
             !std.mem.eql(
@@ -1805,6 +1890,7 @@ fn receiveRetriedClientInitial(
                 .expected_packet_number = 0,
                 .max_crypto_buffer = max_crypto_buffer,
                 .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
+                .allow_zero_fixed_bit = allow_zero_fixed_bit,
             },
         );
         errdefer flight.deinit(endpoint.allocator);
@@ -1830,20 +1916,36 @@ fn receiveServerHandshakeCrypto(
     handshake_keys: quic.protection.PacketProtectionKeys,
     expected_packet_number: u64,
     max_crypto_buffer: usize,
+    allow_zero_fixed_bit: bool,
 ) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
     if (coalesced_tail.len == 0) {
-        return quic.initial_exchange.receiveHandshakeCrypto(endpoint, handshake_keys, expected_packet_number, max_crypto_buffer);
+        var datagram = try endpoint.receiveBytes();
+        defer datagram.deinit(endpoint.allocator);
+        return quic.initial_exchange.openHandshakeCryptoWithFixedBitPolicy(
+            endpoint,
+            datagram.from,
+            datagram.bytes,
+            handshake_keys,
+            expected_packet_number,
+            max_crypto_buffer,
+            allow_zero_fixed_bit,
+        );
     }
 
-    const info = try quic.protection.peekProtectedLongPacketInfo(coalesced_tail);
+    const info =
+        try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+            coalesced_tail,
+            allow_zero_fixed_bit,
+        );
     if (info.packet_type != .handshake or info.len != coalesced_tail.len) return error.InvalidHandshakeFlight;
-    return quic.initial_exchange.openHandshakeCrypto(
+    return quic.initial_exchange.openHandshakeCryptoWithFixedBitPolicy(
         endpoint,
         from,
         coalesced_tail[0..info.len],
         handshake_keys,
         expected_packet_number,
         max_crypto_buffer,
+        allow_zero_fixed_bit,
     );
 }
 
@@ -1856,19 +1958,25 @@ fn openClientEarlyData(
     max_frames: usize,
     expected_destination_connection_id: []const u8,
     expected_source_connection_id: []const u8,
+    allow_zero_fixed_bit: bool,
 ) Error!?quic.zero_rtt.Packet {
     if (coalesced_tail.len == 0) return null;
-    const info = try quic.protection.peekProtectedLongPacketInfo(coalesced_tail);
+    const info =
+        try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+            coalesced_tail,
+            allow_zero_fixed_bit,
+        );
     if (info.packet_type != .zero_rtt or info.len != coalesced_tail.len) {
         return error.InvalidHandshakeFlight;
     }
-    var packet = try quic.zero_rtt.openBytes(
+    var packet = try quic.zero_rtt.openBytesWithFixedBitPolicy(
         endpoint,
         from,
         coalesced_tail,
         keys,
         expected_packet_number,
         max_frames,
+        allow_zero_fixed_bit,
     );
     errdefer packet.deinit(endpoint.allocator);
     if (!std.mem.eql(
@@ -1895,6 +2003,7 @@ fn receiveStandaloneClientEarlyData(
     max_frames: usize,
     expected_destination_connection_id: []const u8,
     expected_source_connection_id: []const u8,
+    allow_zero_fixed_bit: bool,
 ) Error!quic.zero_rtt.Packet {
     var datagram = try endpoint.receiveBytes();
     defer datagram.deinit(endpoint.allocator);
@@ -1910,6 +2019,7 @@ fn receiveStandaloneClientEarlyData(
         max_frames,
         expected_destination_connection_id,
         expected_source_connection_id,
+        allow_zero_fixed_bit,
     )) orelse return error.InvalidHandshakeFlight;
 }
 

@@ -23,6 +23,7 @@ pub const SendOptions = struct {
     source_connection_id: []const u8,
     packet_number: u64,
     packet_number_len: u8 = 4,
+    fixed_bit: bool = true,
     frames: []const quic.Frame,
 };
 
@@ -55,6 +56,7 @@ pub const EarlyDataSender = struct {
             destination_connection_id: []const u8,
             source_connection_id: []const u8,
             packet_number_len: u8 = 4,
+            fixed_bit: bool = true,
             frames: []const quic.Frame,
         },
     ) Error!void {
@@ -75,6 +77,7 @@ pub const EarlyDataSender = struct {
             .source_connection_id = options.source_connection_id,
             .packet_number = self.packet_number,
             .packet_number_len = options.packet_number_len,
+            .fixed_bit = options.fixed_bit,
             .frames = options.frames,
         });
         // The first successful socket write makes this ticket unavailable to
@@ -107,6 +110,7 @@ pub fn sendFrames(
             .source_connection_id = options.source_connection_id,
             .packet_number = options.packet_number,
             .packet_number_len = options.packet_number_len,
+            .fixed_bit = options.fixed_bit,
             .payload = payload,
         },
     );
@@ -140,11 +144,32 @@ pub fn openBytes(
     expected_packet_number: u64,
     max_frames: usize,
 ) Error!Packet {
-    var packet = try quic.protection.openZeroRttPacket(
+    return openBytesWithFixedBitPolicy(
+        endpoint,
+        from,
+        bytes,
+        keys,
+        expected_packet_number,
+        max_frames,
+        false,
+    );
+}
+
+pub fn openBytesWithFixedBitPolicy(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    bytes: []const u8,
+    keys: quic.protection.PacketProtectionKeys,
+    expected_packet_number: u64,
+    max_frames: usize,
+    allow_zero_fixed_bit: bool,
+) Error!Packet {
+    var packet = try quic.protection.openZeroRttPacketWithFixedBitPolicy(
         endpoint.allocator,
         keys,
         bytes,
         expected_packet_number,
+        allow_zero_fixed_bit,
     );
     errdefer packet.deinit(endpoint.allocator);
     const frames = try parseFrames(

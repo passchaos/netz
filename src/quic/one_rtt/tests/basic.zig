@@ -94,6 +94,101 @@ test "QUIC 1-RTT batch send protects consecutive packets" {
     }
 }
 
+test "QUIC 1-RTT connection greases and accepts the fixed bit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xb7} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "sender",
+        .peer_connection_id = "receiver",
+        .accept_zero_fixed_bit = true,
+        .grease_fixed_bit = true,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+    try std.testing.expect(connection.fixed_bit_generator.enabled());
+    const route = connection.route(7, 3);
+    try std.testing.expect(route.accept_zero_fixed_bit);
+    try std.testing.expectEqual(@as(usize, 7), route.connection_index);
+
+    try connection.send(&.{.{ .ping = {} }});
+    var first = try receiver.receiveBytes();
+    defer first.deinit(allocator);
+    // The PRNG output itself is intentionally unpredictable; the codec-level
+    // test deterministically covers zero. Here, authenticate whichever value
+    // the connection selected to prove runtime negotiation reaches the opener.
+    var opened = try quic.protection.openShortPacketWithFixedBitPolicy(
+        allocator,
+        keys,
+        first.bytes,
+        "receiver".len,
+        0,
+        true,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqual(
+        (first.bytes[0] & 0x40) != 0,
+        opened.fixed_bit,
+    );
+
+    const zero_packet = try quic.protection.sealShortPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = "sender",
+            .packet_number = 0,
+            .fixed_bit = false,
+            .payload = &.{@intFromEnum(quic.FrameType.ping)},
+        },
+    );
+    defer allocator.free(zero_packet);
+    try std.testing.expectError(
+        error.InvalidInitialPacket,
+        one_rtt.openReceivedBytes(
+            &sender,
+            receiver.address(),
+            zero_packet,
+            keys,
+            "sender".len,
+            0,
+            4,
+        ),
+    );
+    var accepted = try one_rtt.testing.processReceivedBytesAt(
+        &connection,
+        receiver.address(),
+        zero_packet,
+        .not_ect,
+        1,
+    );
+    defer accepted.deinit(allocator);
+    try std.testing.expect(!accepted.packet.fixed_bit);
+    try std.testing.expect(accepted.frames[0] == .ping);
+}
+
 test "QUIC 1-RTT batch send preflights storage and all packets" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

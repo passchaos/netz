@@ -88,6 +88,13 @@ pub const LongHeader = struct {
     retry_integrity_tag: ?[retry_integrity_tag_len]u8 = null,
 
     pub fn parse(bytes: []const u8) Error!LongHeader {
+        return parseWithFixedBitPolicy(bytes, false);
+    }
+
+    pub fn parseWithFixedBitPolicy(
+        bytes: []const u8,
+        allow_zero_fixed_bit: bool,
+    ) Error!LongHeader {
         var cursor = wire.Cursor.init(bytes);
         const first = try cursor.readByte();
         if ((first & 0x80) == 0) return error.InvalidEncoding;
@@ -96,7 +103,9 @@ pub const LongHeader = struct {
         // because its first byte is intentionally version-independent; all other
         // long-header parsers should fail closed instead of letting random UDP
         // traffic or ossification probes advance into packet-type-specific logic.
-        if ((first & 0x40) == 0) return error.InvalidEncoding;
+        if (!allow_zero_fixed_bit and (first & 0x40) == 0) {
+            return error.InvalidEncoding;
+        }
         const version_value = try cursor.readInt(u32, .big);
         if (version_value == Version.negotiation.wireValue()) return error.InvalidVersionNegotiation;
         const dcid_len = try cursor.readByte();
@@ -370,6 +379,7 @@ pub const TransportParameterId = enum(u64) {
     retry_source_connection_id = 0x10,
     version_information = 0x11,
     max_datagram_frame_size = 0x20,
+    grease_quic_bit = 0x2ab2,
     min_ack_delay = 0xff04de1b,
     _,
 };
@@ -463,6 +473,8 @@ pub const TransportParameters = struct {
     retry_source_connection_id: ?[]const u8 = null,
     version_information: ?VersionInformation = null,
     max_datagram_frame_size: ?u64 = null,
+    /// RFC 9287 support advertisement. Presence is encoded as an empty value.
+    grease_quic_bit: bool = false,
     min_ack_delay: ?u64 = null,
 };
 
@@ -532,6 +544,14 @@ pub fn encodeTransportParametersForSource(
         try encodeVersionInformationTransportParameter(list, allocator, version_information);
     }
     if (params.max_datagram_frame_size) |size| try encodeIntegerTransportParameter(list, allocator, .max_datagram_frame_size, size);
+    if (params.grease_quic_bit) {
+        try encodeTransportParameter(
+            list,
+            allocator,
+            @intFromEnum(TransportParameterId.grease_quic_bit),
+            &.{},
+        );
+    }
     if (params.min_ack_delay) |delay| try encodeIntegerTransportParameter(list, allocator, .min_ack_delay, delay);
 }
 
@@ -641,6 +661,9 @@ pub fn parseTransportParametersTyped(
             params.version_information = try parseVersionInformation(value);
         } else if (id == @intFromEnum(TransportParameterId.max_datagram_frame_size)) {
             params.max_datagram_frame_size = try parseTransportInteger(.max_datagram_frame_size, value);
+        } else if (id == @intFromEnum(TransportParameterId.grease_quic_bit)) {
+            if (value.len != 0) return error.InvalidTransportParameterLength;
+            params.grease_quic_bit = true;
         } else if (id == @intFromEnum(TransportParameterId.min_ack_delay)) {
             params.min_ack_delay = try parseTransportInteger(.min_ack_delay, value);
         } else {
@@ -1906,6 +1929,12 @@ test "QUIC long initial header parse" {
 
     bytes.items[0] &= ~@as(u8, 0x40);
     try std.testing.expectError(error.InvalidEncoding, LongHeader.parse(bytes.items));
+    const greased = try LongHeader.parseWithFixedBitPolicy(
+        bytes.items,
+        true,
+    );
+    try std.testing.expect(!greased.fixed_bit);
+    try std.testing.expectEqual(PacketType.initial, greased.packet_type);
 
     var version_zero = try bytes.clone(allocator);
     defer version_zero.deinit(allocator);
@@ -2126,6 +2155,7 @@ test "QUIC typed transport parameters roundtrip and validate" {
             .available_versions_wire = &available_versions_wire,
         },
         .max_datagram_frame_size = 1200,
+        .grease_quic_bit = true,
         .min_ack_delay = 1000,
     };
 
@@ -2141,6 +2171,7 @@ test "QUIC typed transport parameters roundtrip and validate" {
     try std.testing.expectEqual(@as(u64, 50), decoded.max_ack_delay);
     try std.testing.expectEqual(@as(u64, 4), decoded.active_connection_id_limit);
     try std.testing.expectEqual(@as(?u64, 1200), decoded.max_datagram_frame_size);
+    try std.testing.expect(decoded.grease_quic_bit);
     try std.testing.expectEqual(@as(?u64, 1000), decoded.min_ack_delay);
     try std.testing.expectEqualSlices(u8, &client_cid, decoded.initial_source_connection_id.?);
     try std.testing.expectEqual(Version.version_1, decoded.version_information.?.chosen_version);
@@ -2214,6 +2245,23 @@ test "QUIC typed transport parameters roundtrip and validate" {
     const token = [_]u8{0xaa} ** 16;
     try encodeTransportParameter(&forbidden, allocator, @intFromEnum(TransportParameterId.stateless_reset_token), &token);
     try std.testing.expectError(error.TransportParameterForbidden, parseTransportParametersTyped(allocator, forbidden.items, .client));
+
+    var non_empty_grease_bit: std.ArrayList(u8) = .empty;
+    defer non_empty_grease_bit.deinit(allocator);
+    try encodeTransportParameter(
+        &non_empty_grease_bit,
+        allocator,
+        @intFromEnum(TransportParameterId.grease_quic_bit),
+        &.{1},
+    );
+    try std.testing.expectError(
+        error.InvalidTransportParameterLength,
+        parseTransportParametersTyped(
+            allocator,
+            non_empty_grease_bit.items,
+            .client,
+        ),
+    );
 }
 
 test "QUIC reserved transport parameters grease unknown handling" {

@@ -633,6 +633,69 @@ test "QUIC short packet preserves spin bit" {
     try std.testing.expectEqualStrings("spin", opened.payload);
 }
 
+test "QUIC short packet zero fixed bit requires RFC 9287 policy" {
+    const allocator = std.testing.allocator;
+    const keys = protection.deriveAes128Keys(
+        [_]u8{0xa7} ** protection.secret_len,
+    );
+    const dcid = [_]u8{ 0x17, 0x28, 0x39, 0x4a };
+    const packet = try protection.sealShortPacket(allocator, keys, .{
+        .destination_connection_id = &dcid,
+        .packet_number = 12,
+        .packet_number_len = 2,
+        .fixed_bit = false,
+        .key_phase = true,
+        .payload = "greased fixed bit",
+    });
+    defer allocator.free(packet);
+    // Header protection deliberately excludes the QUIC Bit.
+    try std.testing.expect((packet[0] & 0x40) == 0);
+
+    try std.testing.expectError(
+        error.InvalidInitialPacket,
+        protection.openShortPacket(
+            allocator,
+            keys,
+            packet,
+            dcid.len,
+            0,
+        ),
+    );
+    try std.testing.expect(
+        try protection.peekShortPacketKeyPhaseForPolicy(
+            keys.hp,
+            packet,
+            dcid.len,
+            true,
+        ),
+    );
+    var opened = try protection.openShortPacketWithFixedBitPolicy(
+        allocator,
+        keys,
+        packet,
+        dcid.len,
+        0,
+        true,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expect(!opened.fixed_bit);
+    try std.testing.expect(opened.key_phase);
+    try std.testing.expectEqualStrings("greased fixed bit", opened.payload);
+
+    const in_place_storage = try allocator.dupe(u8, packet);
+    defer allocator.free(in_place_storage);
+    const in_place =
+        try protection.openShortPacketInPlaceWithFixedBitPolicy(
+            keys,
+            in_place_storage,
+            dcid.len,
+            0,
+            true,
+        );
+    try std.testing.expect(!in_place.fixed_bit);
+    try std.testing.expectEqualStrings("greased fixed bit", in_place.payload);
+}
+
 test "QUIC packet protection rejects reserved header bits after unprotect" {
     const allocator = std.testing.allocator;
 
@@ -753,6 +816,119 @@ test "QUIC protected long packets reject a missing fixed bit before AEAD" {
     defer allocator.free(malformed_zero_rtt);
     malformed_zero_rtt[0] &= ~@as(u8, 0x40);
     try std.testing.expectError(error.InvalidInitialPacket, protection.openZeroRttPacket(allocator, zero_rtt_keys, malformed_zero_rtt, 0));
+}
+
+test "QUIC protected long packets accept negotiated zero fixed bits" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const scid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+
+    const initial_keys = protection.deriveInitialSecrets(&dcid).client;
+    const initial = try protection.sealInitialPacket(
+        allocator,
+        initial_keys,
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 1,
+            .fixed_bit = false,
+            .payload = "greased initial",
+        },
+    );
+    defer allocator.free(initial);
+    try std.testing.expectError(
+        error.InvalidInitialPacket,
+        protection.openInitialPacket(allocator, initial_keys, initial, 0),
+    );
+    const initial_info =
+        try protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+            initial,
+            true,
+        );
+    try std.testing.expectEqual(
+        protection.ProtectedLongPacketType.initial,
+        initial_info.packet_type,
+    );
+    var opened_initial =
+        try protection.openInitialPacketWithFixedBitPolicy(
+            allocator,
+            initial_keys,
+            initial,
+            0,
+            true,
+        );
+    defer opened_initial.deinit(allocator);
+    try std.testing.expect(!opened_initial.fixed_bit);
+
+    const handshake_keys = protection.deriveAes128Keys(
+        [_]u8{0xd2} ** protection.secret_len,
+    );
+    const handshake = try protection.sealHandshakePacket(
+        allocator,
+        handshake_keys,
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 2,
+            .fixed_bit = false,
+            .payload = "greased handshake",
+        },
+    );
+    defer allocator.free(handshake);
+    try std.testing.expectError(
+        error.InvalidInitialPacket,
+        protection.openHandshakePacket(
+            allocator,
+            handshake_keys,
+            handshake,
+            0,
+        ),
+    );
+    var opened_handshake =
+        try protection.openHandshakePacketWithFixedBitPolicy(
+            allocator,
+            handshake_keys,
+            handshake,
+            0,
+            true,
+        );
+    defer opened_handshake.deinit(allocator);
+    try std.testing.expect(!opened_handshake.fixed_bit);
+
+    const zero_rtt_keys = protection.deriveAes128Keys(
+        [_]u8{0xd3} ** protection.secret_len,
+    );
+    const zero_rtt = try protection.sealZeroRttPacket(
+        allocator,
+        zero_rtt_keys,
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 3,
+            .fixed_bit = false,
+            .payload = "greased zero rtt",
+        },
+    );
+    defer allocator.free(zero_rtt);
+    try std.testing.expectError(
+        error.InvalidInitialPacket,
+        protection.openZeroRttPacket(
+            allocator,
+            zero_rtt_keys,
+            zero_rtt,
+            0,
+        ),
+    );
+    var opened_zero_rtt =
+        try protection.openZeroRttPacketWithFixedBitPolicy(
+            allocator,
+            zero_rtt_keys,
+            zero_rtt,
+            0,
+            true,
+        );
+    defer opened_zero_rtt.deinit(allocator);
+    try std.testing.expect(!opened_zero_rtt.fixed_bit);
 }
 
 test "QUIC protected long packets reject oversized connection IDs before AEAD" {

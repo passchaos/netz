@@ -1,5 +1,6 @@
 const std = @import("std");
 const quic = @import("mod.zig");
+const fixed_bit = @import("one_rtt/fixed_bit.zig");
 const handshake_status = @import("one_rtt/handshake_status.zig");
 
 const net = std.Io.net;
@@ -27,6 +28,7 @@ pub const SendOptions = struct {
     destination_connection_id: []const u8,
     packet_number: u64,
     packet_number_len: u8 = 4,
+    fixed_bit: bool = true,
     spin_bit: bool = false,
     key_phase: bool = false,
     frames: []const quic.Frame,
@@ -36,6 +38,7 @@ pub const BatchSendOptions = struct {
     destination_connection_id: []const u8,
     first_packet_number: u64,
     packet_number_len: u8 = 4,
+    fixed_bit: bool = true,
     spin_bit: bool = false,
     key_phase: bool = false,
     /// One frame slice per UDP datagram.
@@ -71,6 +74,7 @@ const PayloadSendOptions = struct {
     destination_connection_id: []const u8,
     packet_number: u64,
     packet_number_len: u8 = 4,
+    fixed_bit: bool = true,
     spin_bit: bool = false,
     key_phase: bool = false,
     payload: []const u8,
@@ -176,6 +180,10 @@ pub const ConnectionConfig = struct {
     pacing_max_burst_packets: usize = quic.pacing.Pacer.default_max_burst_packets,
     max_stored_new_tokens: usize = 4,
     enable_spin_bit: bool = false,
+    /// RFC 9287 negotiation is directional: advertise means accepting zero;
+    /// peer advertisement permits sending unpredictable QUIC Bit values.
+    accept_zero_fixed_bit: bool = false,
+    grease_fixed_bit: bool = false,
     active_connection_id_limit: usize = quic.default_active_connection_id_limit,
     local_max_idle_timeout_ms: u64 = 0,
     peer_max_idle_timeout_ms: u64 = 0,
@@ -388,6 +396,7 @@ pub const Connection = struct {
     recv_max_streams_bidi: u64,
     recv_max_streams_uni: u64,
     spin_bit_value: bool = false,
+    fixed_bit_generator: fixed_bit.Generator = .{},
     last_activity_ms: ?u64 = null,
     idle_timed_out: bool = false,
     last_persistent_congestion_packet_number: ?u64 = null,
@@ -450,6 +459,10 @@ pub const Connection = struct {
             .recv_max_streams_uni = config.initial_receive_max_streams_uni,
         };
         errdefer connection.deinit();
+        connection.fixed_bit_generator = try .init(
+            endpoint.io,
+            config.grease_fixed_bit,
+        );
         try connection.send_frame_buffer.ensureTotalCapacity(endpoint.allocator, config.max_datagram_size);
         try connection.send_packet_buffer.ensureTotalCapacity(endpoint.allocator, send_buffer_capacity);
         if (config.local_stateless_reset_key) |key| {
@@ -487,6 +500,7 @@ pub const Connection = struct {
             self.endpoint.allocator,
         );
         self.receive_frame_buffer.deinit(self.endpoint.allocator);
+        self.fixed_bit_generator.deinit();
         self.* = undefined;
     }
 
@@ -498,6 +512,25 @@ pub const Connection = struct {
     pub fn qlogFailed(self: Connection) bool {
         const observer = self.config.qlog_observer orelse return false;
         return observer.failure != null;
+    }
+
+    /// Route metadata for endpoint-level CID dispatch.
+    ///
+    /// Shared UDP endpoints inspect the QUIC Bit before packet decryption, so
+    /// the negotiated RFC 9287 receive policy has to accompany each registered
+    /// connection ID.
+    pub fn route(
+        self: Connection,
+        connection_index: usize,
+        sequence_number: u64,
+    ) quic.connection_router.Route {
+        return .{
+            .connection_index = connection_index,
+            .sequence_number = sequence_number,
+            .peer_address = self.config.peer,
+            .active_migration_disabled = self.config.peer_disable_active_migration,
+            .accept_zero_fixed_bit = self.config.accept_zero_fixed_bit,
+        };
     }
 
     pub fn send(self: *Connection, frames: []const quic.Frame) Error!void {
@@ -940,6 +973,7 @@ pub const Connection = struct {
                     .destination_connection_id = self.config.peer_connection_id,
                     .packet_number = packet.packet_number,
                     .packet_number_len = packet.packet_number_len,
+                    .fixed_bit = self.nextFixedBit(),
                     .spin_bit = self.nextSpinBit(),
                     .key_phase = self.send_key_phase.currentKeyPhase(),
                     .payload = payload,
@@ -1615,6 +1649,7 @@ pub const Connection = struct {
             .destination_connection_id = self.config.peer_connection_id,
             .packet_number = packet_number,
             .packet_number_len = packet_number_len,
+            .fixed_bit = self.nextFixedBit(),
             .spin_bit = self.nextSpinBit(),
             .key_phase = self.send_key_phase.currentKeyPhase(),
             .payload = payload,
@@ -1986,6 +2021,7 @@ pub const Connection = struct {
                     .destination_connection_id = self.config.peer_connection_id,
                     .packet_number = probe.packet_number,
                     .packet_number_len = probe.packet_number_len,
+                    .fixed_bit = self.nextFixedBit(),
                     .spin_bit = self.nextSpinBit(),
                     .key_phase = self.send_key_phase.currentKeyPhase(),
                     .payload = probe.candidate.payload,
@@ -2884,10 +2920,11 @@ pub const Connection = struct {
         while (completed < datagrams.segment_count) : (completed += 1) {
             const bytes = datagrams.datagramAtMutable(completed) orelse return error.InvalidPacket;
             const keys = self.receive_key_phase.keyUpdateKeys();
-            const key_phase = quic.protection.peekShortPacketKeyPhase(
+            const key_phase = quic.protection.peekShortPacketKeyPhaseForPolicy(
                 keys.current.hp,
                 bytes,
                 self.config.local_connection_id.len,
+                self.config.accept_zero_fixed_bit,
             ) catch |err| {
                 if (err == error.AuthenticationFailed) try self.recordAuthenticationFailureAt(now_ns);
                 return err;
@@ -2930,11 +2967,12 @@ pub const Connection = struct {
         keys: quic.protection.PacketProtectionKeys,
     ) Error!void {
         _ = from;
-        const packet = try quic.protection.openShortPacketInPlace(
+        const packet = try quic.protection.openShortPacketInPlaceWithFixedBitPolicy(
             keys,
             bytes,
             self.config.local_connection_id.len,
             self.expected_packet_number,
+            self.config.accept_zero_fixed_bit,
         );
 
         const frames = try self.parseServicePacketFramesOrClose(packet.payload, now_ns);
@@ -3139,12 +3177,13 @@ pub const Connection = struct {
         destination_connection_id_len: usize,
         now_ns: ?u64,
     ) Error!ReceivedPacket {
-        var decoded = try quic.protection.openShortPacketWithKeyUpdate(
+        var decoded = try quic.protection.openShortPacketWithKeyUpdateAndFixedBitPolicy(
             self.endpoint.allocator,
             self.receive_key_phase.keyUpdateKeys(),
             bytes,
             destination_connection_id_len,
             self.expected_packet_number,
+            self.config.accept_zero_fixed_bit,
         );
         errdefer decoded.deinit(self.endpoint.allocator);
 
@@ -3571,6 +3610,10 @@ pub const Connection = struct {
 
     pub fn nextSpinBit(self: Connection) bool {
         return self.config.enable_spin_bit and self.spin_bit_value;
+    }
+
+    fn nextFixedBit(self: *Connection) bool {
+        return self.fixed_bit_generator.next();
     }
 
     pub fn resetSpinBit(self: *Connection) void {
@@ -4194,6 +4237,7 @@ pub fn sendFrames(
         .destination_connection_id = options.destination_connection_id,
         .packet_number = options.packet_number,
         .packet_number_len = options.packet_number_len,
+        .fixed_bit = options.fixed_bit,
         .spin_bit = options.spin_bit,
         .key_phase = options.key_phase,
         .payload = payload,
@@ -4293,6 +4337,7 @@ pub fn sendFramesBatchIntoProgress(
                 .destination_connection_id = options.destination_connection_id,
                 .packet_number = packet_number,
                 .packet_number_len = options.packet_number_len,
+                .fixed_bit = options.fixed_bit,
                 .spin_bit = options.spin_bit,
                 .key_phase = options.key_phase,
                 .payload = encoded.items,
@@ -4380,6 +4425,7 @@ fn sendPayload(
         .destination_connection_id = options.destination_connection_id,
         .packet_number = options.packet_number,
         .packet_number_len = options.packet_number_len,
+        .fixed_bit = options.fixed_bit,
         .spin_bit = options.spin_bit,
         .key_phase = options.key_phase,
         .payload = options.payload,

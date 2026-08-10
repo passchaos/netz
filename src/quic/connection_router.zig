@@ -16,6 +16,10 @@ pub const Route = struct {
     sequence_number: u64 = 0,
     peer_address: ?net.IpAddress = null,
     active_migration_disabled: bool = false,
+    /// RFC 9287 is negotiated per connection. The router needs this bit before
+    /// decryption so a greased short-header packet can reach the connection
+    /// that advertised support, while other routes retain QUIC v1 strictness.
+    accept_zero_fixed_bit: bool = false,
 };
 
 pub const RoutedDatagram = struct {
@@ -91,16 +95,18 @@ pub const Router = struct {
 
     pub fn routeDatagramFrom(self: Router, from: ?net.IpAddress, packet: []const u8) Error!?RoutedDatagram {
         if (packet.len == 0) return error.InvalidPacket;
-        // All non-Version-Negotiation QUIC packets have the fixed bit set.  A
-        // mature endpoint drops fixed-bit-clear datagrams before CID lookup (see
-        // tquic/s2n-quic/quic-zig), which avoids routing greasing probes or
-        // non-QUIC UDP payloads into an established connection.
-        if ((packet[0] & 0x40) == 0) return null;
-        const routed = if ((packet[0] & 0x80) != 0)
+        const long_header = (packet[0] & 0x80) != 0;
+        const fixed_bit = (packet[0] & 0x40) != 0;
+        const routed = if (long_header)
             try self.routeLongHeaderDatagram(packet)
         else
             self.routeShortHeaderDatagram(packet);
-        if (routed) |candidate| try validateRoutePath(candidate.route, from);
+        if (routed) |candidate| {
+            if (!fixed_bit and !candidate.route.accept_zero_fixed_bit) {
+                return null;
+            }
+            try validateRoutePath(candidate.route, from);
+        }
         return routed;
     }
 
@@ -199,6 +205,31 @@ test "QUIC connection router routes short and long header datagrams" {
 
     const fixed_bit_clear_short = [_]u8{ 0x00, 'a', 'b', 'c', 0x00 };
     try std.testing.expectEqual(@as(?RoutedDatagram, null), try router.routeDatagram(&fixed_bit_clear_short));
+
+    try router.registerOrReplace("abc", .{
+        .connection_index = 1,
+        .sequence_number = 10,
+        .accept_zero_fixed_bit = true,
+    });
+    const greased_route = (try router.routeDatagram(
+        &fixed_bit_clear_short,
+    )).?;
+    try std.testing.expectEqual(@as(usize, 1), greased_route.route.connection_index);
+    try std.testing.expectEqualStrings(
+        "abc",
+        greased_route.destination_connection_id,
+    );
+
+    const greased_long = [_]u8{
+        0x80, 0, 0, 0, 1, 3, 'a', 'b', 'c', 0, 0, 0,
+    };
+    const greased_long_route = (try router.routeDatagram(
+        &greased_long,
+    )).?;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        greased_long_route.route.connection_index,
+    );
 }
 
 test "QUIC connection router rejects changed paths when migration disabled" {

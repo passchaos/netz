@@ -122,6 +122,7 @@ pub const InitialPacketOptions = struct {
     token: []const u8 = &.{},
     packet_number: u64,
     packet_number_len: u8 = 4,
+    fixed_bit: bool = true,
     payload: []const u8,
 };
 
@@ -131,6 +132,7 @@ pub const OpenedInitialPacket = struct {
     source_connection_id: []u8,
     token: []u8,
     packet_number: u64,
+    fixed_bit: bool,
     payload: []u8,
 
     pub fn deinit(self: *OpenedInitialPacket, allocator: std.mem.Allocator) void {
@@ -148,6 +150,7 @@ pub const HandshakePacketOptions = struct {
     source_connection_id: []const u8,
     packet_number: u64,
     packet_number_len: u8 = 4,
+    fixed_bit: bool = true,
     payload: []const u8,
 };
 
@@ -156,6 +159,7 @@ pub const OpenedHandshakePacket = struct {
     destination_connection_id: []u8,
     source_connection_id: []u8,
     packet_number: u64,
+    fixed_bit: bool,
     payload: []u8,
 
     pub fn deinit(self: *OpenedHandshakePacket, allocator: std.mem.Allocator) void {
@@ -172,6 +176,7 @@ pub const ZeroRttPacketOptions = struct {
     source_connection_id: []const u8,
     packet_number: u64,
     packet_number_len: u8 = 4,
+    fixed_bit: bool = true,
     payload: []const u8,
 };
 
@@ -180,6 +185,7 @@ pub const OpenedZeroRttPacket = struct {
     destination_connection_id: []u8,
     source_connection_id: []u8,
     packet_number: u64,
+    fixed_bit: bool,
     payload: []u8,
 
     pub fn deinit(self: *OpenedZeroRttPacket, allocator: std.mem.Allocator) void {
@@ -211,6 +217,8 @@ pub const ShortPacketOptions = struct {
     destination_connection_id: []const u8,
     packet_number: u64,
     packet_number_len: u8 = 4,
+    /// RFC 9287 permits clearing this bit only after peer support is known.
+    fixed_bit: bool = true,
     spin_bit: bool = false,
     key_phase: bool = false,
     payload: []const u8,
@@ -219,6 +227,7 @@ pub const ShortPacketOptions = struct {
 pub const OpenedShortPacket = struct {
     destination_connection_id: []u8,
     packet_number: u64,
+    fixed_bit: bool,
     spin_bit: bool,
     key_phase: bool,
     payload: []u8,
@@ -246,6 +255,7 @@ pub const OpenedShortPacketWithKeyUpdate = struct {
 pub const OpenedShortPacketView = struct {
     destination_connection_id: []const u8,
     packet_number: u64,
+    fixed_bit: bool,
     spin_bit: bool,
     key_phase: bool,
     payload: []u8,
@@ -600,10 +610,24 @@ pub fn peekShortPacketKeyPhaseForKeys(
     packet: []const u8,
     destination_connection_id_len: usize,
 ) Error!bool {
+    return peekShortPacketKeyPhaseForKeysWithFixedBitPolicy(
+        keys,
+        packet,
+        destination_connection_id_len,
+        false,
+    );
+}
+
+pub fn peekShortPacketKeyPhaseForKeysWithFixedBitPolicy(
+    keys: PacketProtectionKeys,
+    packet: []const u8,
+    destination_connection_id_len: usize,
+    allow_zero_fixed_bit: bool,
+) Error!bool {
     if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
     if (packet.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
         (packet[0] & 0x80) != 0 or
-        (packet[0] & 0x40) == 0)
+        (!allow_zero_fixed_bit and (packet[0] & 0x40) == 0))
     {
         return error.InvalidInitialPacket;
     }
@@ -615,7 +639,9 @@ pub fn peekShortPacketKeyPhaseForKeys(
         packet[pn_offset + 4 ..][0..header_protection_sample_len].*;
     const mask = asVailKeys(keys).headerProtectionMask(sample);
     const first = packet[0] ^ (mask[0] & 0x1f);
-    if ((first & 0x80) != 0 or (first & 0x40) == 0) {
+    if ((first & 0x80) != 0 or
+        (!allow_zero_fixed_bit and (first & 0x40) == 0))
+    {
         return error.InvalidInitialPacket;
     }
     try validateShortHeaderReservedBits(first);
@@ -807,7 +833,12 @@ pub fn sealInitialPacket(
     errdefer out.deinit(allocator);
 
     const pn_len = @as(usize, options.packet_number_len);
-    const first_byte: u8 = longHeaderFirstByte(options.version, .initial, options.packet_number_len);
+    const first_byte: u8 = longHeaderFirstByte(
+        options.version,
+        .initial,
+        options.packet_number_len,
+        options.fixed_bit,
+    );
     try out.append(allocator, first_byte);
     var version_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_bytes, options.version, .big);
@@ -840,6 +871,22 @@ pub fn openInitialPacket(
     packet: []const u8,
     expected_packet_number: u64,
 ) Error!OpenedInitialPacket {
+    return openInitialPacketWithFixedBitPolicy(
+        allocator,
+        keys,
+        packet,
+        expected_packet_number,
+        false,
+    );
+}
+
+pub fn openInitialPacketWithFixedBitPolicy(
+    allocator: std.mem.Allocator,
+    keys: PacketProtectionKeys,
+    packet: []const u8,
+    expected_packet_number: u64,
+    allow_zero_fixed_bit: bool,
+) Error!OpenedInitialPacket {
     if (keys.suite != .aes_128_gcm_sha256) {
         return error.InvalidCipherSuite;
     }
@@ -849,7 +896,10 @@ pub fn openInitialPacket(
 
     var cursor = wire.Cursor.init(bytes);
     const protected_first_byte = try cursor.readByte();
-    try validateLongHeaderFixedBit(protected_first_byte);
+    try validateLongHeaderFixedBitPolicy(
+        protected_first_byte,
+        allow_zero_fixed_bit,
+    );
     const version = try cursor.readInt(u32, .big);
     try validateProtectedVersion(version);
     if (protectedLongPacketType(protected_first_byte, version) != .initial) return error.InvalidInitialPacket;
@@ -868,7 +918,10 @@ pub fn openInitialPacket(
 
     try removeHeaderProtectionForKeys(keys, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .initial) return error.InvalidInitialPacket;
-    try validateLongHeaderFixedBit(bytes[0]);
+    try validateLongHeaderFixedBitPolicy(
+        bytes[0],
+        allow_zero_fixed_bit,
+    );
     try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
@@ -895,6 +948,7 @@ pub fn openInitialPacket(
         .source_connection_id = scid_owned,
         .token = token_owned,
         .packet_number = packet_number,
+        .fixed_bit = (bytes[0] & 0x40) != 0,
         .payload = payload,
     };
 }
@@ -912,7 +966,12 @@ pub fn sealHandshakePacket(
     errdefer out.deinit(allocator);
 
     const pn_len = @as(usize, options.packet_number_len);
-    const first_byte: u8 = longHeaderFirstByte(options.version, .handshake, options.packet_number_len);
+    const first_byte: u8 = longHeaderFirstByte(
+        options.version,
+        .handshake,
+        options.packet_number_len,
+        options.fixed_bit,
+    );
     try out.append(allocator, first_byte);
     var version_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_bytes, options.version, .big);
@@ -943,13 +1002,32 @@ pub fn openHandshakePacket(
     packet: []const u8,
     expected_packet_number: u64,
 ) Error!OpenedHandshakePacket {
+    return openHandshakePacketWithFixedBitPolicy(
+        allocator,
+        keys,
+        packet,
+        expected_packet_number,
+        false,
+    );
+}
+
+pub fn openHandshakePacketWithFixedBitPolicy(
+    allocator: std.mem.Allocator,
+    keys: PacketProtectionKeys,
+    packet: []const u8,
+    expected_packet_number: u64,
+    allow_zero_fixed_bit: bool,
+) Error!OpenedHandshakePacket {
     var bytes = try allocator.dupe(u8, packet);
     defer allocator.free(bytes);
     if (bytes.len < 7 or (bytes[0] & 0x80) == 0) return error.InvalidInitialPacket;
 
     var cursor = wire.Cursor.init(bytes);
     const protected_first_byte = try cursor.readByte();
-    try validateLongHeaderFixedBit(protected_first_byte);
+    try validateLongHeaderFixedBitPolicy(
+        protected_first_byte,
+        allow_zero_fixed_bit,
+    );
     const version = try cursor.readInt(u32, .big);
     try validateProtectedVersion(version);
     if (protectedLongPacketType(protected_first_byte, version) != .handshake) return error.InvalidInitialPacket;
@@ -966,7 +1044,10 @@ pub fn openHandshakePacket(
 
     try removeHeaderProtectionForKeys(keys, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .handshake) return error.InvalidInitialPacket;
-    try validateLongHeaderFixedBit(bytes[0]);
+    try validateLongHeaderFixedBitPolicy(
+        bytes[0],
+        allow_zero_fixed_bit,
+    );
     try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
@@ -990,6 +1071,7 @@ pub fn openHandshakePacket(
         .destination_connection_id = dcid_owned,
         .source_connection_id = scid_owned,
         .packet_number = packet_number,
+        .fixed_bit = (bytes[0] & 0x40) != 0,
         .payload = payload,
     };
 }
@@ -1007,7 +1089,12 @@ pub fn sealZeroRttPacket(
     errdefer out.deinit(allocator);
 
     const pn_len = @as(usize, options.packet_number_len);
-    const first_byte: u8 = longHeaderFirstByte(options.version, .zero_rtt, options.packet_number_len);
+    const first_byte: u8 = longHeaderFirstByte(
+        options.version,
+        .zero_rtt,
+        options.packet_number_len,
+        options.fixed_bit,
+    );
     try out.append(allocator, first_byte);
     var version_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_bytes, options.version, .big);
@@ -1038,13 +1125,32 @@ pub fn openZeroRttPacket(
     packet: []const u8,
     expected_packet_number: u64,
 ) Error!OpenedZeroRttPacket {
+    return openZeroRttPacketWithFixedBitPolicy(
+        allocator,
+        keys,
+        packet,
+        expected_packet_number,
+        false,
+    );
+}
+
+pub fn openZeroRttPacketWithFixedBitPolicy(
+    allocator: std.mem.Allocator,
+    keys: PacketProtectionKeys,
+    packet: []const u8,
+    expected_packet_number: u64,
+    allow_zero_fixed_bit: bool,
+) Error!OpenedZeroRttPacket {
     var bytes = try allocator.dupe(u8, packet);
     defer allocator.free(bytes);
     if (bytes.len < 7 or (bytes[0] & 0x80) == 0) return error.InvalidInitialPacket;
 
     var cursor = wire.Cursor.init(bytes);
     const protected_first_byte = try cursor.readByte();
-    try validateLongHeaderFixedBit(protected_first_byte);
+    try validateLongHeaderFixedBitPolicy(
+        protected_first_byte,
+        allow_zero_fixed_bit,
+    );
     const version = try cursor.readInt(u32, .big);
     try validateProtectedVersion(version);
     if (protectedLongPacketType(protected_first_byte, version) != .zero_rtt) return error.InvalidInitialPacket;
@@ -1061,7 +1167,10 @@ pub fn openZeroRttPacket(
 
     try removeHeaderProtectionForKeys(keys, .long, bytes, pn_offset);
     if ((bytes[0] & 0x80) == 0 or protectedLongPacketType(bytes[0], version) != .zero_rtt) return error.InvalidInitialPacket;
-    try validateLongHeaderFixedBit(bytes[0]);
+    try validateLongHeaderFixedBitPolicy(
+        bytes[0],
+        allow_zero_fixed_bit,
+    );
     try validateLongHeaderReservedBits(bytes[0]);
     const pn_len = @as(usize, (bytes[0] & 0x03) + 1);
     if (protected_len < pn_len + aead_tag_len) return error.InvalidInitialPacket;
@@ -1085,14 +1194,26 @@ pub fn openZeroRttPacket(
         .destination_connection_id = dcid_owned,
         .source_connection_id = scid_owned,
         .packet_number = packet_number,
+        .fixed_bit = (bytes[0] & 0x40) != 0,
         .payload = payload,
     };
 }
 
 pub fn peekProtectedLongPacketInfo(datagram: []const u8) Error!ProtectedLongPacketInfo {
+    return peekProtectedLongPacketInfoWithFixedBitPolicy(datagram, false);
+}
+
+pub fn peekProtectedLongPacketInfoWithFixedBitPolicy(
+    datagram: []const u8,
+    allow_zero_fixed_bit: bool,
+) Error!ProtectedLongPacketInfo {
     var cursor = wire.Cursor.init(datagram);
     const first = try cursor.readByte();
-    if ((first & 0x80) == 0 or (first & 0x40) == 0) return error.InvalidInitialPacket;
+    if ((first & 0x80) == 0 or
+        (!allow_zero_fixed_bit and (first & 0x40) == 0))
+    {
+        return error.InvalidInitialPacket;
+    }
     const version = try cursor.readInt(u32, .big);
     if (version == 0) return error.InvalidInitialPacket;
     try validateProtectedVersion(version);
@@ -1180,7 +1301,7 @@ pub fn shortPacketLen(options: ShortPacketOptions) Error!usize {
 }
 
 fn shortHeaderFirstByte(options: ShortPacketOptions, packet_number_len: usize) u8 {
-    return 0x40 |
+    return (if (options.fixed_bit) @as(u8, 0x40) else 0) |
         (if (options.spin_bit) @as(u8, 0x20) else 0) |
         (if (options.key_phase) @as(u8, 0x04) else 0) |
         @as(u8, @intCast(packet_number_len - 1));
@@ -1201,15 +1322,43 @@ pub fn openShortPacket(
     destination_connection_id_len: usize,
     expected_packet_number: u64,
 ) Error!OpenedShortPacket {
+    return openShortPacketWithFixedBitPolicy(
+        allocator,
+        keys,
+        packet,
+        destination_connection_id_len,
+        expected_packet_number,
+        false,
+    );
+}
+
+/// Open a short-header packet with RFC 9287 negotiation state supplied by the
+/// connection. The default wrapper above remains strict for pre-negotiation
+/// and standalone callers.
+pub fn openShortPacketWithFixedBitPolicy(
+    allocator: std.mem.Allocator,
+    keys: PacketProtectionKeys,
+    packet: []const u8,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+    allow_zero_fixed_bit: bool,
+) Error!OpenedShortPacket {
     if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
     const bytes = try allocator.dupe(u8, packet);
     defer allocator.free(bytes);
-    if (bytes.len < 1 + destination_connection_id_len + 1 + aead_tag_len or (bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) {
+    if (bytes.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
+        (bytes[0] & 0x80) != 0 or
+        (!allow_zero_fixed_bit and (bytes[0] & 0x40) == 0))
+    {
         return error.InvalidInitialPacket;
     }
     const pn_offset = 1 + destination_connection_id_len;
     try removeHeaderProtectionForKeys(keys, .short, bytes, pn_offset);
-    if ((bytes[0] & 0x80) != 0 or (bytes[0] & 0x40) == 0) return error.InvalidInitialPacket;
+    if ((bytes[0] & 0x80) != 0 or
+        (!allow_zero_fixed_bit and (bytes[0] & 0x40) == 0))
+    {
+        return error.InvalidInitialPacket;
+    }
     try validateShortHeaderReservedBits(bytes[0]);
     const spin_bit = (bytes[0] & 0x20) != 0;
     const key_phase = (bytes[0] & 0x04) != 0;
@@ -1227,6 +1376,7 @@ pub fn openShortPacket(
     return .{
         .destination_connection_id = dcid,
         .packet_number = packet_number,
+        .fixed_bit = (bytes[0] & 0x40) != 0,
         .spin_bit = spin_bit,
         .key_phase = key_phase,
         .payload = payload,
@@ -1246,16 +1396,36 @@ pub fn openShortPacketInPlace(
     destination_connection_id_len: usize,
     expected_packet_number: u64,
 ) Error!OpenedShortPacketView {
+    return openShortPacketInPlaceWithFixedBitPolicy(
+        keys,
+        packet,
+        destination_connection_id_len,
+        expected_packet_number,
+        false,
+    );
+}
+
+pub fn openShortPacketInPlaceWithFixedBitPolicy(
+    keys: PacketProtectionKeys,
+    packet: []u8,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+    allow_zero_fixed_bit: bool,
+) Error!OpenedShortPacketView {
     if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
     if (packet.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
         (packet[0] & 0x80) != 0 or
-        (packet[0] & 0x40) == 0)
+        (!allow_zero_fixed_bit and (packet[0] & 0x40) == 0))
     {
         return error.InvalidInitialPacket;
     }
     const pn_offset = 1 + destination_connection_id_len;
     try removeHeaderProtectionForKeys(keys, .short, packet, pn_offset);
-    if ((packet[0] & 0x80) != 0 or (packet[0] & 0x40) == 0) return error.InvalidInitialPacket;
+    if ((packet[0] & 0x80) != 0 or
+        (!allow_zero_fixed_bit and (packet[0] & 0x40) == 0))
+    {
+        return error.InvalidInitialPacket;
+    }
     try validateShortHeaderReservedBits(packet[0]);
     const spin_bit = (packet[0] & 0x20) != 0;
     const key_phase = (packet[0] & 0x04) != 0;
@@ -1277,10 +1447,25 @@ pub fn openShortPacketInPlace(
     return .{
         .destination_connection_id = packet[1..pn_offset],
         .packet_number = packet_number,
+        .fixed_bit = (packet[0] & 0x40) != 0,
         .spin_bit = spin_bit,
         .key_phase = key_phase,
         .payload = ciphertext,
     };
+}
+
+pub fn peekShortPacketKeyPhaseForPolicy(
+    hp_key: [hp_key_len]u8,
+    packet: []const u8,
+    destination_connection_id_len: usize,
+    allow_zero_fixed_bit: bool,
+) Error!bool {
+    return peekShortPacketKeyPhaseWithFixedBitPolicy(
+        hp_key,
+        packet,
+        destination_connection_id_len,
+        allow_zero_fixed_bit,
+    );
 }
 
 pub fn openShortPacketWithKeyUpdate(
@@ -1290,25 +1475,65 @@ pub fn openShortPacketWithKeyUpdate(
     destination_connection_id_len: usize,
     expected_packet_number: u64,
 ) Error!OpenedShortPacketWithKeyUpdate {
-    const key_phase = try peekShortPacketKeyPhaseForKeys(
+    return openShortPacketWithKeyUpdateAndFixedBitPolicy(
+        allocator,
+        keys,
+        packet,
+        destination_connection_id_len,
+        expected_packet_number,
+        false,
+    );
+}
+
+pub fn openShortPacketWithKeyUpdateAndFixedBitPolicy(
+    allocator: std.mem.Allocator,
+    keys: ShortPacketKeyUpdateKeys,
+    packet: []const u8,
+    destination_connection_id_len: usize,
+    expected_packet_number: u64,
+    allow_zero_fixed_bit: bool,
+) Error!OpenedShortPacketWithKeyUpdate {
+    const key_phase = try peekShortPacketKeyPhaseForKeysWithFixedBitPolicy(
         keys.current,
         packet,
         destination_connection_id_len,
+        allow_zero_fixed_bit,
     );
     if (key_phase == keys.current_key_phase) {
         return .{
-            .packet = try openShortPacket(allocator, keys.current, packet, destination_connection_id_len, expected_packet_number),
+            .packet = try openShortPacketWithFixedBitPolicy(
+                allocator,
+                keys.current,
+                packet,
+                destination_connection_id_len,
+                expected_packet_number,
+                allow_zero_fixed_bit,
+            ),
             .peer_initiated_key_update = false,
         };
     }
 
-    const next_packet = openShortPacket(allocator, keys.next, packet, destination_connection_id_len, expected_packet_number) catch |next_err| {
+    const next_packet = openShortPacketWithFixedBitPolicy(
+        allocator,
+        keys.next,
+        packet,
+        destination_connection_id_len,
+        expected_packet_number,
+        allow_zero_fixed_bit,
+    ) catch |next_err| {
         if (next_err == error.OutOfMemory) return next_err;
         if (keys.previous) |previous| {
             if (keys.previous_key_phase) |previous_key_phase| {
                 if (key_phase == previous_key_phase) {
                     return .{
-                        .packet = try openShortPacket(allocator, previous, packet, destination_connection_id_len, expected_packet_number),
+                        .packet = try openShortPacketWithFixedBitPolicy(
+                            allocator,
+                            previous,
+                            packet,
+                            destination_connection_id_len,
+                            expected_packet_number,
+                            allow_zero_fixed_bit,
+                        ),
                         .peer_initiated_key_update = false,
                     };
                 }
@@ -1375,10 +1600,24 @@ pub fn peekShortPacketKeyPhase(
     packet: []const u8,
     destination_connection_id_len: usize,
 ) Error!bool {
+    return peekShortPacketKeyPhaseWithFixedBitPolicy(
+        hp_key,
+        packet,
+        destination_connection_id_len,
+        false,
+    );
+}
+
+pub fn peekShortPacketKeyPhaseWithFixedBitPolicy(
+    hp_key: [hp_key_len]u8,
+    packet: []const u8,
+    destination_connection_id_len: usize,
+    allow_zero_fixed_bit: bool,
+) Error!bool {
     if (destination_connection_id_len > 20) return error.InvalidInitialPacket;
     if (packet.len < 1 + destination_connection_id_len + 1 + aead_tag_len or
         (packet[0] & 0x80) != 0 or
-        (packet[0] & 0x40) == 0)
+        (!allow_zero_fixed_bit and (packet[0] & 0x40) == 0))
     {
         return error.InvalidInitialPacket;
     }
@@ -1395,7 +1634,11 @@ pub fn peekShortPacketKeyPhase(
         sample,
     );
     const first = packet[0] ^ (mask[0] & 0x1f);
-    if ((first & 0x80) != 0 or (first & 0x40) == 0) return error.InvalidInitialPacket;
+    if ((first & 0x80) != 0 or
+        (!allow_zero_fixed_bit and (first & 0x40) == 0))
+    {
+        return error.InvalidInitialPacket;
+    }
     try validateShortHeaderReservedBits(first);
     return (first & 0x04) != 0;
 }
@@ -1410,7 +1653,12 @@ fn protectionProfile(version: u32) VersionError!ProtectionProfile {
     return error.UnsupportedVersion;
 }
 
-fn longHeaderFirstByte(version: u32, packet_type: ProtectedLongPacketType, packet_number_len: u8) u8 {
+fn longHeaderFirstByte(
+    version: u32,
+    packet_type: ProtectedLongPacketType,
+    packet_number_len: u8,
+    fixed_bit: bool,
+) u8 {
     const type_bits: u8 = if (version == version_2_wire) switch (packet_type) {
         .retry => 0,
         .initial => 1,
@@ -1422,7 +1670,10 @@ fn longHeaderFirstByte(version: u32, packet_type: ProtectedLongPacketType, packe
         .handshake => 2,
         .retry => 3,
     };
-    return 0xc0 | (type_bits << 4) | @as(u8, @intCast(packet_number_len - 1));
+    return 0x80 |
+        (if (fixed_bit) @as(u8, 0x40) else 0) |
+        (type_bits << 4) |
+        @as(u8, @intCast(packet_number_len - 1));
 }
 
 fn protectedLongPacketType(first_byte: u8, version: u32) ProtectedLongPacketType {
@@ -1465,6 +1716,13 @@ fn validateLongHeaderFixedBit(first_byte: u8) Error!void {
     // like the generic long-header parser and mature stacks do, instead of
     // spending AEAD work on datagrams that cannot be valid QUIC v1/v2 packets.
     if ((first_byte & 0x40) == 0) return error.InvalidInitialPacket;
+}
+
+fn validateLongHeaderFixedBitPolicy(
+    first_byte: u8,
+    allow_zero_fixed_bit: bool,
+) Error!void {
+    if (!allow_zero_fixed_bit) try validateLongHeaderFixedBit(first_byte);
 }
 
 fn validateLongHeaderConnectionIdLen(len: usize) Error!void {
