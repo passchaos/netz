@@ -384,6 +384,7 @@ zig build bench-http3-dev -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
+zig build bench-quic-padding-parse -Doptimize=ReleaseFast
 zig build bench-quic-lb -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
@@ -401,6 +402,7 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - MQTT subscription-router trie matching versus a linear filter scan,
 - QUIC AES-128-GCM and ChaCha20-Poly1305 short-packet sealing with
   caller-provided storage versus the allocating convenience wrapper,
+- QUIC long PADDING run parsing for Initial padding and PMTUD/probe payloads,
 - QUIC-LB encrypted server-ID extraction with the draft's three-pass
   load-balancer optimization,
 - QUIC Linux `UDP_SEGMENT` batching versus `sendmmsg`, plus `UDP_GRO`

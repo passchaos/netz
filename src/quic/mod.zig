@@ -1549,9 +1549,16 @@ fn parseFrameWithAllocator(allocator: ?std.mem.Allocator, bytes: []const u8) Err
     try validateFrameTypeEncoding(frame_type, frame_type_len);
 
     if (frame_type == @intFromEnum(FrameType.padding)) {
-        while (!cursor.eof() and cursor.buf[cursor.pos] == @intFromEnum(FrameType.padding)) {
-            cursor.pos += 1;
-        }
+        // PADDING frequently appears in long runs (Initial datagram padding,
+        // DPLPMTUD probes, and anti-deadlock probes). Use std.mem's optimized
+        // non-zero search instead of advancing one byte at a time on the frame
+        // parser hot path.
+        cursor.pos = std.mem.indexOfNonePos(
+            u8,
+            cursor.buf,
+            cursor.pos,
+            &.{@intFromEnum(FrameType.padding)},
+        ) orelse cursor.buf.len;
         return .{ .frame = .{ .padding = .{ .len = cursor.pos } }, .consumed = cursor.pos };
     }
 

@@ -120,6 +120,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark QUIC short packet in-place sealing against allocating sealing",
         },
         .{
+            .exe_name = "netz-bench-quic-padding-parse",
+            .path = "examples/bench_quic_padding_parse.zig",
+            .run_step = "bench-quic-padding-parse",
+            .description = "Benchmark long QUIC PADDING frame parsing",
+        },
+        .{
             .exe_name = "netz-bench-quic-lb",
             .path = "examples/bench_quic_lb.zig",
             .run_step = "bench-quic-lb",
