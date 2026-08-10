@@ -85,6 +85,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   `startResponse`/`sendResponseBody`, preserving per-stream QUIC offsets across
   multiple DATA chunks and enforcing declared Content-Length at FIN. Streaming
   messages can instead finish with dynamic QPACK trailer HEADERS through
+  indexed streaming body state for
   `finishRequestTrailers`/`finishResponseTrailers`. Preconfigured-protection
   and handshake-backed servers expose
   `receiveRequestEvent`/`readRequestData`, while their clients expose

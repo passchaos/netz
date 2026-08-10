@@ -6569,6 +6569,7 @@ const OutboundBodySet = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
     last_entry_index: ?usize = null,
+    entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     max_streams: usize,
 
     fn init(
@@ -6580,6 +6581,7 @@ const OutboundBodySet = struct {
 
     fn deinit(self: *OutboundBodySet) void {
         self.entries.deinit(self.allocator);
+        self.entry_index.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -6592,6 +6594,22 @@ const OutboundBodySet = struct {
             return error.ExcessiveLoad;
         }
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    fn appendOpenAssumeCapacity(
+        self: *OutboundBodySet,
+        stream_id: u62,
+        send: quic.stream_state.SendState,
+        expected_length: ?usize,
+    ) void {
+        const index = self.entries.items.len;
+        self.entries.appendAssumeCapacity(.{
+            .send = send,
+            .expected_length = expected_length,
+        });
+        self.entry_index.putAssumeCapacity(stream_id, index);
+        self.last_entry_index = index;
     }
 
     fn prepareChunk(
@@ -6629,13 +6647,16 @@ const OutboundBodySet = struct {
     }
 
     fn finish(self: *OutboundBodySet, stream_id: u62) bool {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.send.stream_id != stream_id) continue;
-            _ = self.entries.swapRemove(index);
-            self.last_entry_index = null;
-            return true;
+        const index = self.entry_index.get(stream_id) orelse return false;
+        const last_index = self.entries.items.len - 1;
+        const removed = self.entries.swapRemove(index);
+        _ = self.entry_index.remove(@intCast(removed.send.stream_id));
+        if (index != last_index) {
+            const moved = self.entries.items[index];
+            self.entry_index.getPtr(@intCast(moved.send.stream_id)).?.* = index;
         }
-        return false;
+        self.last_entry_index = null;
+        return true;
     }
 
     fn find(self: *OutboundBodySet, stream_id: u62) ?*Entry {
@@ -6646,13 +6667,11 @@ const OutboundBodySet = struct {
                 return &self.entries.items[index];
             }
         }
-        for (self.entries.items, 0..) |*entry, index| {
-            if (entry.send.stream_id == stream_id) {
-                self.last_entry_index = index;
-                return entry;
-            }
-        }
-        return null;
+        const index = self.entry_index.get(stream_id) orelse return null;
+        if (index >= self.entries.items.len) return null;
+        if (self.entries.items[index].send.stream_id != stream_id) return null;
+        self.last_entry_index = index;
+        return &self.entries.items[index];
     }
 };
 
@@ -6759,6 +6778,44 @@ test "HTTP/3 server request lifecycle indexes active streams" {
     lifecycle.markFinished(0);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.active_streams.items.len);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.active_stream_index.count());
+}
+
+test "HTTP/3 outbound body set indexes open streaming bodies" {
+    const allocator = std.testing.allocator;
+    var bodies = OutboundBodySet.init(allocator, 3);
+    defer bodies.deinit();
+
+    inline for (.{ @as(u62, 0), @as(u62, 4), @as(u62, 8) }) |stream_id| {
+        try bodies.reserveOpen(stream_id);
+        bodies.appendOpenAssumeCapacity(
+            stream_id,
+            quic.stream_state.SendState.init(stream_id),
+            null,
+        );
+    }
+    try std.testing.expectError(error.ExcessiveLoad, bodies.reserveOpen(12));
+
+    try std.testing.expect(bodies.find(4) != null);
+    try std.testing.expect(bodies.finish(4));
+    try std.testing.expect(bodies.find(4) == null);
+    // Finishing stream 4 moved another entry into its slot. The index for that
+    // moved entry must still let later DATA/trailer calls find the body state.
+    try std.testing.expect(bodies.find(8) != null);
+    try std.testing.expect(bodies.finish(8));
+
+    try bodies.reserveOpen(12);
+    bodies.appendOpenAssumeCapacity(
+        12,
+        quic.stream_state.SendState.init(12),
+        5,
+    );
+    const entry = try bodies.prepareChunk(12, 5, true);
+    try std.testing.expectEqual(@as(usize, 5), entry.written);
+    try std.testing.expect(!bodies.finish(4));
+    try std.testing.expect(bodies.finish(0));
+    try std.testing.expect(bodies.finish(12));
+    try std.testing.expectEqual(@as(usize, 0), bodies.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), bodies.entry_index.count());
 }
 
 fn messageBlockedByQpack(
@@ -7152,11 +7209,11 @@ fn sendConnectionStreamingHead(
     if (retain_body_state) {
         var body_send = quic.stream_state.SendState.init(stream_id);
         body_send.next_offset = send.next_offset;
-        bodies.entries.appendAssumeCapacity(.{
-            .send = body_send,
-            .expected_length = expected_length,
-        });
-        bodies.last_entry_index = bodies.entries.items.len - 1;
+        bodies.appendOpenAssumeCapacity(
+            stream_id,
+            body_send,
+            expected_length,
+        );
     }
 }
 
@@ -7212,11 +7269,11 @@ fn sendProtectedStreamingHead(
     if (retain_body_state) {
         var body_send = quic.stream_state.SendState.init(stream_id);
         body_send.next_offset = send.next_offset;
-        bodies.entries.appendAssumeCapacity(.{
-            .send = body_send,
-            .expected_length = expected_length,
-        });
-        bodies.last_entry_index = bodies.entries.items.len - 1;
+        bodies.appendOpenAssumeCapacity(
+            stream_id,
+            body_send,
+            expected_length,
+        );
     }
 }
 
