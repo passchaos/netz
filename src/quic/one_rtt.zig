@@ -537,6 +537,7 @@ pub const Connection = struct {
     datagrams_received_count: u64 = 0,
     datagrams_dropped_incoming_count: u64 = 0,
     path_response_targets: std.ArrayList(?net.IpAddress) = .empty,
+    path_response_target_head: usize = 0,
     ack_frequency_send_next_sequence: u64 = 0,
     ack_frequency_recv_next_sequence: u64 = 0,
     ack_eliciting_threshold: u64 = 1,
@@ -2895,30 +2896,53 @@ pub const Connection = struct {
     }
 
     fn peekPathResponseTarget(self: Connection) ?net.IpAddress {
-        if (self.path_response_targets.items.len == 0) return null;
-        return self.path_response_targets.items[0];
+        if (self.pathResponseTargetCount() == 0) return null;
+        return self.path_response_targets.items[self.path_response_target_head];
     }
 
     fn pathResponseTargetsAllDefault(self: Connection, count: usize) bool {
-        if (self.path_response_targets.items.len < count) return false;
-        for (self.path_response_targets.items[0..count]) |target| {
+        if (self.pathResponseTargetCount() < count) return false;
+        for (self.path_response_targets.items[self.path_response_target_head..][0..count]) |target| {
             if (target != null) return false;
         }
         return true;
     }
 
+    fn pathResponseTargetCount(self: Connection) usize {
+        return self.path_response_targets.items.len - self.path_response_target_head;
+    }
+
     fn discardPathResponseTargets(self: *Connection, count: usize) void {
-        if (count == 0 or self.path_response_targets.items.len == 0) return;
-        if (count >= self.path_response_targets.items.len) {
+        if (count == 0 or self.pathResponseTargetCount() == 0) return;
+        if (count >= self.pathResponseTargetCount()) {
             self.path_response_targets.clearRetainingCapacity();
+            self.path_response_target_head = 0;
             return;
         }
-        const remaining = self.path_response_targets.items.len - count;
-        @memmove(
-            self.path_response_targets.items[0..remaining],
-            self.path_response_targets.items[count..],
-        );
+        self.path_response_target_head += count;
+        self.compactPathResponseTargetsIfSparse();
+    }
+
+    fn compactPathResponseTargetsIfSparse(self: *Connection) void {
+        if (self.path_response_target_head == 0) return;
+        if (self.path_response_target_head == self.path_response_targets.items.len or
+            self.path_response_target_head >= self.path_response_targets.items.len / 2)
+        {
+            self.compactPathResponseTargets();
+        }
+    }
+
+    fn compactPathResponseTargets(self: *Connection) void {
+        if (self.path_response_target_head == 0) return;
+        const remaining = self.pathResponseTargetCount();
+        if (remaining != 0) {
+            @memmove(
+                self.path_response_targets.items[0..remaining],
+                self.path_response_targets.items[self.path_response_target_head..],
+            );
+        }
         self.path_response_targets.items.len = remaining;
+        self.path_response_target_head = 0;
     }
 
     pub fn closeTransport(self: *Connection, error_code: u64, frame_type: u64, reason_phrase: []const u8) Error!void {
@@ -3992,6 +4016,12 @@ pub const Connection = struct {
         }
         const path_challenge_count = countPathChallenges(frames);
         if (path_challenge_count != 0) {
+            if (self.path_response_target_head != 0 and
+                self.path_response_targets.items.len + path_challenge_count >
+                    self.path_response_targets.capacity)
+            {
+                self.compactPathResponseTargets();
+            }
             try self.path_response_targets.ensureUnusedCapacity(
                 self.endpoint.allocator,
                 path_challenge_count,

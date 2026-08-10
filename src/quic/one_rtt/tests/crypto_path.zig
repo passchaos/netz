@@ -1191,6 +1191,65 @@ test "QUIC 1-RTT connection batches PATH_CHALLENGE and PATH_RESPONSE frames" {
     try std.testing.expectEqual(@as(usize, 0), client.path_validation.outstandingChallengeCount());
 }
 
+test "QUIC 1-RTT PATH_RESPONSE targets use cursor discard" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xd4} ** quic.protection.secret_len);
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const challenges = [_][8]u8{
+        .{ 1, 0, 0, 0, 0, 0, 0, 1 },
+        .{ 2, 0, 0, 0, 0, 0, 0, 2 },
+        .{ 3, 0, 0, 0, 0, 0, 0, 3 },
+        .{ 4, 0, 0, 0, 0, 0, 0, 4 },
+    };
+    for (challenges) |challenge| try client.queuePathChallenge(challenge);
+    try std.testing.expectEqual(@as(usize, 4), try client.sendPendingPathChallengesAt(100, 50));
+
+    var challenge_packet = try server.receivePacket();
+    defer challenge_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 4), server.path_validation.pendingResponseCount());
+    try std.testing.expectEqual(@as(usize, 4), server.path_response_targets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.path_response_target_head);
+
+    try server.sendPendingPathResponse();
+    try std.testing.expectEqual(@as(usize, 3), server.path_validation.pendingResponseCount());
+    try std.testing.expectEqual(@as(usize, 4), server.path_response_targets.items.len);
+    try std.testing.expectEqual(@as(usize, 1), server.path_response_target_head);
+
+    try std.testing.expectEqual(@as(usize, 3), try server.sendPendingPathResponses());
+    try std.testing.expectEqual(@as(usize, 0), server.path_response_targets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.path_response_target_head);
+}
+
 test "QUIC 1-RTT connection handles NEW and RETIRE connection IDs" {
     const allocator = std.testing.allocator;
 
