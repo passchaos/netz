@@ -38,6 +38,15 @@ fn Fifo(comptime T: type) type {
             try self.items.appendSlice(allocator, values);
         }
 
+        fn ensureUnusedCapacity(self: *Self, allocator: std.mem.Allocator, additional_count: usize) std.mem.Allocator.Error!void {
+            self.compactIfEmpty();
+            try self.items.ensureUnusedCapacity(allocator, additional_count);
+        }
+
+        fn appendAssumeCapacity(self: *Self, value: T) void {
+            self.items.appendAssumeCapacity(value);
+        }
+
         fn popFront(self: *Self) ?T {
             if (self.len() == 0) return null;
             const value = self.items.items[self.head];
@@ -69,6 +78,13 @@ pub const State = struct {
     pending_challenges: Fifo(Challenge) = .{},
     outstanding_challenges: std.ArrayList(Challenge) = .empty,
     failed_challenges: std.ArrayList(Challenge) = .empty,
+    /// PATH_CHALLENGE/PATH_RESPONSE payloads are only 8 bytes, so keep value
+    /// indexes for duplicate suppression and response matching. The FIFO lists
+    /// still define send order, while these maps keep packet receive paths from
+    /// scanning every queued/outstanding validation attempt.
+    pending_response_index: std.AutoHashMapUnmanaged([8]u8, void) = .empty,
+    pending_challenge_index: std.AutoHashMapUnmanaged([8]u8, void) = .empty,
+    outstanding_challenge_index: std.AutoHashMapUnmanaged([8]u8, usize) = .empty,
     max_challenge_transmissions: u8 = default_max_challenge_transmissions,
 
     pub fn init(allocator: std.mem.Allocator) State {
@@ -80,40 +96,45 @@ pub const State = struct {
         self.pending_challenges.deinit(self.allocator);
         self.outstanding_challenges.deinit(self.allocator);
         self.failed_challenges.deinit(self.allocator);
+        self.pending_response_index.deinit(self.allocator);
+        self.pending_challenge_index.deinit(self.allocator);
+        self.outstanding_challenge_index.deinit(self.allocator);
         self.* = undefined;
     }
 
-    pub fn clone(self: State, allocator: std.mem.Allocator) Error!State {
+    pub fn clone(self: *const State, allocator: std.mem.Allocator) Error!State {
         var out = State.init(allocator);
         errdefer out.deinit();
         try out.pending_responses.appendSlice(allocator, self.pending_responses.activeConst());
         try out.pending_challenges.appendSlice(allocator, self.pending_challenges.activeConst());
         try out.outstanding_challenges.appendSlice(allocator, self.outstanding_challenges.items);
         try out.failed_challenges.appendSlice(allocator, self.failed_challenges.items);
+        try out.rebuildIndexes();
         out.max_challenge_transmissions = self.max_challenge_transmissions;
         return out;
     }
 
     pub fn queueChallenge(self: *State, data: [8]u8) Error!void {
-        for (self.pending_challenges.activeConst()) |challenge| {
-            if (std.mem.eql(u8, &challenge.data, &data)) return;
-        }
-        for (self.outstanding_challenges.items) |challenge| {
-            if (std.mem.eql(u8, &challenge.data, &data)) return;
-        }
-        try self.pending_challenges.append(self.allocator, .{ .data = data });
+        if (self.pending_challenge_index.contains(data) or
+            self.outstanding_challenge_index.contains(data)) return;
+        try self.pending_challenges.ensureUnusedCapacity(self.allocator, 1);
+        try self.pending_challenge_index.ensureUnusedCapacity(self.allocator, 1);
+        self.pending_challenges.appendAssumeCapacity(.{ .data = data });
+        self.pending_challenge_index.putAssumeCapacityNoClobber(data, {});
     }
 
     pub fn receiveChallenge(self: *State, data: [8]u8) Error!bool {
-        for (self.pending_responses.activeConst()) |existing| {
-            if (std.mem.eql(u8, &existing, &data)) return false;
-        }
-        try self.pending_responses.append(self.allocator, data);
+        if (self.pending_response_index.contains(data)) return false;
+        try self.pending_responses.ensureUnusedCapacity(self.allocator, 1);
+        try self.pending_response_index.ensureUnusedCapacity(self.allocator, 1);
+        self.pending_responses.appendAssumeCapacity(data);
+        self.pending_response_index.putAssumeCapacityNoClobber(data, {});
         return true;
     }
 
     pub fn nextResponseFrame(self: *State) Error!quic.Frame {
         const data = self.pending_responses.popFront() orelse return error.NoPendingPathResponse;
+        _ = self.pending_response_index.remove(data);
         return .{ .path_response = .{ .data = data } };
     }
 
@@ -129,7 +150,8 @@ pub const State = struct {
     pub fn discardResponses(self: *State, count: usize) void {
         var discarded: usize = 0;
         while (discarded < count) : (discarded += 1) {
-            _ = self.pending_responses.popFront() orelse return;
+            const data = self.pending_responses.popFront() orelse return;
+            _ = self.pending_response_index.remove(data);
         }
     }
 
@@ -137,6 +159,7 @@ pub const State = struct {
         var written: usize = 0;
         while (written < out.len) : (written += 1) {
             const data = self.pending_responses.popFront() orelse break;
+            _ = self.pending_response_index.remove(data);
             out[written] = .{ .path_response = .{ .data = data } };
         }
         return written;
@@ -147,13 +170,10 @@ pub const State = struct {
     }
 
     pub fn nextChallengeFrameAt(self: *State, now_ns: ?u64, timeout_ns: ?u64) Error!quic.Frame {
-        var challenge = self.pending_challenges.popFront() orelse return error.NoPendingPathChallenge;
-        challenge.transmissions +|= 1;
-        challenge.sent_time_ns = now_ns;
-        if (now_ns) |now| {
-            if (timeout_ns) |timeout| challenge.deadline_ns = std.math.add(u64, now, timeout) catch std.math.maxInt(u64);
-        }
-        try self.outstanding_challenges.append(self.allocator, challenge);
+        if (self.pending_challenges.len() == 0) return error.NoPendingPathChallenge;
+        try self.outstanding_challenges.ensureUnusedCapacity(self.allocator, 1);
+        try self.outstanding_challenge_index.ensureUnusedCapacity(self.allocator, 1);
+        const challenge = self.popPendingChallengeToOutstanding(now_ns, timeout_ns);
         return .{ .path_challenge = .{ .data = challenge.data } };
     }
 
@@ -161,16 +181,15 @@ pub const State = struct {
         const count = @min(out.len, self.pendingChallengeCount());
         if (count == 0) return 0;
         try self.outstanding_challenges.ensureUnusedCapacity(self.allocator, count);
+        const outstanding_capacity = std.math.cast(
+            @TypeOf(self.outstanding_challenge_index).Size,
+            count,
+        ) orelse return error.OutOfMemory;
+        try self.outstanding_challenge_index.ensureUnusedCapacity(self.allocator, outstanding_capacity);
 
         var written: usize = 0;
         while (written < count) : (written += 1) {
-            var challenge = self.pending_challenges.popFront().?;
-            challenge.transmissions +|= 1;
-            challenge.sent_time_ns = now_ns;
-            if (now_ns) |now| {
-                if (timeout_ns) |timeout| challenge.deadline_ns = std.math.add(u64, now, timeout) catch std.math.maxInt(u64);
-            }
-            self.outstanding_challenges.appendAssumeCapacity(challenge);
+            const challenge = self.popPendingChallengeToOutstanding(now_ns, timeout_ns);
             out[written] = .{ .path_challenge = .{ .data = challenge.data } };
         }
         return written;
@@ -181,32 +200,28 @@ pub const State = struct {
     }
 
     pub fn receiveResponseValidated(self: *State, data: [8]u8) bool {
-        for (self.outstanding_challenges.items, 0..) |challenge, i| {
-            if (std.mem.eql(u8, &challenge.data, &data)) {
-                _ = self.outstanding_challenges.swapRemove(i);
-                return true;
-            }
-        }
-        return false;
+        const index = self.outstanding_challenge_index.get(data) orelse return false;
+        _ = self.removeOutstandingChallenge(index);
+        return true;
     }
 
-    pub fn pendingResponseCount(self: State) usize {
+    pub fn pendingResponseCount(self: *const State) usize {
         return self.pending_responses.len();
     }
 
-    pub fn pendingChallengeCount(self: State) usize {
+    pub fn pendingChallengeCount(self: *const State) usize {
         return self.pending_challenges.len();
     }
 
-    pub fn outstandingChallengeCount(self: State) usize {
+    pub fn outstandingChallengeCount(self: *const State) usize {
         return self.outstanding_challenges.items.len;
     }
 
-    pub fn failedChallengeCount(self: State) usize {
+    pub fn failedChallengeCount(self: *const State) usize {
         return self.failed_challenges.items.len;
     }
 
-    pub fn earliestChallengeDeadline(self: State) ?u64 {
+    pub fn earliestChallengeDeadline(self: *const State) ?u64 {
         var deadline: ?u64 = null;
         for (self.outstanding_challenges.items) |challenge| {
             const candidate = challenge.deadline_ns orelse continue;
@@ -228,17 +243,105 @@ pub const State = struct {
                 continue;
             }
 
-            var challenge = self.outstanding_challenges.swapRemove(i);
+            const will_fail = self.outstanding_challenges.items[i].transmissions >=
+                self.max_challenge_transmissions;
+            if (will_fail) {
+                try self.failed_challenges.ensureUnusedCapacity(self.allocator, 1);
+            } else {
+                try self.pending_challenges.ensureUnusedCapacity(self.allocator, 1);
+                try self.pending_challenge_index.ensureUnusedCapacity(self.allocator, 1);
+            }
+
+            var challenge = self.removeOutstandingChallenge(i);
             challenge.sent_time_ns = null;
             challenge.deadline_ns = null;
             expired += 1;
-            if (challenge.transmissions >= self.max_challenge_transmissions) {
-                try self.failed_challenges.append(self.allocator, challenge);
+            if (will_fail) {
+                self.failed_challenges.appendAssumeCapacity(challenge);
             } else {
-                try self.pending_challenges.append(self.allocator, challenge);
+                self.pending_challenges.appendAssumeCapacity(challenge);
+                self.pending_challenge_index.putAssumeCapacityNoClobber(challenge.data, {});
             }
         }
         return expired;
+    }
+
+    fn popPendingChallengeToOutstanding(
+        self: *State,
+        now_ns: ?u64,
+        timeout_ns: ?u64,
+    ) Challenge {
+        var challenge = self.pending_challenges.popFront().?;
+        _ = self.pending_challenge_index.remove(challenge.data);
+        challenge.transmissions +|= 1;
+        challenge.sent_time_ns = now_ns;
+        if (now_ns) |now| {
+            if (timeout_ns) |timeout| {
+                challenge.deadline_ns = std.math.add(
+                    u64,
+                    now,
+                    timeout,
+                ) catch std.math.maxInt(u64);
+            }
+        }
+        const index = self.outstanding_challenges.items.len;
+        self.outstanding_challenges.appendAssumeCapacity(challenge);
+        self.outstanding_challenge_index.putAssumeCapacityNoClobber(
+            challenge.data,
+            index,
+        );
+        return challenge;
+    }
+
+    fn removeOutstandingChallenge(self: *State, index: usize) Challenge {
+        const old_len = self.outstanding_challenges.items.len;
+        const removed = self.outstanding_challenges.swapRemove(index);
+        _ = self.outstanding_challenge_index.remove(removed.data);
+        if (index != old_len - 1) {
+            const moved = self.outstanding_challenges.items[index];
+            self.outstanding_challenge_index.getPtr(moved.data).?.* = index;
+        }
+        return removed;
+    }
+
+    fn rebuildIndexes(self: *State) Error!void {
+        const pending_response_count = std.math.cast(
+            @TypeOf(self.pending_response_index).Size,
+            self.pending_responses.len(),
+        ) orelse return error.OutOfMemory;
+        const pending_challenge_count = std.math.cast(
+            @TypeOf(self.pending_challenge_index).Size,
+            self.pending_challenges.len(),
+        ) orelse return error.OutOfMemory;
+        try self.pending_response_index.ensureUnusedCapacity(
+            self.allocator,
+            pending_response_count,
+        );
+        try self.pending_challenge_index.ensureUnusedCapacity(
+            self.allocator,
+            pending_challenge_count,
+        );
+        const outstanding_count = std.math.cast(
+            @TypeOf(self.outstanding_challenge_index).Size,
+            self.outstanding_challenges.items.len,
+        ) orelse return error.OutOfMemory;
+        try self.outstanding_challenge_index.ensureUnusedCapacity(
+            self.allocator,
+            outstanding_count,
+        );
+
+        for (self.pending_responses.activeConst()) |data| {
+            self.pending_response_index.putAssumeCapacityNoClobber(data, {});
+        }
+        for (self.pending_challenges.activeConst()) |challenge| {
+            self.pending_challenge_index.putAssumeCapacityNoClobber(challenge.data, {});
+        }
+        for (self.outstanding_challenges.items, 0..) |challenge, index| {
+            self.outstanding_challenge_index.putAssumeCapacityNoClobber(
+                challenge.data,
+                index,
+            );
+        }
     }
 };
 
@@ -457,4 +560,54 @@ test "QUIC path validation suppresses duplicate pending and outstanding challeng
     try state.queueChallenge(challenge);
     try std.testing.expectEqual(@as(usize, 0), state.pendingChallengeCount());
     try std.testing.expectEqual(@as(usize, 1), state.outstandingChallengeCount());
+}
+
+test "QUIC path validation indexes track queued outstanding and timed-out challenges" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+
+    const first_response = [_]u8{ 'r', 0, 0, 0, 0, 0, 0, 1 };
+    const second_response = [_]u8{ 'r', 0, 0, 0, 0, 0, 0, 2 };
+    try std.testing.expect(try state.receiveChallenge(first_response));
+    try std.testing.expect(try state.receiveChallenge(second_response));
+    try std.testing.expectEqual(@as(usize, 2), state.pending_response_index.count());
+    state.discardResponses(1);
+    try std.testing.expect(!state.pending_response_index.contains(first_response));
+    try std.testing.expect(state.pending_response_index.contains(second_response));
+    _ = try state.nextResponseFrame();
+    try std.testing.expectEqual(@as(usize, 0), state.pending_response_index.count());
+
+    const first = [_]u8{ '1', 0, 0, 0, 0, 0, 0, 1 };
+    const second = [_]u8{ '2', 0, 0, 0, 0, 0, 0, 2 };
+    const third = [_]u8{ '3', 0, 0, 0, 0, 0, 0, 3 };
+    try state.queueChallenge(first);
+    try state.queueChallenge(second);
+    try state.queueChallenge(third);
+    try std.testing.expectEqual(@as(usize, 3), state.pending_challenge_index.count());
+
+    var frames: [3]quic.Frame = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        try state.nextChallengeFramesAt(&frames, 100, 50),
+    );
+    try std.testing.expectEqual(@as(usize, 0), state.pending_challenge_index.count());
+    try std.testing.expectEqual(@as(usize, 3), state.outstanding_challenge_index.count());
+    try std.testing.expectEqual(@as(?usize, 0), state.outstanding_challenge_index.get(first));
+    try std.testing.expectEqual(@as(?usize, 1), state.outstanding_challenge_index.get(second));
+    try std.testing.expectEqual(@as(?usize, 2), state.outstanding_challenge_index.get(third));
+
+    // Removing the middle challenge swap-moves the last challenge into its
+    // slot; the data->slot index must be repaired before another response or
+    // timeout scan can use it.
+    try std.testing.expect(state.receiveResponseValidated(second));
+    try std.testing.expect(!state.outstanding_challenge_index.contains(second));
+    try std.testing.expectEqual(@as(?usize, 0), state.outstanding_challenge_index.get(first));
+    try std.testing.expectEqual(@as(?usize, 1), state.outstanding_challenge_index.get(third));
+
+    try std.testing.expectEqual(@as(usize, 2), try state.checkTimeouts(150));
+    try std.testing.expectEqual(@as(usize, 2), state.pending_challenge_index.count());
+    try std.testing.expect(state.pending_challenge_index.contains(first));
+    try std.testing.expect(state.pending_challenge_index.contains(third));
+    try std.testing.expectEqual(@as(usize, 0), state.outstanding_challenge_index.count());
 }
