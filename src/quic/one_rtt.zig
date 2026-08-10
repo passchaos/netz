@@ -330,6 +330,7 @@ pub const ConnectionStats = struct {
     local_key_update_count: u64,
     peer_key_update_count: u64,
     failed_path_validations: usize,
+    sent_packet_stats: quic.packet_space.SentPacketStats,
 
     pub fn lossRate(self: ConnectionStats) f64 {
         if (self.packets_sent == 0) return 0.0;
@@ -1431,6 +1432,7 @@ pub const Connection = struct {
             .local_key_update_count = self.send_key_phase.keyUpdateCount(),
             .peer_key_update_count = self.receive_key_phase.keyUpdateCount(),
             .failed_path_validations = self.failedPathValidationCount(),
+            .sent_packet_stats = self.sent.stats(),
         };
     }
 

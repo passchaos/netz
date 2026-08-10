@@ -300,8 +300,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   recovery metrics, key-update, key-retirement, and close events with sticky,
   caller-queryable diagnostics that never roll back network state, plus a
   no-allocation 1-RTT `stats`/`getStats` snapshot with lifetime packet/byte,
-  loss, stream, DATAGRAM, RTT, congestion, recovery, ECN, authentication, and
-  key-update counters plus per-stream send/receive stat snapshots with
+  loss, stream, DATAGRAM, RTT, congestion, recovery, sent-packet, ECN,
+  authentication, and key-update counters plus per-stream send/receive stat snapshots with
   remaining credit for fast telemetry loops,
   plus NSS SSLKEYLOGFILE-compatible handshake/application traffic-secret
   streaming from both integrated handshake roles with caller-visible sink
