@@ -113,6 +113,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3, "firstHttp3AltSvcHeader"));
     try std.testing.expect(@hasDecl(netz.http3, "firstHttp3AltSvcTarget"));
     try std.testing.expect(@hasDecl(netz.http3, "altSvcTarget"));
+    try std.testing.expect(@hasDecl(netz.http3, "isHttp3Alpn"));
     try std.testing.expect(@hasDecl(netz.http3, "Origin"));
     try std.testing.expect(@hasDecl(netz.http3, "requestOrigin"));
     try std.testing.expect(@hasDecl(netz.http3, "sameOrigin"));

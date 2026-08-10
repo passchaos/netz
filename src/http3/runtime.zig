@@ -2630,6 +2630,7 @@ pub const HandshakeClient = struct {
         limits: Limits,
         options: HandshakeClientOptions,
     ) Error!OwnedHandshakeResponse {
+        if (!http3.isHttp3Alpn(target.alpn)) return error.InvalidHeader;
         var origin = try uriEndpoint(allocator, uri);
         defer origin.deinit();
         const path = try uriPathAlloc(allocator, uri);
@@ -14081,6 +14082,18 @@ test "HTTP/3 handshake client requests via Alt-Svc target" {
     const original_dcid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8 };
     const client_cid = [_]u8{ 0xb9, 0xba, 0xbb, 0xbc };
     const server_cid = [_]u8{ 0xbd, 0xbe, 0xbf, 0xc0 };
+    const uri = try std.Uri.parse("https://origin.example/alt");
+
+    try std.testing.expectError(error.InvalidHeader, HandshakeClient.requestUriAltSvc(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        uri,
+        .{ .alpn = "h2", .connect_host = "127.0.0.1", .origin_host = "origin.example", .port = 443 },
+        .{},
+        .{},
+        .{ .handshake = .{ .original_destination_connection_id = &original_dcid, .local_connection_id = &client_cid } },
+    ));
 
     var server = try HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
         .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
@@ -14119,7 +14132,6 @@ test "HTTP/3 handshake client requests via Alt-Svc target" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    const uri = try std.Uri.parse("https://origin.example/alt");
     const server_address = server.address();
     var response = try HandshakeClient.requestUriAltSvc(
         allocator,

@@ -223,7 +223,7 @@ pub fn firstHttp3AltSvc(field_value: []const u8) Error!?AltSvcEndpoint {
     return null;
 }
 
-fn isHttp3Alpn(alpn: []const u8) bool {
+pub fn isHttp3Alpn(alpn: []const u8) bool {
     if (std.mem.eql(u8, alpn, "h3")) return true;
     if (!std.mem.startsWith(u8, alpn, "h3-")) return false;
     if (alpn.len == 3) return false;
