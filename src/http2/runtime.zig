@@ -593,7 +593,9 @@ pub const Connection = struct {
     send_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     active_local_streams: std.ArrayList(u31) = .empty,
+    active_local_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     active_peer_streams: std.ArrayList(u31) = .empty,
+    active_peer_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     push_state: push.State = .{},
     priority_state: priority_runtime.State = .{},
     response_semantics: std.ArrayList(StreamResponseSemantics) = .empty,
@@ -627,7 +629,9 @@ pub const Connection = struct {
         self.send_stream_windows.deinit(self.allocator);
         self.recv_stream_windows.deinit(self.allocator);
         self.active_local_streams.deinit(self.allocator);
+        self.active_local_index.deinit(self.allocator);
         self.active_peer_streams.deinit(self.allocator);
+        self.active_peer_index.deinit(self.allocator);
         self.push_state.deinit(self.allocator);
         self.priority_state.deinit(self.allocator);
         self.response_semantics.deinit(self.allocator);
@@ -717,10 +721,7 @@ pub const Connection = struct {
                 return error.FlowControlViolation;
             }
         }
-        try self.active_peer_streams.append(
-            self.allocator,
-            promise.promised_stream_id,
-        );
+        try self.addActivePeerStream(promise.promised_stream_id);
         _ = self.push_state.releaseRemote(
             promise.promised_stream_id,
         );
@@ -1303,10 +1304,7 @@ pub const Connection = struct {
                     return error.FlowControlBlocked;
                 }
             }
-            try self.active_local_streams.append(
-                self.allocator,
-                promised_stream_id,
-            );
+            try self.addActiveLocalStream(promised_stream_id);
             activated = true;
         }
         self.writeResponse(promised_stream_id, response) catch |err| {
@@ -1591,6 +1589,48 @@ pub const Connection = struct {
         }
     }
 
+    fn addActiveLocalStream(self: *Connection, stream_id: u31) Error!void {
+        if (self.active_local_index.contains(stream_id)) return;
+        try self.active_local_streams.ensureUnusedCapacity(self.allocator, 1);
+        try self.active_local_index.ensureUnusedCapacity(self.allocator, 1);
+        const index = self.active_local_streams.items.len;
+        self.active_local_streams.appendAssumeCapacity(stream_id);
+        self.active_local_index.putAssumeCapacity(stream_id, index);
+    }
+
+    fn addActivePeerStream(self: *Connection, stream_id: u31) Error!void {
+        if (self.active_peer_index.contains(stream_id)) return;
+        try self.active_peer_streams.ensureUnusedCapacity(self.allocator, 1);
+        try self.active_peer_index.ensureUnusedCapacity(self.allocator, 1);
+        const index = self.active_peer_streams.items.len;
+        self.active_peer_streams.appendAssumeCapacity(stream_id);
+        self.active_peer_index.putAssumeCapacity(stream_id, index);
+    }
+
+    fn removeActiveLocalStream(self: *Connection, stream_id: u31) bool {
+        const index = self.active_local_index.get(stream_id) orelse return false;
+        const last_index = self.active_local_streams.items.len - 1;
+        const removed = self.active_local_streams.swapRemove(index);
+        _ = self.active_local_index.remove(removed);
+        if (index != last_index) {
+            const moved = self.active_local_streams.items[index];
+            self.active_local_index.getPtr(moved).?.* = index;
+        }
+        return true;
+    }
+
+    fn removeActivePeerStream(self: *Connection, stream_id: u31) bool {
+        const index = self.active_peer_index.get(stream_id) orelse return false;
+        const last_index = self.active_peer_streams.items.len - 1;
+        const removed = self.active_peer_streams.swapRemove(index);
+        _ = self.active_peer_index.remove(removed);
+        if (index != last_index) {
+            const moved = self.active_peer_streams.items[index];
+            self.active_peer_index.getPtr(moved).?.* = index;
+        }
+        return true;
+    }
+
     fn reserveNextClientStreamId(self: *Connection) Error!u31 {
         const stream_id = self.next_client_stream_id;
         if (stream_id > std.math.maxInt(u31) - 2) return error.InvalidStreamId;
@@ -1605,33 +1645,23 @@ pub const Connection = struct {
                 @intFromBool(was_priority_reserved);
             if (counted >= max_streams) return error.FlowControlBlocked;
         }
-        try self.active_local_streams.append(self.allocator, stream_id);
+        try self.addActiveLocalStream(stream_id);
         _ = self.priority_state.activateRequest(stream_id);
         self.next_client_stream_id += 2;
         return stream_id;
     }
 
     fn outboundStreamIsActive(self: Connection, stream_id: u31) bool {
-        for (self.active_local_streams.items) |active| {
-            if (active == stream_id) return true;
-        }
-        for (self.active_peer_streams.items) |active| {
-            if (active == stream_id) return true;
-        }
-        return false;
+        return self.active_local_index.contains(stream_id) or
+            self.active_peer_index.contains(stream_id);
     }
 
     fn releaseLocalStream(self: *Connection, stream_id: u31) void {
-        for (self.active_local_streams.items, 0..) |active, index| {
-            if (active == stream_id) {
-                _ = self.active_local_streams.swapRemove(index);
-                _ = self.priority_state.remove(
-                    self.allocator,
-                    stream_id,
-                );
-                return;
-            }
-        }
+        if (!self.removeActiveLocalStream(stream_id)) return;
+        _ = self.priority_state.remove(
+            self.allocator,
+            stream_id,
+        );
     }
 
     fn recordPeerGoAway(self: *Connection, goaway: http2.GoAwayPayload) Error!void {
@@ -1662,17 +1692,12 @@ pub const Connection = struct {
                 @intFromBool(was_priority_reserved);
             if (counted >= max_streams) return error.FlowControlViolation;
         }
-        try self.active_peer_streams.append(self.allocator, stream_id);
+        try self.addActivePeerStream(stream_id);
         self.priority_state.openRequest(self.allocator, stream_id);
     }
 
     fn releasePeerStream(self: *Connection, stream_id: u31) void {
-        for (self.active_peer_streams.items, 0..) |active, index| {
-            if (active == stream_id) {
-                _ = self.active_peer_streams.swapRemove(index);
-                break;
-            }
-        }
+        _ = self.removeActivePeerStream(stream_id);
         self.forgetResponseSemantics(stream_id);
         _ = self.priority_state.remove(self.allocator, stream_id);
     }
@@ -2089,11 +2114,11 @@ pub const Connection = struct {
         const client_initiated = clientInitiatedStreamId(stream_id);
         if (self.role == .client) {
             if (!client_initiated) return error.InvalidStreamId;
-            try self.active_local_streams.append(self.allocator, stream_id);
+            try self.addActiveLocalStream(stream_id);
             return .local;
         }
         if (!client_initiated) return error.InvalidStreamId;
-        try self.active_peer_streams.append(self.allocator, stream_id);
+        try self.addActivePeerStream(stream_id);
         return .peer;
     }
 
@@ -3582,6 +3607,20 @@ pub const testing = struct {
     ) void {
         connection.releaseLocalStream(stream_id);
     }
+
+    pub fn addActiveLocalStream(
+        connection: *Connection,
+        stream_id: u31,
+    ) Error!void {
+        return connection.addActiveLocalStream(stream_id);
+    }
+
+    pub fn addActivePeerStream(
+        connection: *Connection,
+        stream_id: u31,
+    ) Error!void {
+        return connection.addActivePeerStream(stream_id);
+    }
 };
 
 fn requestAuthority(headers: []const http2.Hpack.HeaderField) ?[]const u8 {
@@ -4806,7 +4845,9 @@ test "HTTP/2 sendResetStream rejects idle streams" {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -4818,7 +4859,7 @@ test "HTTP/2 sendResetStream rejects idle streams" {
     // accidentally resetting a stream that has already been fully released.
     try std.testing.expectError(error.InvalidStreamId, connection.sendResetStream(1, .cancel));
 
-    try connection.active_local_streams.append(std.testing.allocator, 1);
+    try connection.addActiveLocalStream(1);
     connection.releaseLocalStream(1);
     try std.testing.expectError(error.InvalidStreamId, connection.sendResetStream(1, .cancel));
 }
@@ -4834,7 +4875,9 @@ test "HTTP/2 writeData rejects idle streams" {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -4863,7 +4906,9 @@ test "HTTP/2 writeHeaders rejects wrong-direction idle streams" {
         client.send_stream_windows.deinit(std.testing.allocator);
         client.recv_stream_windows.deinit(std.testing.allocator);
         client.active_local_streams.deinit(std.testing.allocator);
+        client.active_local_index.deinit(std.testing.allocator);
         client.active_peer_streams.deinit(std.testing.allocator);
+        client.active_peer_index.deinit(std.testing.allocator);
         client.hpack_decoder.deinit(std.testing.allocator);
         client.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -4880,7 +4925,9 @@ test "HTTP/2 writeHeaders rejects wrong-direction idle streams" {
         server.send_stream_windows.deinit(std.testing.allocator);
         server.recv_stream_windows.deinit(std.testing.allocator);
         server.active_local_streams.deinit(std.testing.allocator);
+        server.active_local_index.deinit(std.testing.allocator);
         server.active_peer_streams.deinit(std.testing.allocator);
+        server.active_peer_index.deinit(std.testing.allocator);
         server.hpack_decoder.deinit(std.testing.allocator);
         server.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -5261,7 +5308,7 @@ test "HTTP/2 runtime decodes padded priority HEADERS payloads" {
 
     const flags = flag_end_headers | @as(u8, (@as(http2.Flags, .{ .padded = true, .priority = true })).byte());
     try writeFrame(allocator, io, client.stream, .headers, flags, 1, payload.items);
-    try client.active_local_streams.append(allocator, 1);
+    try client.addActiveLocalStream(1);
     try client.writeData(1, "hello", true);
 
     var response = try client.readResponse(1, "POST", false);
@@ -5990,7 +6037,9 @@ test "HTTP/2 validates PUSH_PROMISE parent and promised stream ids" {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -6001,7 +6050,7 @@ test "HTTP/2 validates PUSH_PROMISE parent and promised stream ids" {
     };
     try std.testing.expectError(error.InvalidFrame, connection.validatePushPromiseForClientStream(valid_parent_even_promise));
 
-    try connection.active_local_streams.append(std.testing.allocator, 1);
+    try connection.addActiveLocalStream(1);
     const promise = try connection.validatePushPromiseForClientStream(valid_parent_even_promise);
     try std.testing.expectEqual(@as(u31, 1), promise.stream_id);
     try std.testing.expectEqual(@as(u31, 2), promise.promised_stream_id);
@@ -8675,7 +8724,9 @@ test "HTTP/2 ignores WINDOW_UPDATE for inactive streams" {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8687,7 +8738,7 @@ test "HTTP/2 ignores WINDOW_UPDATE for inactive streams" {
     try std.testing.expect(try connection.handleConnectionFrame(inactive_update));
     try std.testing.expectEqual(@as(usize, 0), connection.send_stream_windows.items.len);
 
-    try connection.active_local_streams.append(std.testing.allocator, 1);
+    try connection.addActiveLocalStream(1);
     try std.testing.expect(try connection.handleConnectionFrame(inactive_update));
     try std.testing.expectEqual(@as(usize, 1), connection.send_stream_windows.items.len);
     try std.testing.expectEqual(@as(i64, default_flow_window + 10), (try connection.sendStreamWindow(1)).value);
@@ -8696,7 +8747,7 @@ test "HTTP/2 ignores WINDOW_UPDATE for inactive streams" {
         .header = .{ .length = 4, .frame_type = .window_update, .flags = 0, .stream_id = 3 },
         .payload = &.{ 0, 0, 0, 7 },
     };
-    try connection.active_peer_streams.append(std.testing.allocator, 3);
+    try connection.addActivePeerStream(3);
     try std.testing.expect(try connection.handleConnectionFrame(peer_update));
     try std.testing.expectEqual(@as(i64, default_flow_window + 7), (try connection.sendStreamWindow(3)).value);
 }
@@ -8732,7 +8783,9 @@ test "HTTP/2 sendWindowUpdate rejects idle streams" {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8774,6 +8827,7 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8781,6 +8835,7 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
     const first = try connection.reserveNextClientStreamId();
     try std.testing.expectEqual(@as(u31, 1), first);
     try std.testing.expectEqual(@as(usize, 1), connection.active_local_streams.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), connection.active_local_index.get(first));
     try std.testing.expectError(error.FlowControlBlocked, connection.reserveNextClientStreamId());
     try std.testing.expectEqual(@as(u31, 3), connection.next_client_stream_id);
 
@@ -8788,8 +8843,10 @@ test "HTTP/2 peer max concurrent streams limits locally opened streams" {
     const second = try connection.reserveNextClientStreamId();
     try std.testing.expectEqual(@as(u31, 3), second);
     try std.testing.expectEqual(@as(usize, 1), connection.active_local_streams.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), connection.active_local_index.get(second));
     connection.releaseLocalStream(second);
     try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.active_local_index.count());
     connection.releaseLocalStream(second);
     try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
 
@@ -8820,6 +8877,7 @@ test "HTTP/2 client stream id allocation detects overflow" {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
@@ -8844,13 +8902,16 @@ test "HTTP/2 local max concurrent streams limits peer opened streams" {
         connection.send_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
         connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
 
     try connection.reservePeerStream(1);
     try std.testing.expectEqual(@as(usize, 1), connection.active_peer_streams.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), connection.active_peer_index.get(1));
     try std.testing.expectError(error.FlowControlViolation, connection.reservePeerStream(3));
     connection.releasePeerStream(1);
     try connection.reservePeerStream(3);

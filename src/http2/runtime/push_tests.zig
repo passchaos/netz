@@ -108,10 +108,12 @@ test "HTTP/2 push promises require monotonic server stream IDs" {
     defer {
         connection.push_state.deinit(allocator);
         connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
         connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
     }
-    try connection.active_local_streams.append(allocator, 1);
+    try runtime.testing.addActiveLocalStream(&connection, 1);
     var block: std.ArrayList(u8) = .empty;
     defer block.deinit(allocator);
     try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{

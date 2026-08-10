@@ -200,7 +200,9 @@ test "HTTP/2 PRIORITY_UPDATE enforces negotiation and target direction" {
         connection.push_state.deinit(allocator);
         connection.priority_state.deinit(allocator);
         connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
         connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
@@ -233,7 +235,9 @@ test "HTTP/2 client opens lower streams before a pre-prioritized stream" {
         connection.push_state.deinit(allocator);
         connection.priority_state.deinit(allocator);
         connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
         connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
