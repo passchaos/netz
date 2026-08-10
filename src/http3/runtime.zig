@@ -5606,34 +5606,39 @@ const ResponseStreamSet = struct {
         table: http3.Qpack.DynamicTable,
         max_blocked_streams: u64,
     ) Error!?AssembledStream {
-        var target_index: ?usize = null;
-        var blocked_streams: u64 = 0;
-        for (self.entries.items, 0..) |*entry, index| {
-            const final_size = entry.receive.final_size orelse continue;
-            if (entry.receive.contiguous_end < final_size) continue;
-            const bytes = entry.receive.buffer.items[0..final_size];
-            if (max_blocked_streams != 0 and
-                try messageBlockedByQpack(bytes, table))
-            {
-                blocked_streams += 1;
-                if (blocked_streams > max_blocked_streams) {
-                    return error.QpackDecompressionFailed;
-                }
-                continue;
-            }
-            if (entry.receive.stream_id == stream_id) target_index = index;
-        }
-        const index = target_index orelse return null;
+        const index = self.entry_index.get(stream_id) orelse return null;
         const entry = &self.entries.items[index];
-        const final_size = entry.receive.final_size.?;
+        const final_size = entry.receive.final_size orelse return null;
+        if (entry.receive.contiguous_end < final_size) return null;
+        const bytes = entry.receive.buffer.items[0..final_size];
+        if (max_blocked_streams != 0 and try messageBlockedByQpack(bytes, table)) {
+            if (try self.blockedReadyStreamCount(table) > max_blocked_streams) {
+                return error.QpackDecompressionFailed;
+            }
+            return null;
+        }
         const owned = try self.allocator.dupe(
             u8,
-            entry.receive.buffer.items[0..final_size],
+            bytes,
         );
         const from = entry.from;
         var removed = self.takeEntry(stream_id).?;
         removed.deinit();
         return .{ .from = from, .stream_id = stream_id, .bytes = owned };
+    }
+
+    fn blockedReadyStreamCount(
+        self: *ResponseStreamSet,
+        table: http3.Qpack.DynamicTable,
+    ) Error!u64 {
+        var blocked_streams: u64 = 0;
+        for (self.entries.items) |*entry| {
+            const final_size = entry.receive.final_size orelse continue;
+            if (entry.receive.contiguous_end < final_size) continue;
+            const bytes = entry.receive.buffer.items[0..final_size];
+            if (try messageBlockedByQpack(bytes, table)) blocked_streams += 1;
+        }
+        return blocked_streams;
     }
 
     fn appendEntryAssumeCapacity(
@@ -10817,6 +10822,26 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     responses.remove(8);
     try std.testing.expect(responses.entry_index.get(8) == null);
     try std.testing.expectEqual(@as(usize, 1), responses.entry_index.count());
+
+    try responses.insert(from, .{
+        .stream_id = 12,
+        .data = "target",
+        .fin = true,
+    });
+    try responses.insert(from, .{
+        .stream_id = 16,
+        .data = "other",
+        .fin = true,
+    });
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    const ready = (try responses.takeReady(12, table, 0)) orelse
+        return error.TestUnexpectedResult;
+    defer allocator.free(ready.bytes);
+    try std.testing.expectEqual(@as(u62, 12), ready.stream_id);
+    try std.testing.expectEqualStrings("target", ready.bytes);
+    try std.testing.expect(responses.entry_index.get(12) == null);
+    try std.testing.expect(responses.entry_index.get(16) != null);
 }
 
 test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
