@@ -137,6 +137,17 @@ pub fn Pool(comptime Handle: type) type {
             origin: http3.Origin,
             now_ms: u64,
         ) !void {
+            _ = self.pruneExpired(now_ms);
+            if (self.config.max_idle_per_origin == 0 or
+                self.config.max_idle_total == 0)
+            {
+                self.dropHandle(handle);
+                return;
+            }
+            if (self.idleCountForOrigin(origin) >= self.config.max_idle_per_origin) {
+                self.dropHandle(handle);
+                return;
+            }
             const key = try originKeyFromOrigin(self.allocator, origin);
             try self.releaseKey(handle, key, now_ms);
         }
@@ -299,6 +310,19 @@ test "HTTP/3 origin pool releaseKey is transactional on allocation failure" {
     try std.testing.expectEqual(@as(usize, 0), drops);
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
     try std.testing.expectEqual(@as(u64, 0), pool.stats().total_dropped);
+}
+
+test "HTTP/3 origin pool disabled release does not allocate" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const CounterPool = Pool(*usize);
+    var pool = CounterPool.init(failing.allocator(), .{ .max_idle_total = 0 }, countDrop);
+    defer pool.deinit();
+
+    var drops: usize = 0;
+    try pool.release(&drops, try http3.requestOrigin("https", "disabled.example"), 0);
+    try std.testing.expectEqual(@as(usize, 1), drops);
+    try std.testing.expectEqual(@as(u64, 1), pool.stats().total_dropped);
 }
 
 test "HTTP/3 origin pool enforces expiry and capacity" {
