@@ -1666,6 +1666,11 @@ test "QUIC 1-RTT next timer deadline selects earliest work" {
     const path = connection.nextTimerDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.TimerDeadlineKind.path_validation, path.kind);
     try std.testing.expectEqual(@as(u64, 30), path.deadline_ns);
+
+    try std.testing.expectEqual(@as(?one_rtt.TimerDeadline, null), try connection.serviceNextTimerAt(29));
+    const serviced = (try connection.serviceNextTimerAt(30)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.path_validation, serviced.kind);
+    try std.testing.expectEqual(@as(usize, 1), connection.path_validation.pendingChallengeCount());
 }
 
 test "QUIC 1-RTT next timer deadline includes key discard" {
@@ -1694,6 +1699,11 @@ test "QUIC 1-RTT next timer deadline includes key discard" {
     const deadline = connection.nextTimerDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(one_rtt.TimerDeadlineKind.key_discard, deadline.kind);
     try std.testing.expectEqual(@as(u64, 7), deadline.deadline_ns);
+
+    try std.testing.expectEqual(@as(?one_rtt.TimerDeadline, null), try connection.serviceNextTimerAt(6));
+    const serviced = (try connection.serviceNextTimerAt(7)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.key_discard, serviced.kind);
+    try std.testing.expectEqual(@as(?i64, null), connection.oneRttKeyDiscardDeadline());
 }
 
 test "QUIC 1-RTT connection selects and exposes CUBIC congestion control" {

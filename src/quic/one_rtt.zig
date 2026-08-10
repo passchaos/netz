@@ -1457,6 +1457,35 @@ pub const Connection = struct {
         return next;
     }
 
+    pub fn serviceNextTimerAt(self: *Connection, now_ns: u64) Error!?TimerDeadline {
+        const deadline = self.nextTimerDeadline() orelse return null;
+        if (now_ns < deadline.deadline_ns) return null;
+
+        switch (deadline.kind) {
+            .loss_time, .pto => {
+                _ = try self.serviceLossDetectionTimer(now_ns);
+            },
+            .path_validation => {
+                _ = try self.checkPathValidationTimeouts(now_ns);
+            },
+            .keep_alive => {
+                _ = try self.serviceKeepAliveAt(nanosToMillisFloor(now_ns));
+            },
+            .idle_timeout => {
+                _ = self.checkIdleTimeout(nanosToMillisFloor(now_ns));
+            },
+            .close => {
+                _ = self.checkCloseExpired(nanosToMillisFloor(now_ns));
+            },
+            .key_discard => {
+                _ = self.discardExpiredOneRttKeys(
+                    std.math.cast(i64, now_ns) orelse std.math.maxInt(i64),
+                );
+            },
+        }
+        return deadline;
+    }
+
     pub fn congestionAlgorithm(self: Connection) quic.congestion.Algorithm {
         return self.congestion.algorithm;
     }
