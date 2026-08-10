@@ -270,7 +270,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   ACK-range/ECN and packet-frame emission without fixed-size truncation, plus
   optional 1-RTT connection observers that automatically emit successful
   packet send/receive, recovery metrics, and key-update events with sticky,
-  caller-queryable diagnostics that never roll back network state,
+  caller-queryable diagnostics that never roll back network state, plus a
+  no-allocation 1-RTT `stats`/`getStats` snapshot with lifetime packet/byte,
+  loss, stream, DATAGRAM, RTT, congestion, recovery, ECN, authentication, and
+  key-update counters for fast telemetry loops,
   plus NSS SSLKEYLOGFILE-compatible handshake/application traffic-secret
   streaming from both integrated handshake roles with caller-visible sink
   failures,

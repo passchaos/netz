@@ -626,6 +626,147 @@ test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
 }
 
+test "QUIC 1-RTT connection exposes stable stats counters" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const server_cid = [_]u8{ 0x85, 0x86, 0x87, 0x88 };
+    const client_keys = quic.protection.deriveAes128Keys([_]u8{0x81} ** quic.protection.secret_len);
+    const server_keys = quic.protection.deriveAes128Keys([_]u8{0x82} ** quic.protection.secret_len);
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const initial = client.stats();
+    try std.testing.expectEqual(@as(u64, 0), initial.packets_sent);
+    try std.testing.expectEqual(@as(?u64, null), initial.smoothed_rtt_ns);
+    try std.testing.expectEqual(@as(f64, 0.0), initial.lossRate());
+
+    const request = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "stats",
+        .fin = true,
+    } }};
+    try client.sendAt(&request, 100_000_000);
+    const client_after_send = client.getStats();
+    try std.testing.expectEqual(@as(u64, 1), client_after_send.packets_sent);
+    try std.testing.expect(client_after_send.bytes_sent > 0);
+    try std.testing.expectEqual(@as(u64, 1), client_after_send.outgoing_streams_created);
+    try std.testing.expectEqual(@as(usize, 1), client_after_send.pending_recovery_count);
+    try std.testing.expect(client_after_send.bytes_in_flight > 0);
+
+    var received = try server.receivePacketAt(150_000_000);
+    defer received.deinit(allocator);
+    const server_after_receive = server.stats();
+    try std.testing.expectEqual(@as(u64, 1), server_after_receive.packets_received);
+    try std.testing.expectEqual(client_after_send.bytes_sent, server_after_receive.bytes_received);
+    try std.testing.expectEqual(@as(u64, 1), server_after_receive.incoming_streams_created);
+    try std.testing.expectEqual(@as(u64, 0), server_after_receive.packets_lost);
+
+    try server.sendAck(0);
+    const server_after_ack = server.stats();
+    try std.testing.expectEqual(@as(u64, 1), server_after_ack.packets_sent);
+    try std.testing.expect(server_after_ack.bytes_sent > 0);
+
+    var ack = try client.receivePacketAt(250_000_000);
+    defer ack.deinit(allocator);
+    const client_after_ack = client.stats();
+    try std.testing.expectEqual(@as(u64, 1), client_after_ack.packets_received);
+    try std.testing.expectEqual(server_after_ack.bytes_sent, client_after_ack.bytes_received);
+    try std.testing.expectEqual(@as(usize, 0), client_after_ack.pending_recovery_count);
+    try std.testing.expectEqual(@as(u64, 0), client_after_ack.packets_lost);
+    try std.testing.expectEqual(@as(f64, 0.0), client_after_ack.lossRate());
+    try std.testing.expectEqual(@as(?u64, 150_000_000), client_after_ack.latest_rtt_ns);
+    try std.testing.expect(client_after_ack.smoothed_rtt_ns != null);
+}
+
+test "QUIC 1-RTT stats include datagram queue drops" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const server_cid = [_]u8{ 0x95, 0x96, 0x97, 0x98 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x91} ** quic.protection.secret_len);
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .peer_max_datagram_frame_size = 64,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 64,
+        .max_datagram_queue_items = 1,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    try client.sendDatagram("one");
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    try client.sendDatagram("two");
+    var second = try server.receivePacket();
+    defer second.deinit(allocator);
+
+    const client_stats = client.stats();
+    try std.testing.expectEqual(@as(u64, 2), client_stats.datagrams_sent);
+    try std.testing.expectEqual(@as(u64, 2), client_stats.packets_sent);
+
+    const server_stats = server.stats();
+    try std.testing.expectEqual(@as(u64, 2), server_stats.datagrams_received);
+    try std.testing.expectEqual(@as(u64, 1), server_stats.datagrams_dropped_incoming);
+    try std.testing.expectEqual(@as(usize, 1), server_stats.datagram_receive_queue_len);
+
+    var out: [8]u8 = undefined;
+    const popped = (try server.popDatagram(&out)).?;
+    try std.testing.expectEqualStrings("two", popped);
+    try std.testing.expectEqual(@as(usize, 0), server.stats().datagram_receive_queue_len);
+}
+
 test "QUIC 1-RTT padding-only packets are in flight but non-eliciting" {
     const allocator = std.testing.allocator;
 

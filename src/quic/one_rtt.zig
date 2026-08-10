@@ -287,6 +287,47 @@ pub const CloseState = enum {
     closed,
 };
 
+/// Allocation-free snapshot of the 1-RTT transport state.
+///
+/// The counters intentionally live on `Connection` instead of being derived
+/// from recovery queues: sent/lost packets can leave those queues after ACK
+/// processing, while observability APIs need stable lifetime totals similar to
+/// quic-zig WebTransport stats and browser `getStats()` surfaces.
+pub const ConnectionStats = struct {
+    packets_sent: u64,
+    packets_received: u64,
+    packets_lost: u64,
+    /// Protected QUIC packet bytes accepted by the socket.
+    bytes_sent: u64,
+    /// Protected QUIC packet bytes authenticated and applied by the receiver.
+    bytes_received: u64,
+    bytes_in_flight: usize,
+    congestion_window: usize,
+    congestion_available: usize,
+    outgoing_streams_created: u64,
+    incoming_streams_created: u64,
+    datagrams_sent: u64,
+    datagrams_received: u64,
+    datagrams_dropped_incoming: u64,
+    datagram_receive_queue_len: usize,
+    smoothed_rtt_ns: ?u64,
+    rtt_variance_ns: ?u64,
+    min_rtt_ns: ?u64,
+    latest_rtt_ns: ?u64,
+    pending_recovery_count: usize,
+    pto_backoff_count: u8,
+    ecn_validation_failed: bool,
+    authentication_failures: u64,
+    local_key_update_count: u64,
+    peer_key_update_count: u64,
+
+    pub fn lossRate(self: ConnectionStats) f64 {
+        if (self.packets_sent == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.packets_lost)) /
+            @as(f64, @floatFromInt(self.packets_sent));
+    }
+};
+
 const DatagramRecvQueue = struct {
     slots: std.ArrayList(?[]u8) = .empty,
     head: usize = 0,
@@ -405,6 +446,11 @@ pub const Connection = struct {
     peer_address_bytes_received: usize = 0,
     peer_address_bytes_sent: usize = 0,
     pmtud: quic.pmtu.State = .{},
+    packets_sent_count: u64 = 0,
+    packets_received_count: u64 = 0,
+    packets_lost_count: u64 = 0,
+    bytes_sent_count: u64 = 0,
+    bytes_received_count: u64 = 0,
     datagram_recv_queue: DatagramRecvQueue = .{},
     datagrams_sent_count: u64 = 0,
     datagrams_received_count: u64 = 0,
@@ -995,7 +1041,10 @@ pub const Connection = struct {
         var sent_in_flight: usize = 0;
         var sent_stream_bytes: u64 = 0;
         for (prepared[0..send_result.sent_count]) |packet| {
-            self.noteOneRttPacketSent(packet.packet_number);
+            self.noteOneRttPacketSent(
+                packet.packet_number,
+                packet.packet_len,
+            );
             sent_payload_len += packet.payload_len;
             sent_stream_bytes += packet.stream_bytes;
             if (packet.in_flight) {
@@ -1228,6 +1277,44 @@ pub const Connection = struct {
 
     pub fn datagramsDroppedIncoming(self: Connection) u64 {
         return self.datagrams_dropped_incoming_count;
+    }
+
+    /// Return a stable, allocation-free observability snapshot.
+    ///
+    /// This complements qlog's event stream for fast control loops and
+    /// WebTransport-style APIs that need counters/gauges without JSON encoding
+    /// or heap traffic on the packet path.
+    pub fn stats(self: Connection) ConnectionStats {
+        return .{
+            .packets_sent = self.packets_sent_count,
+            .packets_received = self.packets_received_count,
+            .packets_lost = self.packets_lost_count,
+            .bytes_sent = self.bytes_sent_count,
+            .bytes_received = self.bytes_received_count,
+            .bytes_in_flight = self.congestion.bytes_in_flight,
+            .congestion_window = self.congestion.congestion_window,
+            .congestion_available = self.congestion.available(),
+            .outgoing_streams_created = self.outgoingStreamsCreated(),
+            .incoming_streams_created = self.incomingStreamsCreated(),
+            .datagrams_sent = self.datagrams_sent_count,
+            .datagrams_received = self.datagrams_received_count,
+            .datagrams_dropped_incoming = self.datagrams_dropped_incoming_count,
+            .datagram_receive_queue_len = self.datagram_recv_queue.count(),
+            .smoothed_rtt_ns = if (self.rtt_stats.has_measurement) self.rtt_stats.smoothed_rtt else null,
+            .rtt_variance_ns = if (self.rtt_stats.has_measurement) self.rtt_stats.rtt_var else null,
+            .min_rtt_ns = if (self.rtt_stats.has_measurement) self.rtt_stats.min_rtt else null,
+            .latest_rtt_ns = if (self.rtt_stats.has_measurement) self.rtt_stats.latest_rtt else null,
+            .pending_recovery_count = self.recovery.pendingCount(),
+            .pto_backoff_count = self.pto_count,
+            .ecn_validation_failed = self.sent.ecnDisabled(),
+            .authentication_failures = self.receive_authentication_failures,
+            .local_key_update_count = self.send_key_phase.keyUpdateCount(),
+            .peer_key_update_count = self.receive_key_phase.keyUpdateCount(),
+        };
+    }
+
+    pub fn getStats(self: Connection) ConnectionStats {
+        return self.stats();
     }
 
     pub fn congestionAlgorithm(self: Connection) quic.congestion.Algorithm {
@@ -1681,7 +1768,7 @@ pub const Connection = struct {
             }
         }
         try self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn);
-        self.noteOneRttPacketSent(packet_number);
+        self.noteOneRttPacketSent(packet_number, packet.len);
         if (pace_packet) {
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -1818,6 +1905,7 @@ pub const Connection = struct {
         const largest = self.sent.largestAcknowledged() orelse return false;
         const lost = self.sent.detectTimeThresholdLoss(now_ns, loss_delay_ns, largest);
         if (lost.bytes > 0) {
+            self.recordPacketsLost(lost.packets);
             self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
             if (lost.largest_pmtu_probe_size) |probe_size| {
                 self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
@@ -2046,7 +2134,7 @@ pub const Connection = struct {
         // and transactionally discard the unsent suffix.
         var sent_payload_len: usize = 0;
         for (probes[0..send_result.sent_count]) |probe| {
-            self.noteOneRttPacketSent(probe.packet_number);
+            self.noteOneRttPacketSent(probe.packet_number, probe.packet_len);
             sent_payload_len += probe.candidate.payload.len;
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -3299,6 +3387,7 @@ pub const Connection = struct {
                     self.congestion.endAck();
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
                     if (lost.bytes > 0) {
+                        self.recordPacketsLost(lost.packets);
                         self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
                         if (lost.largest_pmtu_probe_size) |probe_size| {
                             self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
@@ -3308,6 +3397,7 @@ pub const Connection = struct {
                     if (now_ns) |now| {
                         const timed_lost = self.sent.detectTimeThresholdLoss(now, self.rtt_stats.lossDelay(), frame.ack.largest_acknowledged);
                         if (timed_lost.bytes > 0) {
+                            self.recordPacketsLost(timed_lost.packets);
                             self.congestion.onLostAt(timed_lost.bytes, timed_lost.largest_sent_time_ns, now);
                             if (timed_lost.largest_pmtu_probe_size) |probe_size| {
                                 self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
@@ -3695,7 +3785,12 @@ pub const Connection = struct {
     fn noteOneRttPacketSent(
         self: *Connection,
         packet_number: u64,
+        packet_len: usize,
     ) void {
+        self.packets_sent_count +|= 1;
+        const packet_len_u64 = std.math.cast(u64, packet_len) orelse
+            std.math.maxInt(u64);
+        self.bytes_sent_count +|= packet_len_u64;
         if (self.lowest_one_rtt_packet_number == null or
             packet_number < self.lowest_one_rtt_packet_number.?)
         {
@@ -3824,6 +3919,34 @@ pub const Connection = struct {
         }
     }
 
+    fn recordPacketsLost(self: *Connection, packets: usize) void {
+        const packets_u64 = std.math.cast(u64, packets) orelse
+            std.math.maxInt(u64);
+        self.packets_lost_count +|= packets_u64;
+    }
+
+    fn outgoingStreamsCreated(self: Connection) u64 {
+        var count: u64 = 0;
+        for (self.stream_send_flows.items) |entry| {
+            if (streamInitiatedByLocal(
+                self.config.local_endpoint,
+                entry.stream_id,
+            )) count += 1;
+        }
+        return count;
+    }
+
+    fn incomingStreamsCreated(self: Connection) u64 {
+        var count: u64 = 0;
+        for (self.stream_recv_flows.items) |entry| {
+            if (!streamInitiatedByLocal(
+                self.config.local_endpoint,
+                entry.stream_id,
+            )) count += 1;
+        }
+        return count;
+    }
+
     fn setCloseInfo(self: *Connection, close: struct {
         application: bool,
         error_code: u64,
@@ -3908,6 +4031,10 @@ pub const Connection = struct {
         packet_length: usize,
         frames: []const quic.Frame,
     ) void {
+        self.packets_received_count +|= 1;
+        const packet_length_u64 = std.math.cast(u64, packet_length) orelse
+            std.math.maxInt(u64);
+        self.bytes_received_count +|= packet_length_u64;
         const observer = self.config.qlog_observer orelse return;
         observer.packetReceived(
             self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
