@@ -1063,6 +1063,13 @@ test "QUIC 1-RTT connection exchanges PATH_CHALLENGE and PATH_RESPONSE" {
     var challenge_packet = try server.receivePacket();
     defer challenge_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), server.path_validation.pendingResponseCount());
+
+    const saved_packet_number = server.next_packet_number;
+    server.next_packet_number = quic.protection.max_packet_number + 1;
+    try std.testing.expectError(error.InvalidPacketNumber, server.sendPendingPathResponse());
+    try std.testing.expectEqual(@as(usize, 1), server.path_validation.pendingResponseCount());
+    server.next_packet_number = saved_packet_number;
+
     try server.sendPendingPathResponse();
 
     var response_packet = try client.receivePacket();

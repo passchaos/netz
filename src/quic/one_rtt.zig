@@ -2800,17 +2800,23 @@ pub const Connection = struct {
 
     pub fn sendPendingPathResponse(self: *Connection) Error!void {
         try self.validateNextPacketNumber();
-        const frame = try self.path_validation.nextResponseFrame();
+        var frame_storage: [1]quic.Frame = undefined;
+        if (self.path_validation.peekResponseFrames(&frame_storage) == 0) {
+            return error.NoPendingPathResponse;
+        }
+        const frame = frame_storage[0];
         const frames = [_]quic.Frame{frame};
         try self.send(&frames);
+        self.path_validation.discardResponses(1);
     }
 
     pub fn sendPendingPathResponses(self: *Connection) Error!usize {
         try self.validateNextPacketNumber();
         var frames: [8]quic.Frame = undefined;
-        const count = self.path_validation.nextResponseFrames(&frames);
+        const count = self.path_validation.peekResponseFrames(&frames);
         if (count == 0) return 0;
         try self.send(frames[0..count]);
+        self.path_validation.discardResponses(count);
         return count;
     }
 

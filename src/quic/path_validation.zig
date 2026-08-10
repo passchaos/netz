@@ -116,6 +116,22 @@ pub const State = struct {
         return .{ .path_response = .{ .data = data } };
     }
 
+    pub fn peekResponseFrames(self: State, out: []quic.Frame) usize {
+        const responses = self.pending_responses.activeConst();
+        const count = @min(out.len, responses.len);
+        for (responses[0..count], out[0..count]) |data, *frame| {
+            frame.* = .{ .path_response = .{ .data = data } };
+        }
+        return count;
+    }
+
+    pub fn discardResponses(self: *State, count: usize) void {
+        var discarded: usize = 0;
+        while (discarded < count) : (discarded += 1) {
+            _ = self.pending_responses.popFront() orelse return;
+        }
+    }
+
     pub fn nextResponseFrames(self: *State, out: []quic.Frame) usize {
         var written: usize = 0;
         while (written < out.len) : (written += 1) {
@@ -300,6 +316,27 @@ test "QUIC path validation drains response frames into caller storage" {
     try std.testing.expectEqual(@as(usize, 1), second_count);
     try std.testing.expectEqualSlices(u8, &c, &second_batch[0].path_response.data);
     try std.testing.expectEqual(@as(usize, 0), state.nextResponseFrames(&second_batch));
+}
+
+test "QUIC path validation peeks responses without consuming" {
+    const allocator = std.testing.allocator;
+    var state = State.init(allocator);
+    defer state.deinit();
+
+    const a = [_]u8{ 'a', 0, 0, 0, 0, 0, 0, 1 };
+    const b = [_]u8{ 'b', 0, 0, 0, 0, 0, 0, 2 };
+    try state.receiveChallenge(a);
+    try state.receiveChallenge(b);
+
+    var frames: [2]quic.Frame = undefined;
+    try std.testing.expectEqual(@as(usize, 2), state.peekResponseFrames(&frames));
+    try std.testing.expectEqual(@as(usize, 2), state.pendingResponseCount());
+    try std.testing.expectEqualSlices(u8, &a, &frames[0].path_response.data);
+    try std.testing.expectEqualSlices(u8, &b, &frames[1].path_response.data);
+
+    state.discardResponses(1);
+    try std.testing.expectEqual(@as(usize, 1), state.pendingResponseCount());
+    try std.testing.expectEqualSlices(u8, &b, &(try state.nextResponseFrame()).path_response.data);
 }
 
 test "QUIC path validation drains challenge frames into caller storage" {
