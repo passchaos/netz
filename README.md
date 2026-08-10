@@ -109,7 +109,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   heads, preserve the push ID, enforce the advertised limit, and account
   dynamic QPACK section feedback instead of discarding promised fields like
   the current reference runtimes. Protected and handshake runtimes also bind
-  reordered server-initiated push streams to indexed promises, expose bounded
+  reordered server-initiated push streams to indexed promises, expose indexed targeted
   streaming and owned aggregate pushed-response APIs, and can emit
   PUSH_PROMISE plus the corresponding unidirectional pushed response with
   shared dynamic QPACK state, plus a

@@ -6178,6 +6178,11 @@ const PushStreamSet = struct {
         state: State = .promised,
     };
 
+    const ReadyEvent = struct {
+        index: usize,
+        event: StreamingPushEvent,
+    };
+
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
     stream_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
@@ -6380,17 +6385,21 @@ const PushStreamSet = struct {
         table: http3.Qpack.DynamicTable,
         max_blocked_streams: u64,
         target_push_id: ?u64,
-    ) Error!?struct {
-        index: usize,
-        event: StreamingPushEvent,
-    } {
+    ) Error!?ReadyEvent {
+        if (target_push_id) |push_id| {
+            const index = self.push_index.get(push_id) orelse return null;
+            return self.nextEntryEvent(
+                index,
+                table,
+                max_blocked_streams,
+            );
+        }
+
         var blocked_streams: u64 = 0;
         for (self.entries.items, 0..) |*entry, index| {
             if (entry.reader == null) continue;
-            if (target_push_id) |target| {
-                if (entry.push_id.? != target) continue;
-            }
-            const promise = self.findPromise(entry.push_id.?) orelse continue;
+            const push_id = entry.push_id orelse continue;
+            const promise = self.findPromise(push_id) orelse continue;
             const event = entry.reader.?.next(table) catch |err| switch (err) {
                 error.QpackBlocked => {
                     blocked_streams += 1;
@@ -6405,7 +6414,7 @@ const PushStreamSet = struct {
                 return .{
                     .index = index,
                     .event = .{
-                        .push_id = entry.push_id.?,
+                        .push_id = push_id,
                         .request_stream_id = promise.request_stream_id,
                         .stream_id = @intCast(
                             entry.reader.?.receive.stream_id,
@@ -6414,6 +6423,42 @@ const PushStreamSet = struct {
                     },
                 };
             }
+        }
+        return null;
+    }
+
+    fn nextEntryEvent(
+        self: *PushStreamSet,
+        index: usize,
+        table: http3.Qpack.DynamicTable,
+        remaining_blocked_budget: u64,
+    ) Error!?ReadyEvent {
+        if (index >= self.entries.items.len) return null;
+        const entry = &self.entries.items[index];
+        if (entry.reader == null) return null;
+        const push_id = entry.push_id orelse return null;
+        const promise = self.findPromise(push_id) orelse return null;
+        const event = entry.reader.?.next(table) catch |err| switch (err) {
+            error.QpackBlocked => {
+                if (remaining_blocked_budget == 0) {
+                    return error.QpackDecompressionFailed;
+                }
+                return null;
+            },
+            else => return err,
+        };
+        if (event) |value| {
+            return .{
+                .index = index,
+                .event = .{
+                    .push_id = push_id,
+                    .request_stream_id = promise.request_stream_id,
+                    .stream_id = @intCast(
+                        entry.reader.?.receive.stream_id,
+                    ),
+                    .value = value,
+                },
+            };
         }
         return null;
     }
@@ -10489,12 +10534,35 @@ test "HTTP/3 push stream set binds promise and streams response" {
         try pushes.readData(3, &body),
     );
     try std.testing.expectEqualStrings("asset", body[0..5]);
+
+    // Targeted polling uses the push-id index and should not scan unrelated
+    // retained push streams first.
+    try pushes.registerPromise(1, 0);
+    var other_bytes: std.ArrayList(u8) = .empty;
+    defer other_bytes.deinit(allocator);
+    try quic.varint.encode(
+        &other_bytes,
+        allocator,
+        @intFromEnum(http3.StreamType.push),
+    );
+    try quic.varint.encode(&other_bytes, allocator, 1);
+    try other_bytes.appendSlice(allocator, response.items);
+    try std.testing.expect(try pushes.insert(from, .{
+        .stream_id = 19,
+        .data = other_bytes.items,
+        .fin = true,
+    }, control));
+    const targeted = (try pushes.next(table, 0, 3)).?;
+    try std.testing.expect(targeted.event.value == .finished);
+    var targeted_event = targeted.event;
+    targeted_event.deinit(allocator);
+    pushes.removeFinished(targeted.index);
+    try std.testing.expect(pushes.findByPushId(3) == null);
+
     const finished = (try pushes.next(table, 0, null)).?;
-    try std.testing.expect(finished.event.value == .finished);
+    try std.testing.expect(finished.event.value == .head);
     var finished_event = finished.event;
     finished_event.deinit(allocator);
-    pushes.removeFinished(finished.index);
-    try std.testing.expect(pushes.findByPushId(3) == null);
 
     // The same push may be promised on more than one request stream.
     try pushes.registerPromise(3, 4);
