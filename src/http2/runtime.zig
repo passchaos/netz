@@ -601,6 +601,7 @@ pub const Connection = struct {
     push_state: push.State = .{},
     priority_state: priority_runtime.State = .{},
     response_semantics: std.ArrayList(StreamResponseSemantics) = .empty,
+    response_semantics_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
     peer_initial_stream_window: i64 = default_flow_window,
@@ -639,6 +640,7 @@ pub const Connection = struct {
         self.push_state.deinit(self.allocator);
         self.priority_state.deinit(self.allocator);
         self.response_semantics.deinit(self.allocator);
+        self.response_semantics_index.deinit(self.allocator);
         for (self.pending_requests.items[self.pending_request_head..]) |*pending| pending.deinit(self.allocator);
         self.pending_requests.deinit(self.allocator);
         for (self.peer_origins.items) |origin| {
@@ -1707,34 +1709,43 @@ pub const Connection = struct {
     }
 
     fn rememberResponseSemantics(self: *Connection, stream_id: u31, method: []const u8, protocol: ?[]const u8) Error!void {
-        self.forgetResponseSemantics(stream_id);
-        try self.response_semantics.append(self.allocator, .{
+        const semantics = StreamResponseSemantics{
             .stream_id = stream_id,
             .head = methodIsHead(method),
             .traditional_connect = methodIsConnect(method) and protocol == null,
             .extended_connect = methodIsConnect(method) and protocol != null,
-        });
+        };
+        if (self.response_semantics_index.get(stream_id)) |index| {
+            self.response_semantics.items[index] = semantics;
+            return;
+        }
+        try self.response_semantics.ensureUnusedCapacity(self.allocator, 1);
+        try self.response_semantics_index.ensureUnusedCapacity(self.allocator, 1);
+        const index = self.response_semantics.items.len;
+        self.response_semantics.appendAssumeCapacity(semantics);
+        self.response_semantics_index.putAssumeCapacity(stream_id, index);
     }
 
     fn forgetResponseSemantics(self: *Connection, stream_id: u31) void {
-        for (self.response_semantics.items, 0..) |entry, index| {
-            if (entry.stream_id == stream_id) {
-                _ = self.response_semantics.swapRemove(index);
-                return;
-            }
+        const index = self.response_semantics_index.get(stream_id) orelse return;
+        const last_index = self.response_semantics.items.len - 1;
+        const removed = self.response_semantics.swapRemove(index);
+        _ = self.response_semantics_index.remove(removed.stream_id);
+        if (index != last_index) {
+            const moved = self.response_semantics.items[index];
+            self.response_semantics_index.getPtr(moved.stream_id).?.* = index;
         }
     }
 
     fn responseSemanticsFor(self: Connection, stream_id: u31, options: ResponseOptions) ResponseBodySemantics {
         if (options.request_method) |method| return responseSemanticsFromMethod(method, options.extended_connect);
-        for (self.response_semantics.items) |entry| {
-            if (entry.stream_id == stream_id) {
-                return .{
-                    .head = entry.head,
-                    .traditional_connect = entry.traditional_connect,
-                    .extended_connect = entry.extended_connect,
-                };
-            }
+        if (self.response_semantics_index.get(stream_id)) |index| {
+            const entry = self.response_semantics.items[index];
+            return .{
+                .head = entry.head,
+                .traditional_connect = entry.traditional_connect,
+                .extended_connect = entry.extended_connect,
+            };
         }
         return .{};
     }
@@ -8741,9 +8752,17 @@ test "HTTP/2 readGoAway records monotonic peer boundary" {
         connection.send_stream_window_index.deinit(std.testing.allocator);
         connection.recv_stream_windows.deinit(std.testing.allocator);
         connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.response_semantics.deinit(std.testing.allocator);
+        connection.response_semantics_index.deinit(std.testing.allocator);
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
+
+    try connection.rememberResponseSemantics(1, "HEAD", null);
+    try std.testing.expectEqual(@as(?usize, 0), connection.response_semantics_index.get(1));
+    try std.testing.expect((connection.responseSemanticsFor(1, .{})).head);
+    connection.forgetResponseSemantics(1);
+    try std.testing.expectEqual(@as(usize, 0), connection.response_semantics_index.count());
 
     try connection.recordPeerGoAway(.{ .last_stream_id = 7, .error_code = .no_error, .debug_data = &.{} });
     try std.testing.expectEqual(@as(?u31, 7), connection.peer_goaway_last_stream_id);
