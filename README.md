@@ -98,8 +98,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   cursor, amortizing recvmsg/decryption without bulk-inserting the whole GRO
   payload into a small HTTP/3 stream window. Handshake streaming readers return
   consumed protocol offsets to both QUIC flow-control levels, compact the
-  transport overlap-validation window, and emit ACK/MAX_DATA/MAX_STREAM_DATA so
-  bodies can continue beyond their initially negotiated stream credit. Both
+  transport overlap-validation window, keep reset and cancelled-push FIFO queues
+  on O(1) cursor pops, and emit ACK/MAX_DATA/MAX_STREAM_DATA so bodies can
+  continue beyond their initially negotiated stream credit. Both
   protected clients also maintain persistent MAX_PUSH_ID/CANCEL_PUSH control
   state with monotonic advertisement, per-ID cancellation retention, local
   STOP_SENDING of active cancelled pushes, and advertised-range validation.

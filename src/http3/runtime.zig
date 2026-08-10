@@ -5678,6 +5678,7 @@ const StreamingMessageSet = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
     resets: std.ArrayList(Reset) = .empty,
+    reset_head: usize = 0,
     max_streams: usize,
     max_stream_buffer: usize,
     settings: http3.Settings,
@@ -5838,9 +5839,10 @@ const StreamingMessageSet = struct {
 
     fn remove(self: *StreamingMessageSet, stream_id: u62) void {
         self.removeEntry(stream_id);
-        for (self.resets.items, 0..) |reset, index| {
+        for (self.resets.items[self.reset_head..], self.reset_head..) |reset, index| {
             if (reset.stream_id != stream_id) continue;
             _ = self.resets.swapRemove(index);
+            self.compactResetQueueIfSparse();
             break;
         }
     }
@@ -5889,7 +5891,7 @@ const StreamingMessageSet = struct {
         replaces_stream: bool,
     ) Error!void {
         if (self.kind != .request) return error.UnexpectedStream;
-        for (self.resets.items) |reset| {
+        for (self.resets.items[self.reset_head..]) |reset| {
             if (reset.stream_id != stream_id) continue;
             if (!reset.from.eql(&from)) return error.UnexpectedStream;
             return;
@@ -5901,6 +5903,11 @@ const StreamingMessageSet = struct {
         if (projected_count > self.max_streams) {
             return error.ExcessiveLoad;
         }
+        if (self.reset_head != 0 and
+            self.resets.items.len == self.resets.capacity)
+        {
+            self.compactResetQueue();
+        }
         try self.resets.ensureUnusedCapacity(self.allocator, 1);
     }
 
@@ -5910,12 +5917,17 @@ const StreamingMessageSet = struct {
         stream_id: u62,
         application_error_code: u64,
     ) void {
-        for (self.resets.items) |*reset| {
+        for (self.resets.items[self.reset_head..]) |*reset| {
             if (reset.stream_id != stream_id) continue;
             reset.application_error_code = application_error_code;
             return;
         }
         var removed_entry = self.takeEntry(stream_id);
+        if (self.reset_head != 0 and
+            self.resets.items.len == self.resets.capacity)
+        {
+            self.compactResetQueue();
+        }
         self.resets.appendAssumeCapacity(.{
             .from = from,
             .stream_id = stream_id,
@@ -5925,22 +5937,28 @@ const StreamingMessageSet = struct {
     }
 
     fn takeFirstReset(self: *StreamingMessageSet) ?Reset {
-        if (self.resets.items.len == 0) return null;
-        return self.resets.orderedRemove(0);
+        if (self.resetCount() == 0) return null;
+        const reset = self.resets.items[self.reset_head];
+        self.reset_head += 1;
+        // Reset delivery is FIFO but may happen in bursts. Advancing a cursor
+        // keeps each pop O(1); occasional compaction reclaims consumed slots
+        // before a bounded max-stream queue would otherwise appear full.
+        self.compactResetQueueIfSparse();
+        return reset;
     }
 
     fn contains(self: StreamingMessageSet, stream_id: u62) bool {
         for (self.entries.items) |entry| {
             if (entry.reader.receive.stream_id == stream_id) return true;
         }
-        for (self.resets.items) |reset| {
+        for (self.resets.items[self.reset_head..]) |reset| {
             if (reset.stream_id == stream_id) return true;
         }
         return false;
     }
 
     fn retainedCount(self: StreamingMessageSet) usize {
-        return self.entries.items.len + self.resets.items.len;
+        return self.entries.items.len + self.resetCount();
     }
 
     fn insertRequest(
@@ -6000,6 +6018,32 @@ const StreamingMessageSet = struct {
     ) Error!bool {
         const entry = self.find(stream_id) orelse return false;
         return entry.reader.hasUnacknowledgedDynamicSection(table);
+    }
+
+    fn resetCount(self: StreamingMessageSet) usize {
+        return self.resets.items.len - self.reset_head;
+    }
+
+    fn compactResetQueueIfSparse(self: *StreamingMessageSet) void {
+        if (self.reset_head == 0) return;
+        if (self.reset_head == self.resets.items.len or
+            self.reset_head >= self.resets.items.len / 2)
+        {
+            self.compactResetQueue();
+        }
+    }
+
+    fn compactResetQueue(self: *StreamingMessageSet) void {
+        if (self.reset_head == 0) return;
+        const remaining = self.resetCount();
+        if (remaining != 0) {
+            @memmove(
+                self.resets.items[0..remaining],
+                self.resets.items[self.reset_head..],
+            );
+        }
+        self.resets.items.len = remaining;
+        self.reset_head = 0;
     }
 };
 
@@ -6098,6 +6142,7 @@ const PushStreamSet = struct {
     entries: std.ArrayList(Entry) = .empty,
     promises: std.ArrayList(Promise) = .empty,
     cancelled_stream_ids: std.ArrayList(u62) = .empty,
+    cancelled_stream_head: usize = 0,
     max_streams: usize,
     max_stream_buffer: usize,
     settings: http3.Settings,
@@ -6280,6 +6325,12 @@ const PushStreamSet = struct {
         promise.state = .finished;
         if (self.findByPushId(push_id)) |entry| {
             const stream_id: u62 = @intCast(entry.receiveState().stream_id);
+            if (self.cancelled_stream_head != 0 and
+                self.cancelled_stream_ids.items.len ==
+                    self.cancelled_stream_ids.capacity)
+            {
+                self.compactCancelledStreamQueue();
+            }
             if (self.cancelled_stream_ids.items.len ==
                 self.cancelled_stream_ids.capacity)
             {
@@ -6291,8 +6342,11 @@ const PushStreamSet = struct {
     }
 
     fn takeCancelledStream(self: *PushStreamSet) ?u62 {
-        if (self.cancelled_stream_ids.items.len == 0) return null;
-        return self.cancelled_stream_ids.orderedRemove(0);
+        if (self.cancelledStreamCount() == 0) return null;
+        const stream_id = self.cancelled_stream_ids.items[self.cancelled_stream_head];
+        self.cancelled_stream_head += 1;
+        self.compactCancelledStreamQueueIfSparse();
+        return stream_id;
     }
 
     fn readData(
@@ -6327,6 +6381,34 @@ const PushStreamSet = struct {
 
     fn removeByStreamId(self: *PushStreamSet, stream_id: u62) void {
         self.removeStream(stream_id);
+    }
+
+    fn cancelledStreamCount(self: PushStreamSet) usize {
+        return self.cancelled_stream_ids.items.len -
+            self.cancelled_stream_head;
+    }
+
+    fn compactCancelledStreamQueueIfSparse(self: *PushStreamSet) void {
+        if (self.cancelled_stream_head == 0) return;
+        if (self.cancelled_stream_head == self.cancelled_stream_ids.items.len or
+            self.cancelled_stream_head >=
+                self.cancelled_stream_ids.items.len / 2)
+        {
+            self.compactCancelledStreamQueue();
+        }
+    }
+
+    fn compactCancelledStreamQueue(self: *PushStreamSet) void {
+        if (self.cancelled_stream_head == 0) return;
+        const remaining = self.cancelledStreamCount();
+        if (remaining != 0) {
+            @memmove(
+                self.cancelled_stream_ids.items[0..remaining],
+                self.cancelled_stream_ids.items[self.cancelled_stream_head..],
+            );
+        }
+        self.cancelled_stream_ids.items.len = remaining;
+        self.cancelled_stream_head = 0;
     }
 
     fn findByStreamId(self: *PushStreamSet, stream_id: u64) ?*Entry {
@@ -6604,7 +6686,7 @@ const ServerRequestLifecycle = struct {
         for (streaming_requests.entries.items) |entry| {
             if (entry.reader.receive.stream_id < goaway_id) return false;
         }
-        for (streaming_requests.resets.items) |reset| {
+        for (streaming_requests.resets.items[streaming_requests.reset_head..]) |reset| {
             if (reset.stream_id < goaway_id) return false;
         }
         return true;
@@ -10231,6 +10313,94 @@ test "HTTP/3 push stream set retains response until promise arrives" {
     try std.testing.expect(event.event.value == .head);
     var owned_event = event.event;
     owned_event.deinit(allocator);
+}
+
+test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
+    const allocator = std.testing.allocator;
+    var requests = StreamingRequestSet.init(allocator, 3, 512, .{}, .request);
+    defer requests.deinit();
+
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    for ([_]u62{ 0, 4, 8 }) |stream_id| {
+        try requests.prepareReset(from, stream_id, 0, false);
+        requests.recordResetAssumeCapacity(
+            from,
+            stream_id,
+            http3.ApplicationErrorCode.request_cancelled,
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 3), requests.resetCount());
+
+    const first = requests.takeFirstReset() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 0), first.stream_id);
+    try std.testing.expectEqual(@as(usize, 2), requests.resetCount());
+
+    // The queue has consumed a head element. Adding a replacement must reuse
+    // that FIFO space rather than reporting max-stream exhaustion.
+    try requests.prepareReset(from, 12, 0, false);
+    requests.recordResetAssumeCapacity(
+        from,
+        12,
+        http3.ApplicationErrorCode.request_cancelled,
+    );
+
+    for ([_]u62{ 4, 8, 12 }) |stream_id| {
+        const reset = requests.takeFirstReset() orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(stream_id, reset.stream_id);
+    }
+    try std.testing.expect(requests.takeFirstReset() == null);
+    try std.testing.expectEqual(@as(usize, 0), requests.resetCount());
+}
+
+test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
+    const allocator = std.testing.allocator;
+    var pushes = PushStreamSet.init(allocator, 4, 512, .{});
+    defer pushes.deinit();
+    try pushes.reservePromisesThrough(4);
+
+    for ([_]struct { push_id: u64, stream_id: u64 }{
+        .{ .push_id = 1, .stream_id = 15 },
+        .{ .push_id = 2, .stream_id = 19 },
+        .{ .push_id = 3, .stream_id = 23 },
+    }) |item| {
+        try pushes.registerPromise(item.push_id, 0);
+        try pushes.entries.append(allocator, .{
+            .receive = quic.stream_state.RecvState.init(
+                allocator,
+                item.stream_id,
+                512,
+            ),
+            .push_id = item.push_id,
+        });
+        try pushes.observePeerCancellation(item.push_id);
+    }
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        pushes.cancelledStreamCount(),
+    );
+
+    try std.testing.expectEqual(
+        @as(u62, 15),
+        pushes.takeCancelledStream() orelse return error.TestUnexpectedResult,
+    );
+
+    try pushes.registerPromise(4, 0);
+    try pushes.entries.append(allocator, .{
+        .receive = quic.stream_state.RecvState.init(allocator, 27, 512),
+        .push_id = 4,
+    });
+    try pushes.observePeerCancellation(4);
+
+    for ([_]u62{ 19, 23, 27 }) |stream_id| {
+        try std.testing.expectEqual(
+            stream_id,
+            pushes.takeCancelledStream() orelse return error.TestUnexpectedResult,
+        );
+    }
+    try std.testing.expect(pushes.takeCancelledStream() == null);
+    try std.testing.expectEqual(@as(usize, 0), pushes.cancelledStreamCount());
 }
 
 test "HTTP/3 incremental reader retries blocked HEADERS transactionally" {
