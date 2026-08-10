@@ -348,6 +348,40 @@ test "QUIC 1-RTT connection sends and validates PMTU probes" {
     const ack_frames = [_]quic.Frame{.{ .ack = ack_frame }};
     try one_rtt.testing.applyReceivedFrames(&client, 99, &ack_frames, null, .not_ect);
     try std.testing.expectEqual(@as(usize, 1300), client.pmtudCurrentSize());
+    try std.testing.expectEqual(@as(usize, 1300), client.currentSendDatagramSize());
+}
+
+test "QUIC 1-RTT PMTUD gates ordinary sends until probe succeeds" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xbd} ** quic.protection.secret_len);
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "pmtu-send-local",
+        .peer_connection_id = "pmtu-send-peer",
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, connection.currentSendDatagramSize());
+    try std.testing.expectError(error.DatagramTooLarge, connection.sendAt(&.{.{ .padding = .{ .len = 1250 } }}, 10));
+    try std.testing.expectEqual(@as(u64, 0), connection.next_packet_number);
+
+    connection.pmtud.onProbeAcked(1300, 1400);
+    try std.testing.expectEqual(@as(usize, 1300), connection.currentSendDatagramSize());
+    try connection.sendAt(&.{.{ .padding = .{ .len = 1250 } }}, 20);
+    try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
 }
 
 test "QUIC 1-RTT PMTU probe loss lowers next probe size" {

@@ -867,7 +867,9 @@ pub const Connection = struct {
                 overhead,
                 payload_len,
             ) catch return error.InvalidPayloadLength;
-            if (packet_len > self.endpoint.limits.max_datagram_size) {
+            if (packet_len > self.currentSendDatagramSize() or
+                packet_len > self.endpoint.limits.max_datagram_size)
+            {
                 return error.DatagramTooLarge;
             }
 
@@ -1786,6 +1788,7 @@ pub const Connection = struct {
             .packet_number_len = packet_number_len,
             .payload = payload,
         });
+        if (packet_len > self.currentSendDatagramSize()) return error.DatagramTooLarge;
         if (is_in_flight) if (sent_time_ns) |now_ns| {
             if (self.pacingDeadlineAt(now_ns, packet_len)) |deadline| {
                 self.pacing_blocked_until_ns = deadline;
@@ -1917,6 +1920,15 @@ pub const Connection = struct {
 
     pub fn pmtudShouldProbe(self: Connection) bool {
         return self.pmtud.shouldProbe();
+    }
+
+    pub fn currentSendDatagramSize(self: Connection) usize {
+        const configured = @min(
+            self.config.max_datagram_size,
+            self.endpoint.limits.max_datagram_size,
+        );
+        if (!self.pmtud.enabled) return configured;
+        return @min(configured, self.pmtud.currentSize());
     }
 
     pub fn sendPmtuProbeAt(self: *Connection, peer_max_udp_payload: usize, sent_time_ns: ?u64) Error!?usize {
