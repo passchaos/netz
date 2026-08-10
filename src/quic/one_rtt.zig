@@ -486,6 +486,7 @@ pub const Connection = struct {
     recv_flow: quic.flow_control.RecvFlow,
     recv_data_total: u64 = 0,
     stream_send_flows: std.ArrayList(StreamFlowEntry) = .empty,
+    last_send_stream_index: ?usize = null,
     stream_recv_flows: std.ArrayList(StreamRecvFlowEntry) = .empty,
     close_info: ?CloseInfo = null,
     send_key_phase: quic.protection.Aes128KeyPhaseState,
@@ -4812,6 +4813,7 @@ pub const Connection = struct {
             .stream_id = stream_id,
             .flow = .init(self.initialSendStreamDataLimit(stream_id)),
         });
+        self.last_send_stream_index = self.stream_send_flows.items.len - 1;
         return &self.stream_send_flows.items[self.stream_send_flows.items.len - 1];
     }
 
@@ -4869,8 +4871,18 @@ pub const Connection = struct {
     }
 
     fn findSendStreamEntry(self: *Connection, stream_id: u64) ?*StreamFlowEntry {
-        for (self.stream_send_flows.items) |*entry| {
-            if (entry.stream_id == stream_id) return entry;
+        if (self.last_send_stream_index) |index| {
+            if (index < self.stream_send_flows.items.len and
+                self.stream_send_flows.items[index].stream_id == stream_id)
+            {
+                return &self.stream_send_flows.items[index];
+            }
+        }
+        for (self.stream_send_flows.items, 0..) |*entry, index| {
+            if (entry.stream_id == stream_id) {
+                self.last_send_stream_index = index;
+                return entry;
+            }
         }
         return null;
     }
