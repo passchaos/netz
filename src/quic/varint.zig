@@ -29,20 +29,27 @@ pub fn encodedLen(first: u8) u8 {
 pub fn encode(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64) !void {
     const len = try length(value);
     var tmp: [8]u8 = undefined;
+    _ = try encodeInto(&tmp, value);
+    try list.appendSlice(allocator, tmp[0..len]);
+}
+
+pub fn encodeInto(out: []u8, value: u64) Error![]u8 {
+    const len = try length(value);
+    if (out.len < len) return error.BufferTooShort;
     switch (len) {
-        1 => tmp[0] = @truncate(value),
+        1 => out[0] = @truncate(value),
         2 => {
-            std.mem.writeInt(u16, tmp[0..2], @as(u16, @intCast(value)) | 0x4000, .big);
+            std.mem.writeInt(u16, out[0..2], @as(u16, @intCast(value)) | 0x4000, .big);
         },
         4 => {
-            std.mem.writeInt(u32, tmp[0..4], @as(u32, @intCast(value)) | 0x80000000, .big);
+            std.mem.writeInt(u32, out[0..4], @as(u32, @intCast(value)) | 0x80000000, .big);
         },
         8 => {
-            std.mem.writeInt(u64, tmp[0..8], value | 0xc000000000000000, .big);
+            std.mem.writeInt(u64, out[0..8], value | 0xc000000000000000, .big);
         },
         else => unreachable,
     }
-    try list.appendSlice(allocator, tmp[0..len]);
+    return out[0..len];
 }
 
 pub fn decode(cursor: *wire.Cursor) Error!u64 {
@@ -75,4 +82,20 @@ test "QUIC varint roundtrips" {
         try std.testing.expectEqual(value, try decode(&cursor));
         try std.testing.expect(cursor.eof());
     }
+}
+
+test "QUIC varint encodes into caller storage" {
+    const values = [_]u64{ 0, 63, 64, 15293, 16383, 16384, 1073741823, 1073741824, max_value };
+    for (values) |value| {
+        var direct: [8]u8 = undefined;
+        const encoded = try encodeInto(&direct, value);
+
+        var list: std.ArrayList(u8) = .empty;
+        defer list.deinit(std.testing.allocator);
+        try encode(&list, std.testing.allocator, value);
+        try std.testing.expectEqualSlices(u8, list.items, encoded);
+    }
+
+    var too_small: [1]u8 = undefined;
+    try std.testing.expectError(error.BufferTooShort, encodeInto(&too_small, 64));
 }

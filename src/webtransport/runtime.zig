@@ -4,6 +4,7 @@ const http3 = @import("../http3/mod.zig");
 const quic = @import("../quic/mod.zig");
 
 const net = std.Io.net;
+const datagram_stack_capacity: usize = 4096;
 
 pub const Error = webtransport.Error || http3.runtime.Error || error{
     InvalidConnect,
@@ -497,11 +498,31 @@ fn sendDatagramFromEndpoint(
     session_id: webtransport.SessionId,
     payload: []const u8,
 ) Error!void {
+    var storage: [datagram_stack_capacity]u8 = undefined;
+    if (try encodeDatagramIntoStack(&storage, session_id, payload)) |encoded| {
+        const frames = [_]quic.Frame{.{ .datagram = .{ .data = encoded, .length_present = true } }};
+        try endpoint.sendFrames(to, &frames);
+        return;
+    }
+
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(endpoint.allocator);
     try (webtransport.Datagram{ .session_id = session_id, .payload = payload }).write(&encoded, endpoint.allocator);
     const frames = [_]quic.Frame{.{ .datagram = .{ .data = encoded.items, .length_present = true } }};
     try endpoint.sendFrames(to, &frames);
+}
+
+fn encodeDatagramIntoStack(
+    storage: *[datagram_stack_capacity]u8,
+    session_id: webtransport.SessionId,
+    payload: []const u8,
+) Error!?[]const u8 {
+    if (!session_id.isClientInitiatedBidirectional()) return error.InvalidSessionId;
+    const prefix = try quic.varint.encodeInto(storage, session_id.quarterStreamId());
+    const total_len = std.math.add(usize, prefix.len, payload.len) catch return error.IntegerOverflow;
+    if (total_len > storage.len) return null;
+    @memcpy(storage[prefix.len..total_len], payload);
+    return storage[0..total_len];
 }
 
 fn receiveDatagramFromEndpoint(endpoint: *quic.runtime.Endpoint) Error!OwnedDatagram {
