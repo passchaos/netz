@@ -643,6 +643,11 @@ pub const SettingsState = struct {
 };
 
 pub const ControlState = struct {
+    const PriorityUpdateKey = struct {
+        frame_type: u64,
+        prioritized_element_id: u64,
+    };
+
     pub const StoredPriorityUpdate = struct {
         frame_type: u64,
         payload: PriorityUpdatePayload,
@@ -674,16 +679,20 @@ pub const ControlState = struct {
     latest_priority_update: ?PriorityUpdatePayload = null,
     latest_priority_update_type: ?u64 = null,
     priority_updates: std.ArrayList(StoredPriorityUpdate) = .empty,
+    priority_update_index: std.AutoHashMapUnmanaged(PriorityUpdateKey, usize) = .empty,
     priority_update_generation: u64 = 0,
     peer_qpack_encoder_stream_id: ?u64 = null,
     peer_qpack_decoder_stream_id: ?u64 = null,
+    peer_cancelled_push_index: std.AutoHashMapUnmanaged(u64, void) = .empty,
 
     pub fn deinit(self: *ControlState, allocator: std.mem.Allocator) void {
         for (self.priority_updates.items) |*update| {
             update.deinit(allocator);
         }
         self.priority_updates.deinit(allocator);
+        self.priority_update_index.deinit(allocator);
         self.peer_cancelled_push_ids.deinit(allocator);
+        self.peer_cancelled_push_index.deinit(allocator);
         self.* = undefined;
     }
 
@@ -694,28 +703,49 @@ pub const ControlState = struct {
         var copy = self;
         copy.latest_priority_update = null;
         copy.priority_updates = .empty;
+        copy.priority_update_index = .empty;
         copy.peer_cancelled_push_ids = .empty;
+        copy.peer_cancelled_push_index = .empty;
         errdefer copy.deinit(allocator);
         try copy.peer_cancelled_push_ids.appendSlice(
             allocator,
             self.peer_cancelled_push_ids.items,
         );
+        try copy.peer_cancelled_push_index.ensureUnusedCapacity(
+            allocator,
+            std.math.cast(u32, self.peer_cancelled_push_ids.items.len) orelse
+                return error.OutOfMemory,
+        );
+        for (copy.peer_cancelled_push_ids.items) |push_id| {
+            copy.peer_cancelled_push_index.putAssumeCapacity(push_id, {});
+        }
         try copy.priority_updates.ensureTotalCapacity(
             allocator,
             self.priority_updates.items.len,
+        );
+        try copy.priority_update_index.ensureUnusedCapacity(
+            allocator,
+            std.math.cast(u32, self.priority_updates.items.len) orelse
+                return error.OutOfMemory,
         );
         for (self.priority_updates.items) |update| {
             const owned = try allocator.dupe(
                 u8,
                 update.payload.field_value,
             );
-            copy.priority_updates.appendAssumeCapacity(.{
+            const index = copy.priority_updates.items.len;
+            const copied = StoredPriorityUpdate{
                 .frame_type = update.frame_type,
                 .payload = .{
                     .prioritized_element_id = update.payload.prioritized_element_id,
                     .field_value = owned,
                 },
-            });
+            };
+            copy.priority_updates.appendAssumeCapacity(copied);
+            copy.priority_update_index.putAssumeCapacity(
+                priorityUpdateKey(copied.frame_type, copied.payload.prioritized_element_id),
+                index,
+            );
         }
         if (copy.priority_updates.items.len != 0) {
             copy.latest_priority_update =
@@ -875,22 +905,20 @@ pub const ControlState = struct {
         frame_type: u64,
         prioritized_element_id: u64,
     ) ?PriorityUpdatePayload {
-        for (self.priority_updates.items) |update| {
-            if (update.frame_type == frame_type and
-                update.payload.prioritized_element_id ==
-                    prioritized_element_id)
-            {
-                return update.payload;
-            }
+        const key = priorityUpdateKey(frame_type, prioritized_element_id);
+        const index = self.priority_update_index.get(key) orelse return null;
+        if (index >= self.priority_updates.items.len) return null;
+        const update = self.priority_updates.items[index];
+        if (update.frame_type != frame_type or
+            update.payload.prioritized_element_id != prioritized_element_id)
+        {
+            return null;
         }
-        return null;
+        return update.payload;
     }
 
     pub fn pushCancelled(self: ControlState, push_id: u64) bool {
-        for (self.peer_cancelled_push_ids.items) |cancelled| {
-            if (cancelled == push_id) return true;
-        }
-        return false;
+        return self.peer_cancelled_push_index.contains(push_id);
     }
 
     fn storePushCancellation(
@@ -907,7 +935,9 @@ pub const ControlState = struct {
             self.push_cancellation_generation,
             1,
         ) catch return error.InvalidFrame;
+        try self.peer_cancelled_push_index.ensureUnusedCapacity(allocator, 1);
         try self.peer_cancelled_push_ids.append(allocator, push_id);
+        self.peer_cancelled_push_index.putAssumeCapacity(push_id, {});
         self.peer_cancelled_push_id = push_id;
         self.push_cancellation_generation = next_generation;
     }
@@ -926,23 +956,29 @@ pub const ControlState = struct {
         const owned = try allocator.dupe(u8, update.field_value);
         errdefer allocator.free(owned);
 
-        var existing_index: ?usize = null;
-        for (self.priority_updates.items, 0..) |stored, index| {
-            if (stored.frame_type == frame_type and
-                stored.payload.prioritized_element_id ==
-                    update.prioritized_element_id)
-            {
-                existing_index = index;
-                break;
-            }
-        }
+        const key = priorityUpdateKey(
+            frame_type,
+            update.prioritized_element_id,
+        );
+        const existing_index = self.priority_update_index.get(key);
         if (existing_index == null) {
             try self.priority_updates.ensureUnusedCapacity(allocator, 1);
+            try self.priority_update_index.ensureUnusedCapacity(allocator, 1);
         }
         if (existing_index) |index| {
+            const last_index = self.priority_updates.items.len - 1;
             var replaced = self.priority_updates.swapRemove(index);
+            _ = self.priority_update_index.remove(key);
+            if (index != last_index) {
+                const moved = self.priority_updates.items[index];
+                self.priority_update_index.getPtr(priorityUpdateKey(
+                    moved.frame_type,
+                    moved.payload.prioritized_element_id,
+                )).?.* = index;
+            }
             replaced.deinit(allocator);
         }
+        const insert_index = self.priority_updates.items.len;
         self.priority_updates.appendAssumeCapacity(.{
             .frame_type = frame_type,
             .payload = .{
@@ -950,12 +986,23 @@ pub const ControlState = struct {
                 .field_value = owned,
             },
         });
+        self.priority_update_index.putAssumeCapacity(key, insert_index);
         self.latest_priority_update_type = frame_type;
         self.latest_priority_update = .{
             .prioritized_element_id = update.prioritized_element_id,
             .field_value = owned,
         };
         self.priority_update_generation = next_generation;
+    }
+
+    fn priorityUpdateKey(
+        frame_type: u64,
+        prioritized_element_id: u64,
+    ) PriorityUpdateKey {
+        return .{
+            .frame_type = frame_type,
+            .prioritized_element_id = prioritized_element_id,
+        };
     }
 };
 
@@ -3173,6 +3220,10 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
         @as(u3, 0),
         control.requestPriorityUpdate(8).?.priority().urgency,
     );
+    try std.testing.expectEqual(
+        @as(u3, 5),
+        control.requestPriorityUpdate(12).?.priority().urgency,
+    );
     try std.testing.expectEqual(@as(usize, 2), control.priority_updates.items.len);
 
     var push_priority: std.ArrayList(u8) = .empty;
@@ -3193,6 +3244,20 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
     );
     try std.testing.expect(
         control.pushPriorityUpdate(3).?.priority().incremental,
+    );
+    var cloned = try control.clone(allocator);
+    defer cloned.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u3, 0),
+        cloned.requestPriorityUpdate(8).?.priority().urgency,
+    );
+    try std.testing.expectEqual(
+        @as(u3, 5),
+        cloned.requestPriorityUpdate(12).?.priority().urgency,
+    );
+    try std.testing.expectEqual(
+        @as(u3, 2),
+        cloned.pushPriorityUpdate(3).?.priority().urgency,
     );
 
     try std.testing.expectError(error.UnexpectedFrame, writePriorityUpdateFrame(&encoded, allocator, 1, parsed));
@@ -3568,6 +3633,10 @@ fn checkPushCancellationStateAllocationFailure(
         @as(usize, 2),
         control.peer_cancelled_push_ids.items.len,
     );
+    var cloned = try control.clone(allocator);
+    defer cloned.deinit(allocator);
+    try std.testing.expect(cloned.pushCancelled(1));
+    try std.testing.expect(cloned.pushCancelled(3));
 }
 
 test "HTTP/3 per-ID push cancellation is allocation-failure safe" {

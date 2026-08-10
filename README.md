@@ -48,7 +48,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   collision-verified hash indexes for current QPACK exact/name matches with
   restricted-reference and eviction-safe scan fallback plus indexed QPACK
   static-name lookups,
-  CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs with malformed-payload rejection and advertised MAX_PUSH_ID enforcement for received PUSH_PROMISE frames,
+  CANCEL_PUSH/PUSH_PROMISE/MAX_PUSH_ID/PRIORITY_UPDATE payload codecs with malformed-payload rejection, indexed per-ID control-state lookups, and advertised MAX_PUSH_ID enforcement for received PUSH_PROMISE frames,
   RFC 9218 Priority field parsing/serialization,
   request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, static or dynamic QPACK field-section decoding with per-stream Section Acknowledgment accounting, non-blocking Known-Received dynamic writers for request/response/interim/trailer sections with sensitive-field exclusion and speculative future inserts, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, response-side PUSH_PROMISE tolerance, interim 1xx response skipping and runtime emission before final responses, and forbidden trailer-field rejection,
   HEADERS-only dynamic request/response writers for incremental DATA sending
