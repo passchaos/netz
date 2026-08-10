@@ -5360,7 +5360,7 @@ const RequestStreamSet = struct {
         for (self.entries.items, 0..) |*entry, index| {
             const final_size = entry.receive.final_size orelse continue;
             if (entry.receive.contiguous_end < final_size) continue;
-            if (ready_index != null and max_blocked_streams == 0) continue;
+            if (ready_index != null and max_blocked_streams == 0) break;
             const bytes = entry.receive.buffer.items[0..final_size];
             if (max_blocked_streams != 0 and
                 try messageBlockedByQpack(bytes, table))
@@ -10805,6 +10805,26 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     requests.remove(8);
     try std.testing.expect(!requests.contains(8));
     try std.testing.expectEqual(@as(usize, 1), requests.entry_index.count());
+
+    try requests.insert(from, .{
+        .stream_id = 12,
+        .data = "target",
+        .fin = true,
+    });
+    try requests.insert(from, .{
+        .stream_id = 16,
+        .data = "other",
+        .fin = true,
+    });
+    var request_table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer request_table.deinit();
+    const ready_request = (try requests.takeReady(request_table, 0)) orelse
+        return error.TestUnexpectedResult;
+    defer allocator.free(ready_request.bytes);
+    try std.testing.expectEqual(@as(u62, 12), ready_request.stream_id);
+    try std.testing.expectEqualStrings("target", ready_request.bytes);
+    try std.testing.expect(!requests.contains(12));
+    try std.testing.expect(requests.contains(16));
 
     var responses = ResponseStreamSet.init(allocator, 512, 3);
     defer responses.deinit();
