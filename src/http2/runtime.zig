@@ -571,8 +571,30 @@ pub const PromisedRequest = push.PromisedRequest;
 
 const AltSvcKey = struct {
     stream_id: u31,
-    origin_hash: u64,
+    origin: []const u8,
 };
+
+const AltSvcKeyContext = struct {
+    pub fn hash(_: @This(), key: AltSvcKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hasher, key.stream_id);
+        std.hash.autoHash(&hasher, key.origin.len);
+        hasher.update(key.origin);
+        return hasher.final();
+    }
+
+    pub fn eql(_: @This(), lhs: AltSvcKey, rhs: AltSvcKey) bool {
+        return lhs.stream_id == rhs.stream_id and
+            std.mem.eql(u8, lhs.origin, rhs.origin);
+    }
+};
+
+const AltSvcIndex = std.HashMapUnmanaged(
+    AltSvcKey,
+    usize,
+    AltSvcKeyContext,
+    std.hash_map.default_max_load_percentage,
+);
 
 pub const AlternativeService = struct {
     stream_id: u31,
@@ -627,7 +649,7 @@ pub const Connection = struct {
     peer_origins: std.ArrayList([]u8) = .empty,
     peer_origin_index: std.StringHashMapUnmanaged(usize) = .empty,
     alternative_services: std.ArrayList(AlternativeService) = .empty,
-    alternative_service_index: std.AutoHashMapUnmanaged(AltSvcKey, usize) = .empty,
+    alternative_service_index: AltSvcIndex = .empty,
     default_authority: ?[]u8 = null,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
     /// runtime constructors set this to "http"; a future ALPN/TLS constructor
@@ -2627,32 +2649,30 @@ pub const Connection = struct {
         errdefer self.allocator.free(value);
         const key = AltSvcKey{
             .stream_id = stream_id,
-            .origin_hash = originHash(origin_value),
+            .origin = origin_value,
         };
         if (self.alternative_service_index.get(key)) |index| {
             const service = &self.alternative_services.items[index];
-            if (service.stream_id == stream_id and
-                std.mem.eql(u8, service.origin, origin_value))
-            {
-                self.allocator.free(service.origin);
-                self.allocator.free(service.field_value);
-                service.origin = origin;
-                service.field_value = value;
-                return;
-            }
+            const key_ptr = self.alternative_service_index.getKeyPtr(key) orelse
+                unreachable;
+            key_ptr.* = .{ .stream_id = stream_id, .origin = origin };
+            self.allocator.free(service.origin);
+            self.allocator.free(service.field_value);
+            service.origin = origin;
+            service.field_value = value;
+            return;
         }
-        if (self.alternative_service_index.get(key) == null) {
-            try self.alternative_service_index.ensureUnusedCapacity(self.allocator, 1);
-        }
+        try self.alternative_service_index.ensureUnusedCapacity(self.allocator, 1);
         const index = self.alternative_services.items.len;
         try self.alternative_services.append(self.allocator, .{
             .stream_id = stream_id,
             .origin = origin,
             .field_value = value,
         });
-        if (self.alternative_service_index.get(key) == null) {
-            self.alternative_service_index.putAssumeCapacity(key, index);
-        }
+        self.alternative_service_index.putAssumeCapacityNoClobber(
+            .{ .stream_id = stream_id, .origin = origin },
+            index,
+        );
     }
 
     fn peerOriginKnown(self: Connection, origin: []const u8) bool {
@@ -3042,10 +3062,6 @@ fn validateFrameEnvelope(frame: http2.Frame) Error!void {
         .push_promise => if (stream_id == 0) return error.InvalidFrame,
         _ => {},
     }
-}
-
-fn originHash(origin: []const u8) u64 {
-    return std.hash.Wyhash.hash(0, origin);
 }
 
 fn clientInitiatedStreamId(stream_id: u31) bool {
@@ -4075,6 +4091,24 @@ test "HTTP/2 runtime receives connection and stream ALTSVC frames" {
         @as(u31, 1),
         client.alternativeServices()[1].stream_id,
     );
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        client.alternative_service_index.get(.{
+            .stream_id = 0,
+            .origin = "https://example.com",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        client.alternative_service_index.get(.{
+            .stream_id = 1,
+            .origin = "",
+        }),
+    );
+    try std.testing.expect(client.alternative_service_index.get(.{
+        .stream_id = 0,
+        .origin = "https://missing.example.com",
+    }) == null);
     _ = try client.ping([_]u8{0x42} ** 8);
     thread.join();
     if (shared.err) |err| return err;
