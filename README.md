@@ -175,8 +175,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   cache/lease/early-data stats, exclusive single-use early-data leases, RFC
   9000 §7.4.1 remembered-parameter
   filtering/reduction checks, RFC 9221 DATAGRAM restoration, snapshot-capable
-  0-RTT replay filters with explicit expiry pruning and next-expiry observability
-  for worker handoff, and a lease-backed
+  0-RTT replay filters with digest-indexed duplicate checks, explicit expiry
+  pruning, and next-expiry observability for worker handoff, and a lease-backed
   sender that consumes a ticket after the first successful 0-RTT packet,
   plus automatic TLS early_data signaling, ClientHello-bound early traffic
   keys, coalesced Initial+0-RTT sending, explicit server acceptance/rejection,
