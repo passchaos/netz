@@ -2661,12 +2661,15 @@ pub const HandshakeClient = struct {
         });
     }
 
+    /// Resolve the first HTTP/3 Alt-Svc advertisement from any header list
+    /// whose items expose `.name` and `.value`, then issue an origin-preserving
+    /// HTTP/3 request to the advertised alternative service.
     pub fn requestUriAltSvcHeader(
         allocator: std.mem.Allocator,
         io: std.Io,
         local_address: net.IpAddress,
         uri: std.Uri,
-        headers: []const http3.Qpack.HeaderField,
+        headers: anytype,
         request_options: UriRequestOptions,
         limits: Limits,
         options: HandshakeClientOptions,
