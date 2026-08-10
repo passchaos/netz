@@ -131,6 +131,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.Server, "receiveRequestsConcurrent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ProtectedClient"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "HandshakeClient"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "UriEndpoint"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "uriEndpoint"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendGoAway"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "sendMaxPushId"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.ProtectedClient, "cancelPush"));

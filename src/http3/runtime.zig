@@ -4,12 +4,13 @@ const quic = @import("../quic/mod.zig");
 
 const net = std.Io.net;
 
-pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error || error{
+pub const Error = http3.Error || quic.runtime.Error || quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error || net.HostName.ValidateError || net.HostName.LookupError || error{
     MissingStreamFrame,
     UnexpectedStream,
     GoAwayReceived,
     RequestRejected,
     ClosedCriticalStream,
+    InvalidUri,
 };
 
 const client_control_stream_id: u62 = 2;
@@ -19,6 +20,137 @@ const server_control_stream_id: u62 = 3;
 const server_qpack_encoder_stream_id: u62 = 7;
 const server_qpack_decoder_stream_id: u62 = 11;
 const first_server_push_stream_id: u62 = 15;
+
+pub const UriEndpoint = struct {
+    allocator: std.mem.Allocator,
+    host_storage: []u8,
+    authority: []u8,
+    port: u16,
+    target: Target,
+    /// Host text suitable for TLS SNI/certificate policy. Bracketed IPv6 URI
+    /// literals drop their brackets here while authority keeps them.
+    tls_host: []const u8,
+
+    pub const Target = union(enum) {
+        host: net.HostName,
+        ip: net.IpAddress,
+    };
+
+    pub fn deinit(self: *UriEndpoint) void {
+        self.allocator.free(self.authority);
+        self.allocator.free(self.host_storage);
+        self.* = undefined;
+    }
+
+    pub fn resolve(self: UriEndpoint, io: std.Io) Error!net.IpAddress {
+        return switch (self.target) {
+            .ip => |address| address,
+            .host => |host| try resolveHostName(io, host, self.port),
+        };
+    }
+};
+
+pub fn uriEndpoint(allocator: std.mem.Allocator, uri: std.Uri) Error!UriEndpoint {
+    if (uri.user != null or uri.password != null) return error.InvalidUri;
+    if (uri.scheme.len == 0 or !std.ascii.eqlIgnoreCase(uri.scheme, "https")) {
+        return error.InvalidUri;
+    }
+    const host_component = uri.host orelse return error.InvalidUri;
+    const host_storage = try uriHostToOwned(allocator, host_component);
+    errdefer allocator.free(host_storage);
+
+    const port = uri.port orelse 443;
+    const authority = if (uri.port == null)
+        try allocator.dupe(u8, host_storage)
+    else
+        try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host_storage, port });
+    errdefer allocator.free(authority);
+
+    const target, const tls_host = try uriTargetForHost(host_storage, port);
+    return .{
+        .allocator = allocator,
+        .host_storage = host_storage,
+        .authority = authority,
+        .port = port,
+        .target = target,
+        .tls_host = tls_host,
+    };
+}
+
+fn uriHostToOwned(allocator: std.mem.Allocator, host: std.Uri.Component) Error![]u8 {
+    var buffer: [net.HostName.max_len + 2]u8 = undefined;
+    const raw = host.toRaw(&buffer) catch return error.InvalidUri;
+    if (raw.len == 0) return error.InvalidUri;
+    return allocator.dupe(u8, raw);
+}
+
+fn uriTargetForHost(host: []const u8, port: u16) Error!struct { UriEndpoint.Target, []const u8 } {
+    if (host[0] == '[') {
+        if (host[host.len - 1] != ']') return error.InvalidUri;
+        const inner = host[1 .. host.len - 1];
+        if (inner.len == 0) return error.InvalidUri;
+        const ip6 = net.IpAddress.parseIp6(inner, port) catch return error.InvalidUri;
+        return .{ .{ .ip = ip6 }, inner };
+    }
+    if (std.mem.indexOfScalar(u8, host, '[') != null or
+        std.mem.indexOfScalar(u8, host, ']') != null)
+    {
+        return error.InvalidUri;
+    }
+    if (net.IpAddress.parse(host, port)) |address| {
+        return .{ .{ .ip = address }, host };
+    } else |_| {}
+    return .{ .{ .host = try net.HostName.init(host) }, host };
+}
+
+fn resolveHostName(io: std.Io, host: net.HostName, port: u16) Error!net.IpAddress {
+    var lookup_buffer: [32]net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(net.HostName.LookupResult) = .init(&lookup_buffer);
+    try net.HostName.lookup(host, io, &lookup_queue, .{ .port = port });
+    var first: ?net.IpAddress = null;
+    while (lookup_queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |address| {
+                if (first == null) first = address;
+            },
+            .canonical_name => {},
+        }
+    } else |err| switch (err) {
+        error.Closed => {},
+        error.Canceled => return error.Canceled,
+    }
+    return first orelse error.NoAddressReturned;
+}
+
+test "HTTP/3 URI endpoint parses authorities for handshake clients" {
+    const allocator = std.testing.allocator;
+
+    const host_uri = try std.Uri.parse("https://Example.COM:8443/robots.txt");
+    var host_endpoint = try uriEndpoint(allocator, host_uri);
+    defer host_endpoint.deinit();
+    try std.testing.expectEqualStrings("Example.COM:8443", host_endpoint.authority);
+    try std.testing.expectEqualStrings("Example.COM", host_endpoint.tls_host);
+    try std.testing.expectEqual(@as(u16, 8443), host_endpoint.port);
+    try std.testing.expect(host_endpoint.target == .host);
+
+    const ip4_uri = try std.Uri.parse("https://127.0.0.1/");
+    var ip4_endpoint = try uriEndpoint(allocator, ip4_uri);
+    defer ip4_endpoint.deinit();
+    try std.testing.expectEqualStrings("127.0.0.1", ip4_endpoint.authority);
+    try std.testing.expectEqual(@as(u16, 443), ip4_endpoint.port);
+    try std.testing.expect(ip4_endpoint.target == .ip);
+
+    const ip6_uri = try std.Uri.parse("https://[::1]:9443/");
+    var ip6_endpoint = try uriEndpoint(allocator, ip6_uri);
+    defer ip6_endpoint.deinit();
+    try std.testing.expectEqualStrings("[::1]:9443", ip6_endpoint.authority);
+    try std.testing.expectEqualStrings("::1", ip6_endpoint.tls_host);
+    try std.testing.expectEqual(@as(u16, 9443), ip6_endpoint.port);
+    try std.testing.expect(ip6_endpoint.target == .ip);
+
+    try std.testing.expectError(error.InvalidUri, uriEndpoint(allocator, try std.Uri.parse("http://example.com/")));
+    try std.testing.expectError(error.InvalidUri, uriEndpoint(allocator, try std.Uri.parse("https://user@example.com/")));
+}
 
 /// Reusable protection scratch for the preconfigured-key HTTP/3 runtime.
 ///
