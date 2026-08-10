@@ -82,6 +82,10 @@ pub fn Pool(comptime Handle: type) type {
             return self.stats();
         }
 
+        pub fn hitRate(self: Self) f64 {
+            return self.stats().hitRate();
+        }
+
         pub fn idleCountForOrigin(self: Self, origin: http3.Origin) usize {
             var count: usize = 0;
             for (self.entries.items) |entry| {
@@ -226,6 +230,7 @@ test "HTTP/3 origin pool releases and acquires by normalized origin" {
     const stats = pool.stats();
     try std.testing.expectEqual(@as(u64, 1), stats.total_reused);
     try std.testing.expectEqual(@as(f64, 1.0), stats.hitRate());
+    try std.testing.expectEqual(@as(f64, 1.0), pool.hitRate());
 }
 
 test "HTTP/3 origin pool enforces expiry and capacity" {
