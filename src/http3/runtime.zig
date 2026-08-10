@@ -1238,6 +1238,11 @@ pub const QpackEncodeState = struct {
     table: http3.Qpack.DynamicTable,
     known_received_count: u64 = 0,
     pending_sections: std.ArrayList(PendingSection) = .empty,
+    /// First pending field section per stream. QPACK decoder feedback names
+    /// streams rather than individual sections, and sections on the same stream
+    /// must be acknowledged/cancelled in FIFO order, so this index points at
+    /// the earliest retained section for each stream.
+    pending_section_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     reference_counts: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     encoder_instructions: std.ArrayList(u8) = .empty,
     decoder_stream: ?quic.stream_state.RecvState = null,
@@ -1277,6 +1282,7 @@ pub const QpackEncodeState = struct {
         if (self.decoder_stream) |*stream| stream.deinit();
         for (self.pending_sections.items) |*section| section.deinit(self.allocator);
         self.pending_sections.deinit(self.allocator);
+        self.pending_section_index.deinit(self.allocator);
         self.reference_counts.deinit(self.allocator);
         self.encoder_instructions.deinit(self.allocator);
         self.table.deinit();
@@ -1383,6 +1389,12 @@ pub const QpackEncodeState = struct {
         const owned = try references.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(owned);
         try self.pending_sections.ensureUnusedCapacity(self.allocator, 1);
+        if (!self.pending_section_index.contains(stream_id)) {
+            try self.pending_section_index.ensureUnusedCapacity(
+                self.allocator,
+                1,
+            );
+        }
         var new_reference_count_entries: usize = 0;
         for (owned) |absolute_index| {
             if (!self.reference_counts.contains(absolute_index)) {
@@ -1401,7 +1413,7 @@ pub const QpackEncodeState = struct {
             if (!entry.found_existing) entry.value_ptr.* = 0;
             entry.value_ptr.* += 1;
         }
-        self.pending_sections.appendAssumeCapacity(.{
+        self.appendPendingSectionAssumeCapacity(.{
             .stream_id = stream_id,
             .required_insert_count = maxReferencedInsertCount(owned),
             .references = owned,
@@ -1463,7 +1475,7 @@ pub const QpackEncodeState = struct {
     }
 
     pub fn hasPendingSections(self: QpackEncodeState, stream_id: u64) bool {
-        return self.findPendingSection(stream_id) != null;
+        return self.pending_section_index.contains(stream_id);
     }
 
     fn rollbackPendingSections(self: *QpackEncodeState, original_len: usize) void {
@@ -1507,15 +1519,13 @@ pub const QpackEncodeState = struct {
     }
 
     fn findPendingSection(self: QpackEncodeState, stream_id: u64) ?usize {
-        for (self.pending_sections.items, 0..) |section, index| {
-            if (section.stream_id == stream_id) return index;
-        }
-        return null;
+        return self.pending_section_index.get(stream_id);
     }
 
     fn releaseSection(self: *QpackEncodeState, index: usize) void {
         var section = self.pending_sections.orderedRemove(index);
         self.releaseSectionReferences(&section);
+        self.rebuildPendingSectionIndexAssumeCapacity();
     }
 
     fn releaseSectionReferences(
@@ -1554,7 +1564,35 @@ pub const QpackEncodeState = struct {
             write_index += 1;
         }
         self.pending_sections.items.len = write_index;
+        self.rebuildPendingSectionIndexAssumeCapacity();
         return released;
+    }
+
+    fn appendPendingSectionAssumeCapacity(
+        self: *QpackEncodeState,
+        section: PendingSection,
+    ) void {
+        const index = self.pending_sections.items.len;
+        const stream_id = section.stream_id;
+        self.pending_sections.appendAssumeCapacity(section);
+        if (!self.pending_section_index.contains(stream_id)) {
+            self.pending_section_index.putAssumeCapacityNoClobber(
+                stream_id,
+                index,
+            );
+        }
+    }
+
+    fn rebuildPendingSectionIndexAssumeCapacity(self: *QpackEncodeState) void {
+        self.pending_section_index.clearRetainingCapacity();
+        for (self.pending_sections.items, 0..) |section, index| {
+            if (!self.pending_section_index.contains(section.stream_id)) {
+                self.pending_section_index.putAssumeCapacityNoClobber(
+                    section.stream_id,
+                    index,
+                );
+            }
+        }
     }
 
     fn canEvictForInsert(
@@ -9832,6 +9870,9 @@ test "HTTP/3 QPACK stream cancellation compacts pending sections stably" {
         .{ .name = "x-three", .value = "three" },
     });
     try std.testing.expectEqual(@as(usize, 4), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(usize, 2), encoder.pending_section_index.count());
+    try std.testing.expectEqual(@as(?usize, 0), encoder.pending_section_index.get(4));
+    try std.testing.expectEqual(@as(?usize, 1), encoder.pending_section_index.get(8));
 
     var feedback: std.ArrayList(u8) = .empty;
     defer feedback.deinit(allocator);
@@ -9849,6 +9890,8 @@ test "HTTP/3 QPACK stream cancellation compacts pending sections stably" {
     });
 
     try std.testing.expectEqual(@as(usize, 3), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(usize, 1), encoder.pending_section_index.count());
+    try std.testing.expectEqual(@as(?usize, 0), encoder.pending_section_index.get(4));
     try std.testing.expectEqual(@as(u64, 4), encoder.pending_sections.items[0].stream_id);
     try std.testing.expectEqual(@as(u64, 1), encoder.pending_sections.items[0].required_insert_count);
     try std.testing.expectEqual(@as(u64, 4), encoder.pending_sections.items[1].stream_id);
@@ -9856,6 +9899,26 @@ test "HTTP/3 QPACK stream cancellation compacts pending sections stably" {
     try std.testing.expectEqual(@as(u64, 4), encoder.pending_sections.items[2].stream_id);
     try std.testing.expectEqual(@as(u64, 3), encoder.pending_sections.items[2].required_insert_count);
     try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(0));
+    try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(1));
+    try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(2));
+
+    var ack_first: std.ArrayList(u8) = .empty;
+    defer ack_first.deinit(allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &ack_first,
+        allocator,
+        .{ .section_acknowledgment = 4 },
+    );
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = feedback.items.len,
+        .data = ack_first.items,
+    });
+    try std.testing.expectEqual(@as(usize, 2), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), encoder.pending_section_index.get(4));
+    try std.testing.expectEqual(@as(u64, 2), encoder.pending_sections.items[0].required_insert_count);
+    try std.testing.expectEqual(@as(u64, 3), encoder.pending_sections.items[1].required_insert_count);
+    try std.testing.expect(!encoder.reference_counts.contains(0));
     try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(1));
     try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(2));
 }
@@ -10013,6 +10076,8 @@ test "HTTP/3 dynamic response writer tracks informational final and trailer sect
         &encoder,
     );
     try std.testing.expectEqual(@as(usize, 3), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(usize, 1), encoder.pending_section_index.count());
+    try std.testing.expectEqual(@as(?usize, 0), encoder.pending_section_index.get(8));
     for (encoder.pending_sections.items) |section| {
         try std.testing.expectEqual(@as(u64, 8), section.stream_id);
         try std.testing.expectEqual(@as(u64, 1), section.required_insert_count);
@@ -10035,6 +10100,7 @@ test "HTTP/3 dynamic response writer tracks informational final and trailer sect
     try std.testing.expectEqual(@as(usize, 3), dynamic_sections);
     encoder.abandonStream(8);
     try std.testing.expectEqual(@as(usize, 0), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(usize, 0), encoder.pending_section_index.count());
     try std.testing.expectEqual(@as(usize, 0), encoder.reference_counts.count());
 }
 
