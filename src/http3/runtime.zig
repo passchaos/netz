@@ -6665,6 +6665,7 @@ pub const ShutdownState = enum {
 const ServerRequestLifecycle = struct {
     allocator: std.mem.Allocator,
     active_streams: std.ArrayList(u62) = .empty,
+    active_stream_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     highest_processed_stream_id: ?u62 = null,
     shutdown_state: ShutdownState = .active,
 
@@ -6674,6 +6675,7 @@ const ServerRequestLifecycle = struct {
 
     fn deinit(self: *ServerRequestLifecycle) void {
         self.active_streams.deinit(self.allocator);
+        self.active_stream_index.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -6681,10 +6683,13 @@ const ServerRequestLifecycle = struct {
         self: *ServerRequestLifecycle,
         stream_id: u62,
     ) Error!void {
-        for (self.active_streams.items) |existing| {
-            if (existing == stream_id) return error.UnexpectedStream;
+        if (self.active_stream_index.contains(stream_id)) {
+            return error.UnexpectedStream;
         }
+        try self.active_stream_index.ensureUnusedCapacity(self.allocator, 1);
+        const index = self.active_streams.items.len;
         try self.active_streams.append(self.allocator, stream_id);
+        self.active_stream_index.putAssumeCapacity(stream_id, index);
         self.highest_processed_stream_id = if (self.highest_processed_stream_id) |highest|
             @max(highest, stream_id)
         else
@@ -6692,10 +6697,14 @@ const ServerRequestLifecycle = struct {
     }
 
     fn markFinished(self: *ServerRequestLifecycle, stream_id: u64) void {
-        for (self.active_streams.items, 0..) |existing, index| {
-            if (existing != stream_id) continue;
-            _ = self.active_streams.swapRemove(index);
-            return;
+        const key = std.math.cast(u62, stream_id) orelse return;
+        const index = self.active_stream_index.get(key) orelse return;
+        const last_index = self.active_streams.items.len - 1;
+        const removed = self.active_streams.swapRemove(index);
+        _ = self.active_stream_index.remove(removed);
+        if (index != last_index) {
+            const moved = self.active_streams.items[index];
+            self.active_stream_index.getPtr(moved).?.* = index;
         }
     }
 
@@ -6727,6 +6736,30 @@ const ServerRequestLifecycle = struct {
         return true;
     }
 };
+
+test "HTTP/3 server request lifecycle indexes active streams" {
+    const allocator = std.testing.allocator;
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+
+    try lifecycle.markReceived(0);
+    try lifecycle.markReceived(4);
+    try lifecycle.markReceived(8);
+    try std.testing.expectError(error.UnexpectedStream, lifecycle.markReceived(4));
+    try std.testing.expectEqual(@as(?u62, 8), lifecycle.highest_processed_stream_id);
+    try std.testing.expectEqual(@as(u64, 12), try lifecycle.finalGoAwayId());
+
+    lifecycle.markFinished(4);
+    try std.testing.expect(!lifecycle.active_stream_index.contains(4));
+    try std.testing.expect(lifecycle.active_stream_index.contains(8));
+    lifecycle.markFinished(8);
+    try std.testing.expect(!lifecycle.active_stream_index.contains(8));
+    lifecycle.markFinished(999);
+    try std.testing.expect(lifecycle.active_stream_index.contains(0));
+    lifecycle.markFinished(0);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.active_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.active_stream_index.count());
+}
 
 fn messageBlockedByQpack(
     bytes: []const u8,

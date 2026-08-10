@@ -70,7 +70,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   cancellation, and expose client/server cancel helpers that send
   RESET_STREAM+STOP_SENDING with conditional QPACK stream cancellation. Servers
   also expose two-phase GOAWAY initiation/completion and drain-completion
-  tracking over queued and application-owned requests. Clients can send
+  tracking over queued and indexed application-owned requests. Clients can send
   pre-request or live RFC 9218 PRIORITY_UPDATE frames on persistent control
   streams, including promised-push priorities. Received priority fields are
   owned and retained per request stream or push ID rather than collapsing
