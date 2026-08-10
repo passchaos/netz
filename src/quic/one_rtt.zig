@@ -2162,6 +2162,7 @@ pub const Connection = struct {
         const lost = self.sent.detectTimeThresholdLoss(now_ns, loss_delay_ns, largest);
         if (lost.bytes > 0) {
             self.recordPacketsLost(lost.packets);
+            self.observeLostPackets(now_ns, "time_threshold");
             self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
             if (lost.largest_pmtu_probe_size) |probe_size| {
                 self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
@@ -3759,6 +3760,7 @@ pub const Connection = struct {
                     const lost = self.sent.detectPacketThresholdLoss(frame.ack.largest_acknowledged, quic.packet_space.default_packet_threshold);
                     if (lost.bytes > 0) {
                         self.recordPacketsLost(lost.packets);
+                        self.observeLostPackets(now_ns, "packet_threshold");
                         self.congestion.onLostAt(lost.bytes, lost.largest_sent_time_ns, now_ns);
                         if (lost.largest_pmtu_probe_size) |probe_size| {
                             self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
@@ -3769,6 +3771,7 @@ pub const Connection = struct {
                         const timed_lost = self.sent.detectTimeThresholdLoss(now, self.rtt_stats.lossDelay(), frame.ack.largest_acknowledged);
                         if (timed_lost.bytes > 0) {
                             self.recordPacketsLost(timed_lost.packets);
+                            self.observeLostPackets(now_ns, "time_threshold");
                             self.congestion.onLostAt(timed_lost.bytes, timed_lost.largest_sent_time_ns, now);
                             if (timed_lost.largest_pmtu_probe_size) |probe_size| {
                                 self.pmtud.onProbeLost(probe_size, self.config.max_datagram_size);
@@ -4460,6 +4463,16 @@ pub const Connection = struct {
                 .bytes_in_flight = self.congestion.bytes_in_flight,
             },
         );
+    }
+
+    fn observeLostPackets(self: *Connection, now_ns: ?u64, trigger: []const u8) void {
+        const observer = self.config.qlog_observer orelse return;
+        const event_time = self.qlogEventTime(now_ns orelse self.monotonicNowNs());
+        for (self.sent.packets.items) |*packet| {
+            if (!packet.lost or packet.loss_reported) continue;
+            observer.packetLost(event_time, packet.packet_number, trigger);
+            packet.loss_reported = true;
+        }
     }
 
     fn monotonicNowNs(self: Connection) u64 {

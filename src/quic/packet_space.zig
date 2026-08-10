@@ -254,6 +254,7 @@ pub const SentPacket = struct {
     in_flight: bool = true,
     acknowledged: bool = false,
     lost: bool = false,
+    loss_reported: bool = false,
     bytes: usize = 0,
     ecn: EcnCodepoint = .not_ect,
     sent_time_ns: ?u64 = null,

@@ -1284,7 +1284,11 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
     defer server.deinit();
 
     const ping = [_]quic.Frame{.{ .ping = {} }};
-    try client.sendAt(&ping, 1_000_000);
+    for (0..5) |_| try client.sendAt(&ping, 1_000_000);
+    for (0..4) |_| {
+        var dropped = try server_endpoint.receiveBytes();
+        dropped.deinit(allocator);
+    }
     var received = try server.receivePacketAt(2_000_000);
     defer received.deinit(allocator);
     try std.testing.expect(try server.sendAckForPacketsIfNeeded(&.{received}));
@@ -1308,6 +1312,16 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
         u8,
         client_output.written(),
         "\"name\":\"recovery:metrics_updated\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"name\":\"recovery:packet_lost\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"trigger\":\"packet_threshold\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
