@@ -104,6 +104,12 @@ const PendingDatagram = struct {
 pub const Queue = struct {
     allocator: std.mem.Allocator,
     pending: std.ArrayList(PendingDatagram) = .empty,
+    /// Stable payload groups are stored in `pending` so PTO scheduling can keep
+    /// FIFO order, but ACK/loss paths usually start from a packet number or
+    /// group id.  These indexes make those hot lookups O(1); any operation that
+    /// shifts `pending` must refresh the affected physical slots.
+    group_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    packet_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     next_group_id: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Queue {
@@ -113,14 +119,16 @@ pub const Queue = struct {
     pub fn deinit(self: *Queue) void {
         for (self.pending.items) |*entry| entry.deinit(self.allocator);
         self.pending.deinit(self.allocator);
+        self.group_index.deinit(self.allocator);
+        self.packet_index.deinit(self.allocator);
         self.* = undefined;
     }
 
-    pub fn pendingCount(self: Queue) usize {
+    pub fn pendingCount(self: *const Queue) usize {
         return self.pending.items.len;
     }
 
-    pub fn stats(self: Queue) QueueStats {
+    pub fn stats(self: *const Queue) QueueStats {
         var packet_number_copies: usize = 0;
         var retransmission_copies: usize = 0;
         var payload_bytes: usize = 0;
@@ -137,7 +145,7 @@ pub const Queue = struct {
         };
     }
 
-    pub fn getStats(self: Queue) QueueStats {
+    pub fn getStats(self: *const Queue) QueueStats {
         return self.stats();
     }
 
@@ -146,12 +154,16 @@ pub const Queue = struct {
         packet_number: u64,
         payload: []const u8,
     ) Error!u64 {
+        if (self.packet_index.contains(packet_number)) return error.InvalidRetransmission;
         const group_id = self.next_group_id;
         const next_group_id = std.math.add(
             u64,
             group_id,
             1,
         ) catch return error.InvalidRetransmission;
+        try self.pending.ensureUnusedCapacity(self.allocator, 1);
+        try self.group_index.ensureUnusedCapacity(self.allocator, 1);
+        try self.packet_index.ensureUnusedCapacity(self.allocator, 1);
         var entry = try PendingDatagram.init(
             self.allocator,
             group_id,
@@ -159,28 +171,21 @@ pub const Queue = struct {
             payload,
         );
         errdefer entry.deinit(self.allocator);
-        try self.pending.append(self.allocator, entry);
+        self.appendGroupAssumeCapacity(entry);
         self.next_group_id = next_group_id;
         return group_id;
     }
 
     pub fn groupIdForPacketNumber(
-        self: Queue,
+        self: *const Queue,
         packet_number: u64,
     ) ?u64 {
-        for (self.pending.items) |entry| {
-            if (entry.containsRange(packet_number, packet_number)) {
-                return entry.group_id;
-            }
-        }
-        return null;
+        const index = self.packet_index.get(packet_number) orelse return null;
+        return self.pending.items[index].group_id;
     }
 
-    pub fn containsGroupId(self: Queue, group_id: u64) bool {
-        for (self.pending.items) |entry| {
-            if (entry.group_id == group_id) return true;
-        }
-        return false;
+    pub fn containsGroupId(self: *const Queue, group_id: u64) bool {
+        return self.group_index.contains(group_id);
     }
 
     pub fn ptoCandidate(self: *const Queue) ?Candidate {
@@ -220,64 +225,53 @@ pub const Queue = struct {
     }
 
     pub fn packetNumberCandidate(self: *const Queue, packet_number: u64) ?Candidate {
-        for (self.pending.items, 0..) |entry, group_index| {
-            var packet_index: usize = 0;
-            while (entry.packetNumberAt(packet_index)) |candidate| : (packet_index += 1) {
-                if (candidate != packet_number) continue;
-                return .{
-                    .group_index = group_index,
-                    .packet_number = entry.newestPacketNumber(),
-                    .payload = entry.payload,
-                    .retransmission_count = entry.retransmission_packet_numbers.items.len,
-                };
-            }
-        }
-        return null;
+        const group_index = self.packet_index.get(packet_number) orelse return null;
+        const entry = self.pending.items[group_index];
+        return .{
+            .group_index = group_index,
+            .packet_number = entry.newestPacketNumber(),
+            .payload = entry.payload,
+            .retransmission_count = entry.retransmission_packet_numbers.items.len,
+        };
     }
 
     pub fn recordRetransmission(self: *Queue, group_index: usize, packet_number: u64) Error!void {
         if (group_index >= self.pending.items.len) return error.InvalidRetransmission;
+        if (self.packet_index.contains(packet_number)) return error.InvalidRetransmission;
         const entry = &self.pending.items[group_index];
+        try self.packet_index.ensureUnusedCapacity(self.allocator, 1);
         try entry.retransmission_packet_numbers.append(self.allocator, packet_number);
+        self.packet_index.putAssumeCapacityNoClobber(packet_number, group_index);
     }
 
     pub fn acknowledgePacketNumber(self: *Queue, packet_number: u64) bool {
-        var i: usize = 0;
-        while (i < self.pending.items.len) {
-            if (self.pending.items[i].containsRange(packet_number, packet_number)) {
-                var removed = self.pending.orderedRemove(i);
-                removed.deinit(self.allocator);
-                return true;
-            }
-            i += 1;
-        }
-        return false;
+        const index = self.packet_index.get(packet_number) orelse return false;
+        var removed = self.removeGroupOrdered(index);
+        removed.deinit(self.allocator);
+        return true;
     }
 
     pub fn forgetPacketNumber(self: *Queue, packet_number: u64) bool {
-        var i: usize = 0;
-        while (i < self.pending.items.len) : (i += 1) {
-            var entry = &self.pending.items[i];
-            if (entry.original_packet_number == packet_number) {
-                entry.original_packet_number = null;
-                if (entry.packetCount() == 0) {
-                    var removed = self.pending.orderedRemove(i);
-                    removed.deinit(self.allocator);
-                }
-                return true;
-            }
-            for (entry.retransmission_packet_numbers.items, 0..) |candidate, packet_index| {
-                if (candidate != packet_number) continue;
-
-                _ = entry.retransmission_packet_numbers.orderedRemove(packet_index);
-                if (entry.packetCount() == 0) {
-                    var removed = self.pending.orderedRemove(i);
-                    removed.deinit(self.allocator);
-                }
-                return true;
-            }
+        const group_index = self.packet_index.get(packet_number) orelse return false;
+        if (self.pending.items[group_index].packetCount() == 1) {
+            var removed = self.removeGroupOrdered(group_index);
+            removed.deinit(self.allocator);
+            return true;
         }
-        return false;
+
+        var entry = &self.pending.items[group_index];
+        if (entry.original_packet_number == packet_number) {
+            entry.original_packet_number = null;
+            _ = self.packet_index.remove(packet_number);
+            return true;
+        }
+        for (entry.retransmission_packet_numbers.items, 0..) |candidate, retransmission_index| {
+            if (candidate != packet_number) continue;
+            _ = entry.retransmission_packet_numbers.orderedRemove(retransmission_index);
+            _ = self.packet_index.remove(packet_number);
+            return true;
+        }
+        unreachable;
     }
 
     pub fn applyAck(self: *Queue, ack: quic.AckFrame) Error!usize {
@@ -334,6 +328,7 @@ pub const Queue = struct {
             write_index += 1;
         }
         self.pending.items.len = write_index;
+        self.rebuildIndexesAssumeCapacity();
         return removed;
     }
 
@@ -345,6 +340,62 @@ pub const Queue = struct {
             if (entry.containsRange(range.start, range.end)) return true;
         }
         return false;
+    }
+
+    fn appendGroupAssumeCapacity(self: *Queue, entry: PendingDatagram) void {
+        const index = self.pending.items.len;
+        self.pending.appendAssumeCapacity(entry);
+        self.group_index.putAssumeCapacityNoClobber(entry.group_id, index);
+        self.packet_index.putAssumeCapacityNoClobber(entry.original_packet_number.?, index);
+    }
+
+    fn removeGroupOrdered(self: *Queue, index: usize) PendingDatagram {
+        const removed = self.pending.orderedRemove(index);
+        self.removeEntryIndexes(removed);
+        self.refreshIndexesFrom(index);
+        return removed;
+    }
+
+    fn removeEntryIndexes(self: *Queue, entry: PendingDatagram) void {
+        _ = self.group_index.remove(entry.group_id);
+        if (entry.original_packet_number) |packet_number| {
+            _ = self.packet_index.remove(packet_number);
+        }
+        for (entry.retransmission_packet_numbers.items) |packet_number| {
+            _ = self.packet_index.remove(packet_number);
+        }
+    }
+
+    fn refreshIndexesFrom(self: *Queue, start: usize) void {
+        var index = start;
+        while (index < self.pending.items.len) : (index += 1) {
+            self.refreshEntryIndex(index);
+        }
+    }
+
+    fn refreshEntryIndex(self: *Queue, index: usize) void {
+        const entry = self.pending.items[index];
+        self.group_index.getPtr(entry.group_id).?.* = index;
+        if (entry.original_packet_number) |packet_number| {
+            self.packet_index.getPtr(packet_number).?.* = index;
+        }
+        for (entry.retransmission_packet_numbers.items) |packet_number| {
+            self.packet_index.getPtr(packet_number).?.* = index;
+        }
+    }
+
+    fn rebuildIndexesAssumeCapacity(self: *Queue) void {
+        self.group_index.clearRetainingCapacity();
+        self.packet_index.clearRetainingCapacity();
+        for (self.pending.items, 0..) |entry, index| {
+            self.group_index.putAssumeCapacityNoClobber(entry.group_id, index);
+            if (entry.original_packet_number) |packet_number| {
+                self.packet_index.putAssumeCapacityNoClobber(packet_number, index);
+            }
+            for (entry.retransmission_packet_numbers.items) |packet_number| {
+                self.packet_index.putAssumeCapacityNoClobber(packet_number, index);
+            }
+        }
     }
 };
 
@@ -361,6 +412,10 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
     try queue.recordRetransmission(candidate.group_index, 4);
     try std.testing.expectEqual(@as(usize, 1), queue.pendingCount());
     try std.testing.expectEqual(@as(usize, 2), queue.pending.items[0].packetCount());
+    try std.testing.expectEqual(@as(usize, 1), queue.group_index.count());
+    try std.testing.expectEqual(@as(usize, 2), queue.packet_index.count());
+    try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(0));
+    try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(4));
     const stats = queue.stats();
     try std.testing.expectEqual(@as(usize, 1), stats.pending_groups);
     try std.testing.expectEqual(@as(usize, 2), stats.packet_number_copies);
@@ -375,6 +430,8 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
     try std.testing.expectEqual(@as(usize, 1), try queue.applyAck(ack));
     try std.testing.expectEqual(@as(usize, 0), queue.getStats().pending_groups);
     try std.testing.expectEqual(@as(usize, 0), queue.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), queue.group_index.count());
+    try std.testing.expectEqual(@as(usize, 0), queue.packet_index.count());
 }
 
 test "QUIC recovery queue keeps initial packet number allocation-free" {
@@ -387,6 +444,8 @@ test "QUIC recovery queue keeps initial packet number allocation-free" {
     // needs exactly one allocation for bytes that must survive caller reuse;
     // the overwhelmingly common original packet number stays inline.
     try queue.pending.ensureTotalCapacity(allocator, 1);
+    try queue.group_index.ensureTotalCapacity(allocator, 1);
+    try queue.packet_index.ensureTotalCapacity(allocator, 1);
     const allocations_before = counting.allocations;
     _ = try queue.trackSent(42, "owned recovery payload");
     try std.testing.expectEqual(@as(usize, 1), counting.allocations - allocations_before);
@@ -416,8 +475,56 @@ test "QUIC recovery queue keeps stable group identity across retransmissions" {
         group_id,
         queue.groupIdForPacketNumber(8).?,
     );
+    try std.testing.expectEqual(@as(?usize, 0), queue.group_index.get(group_id));
+    try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(4));
+    try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(8));
     try std.testing.expect(queue.acknowledgePacketNumber(8));
     try std.testing.expect(!queue.containsGroupId(group_id));
+    try std.testing.expect(queue.group_index.get(group_id) == null);
+    try std.testing.expect(queue.packet_index.get(4) == null);
+    try std.testing.expect(queue.packet_index.get(8) == null);
+}
+
+test "QUIC recovery queue indexes survive ordered removals and ACK compaction" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    const first = try queue.trackSent(10, "first");
+    const second = try queue.trackSent(20, "second");
+    const third = try queue.trackSent(30, "third");
+    try queue.recordRetransmission(2, 31);
+    try std.testing.expectEqual(@as(usize, 3), queue.group_index.count());
+    try std.testing.expectEqual(@as(usize, 4), queue.packet_index.count());
+
+    // ACKing the first group uses orderedRemove to preserve PTO scheduling
+    // order.  The later groups shift left, so every packet-number and group-id
+    // index must be repaired before the next ACK/loss lookup.
+    try std.testing.expect(queue.acknowledgePacketNumber(10));
+    try std.testing.expect(!queue.containsGroupId(first));
+    try std.testing.expectEqual(@as(?usize, 0), queue.group_index.get(second));
+    try std.testing.expectEqual(@as(?usize, 1), queue.group_index.get(third));
+    try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(20));
+    try std.testing.expectEqual(@as(?usize, 1), queue.packet_index.get(30));
+    try std.testing.expectEqual(@as(?usize, 1), queue.packet_index.get(31));
+    try std.testing.expectEqual(third, queue.groupIdForPacketNumber(31).?);
+
+    try std.testing.expect(queue.forgetPacketNumber(30));
+    try std.testing.expect(queue.packet_index.get(30) == null);
+    try std.testing.expectEqual(@as(?usize, 1), queue.packet_index.get(31));
+    try std.testing.expectEqual(@as(usize, 1), queue.pending.items[1].packetCount());
+
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 31,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    try std.testing.expectEqual(@as(usize, 1), try queue.applyAck(ack));
+    try std.testing.expect(!queue.containsGroupId(third));
+    try std.testing.expect(queue.packet_index.get(31) == null);
+    try std.testing.expectEqual(@as(usize, 1), queue.pendingCount());
+    try std.testing.expectEqual(@as(?usize, 0), queue.group_index.get(second));
+    try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(20));
 }
 
 test "QUIC recovery queue selects PTO candidates by pending group" {
