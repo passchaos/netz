@@ -56,13 +56,28 @@ pub const SendFlow = struct {
 pub const RecvFlow = struct {
     limit: u64,
     window: u64,
+    max_window: u64,
     highest_received: u64 = 0,
     consumed: u64 = 0,
+    autotune_epoch_consumed: u64 = 0,
 
     pub fn init(initial_limit: u64, window: u64) Error!RecvFlow {
-        if (window == 0) return error.InvalidWindow;
-        if (initial_limit > quic.varint.max_value or window > quic.varint.max_value) return error.InvalidWindow;
-        return .{ .limit = initial_limit, .window = window };
+        return initWithMaxWindow(initial_limit, window, window);
+    }
+
+    pub fn initWithMaxWindow(initial_limit: u64, window: u64, max_window: u64) Error!RecvFlow {
+        if (window == 0 or max_window == 0) return error.InvalidWindow;
+        if (initial_limit > quic.varint.max_value or
+            window > quic.varint.max_value or
+            max_window > quic.varint.max_value)
+        {
+            return error.InvalidWindow;
+        }
+        return .{
+            .limit = initial_limit,
+            .window = window,
+            .max_window = @max(window, max_window),
+        };
     }
 
     pub fn receive(self: *RecvFlow, end_offset: u64) Error!void {
@@ -73,12 +88,25 @@ pub const RecvFlow = struct {
     pub fn consume(self: *RecvFlow, amount: u64) ?u64 {
         self.consumed = @min(self.highest_received, self.consumed +| amount);
         if (self.limit - self.consumed <= self.window / 2) {
+            self.maybeGrowWindow();
             const next_limit = @min(self.consumed +| self.window, quic.varint.max_value);
             if (next_limit <= self.limit) return null;
             self.limit = next_limit;
             return self.limit;
         }
         return null;
+    }
+
+    fn maybeGrowWindow(self: *RecvFlow) void {
+        if (self.window >= self.max_window) return;
+        const consumed_since_epoch = self.consumed -| self.autotune_epoch_consumed;
+        // A receiver that drains at least a quarter of its current advertised
+        // window between credit updates is keeping up with the peer.  Growing
+        // the window here mirrors production stacks' receive-window autotuning
+        // without adding RTT dependencies to this low-level state helper.
+        if (consumed_since_epoch <= self.window / 4) return;
+        self.window = @min(self.window *| 2, self.max_window);
+        self.autotune_epoch_consumed = self.consumed;
     }
 
     pub fn maxDataFrame(self: RecvFlow) quic.Frame {
@@ -140,6 +168,27 @@ test "QUIC receive flow emits MAX_DATA after consumption threshold" {
     const oversized_varint = @as(u64, quic.varint.max_value) + 1;
     try std.testing.expectError(error.InvalidWindow, RecvFlow.init(oversized_varint, 1));
     try std.testing.expectError(error.InvalidWindow, RecvFlow.init(0, oversized_varint));
+}
+
+test "QUIC receive flow optionally autotunes receive window" {
+    var fixed = try RecvFlow.init(100, 100);
+    try fixed.receive(80);
+    try std.testing.expectEqual(@as(?u64, 160), fixed.consume(60));
+    try std.testing.expectEqual(@as(u64, 100), fixed.window);
+
+    var adaptive = try RecvFlow.initWithMaxWindow(100, 100, 400);
+    try adaptive.receive(80);
+    const grown_limit = adaptive.consume(60).?;
+    try std.testing.expectEqual(@as(u64, 200), adaptive.window);
+    try std.testing.expectEqual(@as(u64, 260), grown_limit);
+
+    try adaptive.receive(260);
+    try std.testing.expectEqual(@as(?u64, null), adaptive.consume(50));
+    try std.testing.expectEqual(@as(u64, 200), adaptive.window);
+    try std.testing.expectEqual(@as(?u64, 570), adaptive.consume(60));
+    try std.testing.expectEqual(@as(u64, 400), adaptive.window);
+
+    try std.testing.expectError(error.InvalidWindow, RecvFlow.initWithMaxWindow(0, 1, 0));
 }
 
 test "QUIC receive flow consumes and expands near varint ceiling safely" {

@@ -150,7 +150,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling
   with one advisory BLOCKED emission per unchanged limit to avoid retry-loop
-  packet storms,
+  packet storms and opt-in adaptive receive-window growth,
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling plus
   the same per-limit duplicate suppression for stream-count exhaustion,
   protected 0-RTT long-header packet seal/open and frame datagram helpers with

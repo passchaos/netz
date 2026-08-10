@@ -155,6 +155,7 @@ pub const ConnectionConfig = struct {
     initial_send_max_data: u64 = std.math.maxInt(u62),
     initial_receive_max_data: u64 = std.math.maxInt(u62),
     receive_window: u64 = 64 * 1024,
+    max_receive_window: ?u64 = null,
     /// Back-compat fallback used when stream-direction-specific limits below
     /// are not supplied.  Real handshakes should prefer the specific fields so
     /// client/server and uni/bidi stream rules follow RFC 9000 Section 18.2.
@@ -171,6 +172,7 @@ pub const ConnectionConfig = struct {
     initial_receive_max_streams_bidi: u64 = std.math.maxInt(u60),
     initial_receive_max_streams_uni: u64 = std.math.maxInt(u60),
     stream_receive_window: u64 = 64 * 1024,
+    max_stream_receive_window: ?u64 = null,
     max_datagram_size: usize = quic.congestion.default_max_datagram_size,
     /// CUBIC is the high-throughput default; NewReno remains selectable for
     /// compatibility-sensitive deployments.
@@ -522,7 +524,11 @@ pub const Connection = struct {
             .pmtud = .init(.{ .enabled = config.enable_pmtud, .max_probe_size = config.pmtud_max_probe_size }),
             .path_validation = .init(endpoint.allocator),
             .send_flow = .init(config.initial_send_max_data),
-            .recv_flow = try .init(config.initial_receive_max_data, config.receive_window),
+            .recv_flow = try .initWithMaxWindow(
+                config.initial_receive_max_data,
+                config.receive_window,
+                config.max_receive_window orelse config.receive_window,
+            ),
             .send_key_phase = .init(config.send_keys, false),
             .receive_key_phase = .init(config.receive_keys, false),
             .peer_max_streams_bidi = config.initial_send_max_streams_bidi,
@@ -3862,13 +3868,18 @@ pub const Connection = struct {
         } else {
             try self.validatePeerStreamCount(stream_id);
             const flow_limit = self.initialReceiveStreamDataLimit(stream_id);
+            const max_buffered = @max(
+                flow_limit,
+                self.config.max_stream_receive_window orelse
+                    self.config.stream_receive_window,
+            );
             try recv_streams.append(self.endpoint.allocator, .{
                 .stream_id = stream_id,
                 .flow_limit = flow_limit,
                 .recv_state = quic.stream_state.RecvState.init(
                     self.endpoint.allocator,
                     stream_id,
-                    maxBufferedForLimit(flow_limit),
+                    maxBufferedForLimit(max_buffered),
                 ),
             });
         }
@@ -4437,13 +4448,23 @@ pub const Connection = struct {
         if (self.findRecvStreamEntry(stream_id)) |entry| return entry;
         try self.validateStreamReceiveFrameId(stream_id);
         try self.validatePeerStreamCount(stream_id);
+        const initial_limit = self.initialReceiveStreamDataLimit(stream_id);
+        const max_buffered = @max(
+            initial_limit,
+            self.config.max_stream_receive_window orelse
+                self.config.stream_receive_window,
+        );
         try self.stream_recv_flows.append(self.endpoint.allocator, .{
             .stream_id = stream_id,
-            .flow = try .init(self.initialReceiveStreamDataLimit(stream_id), self.config.stream_receive_window),
+            .flow = try .initWithMaxWindow(
+                initial_limit,
+                self.config.stream_receive_window,
+                self.config.max_stream_receive_window orelse self.config.stream_receive_window,
+            ),
             .recv_state = quic.stream_state.RecvState.init(
                 self.endpoint.allocator,
                 stream_id,
-                maxBufferedForLimit(self.initialReceiveStreamDataLimit(stream_id)),
+                maxBufferedForLimit(max_buffered),
             ),
         });
         return &self.stream_recv_flows.items[self.stream_recv_flows.items.len - 1];

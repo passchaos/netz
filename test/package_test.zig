@@ -389,10 +389,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "congestion_algorithm"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "enable_hystart"));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "enable_pacing"));
+    try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "max_receive_window"));
+    try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "max_stream_receive_window"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_endpoint"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_stream_data_bidi_local"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_send_max_streams_bidi"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "initial_receive_max_streams_uni"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_receive_window"));
+    try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "max_stream_receive_window"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_spin_bit"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "active_connection_id_limit"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_max_idle_timeout_ms"));
