@@ -418,7 +418,7 @@ pub const SentPacketTracker = struct {
         var bytes_in_flight: usize = 0;
         for (self.packets.items) |packet| {
             if (packet.ack_eliciting) ack_eliciting_packets += 1;
-            if (packet.in_flight) {
+            if (packet.in_flight and !packet.acknowledged and !packet.lost) {
                 in_flight_packets += 1;
                 bytes_in_flight += packet.bytes;
             }
@@ -1063,6 +1063,8 @@ test "QUIC sent packet tracker applies ACK ranges" {
     try std.testing.expect(!sent.packets.items[9].acknowledged);
     const after = sent.getStats();
     try std.testing.expectEqual(@as(usize, 6), after.acknowledged_packets);
+    try std.testing.expectEqual(@as(usize, 6), after.in_flight_packets);
+    try std.testing.expectEqual(@as(usize, 6 * 1200), after.bytes_in_flight);
     try std.testing.expectEqual(@as(usize, 0), after.lost_packets);
 }
 

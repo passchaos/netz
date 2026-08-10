@@ -737,6 +737,8 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expectEqual(@as(usize, 0), client_after_ack.pending_recovery_count);
     try std.testing.expectEqual(@as(usize, 0), client_after_ack.recovery_queue_stats.pending_groups);
     try std.testing.expectEqual(@as(usize, 1), client_after_ack.sent_packet_stats.acknowledged_packets);
+    try std.testing.expectEqual(@as(usize, 0), client_after_ack.sent_packet_stats.in_flight_packets);
+    try std.testing.expectEqual(@as(usize, 0), client_after_ack.sent_packet_stats.bytes_in_flight);
     try std.testing.expectEqual(@as(u64, 0), client_after_ack.packets_lost);
     try std.testing.expectEqual(@as(f64, 0.0), client_after_ack.lossRate());
     try std.testing.expectEqual(@as(?u64, 150_000_000), client_after_ack.latest_rtt_ns);
