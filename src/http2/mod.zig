@@ -954,6 +954,21 @@ pub const Hpack = struct {
         pub fn decodeBlock(self: *Decoder, allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {
             return decodeBlockWithDynamicTable(allocator, block, &self.dynamic_table, self.max_dynamic_table_size);
         }
+
+        pub fn decodeBlockInto(
+            self: *Decoder,
+            allocator: std.mem.Allocator,
+            block: []const u8,
+            storage: []HeaderField,
+        ) ![]HeaderField {
+            return decodeBlockIntoWithDynamicTable(
+                allocator,
+                block,
+                &self.dynamic_table,
+                self.max_dynamic_table_size,
+                storage,
+            );
+        }
     };
 
     pub const Encoder = struct {
@@ -1124,10 +1139,20 @@ pub const Hpack = struct {
         allocator.free(fields);
     }
 
+    pub fn freeDecodedFieldStorages(allocator: std.mem.Allocator, fields: []HeaderField) void {
+        freeFieldStorages(allocator, fields);
+    }
+
     fn freeFieldStorages(allocator: std.mem.Allocator, fields: []HeaderField) void {
-        for (fields) |field| {
-            if (field.name_storage) |name| allocator.free(name);
-            if (field.value_storage) |value| allocator.free(value);
+        for (fields) |*field| {
+            if (field.name_storage) |name| {
+                allocator.free(name);
+                field.name_storage = null;
+            }
+            if (field.value_storage) |value| {
+                allocator.free(value);
+                field.value_storage = null;
+            }
         }
     }
 
@@ -1253,6 +1278,68 @@ pub const Hpack = struct {
             try fields.append(allocator, field);
         }
         return fields.toOwnedSlice(allocator);
+    }
+
+    fn decodeBlockIntoWithDynamicTable(
+        allocator: std.mem.Allocator,
+        block: []const u8,
+        dynamic_table: *DynamicTable,
+        max_dynamic_table_size: usize,
+        storage: []HeaderField,
+    ) ![]HeaderField {
+        var cursor = wire.Cursor.init(block);
+        var count: usize = 0;
+        errdefer freeFieldStorages(allocator, storage[0..count]);
+        var saw_header = false;
+        while (!cursor.eof()) {
+            const first = try cursor.readByte();
+            if ((first & 0x80) != 0) {
+                saw_header = true;
+                if (count >= storage.len) return error.BufferTooShort;
+                storage[count] = try indexedHeaderOwned(allocator, dynamic_table, try decodeInteger(first, &cursor, 7));
+                count += 1;
+                continue;
+            }
+
+            if ((first & 0xe0) == 0x20) {
+                if (saw_header) return error.InvalidEncoding;
+                const new_size = std.math.cast(usize, try decodeInteger(first, &cursor, 5)) orelse return error.IntegerOverflow;
+                if (new_size > max_dynamic_table_size) return error.InvalidEncoding;
+                dynamic_table.setLimit(allocator, new_size);
+                continue;
+            }
+
+            saw_header = true;
+            if (count >= storage.len) return error.BufferTooShort;
+            const indexed_literal = (first & 0x40) != 0;
+            const name_index = if (indexed_literal)
+                try decodeInteger(first, &cursor, 6)
+            else
+                try decodeInteger(first, &cursor, 4);
+            const never_index = (first & 0x10) != 0;
+
+            var field = HeaderField{
+                .name = undefined,
+                .value = undefined,
+                .never_index = never_index,
+            };
+            if (name_index == 0) {
+                const name = try decodeString(allocator, &cursor);
+                field.name = name.value;
+                field.name_storage = name.storage;
+            } else {
+                const name = try indexedNameOwned(allocator, dynamic_table, name_index);
+                field.name = name.value;
+                field.name_storage = name.storage;
+            }
+            const value = try decodeString(allocator, &cursor);
+            field.value = value.value;
+            field.value_storage = value.storage;
+            if (indexed_literal) try dynamic_table.add(allocator, field.name, field.value);
+            storage[count] = field;
+            count += 1;
+        }
+        return storage[0..count];
     }
 
     fn encodeInteger(
@@ -1970,6 +2057,38 @@ test "HTTP/2 HPACK Huffman and dynamic table state" {
     defer Hpack.freeDecodedFields(allocator, second_fields);
     try std.testing.expectEqualStrings("x-dynamic", second_fields[0].name);
     try std.testing.expectEqualStrings("one", second_fields[0].value);
+}
+
+test "HTTP/2 HPACK decoder writes into caller storage" {
+    const allocator = std.testing.allocator;
+
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try encoder.encodeBlock(&block, allocator, &.{
+        .{ .name = "x-dynamic", .value = "one" },
+        .{ .name = ":method", .value = "GET" },
+    });
+
+    var decoder = Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    var storage: [2]Hpack.HeaderField = undefined;
+    const fields = try decoder.decodeBlockInto(allocator, block.items, &storage);
+    defer Hpack.freeDecodedFieldStorages(allocator, fields);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings("x-dynamic", fields[0].name);
+    try std.testing.expectEqualStrings("one", fields[0].value);
+    try std.testing.expectEqualStrings(":method", fields[1].name);
+    try std.testing.expectEqualStrings("GET", fields[1].value);
+
+    var too_small_decoder = Hpack.Decoder{};
+    defer too_small_decoder.deinit(allocator);
+    var too_small: [1]Hpack.HeaderField = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        too_small_decoder.decodeBlockInto(allocator, block.items, &too_small),
+    );
 }
 
 test "HTTP/2 HPACK encoder emits table size updates and avoids low-value indexing" {

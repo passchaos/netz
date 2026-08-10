@@ -51,6 +51,22 @@ pub fn main() !void {
     }
     const decode_ns = nowNs(io) -| decode_start;
 
+    var decode_into_decoder = netz.http2.Hpack.Decoder{};
+    defer decode_into_decoder.deinit(allocator);
+    var decode_storage: [headers.len]netz.http2.Hpack.HeaderField = undefined;
+    const decode_into_start = nowNs(io);
+    var decode_into_total: usize = 0;
+    for (0..iterations) |_| {
+        const decoded = try decode_into_decoder.decodeBlockInto(
+            allocator,
+            decode_block.items,
+            &decode_storage,
+        );
+        decode_into_total += decoded.len;
+        netz.http2.Hpack.freeDecodedFieldStorages(allocator, decoded);
+    }
+    const decode_into_ns = nowNs(io) -| decode_into_start;
+
     var roundtrip_encoder = netz.http2.Hpack.Encoder{};
     defer roundtrip_encoder.deinit(allocator);
     var roundtrip_decoder = netz.http2.Hpack.Decoder{};
@@ -84,6 +100,7 @@ pub fn main() !void {
         \\  iterations: {d}
         \\  stateful encode-only total bytes: {d}, ns/op: {d}
         \\  stateful decode-only fields: {d}, ns/op: {d}
+        \\  stateful decode-into fields: {d}, ns/op: {d}
         \\  stateful total bytes: {d}, ns/op: {d}
         \\  stateless total bytes: {d}, ns/op: {d}
         \\  stateful speedup: {d}.{d:0>2}x
@@ -95,6 +112,8 @@ pub fn main() !void {
         encode_ns / iterations,
         decode_total,
         decode_ns / iterations,
+        decode_into_total,
+        decode_into_ns / iterations,
         stateful_total,
         stateful_ns / iterations,
         stateless_total,

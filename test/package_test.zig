@@ -93,9 +93,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http2.Hpack, "Decoder"));
     try std.testing.expect(@hasDecl(netz.http2.Hpack, "Encoder"));
     try std.testing.expect(@hasDecl(netz.http2.Hpack, "DynamicTable"));
+    try std.testing.expect(@hasDecl(netz.http2.Hpack.Decoder, "decodeBlockInto"));
     try std.testing.expect(@hasDecl(netz.http2.Hpack, "encodeHuffman"));
     try std.testing.expect(@hasDecl(netz.http2.Hpack, "decodeHuffman"));
     try std.testing.expect(@hasDecl(netz.http2.Hpack, "freeDecodedFields"));
+    try std.testing.expect(@hasDecl(netz.http2.Hpack, "freeDecodedFieldStorages"));
     try std.testing.expect(@hasDecl(netz.http2.Hpack, "sensitiveHeaderName"));
     try std.testing.expect(@hasDecl(netz.http2.runtime, "FlowWindow"));
     try std.testing.expect(@hasDecl(netz.http2.runtime.FlowWindow, "available"));
