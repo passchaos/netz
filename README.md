@@ -89,7 +89,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   and handshake-backed servers expose
   `receiveRequestEvent`/`readRequestData`, while their clients expose
   per-stream `receiveResponseEvent`/`readResponseData` plus
-  `receiveNextResponseEvent` for one tquic-style poll loop over every
+  `receiveNextResponseEvent` for one tquic-style poll loop over every indexed
   outstanding response and reset. Both directions provide
   bounded-window network reads with automatic QPACK head/trailer feedback,
   interleaved-stream and reset identity preservation, Content-Length

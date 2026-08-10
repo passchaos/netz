@@ -6485,6 +6485,7 @@ fn bufferedHasResponse(
 const ClientRequestLifecycle = struct {
     allocator: std.mem.Allocator,
     outstanding: std.ArrayList(u62) = .empty,
+    outstanding_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     max_streams: usize,
 
     fn init(
@@ -6496,6 +6497,7 @@ const ClientRequestLifecycle = struct {
 
     fn deinit(self: *ClientRequestLifecycle) void {
         self.outstanding.deinit(self.allocator);
+        self.outstanding_index.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -6504,25 +6506,58 @@ const ClientRequestLifecycle = struct {
             return error.ExcessiveLoad;
         }
         if (self.contains(stream_id)) return error.UnexpectedStream;
+        try self.outstanding_index.ensureUnusedCapacity(self.allocator, 1);
+        const index = self.outstanding.items.len;
         try self.outstanding.append(self.allocator, stream_id);
+        self.outstanding_index.putAssumeCapacity(stream_id, index);
     }
 
     fn contains(self: ClientRequestLifecycle, stream_id: u62) bool {
-        for (self.outstanding.items) |existing| {
-            if (existing == stream_id) return true;
-        }
-        return false;
+        return self.outstanding_index.contains(stream_id);
     }
 
     fn finish(self: *ClientRequestLifecycle, stream_id: u62) bool {
-        for (self.outstanding.items, 0..) |existing, index| {
-            if (existing != stream_id) continue;
-            _ = self.outstanding.swapRemove(index);
-            return true;
+        const index = self.outstanding_index.get(stream_id) orelse return false;
+        const last_index = self.outstanding.items.len - 1;
+        const removed = self.outstanding.swapRemove(index);
+        _ = self.outstanding_index.remove(removed);
+        if (index != last_index) {
+            const moved = self.outstanding.items[index];
+            self.outstanding_index.getPtr(moved).?.* = index;
         }
-        return false;
+        return true;
     }
 };
+
+test "HTTP/3 client request lifecycle indexes outstanding streams" {
+    const allocator = std.testing.allocator;
+    var lifecycle = ClientRequestLifecycle.init(allocator, 3);
+    defer lifecycle.deinit();
+
+    try lifecycle.open(0);
+    try lifecycle.open(4);
+    try lifecycle.open(8);
+    try std.testing.expect(lifecycle.contains(0));
+    try std.testing.expect(lifecycle.contains(4));
+    try std.testing.expect(lifecycle.contains(8));
+    try std.testing.expectError(error.ExcessiveLoad, lifecycle.open(12));
+
+    // Removing from the middle uses swapRemove; the moved stream must keep a
+    // valid index because send/receive body paths call contains() frequently.
+    try std.testing.expect(lifecycle.finish(4));
+    try std.testing.expect(!lifecycle.contains(4));
+    try std.testing.expect(lifecycle.contains(8));
+    try std.testing.expect(lifecycle.finish(8));
+    try std.testing.expect(!lifecycle.contains(8));
+
+    try lifecycle.open(12);
+    try std.testing.expect(lifecycle.contains(12));
+    try std.testing.expect(!lifecycle.finish(4));
+    try std.testing.expect(lifecycle.finish(0));
+    try std.testing.expect(lifecycle.finish(12));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.outstanding.items.len);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.outstanding_index.count());
+}
 
 const OutboundBodySet = struct {
     const Entry = struct {
