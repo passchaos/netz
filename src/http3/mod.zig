@@ -56,6 +56,15 @@ pub const AltSvcEndpoint = struct {
     max_age: ?u64 = null,
 };
 
+/// Parse the first HTTP/3 alternative from any header list containing Alt-Svc.
+pub fn firstHttp3AltSvcHeader(headers: anytype) Error!?AltSvcEndpoint {
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "alt-svc")) continue;
+        if (try firstHttp3AltSvc(header.value)) |endpoint| return endpoint;
+    }
+    return null;
+}
+
 /// Parse the first HTTP/3 alternative from an Alt-Svc field value.
 ///
 /// This is intentionally allocation-free so clients can cheaply inspect HTTP/1
@@ -2706,6 +2715,15 @@ test "HTTP/3 parses Alt-Svc HTTP/3 advertisements" {
 
     try std.testing.expect((try firstHttp3AltSvc("clear")) == null);
     try std.testing.expect((try firstHttp3AltSvc("h2=\":443\"")) == null);
+
+    const headers = [_]Qpack.HeaderField{
+        .{ .name = "server", .value = "example" },
+        .{ .name = "Alt-Svc", .value = "h2=\":443\", h3=\":8443\"; ma=30" },
+    };
+    const from_headers = try firstHttp3AltSvcHeader(&headers) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("h3", from_headers.alpn);
+    try std.testing.expectEqual(@as(?u16, 8443), from_headers.port);
+
     try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\"\""));
     try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\":bad\""));
     try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\"example.com/evil\""));
