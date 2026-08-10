@@ -625,7 +625,7 @@ pub const Connection = struct {
     pending_requests: std.ArrayList(OwnedRequest) = .empty,
     pending_request_head: usize = 0,
     peer_origins: std.ArrayList([]u8) = .empty,
-    peer_origin_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    peer_origin_index: std.StringHashMapUnmanaged(usize) = .empty,
     alternative_services: std.ArrayList(AlternativeService) = .empty,
     alternative_service_index: std.AutoHashMapUnmanaged(AltSvcKey, usize) = .empty,
     default_authority: ?[]u8 = null,
@@ -2647,30 +2647,17 @@ pub const Connection = struct {
     }
 
     fn peerOriginKnown(self: Connection, origin: []const u8) bool {
-        const hash = originHash(origin);
-        const index = self.peer_origin_index.get(hash) orelse return false;
-        if (index >= self.peer_origins.items.len) return false;
-        if (std.mem.eql(u8, self.peer_origins.items[index], origin)) return true;
-        // Hash collisions are unlikely but must not collapse distinct origins.
-        for (self.peer_origins.items) |known| {
-            if (std.mem.eql(u8, known, origin)) return true;
-        }
-        return false;
+        return self.peer_origin_index.contains(origin);
     }
 
     fn storePeerOrigin(self: *Connection, origin: []const u8) Error!void {
         if (self.peerOriginKnown(origin)) return;
-        const hash = originHash(origin);
-        if (self.peer_origin_index.get(hash) == null) {
-            try self.peer_origin_index.ensureUnusedCapacity(self.allocator, 1);
-        }
+        try self.peer_origin_index.ensureUnusedCapacity(self.allocator, 1);
         const owned = try self.allocator.dupe(u8, origin);
         errdefer self.allocator.free(owned);
         const index = self.peer_origins.items.len;
         try self.peer_origins.append(self.allocator, owned);
-        if (self.peer_origin_index.get(hash) == null) {
-            self.peer_origin_index.putAssumeCapacity(hash, index);
-        }
+        self.peer_origin_index.putAssumeCapacityNoClobber(owned, index);
     }
 
     fn applyLocalLimits(self: *Connection) void {
@@ -3921,6 +3908,9 @@ test "HTTP/2 runtime accumulates server ORIGIN entries" {
     );
     try std.testing.expect(client.peerOriginKnown("https://cdn.example.com"));
     try std.testing.expect(client.peerOriginKnown("https://img.example.com"));
+    try std.testing.expectEqual(@as(?usize, 1), client.peer_origin_index.get("https://cdn.example.com"));
+    try std.testing.expectEqual(@as(?usize, 2), client.peer_origin_index.get("https://img.example.com"));
+    try std.testing.expect(client.peer_origin_index.get("https://missing.example.com") == null);
     _ = try client.ping([_]u8{0x41} ** 8);
 
     thread.join();
