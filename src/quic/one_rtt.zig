@@ -488,6 +488,7 @@ pub const Connection = struct {
     stream_send_flows: std.ArrayList(StreamFlowEntry) = .empty,
     last_send_stream_index: ?usize = null,
     stream_recv_flows: std.ArrayList(StreamRecvFlowEntry) = .empty,
+    last_recv_stream_index: ?usize = null,
     close_info: ?CloseInfo = null,
     send_key_phase: quic.protection.Aes128KeyPhaseState,
     receive_key_phase: quic.protection.Aes128KeyPhaseState,
@@ -4910,12 +4911,23 @@ pub const Connection = struct {
                 maxBufferedForLimit(max_buffered),
             ),
         });
+        self.last_recv_stream_index = self.stream_recv_flows.items.len - 1;
         return &self.stream_recv_flows.items[self.stream_recv_flows.items.len - 1];
     }
 
     fn findRecvStreamEntry(self: *Connection, stream_id: u64) ?*StreamRecvFlowEntry {
-        for (self.stream_recv_flows.items) |*entry| {
-            if (entry.stream_id == stream_id) return entry;
+        if (self.last_recv_stream_index) |index| {
+            if (index < self.stream_recv_flows.items.len and
+                self.stream_recv_flows.items[index].stream_id == stream_id)
+            {
+                return &self.stream_recv_flows.items[index];
+            }
+        }
+        for (self.stream_recv_flows.items, 0..) |*entry, index| {
+            if (entry.stream_id == stream_id) {
+                self.last_recv_stream_index = index;
+                return entry;
+            }
         }
         return null;
     }
