@@ -408,6 +408,21 @@ pub const LossDetectionTimerDeadline = struct {
     deadline_ns: u64,
 };
 
+pub const TimerDeadlineKind = enum {
+    loss_time,
+    pto,
+    path_validation,
+    keep_alive,
+    idle_timeout,
+    close,
+    key_discard,
+};
+
+pub const TimerDeadline = struct {
+    kind: TimerDeadlineKind,
+    deadline_ns: u64,
+};
+
 pub const anti_amplification_multiplier: usize = 3;
 const max_short_packet_overhead: usize = 1 + 20 + 4 + quic.protection.aead_tag_len;
 
@@ -1381,6 +1396,65 @@ pub const Connection = struct {
         const deadline = self.keepAliveDeadlineMillis() orelse return false;
         if (now_ms < deadline) return false;
         return try self.sendKeepAliveAt(now_ms);
+    }
+
+    /// Earliest connection timer for socket/event-loop integration.
+    ///
+    /// Mature QUIC loops arm one kernel timer for the next item of transport
+    /// work instead of polling loss detection, idle timeout, keep-alive,
+    /// path-validation, close, and key-discard timers independently.  This
+    /// selector is read-only: callers still dispatch the typed helper matching
+    /// `kind` when the deadline becomes due.
+    pub fn nextTimerDeadline(self: Connection) ?TimerDeadline {
+        var next: ?TimerDeadline = null;
+        if (self.lossDetectionTimerDeadline()) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = switch (deadline.kind) {
+                    .loss_time => .loss_time,
+                    .pto => .pto,
+                },
+                .deadline_ns = deadline.deadline_ns,
+            });
+        }
+        if (self.pathValidationDeadline()) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .path_validation,
+                .deadline_ns = deadline,
+            });
+        }
+        if (self.keepAliveDeadlineMillis()) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .keep_alive,
+                .deadline_ns = millisToNanos(deadline),
+            });
+        }
+        if (self.idleTimeoutDeadlineMillis()) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .idle_timeout,
+                .deadline_ns = millisToNanos(deadline),
+            });
+        }
+        if (self.closeExpiryDeadlineMillis()) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .close,
+                .deadline_ns = millisToNanos(deadline),
+            });
+        }
+        if (self.oneRttKeyDiscardDeadline()) |deadline| {
+            if (deadline >= 0) {
+                considerTimerDeadline(&next, .{
+                    .kind = .key_discard,
+                    .deadline_ns = std.math.cast(u64, deadline) orelse
+                        std.math.maxInt(u64),
+                });
+            } else {
+                considerTimerDeadline(&next, .{
+                    .kind = .key_discard,
+                    .deadline_ns = 0,
+                });
+            }
+        }
+        return next;
     }
 
     pub fn congestionAlgorithm(self: Connection) quic.congestion.Algorithm {
@@ -4447,6 +4521,12 @@ fn nanosToMillisCeil(ns: u64) u64 {
 
 fn millisToNanos(ms: u64) u64 {
     return std.math.mul(u64, ms, 1_000_000) catch std.math.maxInt(u64);
+}
+
+fn considerTimerDeadline(next: *?TimerDeadline, candidate: TimerDeadline) void {
+    if (next.* == null or candidate.deadline_ns < next.*.?.deadline_ns) {
+        next.* = candidate;
+    }
 }
 
 fn qlogAckDelayExponent(exponent: u64) u6 {

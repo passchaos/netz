@@ -1625,6 +1625,77 @@ test "QUIC 1-RTT keep-alive waits for handshake confirmation" {
     try std.testing.expect(!try client.serviceKeepAliveAt(1_000));
 }
 
+test "QUIC 1-RTT next timer deadline selects earliest work" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const server_cid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xb9} ** quic.protection.secret_len);
+
+    var connection = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .local_max_idle_timeout_ms = 1000,
+        .keep_alive_period_ms = 900,
+        .tls_handshake_complete = true,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    connection.markPeerActivity(0);
+    try connection.sendAt(&.{.{ .ping = {} }}, 100_000_000);
+    const pto = connection.nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.pto, pto.kind);
+    try std.testing.expectEqual(@as(u64, 300_000_000), pto.deadline_ns);
+
+    try connection.queuePathChallenge([_]u8{1} ** 8);
+    try connection.sendPendingPathChallengeAt(10, 20);
+    const path = connection.nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.path_validation, path.kind);
+    try std.testing.expectEqual(@as(u64, 30), path.deadline_ns);
+}
+
+test "QUIC 1-RTT next timer deadline includes key discard" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xba} ** quic.protection.secret_len);
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "deadline-local",
+        .peer_connection_id = "deadline-peer",
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.initiateKeyUpdate();
+    connection.schedulePreviousOneRttKeyDiscard(7);
+    const deadline = connection.nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.key_discard, deadline.kind);
+    try std.testing.expectEqual(@as(u64, 7), deadline.deadline_ns);
+}
+
 test "QUIC 1-RTT connection selects and exposes CUBIC congestion control" {
     const allocator = std.testing.allocator;
 
