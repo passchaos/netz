@@ -573,6 +573,7 @@ pub const Connection = struct {
     local_goaway_last_stream_id: ?u31 = null,
     pending_requests: std.ArrayList(OwnedRequest) = .empty,
     pending_request_head: usize = 0,
+    peer_origins: std.ArrayList([]u8) = .empty,
     default_authority: ?[]u8 = null,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
     /// runtime constructors set this to "http"; a future ALPN/TLS constructor
@@ -588,6 +589,10 @@ pub const Connection = struct {
         self.response_semantics.deinit(self.allocator);
         for (self.pending_requests.items[self.pending_request_head..]) |*pending| pending.deinit(self.allocator);
         self.pending_requests.deinit(self.allocator);
+        for (self.peer_origins.items) |origin| {
+            self.allocator.free(origin);
+        }
+        self.peer_origins.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.stream.close(self.io);
@@ -634,6 +639,10 @@ pub const Connection = struct {
         if (request_options.body.len != 0) try self.writeData(stream_id, request_options.body, request_options.trailers.len == 0);
         if (request_options.trailers.len != 0) try self.writeHeaders(stream_id, request_options.trailers, true);
         return self.readResponse(stream_id, request_options.method, extended_connect);
+    }
+
+    pub fn peerOrigins(self: Connection) []const []u8 {
+        return self.peer_origins.items;
     }
 
     pub fn openExtendedConnect(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
@@ -1047,6 +1056,21 @@ pub const Connection = struct {
         try http2.GoAwayPayload.write(&encoded, self.allocator, last_stream_id, error_code, debug_data);
         try writeAll(self.io, self.stream, encoded.items);
         self.local_goaway_last_stream_id = last_stream_id;
+    }
+
+    pub fn sendOrigins(
+        self: *Connection,
+        origins: []const []const u8,
+    ) Error!void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try http2.OriginPayload.write(
+            &encoded,
+            self.allocator,
+            origins,
+        );
+        try writeAll(self.io, self.stream, encoded.items);
     }
 
     fn validateLocalGoAway(self: Connection, last_stream_id: u31) Error!void {
@@ -1547,6 +1571,32 @@ pub const Connection = struct {
                 // checked stream id and payload length; parse it here so
                 // malformed priority payloads still fail before being ignored.
                 _ = try http2.PriorityPayload.parse(frame);
+                return true;
+            },
+            .origin => {
+                // ORIGIN is server-to-client only. RFC 8336 requires clients
+                // to ignore it when sent on a non-zero stream or with an
+                // incompatible reserved flag; envelope validation therefore
+                // leaves those cases available for this semantic decision.
+                if (self.role != .client or
+                    frame.header.stream_id != 0 or
+                    (frame.header.flags & 0x0f) != 0)
+                {
+                    return true;
+                }
+                var origin = try http2.OriginPayload.parse(
+                    self.allocator,
+                    frame,
+                );
+                defer origin.deinit(self.allocator);
+                for (origin.origins) |value| {
+                    if (containsOrigin(self.peer_origins.items, value)) {
+                        continue;
+                    }
+                    const owned = try self.allocator.dupe(u8, value);
+                    errdefer self.allocator.free(owned);
+                    try self.peer_origins.append(self.allocator, owned);
+                }
                 return true;
             },
             else => return false,
@@ -2082,6 +2132,7 @@ fn validateFrameEnvelope(frame: http2.Frame) Error!void {
         .goaway => {
             if (stream_id != 0 or frame.payload.len < 8) return error.InvalidFrame;
         },
+        .origin => {},
         .window_update => {
             if (frame.payload.len != 4) return error.InvalidFrame;
             const increment = std.mem.readInt(u32, frame.payload[0..4], .big) & 0x7fff_ffff;
@@ -2090,6 +2141,13 @@ fn validateFrameEnvelope(frame: http2.Frame) Error!void {
         .push_promise => if (stream_id == 0) return error.InvalidFrame,
         _ => {},
     }
+}
+
+fn containsOrigin(origins: []const []u8, wanted: []const u8) bool {
+    for (origins) |origin| {
+        if (std.mem.eql(u8, origin, wanted)) return true;
+    }
+    return false;
 }
 
 fn clientInitiatedStreamId(stream_id: u31) bool {
@@ -2807,6 +2865,136 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
         if (n == 0) return error.SocketUnconnected;
         written += n;
     }
+}
+
+test "HTTP/2 runtime accumulates server ORIGIN entries" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            connection.sendOrigins(&.{
+                "https://example.com",
+                "https://cdn.example.com",
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            // Duplicate entries are legal; clients maintain set semantics.
+            connection.sendOrigins(&.{
+                "https://cdn.example.com",
+                "https://img.example.com",
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            const ping = connection.readPing() catch |err| {
+                shared.err = err;
+                return;
+            };
+            _ = ping;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096 },
+    );
+    defer client.close();
+    // Any connection-level read pumps ORIGIN through shared state. Two reads
+    // consume the two frames without requiring a synthetic request stream.
+    var first = try readFrame(allocator, io, client.stream, client.limits);
+    defer first.deinit(allocator);
+    try std.testing.expect(try client.handleConnectionFrame(first.frame));
+    var second = try readFrame(allocator, io, client.stream, client.limits);
+    defer second.deinit(allocator);
+    try std.testing.expect(try client.handleConnectionFrame(second.frame));
+    try std.testing.expectEqual(@as(usize, 3), client.peerOrigins().len);
+    try std.testing.expectEqualStrings(
+        "https://img.example.com",
+        client.peerOrigins()[2],
+    );
+    _ = try client.ping([_]u8{0x41} ** 8);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 runtime ignores invalid ORIGIN envelope and client origin" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        for (connection.peer_origins.items) |origin| allocator.free(origin);
+        connection.peer_origins.deinit(allocator);
+    }
+    const payload = [_]u8{ 0, 1, 'x' };
+    // Non-zero stream and incompatible flags are ignored per RFC 8336.
+    try std.testing.expect(try connection.handleConnectionFrame(.{
+        .header = .{
+            .length = payload.len,
+            .frame_type = .origin,
+            .flags = 0,
+            .stream_id = 1,
+        },
+        .payload = &payload,
+    }));
+    try std.testing.expect(try connection.handleConnectionFrame(.{
+        .header = .{
+            .length = payload.len,
+            .frame_type = .origin,
+            .flags = 1,
+            .stream_id = 0,
+        },
+        .payload = &payload,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), connection.peerOrigins().len);
+
+    var server_connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer server_connection.peer_origins.deinit(allocator);
+    try std.testing.expect(try server_connection.handleConnectionFrame(.{
+        .header = .{
+            .length = payload.len,
+            .frame_type = .origin,
+            .flags = 0,
+            .stream_id = 0,
+        },
+        .payload = &payload,
+    }));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server_connection.peerOrigins().len,
+    );
 }
 
 test "HTTP/2 h2c runtime client and server exchange over TCP" {

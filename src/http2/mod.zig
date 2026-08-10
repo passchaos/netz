@@ -27,6 +27,7 @@ pub const FrameType = enum(u8) {
     goaway = 0x7,
     window_update = 0x8,
     continuation = 0x9,
+    origin = 0x0c,
     _,
 };
 
@@ -269,6 +270,82 @@ pub const PushPromisePayload = struct {
         }).write(list, allocator);
     }
 };
+
+pub const OriginPayload = struct {
+    origins: []const []const u8,
+
+    pub fn parse(
+        allocator: std.mem.Allocator,
+        frame: Frame,
+    ) Error!OriginPayload {
+        if (frame.header.frame_type != .origin) {
+            return error.InvalidFrameSize;
+        }
+        if (frame.header.stream_id != 0) return error.InvalidStreamId;
+        var cursor = wire.Cursor.init(frame.payload);
+        var origins: std.ArrayList([]const u8) = .empty;
+        errdefer origins.deinit(allocator);
+        while (!cursor.eof()) {
+            const len = try cursor.readInt(u16, .big);
+            const origin = cursor.readSlice(len) catch
+                return error.InvalidFrameSize;
+            if (origin.len == 0 or !validOriginAscii(origin)) {
+                return error.InvalidFrameSize;
+            }
+            try origins.append(allocator, origin);
+        }
+        return .{ .origins = try origins.toOwnedSlice(allocator) };
+    }
+
+    pub fn deinit(self: *OriginPayload, allocator: std.mem.Allocator) void {
+        allocator.free(self.origins);
+        self.* = undefined;
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        origins: []const []const u8,
+    ) Error!void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        for (origins) |origin| {
+            if (origin.len == 0 or
+                origin.len > std.math.maxInt(u16) or
+                !validOriginAscii(origin))
+            {
+                return error.InvalidFrameSize;
+            }
+            try wire.appendInt(
+                &payload,
+                allocator,
+                u16,
+                @intCast(origin.len),
+                .big,
+            );
+            try payload.appendSlice(allocator, origin);
+        }
+        try (Frame{
+            .header = .{
+                .length = 0,
+                .frame_type = .origin,
+                .flags = 0,
+                .stream_id = 0,
+            },
+            .payload = payload.items,
+        }).write(list, allocator);
+    }
+};
+
+fn validOriginAscii(origin: []const u8) bool {
+    for (origin) |byte| {
+        // RFC 8336 carries the ASCII serialization of an origin. Reject
+        // controls, whitespace, and non-ASCII bytes at the frame boundary;
+        // URI scheme/host/port validation remains an origin-layer concern.
+        if (byte < 0x21 or byte > 0x7e) return false;
+    }
+    return true;
+}
 
 pub const DataPayload = struct {
     data: []const u8,
@@ -1187,6 +1264,52 @@ test "HTTP/2 PUSH_PROMISE payload helper" {
         .header = .{ .length = 2, .frame_type = .push_promise, .flags = 0, .stream_id = 1 },
         .payload = &.{ 0, 0 },
     }));
+}
+
+test "HTTP/2 ORIGIN frame round trips and validates ASCII entries" {
+    const allocator = std.testing.allocator;
+    const expected = [_][]const u8{
+        "https://example.com",
+        "https://cdn.example.com:8443",
+    };
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try OriginPayload.write(&encoded, allocator, &expected);
+    const frame = try Frame.parse(encoded.items);
+    try std.testing.expectEqual(FrameType.origin, frame.header.frame_type);
+    try std.testing.expectEqual(@as(u31, 0), frame.header.stream_id);
+    var parsed = try OriginPayload.parse(allocator, frame);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), parsed.origins.len);
+    try std.testing.expectEqualStrings(expected[0], parsed.origins[0]);
+    try std.testing.expectEqualStrings(expected[1], parsed.origins[1]);
+
+    var empty: std.ArrayList(u8) = .empty;
+    defer empty.deinit(allocator);
+    try OriginPayload.write(&empty, allocator, &.{});
+    var empty_parsed = try OriginPayload.parse(
+        allocator,
+        try Frame.parse(empty.items),
+    );
+    defer empty_parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), empty_parsed.origins.len);
+
+    try std.testing.expectError(
+        error.InvalidFrameSize,
+        OriginPayload.write(&encoded, allocator, &.{"https://bad host"}),
+    );
+    try std.testing.expectError(
+        error.InvalidFrameSize,
+        OriginPayload.parse(allocator, .{
+            .header = .{
+                .length = 3,
+                .frame_type = .origin,
+                .flags = 0,
+                .stream_id = 0,
+            },
+            .payload = &.{ 0, 2, 'x' },
+        }),
+    );
 }
 
 test "HTTP/2 SETTINGS validates RFC value bounds" {
