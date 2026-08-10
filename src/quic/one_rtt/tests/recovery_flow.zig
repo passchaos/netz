@@ -639,6 +639,12 @@ test "QUIC 1-RTT connection emits DATA_BLOCKED and applies MAX_DATA" {
     var blocked = try server.receivePacket();
     defer blocked.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 5), blocked.frames[0].data_blocked.maximum_data);
+    const blocked_stats = client.stats();
+    try std.testing.expectError(error.FlowControlBlocked, client.send(&too_much));
+    // DATA_BLOCKED is advisory. Repeating it at the same unchanged limit would
+    // amplify an application retry loop into network traffic, so the sender
+    // suppresses duplicates until MAX_DATA advances the limit.
+    try std.testing.expectEqual(blocked_stats.packets_sent, client.stats().packets_sent);
 
     const grant = [_]quic.Frame{.{ .max_data = .{ .maximum_data = 10 } }};
     try server.send(&grant);
@@ -696,6 +702,9 @@ test "QUIC 1-RTT connection handles stream-level flow control" {
     defer blocked.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 0), blocked.frames[0].stream_data_blocked.stream_id);
     try std.testing.expectEqual(@as(u64, 3), blocked.frames[0].stream_data_blocked.maximum_stream_data);
+    const blocked_stats = client.stats();
+    try std.testing.expectError(error.FlowControlBlocked, client.send(&too_much));
+    try std.testing.expectEqual(blocked_stats.packets_sent, client.stats().packets_sent);
 
     const grant = [_]quic.Frame{.{ .max_stream_data = .{ .stream_id = 0, .maximum_stream_data = 8 } }};
     try server.send(&grant);

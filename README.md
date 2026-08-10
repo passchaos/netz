@@ -148,7 +148,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   transport-parameter negotiation and opt-in 1-RTT state updates for requested
   ACK threshold/max-delay/reordering behavior,
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
-  1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling,
+  1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling
+  with one advisory BLOCKED emission per unchanged limit to avoid retry-loop
+  packet storms,
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling,
   protected 0-RTT long-header packet seal/open and frame datagram helpers with
   0-RTT packet-type restrictions, an owning origin+ALPN session cache with

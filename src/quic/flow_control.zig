@@ -10,6 +10,7 @@ pub const Error = error{
 pub const SendFlow = struct {
     limit: u64,
     used: u64 = 0,
+    blocked_at: ?u64 = null,
 
     pub fn init(limit: u64) SendFlow {
         return .{ .limit = @min(limit, quic.varint.max_value) };
@@ -25,7 +26,22 @@ pub const SendFlow = struct {
     }
 
     pub fn updateLimit(self: *SendFlow, new_limit: u64) void {
-        self.limit = @max(self.limit, @min(new_limit, quic.varint.max_value));
+        const capped = @min(new_limit, quic.varint.max_value);
+        if (capped <= self.limit) return;
+        self.limit = capped;
+        // BLOCKED frames are advisory but useful to unstick peers. Re-arm the
+        // signal only when the advertised limit changes so repeated writes at
+        // one exhausted limit cannot create a packet storm.
+        self.blocked_at = null;
+    }
+
+    pub fn shouldSendBlocked(self: SendFlow) bool {
+        if (self.blocked_at) |blocked_at| return blocked_at != self.limit;
+        return true;
+    }
+
+    pub fn markBlockedSent(self: *SendFlow) void {
+        self.blocked_at = self.limit;
     }
 
     pub fn dataBlockedFrame(self: SendFlow) quic.Frame {
@@ -93,9 +109,15 @@ test "QUIC send flow reserves bytes and reports blocked" {
     try flow.reserve(7);
     try std.testing.expectEqual(@as(u64, 3), flow.available());
     try std.testing.expectError(error.FlowControlBlocked, flow.reserve(4));
+    try std.testing.expect(flow.shouldSendBlocked());
     const blocked = flow.dataBlockedFrame();
     try std.testing.expectEqual(@as(u64, 10), blocked.data_blocked.maximum_data);
+    flow.markBlockedSent();
+    try std.testing.expect(!flow.shouldSendBlocked());
+    flow.updateLimit(10);
+    try std.testing.expect(!flow.shouldSendBlocked());
     flow.updateLimit(20);
+    try std.testing.expect(flow.shouldSendBlocked());
     try flow.reserve(4);
     try std.testing.expectEqual(@as(u64, 9), flow.available());
 

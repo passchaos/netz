@@ -868,7 +868,7 @@ pub const Connection = struct {
                 }
                 break;
             }
-            var blocked_stream: ?struct { id: u64, limit: u64 } = null;
+            var blocked_stream_id: ?u64 = null;
             for (packet_streams.items) |credit| {
                 const planned = reservedStreamBytes(
                     planned_streams.items,
@@ -881,19 +881,13 @@ pub const Connection = struct {
                 else
                     self.initialSendStreamDataLimit(credit.stream_id);
                 if (credit.bytes > available - @min(available, planned)) {
-                    blocked_stream = .{
-                        .id = credit.stream_id,
-                        .limit = available,
-                    };
+                    blocked_stream_id = credit.stream_id;
                     break;
                 }
             }
-            if (blocked_stream) |blocked| {
+            if (blocked_stream_id) |stream_id| {
                 if (count == 0) {
-                    try self.sendStreamDataBlocked(
-                        blocked.id,
-                        blocked.limit,
-                    );
+                    try self.sendStreamDataBlocked(stream_id);
                     return error.FlowControlBlocked;
                 }
                 break;
@@ -1210,7 +1204,7 @@ pub const Connection = struct {
                 self.initialSendStreamDataLimit(frame.stream.stream_id);
             if (frame.stream.data.len > available) {
                 self.send_frame_buffer.items.len = 0;
-                try self.sendStreamDataBlocked(frame.stream.stream_id, available);
+                try self.sendStreamDataBlocked(frame.stream.stream_id);
                 return error.FlowControlBlocked;
             }
         }
@@ -1580,13 +1574,18 @@ pub const Connection = struct {
     }
 
     fn sendDataBlocked(self: *Connection) Error!void {
+        if (!self.send_flow.shouldSendBlocked()) return;
         const frames = [_]quic.Frame{self.send_flow.dataBlockedFrame()};
         try self.sendTrackedFrames(&frames);
+        self.send_flow.markBlockedSent();
     }
 
-    fn sendStreamDataBlocked(self: *Connection, stream_id: u64, limit: u64) Error!void {
-        const frames = [_]quic.Frame{.{ .stream_data_blocked = .{ .stream_id = stream_id, .maximum_stream_data = limit } }};
+    fn sendStreamDataBlocked(self: *Connection, stream_id: u64) Error!void {
+        const entry = try self.sendStreamEntry(stream_id);
+        if (!entry.flow.shouldSendBlocked()) return;
+        const frames = [_]quic.Frame{entry.flow.streamDataBlockedFrame(stream_id)};
         try self.sendTrackedFrames(&frames);
+        entry.flow.markBlockedSent();
     }
 
     fn sendTrackedFrames(self: *Connection, frames: []const quic.Frame) Error!void {
