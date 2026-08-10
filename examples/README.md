@@ -16,6 +16,7 @@ Run individual examples:
 ```sh
 zig build run-http1-hello
 zig build run-http2-h2c
+zig build run-http3-handshake
 zig build run-websocket-echo
 # Linux only: raw std.os.linux.IoUring connect/send/recv around HTTP/1 bytes
 zig build run-linux-io-uring-http1
@@ -24,6 +25,11 @@ zig build run-linux-io-uring-http1
 The URI helpers derive Host / `:authority` / `:scheme` from the URI. Host names,
 IPv4 literals, and bracketed IPv6 literals such as `http://[::1]:8080/` are
 supported by the HTTP/1, HTTP/2 h2c, and WebSocket client examples.
+
+`run-http3-handshake` is the protected-loopback counterpart to the public
+HTTP/3 fetcher: it starts a local QUIC/H3 server, performs a full client
+handshake, exchanges one POST/200 response, and exits without relying on
+external network access.
 
 ## I/O backend note
 

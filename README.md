@@ -379,6 +379,7 @@ Runnable examples are under `examples/` and are wired into the build:
 zig build examples
 zig build run-http1-hello
 zig build run-http2-h2c
+zig build run-http3-handshake
 zig build run-websocket-echo
 zig build run-http3-fetch
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify
@@ -390,6 +391,10 @@ zig build run-linux-io-uring-http1
 zig build run-linux-io-uring-http1-server
 zig build run-linux-io-uring-websocket
 ```
+
+`run-http3-handshake` is the self-contained local HTTP/3 counterpart to the
+public fetch tool: it binds a QUIC/H3 server on loopback, performs a protected
+client handshake, exchanges one request/response, and exits.
 
 Native microbenchmarks are also wired into the build.  Prefer `ReleaseFast`
 when collecting performance evidence:

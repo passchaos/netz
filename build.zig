@@ -66,6 +66,12 @@ pub fn build(b: *std.Build) void {
             .description = "Run the HTTP/2 h2c local client/server example",
         },
         .{
+            .exe_name = "netz-http3-handshake",
+            .path = "examples/http3_handshake.zig",
+            .run_step = "run-http3-handshake",
+            .description = "Run the local HTTP/3 client/server handshake example",
+        },
+        .{
             .exe_name = "netz-websocket-echo",
             .path = "examples/websocket_echo.zig",
             .run_step = "run-websocket-echo",
