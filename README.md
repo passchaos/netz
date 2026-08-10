@@ -277,8 +277,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   escaping, caller-visible sink failures, allocation-free event views, complete
   ACK-range/ECN and packet-frame emission without fixed-size truncation, plus
   optional 1-RTT connection observers that automatically emit successful
-  packet send/receive, packet-loss, recovery metrics, key-update, and close
-  events with sticky,
+  connection-start, packet send/receive, packet-loss, recovery metrics,
+  key-update, and close events with sticky,
   caller-queryable diagnostics that never roll back network state, plus a
   no-allocation 1-RTT `stats`/`getStats` snapshot with lifetime packet/byte,
   loss, stream, DATAGRAM, RTT, congestion, recovery, ECN, authentication, and

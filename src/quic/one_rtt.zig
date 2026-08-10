@@ -595,6 +595,7 @@ pub const Connection = struct {
                 .server => .server,
             });
         }
+        connection.observeConnectionStarted(null);
         return connection;
     }
 
@@ -4487,6 +4488,16 @@ pub const Connection = struct {
             observer.packetLost(event_time, packet.packet_number, trigger);
             packet.loss_reported = true;
         }
+    }
+
+    fn observeConnectionStarted(self: *Connection, now_ns: ?u64) void {
+        const observer = self.config.qlog_observer orelse return;
+        observer.connectionStarted(
+            // init() has no caller-provided timestamp. Use the trace reference
+            // point rather than wall-clock time so deterministic tests and
+            // embedders can still inject smaller packet timestamps later.
+            self.qlogEventTime(now_ns orelse 0),
+        );
     }
 
     fn observeConnectionClosed(

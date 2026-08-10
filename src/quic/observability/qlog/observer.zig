@@ -36,6 +36,13 @@ pub const Observer = struct {
         return failure;
     }
 
+    pub fn connectionStarted(self: *Observer, now_ns: u64) void {
+        if (self.failure != null) return;
+        self.trace.writeEvent(now_ns, .{ .connection_started = .{} }) catch |err| {
+            self.failure = err;
+        };
+    }
+
     pub fn packetSent(
         self: *Observer,
         now_ns: u64,
