@@ -1147,10 +1147,7 @@ pub const Connection = struct {
         if (self.pending_request_head >= self.pending_requests.items.len) return null;
         const pending = self.pending_requests.items[self.pending_request_head];
         self.pending_request_head += 1;
-        if (self.pending_request_head == self.pending_requests.items.len) {
-            self.pending_requests.clearRetainingCapacity();
-            self.pending_request_head = 0;
-        }
+        self.compactPendingRequestsIfSparse();
         return pending;
     }
 
@@ -1176,8 +1173,39 @@ pub const Connection = struct {
             var owned = queued_request;
             owned.deinit(self.allocator);
         }
+        if (self.pending_request_head != 0 and
+            self.pending_requests.items.len == self.pending_requests.capacity)
+        {
+            self.compactPendingRequests();
+        }
         try self.pending_requests.append(self.allocator, queued_request);
         return true;
+    }
+
+    fn pendingRequestCount(self: *const Connection) usize {
+        return self.pending_requests.items.len - self.pending_request_head;
+    }
+
+    fn compactPendingRequestsIfSparse(self: *Connection) void {
+        if (self.pending_request_head == 0) return;
+        if (self.pending_request_head == self.pending_requests.items.len or
+            self.pending_request_head >= self.pending_requests.items.len / 2)
+        {
+            self.compactPendingRequests();
+        }
+    }
+
+    fn compactPendingRequests(self: *Connection) void {
+        if (self.pending_request_head == 0) return;
+        const remaining = self.pendingRequestCount();
+        if (remaining != 0) {
+            @memmove(
+                self.pending_requests.items[0..remaining],
+                self.pending_requests.items[self.pending_request_head..],
+            );
+        }
+        self.pending_requests.items.len = remaining;
+        self.pending_request_head = 0;
     }
 
     fn requestFromHeadersAndBody(
@@ -6638,6 +6666,100 @@ test "HTTP/2 runtime exchanges request and response trailers" {
     try std.testing.expectEqual(@as(usize, 1), response.trailers.len);
     try std.testing.expectEqualStrings("grpc-status", response.trailers[0].name);
     try std.testing.expectEqualStrings("0", response.trailers[0].value);
+}
+
+test "HTTP/2 pending request queue reuses consumed slots" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.recv_stream_windows.deinit(allocator);
+        connection.recv_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.push_state.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.response_semantics.deinit(allocator);
+        connection.response_semantics_index.deinit(allocator);
+        for (connection.pending_requests.items[connection.pending_request_head..]) |*pending| {
+            pending.deinit(allocator);
+        }
+        connection.pending_requests.deinit(allocator);
+        connection.peer_origins.deinit(allocator);
+        connection.peer_origin_index.deinit(allocator);
+        connection.alternative_services.deinit(allocator);
+        connection.alternative_service_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    try connection.pending_requests.ensureTotalCapacityPrecise(allocator, 4);
+    try queueTestPendingRequest(&connection, 1, "/one", allocator);
+    try queueTestPendingRequest(&connection, 3, "/three", allocator);
+    try queueTestPendingRequest(&connection, 5, "/five", allocator);
+    try queueTestPendingRequest(&connection, 7, "/seven", allocator);
+
+    var first = connection.popPendingRequest() orelse
+        return error.TestUnexpectedResult;
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 1), first.stream_id);
+    try std.testing.expectEqual(@as(usize, 3), connection.pendingRequestCount());
+    try std.testing.expectEqual(@as(usize, 1), connection.pending_request_head);
+
+    // The queue is logically non-empty and physically full with one consumed
+    // head element. A new interleaved complete request should compact and reuse
+    // that slot rather than allocate during a burst of peer request completions.
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try queueTestPendingRequest(&connection, 9, "/nine", no_alloc.allocator());
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 4), connection.pendingRequestCount());
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_request_head);
+
+    for ([_]u31{ 3, 5, 7, 9 }) |expected_stream_id| {
+        var pending = connection.popPendingRequest() orelse
+            return error.TestUnexpectedResult;
+        defer pending.deinit(allocator);
+        try std.testing.expectEqual(expected_stream_id, pending.stream_id);
+    }
+    try std.testing.expect(connection.popPendingRequest() == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_requests.items.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_request_head);
+}
+
+fn queueTestPendingRequest(
+    connection: *Connection,
+    stream_id: u31,
+    path: []const u8,
+    queue_allocator: std.mem.Allocator,
+) !void {
+    const headers = try connection.allocator.alloc(http2.Hpack.HeaderField, 4);
+    errdefer connection.allocator.free(headers);
+    headers[0] = .{ .name = try connection.allocator.dupe(u8, ":method"), .value = try connection.allocator.dupe(u8, "GET") };
+    headers[1] = .{ .name = try connection.allocator.dupe(u8, ":path"), .value = try connection.allocator.dupe(u8, path) };
+    headers[2] = .{ .name = try connection.allocator.dupe(u8, ":scheme"), .value = try connection.allocator.dupe(u8, "https") };
+    headers[3] = .{ .name = try connection.allocator.dupe(u8, ":authority"), .value = try connection.allocator.dupe(u8, "localhost") };
+    errdefer freeHeaders(connection.allocator, headers);
+
+    const body = try connection.allocator.alloc(u8, 0);
+    errdefer connection.allocator.free(body);
+    var request = try connection.requestFromHeadersAndBody(stream_id, headers, body, &.{});
+    errdefer request.deinit(connection.allocator);
+
+    if (connection.pending_request_head != 0 and
+        connection.pending_requests.items.len == connection.pending_requests.capacity)
+    {
+        connection.compactPendingRequests();
+    }
+    try connection.pending_requests.append(queue_allocator, request);
+    request = undefined;
 }
 
 test "HTTP/2 readRequest queues complete interleaved peer request" {
