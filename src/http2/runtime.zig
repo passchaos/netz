@@ -2,6 +2,7 @@ const std = @import("std");
 const http2 = @import("mod.zig");
 const http1 = @import("../http1/mod.zig");
 const http1_runtime = http1.runtime;
+const push = @import("runtime/push.zig");
 
 const net = std.Io.net;
 
@@ -549,23 +550,7 @@ const StreamWindowEntry = struct {
     window: FlowWindow = .{},
 };
 
-pub const PromisedRequest = struct {
-    parent_stream_id: u31,
-    promised_stream_id: u31,
-    headers: []http2.Hpack.HeaderField,
-
-    pub fn deinit(
-        self: *PromisedRequest,
-        allocator: std.mem.Allocator,
-    ) void {
-        freeHeaders(allocator, self.headers);
-        self.* = undefined;
-    }
-};
-
-const PendingPush = struct {
-    request: PromisedRequest,
-};
+pub const PromisedRequest = push.PromisedRequest;
 
 pub const AlternativeService = struct {
     stream_id: u31,
@@ -592,9 +577,7 @@ pub const Connection = struct {
     recv_stream_windows: std.ArrayList(StreamWindowEntry) = .empty,
     active_local_streams: std.ArrayList(u31) = .empty,
     active_peer_streams: std.ArrayList(u31) = .empty,
-    pending_pushes: std.ArrayList(PendingPush) = .empty,
-    next_server_push_stream_id: u31 = 2,
-    last_promised_stream_id: ?u31 = null,
+    push_state: push.State = .{},
     response_semantics: std.ArrayList(StreamResponseSemantics) = .empty,
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
@@ -624,10 +607,7 @@ pub const Connection = struct {
         self.recv_stream_windows.deinit(self.allocator);
         self.active_local_streams.deinit(self.allocator);
         self.active_peer_streams.deinit(self.allocator);
-        for (self.pending_pushes.items) |*push| {
-            push.request.deinit(self.allocator);
-        }
-        self.pending_pushes.deinit(self.allocator);
+        self.push_state.deinit(self.allocator);
         self.response_semantics.deinit(self.allocator);
         for (self.pending_requests.items[self.pending_request_head..]) |*pending| pending.deinit(self.allocator);
         self.pending_requests.deinit(self.allocator);
@@ -690,8 +670,7 @@ pub const Connection = struct {
     pub fn takePromisedRequest(
         self: *Connection,
     ) ?PromisedRequest {
-        if (self.pending_pushes.items.len == 0) return null;
-        return self.pending_pushes.orderedRemove(0).request;
+        return self.push_state.take();
     }
 
     pub fn readPushedResponse(
@@ -699,6 +678,15 @@ pub const Connection = struct {
         promise: PromisedRequest,
     ) Error!OwnedResponse {
         if (self.role != .client) return error.UnexpectedFrame;
+        if (self.limits.max_concurrent_streams) |limit| {
+            if (self.active_peer_streams.items.len >= limit) {
+                return error.FlowControlViolation;
+            }
+        }
+        try self.active_peer_streams.append(
+            self.allocator,
+            promise.promised_stream_id,
+        );
         defer self.releasePeerStream(promise.promised_stream_id);
         return self.readResponseOnPeerStream(
             promise.promised_stream_id,
@@ -1044,15 +1032,8 @@ pub const Connection = struct {
             return error.InvalidStreamId;
         }
         try validateHeaderBlock(request_headers, .request);
-        const promised_stream_id = self.next_server_push_stream_id;
-        if (promised_stream_id > std.math.maxInt(u31) - 2) {
-            return error.InvalidStreamId;
-        }
-        if (self.peer_max_concurrent_streams) |limit| {
-            if (self.active_local_streams.items.len >= limit) {
-                return error.FlowControlBlocked;
-            }
-        }
+        const promised_stream_id =
+            try self.push_state.nextLocalStreamId();
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
         try self.hpack_encoder.encodeBlock(
@@ -1071,12 +1052,7 @@ pub const Connection = struct {
             .{},
         );
         try writeAll(self.io, self.stream, encoded.items);
-        try self.active_local_streams.append(
-            self.allocator,
-            promised_stream_id,
-        );
-        self.next_server_push_stream_id += 2;
-        errdefer self.releaseLocalStream(promised_stream_id);
+        self.push_state.commitLocalStream();
         try self.rememberResponseSemantics(
             promised_stream_id,
             findHeader(request_headers, ":method") orelse "GET",
@@ -1092,9 +1068,20 @@ pub const Connection = struct {
     ) Error!void {
         if (self.role != .server or
             clientInitiatedStreamId(promised_stream_id) or
-            !self.outboundStreamIsActive(promised_stream_id))
+            promised_stream_id >= self.push_state.next_local_stream_id)
         {
             return error.InvalidStreamId;
+        }
+        if (!self.outboundStreamIsActive(promised_stream_id)) {
+            if (self.peer_max_concurrent_streams) |limit| {
+                if (self.active_local_streams.items.len >= limit) {
+                    return error.FlowControlBlocked;
+                }
+            }
+            try self.active_local_streams.append(
+                self.allocator,
+                promised_stream_id,
+            );
         }
         try self.writeResponse(promised_stream_id, response);
     }
@@ -1699,11 +1686,9 @@ pub const Connection = struct {
         // but validating the promised id catches malformed peers before the
         // normal "push disabled" rejection path.
         if (clientInitiatedStreamId(promise.promised_stream_id)) return error.InvalidStreamId;
-        if (self.last_promised_stream_id) |last| {
-            if (promise.promised_stream_id <= last) {
-                return error.InvalidStreamId;
-            }
-        }
+        try self.push_state.validatePeerStreamId(
+            promise.promised_stream_id,
+        );
         return promise;
     }
 
@@ -1723,24 +1708,11 @@ pub const Connection = struct {
         );
         errdefer freeHeaders(self.allocator, headers);
         try validateHeaderBlock(headers, .request);
-        if (self.limits.max_concurrent_streams) |limit| {
-            if (self.active_peer_streams.items.len >= limit) {
-                return error.FlowControlViolation;
-            }
-        }
-        try self.active_peer_streams.append(
-            self.allocator,
-            promise.promised_stream_id,
-        );
-        errdefer self.releasePeerStream(promise.promised_stream_id);
-        try self.pending_pushes.append(self.allocator, .{
-            .request = .{
-                .parent_stream_id = promise.stream_id,
-                .promised_stream_id = promise.promised_stream_id,
-                .headers = headers,
-            },
+        try self.push_state.queue(self.allocator, .{
+            .parent_stream_id = promise.stream_id,
+            .promised_stream_id = promise.promised_stream_id,
+            .headers = headers,
         });
-        self.last_promised_stream_id = promise.promised_stream_id;
     }
 
     fn consumeForbiddenResponseBody(self: *Connection, stream_id: u31) Error!void {
@@ -3078,6 +3050,27 @@ fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]con
     }
     return null;
 }
+
+pub const testing = struct {
+    pub fn findHeader(
+        headers: []const http2.Hpack.HeaderField,
+        name: []const u8,
+    ) ?[]const u8 {
+        for (headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, name)) {
+                return header.value;
+            }
+        }
+        return null;
+    }
+
+    pub fn receivePushPromise(
+        connection: *Connection,
+        frame: http2.Frame,
+    ) Error!void {
+        return connection.receivePushPromise(frame);
+    }
+};
 
 fn requestAuthority(headers: []const http2.Hpack.HeaderField) ?[]const u8 {
     if (findHeader(headers, ":authority")) |authority| return authority;
@@ -5465,141 +5458,6 @@ test "HTTP/2 client rejects PUSH_PROMISE after disabling push" {
 
     thread.join();
     if (shared.err) |err| return err;
-}
-
-test "HTTP/2 explicit server push delivers promise and pushed response" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var server = try Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
-    );
-    defer server.deinit();
-
-    const Shared = struct {
-        server: *Server,
-        err: ?anyerror = null,
-
-        fn run(shared: *@This()) void {
-            var connection = shared.server.accept() catch |err| {
-                shared.err = err;
-                return;
-            };
-            defer connection.close();
-            var request = connection.readRequest() catch |err| {
-                shared.err = err;
-                return;
-            };
-            defer request.deinit(shared.server.allocator);
-            const pushed_stream = connection.promisePush(
-                request.stream_id,
-                &.{
-                    .{ .name = ":method", .value = "GET" },
-                    .{ .name = ":path", .value = "/style.css" },
-                    .{ .name = ":scheme", .value = "http" },
-                    .{ .name = ":authority", .value = "localhost" },
-                },
-            ) catch |err| {
-                shared.err = err;
-                return;
-            };
-            connection.writeResponse(request.stream_id, .{
-                .body = "parent",
-            }) catch |err| {
-                shared.err = err;
-                return;
-            };
-            connection.writePushedResponse(pushed_stream, .{
-                .body = "css",
-            }) catch |err| {
-                shared.err = err;
-                return;
-            };
-        }
-    };
-    var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-
-    var client = try Client.connect(
-        allocator,
-        io,
-        server.address(),
-        .{
-            .max_frame_payload = 4096,
-            .max_body_bytes = 4096,
-            .enable_push = true,
-        },
-    );
-    defer client.close();
-    var parent = try client.request(.{
-        .path = "/",
-        .authority = "localhost",
-    });
-    defer parent.deinit(allocator);
-    try std.testing.expectEqualStrings("parent", parent.body);
-
-    var promise = client.takePromisedRequest() orelse
-        return error.TestUnexpectedResult;
-    defer promise.deinit(allocator);
-    try std.testing.expectEqual(@as(u31, 2), promise.promised_stream_id);
-    try std.testing.expectEqualStrings(
-        "/style.css",
-        findHeader(promise.headers, ":path").?,
-    );
-    var pushed = try client.readPushedResponse(promise);
-    defer pushed.deinit(allocator);
-    try std.testing.expectEqualStrings("css", pushed.body);
-
-    thread.join();
-    if (shared.err) |err| return err;
-}
-
-test "HTTP/2 push promises require monotonic server stream IDs" {
-    const allocator = std.testing.allocator;
-    var connection = Connection{
-        .io = undefined,
-        .allocator = allocator,
-        .stream = undefined,
-        .role = .client,
-        .limits = .{ .enable_push = true },
-    };
-    defer {
-        for (connection.pending_pushes.items) |*push| {
-            push.request.deinit(allocator);
-        }
-        connection.pending_pushes.deinit(allocator);
-        connection.active_local_streams.deinit(allocator);
-        connection.active_peer_streams.deinit(allocator);
-        connection.hpack_decoder.deinit(allocator);
-    }
-    try connection.active_local_streams.append(allocator, 1);
-    var block: std.ArrayList(u8) = .empty;
-    defer block.deinit(allocator);
-    try http2.Hpack.encodeLiteralBlock(&block, allocator, &.{
-        .{ .name = ":method", .value = "GET" },
-        .{ .name = ":path", .value = "/push" },
-        .{ .name = ":scheme", .value = "http" },
-    });
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try http2.PushPromisePayload.write(
-        &encoded,
-        allocator,
-        1,
-        2,
-        block.items,
-        .{},
-    );
-    const frame = try http2.Frame.parse(encoded.items);
-    try connection.receivePushPromise(frame);
-    try std.testing.expectError(
-        error.InvalidStreamId,
-        connection.receivePushPromise(frame),
-    );
 }
 
 test "HTTP/2 validates PUSH_PROMISE parent and promised stream ids" {
@@ -8940,4 +8798,8 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
     try std.testing.expectEqual(@as(?u32, 4096), shared.max_header_list_size);
     try std.testing.expectEqual(@as(?u32, 0), shared.enable_push);
     try std.testing.expectEqual(@as(?u32, 1), shared.enable_connect_protocol);
+}
+
+test {
+    _ = @import("runtime/push_tests.zig");
 }
