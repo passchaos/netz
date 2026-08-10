@@ -61,6 +61,9 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
     try std.testing.expect(parsed.supports_rsa_pss_rsae_sha256);
     try std.testing.expect(parsed.supports_rsa_pss_rsae_sha384);
     try std.testing.expect(parsed.supports_rsa_pss_rsae_sha512);
+    try std.testing.expect(parsed.supports_rsa_pss_pss_sha256);
+    try std.testing.expect(parsed.supports_rsa_pss_pss_sha384);
+    try std.testing.expect(parsed.supports_rsa_pss_pss_sha512);
 
     const params = try quic.parseTransportParameters(allocator, parsed.transport_parameters);
     defer allocator.free(params);

@@ -155,6 +155,9 @@ pub const ParsedClientHello = struct {
     supports_rsa_pss_rsae_sha256: bool = false,
     supports_rsa_pss_rsae_sha384: bool = false,
     supports_rsa_pss_rsae_sha512: bool = false,
+    supports_rsa_pss_pss_sha256: bool = false,
+    supports_rsa_pss_pss_sha384: bool = false,
+    supports_rsa_pss_pss_sha512: bool = false,
     supports_x25519: bool = false,
     supports_secp256r1: bool = false,
     supports_secp384r1: bool = false,
@@ -431,6 +434,9 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
     var supports_rsa_pss_rsae_sha256 = false;
     var supports_rsa_pss_rsae_sha384 = false;
     var supports_rsa_pss_rsae_sha512 = false;
+    var supports_rsa_pss_pss_sha256 = false;
+    var supports_rsa_pss_pss_sha384 = false;
+    var supports_rsa_pss_pss_sha512 = false;
     var alpn_list: std.ArrayList([]const u8) = .empty;
     errdefer alpn_list.deinit(allocator);
     var seen_extensions = SeenExtensions{};
@@ -492,6 +498,24 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
                         payload,
                         quic.tls.auth
                             .signature_scheme_rsa_pss_rsae_sha512,
+                    );
+                supports_rsa_pss_pss_sha256 =
+                    try signatureAlgorithmsContain(
+                        payload,
+                        quic.tls.auth
+                            .signature_scheme_rsa_pss_pss_sha256,
+                    );
+                supports_rsa_pss_pss_sha384 =
+                    try signatureAlgorithmsContain(
+                        payload,
+                        quic.tls.auth
+                            .signature_scheme_rsa_pss_pss_sha384,
+                    );
+                supports_rsa_pss_pss_sha512 =
+                    try signatureAlgorithmsContain(
+                        payload,
+                        quic.tls.auth
+                            .signature_scheme_rsa_pss_pss_sha512,
                     );
             },
             ext_key_share => {
@@ -555,6 +579,9 @@ pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!P
         .supports_rsa_pss_rsae_sha256 = supports_rsa_pss_rsae_sha256,
         .supports_rsa_pss_rsae_sha384 = supports_rsa_pss_rsae_sha384,
         .supports_rsa_pss_rsae_sha512 = supports_rsa_pss_rsae_sha512,
+        .supports_rsa_pss_pss_sha256 = supports_rsa_pss_pss_sha256,
+        .supports_rsa_pss_pss_sha384 = supports_rsa_pss_pss_sha384,
+        .supports_rsa_pss_pss_sha512 = supports_rsa_pss_pss_sha512,
         .supports_x25519 = supports_x25519,
         .supports_secp256r1 = supports_secp256r1,
         .supports_secp384r1 = supports_secp384r1,
@@ -1153,14 +1180,17 @@ fn writeSupportedGroupsExtension(
 fn writeSignatureAlgorithmsExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
     // These are exactly the schemes Vail can verify for peer
     // CertificateVerify. Built-in signing remains Ed25519/ECDSA.
-    var payload: [14]u8 = undefined;
-    std.mem.writeInt(u16, payload[0..2], 12, .big);
+    var payload: [20]u8 = undefined;
+    std.mem.writeInt(u16, payload[0..2], 18, .big);
     std.mem.writeInt(u16, payload[2..4], 0x0403, .big);
     std.mem.writeInt(u16, payload[4..6], 0x0503, .big);
     std.mem.writeInt(u16, payload[6..8], 0x0804, .big);
     std.mem.writeInt(u16, payload[8..10], 0x0805, .big);
     std.mem.writeInt(u16, payload[10..12], 0x0806, .big);
     std.mem.writeInt(u16, payload[12..14], 0x0807, .big);
+    std.mem.writeInt(u16, payload[14..16], 0x0809, .big);
+    std.mem.writeInt(u16, payload[16..18], 0x080a, .big);
+    std.mem.writeInt(u16, payload[18..20], 0x080b, .big);
     try writeExtension(list, allocator, ext_signature_algorithms, &payload);
 }
 
