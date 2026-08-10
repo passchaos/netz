@@ -137,15 +137,35 @@ pub fn Pool(comptime Handle: type) type {
             origin: http3.Origin,
             now_ms: u64,
         ) !void {
+            const key = try originKeyFromOrigin(self.allocator, origin);
+            try self.releaseKey(handle, key, now_ms);
+        }
+
+        /// Return a handle to the pool using an already-owned canonical key.
+        ///
+        /// On success, the pool takes ownership of `key`.  If capacity policy
+        /// drops the handle or appending fails, this function deinitializes
+        /// `key` before returning so callers can use `errdefer key.deinit()`
+        /// only until this call starts.
+        pub fn releaseKey(
+            self: *Self,
+            handle: Handle,
+            key: http3.OriginKey,
+            now_ms: u64,
+        ) !void {
+            var owned_key = key;
+            errdefer owned_key.deinit();
             _ = self.pruneExpired(now_ms);
             if (self.config.max_idle_per_origin == 0 or
                 self.config.max_idle_total == 0)
             {
                 self.dropHandle(handle);
+                owned_key.deinit();
                 return;
             }
-            if (self.idleCountForOrigin(origin) >= self.config.max_idle_per_origin) {
+            if (self.idleCountForOrigin(owned_key.origin()) >= self.config.max_idle_per_origin) {
                 self.dropHandle(handle);
+                owned_key.deinit();
                 return;
             }
             if (self.entries.items.len >= self.config.max_idle_total) {
@@ -156,13 +176,12 @@ pub fn Pool(comptime Handle: type) type {
                 self.destroyEntry(&evicted);
             }
 
-            var key = try originKeyFromOrigin(self.allocator, origin);
-            errdefer key.deinit();
             try self.entries.append(self.allocator, .{
-                .key = key,
+                .key = owned_key,
                 .handle = handle,
                 .pooled_at_ms = now_ms,
             });
+            owned_key = undefined;
         }
 
         fn expired(self: Self, entry: Entry, now_ms: u64) bool {
@@ -231,6 +250,28 @@ test "HTTP/3 origin pool releases and acquires by normalized origin" {
     try std.testing.expectEqual(@as(u64, 1), stats.total_reused);
     try std.testing.expectEqual(@as(f64, 1.0), stats.hitRate());
     try std.testing.expectEqual(@as(f64, 1.0), pool.hitRate());
+}
+
+test "HTTP/3 origin pool accepts owned origin keys" {
+    const allocator = std.testing.allocator;
+    const IntPool = Pool(usize);
+    var pool = IntPool.init(allocator, .{}, dropInt);
+    defer pool.deinit();
+
+    const key = try http3.requestOriginKey(allocator, "HTTPS", "Owned.EXAMPLE:443");
+    try pool.releaseKey(7, key, 10);
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+    try std.testing.expectEqual(@as(?usize, 7), pool.acquire(
+        try http3.requestOrigin("https", "owned.example"),
+        11,
+    ));
+
+    const disabled_key = try http3.requestOriginKey(allocator, "https", "drop.example");
+    var disabled = IntPool.init(allocator, .{ .max_idle_total = 0 }, dropInt);
+    defer disabled.deinit();
+    try disabled.releaseKey(9, disabled_key, 0);
+    try std.testing.expectEqual(@as(usize, 0), disabled.idleCount());
+    try std.testing.expectEqual(@as(u64, 1), disabled.stats().total_dropped);
 }
 
 test "HTTP/3 origin pool enforces expiry and capacity" {
