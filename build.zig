@@ -102,6 +102,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark HTTP/3 cleartext development request/response round trips",
         },
         .{
+            .exe_name = "netz-http3-fetch",
+            .path = "examples/http3_fetch.zig",
+            .run_step = "run-http3-fetch",
+            .description = "Fetch the default public endpoint over HTTP/3",
+        },
+        .{
             .exe_name = "netz-bench-http3-capsule",
             .path = "examples/bench_http3_capsule.zig",
             .run_step = "bench-http3-capsule",

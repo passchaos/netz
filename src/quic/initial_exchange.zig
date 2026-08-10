@@ -15,6 +15,7 @@ pub const SendInitialFlightOptions = flight.SendOptions;
 pub const SentInitialFlight = flight.Sent;
 pub const ReceiveInitialFlightOptions = flight.ReceiveOptions;
 pub const ReceivedInitialFlight = flight.Received;
+pub const insertCryptoPayload = flight.insertCryptoPayload;
 
 pub const ReceivedInitialCrypto = struct {
     from: net.IpAddress,

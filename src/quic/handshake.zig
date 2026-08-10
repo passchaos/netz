@@ -401,6 +401,17 @@ fn isVersionNegotiationDatagram(bytes: []const u8) bool {
     return std.mem.readInt(u32, bytes[1..5], .big) == quic.Version.negotiation.wireValue();
 }
 
+fn receiveNextServerInitialDatagram(
+    endpoint: *quic.runtime.Endpoint,
+    recovery: retransmit.Config,
+) Error!quic.runtime.OwnedBytes {
+    return endpoint.receiveBytesTimeout(recovery.timeout(0)) catch |err| switch (err) {
+        error.Timeout => error.HandshakeTimeout,
+        error.ConcurrencyUnavailable => error.HandshakeReceiveFailed,
+        else => |other| @errorCast(other),
+    };
+}
+
 fn isHandshakeDatagram(bytes: []const u8) bool {
     const info =
         quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
@@ -770,15 +781,19 @@ fn connectAttempt(
         return connectAttempt(endpoint, peer, next, true);
     }
 
-    const server_initial_info =
-        try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
-            server_datagram.bytes,
-            options.local_transport_parameters.grease_quic_bit,
-        );
-    if (server_initial_info.packet_type != .initial) return error.InvalidHandshakeFlight;
+    var server_initial_attempts: usize = 0;
+    var server_initial_info: quic.protection.ProtectedLongPacketInfo = undefined;
+    var server_initial_flight = while (true) {
+        if (server_initial_attempts >= 8) return error.MissingCryptoFrame;
+        server_initial_attempts += 1;
+        server_initial_info =
+            try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+                server_datagram.bytes,
+                options.local_transport_parameters.grease_quic_bit,
+            );
+        if (server_initial_info.packet_type != .initial) return error.InvalidHandshakeFlight;
 
-    var server_initial_flight =
-        try quic.initial_exchange.openInitialCryptoFlight(
+        break quic.initial_exchange.openInitialCryptoFlight(
             endpoint,
             server_datagram.from,
             server_datagram.bytes[0..server_initial_info.len],
@@ -788,7 +803,19 @@ fn connectAttempt(
                 .max_crypto_buffer = options.max_crypto_buffer,
                 .allow_zero_fixed_bit = local_transport_parameters.grease_quic_bit,
             },
-        );
+        ) catch |err| switch (err) {
+            error.MissingCryptoFrame => {
+                const next_datagram = try receiveNextServerInitialDatagram(
+                    endpoint,
+                    options.handshake_recovery,
+                );
+                server_datagram.deinit(endpoint.allocator);
+                server_datagram = next_datagram;
+                continue;
+            },
+            else => |other| return other,
+        };
+    };
     defer server_initial_flight.deinit(endpoint.allocator);
     const server_initial = quic.initial_exchange.ReceivedInitialCrypto{
         .from = server_initial_flight.from,
@@ -852,6 +879,7 @@ fn connectAttempt(
         0,
         options.max_crypto_buffer,
         local_transport_parameters.grease_quic_bit,
+        !parsed_server.selected_psk and options.server_auth != null,
     );
     defer server_handshake.deinit(endpoint.allocator);
     const server_flight = try splitServerFlight(
@@ -926,10 +954,6 @@ fn connectAttempt(
             certificate_verify,
             certificate_transcript_hash.bytes(),
         );
-    } else if (server_flight.certificate != null or
-        server_flight.certificate_verify != null)
-    {
-        return error.InvalidHandshakeFlight;
     }
     var client_certificate: std.ArrayList(u8) = .empty;
     defer client_certificate.deinit(endpoint.allocator);
@@ -1923,36 +1947,73 @@ fn receiveServerHandshakeCrypto(
     expected_packet_number: u64,
     max_crypto_buffer: usize,
     allow_zero_fixed_bit: bool,
+    require_certificate: bool,
 ) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
-    if (coalesced_tail.len == 0) {
-        var datagram = try endpoint.receiveBytes();
-        defer datagram.deinit(endpoint.allocator);
-        return quic.initial_exchange.openHandshakeCryptoWithFixedBitPolicy(
-            endpoint,
-            datagram.from,
-            datagram.bytes,
-            handshake_keys,
-            expected_packet_number,
-            max_crypto_buffer,
-            allow_zero_fixed_bit,
-        );
-    }
+    var reassembler = quic.crypto_stream.Reassembler.init(endpoint.allocator, max_crypto_buffer);
+    defer reassembler.deinit();
+    var first_packet: ?quic.protection.OpenedHandshakePacket = null;
+    errdefer if (first_packet) |*packet| packet.deinit(endpoint.allocator);
+    var response_from = from;
+    var next_expected = expected_packet_number;
+    var attempts: usize = 0;
+    var pending_tail = coalesced_tail;
 
-    const info =
-        try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
-            coalesced_tail,
+    while (attempts < 8) : (attempts += 1) {
+        var owned_datagram: ?quic.runtime.OwnedBytes = null;
+        defer if (owned_datagram) |*datagram| datagram.deinit(endpoint.allocator);
+        const bytes = if (pending_tail.len != 0) blk: {
+            const info =
+                try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+                    pending_tail,
+                    allow_zero_fixed_bit,
+                );
+            if (info.packet_type != .handshake or info.len != pending_tail.len) return error.InvalidHandshakeFlight;
+            break :blk pending_tail[0..info.len];
+        } else blk: {
+            owned_datagram = try endpoint.receiveBytes();
+            response_from = owned_datagram.?.from;
+            break :blk owned_datagram.?.bytes;
+        };
+        pending_tail = &.{};
+
+        var packet = try quic.protection.openHandshakePacketWithFixedBitPolicy(
+            endpoint.allocator,
+            handshake_keys,
+            bytes,
+            next_expected,
             allow_zero_fixed_bit,
         );
-    if (info.packet_type != .handshake or info.len != coalesced_tail.len) return error.InvalidHandshakeFlight;
-    return quic.initial_exchange.openHandshakeCryptoWithFixedBitPolicy(
-        endpoint,
-        from,
-        coalesced_tail[0..info.len],
-        handshake_keys,
-        expected_packet_number,
-        max_crypto_buffer,
-        allow_zero_fixed_bit,
-    );
+        errdefer packet.deinit(endpoint.allocator);
+        next_expected = packet.packet_number + 1;
+        try quic.initial_exchange.insertCryptoPayload(
+            endpoint.allocator,
+            &reassembler,
+            packet.payload,
+            .handshake,
+        );
+        if (first_packet == null) {
+            first_packet = packet;
+        } else {
+            packet.deinit(endpoint.allocator);
+        }
+
+        const available = reassembler.available();
+        if (splitServerFlight(available, require_certificate)) |_| {
+            const crypto_data = try endpoint.allocator.dupe(u8, available);
+            errdefer endpoint.allocator.free(crypto_data);
+            const out = quic.initial_exchange.ReceivedHandshakeCrypto{
+                .from = response_from,
+                .packet = first_packet.?,
+                .crypto_data = crypto_data,
+            };
+            first_packet = null;
+            return out;
+        } else |err| switch (err) {
+            error.InvalidHandshakeFlight => continue,
+            else => |other| return other,
+        }
+    }
+    return error.InvalidHandshakeFlight;
 }
 
 fn openClientEarlyData(
@@ -2244,7 +2305,10 @@ fn splitServerFlight(
         offset += request_len;
         if (offset >= bytes.len) return error.InvalidHandshakeFlight;
     }
-    if (authenticated_server) {
+    const has_certificate = offset < bytes.len and
+        bytes[offset] == quic.tls.auth.handshake_type_certificate;
+    if (authenticated_server and !has_certificate) return error.InvalidHandshakeFlight;
+    if (has_certificate) {
         const certificate_len = try handshakeMessageLen(bytes[offset..]);
         certificate = bytes[offset..][0..certificate_len];
         offset += certificate_len;

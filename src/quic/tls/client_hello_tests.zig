@@ -729,6 +729,12 @@ test "QUIC TLS EncryptedExtensions and Finished verify data" {
     defer allocator.free(params);
     try std.testing.expectEqual(@as(u64, @intFromEnum(quic.TransportParameterId.initial_max_data)), params[0].id);
 
+    var unknown_ee = try ee.clone(allocator);
+    defer unknown_ee.deinit(allocator);
+    try appendEncryptedExtensionsExtensionForTest(&unknown_ee, allocator, 0xface, "ignored");
+    const parsed_unknown = try target.parseEncryptedExtensions(unknown_ee.items);
+    try std.testing.expectEqualStrings("h3", parsed_unknown.alpn);
+
     var duplicate_ee_alpn = try ee.clone(allocator);
     defer duplicate_ee_alpn.deinit(allocator);
     try appendEncryptedExtensionsExtensionForTest(&duplicate_ee_alpn, allocator, ext_alpn_for_test, &.{ 0x00, 0x03, 0x02, 'h', '3' });

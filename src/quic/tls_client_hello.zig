@@ -714,7 +714,7 @@ pub fn parseEncryptedExtensions(bytes: []const u8) Error!ParsedEncryptedExtensio
                 if (payload.len != 0) return error.InvalidEncryptedExtensions;
                 early_data_accepted = true;
             },
-            else => return error.InvalidEncryptedExtensions,
+            else => {},
         }
     }
     return .{
