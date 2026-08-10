@@ -384,6 +384,67 @@ test "QUIC 1-RTT PMTUD gates ordinary sends until probe succeeds" {
     try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
 }
 
+test "QUIC 1-RTT PMTUD gates retransmission after path reset" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xbd, 0x01, 0x02, 0x03 };
+    const server_cid = [_]u8{ 0xbd, 0x04, 0x05, 0x06 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xbe} ** quic.protection.secret_len);
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .max_datagram_size = 1400,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    var body: [1250]u8 = .{0xaa} ** 1250;
+
+    client.pmtud.onProbeAcked(1300, 1400);
+    try client.sendAt(&.{.{ .stream = .{ .stream_id = 0, .data = &body } }}, 100); // packet 0, too large after reset.
+    var dropped = try server_endpoint.receiveBytes();
+    dropped.deinit(allocator);
+
+    try client.sendAt(&.{.{ .ping = {} }}, 200); // packet 1 establishes a largest ACKed packet.
+    var received = try server.receivePacket();
+    defer received.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), received.packet.packet_number);
+    try server.sendAck(0);
+    var ack = try client.receivePacket();
+    defer ack.deinit(allocator);
+
+    client.pmtud.resetForPath();
+    try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, client.currentSendDatagramSize());
+    try std.testing.expectError(error.DatagramTooLarge, client.retransmitTimeThresholdLoss(1_000_000, 1));
+    try std.testing.expectEqual(@as(u64, 2), client.next_packet_number);
+}
+
 test "QUIC 1-RTT PMTU probe loss lowers next probe size" {
     const allocator = std.testing.allocator;
 

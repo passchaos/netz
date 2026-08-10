@@ -2316,7 +2316,11 @@ pub const Connection = struct {
                 .packet_number_len = packet_number_len,
                 .payload = candidate.payload,
             });
-            if (packet_len > self.endpoint.limits.max_datagram_size) return error.DatagramTooLarge;
+            if (packet_len > self.currentSendDatagramSize() or
+                packet_len > self.endpoint.limits.max_datagram_size)
+            {
+                return error.DatagramTooLarge;
+            }
 
             if (self.antiAmplificationLimitRemaining()) |credit| {
                 const reserved = std.math.add(usize, total_payload_len, candidate.payload.len) catch return error.AntiAmplificationLimited;
@@ -2459,6 +2463,22 @@ pub const Connection = struct {
     fn retransmitCandidateAt(self: *Connection, candidate: quic.recovery.Candidate, mode: RetransmitMode, sent_time_ns: ?u64) Error!void {
         try self.validateNextPacketNumber();
         const packet_number = self.next_packet_number;
+        const packet_number_len = quic.protection.packetNumberLenForPayload(
+            packet_number,
+            self.sent.largestAcknowledged(),
+            candidate.payload.len,
+        );
+        const packet_len = try quic.protection.shortPacketLen(.{
+            .destination_connection_id = self.config.peer_connection_id,
+            .packet_number = packet_number,
+            .packet_number_len = packet_number_len,
+            .payload = candidate.payload,
+        });
+        if (packet_len > self.currentSendDatagramSize() or
+            packet_len > self.endpoint.limits.max_datagram_size)
+        {
+            return error.DatagramTooLarge;
+        }
         switch (mode) {
             .congestion_controlled => try self.congestion.reserve(candidate.payload.len),
             .pto_probe => self.congestion.onPtoProbeSent(candidate.payload.len),
