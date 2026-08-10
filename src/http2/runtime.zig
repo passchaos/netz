@@ -2340,7 +2340,12 @@ pub const Connection = struct {
             if (block.items.len > self.limits.max_frame_payload * @as(usize, self.limits.max_header_fields + 1)) return error.MessageTooLarge;
             flags = frame.frame.header.flags;
         }
-        return cloneDecodedHeaders(self.allocator, block.items, self.limits, &self.hpack_decoder);
+        return cloneDecodedHeaders(
+            self.allocator,
+            block.items,
+            self.limits,
+            &self.hpack_decoder,
+        );
     }
 
     fn writePushPromiseBlock(
@@ -2958,8 +2963,12 @@ fn cloneDecodedHeaders(
     limits: Limits,
     decoder: *http2.Hpack.Decoder,
 ) Error![]http2.Hpack.HeaderField {
-    const scratch = try allocator.alloc(http2.Hpack.HeaderField, limits.max_header_fields);
-    defer allocator.free(scratch);
+    var stack_scratch: [32]http2.Hpack.HeaderField = undefined;
+    const scratch = if (limits.max_header_fields <= stack_scratch.len)
+        stack_scratch[0..limits.max_header_fields]
+    else
+        try allocator.alloc(http2.Hpack.HeaderField, limits.max_header_fields);
+    defer if (limits.max_header_fields > stack_scratch.len) allocator.free(scratch);
     const decoded = decoder.decodeBlockInto(allocator, block, scratch) catch |err| switch (err) {
         error.BufferTooShort => return error.MessageTooLarge,
         else => |e| return e,
