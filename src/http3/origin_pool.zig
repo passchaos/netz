@@ -98,7 +98,7 @@ pub fn Pool(comptime Handle: type) type {
                     index += 1;
                     continue;
                 }
-                var expired_entry = self.entries.orderedRemove(index);
+                var expired_entry = self.entries.swapRemove(index);
                 self.destroyEntry(&expired_entry);
                 removed += 1;
             }
@@ -110,12 +110,12 @@ pub fn Pool(comptime Handle: type) type {
             while (index < self.entries.items.len) {
                 const entry = &self.entries.items[index];
                 if (self.expired(entry.*, now_ms)) {
-                    var expired_entry = self.entries.orderedRemove(index);
+                    var expired_entry = self.entries.swapRemove(index);
                     self.destroyEntry(&expired_entry);
                     continue;
                 }
                 if (http3.sameOrigin(entry.key.origin(), origin)) {
-                    var pooled = self.entries.orderedRemove(index);
+                    var pooled = self.entries.swapRemove(index);
                     const handle = pooled.handle;
                     pooled.key.deinit();
                     self.total_reused +|= 1;
@@ -145,7 +145,10 @@ pub fn Pool(comptime Handle: type) type {
                 return;
             }
             if (self.entries.items.len >= self.config.max_idle_total) {
-                var evicted = self.entries.orderedRemove(0);
+                // Idle pool entries are interchangeable for reuse decisions;
+                // avoid preserving insertion order so capacity eviction stays
+                // O(1) instead of memmoving the rest of the pool.
+                var evicted = self.entries.swapRemove(0);
                 self.destroyEntry(&evicted);
             }
 
