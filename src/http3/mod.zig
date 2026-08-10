@@ -56,6 +56,19 @@ pub const AltSvcEndpoint = struct {
     max_age: ?u64 = null,
 };
 
+pub const AltSvcTarget = struct {
+    alpn: []const u8,
+    /// Host text suitable for DNS/IP connection code.  A leading ":" Alt-Svc
+    /// authority inherits the origin host; bracketed IPv6 literals are
+    /// normalized by dropping their brackets.
+    connect_host: []const u8,
+    port: u16,
+    /// Origin host used for request authority / certificate policy.  Like
+    /// `connect_host`, bracketed IPv6 input is normalized without brackets.
+    origin_host: []const u8,
+    max_age: ?u64 = null,
+};
+
 /// Parse the first HTTP/3 alternative from any header list containing Alt-Svc.
 pub fn firstHttp3AltSvcHeader(headers: anytype) Error!?AltSvcEndpoint {
     for (headers) |header| {
@@ -63,6 +76,41 @@ pub fn firstHttp3AltSvcHeader(headers: anytype) Error!?AltSvcEndpoint {
         if (try firstHttp3AltSvc(header.value)) |endpoint| return endpoint;
     }
     return null;
+}
+
+/// Parse and resolve the first HTTP/3 Alt-Svc endpoint into connection inputs.
+///
+/// Real deployments often advertise `h3=":443"`, meaning "same host, different
+/// protocol/port".  This helper applies that origin-relative rule and returns
+/// the concrete host and port a QUIC client should dial.
+pub fn firstHttp3AltSvcTarget(
+    origin_host: []const u8,
+    headers: anytype,
+    default_port: u16,
+) Error!?AltSvcTarget {
+    const endpoint = (try firstHttp3AltSvcHeader(headers)) orelse return null;
+    return try altSvcTarget(origin_host, endpoint, default_port);
+}
+
+pub fn altSvcTarget(
+    origin_host: []const u8,
+    endpoint: AltSvcEndpoint,
+    default_port: u16,
+) Error!AltSvcTarget {
+    const origin = try normalizeAltSvcHost(origin_host);
+    const connect_host = if (endpoint.authority[0] == ':')
+        origin
+    else
+        try altSvcAuthorityHost(endpoint.authority);
+    const port = endpoint.port orelse default_port;
+    if (port == 0) return error.InvalidHeader;
+    return .{
+        .alpn = endpoint.alpn,
+        .connect_host = connect_host,
+        .port = port,
+        .origin_host = origin,
+        .max_age = endpoint.max_age,
+    };
 }
 
 /// Parse the first HTTP/3 alternative from an Alt-Svc field value.
@@ -178,6 +226,42 @@ fn altSvcPort(authority: []const u8) ?u16 {
 fn parseAltSvcPort(bytes: []const u8) ?u16 {
     if (bytes.len == 0) return null;
     return std.fmt.parseInt(u16, bytes, 10) catch null;
+}
+
+fn normalizeAltSvcHost(host: []const u8) Error![]const u8 {
+    if (host.len == 0) return error.InvalidHeader;
+    for (host) |byte| {
+        if (byte <= 0x20 or byte >= 0x7f or
+            byte == '"' or byte == ',' or byte == ';' or byte == '/')
+        {
+            return error.InvalidHeader;
+        }
+    }
+    if (host[0] == '[') {
+        if (host.len <= 2 or host[host.len - 1] != ']') {
+            return error.InvalidHeader;
+        }
+        return host[1 .. host.len - 1];
+    }
+    if (std.mem.indexOfScalar(u8, host, '[') != null or
+        std.mem.indexOfScalar(u8, host, ']') != null)
+    {
+        return error.InvalidHeader;
+    }
+    return host;
+}
+
+fn altSvcAuthorityHost(authority: []const u8) Error![]const u8 {
+    if (authority.len == 0 or authority[0] == ':') return error.InvalidHeader;
+    if (authority[0] == '[') {
+        const end = std.mem.indexOfScalar(u8, authority, ']') orelse
+            return error.InvalidHeader;
+        if (end <= 1) return error.InvalidHeader;
+        return authority[1..end];
+    }
+    const colon = std.mem.lastIndexOfScalar(u8, authority, ':') orelse
+        return authority;
+    return authority[0..colon];
 }
 
 pub const FrameType = struct {
@@ -2724,6 +2808,22 @@ test "HTTP/3 parses Alt-Svc HTTP/3 advertisements" {
     try std.testing.expectEqualStrings("h3", from_headers.alpn);
     try std.testing.expectEqual(@as(?u16, 8443), from_headers.port);
 
+    const robotics_target = try altSvcTarget("robotics.bytedance.com", robotics, 443);
+    try std.testing.expectEqualStrings("robotics.bytedance.com", robotics_target.connect_host);
+    try std.testing.expectEqualStrings("robotics.bytedance.com", robotics_target.origin_host);
+    try std.testing.expectEqual(@as(u16, 443), robotics_target.port);
+
+    const header_target = try firstHttp3AltSvcTarget("example.com", &headers, 443) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("example.com", header_target.origin_host);
+    try std.testing.expectEqualStrings("example.com", header_target.connect_host);
+    try std.testing.expectEqual(@as(u16, 8443), header_target.port);
+
+    const ipv6_target = try altSvcTarget("[2001:db8::2]", ipv6, 443);
+    try std.testing.expectEqualStrings("2001:db8::2", ipv6_target.origin_host);
+    try std.testing.expectEqualStrings("2001:db8::1", ipv6_target.connect_host);
+    try std.testing.expectEqual(@as(u16, 443), ipv6_target.port);
+
+    try std.testing.expectError(error.InvalidHeader, altSvcTarget("bad/host", robotics, 443));
     try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\"\""));
     try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\":bad\""));
     try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\"example.com/evil\""));
