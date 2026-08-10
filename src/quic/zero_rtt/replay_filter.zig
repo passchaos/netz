@@ -86,7 +86,7 @@ pub const Filter = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        self.pruneExpired(now_ms);
+        _ = self.pruneExpiredUnlocked(now_ms);
         if (containsDigest(self.entries.items, digest)) return error.ReplayedEarlyData;
 
         if (self.entries.items.len < self.max_entries) {
@@ -122,15 +122,24 @@ pub const Filter = struct {
         return self.entries.items.len;
     }
 
-    fn pruneExpired(self: *Filter, now_ms: u64) void {
+    pub fn pruneExpired(self: *Filter, now_ms: u64) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.pruneExpiredUnlocked(now_ms);
+    }
+
+    fn pruneExpiredUnlocked(self: *Filter, now_ms: u64) usize {
+        var removed: usize = 0;
         var index: usize = 0;
         while (index < self.entries.items.len) {
             if (self.entries.items[index].expires_at_ms <= now_ms) {
                 _ = self.entries.swapRemove(index);
+                removed += 1;
             } else {
                 index += 1;
             }
         }
+        return removed;
     }
 
     fn restoreSnapshot(self: *Filter, snapshot: Snapshot, now_ms: u64) Error!void {
@@ -207,6 +216,28 @@ test "0-RTT replay filter rejects duplicates and expires bounded entries" {
 
     try filter.checkAndMark("first", 3000, 4000);
     try std.testing.expectEqual(@as(usize, 1), filter.count());
+}
+
+test "0-RTT replay filter prunes expired entries explicitly" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var filter = try Filter.init(
+        std.testing.allocator,
+        threaded.io(),
+        4,
+    );
+    defer filter.deinit();
+
+    try filter.checkAndMark("expired", 1000, 1500);
+    try filter.checkAndMark("live", 1000, 2500);
+    try std.testing.expectEqual(@as(usize, 2), filter.count());
+    try std.testing.expectEqual(@as(usize, 1), filter.pruneExpired(1500));
+    try std.testing.expectEqual(@as(usize, 1), filter.count());
+    try filter.checkAndMark("expired", 1501, 3000);
+    try std.testing.expectError(
+        error.ReplayedEarlyData,
+        filter.checkAndMark("live", 1501, 2500),
+    );
 }
 
 test "0-RTT replay filter exports and restores snapshots" {
