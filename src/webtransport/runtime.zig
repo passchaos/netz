@@ -34,10 +34,7 @@ pub const Server = struct {
     pub fn accept(self: *Server) Error!AcceptedSession {
         var request = try self.h3.receiveRequest();
         errdefer request.deinit(self.h3.quic_server.endpoint.allocator);
-        if (!std.mem.eql(u8, request.request.method, "CONNECT")) return error.InvalidConnect;
-        if (!std.mem.eql(u8, findHeader(request.request.headers, ":protocol") orelse "", "webtransport")) {
-            return error.InvalidConnect;
-        }
+        try validateConnectRequest(request.request);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
         try self.h3.sendResponse(request.from, request.stream_id, .{ .status = 200 });
@@ -78,10 +75,7 @@ pub const ProtectedServer = struct {
     pub fn accept(self: *ProtectedServer) Error!AcceptedProtectedSession {
         var request = try self.h3.receiveRequest();
         errdefer request.deinit(self.h3.quic_server.endpoint.allocator);
-        if (!std.mem.eql(u8, request.request.method, "CONNECT")) return error.InvalidConnect;
-        if (!std.mem.eql(u8, findHeader(request.request.headers, ":protocol") orelse "", "webtransport")) {
-            return error.InvalidConnect;
-        }
+        try validateConnectRequest(request.request);
         try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
@@ -142,10 +136,7 @@ pub const HandshakeServer = struct {
 
         var request = try session.receiveRequest();
         errdefer request.deinit(session.established.connection.endpoint.allocator);
-        if (!std.mem.eql(u8, request.request.method, "CONNECT")) return error.InvalidConnect;
-        if (!std.mem.eql(u8, findHeader(request.request.headers, ":protocol") orelse "", "webtransport")) {
-            return error.InvalidConnect;
-        }
+        try validateConnectRequest(request.request);
         try webtransport.ensureDatagramsNegotiated(session.options.local_settings, session.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
@@ -233,7 +224,7 @@ pub const ClientSession = struct {
         var h3_client = try http3.runtime.Client.connect(allocator, io, local_address, server, options.limits.http3);
         errdefer h3_client.deinit();
 
-        var header_buf: [2]http3.Qpack.HeaderField = undefined;
+        var header_buf: [3]http3.Qpack.HeaderField = undefined;
         const headers = connectRequestHeaders(options.origin, &header_buf);
         var response = try h3_client.request(.{
             .method = "CONNECT",
@@ -279,7 +270,7 @@ pub const HandshakeClientSession = struct {
     ) Error!HandshakeClientSession {
         var h3_client = try http3.runtime.HandshakeClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportHandshakeClientOptions(options.h3));
         errdefer h3_client.deinit();
-        var header_buf: [2]http3.Qpack.HeaderField = undefined;
+        var header_buf: [3]http3.Qpack.HeaderField = undefined;
         const headers = connectRequestHeaders(options.origin, &header_buf);
         var response = try h3_client.request(.{
             .method = "CONNECT",
@@ -345,7 +336,7 @@ pub const ProtectedClientSession = struct {
     ) Error!ProtectedClientSession {
         var h3_client = try http3.runtime.ProtectedClient.connect(allocator, io, local_address, server, options.limits.http3, webTransportProtectedConfig(options.config));
         errdefer h3_client.deinit();
-        var header_buf: [2]http3.Qpack.HeaderField = undefined;
+        var header_buf: [3]http3.Qpack.HeaderField = undefined;
         const headers = connectRequestHeaders(options.origin, &header_buf);
         var response = try h3_client.request(.{
             .method = "CONNECT",
@@ -436,16 +427,30 @@ fn webTransportHandshakeClientOptions(options: http3.runtime.HandshakeClientOpti
     return out;
 }
 
-fn connectRequestHeaders(origin: []const u8, out: *[2]http3.Qpack.HeaderField) []const http3.Qpack.HeaderField {
-    out[0] = .{ .name = ":protocol", .value = "webtransport" };
+fn validateConnectRequest(request: anytype) Error!void {
+    if (!std.mem.eql(u8, request.method, "CONNECT")) return error.InvalidConnect;
+    if (!std.mem.eql(u8, findHeader(request.headers, ":protocol") orelse "", "webtransport")) {
+        return error.InvalidConnect;
+    }
+    if (!(http3.capsule.protocolEnabled(request.headers) catch return error.InvalidConnect)) {
+        return error.InvalidConnect;
+    }
+}
+
+fn connectRequestHeaders(origin: []const u8, out: *[3]http3.Qpack.HeaderField) []const http3.Qpack.HeaderField {
+    var count: usize = 0;
+    out[count] = .{ .name = ":protocol", .value = "webtransport" };
+    count += 1;
+    out[count] = http3.capsule.protocol_header;
+    count += 1;
     // Keep the historical "/" default from ConnectOptions as "not supplied";
     // real WebTransport clients can pass an Origin value and have it carried in
     // the CONNECT request for server-side policy checks.
     if (origin.len != 0 and !std.mem.eql(u8, origin, "/")) {
-        out[1] = .{ .name = "origin", .value = origin };
-        return out[0..2];
+        out[count] = .{ .name = "origin", .value = origin };
+        count += 1;
     }
-    return out[0..1];
+    return out[0..count];
 }
 
 pub const OwnedDatagram = struct {
@@ -674,6 +679,30 @@ fn findHeader(headers: []const http3.Qpack.HeaderField, name: []const u8) ?[]con
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
     }
     return null;
+}
+
+test "WebTransport runtime CONNECT headers advertise Capsule-Protocol" {
+    var default_buf: [3]http3.Qpack.HeaderField = undefined;
+    const default_headers = connectRequestHeaders("/", &default_buf);
+    try std.testing.expectEqual(@as(usize, 2), default_headers.len);
+    try std.testing.expectEqualStrings("webtransport", findHeader(default_headers, ":protocol").?);
+    try std.testing.expect(try http3.capsule.protocolEnabled(default_headers));
+    try validateConnectRequest(.{ .method = "CONNECT", .headers = default_headers });
+
+    var origin_buf: [3]http3.Qpack.HeaderField = undefined;
+    const origin_headers = connectRequestHeaders("https://example.com", &origin_buf);
+    try std.testing.expectEqual(@as(usize, 3), origin_headers.len);
+    try std.testing.expectEqualStrings("https://example.com", findHeader(origin_headers, "origin").?);
+    try std.testing.expect(try http3.capsule.protocolEnabled(origin_headers));
+    try validateConnectRequest(.{ .method = "CONNECT", .headers = origin_headers });
+
+    const missing_capsule = [_]http3.Qpack.HeaderField{
+        .{ .name = ":protocol", .value = "webtransport" },
+    };
+    try std.testing.expectError(
+        error.InvalidConnect,
+        validateConnectRequest(.{ .method = "CONNECT", .headers = &missing_capsule }),
+    );
 }
 
 test "WebTransport cleartext accept validates CONNECT session id direction" {
