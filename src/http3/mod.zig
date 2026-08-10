@@ -1,5 +1,6 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
+const priority_field = @import("../internal/priority.zig");
 const quic = @import("../quic/mod.zig");
 
 pub const runtime = @import("runtime.zig");
@@ -632,70 +633,7 @@ pub const DecodedPushPromise = struct {
     }
 };
 
-pub const Priority = struct {
-    urgency: u3 = 3,
-    incremental: bool = false,
-
-    pub fn parse(value: []const u8) Priority {
-        var result = Priority{};
-        var rest = value;
-        while (rest.len != 0) {
-            rest = trimPriorityLeading(rest);
-            if (rest.len == 0) break;
-            if (rest[0] == ',') {
-                rest = rest[1..];
-                continue;
-            }
-
-            const name_end = priorityNameEnd(rest);
-            const name = rest[0..name_end];
-            rest = trimPriorityLeading(rest[name_end..]);
-            if (rest.len != 0 and rest[0] == '=') {
-                rest = trimPriorityLeading(rest[1..]);
-                const value_end = priorityValueEnd(rest);
-                const parameter_value = rest[0..value_end];
-                rest = rest[value_end..];
-                if (std.mem.eql(u8, name, "u")) {
-                    if (parameter_value.len == 1 and parameter_value[0] >= '0' and parameter_value[0] <= '7') {
-                        result.urgency = @intCast(parameter_value[0] - '0');
-                    }
-                } else if (std.mem.eql(u8, name, "i")) {
-                    if (std.mem.eql(u8, parameter_value, "?1")) result.incremental = true;
-                    if (std.mem.eql(u8, parameter_value, "?0")) result.incremental = false;
-                }
-            } else if (std.mem.eql(u8, name, "i")) {
-                result.incremental = true;
-            }
-        }
-        return result;
-    }
-
-    pub fn serialize(self: Priority, out: []u8) []const u8 {
-        var pos: usize = 0;
-        if (self.urgency != 3) {
-            if (out.len < 3) return out[0..0];
-            out[pos] = 'u';
-            pos += 1;
-            out[pos] = '=';
-            pos += 1;
-            out[pos] = '0' + @as(u8, self.urgency);
-            pos += 1;
-        }
-        if (self.incremental) {
-            if (pos != 0) {
-                if (pos + 2 > out.len) return out[0..pos];
-                out[pos] = ',';
-                pos += 1;
-                out[pos] = ' ';
-                pos += 1;
-            }
-            if (pos + 1 > out.len) return out[0..pos];
-            out[pos] = 'i';
-            pos += 1;
-        }
-        return out[0..pos];
-    }
-};
+pub const Priority = priority_field.Priority;
 
 pub const PriorityUpdatePayload = struct {
     prioritized_element_id: u64,
@@ -705,24 +643,6 @@ pub const PriorityUpdatePayload = struct {
         return Priority.parse(self.field_value);
     }
 };
-
-fn trimPriorityLeading(value: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < value.len and (value[i] == ' ' or value[i] == 0x09)) : (i += 1) {}
-    return value[i..];
-}
-
-fn priorityNameEnd(value: []const u8) usize {
-    var i: usize = 0;
-    while (i < value.len and value[i] != '=' and value[i] != ',' and value[i] != ' ' and value[i] != 0x09) : (i += 1) {}
-    return i;
-}
-
-fn priorityValueEnd(value: []const u8) usize {
-    var i: usize = 0;
-    while (i < value.len and value[i] != ',' and value[i] != ' ' and value[i] != 0x09) : (i += 1) {}
-    return i;
-}
 
 pub fn writeControlStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
     try quic.varint.encode(list, allocator, @intFromEnum(StreamType.control));

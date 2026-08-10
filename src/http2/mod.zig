@@ -1,5 +1,6 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
+const priority_field = @import("../internal/priority.zig");
 const hpack_huffman = @import("hpack_huffman.zig");
 
 pub const runtime = @import("runtime.zig");
@@ -29,6 +30,7 @@ pub const FrameType = enum(u8) {
     continuation = 0x9,
     altsvc = 0x0a,
     origin = 0x0c,
+    priority_update = 0x10,
     _,
 };
 
@@ -148,6 +150,7 @@ pub fn validateSetting(id: SettingId, value: u32) Error!void {
     switch (id) {
         .enable_push => if (value > 1) return error.InvalidSetting,
         .enable_connect_protocol => if (value > 1) return error.InvalidSetting,
+        .no_rfc7540_priorities => if (value > 1) return error.InvalidSetting,
         .initial_window_size => if (value > std.math.maxInt(i31)) return error.InvalidSetting,
         .max_frame_size => if (value < 16_384 or value > 16_777_215) return error.InvalidSetting,
         else => {},
@@ -208,6 +211,91 @@ pub const PriorityPayload = struct {
             .header = .{ .length = 0, .frame_type = .priority, .flags = 0, .stream_id = stream_id },
             .payload = &payload,
         }).write(list, allocator);
+    }
+};
+
+pub const ExtensiblePriority = priority_field.Priority;
+
+pub const PriorityUpdatePayload = struct {
+    prioritized_stream_id: u31,
+    field_value: []const u8,
+
+    pub fn parse(frame: Frame) Error!PriorityUpdatePayload {
+        if (frame.header.frame_type != .priority_update) {
+            return error.InvalidFrameSize;
+        }
+        if (frame.header.stream_id != 0) return error.InvalidStreamId;
+        if (frame.payload.len < 4) return error.InvalidFrameSize;
+        const raw_id = std.mem.readInt(u32, frame.payload[0..4], .big);
+        const field_value = frame.payload[4..];
+        if (!priority_field.isAsciiFieldValue(field_value)) {
+            return error.InvalidFrameSize;
+        }
+        _ = priority_field.Priority.parseStrict(field_value) catch {
+            return error.InvalidFrameSize;
+        };
+        const prioritized_stream_id: u31 =
+            @truncate(raw_id & 0x7fff_ffff);
+        if (prioritized_stream_id == 0) return error.InvalidStreamId;
+        return .{
+            .prioritized_stream_id = prioritized_stream_id,
+            .field_value = field_value,
+        };
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        prioritized_stream_id: u31,
+        field_value: []const u8,
+    ) Error!void {
+        if (prioritized_stream_id == 0) return error.InvalidStreamId;
+        if (!priority_field.isAsciiFieldValue(field_value)) {
+            return error.InvalidFrameSize;
+        }
+        _ = priority_field.Priority.parseStrict(field_value) catch {
+            return error.InvalidFrameSize;
+        };
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        try wire.appendInt(
+            &payload,
+            allocator,
+            u32,
+            prioritized_stream_id,
+            .big,
+        );
+        try payload.appendSlice(allocator, field_value);
+        try (Frame{
+            .header = .{
+                .length = 0,
+                .frame_type = .priority_update,
+                .flags = 0,
+                .stream_id = 0,
+            },
+            .payload = payload.items,
+        }).write(list, allocator);
+    }
+
+    pub fn writePriority(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        prioritized_stream_id: u31,
+        value: ExtensiblePriority,
+    ) Error!void {
+        var field_value_buf: [16]u8 = undefined;
+        try write(
+            list,
+            allocator,
+            prioritized_stream_id,
+            value.serialize(&field_value_buf),
+        );
+    }
+
+    pub fn priorityValue(
+        self: PriorityUpdatePayload,
+    ) ExtensiblePriority {
+        return ExtensiblePriority.parse(self.field_value);
     }
 };
 
@@ -1310,6 +1398,85 @@ test "HTTP/2 PRIORITY payload helper" {
     }));
 }
 
+test "HTTP/2 PRIORITY_UPDATE payload helper" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try PriorityUpdatePayload.writePriority(
+        &encoded,
+        allocator,
+        5,
+        .{ .urgency = 1, .incremental = true },
+    );
+    const frame = try Frame.parse(encoded.items);
+    try std.testing.expectEqual(
+        FrameType.priority_update,
+        frame.header.frame_type,
+    );
+    try std.testing.expectEqual(@as(u31, 0), frame.header.stream_id);
+    const update = try PriorityUpdatePayload.parse(frame);
+    try std.testing.expectEqual(
+        @as(u31, 5),
+        update.prioritized_stream_id,
+    );
+    try std.testing.expectEqualStrings("u=1, i", update.field_value);
+    try std.testing.expectEqual(
+        @as(u3, 1),
+        update.priorityValue().urgency,
+    );
+    try std.testing.expect(update.priorityValue().incremental);
+
+    try std.testing.expectError(
+        error.InvalidStreamId,
+        PriorityUpdatePayload.write(&encoded, allocator, 0, "u=1"),
+    );
+    try std.testing.expectError(
+        error.InvalidFrameSize,
+        PriorityUpdatePayload.write(&encoded, allocator, 1, "u=1\n"),
+    );
+    try std.testing.expectError(
+        error.InvalidFrameSize,
+        PriorityUpdatePayload.write(&encoded, allocator, 1, "u=1,"),
+    );
+    try std.testing.expectError(
+        error.InvalidFrameSize,
+        PriorityUpdatePayload.parse(.{
+            .header = .{
+                .length = 3,
+                .frame_type = .priority_update,
+                .flags = 0,
+                .stream_id = 0,
+            },
+            .payload = &.{ 0, 0, 1 },
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidStreamId,
+        PriorityUpdatePayload.parse(.{
+            .header = .{
+                .length = 4,
+                .frame_type = .priority_update,
+                .flags = 0,
+                .stream_id = 0,
+            },
+            .payload = &.{ 0, 0, 0, 0 },
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidStreamId,
+        PriorityUpdatePayload.parse(.{
+            .header = .{
+                .length = 4,
+                .frame_type = .priority_update,
+                .flags = 0,
+                .stream_id = 1,
+            },
+            .payload = &.{ 0, 0, 0, 1 },
+        }),
+    );
+}
+
 test "HTTP/2 PUSH_PROMISE payload helper" {
     const allocator = std.testing.allocator;
     var block: std.ArrayList(u8) = .empty;
@@ -1480,6 +1647,27 @@ test "HTTP/2 SETTINGS validates RFC value bounds" {
     try wire.appendInt(&invalid_enable_push, allocator, u32, 2, .big);
     try std.testing.expectError(error.InvalidSetting, parseSettings(allocator, invalid_enable_push.items));
 
+    var invalid_no_rfc7540_priorities: std.ArrayList(u8) = .empty;
+    defer invalid_no_rfc7540_priorities.deinit(allocator);
+    try wire.appendInt(
+        &invalid_no_rfc7540_priorities,
+        allocator,
+        u16,
+        @intFromEnum(SettingId.no_rfc7540_priorities),
+        .big,
+    );
+    try wire.appendInt(
+        &invalid_no_rfc7540_priorities,
+        allocator,
+        u32,
+        2,
+        .big,
+    );
+    try std.testing.expectError(
+        error.InvalidSetting,
+        parseSettings(allocator, invalid_no_rfc7540_priorities.items),
+    );
+
     var invalid_window: std.ArrayList(u8) = .empty;
     defer invalid_window.deinit(allocator);
     try wire.appendInt(&invalid_window, allocator, u16, @intFromEnum(SettingId.initial_window_size), .big);
@@ -1497,12 +1685,13 @@ test "HTTP/2 SETTINGS validates RFC value bounds" {
     try writeSettings(&valid, allocator, &.{
         .{ .id = .enable_push, .value = 0 },
         .{ .id = .enable_connect_protocol, .value = 1 },
+        .{ .id = .no_rfc7540_priorities, .value = 1 },
         .{ .id = .initial_window_size, .value = std.math.maxInt(i31) },
         .{ .id = .max_frame_size, .value = 16_777_215 },
     });
     const parsed = try parseSettings(allocator, valid.items);
     defer allocator.free(parsed);
-    try std.testing.expectEqual(@as(usize, 4), parsed.len);
+    try std.testing.expectEqual(@as(usize, 5), parsed.len);
 
     var invalid_connect_protocol: std.ArrayList(u8) = .empty;
     defer invalid_connect_protocol.deinit(allocator);

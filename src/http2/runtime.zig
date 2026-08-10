@@ -3,6 +3,7 @@ const http2 = @import("mod.zig");
 const http1 = @import("../http1/mod.zig");
 const http1_runtime = http1.runtime;
 const push = @import("runtime/push.zig");
+const priority_runtime = @import("runtime/priority.zig");
 
 const net = std.Io.net;
 
@@ -22,6 +23,7 @@ pub const Error = http2.Error || http1_runtime.Error || error{
     StreamReset,
     ConnectionGoAway,
     UnsupportedScheme,
+    PriorityCapacityExceeded,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
@@ -52,6 +54,10 @@ pub const Limits = struct {
     max_concurrent_streams: ?u32 = null,
     max_frame_size: usize = default_max_frame_size,
     max_header_list_size: usize = default_max_header_list_size,
+    /// Local cap for PRIORITY_UPDATE records that target request streams not
+    /// opened yet. This remains effective even when MAX_CONCURRENT_STREAMS is
+    /// not advertised, preventing unbounded state from speculative IDs.
+    max_idle_priority_updates: usize = 256,
     /// Advertise RFC 8441 SETTINGS_ENABLE_CONNECT_PROTOCOL.  It is disabled by
     /// default because peers may start tunnelling arbitrary bytes on streams
     /// once extended CONNECT is accepted.
@@ -59,6 +65,10 @@ pub const Limits = struct {
     /// Explicitly opt in to HTTP/2 server push. The client otherwise sends
     /// SETTINGS_ENABLE_PUSH=0 and rejects PUSH_PROMISE.
     enable_push: bool = false,
+    /// Advertise RFC 9218 SETTINGS_NO_RFC7540_PRIORITIES=1. This allows a
+    /// client to use PRIORITY_UPDATE and tells the peer that legacy dependency
+    /// signals are intentionally ignored.
+    no_rfc7540_priorities: bool = false,
 };
 
 pub const Server = struct {
@@ -401,6 +411,13 @@ pub const Client = struct {
         var headers: std.ArrayList(http1.Header) = .empty;
         defer headers.deinit(allocator);
         if (request_options.authority) |authority| try headers.append(allocator, .{ .name = "Host", .value = authority });
+        var priority_buf: [16]u8 = undefined;
+        if (request_options.priority) |value| {
+            try headers.append(allocator, .{
+                .name = "Priority",
+                .value = value.serialize(&priority_buf),
+            });
+        }
         try headers.appendSlice(allocator, &.{
             .{ .name = "Connection", .value = "Upgrade, HTTP2-Settings" },
             .{ .name = "Upgrade", .value = "h2c" },
@@ -578,6 +595,7 @@ pub const Connection = struct {
     active_local_streams: std.ArrayList(u31) = .empty,
     active_peer_streams: std.ArrayList(u31) = .empty,
     push_state: push.State = .{},
+    priority_state: priority_runtime.State = .{},
     response_semantics: std.ArrayList(StreamResponseSemantics) = .empty,
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
@@ -587,6 +605,9 @@ pub const Connection = struct {
     peer_max_concurrent_streams: ?u32 = null,
     peer_enable_connect_protocol: bool = false,
     peer_enable_push: bool = true,
+    peer_no_rfc7540_priorities: bool = false,
+    peer_priority_setting_seen: bool = false,
+    peer_initial_settings_applied: bool = false,
     awaiting_settings_ack: bool = false,
     last_peer_client_stream_id: u31 = 0,
     peer_goaway_last_stream_id: ?u31 = null,
@@ -608,6 +629,7 @@ pub const Connection = struct {
         self.active_local_streams.deinit(self.allocator);
         self.active_peer_streams.deinit(self.allocator);
         self.push_state.deinit(self.allocator);
+        self.priority_state.deinit(self.allocator);
         self.response_semantics.deinit(self.allocator);
         for (self.pending_requests.items[self.pending_request_head..]) |*pending| pending.deinit(self.allocator);
         self.pending_requests.deinit(self.allocator);
@@ -648,6 +670,13 @@ pub const Connection = struct {
             try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
         }
         if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
+        var priority_buf: [16]u8 = undefined;
+        if (request_options.priority) |value| {
+            try fields.append(self.allocator, .{
+                .name = "priority",
+                .value = value.serialize(&priority_buf),
+            });
+        }
         for (request_options.headers) |header| try fields.append(self.allocator, header);
         stripConnectionHeaders(&fields, .request);
         var content_length_buf: [32]u8 = undefined;
@@ -741,6 +770,124 @@ pub const Connection = struct {
         return self.alternative_services.items;
     }
 
+    /// Return the most recent RFC 9218 signal for a request or promised push.
+    pub fn peerPriority(
+        self: Connection,
+        stream_id: u31,
+    ) ?http2.ExtensiblePriority {
+        const update = self.priority_state.get(stream_id) orelse return null;
+        return update.priority();
+    }
+
+    pub fn peerPriorityFieldValue(
+        self: Connection,
+        stream_id: u31,
+    ) ?[]const u8 {
+        const update = self.priority_state.get(stream_id) orelse return null;
+        return update.field_value;
+    }
+
+    /// Send an HTTP/2 PRIORITY_UPDATE after the peer opted into RFC 9218.
+    ///
+    /// RFC 9218 only permits clients to send this frame. The target may be a
+    /// request stream that has not opened yet, but a push target must already
+    /// have been promised by the server.
+    pub fn sendPriorityUpdate(
+        self: *Connection,
+        stream_id: u31,
+        value: http2.ExtensiblePriority,
+    ) Error!void {
+        var field_value_buf: [16]u8 = undefined;
+        return self.sendPriorityUpdateRaw(
+            stream_id,
+            value.serialize(&field_value_buf),
+        );
+    }
+
+    /// Raw variant that preserves extension parameters unknown to Netz.
+    pub fn sendPriorityUpdateRaw(
+        self: *Connection,
+        stream_id: u31,
+        field_value: []const u8,
+    ) Error!void {
+        if (self.role != .client) return error.UnexpectedFrame;
+        if (!self.peer_no_rfc7540_priorities) {
+            return error.UnexpectedFrame;
+        }
+        if (stream_id == 0) return error.InvalidStreamId;
+        if (!clientInitiatedStreamId(stream_id) and
+            !self.push_state.isRemoteReserved(stream_id) and
+            !self.outboundStreamIsActive(stream_id))
+        {
+            // Even IDs that have not appeared in PUSH_PROMISE are idle push
+            // streams, which RFC 9218 explicitly forbids reprioritizing.
+            return error.InvalidStreamId;
+        }
+        const idle_request = clientInitiatedStreamId(stream_id) and
+            stream_id >= self.next_client_stream_id and
+            !self.outboundStreamIsActive(stream_id);
+        const already_reserved =
+            self.priority_state.containsIdleRequest(stream_id);
+        if (idle_request) {
+            try self.priority_state.reserveIdleRequest(
+                self.allocator,
+                stream_id,
+                self.active_local_streams.items.len,
+                self.peer_max_concurrent_streams,
+                self.limits.max_idle_priority_updates,
+            );
+        }
+        errdefer if (idle_request and !already_reserved) {
+            _ = self.priority_state.activateRequest(stream_id);
+        };
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try http2.PriorityUpdatePayload.write(
+            &encoded,
+            self.allocator,
+            stream_id,
+            field_value,
+        );
+        try writeAll(self.io, self.stream, encoded.items);
+    }
+
+    /// Read and apply the next peer PRIORITY_UPDATE, skipping ordinary
+    /// connection-management frames. Servers can use this when priority
+    /// signaling arrives while no request reader is currently pumping frames.
+    pub fn readPriorityUpdate(
+        self: *Connection,
+    ) Error!http2.PriorityUpdatePayload {
+        while (true) {
+            var frame = try readFrame(
+                self.allocator,
+                self.io,
+                self.stream,
+                self.limits,
+            );
+            defer frame.deinit(self.allocator);
+            if (frame.frame.header.frame_type == .priority_update) {
+                const update =
+                    try http2.PriorityUpdatePayload.parse(frame.frame);
+                if (!try self.handleConnectionFrame(frame.frame)) {
+                    return error.UnexpectedFrame;
+                }
+                if (self.peerPriorityFieldValue(
+                    update.prioritized_stream_id,
+                )) |owned| {
+                    return .{
+                        .prioritized_stream_id = update.prioritized_stream_id,
+                        .field_value = owned,
+                    };
+                }
+                continue;
+            }
+            if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
+                continue;
+            }
+            return error.UnexpectedFrame;
+        }
+    }
+
     pub fn openExtendedConnect(self: *Connection, options: RequestOptions) Error!ExtendedConnectResponse {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
@@ -758,6 +905,13 @@ pub const Connection = struct {
         try fields.append(self.allocator, .{ .name = ":scheme", .value = scheme });
         try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
         if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
+        var priority_buf: [16]u8 = undefined;
+        if (request_options.priority) |value| {
+            try fields.append(self.allocator, .{
+                .name = "priority",
+                .value = value.serialize(&priority_buf),
+            });
+        }
         for (request_options.headers) |header| try fields.append(self.allocator, header);
         stripConnectionHeaders(&fields, .request);
         try validateHeaderBlock(fields.items, .request);
@@ -783,6 +937,13 @@ pub const Connection = struct {
         defer fields.deinit(self.allocator);
         try fields.append(self.allocator, .{ .name = ":method", .value = "CONNECT" });
         try fields.append(self.allocator, .{ .name = ":authority", .value = request_options.authority.? });
+        var priority_buf: [16]u8 = undefined;
+        if (request_options.priority) |value| {
+            try fields.append(self.allocator, .{
+                .name = "priority",
+                .value = value.serialize(&priority_buf),
+            });
+        }
         for (request_options.headers) |header| try fields.append(self.allocator, header);
         stripConnectionHeaders(&fields, .request);
         try validateHeaderBlock(fields.items, .request);
@@ -829,6 +990,12 @@ pub const Connection = struct {
                         .scheme = findHeader(headers, ":scheme") orelse "",
                         .authority = requestAuthority(headers),
                         .protocol = protocol,
+                        .priority = if (self.peerPriority(stream_id)) |value|
+                            value
+                        else
+                            http2.ExtensiblePriority.parse(
+                                findHeader(headers, "priority") orelse "",
+                            ),
                     };
                 },
                 .goaway => continue,
@@ -946,6 +1113,12 @@ pub const Connection = struct {
                         .protocol = protocol,
                         .body = try body.toOwnedSlice(self.allocator),
                         .trailers = trailers,
+                        .priority = if (self.peerPriority(stream_id)) |value|
+                            value
+                        else
+                            http2.ExtensiblePriority.parse(
+                                findHeader(headers, "priority") orelse "",
+                            ),
                     };
                 },
                 .goaway => continue,
@@ -1017,6 +1190,12 @@ pub const Connection = struct {
             .protocol = protocol,
             .body = body,
             .trailers = trailers,
+            .priority = if (self.peerPriority(stream_id)) |value|
+                value
+            else
+                http2.ExtensiblePriority.parse(
+                    findHeader(headers, "priority") orelse "",
+                ),
         };
     }
 
@@ -1108,6 +1287,10 @@ pub const Connection = struct {
         if (status == .canceled) {
             _ = self.push_state.releaseLocal(promised_stream_id);
             self.forgetResponseSemantics(promised_stream_id);
+            _ = self.priority_state.remove(
+                self.allocator,
+                promised_stream_id,
+            );
             return error.StreamReset;
         }
         var activated = false;
@@ -1361,6 +1544,10 @@ pub const Connection = struct {
             self.releaseLocalStream(reset.stream_id);
             self.releasePeerStream(reset.stream_id);
             self.forgetResponseSemantics(reset.stream_id);
+            _ = self.priority_state.remove(
+                self.allocator,
+                reset.stream_id,
+            );
             return;
         }
         if (self.role == .client) {
@@ -1411,9 +1598,15 @@ pub const Connection = struct {
             if (stream_id > last) return error.ConnectionGoAway;
         }
         if (self.peer_max_concurrent_streams) |max_streams| {
-            if (self.active_local_streams.items.len >= max_streams) return error.FlowControlBlocked;
+            const was_priority_reserved =
+                self.priority_state.containsIdleRequest(stream_id);
+            const counted = self.active_local_streams.items.len +
+                self.priority_state.idle_requests.items.len -
+                @intFromBool(was_priority_reserved);
+            if (counted >= max_streams) return error.FlowControlBlocked;
         }
         try self.active_local_streams.append(self.allocator, stream_id);
+        _ = self.priority_state.activateRequest(stream_id);
         self.next_client_stream_id += 2;
         return stream_id;
     }
@@ -1432,6 +1625,10 @@ pub const Connection = struct {
         for (self.active_local_streams.items, 0..) |active, index| {
             if (active == stream_id) {
                 _ = self.active_local_streams.swapRemove(index);
+                _ = self.priority_state.remove(
+                    self.allocator,
+                    stream_id,
+                );
                 return;
             }
         }
@@ -1457,10 +1654,16 @@ pub const Connection = struct {
     }
 
     fn reservePeerStream(self: *Connection, stream_id: u31) Error!void {
+        const was_priority_reserved =
+            self.priority_state.containsIdleRequest(stream_id);
         if (self.limits.max_concurrent_streams) |max_streams| {
-            if (self.active_peer_streams.items.len >= max_streams) return error.FlowControlViolation;
+            const counted = self.active_peer_streams.items.len +
+                self.priority_state.idle_requests.items.len -
+                @intFromBool(was_priority_reserved);
+            if (counted >= max_streams) return error.FlowControlViolation;
         }
         try self.active_peer_streams.append(self.allocator, stream_id);
+        self.priority_state.openRequest(self.allocator, stream_id);
     }
 
     fn releasePeerStream(self: *Connection, stream_id: u31) void {
@@ -1471,6 +1674,7 @@ pub const Connection = struct {
             }
         }
         self.forgetResponseSemantics(stream_id);
+        _ = self.priority_state.remove(self.allocator, stream_id);
     }
 
     fn rememberResponseSemantics(self: *Connection, stream_id: u31, method: []const u8, protocol: ?[]const u8) Error!void {
@@ -1968,6 +2172,58 @@ pub const Connection = struct {
                 // checked stream id and payload length; parse it here so
                 // malformed priority payloads still fail before being ignored.
                 _ = try http2.PriorityPayload.parse(frame);
+                if (self.limits.no_rfc7540_priorities) {
+                    // Advertising SETTINGS_NO_RFC7540_PRIORITIES=1 commits this
+                    // endpoint to ignoring legacy dependency signals.
+                    return true;
+                }
+                return true;
+            },
+            .priority_update => {
+                if (self.role != .server) return error.InvalidFrame;
+                if (!self.limits.no_rfc7540_priorities) {
+                    // The client is advised to stop these after observing a
+                    // missing/zero setting. Unknown extension frames remain
+                    // ignorable, so discard rather than allocate state.
+                    return true;
+                }
+                const update = try http2.PriorityUpdatePayload.parse(frame);
+                const stream_id = update.prioritized_stream_id;
+                if (clientInitiatedStreamId(stream_id)) {
+                    if (stream_id > self.last_peer_client_stream_id) {
+                        try self.priority_state.reserveIdleRequest(
+                            self.allocator,
+                            stream_id,
+                            self.active_peer_streams.items.len,
+                            self.limits.max_concurrent_streams,
+                            self.limits.max_idle_priority_updates,
+                        );
+                    } else if (!self.outboundStreamIsActive(stream_id)) {
+                        // Closed request streams can be discarded without
+                        // retaining attacker-controlled field values.
+                        return true;
+                    }
+                } else {
+                    if (!self.push_state.isLocalReserved(stream_id) and
+                        !self.outboundStreamIsActive(stream_id))
+                    {
+                        if (stream_id <
+                            self.push_state.next_local_stream_id)
+                        {
+                            // A previously promised push is already closed;
+                            // RFC 9218 permits discarding this late update.
+                            return true;
+                        }
+                        // An even ID not present in local reservations is an
+                        // idle push stream, which RFC 9218 forbids targeting.
+                        return error.InvalidFrame;
+                    }
+                }
+                try self.priority_state.store(
+                    self.allocator,
+                    stream_id,
+                    update.field_value,
+                );
                 return true;
             },
             .rst_stream => {
@@ -2235,6 +2491,27 @@ pub const Connection = struct {
                 .max_header_list_size => self.peer_max_header_list_size = setting.value,
                 .max_concurrent_streams => self.peer_max_concurrent_streams = setting.value,
                 .header_table_size => self.hpack_encoder.setMaxDynamicTableSize(self.allocator, setting.value),
+                .no_rfc7540_priorities => {
+                    if (setting.value > 1) return error.InvalidSetting;
+                    const enabled = setting.value == 1;
+                    if (self.peer_initial_settings_applied and
+                        !self.peer_priority_setting_seen)
+                    {
+                        // SETTINGS_NO_RFC7540_PRIORITIES is only valid in the
+                        // first peer SETTINGS frame.
+                        return error.InvalidSetting;
+                    }
+                    if (self.peer_priority_setting_seen and
+                        self.peer_no_rfc7540_priorities != enabled)
+                    {
+                        // RFC 9218 requires this value in the initial SETTINGS
+                        // and forbids changing it later. Rejecting a change
+                        // avoids switching scheduling semantics mid-connection.
+                        return error.InvalidSetting;
+                    }
+                    self.peer_priority_setting_seen = true;
+                    self.peer_no_rfc7540_priorities = enabled;
+                },
                 .enable_push => {
                     if (setting.value > 1) return error.InvalidSetting;
                     // RFC 9113 forbids SETTINGS_ENABLE_PUSH in server SETTINGS.
@@ -2256,6 +2533,7 @@ pub const Connection = struct {
                 else => {},
             }
         }
+        self.peer_initial_settings_applied = true;
     }
 
     fn applyLocalLimits(self: *Connection) void {
@@ -2309,6 +2587,10 @@ pub const RequestOptions = struct {
     /// requires the peer to advertise SETTINGS_ENABLE_CONNECT_PROTOCOL = 1.
     protocol: ?[]const u8 = null,
     authority: ?[]const u8 = null,
+    /// Optional RFC 9218 end-to-end Priority request field. The runtime emits
+    /// it as a normal lowercase header; callers can later reprioritize the
+    /// response with `sendPriorityUpdate`.
+    priority: ?http2.ExtensiblePriority = null,
     headers: []const http2.Hpack.HeaderField = &.{},
     body: []const u8 = &.{},
     trailers: []const http2.Hpack.HeaderField = &.{},
@@ -2366,6 +2648,7 @@ pub const OwnedRequest = struct {
     protocol: ?[]const u8 = null,
     body: []u8,
     trailers: []http2.Hpack.HeaderField = &.{},
+    priority: http2.ExtensiblePriority = .{},
 
     pub fn deinit(self: *OwnedRequest, allocator: std.mem.Allocator) void {
         freeHeaders(allocator, self.headers);
@@ -2420,6 +2703,7 @@ pub const ExtendedConnectRequest = struct {
     scheme: []const u8,
     authority: ?[]const u8,
     protocol: []const u8,
+    priority: http2.ExtensiblePriority = .{},
 
     pub fn deinit(self: *ExtendedConnectRequest, allocator: std.mem.Allocator) void {
         freeHeaders(allocator, self.headers);
@@ -2603,6 +2887,11 @@ fn validateFrameEnvelope(frame: http2.Frame) Error!void {
         .goaway => {
             if (stream_id != 0 or frame.payload.len < 8) return error.InvalidFrame;
         },
+        .priority_update => {
+            if (stream_id != 0 or frame.payload.len < 4) {
+                return error.InvalidFrame;
+            }
+        },
         .altsvc, .origin => {},
         .window_update => {
             if (frame.payload.len != 4) return error.InvalidFrame;
@@ -2647,6 +2936,7 @@ fn validateLocalLimits(limits: Limits) Error!void {
     if (limits.initial_window_size > std.math.maxInt(i31)) return error.InvalidSetting;
     if (limits.max_frame_size < default_max_frame_size or limits.max_frame_size > max_max_frame_size) return error.InvalidSetting;
     if (limits.max_continuation_frames) |limit| if (limit == 0) return error.InvalidSetting;
+    if (limits.max_idle_priority_updates == 0) return error.InvalidSetting;
 }
 
 fn calcMaxContinuationFrames(header_max: usize, frame_max: usize) usize {
@@ -3251,6 +3541,28 @@ pub const testing = struct {
     ) Error!void {
         return connection.receivePushPromise(frame);
     }
+
+    pub fn receivePriorityUpdate(
+        connection: *Connection,
+        frame: http2.Frame,
+    ) Error!void {
+        if (!try connection.handleConnectionFrame(frame)) {
+            return error.UnexpectedFrame;
+        }
+    }
+
+    pub fn reserveNextClientStreamId(
+        connection: *Connection,
+    ) Error!u31 {
+        return connection.reserveNextClientStreamId();
+    }
+
+    pub fn releaseLocalStream(
+        connection: *Connection,
+        stream_id: u31,
+    ) void {
+        connection.releaseLocalStream(stream_id);
+    }
 };
 
 fn requestAuthority(headers: []const http2.Hpack.HeaderField) ?[]const u8 {
@@ -3298,7 +3610,7 @@ fn headersContainHttpToken(headers: []const http1.Header, name: []const u8, need
 
 fn writeSettingsPayloadForLimits(allocator: std.mem.Allocator, payload: *std.ArrayList(u8), limits: Limits, role: Role) Error!void {
     try validateLocalLimits(limits);
-    var settings_buf: [7]http2.Setting = undefined;
+    var settings_buf: [8]http2.Setting = undefined;
     var count: usize = 0;
     settings_buf[count] = .{ .id = .header_table_size, .value = @intCast(@min(limits.header_table_size, std.math.maxInt(u32))) };
     count += 1;
@@ -3316,6 +3628,13 @@ fn writeSettingsPayloadForLimits(allocator: std.mem.Allocator, payload: *std.Arr
     count += 1;
     if (limits.enable_connect_protocol) {
         settings_buf[count] = .{ .id = .enable_connect_protocol, .value = 1 };
+        count += 1;
+    }
+    if (limits.no_rfc7540_priorities) {
+        settings_buf[count] = .{
+            .id = .no_rfc7540_priorities,
+            .value = 1,
+        };
         count += 1;
     }
     if (role == .client) {
@@ -8706,6 +9025,9 @@ test "HTTP/2 runtime rejects invalid local SETTINGS limits" {
     try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
         .max_frame_size = max_max_frame_size + 1,
     }));
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .max_idle_priority_updates = 0,
+    }));
     try validateLocalLimits(.{
         .initial_window_size = std.math.maxInt(i31),
         .max_frame_size = max_max_frame_size,
@@ -8743,10 +9065,12 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
         .{ .id = .max_frame_size, .value = 32_768 },
         .{ .id = .max_concurrent_streams, .value = 7 },
         .{ .id = .header_table_size, .value = 128 },
+        .{ .id = .no_rfc7540_priorities, .value = 1 },
     });
     try std.testing.expectEqual(@as(usize, 32_768), connection.peer_max_frame_size);
     try std.testing.expectEqual(@as(?u32, 7), connection.peer_max_concurrent_streams);
     try std.testing.expectEqual(@as(usize, 128), connection.hpack_encoder.dynamic_table.size_limit);
+    try std.testing.expect(connection.peer_no_rfc7540_priorities);
 
     try connection.applySettings(&.{
         .{ .id = .enable_connect_protocol, .value = 0 },
@@ -8760,6 +9084,12 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
         .{ .id = .enable_connect_protocol, .value = 0 },
     }));
     try std.testing.expect(connection.peer_enable_connect_protocol);
+    try connection.applySettings(&.{
+        .{ .id = .no_rfc7540_priorities, .value = 1 },
+    });
+    try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
+        .{ .id = .no_rfc7540_priorities, .value = 0 },
+    }));
 
     var server_connection = Connection{
         .io = undefined,
@@ -8926,6 +9256,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
         max_header_list_size: ?u32 = null,
         enable_push: ?u32 = null,
         enable_connect_protocol: ?u32 = null,
+        no_rfc7540_priorities: ?u32 = null,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -8951,6 +9282,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
                 .max_header_list_size => shared.max_header_list_size = setting.value,
                 .enable_push => shared.enable_push = setting.value,
                 .enable_connect_protocol => shared.enable_connect_protocol = setting.value,
+                .no_rfc7540_priorities => shared.no_rfc7540_priorities = setting.value,
                 else => {},
             };
         }
@@ -8968,6 +9300,7 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
         .max_frame_size = 20_000,
         .max_header_list_size = 4096,
         .enable_connect_protocol = true,
+        .no_rfc7540_priorities = true,
     }, .client);
 
     thread.join();
@@ -8979,8 +9312,13 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
     try std.testing.expectEqual(@as(?u32, 4096), shared.max_header_list_size);
     try std.testing.expectEqual(@as(?u32, 0), shared.enable_push);
     try std.testing.expectEqual(@as(?u32, 1), shared.enable_connect_protocol);
+    try std.testing.expectEqual(
+        @as(?u32, 1),
+        shared.no_rfc7540_priorities,
+    );
 }
 
 test {
     _ = @import("runtime/push_tests.zig");
+    _ = @import("runtime/priority_tests.zig");
 }

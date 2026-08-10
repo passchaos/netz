@@ -74,6 +74,10 @@ pub const State = struct {
         return null;
     }
 
+    pub fn isLocalReserved(self: State, stream_id: u31) bool {
+        return self.localStatus(stream_id) == .reserved;
+    }
+
     pub fn cancelLocal(self: *State, stream_id: u31) bool {
         for (self.local.items) |*reservation| {
             if (reservation.stream_id == stream_id) {
