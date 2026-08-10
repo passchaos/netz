@@ -46,6 +46,131 @@ pub const ApplicationErrorCode = struct {
     pub const request_incomplete: u64 = 0x10d;
 };
 
+pub const AltSvcEndpoint = struct {
+    /// ALPN identifier, for example "h3" or "h3-29".
+    alpn: []const u8,
+    /// Authority value from the quoted alternative service, usually ":443" or
+    /// "host:443".  The slice is borrowed from the input field value.
+    authority: []const u8,
+    port: ?u16 = null,
+    max_age: ?u64 = null,
+};
+
+/// Parse the first HTTP/3 alternative from an Alt-Svc field value.
+///
+/// This is intentionally allocation-free so clients can cheaply inspect HTTP/1
+/// or HTTP/2 response headers before deciding whether to race or upgrade to
+/// HTTP/3. It accepts the common wire form used by real sites such as
+/// `h3=":443"; ma=2592000,h3-29=":443"; ma=2592000`.
+pub fn firstHttp3AltSvc(field_value: []const u8) Error!?AltSvcEndpoint {
+    var offset: usize = 0;
+    while (offset < field_value.len) {
+        const next = std.mem.indexOfScalarPos(u8, field_value, offset, ',') orelse field_value.len;
+        const item = std.mem.trim(u8, field_value[offset..next], " \t");
+        offset = if (next == field_value.len) next else next + 1;
+        if (item.len == 0) continue;
+        if (std.ascii.eqlIgnoreCase(item, "clear")) return null;
+
+        const eq = std.mem.indexOfScalar(u8, item, '=') orelse return error.InvalidHeader;
+        const alpn = std.mem.trim(u8, item[0..eq], " \t");
+        if (!isHttp3Alpn(alpn)) continue;
+
+        var rest = std.mem.trim(u8, item[eq + 1 ..], " \t");
+        if (rest.len < 2 or rest[0] != '"') return error.InvalidHeader;
+        const quote_end = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return error.InvalidHeader;
+        const authority = rest[1..quote_end];
+        if (authority.len == 0) return error.InvalidHeader;
+        validateAltSvcAuthority(authority) catch return error.InvalidHeader;
+
+        var max_age: ?u64 = null;
+        rest = rest[quote_end + 1 ..];
+        while (std.mem.trim(u8, rest, " \t").len != 0) {
+            rest = std.mem.trim(u8, rest, " \t");
+            if (rest[0] != ';') return error.InvalidHeader;
+            rest = std.mem.trim(u8, rest[1..], " \t");
+            const param_end = std.mem.indexOfScalar(u8, rest, ';') orelse rest.len;
+            const param = std.mem.trim(u8, rest[0..param_end], " \t");
+            rest = rest[param_end..];
+            if (param.len == 0) continue;
+            const param_eq = std.mem.indexOfScalar(u8, param, '=') orelse continue;
+            const name = std.mem.trim(u8, param[0..param_eq], " \t");
+            const value = std.mem.trim(u8, param[param_eq + 1 ..], " \t");
+            if (std.ascii.eqlIgnoreCase(name, "ma")) {
+                max_age = std.fmt.parseInt(u64, value, 10) catch return error.InvalidHeader;
+            }
+        }
+
+        return .{
+            .alpn = alpn,
+            .authority = authority,
+            .port = altSvcPort(authority),
+            .max_age = max_age,
+        };
+    }
+    return null;
+}
+
+fn isHttp3Alpn(alpn: []const u8) bool {
+    if (std.mem.eql(u8, alpn, "h3")) return true;
+    if (!std.mem.startsWith(u8, alpn, "h3-")) return false;
+    if (alpn.len == 3) return false;
+    for (alpn[3..]) |byte| {
+        if (!std.ascii.isDigit(byte)) return false;
+    }
+    return true;
+}
+
+fn validateAltSvcAuthority(authority: []const u8) Error!void {
+    for (authority) |byte| {
+        // Alt-Svc uses quoted-string syntax, but the alternative authority is
+        // still authority-like. Reject separators/control bytes that would make
+        // the value ambiguous for callers before they race a QUIC connection.
+        if (byte <= 0x20 or byte >= 0x7f or byte == '"' or byte == ',' or byte == ';' or byte == '/') {
+            return error.InvalidHeader;
+        }
+    }
+    if (authority[0] == ':') {
+        _ = parseAltSvcPort(authority[1..]) orelse return error.InvalidHeader;
+        return;
+    }
+    if (authority[0] == '[') {
+        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidHeader;
+        if (end <= 1) return error.InvalidHeader;
+        if (end + 1 == authority.len) return;
+        if (authority[end + 1] != ':') return error.InvalidHeader;
+        _ = parseAltSvcPort(authority[end + 2 ..]) orelse return error.InvalidHeader;
+        return;
+    }
+    if (std.mem.indexOfScalar(u8, authority, '[') != null or
+        std.mem.indexOfScalar(u8, authority, ']') != null)
+    {
+        return error.InvalidHeader;
+    }
+    if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+        if (colon == 0 or colon + 1 >= authority.len) return error.InvalidHeader;
+        if (std.mem.indexOfScalar(u8, authority[0..colon], ':') != null) return error.InvalidHeader;
+        _ = parseAltSvcPort(authority[colon + 1 ..]) orelse return error.InvalidHeader;
+    }
+}
+
+fn altSvcPort(authority: []const u8) ?u16 {
+    if (authority.len == 0) return null;
+    if (authority[0] == ':') return parseAltSvcPort(authority[1..]);
+    if (authority[0] == '[') {
+        const end = std.mem.indexOfScalar(u8, authority, ']') orelse return null;
+        if (end + 1 >= authority.len or authority[end + 1] != ':') return null;
+        return parseAltSvcPort(authority[end + 2 ..]);
+    }
+    const colon = std.mem.lastIndexOfScalar(u8, authority, ':') orelse return null;
+    if (std.mem.indexOfScalar(u8, authority[0..colon], ':') != null) return null;
+    return parseAltSvcPort(authority[colon + 1 ..]);
+}
+
+fn parseAltSvcPort(bytes: []const u8) ?u16 {
+    if (bytes.len == 0) return null;
+    return std.fmt.parseInt(u16, bytes, 10) catch null;
+}
+
 pub const FrameType = struct {
     pub const data: u64 = 0x00;
     pub const headers: u64 = 0x01;
@@ -2561,6 +2686,31 @@ pub const Datagram = struct {
         try list.appendSlice(allocator, self.payload);
     }
 };
+
+test "HTTP/3 parses Alt-Svc HTTP/3 advertisements" {
+    const robotics = try firstHttp3AltSvc("h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("h3", robotics.alpn);
+    try std.testing.expectEqualStrings(":443", robotics.authority);
+    try std.testing.expectEqual(@as(?u16, 443), robotics.port);
+    try std.testing.expectEqual(@as(?u64, 2_592_000), robotics.max_age);
+
+    const draft = try firstHttp3AltSvc(" h2=\":443\"; ma=60, h3-29=\"alt.example:8443\"; ma=120 ") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("h3-29", draft.alpn);
+    try std.testing.expectEqualStrings("alt.example:8443", draft.authority);
+    try std.testing.expectEqual(@as(?u16, 8443), draft.port);
+    try std.testing.expectEqual(@as(?u64, 120), draft.max_age);
+
+    const ipv6 = try firstHttp3AltSvc("h3=\"[2001:db8::1]:443\"") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("[2001:db8::1]:443", ipv6.authority);
+    try std.testing.expectEqual(@as(?u16, 443), ipv6.port);
+
+    try std.testing.expect((try firstHttp3AltSvc("clear")) == null);
+    try std.testing.expect((try firstHttp3AltSvc("h2=\":443\"")) == null);
+    try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\"\""));
+    try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\":bad\""));
+    try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\"example.com/evil\""));
+    try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\":443\"; ma=bad"));
+}
 
 test "HTTP/3 frame settings and qpack literal block" {
     const allocator = std.testing.allocator;

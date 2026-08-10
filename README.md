@@ -400,6 +400,7 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/1 borrowed request-head parsing versus owned full request parsing,
 - HTTP/2 HPACK stateful dynamic-table encode/decode versus stateless helpers,
 - HTTP/3 cleartext development request/response round trips,
+- HTTP/3 Alt-Svc `h3` / `h3-29` endpoint discovery parsing for real-site upgrade hints,
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
 - MQTT subscription-router trie matching versus a linear filter scan,
 - QUIC AES-128-GCM and ChaCha20-Poly1305 short-packet sealing with
