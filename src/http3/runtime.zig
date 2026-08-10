@@ -5677,6 +5677,7 @@ const StreamingMessageSet = struct {
 
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
+    entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     resets: std.ArrayList(Reset) = .empty,
     reset_head: usize = 0,
     max_streams: usize,
@@ -5703,6 +5704,7 @@ const StreamingMessageSet = struct {
     fn deinit(self: *StreamingMessageSet) void {
         for (self.entries.items) |*entry| entry.deinit();
         self.entries.deinit(self.allocator);
+        self.entry_index.deinit(self.allocator);
         self.resets.deinit(self.allocator);
         self.* = undefined;
     }
@@ -5720,8 +5722,9 @@ const StreamingMessageSet = struct {
             return error.ExcessiveLoad;
         }
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
         if (buffered.takeReceive(stream_id)) |owned| {
-            self.entries.appendAssumeCapacity(.{
+            return self.appendEntryAssumeCapacity(.{
                 .reader = .{
                     .allocator = self.allocator,
                     .receive = owned.receive,
@@ -5732,17 +5735,15 @@ const StreamingMessageSet = struct {
                 },
                 .from = owned.from,
             });
-        } else {
-            self.entries.appendAssumeCapacity(.{
-                .reader = .initResponse(
-                    self.allocator,
-                    stream_id,
-                    self.max_stream_buffer,
-                    self.settings,
-                ),
-            });
         }
-        return &self.entries.items[self.entries.items.len - 1];
+        return self.appendEntryAssumeCapacity(.{
+            .reader = .initResponse(
+                self.allocator,
+                stream_id,
+                self.max_stream_buffer,
+                self.settings,
+            ),
+        });
     }
 
     fn activateBufferedResponses(
@@ -5797,8 +5798,9 @@ const StreamingMessageSet = struct {
             return error.ExcessiveLoad;
         }
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
         if (buffered.takeReceive(stream_id)) |owned| {
-            self.entries.appendAssumeCapacity(.{
+            return self.appendEntryAssumeCapacity(.{
                 .reader = .{
                     .allocator = self.allocator,
                     .receive = owned.receive,
@@ -5808,17 +5810,15 @@ const StreamingMessageSet = struct {
                 },
                 .from = owned.from,
             });
-        } else {
-            self.entries.appendAssumeCapacity(.{
-                .reader = .initRequest(
-                    self.allocator,
-                    stream_id,
-                    self.max_stream_buffer,
-                    self.settings,
-                ),
-            });
         }
-        return &self.entries.items[self.entries.items.len - 1];
+        return self.appendEntryAssumeCapacity(.{
+            .reader = .initRequest(
+                self.allocator,
+                stream_id,
+                self.max_stream_buffer,
+                self.settings,
+            ),
+        });
     }
 
     fn insert(
@@ -5837,6 +5837,17 @@ const StreamingMessageSet = struct {
         return true;
     }
 
+    fn appendEntryAssumeCapacity(
+        self: *StreamingMessageSet,
+        entry: Entry,
+    ) *Entry {
+        const index = self.entries.items.len;
+        const stream_id: u62 = @intCast(entry.reader.receive.stream_id);
+        self.entries.appendAssumeCapacity(entry);
+        self.entry_index.putAssumeCapacity(stream_id, index);
+        return &self.entries.items[index];
+    }
+
     fn remove(self: *StreamingMessageSet, stream_id: u62) void {
         self.removeEntry(stream_id);
         for (self.resets.items[self.reset_head..], self.reset_head..) |reset, index| {
@@ -5848,27 +5859,30 @@ const StreamingMessageSet = struct {
     }
 
     fn removeEntry(self: *StreamingMessageSet, stream_id: u62) void {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.reader.receive.stream_id != stream_id) continue;
-            var removed = self.entries.swapRemove(index);
-            removed.deinit();
-            return;
-        }
+        var removed = self.takeEntry(stream_id) orelse return;
+        removed.deinit();
     }
 
     fn takeEntry(self: *StreamingMessageSet, stream_id: u62) ?Entry {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.reader.receive.stream_id != stream_id) continue;
-            return self.entries.swapRemove(index);
+        const index = self.entry_index.get(stream_id) orelse return null;
+        const last_index = self.entries.items.len - 1;
+        const removed = self.entries.swapRemove(index);
+        _ = self.entry_index.remove(@intCast(removed.reader.receive.stream_id));
+        if (index != last_index) {
+            const moved = self.entries.items[index];
+            self.entry_index.getPtr(@intCast(moved.reader.receive.stream_id)).?.* =
+                index;
         }
-        return null;
+        return removed;
     }
 
     fn find(self: *StreamingMessageSet, stream_id: u62) ?*Entry {
-        for (self.entries.items) |*entry| {
-            if (entry.reader.receive.stream_id == stream_id) return entry;
+        const index = self.entry_index.get(stream_id) orelse return null;
+        if (index >= self.entries.items.len) return null;
+        if (self.entries.items[index].reader.receive.stream_id != stream_id) {
+            return null;
         }
-        return null;
+        return &self.entries.items[index];
     }
 
     fn activateBufferedRequests(
@@ -5948,9 +5962,7 @@ const StreamingMessageSet = struct {
     }
 
     fn contains(self: StreamingMessageSet, stream_id: u62) bool {
-        for (self.entries.items) |entry| {
-            if (entry.reader.receive.stream_id == stream_id) return true;
-        }
+        if (self.entry_index.contains(stream_id)) return true;
         for (self.resets.items[self.reset_head..]) |reset| {
             if (reset.stream_id == stream_id) return true;
         }
@@ -10477,6 +10489,47 @@ test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
     }
     try std.testing.expect(requests.takeFirstReset() == null);
     try std.testing.expectEqual(@as(usize, 0), requests.resetCount());
+}
+
+test "HTTP/3 streaming message set indexes active readers" {
+    const allocator = std.testing.allocator;
+    var responses = StreamingResponseSet.init(allocator, 3, 512, .{}, .response);
+    defer responses.deinit();
+    var buffered = ResponseStreamSet.init(allocator, 512, 3);
+    defer buffered.deinit();
+
+    const from: net.IpAddress = .{ .ip4 = .loopback(443) };
+    try buffered.insert(from, .{
+        .stream_id = 0,
+        .data = "a",
+    });
+    try buffered.insert(from, .{
+        .stream_id = 4,
+        .data = "b",
+    });
+    try buffered.insert(from, .{
+        .stream_id = 8,
+        .data = "c",
+    });
+    _ = try responses.activateResponse(&buffered, 0);
+    _ = try responses.activateResponse(&buffered, 4);
+    _ = try responses.activateResponse(&buffered, 8);
+    try std.testing.expect(responses.find(4) != null);
+
+    responses.removeEntry(4);
+    try std.testing.expect(responses.find(4) == null);
+    // Removing the middle entry swaps another reader into that slot; the
+    // stream-id index must follow it so later DATA, reset, or QPACK-cancel
+    // checks can find the active reader without a linear scan.
+    try std.testing.expect(responses.find(8) != null);
+
+    const taken = responses.takeEntry(8) orelse return error.TestUnexpectedResult;
+    var owned = taken;
+    defer owned.deinit();
+    try std.testing.expect(responses.find(8) == null);
+    try std.testing.expectEqual(@as(usize, 1), responses.entry_index.count());
+    responses.removeEntry(0);
+    try std.testing.expectEqual(@as(usize, 0), responses.entry_index.count());
 }
 
 test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
