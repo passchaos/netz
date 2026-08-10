@@ -12,6 +12,36 @@ const parameters = @import("parameters.zig");
 const CipherSuite = vail.tls.cipher_suite.Suite;
 const Secret = vail.tls.secret.Secret;
 
+const OriginAlpnKey = struct {
+    server_id: []const u8,
+    alpn: []const u8,
+};
+
+const OriginAlpnContext = struct {
+    pub fn hash(_: @This(), key: OriginAlpnKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        // Prefix the variable-length fields with their lengths so concatenated
+        // byte strings cannot alias across the server_id/ALPN boundary.
+        std.hash.autoHash(&hasher, key.server_id.len);
+        hasher.update(key.server_id);
+        std.hash.autoHash(&hasher, key.alpn.len);
+        hasher.update(key.alpn);
+        return hasher.final();
+    }
+
+    pub fn eql(_: @This(), lhs: OriginAlpnKey, rhs: OriginAlpnKey) bool {
+        return std.mem.eql(u8, lhs.server_id, rhs.server_id) and
+            std.mem.eql(u8, lhs.alpn, rhs.alpn);
+    }
+};
+
+const OriginAlpnIndex = std.HashMapUnmanaged(
+    OriginAlpnKey,
+    usize,
+    OriginAlpnContext,
+    std.hash_map.default_max_load_percentage,
+);
+
 pub const max_ticket_lifetime_seconds: u32 = 7 * 24 * 60 * 60;
 pub const quic_early_data_size: u32 = std.math.maxInt(u32);
 
@@ -145,17 +175,35 @@ const Entry = struct {
         return self.max_early_data_size == quic_early_data_size and
             !self.early_data_consumed and self.lease_id == null;
     }
+
+    fn originAlpnKey(self: Entry) OriginAlpnKey {
+        return .{
+            .server_id = self.server_id,
+            .alpn = self.alpn,
+        };
+    }
 };
 
 pub const Cache = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
+    /// Exact origin+ALPN index for the single live ticket per tuple. Keys point
+    /// into entry-owned `server_id`/`alpn` buffers; replacement refreshes the
+    /// key before freeing the old entry, and swap-remove paths repair moved
+    /// indexes so hot acquire/store/beginEarlyData paths avoid linear scans.
+    origin_index: OriginAlpnIndex = .empty,
+    /// Active early-data lease IDs map back to their owning entry. This keeps
+    /// lease finish/ownership checks independent of cache size while preserving
+    /// the existing lease ID wraparound semantics.
+    lease_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     max_entries: usize,
     access_clock: u64 = 0,
     next_lease_id: u64 = 1,
 
     pub fn init(allocator: std.mem.Allocator, max_entries: usize) Error!Cache {
-        if (max_entries == 0) return error.InvalidCapacity;
+        if (max_entries == 0 or max_entries > std.math.maxInt(OriginAlpnIndex.Size)) {
+            return error.InvalidCapacity;
+        }
         return .{
             .allocator = allocator,
             .max_entries = max_entries,
@@ -165,14 +213,16 @@ pub const Cache = struct {
     pub fn deinit(self: *Cache) void {
         for (self.entries.items) |*entry| entry.deinit(self.allocator);
         self.entries.deinit(self.allocator);
+        self.origin_index.deinit(self.allocator);
+        self.lease_index.deinit(self.allocator);
         self.* = undefined;
     }
 
-    pub fn count(self: Cache) usize {
+    pub fn count(self: *const Cache) usize {
         return self.entries.items.len;
     }
 
-    pub fn stats(self: Cache) CacheStats {
+    pub fn stats(self: *const Cache) CacheStats {
         var active_leases: usize = 0;
         var consumed: usize = 0;
         var reusable_early_data: usize = 0;
@@ -190,7 +240,7 @@ pub const Cache = struct {
         };
     }
 
-    pub fn getStats(self: Cache) CacheStats {
+    pub fn getStats(self: *const Cache) CacheStats {
         return self.stats();
     }
 
@@ -222,6 +272,7 @@ pub const Cache = struct {
         } else {
             if (self.entries.items.len < self.max_entries) {
                 try self.entries.ensureUnusedCapacity(self.allocator, 1);
+                try self.origin_index.ensureUnusedCapacity(self.allocator, 1);
             } else {
                 // swapRemove below creates the slot used by append, so a full
                 // cache never grows merely to replace its LRU entry.
@@ -234,17 +285,15 @@ pub const Cache = struct {
         owned.last_used = self.nextAccess();
 
         if (replacement_index) |index| {
-            var replaced = self.entries.items[index];
-            self.entries.items[index] = owned;
-            replaced.deinit(self.allocator);
+            self.replaceEntryAt(index, owned);
             return;
         }
         if (self.entries.items.len >= self.max_entries) {
             const index = self.lruEvictableIndex() orelse unreachable;
-            var evicted = self.entries.swapRemove(index);
+            var evicted = self.removeEntryAt(index);
             evicted.deinit(self.allocator);
         }
-        self.entries.appendAssumeCapacity(owned);
+        self.appendEntryAssumeCapacity(owned);
     }
 
     /// Reserve one early-data use and return an owned ticket copy. The cache
@@ -261,11 +310,13 @@ pub const Cache = struct {
         var entry = &self.entries.items[index];
         if (!entry.allowsEarlyData()) return null;
 
+        try self.lease_index.ensureUnusedCapacity(self.allocator, 1);
         var session = try self.copySession(entry.*);
         errdefer session.deinit();
         const lease_id = self.nextLeaseId();
         entry.lease_id = lease_id;
         entry.last_used = self.nextAccess();
+        self.lease_index.putAssumeCapacityNoClobber(lease_id, index);
         return .{
             .owner = self,
             .session = session,
@@ -299,7 +350,7 @@ pub const Cache = struct {
                 index += 1;
                 continue;
             }
-            var expired = self.entries.swapRemove(index);
+            var expired = self.removeEntryAt(index);
             expired.deinit(self.allocator);
             removed += 1;
         }
@@ -312,10 +363,8 @@ pub const Cache = struct {
     ) bool {
         if (lease.owner != self) return false;
         if (lease.state != .active) return false;
-        for (self.entries.items) |entry| {
-            if (entry.lease_id == lease.lease_id) return true;
-        }
-        return false;
+        const index = self.lease_index.get(lease.lease_id) orelse return false;
+        return self.entries.items[index].lease_id == lease.lease_id;
     }
 
     fn finishLease(
@@ -324,15 +373,16 @@ pub const Cache = struct {
         consumed: bool,
     ) Error!void {
         if (lease.state != .active) return error.LeaseAlreadyFinished;
-        for (self.entries.items) |*entry| {
-            if (entry.lease_id != lease.lease_id) continue;
-            entry.lease_id = null;
-            entry.early_data_consumed = consumed;
-            entry.last_used = self.nextAccess();
-            lease.state = if (consumed) .consumed else .released;
-            return;
-        }
-        return error.UnknownLease;
+        if (lease.owner != self) return error.UnknownLease;
+        const index = self.lease_index.get(lease.lease_id) orelse
+            return error.UnknownLease;
+        var entry = &self.entries.items[index];
+        if (entry.lease_id != lease.lease_id) return error.UnknownLease;
+        entry.lease_id = null;
+        _ = self.lease_index.remove(lease.lease_id);
+        entry.early_data_consumed = consumed;
+        entry.last_used = self.nextAccess();
+        lease.state = if (consumed) .consumed else .released;
     }
 
     fn findUsable(
@@ -341,23 +391,19 @@ pub const Cache = struct {
         alpn: []const u8,
         now_ms: u64,
     ) ?usize {
-        for (self.entries.items, 0..) |entry, index| {
-            if (!entry.matches(server_id, alpn) or entry.expired(now_ms)) {
-                continue;
-            }
-            return index;
-        }
-        return null;
+        const index = self.find(server_id, alpn) orelse return null;
+        if (self.entries.items[index].expired(now_ms)) return null;
+        return index;
     }
 
-    fn find(self: Cache, server_id: []const u8, alpn: []const u8) ?usize {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.matches(server_id, alpn)) return index;
-        }
-        return null;
+    fn find(self: *const Cache, server_id: []const u8, alpn: []const u8) ?usize {
+        return self.origin_index.get(.{
+            .server_id = server_id,
+            .alpn = alpn,
+        });
     }
 
-    fn lruEvictableIndex(self: Cache) ?usize {
+    fn lruEvictableIndex(self: *const Cache) ?usize {
         var best: ?usize = null;
         for (self.entries.items, 0..) |entry, index| {
             if (entry.lease_id != null) continue;
@@ -370,7 +416,7 @@ pub const Cache = struct {
         return best;
     }
 
-    fn copyEntry(self: Cache, ticket: Ticket) Error!Entry {
+    fn copyEntry(self: *const Cache, ticket: Ticket) Error!Entry {
         const server_id = try self.allocator.dupe(u8, ticket.server_id);
         errdefer self.allocator.free(server_id);
         const alpn = try self.allocator.dupe(u8, ticket.alpn);
@@ -394,7 +440,7 @@ pub const Cache = struct {
         };
     }
 
-    fn copySession(self: Cache, entry: Entry) Error!Session {
+    fn copySession(self: *const Cache, entry: Entry) Error!Session {
         const server_id = try self.allocator.dupe(u8, entry.server_id);
         errdefer self.allocator.free(server_id);
         const alpn = try self.allocator.dupe(u8, entry.alpn);
@@ -430,11 +476,48 @@ pub const Cache = struct {
         }
     }
 
-    fn leaseIdActive(self: Cache, id: u64) bool {
-        for (self.entries.items) |entry| {
-            if (entry.lease_id == id) return true;
+    fn leaseIdActive(self: *const Cache, id: u64) bool {
+        return self.lease_index.contains(id);
+    }
+
+    fn appendEntryAssumeCapacity(self: *Cache, entry: Entry) void {
+        const index = self.entries.items.len;
+        self.entries.appendAssumeCapacity(entry);
+        self.origin_index.putAssumeCapacityNoClobber(
+            self.entries.items[index].originAlpnKey(),
+            index,
+        );
+    }
+
+    fn replaceEntryAt(self: *Cache, index: usize, replacement: Entry) void {
+        var replaced = self.entries.items[index];
+        std.debug.assert(replaced.lease_id == null);
+        self.entries.items[index] = replacement;
+        const key_ptr = self.origin_index.getKeyPtr(replaced.originAlpnKey()) orelse
+            unreachable;
+        key_ptr.* = self.entries.items[index].originAlpnKey();
+        replaced.deinit(self.allocator);
+    }
+
+    fn removeEntryAt(self: *Cache, index: usize) Entry {
+        const old_len = self.entries.items.len;
+        const removed = self.entries.swapRemove(index);
+        _ = self.origin_index.remove(removed.originAlpnKey());
+        if (removed.lease_id) |lease_id| {
+            _ = self.lease_index.remove(lease_id);
         }
-        return false;
+        if (index != old_len - 1) {
+            self.reindexMovedEntry(index);
+        }
+        return removed;
+    }
+
+    fn reindexMovedEntry(self: *Cache, index: usize) void {
+        const moved = self.entries.items[index];
+        self.origin_index.getPtr(moved.originAlpnKey()).?.* = index;
+        if (moved.lease_id) |lease_id| {
+            self.lease_index.getPtr(lease_id).?.* = index;
+        }
     }
 };
 

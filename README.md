@@ -170,7 +170,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling plus
   the same per-limit duplicate suppression for stream-count exhaustion,
   protected 0-RTT long-header packet seal/open and frame datagram helpers with
-  0-RTT packet-type restrictions, an owning origin+ALPN session cache with
+  0-RTT packet-type restrictions, an indexed owning origin+ALPN session cache with
   transactional LRU eviction, expiry, independent TLS session copies, stable
   cache/lease/early-data stats, exclusive single-use early-data leases, RFC
   9000 §7.4.1 remembered-parameter

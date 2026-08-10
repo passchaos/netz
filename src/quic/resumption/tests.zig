@@ -16,6 +16,7 @@ test "resumption cache deep-copies inputs and returns owned sessions" {
         resumption.cache.quic_early_data_size,
         0x11,
     ));
+    try std.testing.expectEqual(@as(usize, 1), cache.origin_index.count());
     @memset(&server_id, 'x');
     @memset(&ticket_bytes, 0xff);
 
@@ -35,6 +36,7 @@ test "resumption cache deep-copies inputs and returns owned sessions" {
         null,
         0x22,
     ));
+    try std.testing.expectEqual(@as(usize, 1), cache.origin_index.count());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, session.ticket);
 }
 
@@ -239,6 +241,55 @@ test "resumption cache will not evict active leases" {
     );
     try std.testing.expectEqual(@as(usize, 0), cache.pruneExpired(200_000));
     try std.testing.expectEqual(@as(usize, 1), cache.count());
+}
+
+test "resumption cache indexes survive eviction moving an active lease" {
+    var cache = try resumption.Cache.init(std.testing.allocator, 3);
+    defer cache.deinit();
+    try cache.store(ticket(
+        "a",
+        "h3",
+        "a-ticket",
+        1000,
+        100,
+        resumption.cache.quic_early_data_size,
+        1,
+    ));
+    try cache.store(ticket("b", "h3", "b-ticket", 1001, 100, null, 2));
+    try cache.store(ticket(
+        "c",
+        "h3",
+        "c-ticket",
+        1002,
+        100,
+        resumption.cache.quic_early_data_size,
+        3,
+    ));
+    var lease = (try cache.beginEarlyData("c", "h3", 1003)).?;
+    defer lease.deinit();
+    try std.testing.expectEqual(@as(?usize, 2), cache.lease_index.get(lease.lease_id));
+
+    // `a` is the least-recently-used evictable entry at physical slot 0.  The
+    // eviction moves leased `c` from the last slot into slot 0; both the
+    // origin+ALPN and lease indexes must be repaired before later lookups.
+    try cache.store(ticket("d", "h3", "d-ticket", 1004, 100, null, 4));
+    try std.testing.expectEqual(@as(usize, 3), cache.origin_index.count());
+    try std.testing.expectEqual(@as(?usize, 0), cache.lease_index.get(lease.lease_id));
+    try std.testing.expect(cache.ownsActiveLease(lease));
+    try std.testing.expect((try cache.acquire("a", "h3", 1004)) == null);
+
+    var b = (try cache.acquire("b", "h3", 1004)).?;
+    defer b.deinit();
+    try std.testing.expectEqualStrings("b-ticket", b.ticket);
+    var c = (try cache.acquire("c", "h3", 1004)).?;
+    defer c.deinit();
+    try std.testing.expectEqualStrings("c-ticket", c.ticket);
+    var d = (try cache.acquire("d", "h3", 1004)).?;
+    defer d.deinit();
+    try std.testing.expectEqualStrings("d-ticket", d.ticket);
+
+    try cache.releaseEarlyData(&lease);
+    try std.testing.expectEqual(@as(usize, 0), cache.lease_index.count());
 }
 
 test "resumption lease IDs do not collide after counter wrap" {
