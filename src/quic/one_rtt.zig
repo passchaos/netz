@@ -2545,7 +2545,7 @@ pub const Connection = struct {
         packets: []const ReceivedPacket,
     ) Error!bool {
         var ack_eliciting_count: u64 = 0;
-        var largest_packet_number: ?u64 = null;
+        var largest_packet_number = self.received.largestReceived();
         var reordered = false;
         for (packets) |packet| {
             if (!ackEliciting(packet.frames)) continue;

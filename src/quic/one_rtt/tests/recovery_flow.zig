@@ -1297,6 +1297,11 @@ test "QUIC 1-RTT ACK_FREQUENCY gates automatic ACK emission" {
     try std.testing.expectEqual(one_rtt.TimerDeadlineKind.ack_delay, serviced.?.kind);
     try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
     try std.testing.expectEqual(@as(u64, 3), connection.next_packet_number);
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 20, &.{.{ .ping = {} }}, null, .not_ect);
+    try one_rtt.testing.applyReceivedFrames(&connection, 16, &.{.{ .ping = {} }}, null, .not_ect);
+    try std.testing.expect(try connection.sendAckForPacketsIfNeeded(&.{testReceivedPacket(16, &.{.{ .ping = {} }})}));
+    try std.testing.expectEqual(@as(u64, 4), connection.next_packet_number);
 }
 
 fn testReceivedPacket(packet_number: u64, frames: []const quic.Frame) one_rtt.ReceivedPacket {

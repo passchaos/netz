@@ -175,6 +175,11 @@ pub const ReceivedPacketTracker = struct {
         return if (self.saw_ecn) self.ecn_counts else null;
     }
 
+    pub fn largestReceived(self: ReceivedPacketTracker) ?u64 {
+        if (self.ranges.items.len == 0) return null;
+        return self.ranges.items[0].end;
+    }
+
     pub fn pruneAckedRanges(self: *ReceivedPacketTracker, largest_acknowledged: u64) void {
         self.forgetThrough(largest_acknowledged);
         while (self.ranges.items.len != 0) {
