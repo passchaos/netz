@@ -28,11 +28,15 @@ pub const StoredUpdate = struct {
 pub const State = struct {
     updates: std.ArrayList(StoredUpdate) = .empty,
     idle_requests: std.ArrayList(u31) = .empty,
+    update_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
+    idle_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.updates.items) |*update| update.deinit(allocator);
         self.updates.deinit(allocator);
         self.idle_requests.deinit(allocator);
+        self.update_index.deinit(allocator);
+        self.idle_index.deinit(allocator);
         self.* = undefined;
     }
 
@@ -40,20 +44,18 @@ pub const State = struct {
         self: State,
         stream_id: u31,
     ) ?StoredUpdate {
-        for (self.updates.items) |update| {
-            if (update.stream_id == stream_id) return update;
-        }
-        return null;
+        const index = self.update_index.get(stream_id) orelse return null;
+        if (index >= self.updates.items.len) return null;
+        const update = self.updates.items[index];
+        if (update.stream_id != stream_id) return null;
+        return update;
     }
 
     pub fn containsIdleRequest(
         self: State,
         stream_id: u31,
     ) bool {
-        for (self.idle_requests.items) |idle| {
-            if (idle == stream_id) return true;
-        }
-        return false;
+        return self.idle_index.contains(stream_id);
     }
 
     pub fn reserveIdleRequest(
@@ -75,20 +77,19 @@ pub const State = struct {
                 return error.PriorityCapacityExceeded;
             }
         }
+        try self.idle_index.ensureUnusedCapacity(allocator, 1);
+        const index = self.idle_requests.items.len;
         try self.idle_requests.append(allocator, stream_id);
+        self.idle_index.putAssumeCapacity(stream_id, index);
     }
 
     pub fn activateRequest(
         self: *State,
         stream_id: u31,
     ) bool {
-        for (self.idle_requests.items, 0..) |idle, index| {
-            if (idle == stream_id) {
-                _ = self.idle_requests.swapRemove(index);
-                return true;
-            }
-        }
-        return false;
+        const index = self.idle_index.get(stream_id) orelse return false;
+        self.removeIdleRequestAt(index);
+        return true;
     }
 
     /// Apply the HTTP/2 monotonic stream-ID transition caused by HEADERS.
@@ -106,7 +107,7 @@ pub const State = struct {
                 index += 1;
                 continue;
             }
-            _ = self.idle_requests.swapRemove(index);
+            self.removeIdleRequestAt(index);
             if (idle < stream_id) {
                 _ = self.removeUpdate(allocator, idle);
             }
@@ -121,17 +122,19 @@ pub const State = struct {
     ) std.mem.Allocator.Error!void {
         const owned = try allocator.dupe(u8, field_value);
         errdefer allocator.free(owned);
-        for (self.updates.items) |*update| {
-            if (update.stream_id == stream_id) {
-                allocator.free(update.field_value);
-                update.field_value = owned;
-                return;
-            }
+        if (self.update_index.get(stream_id)) |index| {
+            const update = &self.updates.items[index];
+            allocator.free(update.field_value);
+            update.field_value = owned;
+            return;
         }
+        try self.update_index.ensureUnusedCapacity(allocator, 1);
+        const index = self.updates.items.len;
         try self.updates.append(allocator, .{
             .stream_id = stream_id,
             .field_value = owned,
         });
+        self.update_index.putAssumeCapacity(stream_id, index);
     }
 
     pub fn remove(
@@ -148,14 +151,26 @@ pub const State = struct {
         allocator: std.mem.Allocator,
         stream_id: u31,
     ) bool {
-        for (self.updates.items, 0..) |update, index| {
-            if (update.stream_id == stream_id) {
-                var removed = self.updates.swapRemove(index);
-                removed.deinit(allocator);
-                return true;
-            }
+        const index = self.update_index.get(stream_id) orelse return false;
+        const last_index = self.updates.items.len - 1;
+        var removed = self.updates.swapRemove(index);
+        _ = self.update_index.remove(stream_id);
+        if (index != last_index) {
+            const moved = self.updates.items[index];
+            self.update_index.getPtr(moved.stream_id).?.* = index;
         }
-        return false;
+        removed.deinit(allocator);
+        return true;
+    }
+
+    fn removeIdleRequestAt(self: *State, index: usize) void {
+        const last_index = self.idle_requests.items.len - 1;
+        const removed = self.idle_requests.swapRemove(index);
+        _ = self.idle_index.remove(removed);
+        if (index != last_index) {
+            const moved = self.idle_requests.items[index];
+            self.idle_index.getPtr(moved).?.* = index;
+        }
     }
 };
 
@@ -184,4 +199,41 @@ test "priority updates replace state and bound idle reservations" {
     state.openRequest(allocator, 5);
     try std.testing.expect(state.get(3) == null);
     try std.testing.expect(state.get(5) != null);
+}
+
+test "priority state indexes survive swap removals and replacements" {
+    const allocator = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(allocator);
+
+    try state.reserveIdleRequest(allocator, 1, 0, 8, 8);
+    try state.reserveIdleRequest(allocator, 3, 0, 8, 8);
+    try state.reserveIdleRequest(allocator, 5, 0, 8, 8);
+    try state.store(allocator, 1, "u=1");
+    try state.store(allocator, 3, "u=3");
+    try state.store(allocator, 5, "u=5");
+
+    try std.testing.expect(state.activateRequest(3));
+    try std.testing.expect(!state.containsIdleRequest(3));
+    try std.testing.expect(state.containsIdleRequest(1));
+    try std.testing.expect(state.containsIdleRequest(5));
+    try std.testing.expect(state.get(3) != null);
+
+    try std.testing.expect(state.remove(allocator, 1));
+    try std.testing.expect(state.get(1) == null);
+    try std.testing.expect(state.get(5) != null);
+    try state.store(allocator, 5, "u=0, i");
+    try std.testing.expectEqual(@as(u3, 0), state.get(5).?.priority().urgency);
+    try std.testing.expect(state.get(5).?.priority().incremental);
+
+    state.openRequest(allocator, 7);
+    try std.testing.expectEqual(@as(usize, 0), state.idle_requests.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.idle_index.count());
+    // Stream 3 was already activated above, so a later monotonic open only
+    // prunes still-idle lower reservations.  Its update remains available
+    // until the active stream is explicitly removed.
+    try std.testing.expect(state.get(3) != null);
+    try std.testing.expect(state.get(5) == null);
+    try std.testing.expect(state.remove(allocator, 3));
+    try std.testing.expect(state.get(3) == null);
 }
