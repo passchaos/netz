@@ -132,6 +132,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark QUIC 1-RTT UDP_GRO batch receive",
         },
         .{
+            .exe_name = "netz-bench-quic-ack-ranges",
+            .path = "examples/bench_quic_ack_ranges.zig",
+            .run_step = "bench-quic-ack-ranges",
+            .description = "Benchmark QUIC ACK range generation with caller storage",
+        },
+        .{
             .exe_name = "netz-bench-quic-stream-window",
             .path = "examples/bench_quic_stream_window.zig",
             .run_step = "bench-quic-stream-window",

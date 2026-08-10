@@ -375,6 +375,7 @@ zig build bench-quic-lb -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
+zig build bench-quic-ack-ranges -Doptimize=ReleaseFast
 zig build bench-quic-stream-window -Doptimize=ReleaseFast
 ```
 
@@ -396,6 +397,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   submission,
 - end-to-end QUIC 1-RTT UDP_GRO owning-batch cursor receive versus per-packet receive,
   including decryption, frame parsing, state application, and cleanup.
+- QUIC ACK range generation with allocating ownership versus caller-provided
+  stack storage for the 1-RTT ACK send hot path,
 - bounded QUIC receive-stream compaction across long absolute offsets, including
   retained-memory reduction versus the previous absolute-offset buffer model.
 
