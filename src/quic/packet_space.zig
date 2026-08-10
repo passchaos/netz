@@ -316,6 +316,7 @@ pub const SentPacketStats = struct {
     ack_eliciting_packets: usize,
     in_flight_packets: usize,
     ack_eliciting_in_flight_packets: usize,
+    latest_ack_eliciting_in_flight_sent_time_ns: ?u64,
     acknowledged_packets: usize,
     lost_packets: usize,
     bytes_in_flight: usize,
@@ -433,6 +434,7 @@ pub const SentPacketTracker = struct {
             .ack_eliciting_packets = ack_eliciting_packets,
             .in_flight_packets = in_flight_packets,
             .ack_eliciting_in_flight_packets = ack_eliciting_in_flight_packets,
+            .latest_ack_eliciting_in_flight_sent_time_ns = self.latestAckElicitingInFlightSentTime(),
             .acknowledged_packets = acknowledged_packets,
             .lost_packets = lost_packets,
             .bytes_in_flight = bytes_in_flight,
@@ -1314,12 +1316,24 @@ test "QUIC sent packet tracker reports latest ack-eliciting in-flight send time"
     try sent.sentAt(2, true, 1200, .not_ect, 300);
     try sent.sentAt(3, true, 1200, .not_ect, null);
     try std.testing.expectEqual(@as(?u64, 300), sent.latestAckElicitingInFlightSentTime());
+    try std.testing.expectEqual(
+        @as(?u64, 300),
+        sent.stats().latest_ack_eliciting_in_flight_sent_time_ns,
+    );
 
     _ = sent.markAcknowledged(2);
     try std.testing.expectEqual(@as(?u64, 100), sent.latestAckElicitingInFlightSentTime());
+    try std.testing.expectEqual(
+        @as(?u64, 100),
+        sent.stats().latest_ack_eliciting_in_flight_sent_time_ns,
+    );
 
     sent.packets.items[0].lost = true;
     try std.testing.expectEqual(@as(?u64, null), sent.latestAckElicitingInFlightSentTime());
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        sent.stats().latest_ack_eliciting_in_flight_sent_time_ns,
+    );
 }
 
 test "QUIC sent packet tracker accounts non-eliciting in-flight packets" {
