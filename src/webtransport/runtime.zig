@@ -37,7 +37,7 @@ pub const Server = struct {
         try validateConnectRequest(request.request);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
-        try self.h3.sendResponse(request.from, request.stream_id, .{ .status = 200 });
+        try self.h3.sendResponse(request.from, request.stream_id, connectResponse());
         return .{ .request = request, .session_id = session_id };
     }
 
@@ -79,7 +79,7 @@ pub const ProtectedServer = struct {
         try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
-        try self.h3.sendResponse(request.from, request.stream_id, .{ .status = 200 });
+        try self.h3.sendResponse(request.from, request.stream_id, connectResponse());
         return .{ .request = request, .session_id = session_id };
     }
 
@@ -140,7 +140,7 @@ pub const HandshakeServer = struct {
         try webtransport.ensureDatagramsNegotiated(session.options.local_settings, session.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
-        try session.sendResponse(request.stream_id, .{ .status = 200 });
+        try session.sendResponse(request.stream_id, connectResponse());
         return .{ .h3 = session, .request = request, .session_id = session_id };
     }
 };
@@ -234,7 +234,7 @@ pub const ClientSession = struct {
             .headers = headers,
         });
         defer response.deinit(allocator);
-        if (response.response.status < 200 or response.response.status >= 300) return error.InvalidConnect;
+        try validateConnectResponse(response.response);
 
         return .{ .h3 = h3_client, .session_id = .init(0) };
     }
@@ -280,7 +280,7 @@ pub const HandshakeClientSession = struct {
             .headers = headers,
         });
         defer response.deinit(allocator);
-        if (response.response.status < 200 or response.response.status >= 300) return error.InvalidConnect;
+        try validateConnectResponse(response.response);
         try webtransport.ensureDatagramsNegotiated(h3_client.options.local_settings, h3_client.control.settings.peer);
         return .{ .h3 = h3_client, .session_id = .init(0) };
     }
@@ -346,7 +346,7 @@ pub const ProtectedClientSession = struct {
             .headers = headers,
         });
         defer response.deinit(allocator);
-        if (response.response.status < 200 or response.response.status >= 300) return error.InvalidConnect;
+        try validateConnectResponse(response.response);
         try webtransport.ensureDatagramsNegotiated(h3_client.config.local_settings, h3_client.control.settings.peer);
         return .{ .h3 = h3_client, .session_id = .init(0) };
     }
@@ -433,6 +433,17 @@ fn validateConnectRequest(request: anytype) Error!void {
         return error.InvalidConnect;
     }
     if (!(http3.capsule.protocolEnabled(request.headers) catch return error.InvalidConnect)) {
+        return error.InvalidConnect;
+    }
+}
+
+fn connectResponse() http3.Response {
+    return .{ .status = 200, .headers = &.{http3.capsule.protocol_header} };
+}
+
+fn validateConnectResponse(response: anytype) Error!void {
+    if (response.status < 200 or response.status >= 300) return error.InvalidConnect;
+    if (!(http3.capsule.protocolEnabled(response.headers) catch return error.InvalidConnect)) {
         return error.InvalidConnect;
     }
 }
@@ -703,6 +714,14 @@ test "WebTransport runtime CONNECT headers advertise Capsule-Protocol" {
         error.InvalidConnect,
         validateConnectRequest(.{ .method = "CONNECT", .headers = &missing_capsule }),
     );
+
+    const response = connectResponse();
+    try validateConnectResponse(response);
+    try std.testing.expect(try http3.capsule.protocolEnabled(response.headers));
+    try std.testing.expectError(error.InvalidConnect, validateConnectResponse(.{
+        .status = 200,
+        .headers = &[_]http3.Qpack.HeaderField{},
+    }));
 }
 
 test "WebTransport cleartext accept validates CONNECT session id direction" {
