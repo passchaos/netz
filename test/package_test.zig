@@ -654,6 +654,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token, "ReplayFilterSnapshot"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token.ReplayFilter, "exportSnapshot"));
     try std.testing.expect(@hasDecl(netz.quic.address_validation_token.ReplayFilter, "initWithSnapshot"));
+    try std.testing.expect(@hasDecl(netz.quic.address_validation_token.ReplayFilter, "entryCount"));
     try std.testing.expect(@hasDecl(netz.quic, "retry_flow"));
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "issue"));
     try std.testing.expect(@hasDecl(netz.quic.retry_flow, "validate"));

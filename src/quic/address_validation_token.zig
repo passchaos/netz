@@ -487,3 +487,42 @@ test "QUIC address validation replay filter exports and restores snapshots" {
     try std.testing.expect(!try trimmed.contains(b));
     try std.testing.expect(try trimmed.contains(c));
 }
+
+test "QUIC address validation replay filter restores newest unique snapshot fingerprints" {
+    const allocator = std.testing.allocator;
+    const secret: Secret = [_]u8{0x89} ** secret_len;
+    const a = try encode(allocator, secret, .{ .kind = .new_token, .issued_ns = 1, .lifetime_ns = 100, .peer_address = "peer", .nonce = [_]u8{0x1a} ** nonce_len });
+    defer allocator.free(a);
+    const b = try encode(allocator, secret, .{ .kind = .new_token, .issued_ns = 2, .lifetime_ns = 100, .peer_address = "peer", .nonce = [_]u8{0x1b} ** nonce_len });
+    defer allocator.free(b);
+    const c = try encode(allocator, secret, .{ .kind = .new_token, .issued_ns = 3, .lifetime_ns = 100, .peer_address = "peer", .nonce = [_]u8{0x1c} ** nonce_len });
+    defer allocator.free(c);
+
+    const fingerprint_a = try fingerprint(a);
+    const fingerprint_b = try fingerprint(b);
+    const fingerprint_c = try fingerprint(c);
+    var fingerprints = [_]Fingerprint{
+        fingerprint_a,
+        fingerprint_b,
+        fingerprint_a,
+        fingerprint_c,
+    };
+    const snapshot = ReplayFilterSnapshot{ .fingerprints = &fingerprints };
+
+    var restored = try ReplayFilter.initWithSnapshot(allocator, 3, snapshot);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 3), restored.entryCount());
+    try std.testing.expect(try restored.contains(a));
+    try std.testing.expect(try restored.contains(b));
+    try std.testing.expect(try restored.contains(c));
+    try std.testing.expectEqualSlices(u8, &fingerprint_b, &restored.fingerprints.items[0]);
+    try std.testing.expectEqualSlices(u8, &fingerprint_a, &restored.fingerprints.items[1]);
+    try std.testing.expectEqualSlices(u8, &fingerprint_c, &restored.fingerprints.items[2]);
+
+    var trimmed = try ReplayFilter.initWithSnapshot(allocator, 2, snapshot);
+    defer trimmed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), trimmed.entryCount());
+    try std.testing.expect(!try trimmed.contains(b));
+    try std.testing.expect(try trimmed.contains(a));
+    try std.testing.expect(try trimmed.contains(c));
+}
