@@ -620,6 +620,7 @@ pub const Connection = struct {
     pending_requests: std.ArrayList(OwnedRequest) = .empty,
     pending_request_head: usize = 0,
     peer_origins: std.ArrayList([]u8) = .empty,
+    peer_origin_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     alternative_services: std.ArrayList(AlternativeService) = .empty,
     default_authority: ?[]u8 = null,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
@@ -647,6 +648,7 @@ pub const Connection = struct {
             self.allocator.free(origin);
         }
         self.peer_origins.deinit(self.allocator);
+        self.peer_origin_index.deinit(self.allocator);
         for (self.alternative_services.items) |*service| {
             service.deinit(self.allocator);
         }
@@ -2294,12 +2296,7 @@ pub const Connection = struct {
                 );
                 defer origin.deinit(self.allocator);
                 for (origin.origins) |value| {
-                    if (containsOrigin(self.peer_origins.items, value)) {
-                        continue;
-                    }
-                    const owned = try self.allocator.dupe(u8, value);
-                    errdefer self.allocator.free(owned);
-                    try self.peer_origins.append(self.allocator, owned);
+                    try self.storePeerOrigin(value);
                 }
                 return true;
             },
@@ -2579,6 +2576,33 @@ pub const Connection = struct {
             }
         }
         self.peer_initial_settings_applied = true;
+    }
+
+    fn peerOriginKnown(self: Connection, origin: []const u8) bool {
+        const hash = originHash(origin);
+        const index = self.peer_origin_index.get(hash) orelse return false;
+        if (index >= self.peer_origins.items.len) return false;
+        if (std.mem.eql(u8, self.peer_origins.items[index], origin)) return true;
+        // Hash collisions are unlikely but must not collapse distinct origins.
+        for (self.peer_origins.items) |known| {
+            if (std.mem.eql(u8, known, origin)) return true;
+        }
+        return false;
+    }
+
+    fn storePeerOrigin(self: *Connection, origin: []const u8) Error!void {
+        if (self.peerOriginKnown(origin)) return;
+        const hash = originHash(origin);
+        if (self.peer_origin_index.get(hash) == null) {
+            try self.peer_origin_index.ensureUnusedCapacity(self.allocator, 1);
+        }
+        const owned = try self.allocator.dupe(u8, origin);
+        errdefer self.allocator.free(owned);
+        const index = self.peer_origins.items.len;
+        try self.peer_origins.append(self.allocator, owned);
+        if (self.peer_origin_index.get(hash) == null) {
+            self.peer_origin_index.putAssumeCapacity(hash, index);
+        }
     }
 
     fn applyLocalLimits(self: *Connection) void {
@@ -2956,11 +2980,8 @@ fn validateFrameEnvelope(frame: http2.Frame) Error!void {
     }
 }
 
-fn containsOrigin(origins: []const []u8, wanted: []const u8) bool {
-    for (origins) |origin| {
-        if (std.mem.eql(u8, origin, wanted)) return true;
-    }
-    return false;
+fn originHash(origin: []const u8) u64 {
+    return std.hash.Wyhash.hash(0, origin);
 }
 
 fn clientInitiatedStreamId(stream_id: u31) bool {
@@ -3830,6 +3851,8 @@ test "HTTP/2 runtime accumulates server ORIGIN entries" {
         "https://img.example.com",
         client.peerOrigins()[2],
     );
+    try std.testing.expect(client.peerOriginKnown("https://cdn.example.com"));
+    try std.testing.expect(client.peerOriginKnown("https://img.example.com"));
     _ = try client.ping([_]u8{0x41} ** 8);
 
     thread.join();
@@ -3847,6 +3870,7 @@ test "HTTP/2 runtime ignores invalid ORIGIN envelope and client origin" {
     defer {
         for (connection.peer_origins.items) |origin| allocator.free(origin);
         connection.peer_origins.deinit(allocator);
+        connection.peer_origin_index.deinit(allocator);
     }
     const payload = [_]u8{ 0, 1, 'x' };
     // Non-zero stream and incompatible flags are ignored per RFC 8336.
@@ -3876,7 +3900,10 @@ test "HTTP/2 runtime ignores invalid ORIGIN envelope and client origin" {
         .stream = undefined,
         .role = .server,
     };
-    defer server_connection.peer_origins.deinit(allocator);
+    defer {
+        server_connection.peer_origins.deinit(allocator);
+        server_connection.peer_origin_index.deinit(allocator);
+    }
     try std.testing.expect(try server_connection.handleConnectionFrame(.{
         .header = .{
             .length = payload.len,
