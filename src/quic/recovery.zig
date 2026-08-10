@@ -283,36 +283,68 @@ pub const Queue = struct {
     pub fn applyAck(self: *Queue, ack: quic.AckFrame) Error!usize {
         if (ack.largest_acknowledged < ack.first_ack_range) return error.InvalidAckFrame;
 
-        var removed: usize = 0;
+        const range_count = std.math.add(usize, ack.ranges.len, 1) catch
+            return error.InvalidAckFrame;
+        var stack_ranges: [32]AckedRange = undefined;
+        const acked_ranges = if (range_count <= stack_ranges.len)
+            stack_ranges[0..range_count]
+        else
+            try self.allocator.alloc(AckedRange, range_count);
+        defer if (range_count > stack_ranges.len) {
+            self.allocator.free(acked_ranges);
+        };
+
         var start = ack.largest_acknowledged - ack.first_ack_range;
         var end = ack.largest_acknowledged;
-        removed += self.removeRange(start, end);
+        acked_ranges[0] = .{ .start = start, .end = end };
 
-        for (ack.ranges) |range| {
+        for (ack.ranges, 1..) |range, range_index| {
             const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidAckFrame;
             if (start < skipped) return error.InvalidAckFrame;
             end = start - skipped;
             if (end < range.ack_range_length) return error.InvalidAckFrame;
             start = end - range.ack_range_length;
-            removed += self.removeRange(start, end);
+            acked_ranges[range_index] = .{ .start = start, .end = end };
         }
 
+        return self.retainUnacknowledgedRanges(acked_ranges);
+    }
+
+    const AckedRange = struct {
+        start: u64,
+        end: u64,
+    };
+
+    fn retainUnacknowledgedRanges(
+        self: *Queue,
+        acked_ranges: []const AckedRange,
+    ) usize {
+        var write_index: usize = 0;
+        var removed: usize = 0;
+        for (self.pending.items, 0..) |entry, read_index| {
+            if (entryContainsAnyRange(entry, acked_ranges)) {
+                var removed_entry = entry;
+                removed_entry.deinit(self.allocator);
+                removed += 1;
+                continue;
+            }
+            if (write_index != read_index) {
+                self.pending.items[write_index] = entry;
+            }
+            write_index += 1;
+        }
+        self.pending.items.len = write_index;
         return removed;
     }
 
-    fn removeRange(self: *Queue, start: u64, end: u64) usize {
-        var removed: usize = 0;
-        var i: usize = 0;
-        while (i < self.pending.items.len) {
-            if (self.pending.items[i].containsRange(start, end)) {
-                var entry = self.pending.orderedRemove(i);
-                entry.deinit(self.allocator);
-                removed += 1;
-            } else {
-                i += 1;
-            }
+    fn entryContainsAnyRange(
+        entry: PendingDatagram,
+        ranges: []const AckedRange,
+    ) bool {
+        for (ranges) |range| {
+            if (entry.containsRange(range.start, range.end)) return true;
         }
-        return removed;
+        return false;
     }
 };
 
@@ -427,6 +459,61 @@ test "QUIC recovery queue applies ACK ranges" {
     try std.testing.expectEqual(@as(usize, 2), try queue.applyAck(ack));
     try std.testing.expectEqual(@as(usize, 1), queue.pendingCount());
     try std.testing.expectEqual(@as(u64, 1), queue.pending.items[0].newestPacketNumber());
+}
+
+test "QUIC recovery queue compacts ACKed ranges without reordering survivors" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    for (1..6) |packet_number| {
+        _ = try queue.trackSent(@intCast(packet_number), "payload");
+    }
+
+    const ranges = [_]quic.AckRange{
+        .{ .gap = 0, .ack_range_length = 0 }, // acknowledges packet 2 after 4.
+    };
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 4,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    };
+
+    try std.testing.expectEqual(@as(usize, 2), try queue.applyAck(ack));
+    try std.testing.expectEqual(@as(usize, 3), queue.pendingCount());
+    try std.testing.expectEqual(@as(u64, 1), queue.pending.items[0].newestPacketNumber());
+    try std.testing.expectEqual(@as(u64, 3), queue.pending.items[1].newestPacketNumber());
+    try std.testing.expectEqual(@as(u64, 5), queue.pending.items[2].newestPacketNumber());
+}
+
+test "QUIC recovery queue applies large ACK range sets in one pass" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    for (0..81) |packet_number| {
+        _ = try queue.trackSent(@intCast(packet_number), "x");
+    }
+
+    const ranges = [_]quic.AckRange{
+        .{ .gap = 0, .ack_range_length = 0 },
+    } ** 40;
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 80,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    };
+
+    try std.testing.expectEqual(@as(usize, 41), try queue.applyAck(ack));
+    try std.testing.expectEqual(@as(usize, 40), queue.pendingCount());
+    for (queue.pending.items, 0..) |entry, index| {
+        try std.testing.expectEqual(
+            @as(u64, @intCast(index * 2 + 1)),
+            entry.newestPacketNumber(),
+        );
+    }
 }
 
 test "QUIC recovery queue schedules packet-threshold loss once per newest copy" {

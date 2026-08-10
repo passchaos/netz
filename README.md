@@ -265,8 +265,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   ordinary-send and recovery-retransmit size enforcement from the currently
   validated path MTU,
   a 1-RTT recovery queue for PTO plus packet-threshold and time-threshold
-  retransmission of unacknowledged ack-eliciting frame payloads, queue and
-  sent-packet tracker stats, exact frame wire-length prediction,
+  retransmission of unacknowledged ack-eliciting frame payloads with single-pass
+  ACK-range retirement, queue and sent-packet tracker stats, exact frame wire-length prediction,
   allocation-free caller-storage multi-packet protection,
   single-allocation batch wrappers, and stateful connection batches that
   transactionally commit flow control, congestion, recovery, pacing, stream
