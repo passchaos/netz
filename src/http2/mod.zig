@@ -27,6 +27,7 @@ pub const FrameType = enum(u8) {
     goaway = 0x7,
     window_update = 0x8,
     continuation = 0x9,
+    altsvc = 0x0a,
     origin = 0x0c,
     _,
 };
@@ -337,12 +338,92 @@ pub const OriginPayload = struct {
     }
 };
 
+pub const AltSvcPayload = struct {
+    origin: []const u8,
+    field_value: []const u8,
+
+    pub fn parse(frame: Frame) Error!AltSvcPayload {
+        if (frame.header.frame_type != .altsvc or frame.payload.len < 2) {
+            return error.InvalidFrameSize;
+        }
+        const origin_len = std.mem.readInt(u16, frame.payload[0..2], .big);
+        if (origin_len > frame.payload.len - 2) {
+            return error.InvalidFrameSize;
+        }
+        const origin = frame.payload[2..][0..origin_len];
+        const field_value = frame.payload[2 + origin_len ..];
+        if ((origin.len != 0 and !validVisibleAscii(origin)) or
+            field_value.len == 0 or
+            !validFieldValueAscii(field_value))
+        {
+            return error.InvalidFrameSize;
+        }
+        if ((frame.header.stream_id == 0) != (origin.len != 0)) {
+            return error.InvalidStreamId;
+        }
+        return .{ .origin = origin, .field_value = field_value };
+    }
+
+    pub fn write(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+        origin: []const u8,
+        field_value: []const u8,
+    ) Error!void {
+        if (origin.len > std.math.maxInt(u16) or
+            (origin.len != 0 and !validVisibleAscii(origin)) or
+            field_value.len == 0 or
+            !validFieldValueAscii(field_value))
+        {
+            return error.InvalidFrameSize;
+        }
+        if ((stream_id == 0) != (origin.len != 0)) {
+            return error.InvalidStreamId;
+        }
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(allocator);
+        try wire.appendInt(
+            &payload,
+            allocator,
+            u16,
+            @intCast(origin.len),
+            .big,
+        );
+        try payload.appendSlice(allocator, origin);
+        try payload.appendSlice(allocator, field_value);
+        try (Frame{
+            .header = .{
+                .length = 0,
+                .frame_type = .altsvc,
+                .flags = 0,
+                .stream_id = stream_id,
+            },
+            .payload = payload.items,
+        }).write(list, allocator);
+    }
+};
+
 fn validOriginAscii(origin: []const u8) bool {
-    for (origin) |byte| {
+    return validVisibleAscii(origin);
+}
+
+fn validVisibleAscii(value: []const u8) bool {
+    for (value) |byte| {
         // RFC 8336 carries the ASCII serialization of an origin. Reject
         // controls, whitespace, and non-ASCII bytes at the frame boundary;
         // URI scheme/host/port validation remains an origin-layer concern.
         if (byte < 0x21 or byte > 0x7e) return false;
+    }
+    return true;
+}
+
+fn validFieldValueAscii(value: []const u8) bool {
+    for (value) |byte| {
+        // Alt-Svc uses HTTP field-value syntax, where SP and HTAB separators
+        // are legal but other controls and non-ASCII octets are not.
+        if (byte == '\t' or (byte >= 0x20 and byte <= 0x7e)) continue;
+        return false;
     }
     return true;
 }
@@ -1308,6 +1389,78 @@ test "HTTP/2 ORIGIN frame round trips and validates ASCII entries" {
                 .stream_id = 0,
             },
             .payload = &.{ 0, 2, 'x' },
+        }),
+    );
+}
+
+test "HTTP/2 ALTSVC frame validates connection and stream forms" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try AltSvcPayload.write(
+        &encoded,
+        allocator,
+        0,
+        "https://example.com",
+        "h3=\":443\"; ma=3600",
+    );
+    const connection_frame = try Frame.parse(encoded.items);
+    const connection_alt = try AltSvcPayload.parse(connection_frame);
+    try std.testing.expectEqualStrings(
+        "https://example.com",
+        connection_alt.origin,
+    );
+    try std.testing.expectEqualStrings(
+        "h3=\":443\"; ma=3600",
+        connection_alt.field_value,
+    );
+
+    encoded.clearRetainingCapacity();
+    try AltSvcPayload.write(
+        &encoded,
+        allocator,
+        1,
+        "",
+        "h2=\"alt.example.com:443\"",
+    );
+    const stream_alt = try AltSvcPayload.parse(try Frame.parse(encoded.items));
+    try std.testing.expectEqual(@as(usize, 0), stream_alt.origin.len);
+    try std.testing.expectEqualStrings(
+        "h2=\"alt.example.com:443\"",
+        stream_alt.field_value,
+    );
+
+    try std.testing.expectError(
+        error.InvalidStreamId,
+        AltSvcPayload.write(
+            &encoded,
+            allocator,
+            0,
+            "",
+            "h3=\":443\"",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidStreamId,
+        AltSvcPayload.write(
+            &encoded,
+            allocator,
+            1,
+            "https://example.com",
+            "h3=\":443\"",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidFrameSize,
+        AltSvcPayload.parse(.{
+            .header = .{
+                .length = 3,
+                .frame_type = .altsvc,
+                .flags = 0,
+                .stream_id = 0,
+            },
+            .payload = &.{ 0, 4, 'x' },
         }),
     );
 }
