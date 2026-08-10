@@ -2898,10 +2898,17 @@ pub const Connection = struct {
     }
 
     fn discardPathResponseTargets(self: *Connection, count: usize) void {
-        var discarded: usize = 0;
-        while (discarded < count and self.path_response_targets.items.len != 0) : (discarded += 1) {
-            _ = self.path_response_targets.orderedRemove(0);
+        if (count == 0 or self.path_response_targets.items.len == 0) return;
+        if (count >= self.path_response_targets.items.len) {
+            self.path_response_targets.clearRetainingCapacity();
+            return;
         }
+        const remaining = self.path_response_targets.items.len - count;
+        @memmove(
+            self.path_response_targets.items[0..remaining],
+            self.path_response_targets.items[count..],
+        );
+        self.path_response_targets.items.len = remaining;
     }
 
     pub fn closeTransport(self: *Connection, error_code: u64, frame_type: u64, reason_phrase: []const u8) Error!void {

@@ -1181,8 +1181,10 @@ test "QUIC 1-RTT connection batches PATH_CHALLENGE and PATH_RESPONSE frames" {
     try std.testing.expectEqualSlices(u8, &first, &challenge_packet.frames[0].path_challenge.data);
     try std.testing.expectEqualSlices(u8, &second, &challenge_packet.frames[1].path_challenge.data);
     try std.testing.expectEqual(@as(usize, 2), server.path_validation.pendingResponseCount());
+    try std.testing.expectEqual(@as(usize, 2), server.path_response_targets.items.len);
 
     try std.testing.expectEqual(@as(usize, 2), try server.sendPendingPathResponses());
+    try std.testing.expectEqual(@as(usize, 0), server.path_response_targets.items.len);
     var response_packet = try client.receivePacket();
     defer response_packet.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), response_packet.frames.len);
