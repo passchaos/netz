@@ -960,24 +960,21 @@ pub const ControlState = struct {
             frame_type,
             update.prioritized_element_id,
         );
-        const existing_index = self.priority_update_index.get(key);
-        if (existing_index == null) {
-            try self.priority_updates.ensureUnusedCapacity(allocator, 1);
-            try self.priority_update_index.ensureUnusedCapacity(allocator, 1);
+        if (self.priority_update_index.get(key)) |index| {
+            const stored = &self.priority_updates.items[index];
+            allocator.free(stored.payload.field_value);
+            stored.payload.field_value = owned;
+            self.latest_priority_update_type = frame_type;
+            self.latest_priority_update = .{
+                .prioritized_element_id = update.prioritized_element_id,
+                .field_value = owned,
+            };
+            self.priority_update_generation = next_generation;
+            return;
         }
-        if (existing_index) |index| {
-            const last_index = self.priority_updates.items.len - 1;
-            var replaced = self.priority_updates.swapRemove(index);
-            _ = self.priority_update_index.remove(key);
-            if (index != last_index) {
-                const moved = self.priority_updates.items[index];
-                self.priority_update_index.getPtr(priorityUpdateKey(
-                    moved.frame_type,
-                    moved.payload.prioritized_element_id,
-                )).?.* = index;
-            }
-            replaced.deinit(allocator);
-        }
+
+        try self.priority_updates.ensureUnusedCapacity(allocator, 1);
+        try self.priority_update_index.ensureUnusedCapacity(allocator, 1);
         const insert_index = self.priority_updates.items.len;
         self.priority_updates.appendAssumeCapacity(.{
             .frame_type = frame_type,
@@ -986,7 +983,7 @@ pub const ControlState = struct {
                 .field_value = owned,
             },
         });
-        self.priority_update_index.putAssumeCapacity(key, insert_index);
+        self.priority_update_index.putAssumeCapacityNoClobber(key, insert_index);
         self.latest_priority_update_type = frame_type;
         self.latest_priority_update = .{
             .prioritized_element_id = update.prioritized_element_id,
@@ -3225,6 +3222,20 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
         control.requestPriorityUpdate(12).?.priority().urgency,
     );
     try std.testing.expectEqual(@as(usize, 2), control.priority_updates.items.len);
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        control.priority_update_index.get(.{
+            .frame_type = FrameType.priority_update_request,
+            .prioritized_element_id = 8,
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        control.priority_update_index.get(.{
+            .frame_type = FrameType.priority_update_request,
+            .prioritized_element_id = 12,
+        }),
+    );
 
     var push_priority: std.ArrayList(u8) = .empty;
     defer push_priority.deinit(allocator);
