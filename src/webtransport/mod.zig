@@ -241,13 +241,14 @@ pub fn maxDatagramPayloadSize(quic_payload_size: ?usize, session_id: SessionId) 
     return payload_size - quarter_stream_id_len;
 }
 
-pub fn connectHeaders(authority: []const u8, path: []const u8, origin: []const u8) [5]http3.Qpack.HeaderField {
+pub fn connectHeaders(authority: []const u8, path: []const u8, origin: []const u8) [6]http3.Qpack.HeaderField {
     return .{
         .{ .name = ":method", .value = "CONNECT" },
         .{ .name = ":protocol", .value = "webtransport" },
         .{ .name = ":scheme", .value = "https" },
         .{ .name = ":authority", .value = authority },
         .{ .name = ":path", .value = if (path.len == 0) origin else path },
+        http3.capsule.protocol_header,
     };
 }
 
@@ -280,6 +281,11 @@ test "WebTransport capsule and stream headers" {
     try quic.varint.encode(&stream, allocator, @intFromEnum(http3.StreamType.webtransport_unidirectional));
     try quic.varint.encode(&stream, allocator, 1);
     try std.testing.expectError(error.InvalidSessionId, UnidirectionalStreamHeader.parse(stream.items));
+
+    const headers = connectHeaders("example.com", "/wt", "https://example.com");
+    try std.testing.expectEqual(@as(usize, 6), headers.len);
+    try std.testing.expectEqualStrings("capsule-protocol", headers[5].name);
+    try std.testing.expect(try http3.capsule.protocolEnabled(&headers));
 }
 
 test "WebTransport datagram maps quarter stream id" {

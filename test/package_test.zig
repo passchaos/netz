@@ -116,6 +116,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3, "capsule"));
     try std.testing.expect(@hasDecl(netz.http3.capsule, "Iterator"));
     try std.testing.expect(@hasDecl(netz.http3.capsule, "writeInto"));
+    try std.testing.expect(@hasDecl(netz.http3.capsule, "protocolEnabled"));
     try std.testing.expect(@hasDecl(netz.http3.Frame, "parseHeader"));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.http3.runtime.Limits{}).quic.max_datagram_size);
     try std.testing.expectEqual(

@@ -7,15 +7,49 @@
 
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
+const structured_field = @import("../internal/structured_field.zig");
 const quic = @import("../quic/mod.zig");
+const qpack = @import("qpack/mod.zig");
 
 pub const Error = wire.Error || error{
     IntegerOverflow,
+    InvalidFrame,
+    InvalidHeader,
 } || std.mem.Allocator.Error;
 
 pub const CapsuleType = struct {
     pub const datagram: u64 = 0x00;
 };
+
+pub const header_name = "capsule-protocol";
+pub const header_value_true = "?1";
+
+pub const protocol_header: qpack.HeaderField = .{
+    .name = header_name,
+    .value = header_value_true,
+};
+
+pub fn protocolEnabled(headers: []const qpack.HeaderField) Error!bool {
+    var found = false;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, header_name)) continue;
+        if (found) return error.InvalidHeader;
+        found = true;
+        const enabled = structured_field.parseBooleanItem(header.value) catch
+            return error.InvalidHeader;
+        if (!enabled) return error.InvalidHeader;
+    }
+    return found;
+}
+
+pub fn appendProtocolHeader(
+    out: []qpack.HeaderField,
+    count: *usize,
+) Error!void {
+    if (count.* >= out.len) return error.InvalidFrame;
+    out[count.*] = protocol_header;
+    count.* += 1;
+}
 
 pub const Capsule = struct {
     capsule_type: u64,
@@ -160,6 +194,37 @@ test "HTTP/3 capsule writes and parses generic DATAGRAM capsules" {
     const empty = try parse(encoded.items);
     try std.testing.expectEqual(@as(u64, 0x1234), empty.capsule.capsule_type);
     try std.testing.expectEqual(@as(usize, 0), empty.capsule.value.len);
+}
+
+test "HTTP/3 capsule validates Capsule-Protocol header" {
+    const enabled_headers = [_]qpack.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = "Capsule-Protocol", .value = "?1; mode=webtransport" },
+    };
+    try std.testing.expect(try protocolEnabled(&enabled_headers));
+
+    const absent_headers = [_]qpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+    };
+    try std.testing.expect(!(try protocolEnabled(&absent_headers)));
+
+    const false_headers = [_]qpack.HeaderField{
+        .{ .name = "capsule-protocol", .value = "?0" },
+    };
+    try std.testing.expectError(error.InvalidHeader, protocolEnabled(&false_headers));
+
+    const duplicate_headers = [_]qpack.HeaderField{
+        protocol_header,
+        .{ .name = "Capsule-Protocol", .value = "?1" },
+    };
+    try std.testing.expectError(error.InvalidHeader, protocolEnabled(&duplicate_headers));
+
+    var out: [2]qpack.HeaderField = undefined;
+    var count: usize = 0;
+    try appendProtocolHeader(&out, &count);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqualStrings(header_name, out[0].name);
+    try std.testing.expectEqualStrings(header_value_true, out[0].value);
 }
 
 test "HTTP/3 capsule supports caller-buffer encoding" {

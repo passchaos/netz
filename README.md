@@ -38,7 +38,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   `http://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   RFC 9297 Capsule Protocol TLV parsing/writing with allocation-free
-  caller-buffer encoding and an incremental iterator for CONNECT stream data,
+  caller-buffer encoding, `Capsule-Protocol` structured-field validation, and
+  an incremental iterator for CONNECT stream data,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, client-initiated push-stream rejection, and QPACK encoder/decoder critical stream registration with FIN/RESET_STREAM/STOP_SENDING closure rejection, RFC 9204 dynamic-table FIFO/absolute-relative indexing/eviction state, Required Insert Count wrapping, all relative/post-base dynamic field-line forms with blocking/eviction distinction and never-indexed preservation, Huffman-capable encoder and decoder instruction codecs, a connection-scoped decoder with out-of-order/split encoder-stream reassembly plus coalesced feedback, and a non-blocking encoder state with Known Received Count gating, decoder-stream reassembly, outstanding reference accounting, and prohibited-eviction prevention, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
   collision-verified hash indexes for current QPACK exact/name matches with
   restricted-reference and eviction-safe scan fallback,
@@ -316,7 +317,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   per-group/filter shared-subscription round robin, plus a blocking TCP client/server runtime with a
   `std.Io.async` concurrent server helper, MQTT v5 Server Keep Alive, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
-- WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation, and
+- WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation and `Capsule-Protocol` advertisement, and
   datagram mapping, session lifecycle/counter state, plus a cleartext
   development runtime over the HTTP/3 dev transport, a protected QUIC 1-RTT
   runtime over protected HTTP/3 with automatic WebTransport/H3 DATAGRAM
