@@ -6112,6 +6112,11 @@ const PushStreamSet = struct {
             return &self.receive;
         }
 
+        fn streamId(self: *const Entry) u64 {
+            if (self.reader) |*reader| return reader.receive.stream_id;
+            return self.receive.stream_id;
+        }
+
         fn parsePrefix(
             self: *Entry,
             control: http3.ControlState,
@@ -6175,7 +6180,10 @@ const PushStreamSet = struct {
 
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
+    stream_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
+    push_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     promises: std.ArrayList(Promise) = .empty,
+    promise_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     cancelled_stream_ids: std.ArrayList(u62) = .empty,
     cancelled_stream_head: usize = 0,
     max_streams: usize,
@@ -6199,7 +6207,10 @@ const PushStreamSet = struct {
     fn deinit(self: *PushStreamSet) void {
         for (self.entries.items) |*entry| entry.deinit();
         self.entries.deinit(self.allocator);
+        self.stream_index.deinit(self.allocator);
+        self.push_index.deinit(self.allocator);
         self.promises.deinit(self.allocator);
+        self.promise_index.deinit(self.allocator);
         self.cancelled_stream_ids.deinit(self.allocator);
         self.* = undefined;
     }
@@ -6213,6 +6224,11 @@ const PushStreamSet = struct {
             self.allocator,
             self.max_streams,
         );
+        try self.promise_index.ensureTotalCapacity(
+            self.allocator,
+            std.math.cast(u32, self.max_streams) orelse
+                return error.OutOfMemory,
+        );
         try self.cancelled_stream_ids.ensureTotalCapacity(
             self.allocator,
             self.max_streams,
@@ -6224,25 +6240,70 @@ const PushStreamSet = struct {
         push_id: u64,
         request_stream_id: u62,
     ) Error!void {
-        for (self.promises.items) |*promise| {
-            // RFC 9114 permits the same push to be promised by multiple
-            // request streams. The first parent remains the canonical
-            // correlation exposed on push events.
-            if (promise.push_id == push_id) return;
-        }
+        // RFC 9114 permits the same push to be promised by multiple request
+        // streams. The first parent remains the canonical correlation exposed
+        // on push events.
+        if (self.promise_index.contains(push_id)) return;
         if (self.promises.items.len == self.promises.capacity) {
             // MAX_PUSH_ID reserves one slot for every legal unique ID before
             // it is put on the wire, making event application allocation-free
             // after the request reader has transactionally consumed bytes.
             return error.ExcessiveLoad;
         }
+        const index = self.promises.items.len;
         self.promises.appendAssumeCapacity(.{
             .push_id = push_id,
             .request_stream_id = request_stream_id,
         });
+        self.promise_index.putAssumeCapacity(push_id, index);
+        errdefer {
+            _ = self.promise_index.remove(push_id);
+            _ = self.promises.pop();
+        }
         if (self.findByPushId(push_id)) |entry| {
             try self.validateBinding(entry);
         }
+    }
+
+    fn appendEntryAssumeCapacity(
+        self: *PushStreamSet,
+        entry: Entry,
+    ) *Entry {
+        const index = self.entries.items.len;
+        const stream_id: u62 = @intCast(entry.streamId());
+        self.entries.appendAssumeCapacity(entry);
+        self.stream_index.putAssumeCapacity(stream_id, index);
+        if (self.entries.items[index].push_id) |push_id| {
+            self.push_index.putAssumeCapacity(push_id, index);
+        }
+        return &self.entries.items[index];
+    }
+
+    fn rememberPushBinding(
+        self: *PushStreamSet,
+        entry: *const Entry,
+    ) Error!void {
+        const push_id = entry.push_id orelse return;
+        if (self.push_index.contains(push_id)) return;
+        try self.push_index.ensureUnusedCapacity(self.allocator, 1);
+        const stream_id: u62 = @intCast(entry.streamId());
+        const index = self.stream_index.get(stream_id) orelse return;
+        self.push_index.putAssumeCapacity(push_id, index);
+    }
+
+    fn takeEntryAt(self: *PushStreamSet, index: usize) Entry {
+        const last_index = self.entries.items.len - 1;
+        const removed = self.entries.swapRemove(index);
+        _ = self.stream_index.remove(@intCast(removed.streamId()));
+        if (removed.push_id) |push_id| _ = self.push_index.remove(push_id);
+        if (index != last_index) {
+            const moved = self.entries.items[index];
+            self.stream_index.getPtr(@intCast(moved.streamId())).?.* = index;
+            if (moved.push_id) |push_id| {
+                self.push_index.getPtr(push_id).?.* = index;
+            }
+        }
+        return removed;
     }
 
     fn insert(
@@ -6260,7 +6321,10 @@ const PushStreamSet = struct {
             try receive.insert(frame);
             switch (try entry.parsePrefix(control, self.settings)) {
                 .incomplete => {},
-                .push => try self.validateBinding(entry),
+                .push => {
+                    try self.validateBinding(entry);
+                    try self.rememberPushBinding(entry);
+                },
                 .other => {
                     self.removeStream(frame.stream_id);
                     return false;
@@ -6282,7 +6346,9 @@ const PushStreamSet = struct {
         if (self.entries.items.len >= self.max_streams) {
             return error.ExcessiveLoad;
         }
-        try self.entries.append(self.allocator, .{
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        try self.stream_index.ensureUnusedCapacity(self.allocator, 1);
+        const entry = self.appendEntryAssumeCapacity(.{
             .receive = .init(
                 self.allocator,
                 frame.stream_id,
@@ -6290,15 +6356,17 @@ const PushStreamSet = struct {
             ),
             .from = from,
         });
-        const entry = &self.entries.items[self.entries.items.len - 1];
         errdefer {
-            var removed = self.entries.pop().?;
+            var removed = self.takeEntryAt(self.entries.items.len - 1);
             removed.deinit();
         }
         try entry.receive.insert(frame);
         switch (try entry.parsePrefix(control, self.settings)) {
             .incomplete => {},
-            .push => try self.validateBinding(entry),
+            .push => {
+                try self.validateBinding(entry);
+                try self.rememberPushBinding(entry);
+            },
             .other => {
                 self.removeStream(frame.stream_id);
                 return false;
@@ -6359,7 +6427,7 @@ const PushStreamSet = struct {
         if (promise.state == .finished) return;
         promise.state = .finished;
         if (self.findByPushId(push_id)) |entry| {
-            const stream_id: u62 = @intCast(entry.receiveState().stream_id);
+            const stream_id: u62 = @intCast(entry.streamId());
             if (self.cancelled_stream_head != 0 and
                 self.cancelled_stream_ids.items.len ==
                     self.cancelled_stream_ids.capacity)
@@ -6398,7 +6466,7 @@ const PushStreamSet = struct {
         const push_id = self.entries.items[index].push_id.?;
         const promise = self.findPromise(push_id) orelse unreachable;
         promise.state = .finished;
-        var removed = self.entries.swapRemove(index);
+        var removed = self.takeEntryAt(index);
         removed.deinit();
     }
 
@@ -6447,28 +6515,23 @@ const PushStreamSet = struct {
     }
 
     fn findByStreamId(self: *PushStreamSet, stream_id: u64) ?*Entry {
-        for (self.entries.items) |*entry| {
-            if (entry.receiveState().stream_id == stream_id) return entry;
-        }
-        return null;
+        const key = std.math.cast(u62, stream_id) orelse return null;
+        const index = self.stream_index.get(key) orelse return null;
+        if (index >= self.entries.items.len) return null;
+        return &self.entries.items[index];
     }
 
     fn findByPushId(self: *PushStreamSet, push_id: u64) ?*Entry {
-        for (self.entries.items) |*entry| {
-            if (entry.push_id != null and entry.push_id.? == push_id) {
-                return entry;
-            }
-        }
-        return null;
+        const index = self.push_index.get(push_id) orelse return null;
+        if (index >= self.entries.items.len) return null;
+        return &self.entries.items[index];
     }
 
     fn removeStream(self: *PushStreamSet, stream_id: u64) void {
-        for (self.entries.items, 0..) |*entry, index| {
-            if (entry.receiveState().stream_id != stream_id) continue;
-            var removed = self.entries.swapRemove(index);
-            removed.deinit();
-            return;
-        }
+        const key = std.math.cast(u62, stream_id) orelse return;
+        const index = self.stream_index.get(key) orelse return;
+        var removed = self.takeEntryAt(index);
+        removed.deinit();
     }
 
     fn validateBinding(self: PushStreamSet, entry: *const Entry) Error!void {
@@ -6477,9 +6540,10 @@ const PushStreamSet = struct {
         // may arrive before the request stream carrying PUSH_PROMISE. Retain
         // it, but `next` will not expose response events until the promise is
         // registered by the request-stream decoder.
-        for (self.entries.items) |*other| {
-            if (other == entry or other.push_id == null) continue;
-            if (other.push_id.? == push_id) return error.DuplicatePushId;
+        const stream_id: u62 = @intCast(entry.streamId());
+        const entry_index = self.stream_index.get(stream_id) orelse return;
+        if (self.push_index.get(push_id)) |existing_index| {
+            if (existing_index != entry_index) return error.DuplicatePushId;
         }
         if (self.findPromise(push_id)) |promise| {
             if (promise.state == .finished) return error.DuplicatePushId;
@@ -6499,10 +6563,9 @@ const PushStreamSet = struct {
     }
 
     fn findPromise(self: PushStreamSet, push_id: u64) ?*Promise {
-        for (self.promises.items) |*promise| {
-            if (promise.push_id == push_id) return promise;
-        }
-        return null;
+        const index = self.promise_index.get(push_id) orelse return null;
+        if (index >= self.promises.items.len) return null;
+        return &self.promises.items[index];
     }
 };
 
@@ -10607,7 +10670,10 @@ test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
         .{ .push_id = 3, .stream_id = 23 },
     }) |item| {
         try pushes.registerPromise(item.push_id, 0);
-        try pushes.entries.append(allocator, .{
+        try pushes.entries.ensureUnusedCapacity(allocator, 1);
+        try pushes.stream_index.ensureUnusedCapacity(allocator, 1);
+        try pushes.push_index.ensureUnusedCapacity(allocator, 1);
+        _ = pushes.appendEntryAssumeCapacity(.{
             .receive = quic.stream_state.RecvState.init(
                 allocator,
                 item.stream_id,
@@ -10628,7 +10694,10 @@ test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
     );
 
     try pushes.registerPromise(4, 0);
-    try pushes.entries.append(allocator, .{
+    try pushes.entries.ensureUnusedCapacity(allocator, 1);
+    try pushes.stream_index.ensureUnusedCapacity(allocator, 1);
+    try pushes.push_index.ensureUnusedCapacity(allocator, 1);
+    _ = pushes.appendEntryAssumeCapacity(.{
         .receive = quic.stream_state.RecvState.init(allocator, 27, 512),
         .push_id = 4,
     });
@@ -10642,6 +10711,9 @@ test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
     }
     try std.testing.expect(pushes.takeCancelledStream() == null);
     try std.testing.expectEqual(@as(usize, 0), pushes.cancelledStreamCount());
+    try std.testing.expectEqual(@as(usize, 0), pushes.stream_index.count());
+    try std.testing.expectEqual(@as(usize, 0), pushes.push_index.count());
+    try std.testing.expectEqual(@as(usize, 4), pushes.promise_index.count());
 }
 
 test "HTTP/3 incremental reader retries blocked HEADERS transactionally" {
