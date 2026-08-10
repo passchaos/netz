@@ -3,6 +3,7 @@ const netz = @import("netz");
 
 const iterations: usize = 500_000;
 const tracked_ranges: usize = netz.quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity;
+const packet_number_base: u64 = 10_000;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
@@ -20,7 +21,7 @@ pub fn main() !void {
     // heavily reordered/lossy path and keeps the number of extra ranges exactly
     // within the stack storage used by the 1-RTT ACK sender.
     for (0..tracked_ranges) |index| {
-        const packet_number: u64 = @intCast(index * 2 + 1);
+        const packet_number = packet_number_base + @as(u64, @intCast(index * 2 + 1));
         if (!try received.recordFresh(packet_number)) return error.UnexpectedDuplicate;
     }
 
@@ -32,6 +33,7 @@ pub fn main() !void {
         io,
         received,
     );
+    const stale_ns, const stale_checksum = try measureStaleReject(io, received);
     const speedup_x100 = ratioTimes100(allocating_ns, stack_ns);
 
     std.debug.print(
@@ -40,6 +42,7 @@ pub fn main() !void {
         \\  allocating ackFrame:      {d} ns/op
         \\  caller-storage ackFrame:  {d} ns/op
         \\  caller-storage speedup:   {d}.{d:0>2}x
+        \\  stale wouldRecordFresh:   {d} ns/op
         \\  checksum: {d}
         \\
     , .{
@@ -50,7 +53,8 @@ pub fn main() !void {
         stack_ns / iterations,
         speedup_x100 / 100,
         speedup_x100 % 100,
-        allocating_checksum +% stack_checksum,
+        stale_ns / iterations,
+        allocating_checksum +% stack_checksum +% stale_checksum,
     });
 }
 
@@ -86,6 +90,18 @@ fn measureCallerStorage(
         checksum +%= ack.largest_acknowledged;
         checksum +%= ack.first_ack_range;
         checksum +%= ack.ranges.len;
+    }
+    return .{ nowNs(io) -| started, checksum };
+}
+
+fn measureStaleReject(
+    io: std.Io,
+    received: netz.quic.packet_space.ReceivedPacketTracker,
+) !struct { u64, u64 } {
+    var checksum: u64 = 0;
+    const started = nowNs(io);
+    for (0..iterations) |_| {
+        checksum +%= @intFromBool(try received.wouldRecordFresh(packet_number_base - 2));
     }
     return .{ nowNs(io) -| started, checksum };
 }

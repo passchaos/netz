@@ -54,6 +54,13 @@ pub const ReceivedPacketTracker = struct {
         if (self.forgotten_through) |forgotten| {
             if (packet_number <= forgotten) return false;
         }
+        if (self.ranges.items.len != 0) {
+            const oldest = self.ranges.items[self.ranges.items.len - 1];
+            if (packet_number < oldest.start) {
+                if (isImmediatelyBefore(packet_number, oldest.start)) return true;
+                return self.ranges.items.len < self.max_ranges;
+            }
+        }
 
         for (self.ranges.items) |range| {
             if (packet_number >= range.start and packet_number <= range.end) return false;
@@ -72,6 +79,20 @@ pub const ReceivedPacketTracker = struct {
         if (packet_number > quic.varint.max_value) return error.InvalidPacketNumber;
         if (self.forgotten_through) |forgotten| {
             if (packet_number <= forgotten) return false;
+        }
+        if (self.ranges.items.len != 0) {
+            const oldest_index = self.ranges.items.len - 1;
+            const oldest = &self.ranges.items[oldest_index];
+            if (packet_number < oldest.start) {
+                if (isImmediatelyBefore(packet_number, oldest.start)) {
+                    oldest.start = packet_number;
+                    return true;
+                }
+                return try self.insertRange(
+                    self.ranges.items.len,
+                    .{ .start = packet_number, .end = packet_number },
+                );
+            }
         }
 
         for (self.ranges.items, 0..) |*range, i| {
@@ -865,6 +886,23 @@ test "QUIC packet space drops duplicate and too-old packet numbers" {
     try std.testing.expect(try received.recordFresh(7));
     try std.testing.expectEqual(@as(u64, 7), received.ranges.items[1].start);
     try std.testing.expectEqual(@as(u64, 8), received.ranges.items[1].end);
+}
+
+test "QUIC packet space fast-rejects below oldest retained range" {
+    const allocator = std.testing.allocator;
+    var received = ReceivedPacketTracker.init(allocator, 2);
+    defer received.deinit();
+
+    try std.testing.expect(try received.recordFresh(10));
+    try std.testing.expect(try received.recordFresh(20));
+    try std.testing.expect(!(try received.wouldRecordFresh(8)));
+    try std.testing.expect(!(try received.recordFresh(8)));
+    try std.testing.expectEqual(@as(?u64, 8), received.forgotten_through);
+
+    try std.testing.expect(try received.wouldRecordFresh(9));
+    try std.testing.expect(try received.recordFresh(9));
+    try std.testing.expectEqual(@as(u64, 9), received.ranges.items[1].start);
+    try std.testing.expectEqual(@as(u64, 10), received.ranges.items[1].end);
 }
 
 test "QUIC sent packet tracker applies ACK ranges" {
