@@ -5,6 +5,7 @@ const quic = @import("../quic/mod.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const capsule = @import("capsule.zig");
+pub const origin_pool = @import("origin_pool.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
