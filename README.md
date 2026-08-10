@@ -149,7 +149,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   and connection-seeded unpredictable 1-RTT QUIC Bit emission,
   draft ACK_FREQUENCY and IMMEDIATE_ACK frame codecs with `min_ack_delay`
   transport-parameter negotiation and opt-in 1-RTT state updates for requested
-  ACK threshold/max-delay/reordering behavior,
+  ACK threshold/max-delay/reordering behavior, plus automatic ACK coalescing
+  that respects the negotiated threshold and IMMEDIATE_ACK override,
   flow-control state for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling
   with one advisory BLOCKED emission per unchanged limit to avoid retry-loop

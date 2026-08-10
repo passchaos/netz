@@ -1231,6 +1231,74 @@ test "QUIC 1-RTT ACK_FREQUENCY and IMMEDIATE_ACK state" {
     try std.testing.expectEqualStrings("ack frequency", disabled2.close_info.?.reason_phrase);
 }
 
+test "QUIC 1-RTT ACK_FREQUENCY gates automatic ACK emission" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys([_]u8{0x9a} ** quic.protection.secret_len);
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "local",
+        .peer_connection_id = "peer",
+        .enable_ack_frequency = true,
+    });
+    defer connection.deinit();
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 0, &.{.{ .ack_frequency = .{
+        .sequence_number = 0,
+        .ack_eliciting_threshold = 2,
+        .request_max_ack_delay = 12_000,
+        .reordering_threshold = 3,
+    } }}, null, .not_ect);
+    const packet0 = testReceivedPacket(1, &.{.{ .ping = {} }});
+    const packet1 = testReceivedPacket(2, &.{.{ .ping = {} }});
+    const packet2 = testReceivedPacket(3, &.{.{ .padding = .{ .len = 1 } }});
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 1, &.{.{ .ping = {} }}, null, .not_ect);
+    try std.testing.expect(!try connection.sendAckForPacketsIfNeeded(&.{packet0}));
+    try std.testing.expectEqual(@as(u64, 1), connection.ack_eliciting_since_last_ack);
+    try one_rtt.testing.applyReceivedFrames(&connection, 2, &.{.{ .ping = {} }}, null, .not_ect);
+    try std.testing.expect(try connection.sendAckForPacketsIfNeeded(&.{packet1}));
+    try std.testing.expectEqual(@as(u64, 0), connection.ack_eliciting_since_last_ack);
+    try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 3, &.{.{ .ack_frequency = .{
+        .sequence_number = 1,
+        .ack_eliciting_threshold = 10,
+        .request_max_ack_delay = 12_000,
+        .reordering_threshold = 3,
+    } }}, null, .not_ect);
+    try one_rtt.testing.applyReceivedFrames(&connection, 4, &.{.{ .immediate_ack = {} }}, null, .not_ect);
+    try std.testing.expect(!try connection.sendAckForPacketsIfNeeded(&.{packet2}));
+    try std.testing.expect(connection.immediateAckRequested());
+    try one_rtt.testing.applyReceivedFrames(&connection, 5, &.{.{ .ping = {} }}, null, .not_ect);
+    try std.testing.expect(try connection.sendAckForPacketsIfNeeded(&.{packet0}));
+    try std.testing.expect(!connection.immediateAckRequested());
+    try std.testing.expectEqual(@as(u64, 2), connection.next_packet_number);
+}
+
+fn testReceivedPacket(packet_number: u64, frames: []const quic.Frame) one_rtt.ReceivedPacket {
+    return .{
+        .from = .{ .ip4 = .loopback(0) },
+        .packet = .{
+            .destination_connection_id = &.{},
+            .packet_number = packet_number,
+            .fixed_bit = true,
+            .spin_bit = false,
+            .key_phase = false,
+            .payload = &.{},
+        },
+        .frames = @constCast(frames),
+    };
+}
+
 test "QUIC 1-RTT qlog observer records packet and recovery events" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

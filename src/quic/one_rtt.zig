@@ -525,6 +525,7 @@ pub const Connection = struct {
     ack_frequency_send_next_sequence: u64 = 0,
     ack_frequency_recv_next_sequence: u64 = 0,
     ack_eliciting_threshold: u64 = 1,
+    ack_eliciting_since_last_ack: u64 = 0,
     requested_max_ack_delay: u64 = 0,
     ack_reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
     immediate_ack_requested: bool = false,
@@ -2529,12 +2530,44 @@ pub const Connection = struct {
         self: *Connection,
         packets: []const ReceivedPacket,
     ) Error!bool {
+        var ack_eliciting_count: u64 = 0;
+        var largest_packet_number: ?u64 = null;
+        var reordered = false;
         for (packets) |packet| {
             if (!ackEliciting(packet.frames)) continue;
-            try self.sendAck(0);
-            return true;
+            ack_eliciting_count +|= 1;
+            if (largest_packet_number) |largest| {
+                if (packet.packet.packet_number < largest) {
+                    const gap = largest - packet.packet.packet_number;
+                    if (gap >= self.ack_reordering_threshold) reordered = true;
+                } else {
+                    largest_packet_number = packet.packet.packet_number;
+                }
+            } else {
+                largest_packet_number = packet.packet.packet_number;
+            }
         }
-        return false;
+        if (ack_eliciting_count == 0) return false;
+
+        const immediate = self.immediate_ack_requested;
+        if (immediate) self.immediate_ack_requested = false;
+        errdefer if (immediate) {
+            self.immediate_ack_requested = true;
+        };
+
+        self.ack_eliciting_since_last_ack +|= ack_eliciting_count;
+        errdefer self.ack_eliciting_since_last_ack -|= ack_eliciting_count;
+
+        if (!immediate and
+            !reordered and
+            self.ack_eliciting_since_last_ack < self.ack_eliciting_threshold)
+        {
+            return false;
+        }
+
+        try self.sendAck(0);
+        self.ack_eliciting_since_last_ack = 0;
+        return true;
     }
 
     pub fn encodedLocalAckDelayNanos(self: Connection, ack_delay_ns: u64) Error!u64 {
