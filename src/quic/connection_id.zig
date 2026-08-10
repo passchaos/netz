@@ -214,37 +214,43 @@ pub const LocalPool = struct {
         // so callers can observe and handle a stable pool state.
         if (self.next_sequence_number > quic.varint.max_value) return error.ConnectionIdSequenceLimit;
         if (retire_prior_to > self.next_sequence_number) return error.RetirePriorToTooLarge;
-        if (self.containsConnectionId(connection_id)) return error.DuplicateConnectionId;
-        if (self.containsResetToken(token)) return error.DuplicateResetToken;
-        for (&self.entries) |*entry| {
-            if (!entry.occupied) {
-                const seq = self.next_sequence_number;
-                self.next_sequence_number += 1;
-                entry.* = .{ .sequence_number = seq, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .occupied = true };
-                @memcpy(entry.connection_id[0..connection_id.len], connection_id);
-                return .{ .new_connection_id = .{
-                    .sequence_number = seq,
-                    .retire_prior_to = retire_prior_to,
-                    .connection_id = entry.slice(),
-                    .stateless_reset_token = token,
-                } };
-            }
+        const slot = try self.availableIssueSlot(connection_id, token);
+        if (slot) |entry| {
+            const seq = self.next_sequence_number;
+            self.next_sequence_number += 1;
+            entry.* = .{ .sequence_number = seq, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .occupied = true };
+            @memcpy(entry.connection_id[0..connection_id.len], connection_id);
+            return .{ .new_connection_id = .{
+                .sequence_number = seq,
+                .retire_prior_to = retire_prior_to,
+                .connection_id = entry.slice(),
+                .stateless_reset_token = token,
+            } };
         }
         return error.PoolFull;
     }
 
-    fn containsConnectionId(self: *const LocalPool, connection_id: []const u8) bool {
+    fn availableIssueSlot(
+        self: *LocalPool,
+        connection_id: []const u8,
+        token: [16]u8,
+    ) Error!?*Entry {
+        var first_empty: ?*Entry = null;
+        var duplicate_token = false;
         for (&self.entries) |*entry| {
-            if (entry.occupied and std.mem.eql(u8, entry.slice(), connection_id)) return true;
+            if (!entry.occupied) {
+                if (first_empty == null) first_empty = entry;
+                continue;
+            }
+            if (std.mem.eql(u8, entry.slice(), connection_id)) {
+                return error.DuplicateConnectionId;
+            }
+            if (std.mem.eql(u8, &entry.stateless_reset_token, &token)) {
+                duplicate_token = true;
+            }
         }
-        return false;
-    }
-
-    fn containsResetToken(self: *const LocalPool, token: [16]u8) bool {
-        for (&self.entries) |*entry| {
-            if (entry.occupied and std.mem.eql(u8, &entry.stateless_reset_token, &token)) return true;
-        }
-        return false;
+        if (duplicate_token) return error.DuplicateResetToken;
+        return first_empty;
     }
 
     pub fn countAfterRetirePriorTo(self: *const LocalPool, retire_prior_to: u64) usize {
@@ -482,12 +488,15 @@ test "QUIC local CID pool rejects duplicate IDs and reset tokens before mutation
     const initial_token = [_]u8{0} ** 16;
     try pool.registerInitial("init-cid", initial_token);
 
-    try std.testing.expectError(error.DuplicateConnectionId, pool.issue("init-cid", [_]u8{1} ** 16));
-    try std.testing.expectError(error.DuplicateResetToken, pool.issue("new-cid", initial_token));
-    try std.testing.expectEqual(@as(u64, 1), pool.next_sequence_number);
-    try std.testing.expectEqual(@as(usize, 1), pool.count());
+    const issued = try pool.issue("issued-cid", [_]u8{1} ** 16);
+    try std.testing.expectEqual(@as(u64, 1), issued.new_connection_id.sequence_number);
 
-    _ = try pool.issue("new-cid", [_]u8{2} ** 16);
+    try std.testing.expectError(error.DuplicateConnectionId, pool.issue("init-cid", [_]u8{2} ** 16));
+    try std.testing.expectError(error.DuplicateResetToken, pool.issue("new-cid", initial_token));
+    // If a candidate duplicates both a CID and another reset token, the
+    // single-pass validator must preserve the historical error priority:
+    // duplicate connection IDs are reported before duplicate reset tokens.
+    try std.testing.expectError(error.DuplicateConnectionId, pool.issue("init-cid", [_]u8{1} ** 16));
     try std.testing.expectEqual(@as(u64, 2), pool.next_sequence_number);
     try std.testing.expectEqual(@as(usize, 2), pool.count());
 }
