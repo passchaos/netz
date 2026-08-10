@@ -333,6 +333,8 @@ pub const LinuxIoUringStream = if (builtin.os.tag == .linux) struct {
     pub fn writeAll(_: @This(), _: []const u8) Error!void {
         return error.UnsupportedIoBackend;
     }
+
+    pub fn close(_: @This()) void {}
 };
 
 const PosixAddress = if (builtin.os.tag == .linux) extern union {

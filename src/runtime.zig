@@ -97,17 +97,19 @@ const EventedCapableBackend = struct {
     }
 };
 
-/// Zig 0.16's Linux `std.Io.Uring` backend currently fails to compile in this
-/// pinned toolchain because a couple of stdlib error sets are missing
-/// `error.ReadOnlyFileSystem`.  Keep this gate explicit so applications can use
-/// `Backend.initAuto(.evented_then_threaded)` without pulling the broken backend
-/// into generic protocol builds.  When the pinned Zig stdlib is fixed, flipping
-/// the Linux branch to `true` enables Evented without changing protocol code.
+/// Zig 0.16's Evented backends currently fail to compile in this pinned
+/// toolchain on supported host targets: Linux io_uring misses stdlib error-set
+/// cases, while the macOS dispatch backend trips a stdlib allocator assertion
+/// during generic test builds. Keep this gate explicit so applications can use
+/// `Backend.initAuto(.evented_then_threaded)` without pulling a broken backend
+/// into generic protocol builds. When the pinned Zig stdlib is fixed, flipping
+/// target branches to `true` enables Evented without changing protocol code.
 fn canCompileEventedBackend() bool {
     if (std.Io.Evented == void) return false;
     return switch (@import("builtin").os.tag) {
         .linux => false,
-        else => true,
+        .macos => false,
+        else => false,
     };
 }
 

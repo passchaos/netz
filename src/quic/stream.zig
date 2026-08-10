@@ -153,14 +153,24 @@ pub const RecvState = struct {
             return error.InvalidStreamRange;
         if (relative_end > self.max_buffered) return error.StreamBufferTooLarge;
 
+        const old_len = self.received.items.len;
         var newly_received: u64 = 0;
-        for (data, 0..) |byte, i| {
-            const relative = relative_offset + i;
-            if (relative < self.received.items.len and self.received.items[relative]) {
-                if (self.buffer.items[relative] != byte) return error.ConflictingStreamData;
-            } else {
-                newly_received += 1;
+        if (relative_offset >= old_len) {
+            newly_received = data.len;
+        } else {
+            const overlap_end = @min(relative_end, old_len);
+            var relative = relative_offset;
+            while (relative < overlap_end) : (relative += 1) {
+                if (self.received.items[relative]) {
+                    const data_index = relative - relative_offset;
+                    if (self.buffer.items[relative] != data[data_index]) {
+                        return error.ConflictingStreamData;
+                    }
+                } else {
+                    newly_received += 1;
+                }
             }
+            if (relative_end > old_len) newly_received += relative_end - old_len;
         }
         // Preserve the existing conflict-first error classification when a
         // FIN both overlaps inconsistent buffered bytes and shrinks the known
@@ -170,15 +180,20 @@ pub const RecvState = struct {
         }
 
         if (relative_end > self.buffer.items.len) {
-            const old_len = self.buffer.items.len;
             try self.buffer.resize(self.allocator, relative_end);
-            @memset(self.buffer.items[old_len..relative_end], 0);
             try self.received.resize(self.allocator, relative_end);
-            @memset(self.received.items[old_len..relative_end], false);
+            if (relative_offset > old_len) {
+                @memset(self.buffer.items[old_len..relative_offset], 0);
+                @memset(self.received.items[old_len..relative_offset], false);
+            }
         }
         @memcpy(self.buffer.items[relative_offset..relative_end], data);
         @memset(self.received.items[relative_offset..relative_end], true);
         var contiguous_relative = self.contiguous_end - self.storage_offset;
+        if (relative_offset <= contiguous_relative and contiguous_relative < relative_end) {
+            self.contiguous_end = self.storage_offset + relative_end;
+            contiguous_relative = relative_end;
+        }
         while (contiguous_relative < self.received.items.len and
             self.received.items[contiguous_relative])
         {
@@ -402,4 +417,64 @@ test "QUIC receive stream clips overlap at sliding window boundary" {
     );
     try std.testing.expectEqualStrings("ijkl", recv.available());
     try std.testing.expectEqual(@as(u64, 12), recv.receivedByteCount());
+}
+
+test "QUIC receive stream advances through sparse tail after gap fill" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 24);
+    defer recv.deinit();
+
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 8,
+            .data = "ijkl",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), recv.available().len);
+
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 16,
+            .data = "qrst",
+            .fin = true,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), recv.available().len);
+
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 0,
+            .data = "abcdefgh",
+        }),
+    );
+    try std.testing.expectEqualStrings("abcdefghijkl", recv.available());
+    try recv.consume(12);
+
+    try std.testing.expectEqual(
+        @as(u64, 4),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 12,
+            .data = "mnop",
+        }),
+    );
+    try std.testing.expectEqualStrings("mnopqrst", recv.available());
+    try std.testing.expectEqual(@as(u64, 20), recv.receivedByteCount());
+
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        try recv.insertTracked(.{
+            .stream_id = 0,
+            .offset = 16,
+            .data = "qrst",
+            .fin = true,
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 20), recv.receivedByteCount());
 }

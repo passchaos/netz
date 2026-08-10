@@ -652,13 +652,10 @@ pub const Endpoint = struct {
         if (!socketEcnSupported()) return;
         const enabled: u32 = 1;
         const enabled_bytes = std.mem.asBytes(&enabled);
-        // UDP sockets are address-family-specific on some backends and
-        // dual-stack on others. Try both receive options and remember whether
-        // the kernel accepted at least one so parsing ancillary data is gated
-        // by actual socket support rather than by compile-time platform alone.
-        const ipv4 = rawSetSockOpt(self.socket.handle, ipproto_ip, ip_recvtos, enabled_bytes);
-        const ipv6 = rawSetSockOpt(self.socket.handle, ipproto_ipv6, ipv6_recvtclass, enabled_bytes);
-        self.receive_ecn_enabled = ipv4 or ipv6;
+        self.receive_ecn_enabled = switch (self.socket.address) {
+            .ip4 => rawSetSockOpt(self.socket.handle, ipproto_ip, ip_recvtos, enabled_bytes),
+            .ip6 => rawSetSockOpt(self.socket.handle, ipproto_ipv6, ipv6_recvtclass, enabled_bytes),
+        };
     }
 
     fn enableGroReceive(self: *Endpoint) void {
@@ -683,9 +680,11 @@ pub const Endpoint = struct {
         }
         const mark: u32 = ecnCodepointBits(ecn);
         const mark_bytes = std.mem.asBytes(&mark);
-        const ipv4 = rawSetSockOpt(self.socket.handle, ipproto_ip, ip_tos, mark_bytes);
-        const ipv6 = rawSetSockOpt(self.socket.handle, ipproto_ipv6, ipv6_tclass, mark_bytes);
-        if (!ipv4 and !ipv6) return error.EcnUnavailable;
+        const marked = switch (self.socket.address) {
+            .ip4 => rawSetSockOpt(self.socket.handle, ipproto_ip, ip_tos, mark_bytes),
+            .ip6 => rawSetSockOpt(self.socket.handle, ipproto_ipv6, ipv6_tclass, mark_bytes),
+        };
+        if (!marked) return error.EcnUnavailable;
         self.send_ecn_mark = ecn;
     }
 

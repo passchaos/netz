@@ -1402,6 +1402,7 @@ pub const Connection = struct {
         is_ack_eliciting: bool,
         is_in_flight: bool,
         contains_handshake_done: bool,
+        largest_acknowledged_sent: ?u64,
     };
 
     fn prepareFramesForSend(self: *Connection, frames: []const quic.Frame, sent_time_ns: ?u64) Error!PreparedFrames {
@@ -1436,6 +1437,7 @@ pub const Connection = struct {
             .is_ack_eliciting = is_ack_eliciting,
             .is_in_flight = is_in_flight,
             .contains_handshake_done = containsHandshakeDone(frames),
+            .largest_acknowledged_sent = largestAckFrameSent(frames),
         };
     }
 
@@ -1482,7 +1484,7 @@ pub const Connection = struct {
                     ecn,
                     sent_time_ns,
                     null,
-                    largestAckFrameSent(frames),
+                    prepared.largest_acknowledged_sent,
                 );
                 var tracked_sent = true;
                 errdefer if (tracked_sent) {
@@ -1505,7 +1507,7 @@ pub const Connection = struct {
                 return;
             }
         }
-        try self.sent.sentInFlightAtWithMetadata(packet_number, prepared.is_ack_eliciting, prepared.is_in_flight, payload.len, ecn, sent_time_ns, null, largestAckFrameSent(frames));
+        try self.sent.sentInFlightAtWithMetadata(packet_number, prepared.is_ack_eliciting, prepared.is_in_flight, payload.len, ecn, sent_time_ns, null, prepared.largest_acknowledged_sent);
         errdefer _ = self.sent.forget(packet_number);
         try self.sendPayloadPacketWithPacketNumberLenAt(
             packet_number,
@@ -4477,6 +4479,17 @@ fn containsHandshakeDone(frames: []const quic.Frame) bool {
         if (frame == .handshake_done) return true;
     }
     return false;
+}
+
+fn largestAckFrameSent(frames: []const quic.Frame) ?u64 {
+    var largest: ?u64 = null;
+    for (frames) |frame| {
+        if (frame == .ack) {
+            const acknowledged = frame.ack.largest_acknowledged;
+            if (largest == null or acknowledged > largest.?) largest = acknowledged;
+        }
+    }
+    return largest;
 }
 
 fn packetInFlight(frames: []const quic.Frame) bool {
