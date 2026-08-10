@@ -3124,8 +3124,24 @@ pub const Connection = struct {
     }
 
     pub fn discardExpiredOneRttKeys(self: *Connection, now_nanos: i64) bool {
+        const send_generation = self.send_key_phase.previousKeyGeneration();
+        const receive_generation = self.receive_key_phase.previousKeyGeneration();
         var discarded = self.send_key_phase.discardExpiredPrevious(now_nanos);
-        discarded = self.receive_key_phase.discardExpiredPrevious(now_nanos) or discarded;
+        if (discarded) {
+            self.observeKeyDiscarded(
+                now_nanos,
+                oneRttKeyType(self.config.local_endpoint),
+                send_generation,
+            );
+        }
+        if (self.receive_key_phase.discardExpiredPrevious(now_nanos)) {
+            discarded = true;
+            self.observeKeyDiscarded(
+                now_nanos,
+                peerOneRttKeyType(self.config.local_endpoint),
+                receive_generation,
+            );
+        }
         return discarded;
     }
 
@@ -4489,6 +4505,15 @@ pub const Connection = struct {
             observer.packetLost(event_time, packet.packet_number, trigger);
             packet.loss_reported = true;
         }
+    }
+
+    fn observeKeyDiscarded(self: *Connection, now_nanos: i64, key_type: []const u8, generation: ?u64) void {
+        const observer = self.config.qlog_observer orelse return;
+        const now_ns = if (now_nanos <= 0)
+            0
+        else
+            (std.math.cast(u64, now_nanos) orelse std.math.maxInt(u64));
+        observer.keyDiscarded(self.qlogEventTime(now_ns), key_type, generation);
     }
 
     fn observeConnectionStarted(self: *Connection, now_ns: ?u64) void {

@@ -1296,6 +1296,8 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
     defer ack.deinit(allocator);
     try client.initiateKeyUpdate();
     try client.closeApplicationAt(42, "done", null, null);
+    client.schedulePreviousOneRttKeyDiscard(std.math.maxInt(i64));
+    try std.testing.expect(client.discardExpiredOneRttKeys(std.math.maxInt(i64)));
 
     try std.testing.expect(client.takeQlogError() == null);
     try std.testing.expect(server.takeQlogError() == null);
@@ -1353,6 +1355,16 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
         u8,
         client_output.written(),
         "\"key_type\":\"client_1rtt_secret\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"name\":\"security:key_retired\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"generation\":0",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

@@ -168,6 +168,21 @@ pub const Observer = struct {
         };
     }
 
+    pub fn keyDiscarded(
+        self: *Observer,
+        now_ns: u64,
+        key_type: []const u8,
+        generation: ?u64,
+    ) void {
+        if (self.failure != null) return;
+        self.trace.writeEvent(now_ns, .{ .key_discarded = .{
+            .key_type = key_type,
+            .generation = generation,
+        } }) catch |err| {
+            self.failure = err;
+        };
+    }
+
     fn writePacket(
         self: *Observer,
         now_ns: u64,
