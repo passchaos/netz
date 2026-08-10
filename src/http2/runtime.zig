@@ -678,6 +678,11 @@ pub const Connection = struct {
         promise: PromisedRequest,
     ) Error!OwnedResponse {
         if (self.role != .client) return error.UnexpectedFrame;
+        if (!self.push_state.isRemoteReserved(
+            promise.promised_stream_id,
+        ) or self.push_state.hasPending(promise.promised_stream_id)) {
+            return error.InvalidStreamId;
+        }
         if (self.limits.max_concurrent_streams) |limit| {
             if (self.active_peer_streams.items.len >= limit) {
                 return error.FlowControlViolation;
@@ -687,11 +692,43 @@ pub const Connection = struct {
             self.allocator,
             promise.promised_stream_id,
         );
+        _ = self.push_state.releaseRemote(
+            promise.promised_stream_id,
+        );
         defer self.releasePeerStream(promise.promised_stream_id);
         return self.readResponseOnPeerStream(
             promise.promised_stream_id,
             findHeader(promise.headers, ":method") orelse "GET",
         );
+    }
+
+    /// Refuses a server push that was announced by PUSH_PROMISE.
+    ///
+    /// The stream ID remains valid after `takePromisedRequest` transfers the
+    /// request headers to the caller. Cancellation consumes that owned request,
+    /// emits RST_STREAM(CANCEL), and makes later reads or duplicate cancellation
+    /// invalid. The caller must not deinitialize or use `promise` afterward.
+    pub fn cancelPush(
+        self: *Connection,
+        promise: *PromisedRequest,
+    ) Error!void {
+        if (self.role != .client) return error.UnexpectedFrame;
+        const promised_stream_id = promise.promised_stream_id;
+        if (!self.push_state.isRemoteReserved(promised_stream_id)) {
+            return error.InvalidStreamId;
+        }
+        if (self.push_state.hasPending(promised_stream_id)) {
+            return error.InvalidStreamId;
+        }
+        try self.writeResetStreamFrame(
+            promised_stream_id,
+            .cancel,
+        );
+        _ = self.push_state.cancelRemote(
+            self.allocator,
+            promised_stream_id,
+        );
+        promise.deinit(self.allocator);
     }
 
     pub fn peerOrigins(self: Connection) []const []u8 {
@@ -1032,8 +1069,18 @@ pub const Connection = struct {
             return error.InvalidStreamId;
         }
         try validateHeaderBlock(request_headers, .request);
-        const promised_stream_id =
-            try self.push_state.nextLocalStreamId();
+        const promised_stream_id = try self.push_state.reserveLocal(
+            self.allocator,
+        );
+        errdefer {
+            _ = self.push_state.releaseLocal(promised_stream_id);
+            self.forgetResponseSemantics(promised_stream_id);
+        }
+        try self.rememberResponseSemantics(
+            promised_stream_id,
+            findHeader(request_headers, ":method") orelse "GET",
+            findHeader(request_headers, ":protocol"),
+        );
         var block: std.ArrayList(u8) = .empty;
         defer block.deinit(self.allocator);
         try self.hpack_encoder.encodeBlock(
@@ -1046,12 +1093,6 @@ pub const Connection = struct {
             promised_stream_id,
             block.items,
         );
-        self.push_state.commitLocalStream();
-        try self.rememberResponseSemantics(
-            promised_stream_id,
-            findHeader(request_headers, ":method") orelse "GET",
-            findHeader(request_headers, ":protocol"),
-        );
         return promised_stream_id;
     }
 
@@ -1060,12 +1101,19 @@ pub const Connection = struct {
         promised_stream_id: u31,
         response: ResponseOptions,
     ) Error!void {
-        if (self.role != .server or
-            clientInitiatedStreamId(promised_stream_id) or
-            promised_stream_id >= self.push_state.next_local_stream_id)
-        {
-            return error.InvalidStreamId;
+        if (self.role != .server) return error.UnexpectedFrame;
+        const status = self.push_state.localStatus(
+            promised_stream_id,
+        ) orelse return error.InvalidStreamId;
+        if (status == .canceled) {
+            _ = self.push_state.releaseLocal(promised_stream_id);
+            self.forgetResponseSemantics(promised_stream_id);
+            return error.StreamReset;
         }
+        var activated = false;
+        errdefer if (activated) {
+            self.releaseLocalStream(promised_stream_id);
+        };
         if (!self.outboundStreamIsActive(promised_stream_id)) {
             if (self.peer_max_concurrent_streams) |limit| {
                 if (self.active_local_streams.items.len >= limit) {
@@ -1076,9 +1124,22 @@ pub const Connection = struct {
                 self.allocator,
                 promised_stream_id,
             );
+            activated = true;
         }
-        try self.writeResponse(promised_stream_id, response);
+        self.writeResponse(promised_stream_id, response) catch |err| {
+            if (self.push_state.localStatus(promised_stream_id) ==
+                .canceled)
+            {
+                _ = self.push_state.releaseLocal(
+                    promised_stream_id,
+                );
+                self.forgetResponseSemantics(promised_stream_id);
+            }
+            return err;
+        };
         self.releaseLocalStream(promised_stream_id);
+        _ = self.push_state.releaseLocal(promised_stream_id);
+        self.forgetResponseSemantics(promised_stream_id);
     }
 
     fn peerPushEnabled(self: Connection) bool {
@@ -1247,10 +1308,7 @@ pub const Connection = struct {
 
     pub fn sendResetStream(self: *Connection, stream_id: u31, error_code: http2.ErrorCode) Error!void {
         if (!self.outboundStreamIsActive(stream_id)) return error.InvalidStreamId;
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try http2.ResetStreamPayload.write(&encoded, self.allocator, stream_id, error_code);
-        try writeAll(self.io, self.stream, encoded.items);
+        try self.writeResetStreamFrame(stream_id, error_code);
         self.releaseLocalStream(stream_id);
         self.releasePeerStream(stream_id);
     }
@@ -1268,10 +1326,58 @@ pub const Connection = struct {
                 return error.UnexpectedFrame;
             }
             const reset = try http2.ResetStreamPayload.parse(frame.frame);
-            self.releaseLocalStream(reset.stream_id);
-            self.releasePeerStream(reset.stream_id);
+            self.recordResetStream(reset);
             return .{ .frame = frame, .reset = reset };
         }
+    }
+
+    fn writeResetStreamFrame(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+    ) Error!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try http2.ResetStreamPayload.write(
+            &encoded,
+            self.allocator,
+            stream_id,
+            error_code,
+        );
+        try writeAll(self.io, self.stream, encoded.items);
+    }
+
+    fn recordResetStream(
+        self: *Connection,
+        reset: http2.ResetStreamPayload,
+    ) void {
+        // A reset is legal on a reserved stream even though that stream is not
+        // counted as active. Preserve a server-side cancellation marker until
+        // writePushedResponse observes it; client-side reservations can be
+        // removed immediately because no pushed response may follow.
+        if (self.role == .server and
+            self.push_state.cancelLocal(reset.stream_id))
+        {
+            self.releaseLocalStream(reset.stream_id);
+            self.releasePeerStream(reset.stream_id);
+            self.forgetResponseSemantics(reset.stream_id);
+            return;
+        }
+        if (self.role == .client) {
+            if (self.push_state.cancelRemote(
+                self.allocator,
+                reset.stream_id,
+            )) {
+                self.releaseLocalStream(reset.stream_id);
+                self.releasePeerStream(reset.stream_id);
+                return;
+            }
+        }
+        // A locally completed stream can race with a reset already in flight.
+        // Keep accepting that late reset, as the previous runtime did; outbound
+        // sendResetStream still rejects streams that were never activated.
+        self.releaseLocalStream(reset.stream_id);
+        self.releasePeerStream(reset.stream_id);
     }
 
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
@@ -1864,6 +1970,17 @@ pub const Connection = struct {
                 _ = try http2.PriorityPayload.parse(frame);
                 return true;
             },
+            .rst_stream => {
+                const reset = try http2.ResetStreamPayload.parse(frame);
+                const reserved_push =
+                    (self.role == .server and
+                        self.push_state.localStatus(reset.stream_id) != null) or
+                    (self.role == .client and
+                        self.push_state.isRemoteReserved(reset.stream_id));
+                if (!reserved_push) return false;
+                self.recordResetStream(reset);
+                return true;
+            },
             .origin => {
                 // ORIGIN is server-to-client only. RFC 8336 requires clients
                 // to ignore it when sent on a non-zero stream or with an
@@ -2068,7 +2185,14 @@ pub const Connection = struct {
         while (self.send_connection_window.available() == 0 or (try self.sendStreamWindow(stream_id)).available() == 0) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
             defer frame.deinit(self.allocator);
-            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (try self.handleConnectionFrame(frame.frame)) {
+                if (self.push_state.localStatus(stream_id) ==
+                    .canceled)
+                {
+                    return error.StreamReset;
+                }
+                continue;
+            }
             switch (frame.frame.header.frame_type) {
                 .goaway => {
                     const goaway = try http2.GoAwayPayload.parse(frame.frame);
@@ -2077,7 +2201,7 @@ pub const Connection = struct {
                 .rst_stream => {
                     const reset = try http2.ResetStreamPayload.parse(frame.frame);
                     if (reset.stream_id == stream_id) {
-                        self.releaseLocalStream(stream_id);
+                        self.recordResetStream(reset);
                         return error.StreamReset;
                     }
                 },

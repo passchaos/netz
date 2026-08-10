@@ -227,3 +227,109 @@ test "HTTP/2 server push fragments large promised request headers" {
     thread.join();
     if (shared.err) |err| return err;
 }
+
+test "HTTP/2 client cancels a reserved promised push" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        canceled_stream_id: ?u31 = null,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(shared.server.allocator);
+            const pushed_stream = try connection.promisePush(
+                request.stream_id,
+                &.{
+                    .{ .name = ":method", .value = "GET" },
+                    .{ .name = ":path", .value = "/unused.css" },
+                    .{ .name = ":scheme", .value = "http" },
+                    .{ .name = ":authority", .value = "localhost" },
+                },
+            );
+            try connection.writeResponse(request.stream_id, .{
+                .body = "parent",
+            });
+
+            var reset = try connection.readResetStream();
+            defer reset.deinit(shared.server.allocator);
+            try std.testing.expectEqual(
+                pushed_stream,
+                reset.reset.stream_id,
+            );
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+            shared.canceled_stream_id = reset.reset.stream_id;
+
+            // The reservation remains as a cancellation tombstone until the
+            // producer attempts to fulfill it. This prevents an application
+            // race from turning a consumed RST_STREAM into pushed HEADERS.
+            try std.testing.expectError(
+                error.StreamReset,
+                connection.writePushedResponse(pushed_stream, .{
+                    .body = "must not be sent",
+                }),
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .enable_push = true,
+        },
+    );
+    defer client.close();
+    var parent = try client.request(.{
+        .path = "/",
+        .authority = "localhost",
+    });
+    defer parent.deinit(allocator);
+    try std.testing.expectEqualStrings("parent", parent.body);
+
+    var promise = client.takePromisedRequest() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "/unused.css",
+        runtime.testing.findHeader(promise.headers, ":path").?,
+    );
+    const promised_stream_id = promise.promised_stream_id;
+    try client.cancelPush(&promise);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        promised_stream_id,
+        shared.canceled_stream_id.?,
+    );
+}
