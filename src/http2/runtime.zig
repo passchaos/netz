@@ -2305,18 +2305,11 @@ pub const Connection = struct {
                     return true;
                 }
                 const service = try http2.AltSvcPayload.parse(frame);
-                const origin = try self.allocator.dupe(u8, service.origin);
-                errdefer self.allocator.free(origin);
-                const value = try self.allocator.dupe(
-                    u8,
+                try self.storeAlternativeService(
+                    frame.header.stream_id,
+                    service.origin,
                     service.field_value,
                 );
-                errdefer self.allocator.free(value);
-                try self.alternative_services.append(self.allocator, .{
-                    .stream_id = frame.header.stream_id,
-                    .origin = origin,
-                    .field_value = value,
-                });
                 return true;
             },
             else => return false,
@@ -2576,6 +2569,34 @@ pub const Connection = struct {
             }
         }
         self.peer_initial_settings_applied = true;
+    }
+
+    fn storeAlternativeService(
+        self: *Connection,
+        stream_id: u31,
+        origin_value: []const u8,
+        field_value: []const u8,
+    ) Error!void {
+        const origin = try self.allocator.dupe(u8, origin_value);
+        errdefer self.allocator.free(origin);
+        const value = try self.allocator.dupe(u8, field_value);
+        errdefer self.allocator.free(value);
+        for (self.alternative_services.items) |*service| {
+            if (service.stream_id == stream_id and
+                std.mem.eql(u8, service.origin, origin_value))
+            {
+                self.allocator.free(service.origin);
+                self.allocator.free(service.field_value);
+                service.origin = origin;
+                service.field_value = value;
+                return;
+            }
+        }
+        try self.alternative_services.append(self.allocator, .{
+            .stream_id = stream_id,
+            .origin = origin,
+            .field_value = value,
+        });
     }
 
     fn peerOriginKnown(self: Connection, origin: []const u8) bool {
@@ -3951,6 +3972,14 @@ test "HTTP/2 runtime receives connection and stream ALTSVC frames" {
                 return;
             };
             connection.sendAlternativeService(
+                0,
+                "https://example.com",
+                "h3=\":8443\"; ma=60",
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            connection.sendAlternativeService(
                 1,
                 "",
                 "h2=\"alt.example.com:443\"",
@@ -3974,7 +4003,7 @@ test "HTTP/2 runtime receives connection and stream ALTSVC frames" {
         .{ .max_frame_payload = 4096 },
     );
     defer client.close();
-    inline for (0..2) |_| {
+    inline for (0..3) |_| {
         var frame = try readFrame(
             allocator,
             io,
@@ -3991,6 +4020,10 @@ test "HTTP/2 runtime receives connection and stream ALTSVC frames" {
     try std.testing.expectEqualStrings(
         "https://example.com",
         client.alternativeServices()[0].origin,
+    );
+    try std.testing.expectEqualStrings(
+        "h3=\":8443\"; ma=60",
+        client.alternativeServices()[0].field_value,
     );
     try std.testing.expectEqual(
         @as(u31, 1),
