@@ -2115,18 +2115,40 @@ pub const Connection = struct {
     }
 
     pub fn sendAck(self: *Connection, ack_delay: u64) Error!void {
-        const ack = try self.received.ackFrame(self.endpoint.allocator, ack_delay);
-        defer self.endpoint.allocator.free(ack.ranges);
+        var stack_ranges: [quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity]quic.AckRange = undefined;
+        var heap_ranges: ?[]quic.AckRange = null;
+        defer if (heap_ranges) |ranges| self.endpoint.allocator.free(ranges);
+        const ack = try self.ackFrameForSend(ack_delay, &stack_ranges, &heap_ranges);
         const frames = [_]quic.Frame{.{ .ack = ack }};
         try self.send(&frames);
     }
 
     pub fn sendAckWithEcn(self: *Connection, ack_delay: u64, ecn_counts: quic.EcnCounts) Error!void {
-        var ack = try self.received.ackFrame(self.endpoint.allocator, ack_delay);
-        defer self.endpoint.allocator.free(ack.ranges);
+        var stack_ranges: [quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity]quic.AckRange = undefined;
+        var heap_ranges: ?[]quic.AckRange = null;
+        defer if (heap_ranges) |ranges| self.endpoint.allocator.free(ranges);
+        var ack = try self.ackFrameForSend(ack_delay, &stack_ranges, &heap_ranges);
         ack.ecn_counts = ecn_counts;
         const frames = [_]quic.Frame{.{ .ack = ack }};
         try self.send(&frames);
+    }
+
+    fn ackFrameForSend(
+        self: Connection,
+        ack_delay: u64,
+        stack_ranges: *[quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity]quic.AckRange,
+        heap_ranges: *?[]quic.AckRange,
+    ) Error!quic.AckFrame {
+        const extra_ranges = if (self.received.ranges.items.len == 0)
+            0
+        else
+            self.received.ranges.items.len - 1;
+        if (extra_ranges <= stack_ranges.len) {
+            return self.received.ackFrameInto(stack_ranges, ack_delay);
+        }
+        const allocated = try self.endpoint.allocator.alloc(quic.AckRange, extra_ranges);
+        heap_ranges.* = allocated;
+        return self.received.ackFrameInto(allocated, ack_delay);
     }
 
     pub fn sendAckForDelayNs(self: *Connection, ack_delay_ns: u64) Error!void {

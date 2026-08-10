@@ -20,6 +20,8 @@ pub const PacketRange = struct {
 };
 
 pub const ReceivedPacketTracker = struct {
+    pub const stack_ack_range_capacity: usize = 64;
+
     allocator: std.mem.Allocator,
     ranges: std.ArrayList(PacketRange) = .empty,
     max_ranges: usize = 64,
@@ -93,11 +95,23 @@ pub const ReceivedPacketTracker = struct {
 
     pub fn ackFrame(self: ReceivedPacketTracker, allocator: std.mem.Allocator, ack_delay: u64) Error!quic.AckFrame {
         if (self.ranges.items.len == 0) return error.InvalidAckFrame;
-        const largest = self.ranges.items[0];
         const extra_count = self.ranges.items.len - 1;
         const ack_ranges = try allocator.alloc(quic.AckRange, extra_count);
         errdefer allocator.free(ack_ranges);
+        return self.ackFrameInto(ack_ranges, ack_delay);
+    }
 
+    /// Build an ACK frame using caller-provided storage for additional ranges.
+    ///
+    /// ACK emission can happen on every packet-processing turn and mature QUIC
+    /// stacks avoid heap traffic on this hot path.  `ackFrame` remains as the
+    /// owning convenience wrapper; runtimes with bounded ACK history can pass a
+    /// stack buffer here and send reordered ACK ranges allocation-free.
+    pub fn ackFrameInto(self: ReceivedPacketTracker, ack_ranges: []quic.AckRange, ack_delay: u64) Error!quic.AckFrame {
+        if (self.ranges.items.len == 0) return error.InvalidAckFrame;
+        const largest = self.ranges.items[0];
+        const extra_count = self.ranges.items.len - 1;
+        if (ack_ranges.len < extra_count) return error.TooManyAckRanges;
         var previous = largest;
         for (self.ranges.items[1..], 0..) |range, i| {
             const next_largest_after_gap = std.math.add(u64, range.end, 2) catch return error.InvalidAckFrame;
@@ -113,7 +127,7 @@ pub const ReceivedPacketTracker = struct {
             .largest_acknowledged = largest.end,
             .ack_delay = ack_delay,
             .first_ack_range = largest.len() - 1,
-            .ranges = ack_ranges,
+            .ranges = ack_ranges[0..extra_count],
             .ecn_counts = if (self.saw_ecn) self.ecn_counts else null,
         };
     }
@@ -792,6 +806,31 @@ test "QUIC packet space generates ACK ranges" {
     try std.testing.expectEqual(@as(u64, 1), ack.ranges[0].ack_range_length); // 7..8
     try std.testing.expectEqual(@as(u64, 2), ack.ranges[1].gap); // missing 4..6
     try std.testing.expectEqual(@as(u64, 2), ack.ranges[1].ack_range_length); // 1..3
+}
+
+test "QUIC packet space builds ACK ranges into caller storage" {
+    const allocator = std.testing.allocator;
+    var received = ReceivedPacketTracker.init(allocator, 8);
+    defer received.deinit();
+
+    for ([_]u64{ 1, 3, 5, 6 }) |pn| {
+        try std.testing.expect(try received.recordFresh(pn));
+    }
+
+    var ranges: [2]quic.AckRange = undefined;
+    const ack = try received.ackFrameInto(&ranges, 7);
+    try std.testing.expectEqual(@as(u64, 6), ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 7), ack.ack_delay);
+    try std.testing.expectEqual(@as(u64, 1), ack.first_ack_range);
+    try std.testing.expectEqual(@as(usize, 2), ack.ranges.len);
+    try std.testing.expectEqual(@intFromPtr(ranges[0..].ptr), @intFromPtr(ack.ranges.ptr));
+    try std.testing.expectEqual(@as(u64, 0), ack.ranges[0].gap);
+    try std.testing.expectEqual(@as(u64, 0), ack.ranges[0].ack_range_length);
+    try std.testing.expectEqual(@as(u64, 0), ack.ranges[1].gap);
+    try std.testing.expectEqual(@as(u64, 0), ack.ranges[1].ack_range_length);
+
+    var too_small: [1]quic.AckRange = undefined;
+    try std.testing.expectError(error.TooManyAckRanges, received.ackFrameInto(&too_small, 0));
 }
 
 test "QUIC packet space drops duplicate and too-old packet numbers" {
