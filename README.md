@@ -37,6 +37,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`,
   `http://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
+  RFC 9297 Capsule Protocol TLV parsing/writing with allocation-free
+  caller-buffer encoding and an incremental iterator for CONNECT stream data,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, client-initiated push-stream rejection, and QPACK encoder/decoder critical stream registration with FIN/RESET_STREAM/STOP_SENDING closure rejection, RFC 9204 dynamic-table FIFO/absolute-relative indexing/eviction state, Required Insert Count wrapping, all relative/post-base dynamic field-line forms with blocking/eviction distinction and never-indexed preservation, Huffman-capable encoder and decoder instruction codecs, a connection-scoped decoder with out-of-order/split encoder-stream reassembly plus coalesced feedback, and a non-blocking encoder state with Known Received Count gating, decoder-stream reassembly, outstanding reference accounting, and prohibited-eviction prevention, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
   collision-verified hash indexes for current QPACK exact/name matches with
   restricted-reference and eviction-safe scan fallback,
@@ -383,6 +385,7 @@ zig build bench -Doptimize=ReleaseFast
 zig build bench-http1-parse -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
 zig build bench-http3-dev -Doptimize=ReleaseFast
+zig build bench-http3-capsule -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
@@ -401,6 +404,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/2 HPACK stateful dynamic-table encode/decode versus stateless helpers,
 - HTTP/3 cleartext development request/response round trips,
 - HTTP/3 Alt-Svc `h3` / `h3-29` endpoint discovery parsing and origin-relative connection target resolution for real-site upgrade hints,
+- HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
+  CONNECT-stream extension payloads,
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
 - MQTT subscription-router trie matching versus a linear filter scan,
 - QUIC AES-128-GCM and ChaCha20-Poly1305 short-packet sealing with

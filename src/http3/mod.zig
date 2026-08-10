@@ -4,6 +4,7 @@ const priority_field = @import("../internal/priority.zig");
 const quic = @import("../quic/mod.zig");
 
 pub const runtime = @import("runtime.zig");
+pub const capsule = @import("capsule.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,

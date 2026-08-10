@@ -102,6 +102,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark HTTP/3 cleartext development request/response round trips",
         },
         .{
+            .exe_name = "netz-bench-http3-capsule",
+            .path = "examples/bench_http3_capsule.zig",
+            .run_step = "bench-http3-capsule",
+            .description = "Benchmark HTTP/3 Capsule Protocol parsing and caller-buffer encoding",
+        },
+        .{
             .exe_name = "netz-bench-http3-qpack",
             .path = "examples/bench_http3_qpack.zig",
             .run_step = "bench-http3-qpack",
