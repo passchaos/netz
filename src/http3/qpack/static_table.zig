@@ -117,14 +117,72 @@ pub fn get(index: usize) ?Entry {
     return entries[index];
 }
 
+const name_index = std.StaticStringMap([]const u8).initComptime(.{
+    .{ ":authority", &[_]u8{0} },
+    .{ ":path", &[_]u8{1} },
+    .{ "age", &[_]u8{2} },
+    .{ "content-disposition", &[_]u8{3} },
+    .{ "content-length", &[_]u8{4} },
+    .{ "cookie", &[_]u8{5} },
+    .{ "date", &[_]u8{6} },
+    .{ "etag", &[_]u8{7} },
+    .{ "if-modified-since", &[_]u8{8} },
+    .{ "if-none-match", &[_]u8{9} },
+    .{ "last-modified", &[_]u8{10} },
+    .{ "link", &[_]u8{11} },
+    .{ "location", &[_]u8{12} },
+    .{ "referer", &[_]u8{13} },
+    .{ "set-cookie", &[_]u8{14} },
+    .{ ":method", &[_]u8{ 15, 16, 17, 18, 19, 20, 21 } },
+    .{ ":scheme", &[_]u8{ 22, 23 } },
+    .{ ":status", &[_]u8{ 24, 25, 26, 27, 28, 63, 64, 65, 66, 67, 68, 69, 70, 71 } },
+    .{ "accept", &[_]u8{ 29, 30 } },
+    .{ "accept-encoding", &[_]u8{31} },
+    .{ "accept-ranges", &[_]u8{32} },
+    .{ "access-control-allow-headers", &[_]u8{ 33, 34, 75 } },
+    .{ "access-control-allow-origin", &[_]u8{35} },
+    .{ "cache-control", &[_]u8{ 36, 37, 38, 39, 40, 41 } },
+    .{ "content-encoding", &[_]u8{ 42, 43 } },
+    .{ "content-type", &[_]u8{ 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54 } },
+    .{ "range", &[_]u8{55} },
+    .{ "strict-transport-security", &[_]u8{ 56, 57, 58 } },
+    .{ "vary", &[_]u8{ 59, 60 } },
+    .{ "x-content-type-options", &[_]u8{61} },
+    .{ "x-xss-protection", &[_]u8{62} },
+    .{ "accept-language", &[_]u8{72} },
+    .{ "access-control-allow-credentials", &[_]u8{ 73, 74 } },
+    .{ "access-control-allow-methods", &[_]u8{ 76, 77, 78 } },
+    .{ "access-control-expose-headers", &[_]u8{79} },
+    .{ "access-control-request-headers", &[_]u8{80} },
+    .{ "access-control-request-method", &[_]u8{ 81, 82 } },
+    .{ "alt-svc", &[_]u8{83} },
+    .{ "authorization", &[_]u8{84} },
+    .{ "content-security-policy", &[_]u8{85} },
+    .{ "early-data", &[_]u8{86} },
+    .{ "expect-ct", &[_]u8{87} },
+    .{ "forwarded", &[_]u8{88} },
+    .{ "if-range", &[_]u8{89} },
+    .{ "origin", &[_]u8{90} },
+    .{ "purpose", &[_]u8{91} },
+    .{ "server", &[_]u8{92} },
+    .{ "timing-allow-origin", &[_]u8{93} },
+    .{ "upgrade-insecure-requests", &[_]u8{94} },
+    .{ "user-agent", &[_]u8{95} },
+    .{ "x-forwarded-for", &[_]u8{96} },
+    .{ "x-frame-options", &[_]u8{ 97, 98 } },
+});
+
 pub fn findMatch(name: []const u8, value: []const u8) ?struct { index: u64, full_match: bool } {
-    var name_match: ?u64 = null;
-    for (entries, 0..) |entry, i| {
-        if (std.mem.eql(u8, entry.name, name)) {
-            if (std.mem.eql(u8, entry.value, value)) return .{ .index = @intCast(i), .full_match = true };
-            if (name_match == null) name_match = @intCast(i);
+    const indexes = name_index.get(name) orelse return null;
+    // QPACK encoders probe the static table for every field section.  The
+    // reference Zig implementations under ~/Work scan all 99 entries; keep a
+    // no-allocation comptime name index so common fields inspect only their
+    // small equivalence class while preserving RFC table-order tie breaking.
+    for (indexes) |index| {
+        const entry = entries[index];
+        if (std.mem.eql(u8, entry.value, value)) {
+            return .{ .index = index, .full_match = true };
         }
     }
-    if (name_match) |index| return .{ .index = index, .full_match = false };
-    return null;
+    return .{ .index = indexes[0], .full_match = false };
 }

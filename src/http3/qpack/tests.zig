@@ -1,5 +1,6 @@
 const std = @import("std");
 const Qpack = @import("mod.zig");
+const static_table = @import("static_table.zig");
 
 test "HTTP/3 QPACK static name references and literal fallback" {
     const allocator = std.testing.allocator;
@@ -39,6 +40,29 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     try std.testing.expectEqualStrings("200", lower_decoded[0].value);
     try std.testing.expectEqualStrings("x-proto", lower_decoded[1].name);
     try std.testing.expectEqualStrings("QUIC", lower_decoded[1].value);
+}
+
+test "HTTP/3 QPACK static table name index preserves RFC lookup order" {
+    for (static_table.entries, 0..) |entry, index| {
+        const match = static_table.findMatch(entry.name, entry.value) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(match.full_match);
+        try std.testing.expectEqual(@as(u64, @intCast(index)), match.index);
+    }
+
+    var first_indexes = std.StaticStringMap(u64).initComptime(.{
+        .{ ":status", 24 },
+        .{ "access-control-allow-headers", 33 },
+        .{ "content-type", 44 },
+    });
+    inline for (.{ ":status", "access-control-allow-headers", "content-type" }) |name| {
+        const match = static_table.findMatch(name, "not in the static table") orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(!match.full_match);
+        // Name-only matches must keep RFC table-order tie breaking because the
+        // encoded index becomes observable wire output.
+        try std.testing.expectEqual(first_indexes.get(name).?, match.index);
+    }
 }
 
 test "HTTP/3 QPACK dynamic table applies RFC 9204 Appendix B encoder stream" {
