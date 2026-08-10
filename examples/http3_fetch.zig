@@ -28,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.next(); // executable name
     var uri_text: []const u8 = default_uri;
+    var method: []const u8 = "GET";
     var verify_server = false;
     var discover = false;
     while (args.next()) |arg| {
@@ -35,6 +36,10 @@ pub fn main(init: std.process.Init) !void {
             verify_server = true;
         } else if (std.mem.eql(u8, arg, "--discover")) {
             discover = true;
+        } else if (std.mem.eql(u8, arg, "--head")) {
+            method = "HEAD";
+        } else if (std.mem.startsWith(u8, arg, "--method=")) {
+            method = arg["--method=".len..];
         } else {
             uri_text = arg;
         }
@@ -54,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
     // handshake path accepts the certificate chain unless callers provide a
     // `server_auth` verifier.  Keeping the example explicit lets it exercise
     // public HTTP/3 reachability while the verifier policy remains pluggable.
-    var response = try fetchWithRetries(allocator, io, uri, verify_server, if (discovered) |*target| target else null);
+    var response = try fetchWithRetries(allocator, io, uri, method, verify_server, if (discovered) |*target| target else null);
     defer response.deinit(allocator);
 
     std.debug.print("HTTP/3 {s} -> {d}\n", .{ uri_text, response.response.status });
@@ -73,13 +78,14 @@ fn fetchWithRetries(
     allocator: std.mem.Allocator,
     io: std.Io,
     uri: std.Uri,
+    method: []const u8,
     verify_server: bool,
     discovered: ?*const DiscoveredTarget,
 ) !netz.http3.runtime.OwnedHandshakeResponse {
     var attempt: usize = 0;
     var last_err: ?anyerror = null;
     while (attempt < max_attempts) : (attempt += 1) {
-        return fetchOnce(allocator, io, uri, verify_server, discovered) catch |err| {
+        return fetchOnce(allocator, io, uri, method, verify_server, discovered) catch |err| {
             last_err = err;
             std.debug.print(
                 "HTTP/3 fetch attempt {d}/{d} failed: {s}\n",
@@ -95,6 +101,7 @@ fn fetchOnce(
     allocator: std.mem.Allocator,
     io: std.Io,
     uri: std.Uri,
+    method: []const u8,
     verify_server: bool,
     discovered: ?*const DiscoveredTarget,
 ) !netz.http3.runtime.OwnedHandshakeResponse {
@@ -126,7 +133,7 @@ fn fetchOnce(
                 .port = target.port,
                 .max_age = target.max_age,
             },
-            .{ .method = "GET" },
+            .{ .method = method },
             .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 16 } },
             .{
                 .handshake = .{
@@ -150,7 +157,7 @@ fn fetchOnce(
         io,
         .{ .ip4 = .unspecified(0) },
         uri,
-        .{ .method = "GET" },
+        .{ .method = method },
         .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 16 } },
         .{
             .handshake = .{
