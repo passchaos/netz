@@ -940,7 +940,7 @@ pub const ControlState = struct {
             try self.priority_updates.ensureUnusedCapacity(allocator, 1);
         }
         if (existing_index) |index| {
-            var replaced = self.priority_updates.orderedRemove(index);
+            var replaced = self.priority_updates.swapRemove(index);
             replaced.deinit(allocator);
         }
         self.priority_updates.appendAssumeCapacity(.{
@@ -3157,6 +3157,23 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
         @as(u3, 5),
         control.requestPriorityUpdate(12).?.priority().urgency,
     );
+    var replacement_request: std.ArrayList(u8) = .empty;
+    defer replacement_request.deinit(allocator);
+    try writePriorityUpdateFrame(
+        &replacement_request,
+        allocator,
+        8,
+        .{ .urgency = 0 },
+    );
+    try control.applyFrame(
+        allocator,
+        try Frame.parse(replacement_request.items),
+    );
+    try std.testing.expectEqual(
+        @as(u3, 0),
+        control.requestPriorityUpdate(8).?.priority().urgency,
+    );
+    try std.testing.expectEqual(@as(usize, 2), control.priority_updates.items.len);
 
     var push_priority: std.ArrayList(u8) = .empty;
     defer push_priority.deinit(allocator);
