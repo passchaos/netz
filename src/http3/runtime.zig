@@ -2532,6 +2532,31 @@ pub const HandshakeClient = struct {
         };
     }
 
+    pub fn connectUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        limits: Limits,
+        options: HandshakeClientOptions,
+    ) Error!HandshakeClient {
+        var endpoint = try uriEndpoint(allocator, uri);
+        defer endpoint.deinit();
+        const server = try endpoint.resolve(io);
+        var connect_options = options;
+        if (connect_options.handshake.server_name == null) {
+            connect_options.handshake.server_name = endpoint.tls_host;
+        }
+        return try connect(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            connect_options,
+        );
+    }
+
     pub fn deinit(self: *HandshakeClient) void {
         self.outbound_bodies.deinit();
         self.receive_packets.deinit();
@@ -13871,6 +13896,86 @@ test "HTTP/3 handshake runtime establishes QUIC and exchanges request response" 
     try std.testing.expectEqual(@as(?u64, server_control_stream_id), client.control.peer_control_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_encoder_stream_id), client.control.peer_qpack_encoder_stream_id);
     try std.testing.expectEqual(@as(?u64, server_qpack_decoder_stream_id), client.control.peer_qpack_decoder_stream_id);
+}
+
+test "HTTP/3 handshake client connects from URI endpoint" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xa1, 0xb1, 0xc1, 0xd1, 0xe1, 0xf1, 0x01, 0x11 };
+    const client_cid = [_]u8{ 0xa2, 0xb2, 0xc2, 0xd2 };
+    const server_cid = [_]u8{ 0xa3, 0xb3, 0xc3, 0xd3 };
+
+    var server = try HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xa4} ** 32,
+            .x25519_secret_key = [_]u8{0xa5} ** 32,
+        },
+    });
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+
+            var request = try session.receiveRequest();
+            defer request.deinit(session.established.connection.endpoint.allocator);
+            try std.testing.expectEqualStrings("GET", request.request.method);
+            try std.testing.expectEqualStrings("/uri", request.request.path);
+            try std.testing.expectEqualStrings("127.0.0.1", request.request.authority.?[0..9]);
+            try session.sendResponse(request.stream_id, .{
+                .status = 204,
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var uri_buf: [64]u8 = undefined;
+    const uri_text = try std.fmt.bufPrint(&uri_buf, "https://127.0.0.1:{d}/uri", .{server.address().ip4.port});
+    const uri = try std.Uri.parse(uri_text);
+    var client = try HandshakeClient.connectUri(allocator, io, .{ .ip4 = .loopback(0) }, uri, .{
+        .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 },
+    }, .{
+        .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .random = [_]u8{0xa6} ** 32,
+            .x25519_secret_key = [_]u8{0xa7} ** 32,
+        },
+    });
+    defer client.deinit();
+    try std.testing.expectEqualStrings("h3", client.established.alpn);
+
+    var endpoint = try uriEndpoint(allocator, uri);
+    defer endpoint.deinit();
+    var response = try client.request(.{
+        .method = "GET",
+        .path = "/uri",
+        .authority = endpoint.authority,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u16, 204), response.response.status);
 }
 
 test "HTTP/3 handshake server retains interleaved request streams" {
