@@ -1307,6 +1307,21 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         client_output.written(),
+        "\"name\":\"quic:parameters_set\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"owner\":\"local\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
+        "\"owner\":\"remote\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.written(),
         "\"name\":\"quic:packet_sent\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(

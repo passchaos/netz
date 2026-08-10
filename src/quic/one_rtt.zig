@@ -596,6 +596,7 @@ pub const Connection = struct {
             });
         }
         connection.observeConnectionStarted(null);
+        connection.observeParametersSet(null);
         return connection;
     }
 
@@ -4498,6 +4499,29 @@ pub const Connection = struct {
             // embedders can still inject smaller packet timestamps later.
             self.qlogEventTime(now_ns orelse 0),
         );
+    }
+
+    fn observeParametersSet(self: *Connection, now_ns: ?u64) void {
+        const observer = self.config.qlog_observer orelse return;
+        const event_time = self.qlogEventTime(now_ns orelse 0);
+        observer.parametersSet(event_time, .{
+            .owner = .local,
+            .max_idle_timeout_ms = self.config.local_max_idle_timeout_ms,
+            .max_udp_payload_size = std.math.cast(u64, self.endpoint.limits.max_datagram_size) orelse std.math.maxInt(u64),
+            .initial_max_data = self.config.initial_receive_max_data,
+            .initial_max_streams_bidi = self.config.initial_receive_max_streams_bidi,
+            .initial_max_streams_uni = self.config.initial_receive_max_streams_uni,
+            .disable_active_migration = null,
+        });
+        observer.parametersSet(event_time, .{
+            .owner = .remote,
+            .max_idle_timeout_ms = self.config.peer_max_idle_timeout_ms,
+            .max_udp_payload_size = std.math.cast(u64, self.config.max_datagram_size) orelse std.math.maxInt(u64),
+            .initial_max_data = self.config.initial_send_max_data,
+            .initial_max_streams_bidi = self.config.initial_send_max_streams_bidi,
+            .initial_max_streams_uni = self.config.initial_send_max_streams_uni,
+            .disable_active_migration = self.config.peer_disable_active_migration,
+        });
     }
 
     fn observeConnectionClosed(

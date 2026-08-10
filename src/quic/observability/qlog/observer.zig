@@ -43,6 +43,21 @@ pub const Observer = struct {
         };
     }
 
+    pub fn parametersSet(self: *Observer, now_ns: u64, parameters: anytype) void {
+        if (self.failure != null) return;
+        self.trace.writeEvent(now_ns, .{ .parameters_set = .{
+            .owner = parameters.owner,
+            .max_idle_timeout_ms = parameters.max_idle_timeout_ms,
+            .max_udp_payload_size = parameters.max_udp_payload_size,
+            .initial_max_data = parameters.initial_max_data,
+            .initial_max_streams_bidi = parameters.initial_max_streams_bidi,
+            .initial_max_streams_uni = parameters.initial_max_streams_uni,
+            .disable_active_migration = parameters.disable_active_migration,
+        } }) catch |err| {
+            self.failure = err;
+        };
+    }
+
     pub fn packetSent(
         self: *Observer,
         now_ns: u64,
