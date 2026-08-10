@@ -612,6 +612,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "timeThresholdLossDeadline"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "latestAckElicitingInFlightSentTime"));
     try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "sentAt"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space, "SentPacketStats"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "stats"));
+    try std.testing.expect(@hasDecl(netz.quic.packet_space.SentPacketTracker, "getStats"));
     try std.testing.expect(@hasDecl(netz.quic.stream_state, "RecvState"));
     const stream_conflict_error: netz.quic.stream_state.Error = error.ConflictingStreamData;
     try std.testing.expect(stream_conflict_error == error.ConflictingStreamData);

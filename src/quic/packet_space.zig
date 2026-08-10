@@ -282,6 +282,18 @@ pub const EcnCodepoint = enum {
     ce,
 };
 
+pub const SentPacketStats = struct {
+    tracked_packets: usize,
+    ack_eliciting_packets: usize,
+    in_flight_packets: usize,
+    acknowledged_packets: usize,
+    lost_packets: usize,
+    bytes_in_flight: usize,
+    sent_ect0_count: u64,
+    sent_ect1_count: u64,
+    ecn_validation_failed: bool,
+};
+
 pub const SentPacketTracker = struct {
     allocator: std.mem.Allocator,
     packets: std.ArrayList(SentPacket) = .empty,
@@ -367,6 +379,38 @@ pub const SentPacketTracker = struct {
 
     pub fn largestAcknowledged(self: SentPacketTracker) ?u64 {
         return self.largest_acknowledged;
+    }
+
+    pub fn stats(self: SentPacketTracker) SentPacketStats {
+        var ack_eliciting_packets: usize = 0;
+        var in_flight_packets: usize = 0;
+        var acknowledged_packets: usize = 0;
+        var lost_packets: usize = 0;
+        var bytes_in_flight: usize = 0;
+        for (self.packets.items) |packet| {
+            if (packet.ack_eliciting) ack_eliciting_packets += 1;
+            if (packet.in_flight) {
+                in_flight_packets += 1;
+                bytes_in_flight += packet.bytes;
+            }
+            if (packet.acknowledged) acknowledged_packets += 1;
+            if (packet.lost) lost_packets += 1;
+        }
+        return .{
+            .tracked_packets = self.packets.items.len,
+            .ack_eliciting_packets = ack_eliciting_packets,
+            .in_flight_packets = in_flight_packets,
+            .acknowledged_packets = acknowledged_packets,
+            .lost_packets = lost_packets,
+            .bytes_in_flight = bytes_in_flight,
+            .sent_ect0_count = self.sent_ect0_count,
+            .sent_ect1_count = self.sent_ect1_count,
+            .ecn_validation_failed = self.ecn_validation_failed,
+        };
+    }
+
+    pub fn getStats(self: SentPacketTracker) SentPacketStats {
+        return self.stats();
     }
 
     pub const AckResult = struct {
@@ -957,6 +1001,11 @@ test "QUIC sent packet tracker applies ACK ranges" {
     var sent = SentPacketTracker.init(allocator);
     defer sent.deinit();
     for (0..12) |pn| try sent.sent(@intCast(pn), true, 1200);
+    const before = sent.stats();
+    try std.testing.expectEqual(@as(usize, 12), before.tracked_packets);
+    try std.testing.expectEqual(@as(usize, 12), before.ack_eliciting_packets);
+    try std.testing.expectEqual(@as(usize, 12), before.in_flight_packets);
+    try std.testing.expectEqual(@as(usize, 12 * 1200), before.bytes_in_flight);
 
     const ranges = [_]quic.AckRange{
         .{ .gap = 0, .ack_range_length = 1 },
@@ -977,6 +1026,9 @@ test "QUIC sent packet tracker applies ACK ranges" {
     try std.testing.expect(sent.packets.items[7].acknowledged);
     try std.testing.expect(sent.packets.items[3].acknowledged);
     try std.testing.expect(!sent.packets.items[9].acknowledged);
+    const after = sent.getStats();
+    try std.testing.expectEqual(@as(usize, 6), after.acknowledged_packets);
+    try std.testing.expectEqual(@as(usize, 0), after.lost_packets);
 }
 
 test "QUIC sent packet tracker rejects ACK for never-sent packets" {
