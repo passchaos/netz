@@ -328,6 +328,11 @@ pub const SentPacketStats = struct {
 pub const SentPacketTracker = struct {
     allocator: std.mem.Allocator,
     packets: std.ArrayList(SentPacket) = .empty,
+    /// Packet-number lookups feed RTT sampling, ack bookkeeping, and send
+    /// rollback after partial writes. `packets` remains ordered for ACK/loss
+    /// range scans; this index keeps exact packet operations from walking the
+    /// whole sent-packet history.
+    packet_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     largest_acknowledged: ?u64 = null,
     latest_ecn_counts: quic.EcnCounts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 0 },
     ecn_validation_failed: bool = false,
@@ -341,6 +346,7 @@ pub const SentPacketTracker = struct {
 
     pub fn deinit(self: *SentPacketTracker) void {
         self.packets.deinit(self.allocator);
+        self.packet_index.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -369,6 +375,16 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn sentInFlightAtWithMetadata(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, largest_acknowledged_sent: ?u64) !void {
+        if (self.findPacketIndex(packet_number) != null) return error.DuplicatePacket;
+        const packet_storage_available = self.packets.items.len < self.packets.capacity;
+        // Some send paths pre-reserve packet metadata and deliberately run
+        // under a no-allocation guard to verify protected packet storage reuse.
+        // Grow the exact lookup index only when the packet list itself is about
+        // to allocate; otherwise use already-reserved map slots and let lookup
+        // helpers fall back to the ordered packet list if the map is also full.
+        if (!packet_storage_available) {
+            try self.packet_index.ensureUnusedCapacity(self.allocator, 1);
+        }
         try self.packets.append(self.allocator, .{
             .packet_number = packet_number,
             .ack_eliciting = ack_eliciting,
@@ -379,6 +395,10 @@ pub const SentPacketTracker = struct {
             .pmtu_probe_size = pmtu_probe_size,
             .largest_acknowledged_sent = largest_acknowledged_sent,
         });
+        const index = self.packets.items.len - 1;
+        if (self.packetIndexHasUnusedCapacity()) {
+            self.packet_index.putAssumeCapacityNoClobber(packet_number, index);
+        }
         switch (ecn) {
             .not_ect => {},
             .ect0 => self.sent_ect0_count += 1,
@@ -388,24 +408,18 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn forget(self: *SentPacketTracker, packet_number: u64) bool {
-        for (self.packets.items, 0..) |packet, i| {
-            if (packet.packet_number == packet_number) {
-                _ = self.packets.orderedRemove(i);
-                return true;
-            }
-        }
-        return false;
+        const index = self.findPacketIndex(packet_number) orelse return false;
+        _ = self.packets.orderedRemove(index);
+        _ = self.packet_index.remove(packet_number);
+        self.refreshPacketIndexFrom(index);
+        return true;
     }
 
     pub fn markAcknowledged(self: *SentPacketTracker, packet_number: u64) bool {
-        for (self.packets.items) |*packet| {
-            if (packet.packet_number == packet_number) {
-                packet.acknowledged = true;
-                self.observeAcknowledged(packet_number);
-                return true;
-            }
-        }
-        return false;
+        const index = self.findPacketIndex(packet_number) orelse return false;
+        self.packets.items[index].acknowledged = true;
+        self.observeAcknowledged(packet_number);
+        return true;
     }
 
     pub fn largestAcknowledged(self: SentPacketTracker) ?u64 {
@@ -1003,10 +1017,33 @@ pub const SentPacketTracker = struct {
     }
 
     fn findSentPacket(self: SentPacketTracker, packet_number: u64) ?SentPacket {
-        for (self.packets.items) |packet| {
-            if (packet.packet_number == packet_number) return packet;
+        const index = self.findPacketIndex(packet_number) orelse return null;
+        return self.packets.items[index];
+    }
+
+    fn findPacketIndex(self: SentPacketTracker, packet_number: u64) ?usize {
+        if (self.packet_index.get(packet_number)) |index| return index;
+        for (self.packets.items, 0..) |packet, index| {
+            if (packet.packet_number == packet_number) return index;
         }
         return null;
+    }
+
+    fn refreshPacketIndexFrom(self: *SentPacketTracker, start: usize) void {
+        var index = start;
+        while (index < self.packets.items.len) : (index += 1) {
+            const packet_number = self.packets.items[index].packet_number;
+            if (self.packet_index.getPtr(packet_number)) |indexed| {
+                indexed.* = index;
+            }
+        }
+    }
+
+    fn packetIndexHasUnusedCapacity(self: SentPacketTracker) bool {
+        const capacity = self.packet_index.capacity();
+        if (capacity == 0) return false;
+        const max_load = (capacity * std.hash_map.default_max_load_percentage) / 100;
+        return self.packet_index.count() < max_load;
     }
 
     fn ackContainsNewAckEliciting(self: SentPacketTracker, ack: quic.AckFrame) bool {
@@ -1170,6 +1207,42 @@ test "QUIC packet space fast-rejects below oldest retained range" {
     try std.testing.expect(try received.recordFresh(9));
     try std.testing.expectEqual(@as(u64, 9), received.ranges.items[1].start);
     try std.testing.expectEqual(@as(u64, 10), received.ranges.items[1].end);
+}
+
+test "QUIC sent packet tracker indexes exact packet lookups" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(0, true, 100, .not_ect, 1_000);
+    try sent.sentAt(1, true, 200, .not_ect, 2_000);
+    try sent.sentAt(2, true, 300, .not_ect, 3_000);
+    try std.testing.expectEqual(@as(usize, 3), sent.packet_index.count());
+    try std.testing.expectEqual(@as(?usize, 0), sent.packet_index.get(0));
+    try std.testing.expectEqual(@as(?usize, 1), sent.packet_index.get(1));
+    try std.testing.expectEqual(@as(?usize, 2), sent.packet_index.get(2));
+    try std.testing.expectError(
+        error.DuplicatePacket,
+        sent.sent(1, true, 100),
+    );
+
+    try std.testing.expect(sent.markAcknowledged(2));
+    try std.testing.expect(sent.packets.items[sent.packet_index.get(2).?].acknowledged);
+    try std.testing.expect(sent.forget(1));
+    try std.testing.expect(sent.packet_index.get(1) == null);
+    try std.testing.expectEqual(@as(?usize, 1), sent.packet_index.get(2));
+
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 2,
+        .ack_delay = 1,
+        .first_ack_range = 0,
+    };
+    // The largest packet is already acknowledged above, so the indexed RTT
+    // lookup finds it and correctly suppresses a duplicate RTT sample.
+    try std.testing.expectEqual(
+        @as(?SentPacketTracker.RttSample, null),
+        try sent.ackRttSample(ack, 4_000, 3),
+    );
 }
 
 test "QUIC sent packet tracker applies ACK ranges" {
