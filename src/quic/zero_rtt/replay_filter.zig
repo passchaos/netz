@@ -122,6 +122,17 @@ pub const Filter = struct {
         return self.entries.items.len;
     }
 
+    pub fn entryCount(self: *Filter) usize {
+        return self.count();
+    }
+
+    pub fn nextExpiryMillis(self: *Filter) ?u64 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.entries.items.len == 0) return null;
+        return self.entries.items[self.earliestExpiryIndex()].expires_at_ms;
+    }
+
     pub fn pruneExpired(self: *Filter, now_ms: u64) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -212,10 +223,12 @@ test "0-RTT replay filter rejects duplicates and expires bounded entries" {
     );
     try filter.checkAndMark("second", 1001, 1500);
     try filter.checkAndMark("third", 1002, 3000);
-    try std.testing.expectEqual(@as(usize, 2), filter.count());
+    try std.testing.expectEqual(@as(usize, 2), filter.entryCount());
+    try std.testing.expectEqual(@as(?u64, 2000), filter.nextExpiryMillis());
 
     try filter.checkAndMark("first", 3000, 4000);
     try std.testing.expectEqual(@as(usize, 1), filter.count());
+    try std.testing.expectEqual(@as(?u64, 4000), filter.nextExpiryMillis());
 }
 
 test "0-RTT replay filter prunes expired entries explicitly" {
@@ -231,8 +244,10 @@ test "0-RTT replay filter prunes expired entries explicitly" {
     try filter.checkAndMark("expired", 1000, 1500);
     try filter.checkAndMark("live", 1000, 2500);
     try std.testing.expectEqual(@as(usize, 2), filter.count());
+    try std.testing.expectEqual(@as(?u64, 1500), filter.nextExpiryMillis());
     try std.testing.expectEqual(@as(usize, 1), filter.pruneExpired(1500));
     try std.testing.expectEqual(@as(usize, 1), filter.count());
+    try std.testing.expectEqual(@as(?u64, 2500), filter.nextExpiryMillis());
     try filter.checkAndMark("expired", 1501, 3000);
     try std.testing.expectError(
         error.ReplayedEarlyData,
