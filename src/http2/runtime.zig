@@ -569,6 +569,11 @@ const StreamWindowEntry = struct {
 
 pub const PromisedRequest = push.PromisedRequest;
 
+const AltSvcKey = struct {
+    stream_id: u31,
+    origin_hash: u64,
+};
+
 pub const AlternativeService = struct {
     stream_id: u31,
     origin: []u8,
@@ -622,6 +627,7 @@ pub const Connection = struct {
     peer_origins: std.ArrayList([]u8) = .empty,
     peer_origin_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     alternative_services: std.ArrayList(AlternativeService) = .empty,
+    alternative_service_index: std.AutoHashMapUnmanaged(AltSvcKey, usize) = .empty,
     default_authority: ?[]u8 = null,
     /// Borrowed default used when RequestOptions.scheme is omitted.  Cleartext
     /// runtime constructors set this to "http"; a future ALPN/TLS constructor
@@ -653,6 +659,7 @@ pub const Connection = struct {
             service.deinit(self.allocator);
         }
         self.alternative_services.deinit(self.allocator);
+        self.alternative_service_index.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.stream.close(self.io);
@@ -2581,7 +2588,12 @@ pub const Connection = struct {
         errdefer self.allocator.free(origin);
         const value = try self.allocator.dupe(u8, field_value);
         errdefer self.allocator.free(value);
-        for (self.alternative_services.items) |*service| {
+        const key = AltSvcKey{
+            .stream_id = stream_id,
+            .origin_hash = originHash(origin_value),
+        };
+        if (self.alternative_service_index.get(key)) |index| {
+            const service = &self.alternative_services.items[index];
             if (service.stream_id == stream_id and
                 std.mem.eql(u8, service.origin, origin_value))
             {
@@ -2592,11 +2604,18 @@ pub const Connection = struct {
                 return;
             }
         }
+        if (self.alternative_service_index.get(key) == null) {
+            try self.alternative_service_index.ensureUnusedCapacity(self.allocator, 1);
+        }
+        const index = self.alternative_services.items.len;
         try self.alternative_services.append(self.allocator, .{
             .stream_id = stream_id,
             .origin = origin,
             .field_value = value,
         });
+        if (self.alternative_service_index.get(key) == null) {
+            self.alternative_service_index.putAssumeCapacity(key, index);
+        }
     }
 
     fn peerOriginKnown(self: Connection, origin: []const u8) bool {
