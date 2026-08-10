@@ -470,6 +470,7 @@ fn pskForSuite(
     return switch (suite.hash()) {
         .sha256 => .fromSha256([_]u8{0xb1} ** 32),
         .sha384 => .fromSha384([_]u8{0xb1} ** 48),
+        .sm3 => unreachable,
     };
 }
 

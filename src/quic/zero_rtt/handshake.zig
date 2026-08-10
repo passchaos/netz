@@ -117,6 +117,7 @@ pub fn clientKeysForSecretAndVersion(
                 ),
             );
         },
+        .sm3 => return error.InvalidEarlyDataLease,
     };
     return .{
         .traffic_secret = if (traffic_secret.hash == .sha256)

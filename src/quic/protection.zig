@@ -779,6 +779,7 @@ fn nextTrafficSecretValue(
             "",
             48,
         )),
+        .sm3 => unreachable,
     };
 }
 

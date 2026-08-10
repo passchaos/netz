@@ -401,7 +401,7 @@ fn isVersionNegotiationDatagram(bytes: []const u8) bool {
     return std.mem.readInt(u32, bytes[1..5], .big) == quic.Version.negotiation.wireValue();
 }
 
-fn receiveNextServerInitialDatagram(
+fn receiveNextServerDatagramWithTimeout(
     endpoint: *quic.runtime.Endpoint,
     recovery: retransmit.Config,
 ) Error!quic.runtime.OwnedBytes {
@@ -600,6 +600,7 @@ fn connectAttempt(
                 try session.psk_secret.sha384(),
                 offer_early_data,
             ),
+            .sm3 => return error.InvalidClientHello,
         }
     }
 
@@ -805,7 +806,7 @@ fn connectAttempt(
             },
         ) catch |err| switch (err) {
             error.MissingCryptoFrame => {
-                const next_datagram = try receiveNextServerInitialDatagram(
+                const next_datagram = try receiveNextServerDatagramWithTimeout(
                     endpoint,
                     options.handshake_recovery,
                 );
@@ -880,6 +881,7 @@ fn connectAttempt(
         options.max_crypto_buffer,
         local_transport_parameters.grease_quic_bit,
         !parsed_server.selected_psk and options.server_auth != null,
+        options.handshake_recovery,
     );
     defer server_handshake.deinit(endpoint.allocator);
     const server_flight = try splitServerFlight(
@@ -1380,6 +1382,7 @@ pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!Es
                         configured_psk.identity,
                         try configured_secret.sha384(),
                     ),
+                    .sm3 => return error.InvalidClientHello,
                 }
                 try quic.resumption.tls_psk.validateTicketAge(offer, .{
                     .age_add = configured_psk.age_add,
@@ -1948,6 +1951,7 @@ fn receiveServerHandshakeCrypto(
     max_crypto_buffer: usize,
     allow_zero_fixed_bit: bool,
     require_certificate: bool,
+    recovery: retransmit.Config,
 ) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
     var reassembler = quic.crypto_stream.Reassembler.init(endpoint.allocator, max_crypto_buffer);
     defer reassembler.deinit();
@@ -1970,7 +1974,7 @@ fn receiveServerHandshakeCrypto(
             if (info.packet_type != .handshake or info.len != pending_tail.len) return error.InvalidHandshakeFlight;
             break :blk pending_tail[0..info.len];
         } else blk: {
-            owned_datagram = try endpoint.receiveBytes();
+            owned_datagram = try receiveNextServerDatagramWithTimeout(endpoint, recovery);
             response_from = owned_datagram.?.from;
             break :blk owned_datagram.?.bytes;
         };
