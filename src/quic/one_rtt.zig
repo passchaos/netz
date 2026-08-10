@@ -450,6 +450,7 @@ pub const LossDetectionTimerDeadline = struct {
 };
 
 pub const TimerDeadlineKind = enum {
+    ack_delay,
     loss_time,
     pto,
     path_validation,
@@ -526,6 +527,8 @@ pub const Connection = struct {
     ack_frequency_recv_next_sequence: u64 = 0,
     ack_eliciting_threshold: u64 = 1,
     ack_eliciting_since_last_ack: u64 = 0,
+    ack_delay_start_ns: ?u64 = null,
+    ack_delay_deadline_ns: ?u64 = null,
     requested_max_ack_delay: u64 = 0,
     ack_reordering_threshold: u64 = quic.packet_space.default_packet_threshold,
     immediate_ack_requested: bool = false,
@@ -1492,6 +1495,12 @@ pub const Connection = struct {
     /// `kind` when the deadline becomes due.
     pub fn nextTimerDeadline(self: Connection) ?TimerDeadline {
         var next: ?TimerDeadline = null;
+        if (self.ack_delay_deadline_ns) |deadline| {
+            considerTimerDeadline(&next, .{
+                .kind = .ack_delay,
+                .deadline_ns = deadline,
+            });
+        }
         if (self.lossDetectionTimerDeadline()) |deadline| {
             considerTimerDeadline(&next, .{
                 .kind = switch (deadline.kind) {
@@ -1547,6 +1556,9 @@ pub const Connection = struct {
         if (now_ns < deadline.deadline_ns) return null;
 
         switch (deadline.kind) {
+            .ack_delay => {
+                try self.serviceAckDelayTimerAt(now_ns);
+            },
             .loss_time, .pto => {
                 _ = try self.serviceLossDetectionTimer(now_ns);
             },
@@ -2482,6 +2494,7 @@ pub const Connection = struct {
         const ack = try self.ackFrameForSend(ack_delay, &stack_ranges, &heap_ranges);
         const frames = [_]quic.Frame{.{ .ack = ack }};
         try self.send(&frames);
+        self.ackDelaySent();
     }
 
     pub fn sendAckWithEcn(self: *Connection, ack_delay: u64, ecn_counts: quic.EcnCounts) Error!void {
@@ -2492,6 +2505,7 @@ pub const Connection = struct {
         ack.ecn_counts = ecn_counts;
         const frames = [_]quic.Frame{.{ .ack = ack }};
         try self.send(&frames);
+        self.ackDelaySent();
     }
 
     fn ackFrameForSend(
@@ -2562,12 +2576,39 @@ pub const Connection = struct {
             !reordered and
             self.ack_eliciting_since_last_ack < self.ack_eliciting_threshold)
         {
+            self.scheduleAckDelayIfNeeded(packets);
             return false;
         }
 
         try self.sendAck(0);
-        self.ack_eliciting_since_last_ack = 0;
         return true;
+    }
+
+    fn scheduleAckDelayIfNeeded(self: *Connection, packets: []const ReceivedPacket) void {
+        _ = packets;
+        if (self.requested_max_ack_delay == 0 or self.ack_delay_deadline_ns != null) return;
+        const base = self.monotonicNowNs();
+        const delay_ns = std.math.mul(u64, self.requested_max_ack_delay, 1_000) catch std.math.maxInt(u64);
+        self.ack_delay_start_ns = base;
+        self.ack_delay_deadline_ns = std.math.add(u64, base, delay_ns) catch std.math.maxInt(u64);
+    }
+
+    pub fn ackDelayDeadline(self: Connection) ?u64 {
+        return self.ack_delay_deadline_ns;
+    }
+
+    pub fn serviceAckDelayTimerAt(self: *Connection, now_ns: u64) Error!void {
+        const deadline = self.ack_delay_deadline_ns orelse return;
+        if (now_ns < deadline) return;
+        const start = self.ack_delay_start_ns orelse deadline;
+        try self.sendAckForDelayNs(now_ns -| start);
+    }
+
+    fn ackDelaySent(self: *Connection) void {
+        self.ack_delay_start_ns = null;
+        self.ack_delay_deadline_ns = null;
+        self.ack_eliciting_since_last_ack = 0;
+        self.immediate_ack_requested = false;
     }
 
     pub fn encodedLocalAckDelayNanos(self: Connection, ack_delay_ns: u64) Error!u64 {

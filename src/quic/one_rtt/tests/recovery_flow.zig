@@ -1264,10 +1264,14 @@ test "QUIC 1-RTT ACK_FREQUENCY gates automatic ACK emission" {
     try one_rtt.testing.applyReceivedFrames(&connection, 1, &.{.{ .ping = {} }}, null, .not_ect);
     try std.testing.expect(!try connection.sendAckForPacketsIfNeeded(&.{packet0}));
     try std.testing.expectEqual(@as(u64, 1), connection.ack_eliciting_since_last_ack);
+    const delayed_deadline = connection.ackDelayDeadline() orelse return error.TestUnexpectedResult;
+    try connection.serviceAckDelayTimerAt(delayed_deadline - 1);
+    try std.testing.expectEqual(delayed_deadline, connection.ackDelayDeadline().?);
     try one_rtt.testing.applyReceivedFrames(&connection, 2, &.{.{ .ping = {} }}, null, .not_ect);
     try std.testing.expect(try connection.sendAckForPacketsIfNeeded(&.{packet1}));
     try std.testing.expectEqual(@as(u64, 0), connection.ack_eliciting_since_last_ack);
     try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
+    try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
 
     try one_rtt.testing.applyReceivedFrames(&connection, 3, &.{.{ .ack_frequency = .{
         .sequence_number = 1,
@@ -1282,6 +1286,17 @@ test "QUIC 1-RTT ACK_FREQUENCY gates automatic ACK emission" {
     try std.testing.expect(try connection.sendAckForPacketsIfNeeded(&.{packet0}));
     try std.testing.expect(!connection.immediateAckRequested());
     try std.testing.expectEqual(@as(u64, 2), connection.next_packet_number);
+
+    try one_rtt.testing.applyReceivedFrames(&connection, 6, &.{.{ .ping = {} }}, null, .not_ect);
+    try std.testing.expect(!try connection.sendAckForPacketsIfNeeded(&.{testReceivedPacket(6, &.{.{ .ping = {} }})}));
+    const timer_deadline = connection.ackDelayDeadline() orelse return error.TestUnexpectedResult;
+    const timer = connection.nextTimerDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.ack_delay, timer.kind);
+    try std.testing.expectEqual(timer_deadline, timer.deadline_ns);
+    const serviced = try connection.serviceNextTimerAt(timer_deadline);
+    try std.testing.expectEqual(one_rtt.TimerDeadlineKind.ack_delay, serviced.?.kind);
+    try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
+    try std.testing.expectEqual(@as(u64, 3), connection.next_packet_number);
 }
 
 fn testReceivedPacket(packet_number: u64, frames: []const quic.Frame) one_rtt.ReceivedPacket {

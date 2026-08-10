@@ -479,6 +479,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "releaseReceivedCapacity"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAckForPacketsIfNeeded"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "ackDelayDeadline"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "serviceAckDelayTimerAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "retransmitPacketThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "retransmitTimeThresholdLoss"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "timeThresholdLossDeadline"));
