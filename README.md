@@ -39,7 +39,8 @@ starts with deterministic parsers, serializers, and state helpers for:
 - HTTP/3 frame, SETTINGS, DATAGRAM, request/response HEADERS+DATA helpers,
   RFC 9297 Capsule Protocol TLV parsing/writing with allocation-free
   caller-buffer encoding, `Capsule-Protocol` structured-field validation, and
-  an incremental iterator for CONNECT stream data,
+  an incremental iterator for CONNECT stream data, normalized HTTP/3 origin
+  keys for conservative connection-reuse/coalescing policy decisions,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, forbidden frame rejection on control/request streams, client-initiated push-stream rejection, and QPACK encoder/decoder critical stream registration with FIN/RESET_STREAM/STOP_SENDING closure rejection, RFC 9204 dynamic-table FIFO/absolute-relative indexing/eviction state, Required Insert Count wrapping, all relative/post-base dynamic field-line forms with blocking/eviction distinction and never-indexed preservation, Huffman-capable encoder and decoder instruction codecs, a connection-scoped decoder with out-of-order/split encoder-stream reassembly plus coalesced feedback, and a non-blocking encoder state with Known Received Count gating, decoder-stream reassembly, outstanding reference accounting, and prohibited-eviction prevention, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection and same-control-stream GOAWAY emission with persistent control-stream offsets,
   collision-verified hash indexes for current QPACK exact/name matches with
   restricted-reference and eviction-safe scan fallback,

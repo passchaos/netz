@@ -70,6 +70,38 @@ pub const AltSvcTarget = struct {
     max_age: ?u64 = null,
 };
 
+pub const Origin = struct {
+    scheme: []const u8,
+    /// Host text normalized for origin comparison.  Bracketed IPv6
+    /// authorities are stored without their brackets, matching Alt-Svc targets
+    /// and DNS/IP dial helpers.
+    host: []const u8,
+    port: u16,
+};
+
+/// Build an RFC 6454-style origin key from HTTP/3 pseudo-header inputs.
+///
+/// This helper is intentionally certificate-agnostic: callers that coalesce
+/// HTTP/3 requests across origins still need to enforce their TLS certificate
+/// and server-authority policy, while this parser supplies the normalized
+/// scheme/host/port key used by those decisions.
+pub fn requestOrigin(scheme: []const u8, authority: []const u8) Error!Origin {
+    try validateUriScheme(scheme);
+    try validateRequestAuthority(authority);
+    const default_port = defaultPortForScheme(scheme) orelse return error.InvalidHeader;
+    return .{
+        .scheme = scheme,
+        .host = try altSvcAuthorityHost(authority),
+        .port = altSvcPort(authority) orelse default_port,
+    };
+}
+
+pub fn sameOrigin(a: Origin, b: Origin) bool {
+    return std.ascii.eqlIgnoreCase(a.scheme, b.scheme) and
+        std.ascii.eqlIgnoreCase(a.host, b.host) and
+        a.port == b.port;
+}
+
 /// Parse the first HTTP/3 alternative from any header list containing Alt-Svc.
 pub fn firstHttp3AltSvcHeader(headers: anytype) Error!?AltSvcEndpoint {
     for (headers) |header| {
@@ -227,6 +259,12 @@ fn altSvcPort(authority: []const u8) ?u16 {
 fn parseAltSvcPort(bytes: []const u8) ?u16 {
     if (bytes.len == 0) return null;
     return std.fmt.parseInt(u16, bytes, 10) catch null;
+}
+
+fn defaultPortForScheme(scheme: []const u8) ?u16 {
+    if (std.ascii.eqlIgnoreCase(scheme, "https")) return 443;
+    if (std.ascii.eqlIgnoreCase(scheme, "http")) return 80;
+    return null;
 }
 
 fn normalizeAltSvcHost(host: []const u8) Error![]const u8 {
@@ -2829,6 +2867,31 @@ test "HTTP/3 parses Alt-Svc HTTP/3 advertisements" {
     try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\":bad\""));
     try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\"example.com/evil\""));
     try std.testing.expectError(error.InvalidHeader, firstHttp3AltSvc("h3=\":443\"; ma=bad"));
+}
+
+test "HTTP/3 normalizes request origins for reuse policy" {
+    const https_default = try requestOrigin("https", "Example.COM");
+    try std.testing.expectEqualStrings("https", https_default.scheme);
+    try std.testing.expectEqualStrings("Example.COM", https_default.host);
+    try std.testing.expectEqual(@as(u16, 443), https_default.port);
+
+    const explicit_https = try requestOrigin("https", "example.com:443");
+    try std.testing.expect(sameOrigin(https_default, explicit_https));
+
+    const different_port = try requestOrigin("https", "example.com:8443");
+    try std.testing.expect(!sameOrigin(https_default, different_port));
+
+    const ipv6 = try requestOrigin("https", "[2001:db8::1]:443");
+    try std.testing.expectEqualStrings("2001:db8::1", ipv6.host);
+    try std.testing.expectEqual(@as(u16, 443), ipv6.port);
+
+    const http_default = try requestOrigin("http", "example.com");
+    try std.testing.expectEqual(@as(u16, 80), http_default.port);
+    try std.testing.expect(!sameOrigin(https_default, http_default));
+
+    try std.testing.expectError(error.InvalidHeader, requestOrigin("ftp", "example.com"));
+    try std.testing.expectError(error.InvalidHeader, requestOrigin("https", "user@example.com"));
+    try std.testing.expectError(error.InvalidHeader, requestOrigin("https", "example.com:bad"));
 }
 
 test "HTTP/3 frame settings and qpack literal block" {
