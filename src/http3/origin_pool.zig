@@ -136,11 +136,11 @@ pub fn Pool(comptime Handle: type) type {
             if (self.config.max_idle_per_origin == 0 or
                 self.config.max_idle_total == 0)
             {
-                self.drop_fn(self.allocator, handle);
+                self.dropHandle(handle);
                 return;
             }
             if (self.idleCountForOrigin(origin) >= self.config.max_idle_per_origin) {
-                self.drop_fn(self.allocator, handle);
+                self.dropHandle(handle);
                 return;
             }
             if (self.entries.items.len >= self.config.max_idle_total) {
@@ -164,7 +164,11 @@ pub fn Pool(comptime Handle: type) type {
 
         fn destroyEntry(self: *Self, entry: *Entry) void {
             entry.key.deinit();
-            self.drop_fn(self.allocator, entry.handle);
+            self.dropHandle(entry.handle);
+        }
+
+        fn dropHandle(self: *Self, handle: Handle) void {
+            self.drop_fn(self.allocator, handle);
             self.total_dropped +|= 1;
         }
     };
@@ -236,14 +240,16 @@ test "HTTP/3 origin pool enforces expiry and capacity" {
     try pool.release(1, a, 0);
     try pool.release(2, a, 1); // per-origin overflow: dropped.
     try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+    try std.testing.expectEqual(@as(u64, 1), pool.stats().total_dropped);
     try pool.release(3, b, 2);
     try pool.release(4, c, 3); // total overflow evicts oldest.
     try std.testing.expectEqual(@as(usize, 2), pool.idleCount());
     try std.testing.expect(pool.acquire(a, 4) == null);
     try std.testing.expectEqual(@as(u64, 1), pool.getStats().total_misses);
 
-    // Expired b is removed while searching, then c is returned.
-    try std.testing.expectEqual(@as(?usize, 4), pool.acquire(c, 20));
+    // Expired b is removed while searching, then c is returned before its own
+    // idle timeout elapses.
+    try std.testing.expectEqual(@as(?usize, 4), pool.acquire(c, 13));
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
     try std.testing.expectEqual(@as(u64, 3), pool.stats().total_dropped);
 }

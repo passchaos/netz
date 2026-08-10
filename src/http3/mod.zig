@@ -4540,4 +4540,5 @@ test "HTTP/3 response encode decode" {
 
 test {
     _ = runtime;
+    _ = origin_pool;
 }
