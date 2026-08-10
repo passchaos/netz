@@ -26,6 +26,13 @@ pub const Candidate = struct {
     retransmission_count: usize,
 };
 
+pub const QueueStats = struct {
+    pending_groups: usize,
+    packet_number_copies: usize,
+    retransmission_copies: usize,
+    payload_bytes: usize,
+};
+
 const PendingDatagram = struct {
     group_id: u64,
     /// Almost every payload is acknowledged without retransmission. Keep its
@@ -111,6 +118,27 @@ pub const Queue = struct {
 
     pub fn pendingCount(self: Queue) usize {
         return self.pending.items.len;
+    }
+
+    pub fn stats(self: Queue) QueueStats {
+        var packet_number_copies: usize = 0;
+        var retransmission_copies: usize = 0;
+        var payload_bytes: usize = 0;
+        for (self.pending.items) |entry| {
+            packet_number_copies += entry.packetCount();
+            retransmission_copies += entry.retransmission_packet_numbers.items.len;
+            payload_bytes += entry.payload.len;
+        }
+        return .{
+            .pending_groups = self.pending.items.len,
+            .packet_number_copies = packet_number_copies,
+            .retransmission_copies = retransmission_copies,
+            .payload_bytes = payload_bytes,
+        };
+    }
+
+    pub fn getStats(self: Queue) QueueStats {
+        return self.stats();
     }
 
     pub fn trackSent(
@@ -301,6 +329,11 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
     try queue.recordRetransmission(candidate.group_index, 4);
     try std.testing.expectEqual(@as(usize, 1), queue.pendingCount());
     try std.testing.expectEqual(@as(usize, 2), queue.pending.items[0].packetCount());
+    const stats = queue.stats();
+    try std.testing.expectEqual(@as(usize, 1), stats.pending_groups);
+    try std.testing.expectEqual(@as(usize, 2), stats.packet_number_copies);
+    try std.testing.expectEqual(@as(usize, 1), stats.retransmission_copies);
+    try std.testing.expectEqual("stream frame bytes".len, stats.payload_bytes);
 
     const ack = quic.AckFrame{
         .largest_acknowledged = 4,
@@ -308,6 +341,7 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
         .first_ack_range = 0,
     };
     try std.testing.expectEqual(@as(usize, 1), try queue.applyAck(ack));
+    try std.testing.expectEqual(@as(usize, 0), queue.getStats().pending_groups);
     try std.testing.expectEqual(@as(usize, 0), queue.pendingCount());
 }
 

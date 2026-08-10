@@ -619,9 +619,12 @@ test "public modules are reachable" {
     try std.testing.expect(crypto_conflict_error == error.ConflictingCryptoData);
     try std.testing.expect(@hasDecl(netz.quic.flow_control, "SendFlow"));
     try std.testing.expect(@hasDecl(netz.quic.recovery, "Queue"));
+    try std.testing.expect(@hasDecl(netz.quic.recovery, "QueueStats"));
     try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "packetThresholdCandidate"));
     try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "packetNumberCandidate"));
     try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "ptoCandidateAt"));
+    try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "stats"));
+    try std.testing.expect(@hasDecl(netz.quic.recovery.Queue, "getStats"));
     try std.testing.expect(@hasDecl(netz.quic.congestion, "Controller"));
     try std.testing.expect(@hasDecl(netz.quic.congestion, "Algorithm"));
     try std.testing.expect(@hasDecl(netz.quic.congestion, "CubicState"));

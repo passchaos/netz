@@ -264,8 +264,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   ordinary-send and recovery-retransmit size enforcement from the currently
   validated path MTU,
   a 1-RTT recovery queue for PTO plus packet-threshold and time-threshold
-  retransmission of unacknowledged ack-eliciting frame payloads, exact frame
-  wire-length prediction, allocation-free caller-storage multi-packet protection,
+  retransmission of unacknowledged ack-eliciting frame payloads, queue stats,
+  exact frame wire-length prediction, allocation-free caller-storage multi-packet protection,
   single-allocation batch wrappers, and stateful connection batches that
   transactionally commit flow control, congestion, recovery, pacing, stream
   offsets, AEAD key phases, and socket-visible prefixes. Portable UDP batch
