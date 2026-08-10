@@ -314,7 +314,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   runtime over protected HTTP/3 with automatic WebTransport/H3 DATAGRAM
   SETTINGS advertisement and negotiation checks, and a handshake-backed
   protected runtime that uses QUIC 1-RTT DATAGRAM send/receive queues with
-  WebTransport payload-size accounting and batch receive helpers
+  WebTransport payload-size accounting, batch receive helpers, and
+  WebTransport-style `stats`/`getStats` access to the underlying QUIC 1-RTT
+  counters
 - WebRTC building blocks: STUN, ICE connectivity-check helpers with priority encode/decode,
   USERNAME ufrag demux, PRIORITY/ICE-CONTROLLING/CONTROLLED/USE-CANDIDATE role-conflict tiebreaker decisions, UNKNOWN-ATTRIBUTES helpers, and authenticated 487 Role Conflict error responses plus
   MESSAGE-INTEGRITY (HMAC-SHA1) and FINGERPRINT validation,

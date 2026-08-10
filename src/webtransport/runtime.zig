@@ -209,6 +209,14 @@ pub const AcceptedHandshakeSession = struct {
         webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer) catch return false;
         return true;
     }
+
+    pub fn stats(self: AcceptedHandshakeSession) quic.one_rtt.ConnectionStats {
+        return self.h3.established.connection.stats();
+    }
+
+    pub fn getStats(self: AcceptedHandshakeSession) quic.one_rtt.ConnectionStats {
+        return self.stats();
+    }
 };
 
 pub const ClientSession = struct {
@@ -313,6 +321,14 @@ pub const HandshakeClientSession = struct {
     pub fn datagramsNegotiated(self: HandshakeClientSession) bool {
         webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer) catch return false;
         return true;
+    }
+
+    pub fn stats(self: HandshakeClientSession) quic.one_rtt.ConnectionStats {
+        return self.h3.established.connection.stats();
+    }
+
+    pub fn getStats(self: HandshakeClientSession) quic.one_rtt.ConnectionStats {
+        return self.stats();
     }
 };
 
@@ -834,6 +850,11 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
             try std.testing.expectEqual(accepted.session_id.value, datagram.datagram.session_id.value);
             try std.testing.expectEqualStrings("handshake-client-dgram", datagram.datagram.payload);
             try accepted.sendDatagram("handshake-server-dgram");
+            const stats = accepted.getStats();
+            try std.testing.expectEqual(@as(u64, 1), stats.datagrams_received);
+            try std.testing.expectEqual(@as(u64, 1), stats.datagrams_sent);
+            try std.testing.expect(stats.packets_received > 0);
+            try std.testing.expect(stats.packets_sent > 0);
         }
     };
 
@@ -861,6 +882,11 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
     defer response.deinit(allocator);
     try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
     try std.testing.expectEqualStrings("handshake-server-dgram", response.datagram.payload);
+    const stats = client.stats();
+    try std.testing.expectEqual(@as(u64, 1), stats.datagrams_sent);
+    try std.testing.expectEqual(@as(u64, 1), stats.datagrams_received);
+    try std.testing.expect(stats.packets_sent > 0);
+    try std.testing.expect(stats.packets_received > 0);
 
     thread.join();
     if (shared.err) |err| return err;

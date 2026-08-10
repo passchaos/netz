@@ -661,6 +661,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "receiveManyDatagrams"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "maxDatagramPayloadSize"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "datagramsNegotiated"));
+    try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "getStats"));
+    try std.testing.expect(@hasDecl(netz.webtransport.runtime.AcceptedHandshakeSession, "getStats"));
     try std.testing.expectEqual(@as(u32, 0x2112A442), netz.webrtc.stun.magic_cookie);
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "writeIceBindingRequest"));
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "validateMessageIntegrity"));
