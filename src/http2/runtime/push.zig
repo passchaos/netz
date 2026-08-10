@@ -35,10 +35,13 @@ pub const State = struct {
     /// Client-side notifications whose header ownership is still queued.
     pending: std.ArrayList(PromisedRequest) = .empty,
     pending_head: usize = 0,
+    pending_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     /// Server-created streams between PUSH_PROMISE and response/cancellation.
     local: std.ArrayList(LocalReservation) = .empty,
+    local_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     /// Client-observed streams awaiting acceptance or refusal by the caller.
     remote: std.ArrayList(u31) = .empty,
+    remote_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     next_local_stream_id: u31 = 2,
     last_peer_stream_id: ?u31 = null,
 
@@ -47,8 +50,11 @@ pub const State = struct {
             promise.deinit(allocator);
         }
         self.pending.deinit(allocator);
+        self.pending_index.deinit(allocator);
         self.local.deinit(allocator);
+        self.local_index.deinit(allocator);
         self.remote.deinit(allocator);
+        self.remote_index.deinit(allocator);
         self.* = undefined;
     }
 
@@ -60,49 +66,48 @@ pub const State = struct {
             return error.InvalidStreamId;
         }
         const stream_id = self.next_local_stream_id;
-        try self.local.append(allocator, .{ .stream_id = stream_id });
+        try self.local.ensureUnusedCapacity(allocator, 1);
+        try self.local_index.ensureUnusedCapacity(allocator, 1);
+        self.local.appendAssumeCapacity(.{ .stream_id = stream_id });
+        self.local_index.putAssumeCapacityNoClobber(
+            stream_id,
+            self.local.items.len - 1,
+        );
         self.next_local_stream_id += 2;
         return stream_id;
     }
 
     pub fn localStatus(
-        self: State,
+        self: *const State,
         stream_id: u31,
     ) ?LocalStatus {
-        for (self.local.items) |reservation| {
-            if (reservation.stream_id == stream_id) {
-                return reservation.status;
-            }
-        }
-        return null;
+        const index = self.local_index.get(stream_id) orelse return null;
+        return self.local.items[index].status;
     }
 
-    pub fn isLocalReserved(self: State, stream_id: u31) bool {
+    pub fn isLocalReserved(self: *const State, stream_id: u31) bool {
         return self.localStatus(stream_id) == .reserved;
     }
 
     pub fn cancelLocal(self: *State, stream_id: u31) bool {
-        for (self.local.items) |*reservation| {
-            if (reservation.stream_id == stream_id) {
-                reservation.status = .canceled;
-                return true;
-            }
-        }
-        return false;
+        const index = self.local_index.get(stream_id) orelse return false;
+        self.local.items[index].status = .canceled;
+        return true;
     }
 
     pub fn releaseLocal(self: *State, stream_id: u31) bool {
-        for (self.local.items, 0..) |reservation, index| {
-            if (reservation.stream_id == stream_id) {
-                _ = self.local.swapRemove(index);
-                return true;
-            }
+        const index = self.local_index.get(stream_id) orelse return false;
+        _ = self.local.swapRemove(index);
+        _ = self.local_index.remove(stream_id);
+        if (index < self.local.items.len) {
+            const moved = self.local.items[index];
+            self.local_index.getPtr(moved.stream_id).?.* = index;
         }
-        return false;
+        return true;
     }
 
     pub fn validatePeerStreamId(
-        self: State,
+        self: *const State,
         stream_id: u31,
     ) error{InvalidStreamId}!void {
         if ((stream_id & 1) != 0 or stream_id == 0) {
@@ -121,23 +126,33 @@ pub const State = struct {
         // Keep reservation identity separate from notification ownership.
         // `take` transfers the request headers to the caller, while the stream
         // must remain reserved until that caller reads or cancels the push.
-        try self.remote.append(
-            allocator,
-            promise.promised_stream_id,
-        );
-        errdefer _ = self.remote.pop();
         if (self.pending_head != 0 and
             self.pending.items.len == self.pending.capacity)
         {
             self.compactPending();
         }
-        try self.pending.append(allocator, promise);
+        try self.remote.ensureUnusedCapacity(allocator, 1);
+        try self.remote_index.ensureUnusedCapacity(allocator, 1);
+        try self.pending.ensureUnusedCapacity(allocator, 1);
+        try self.pending_index.ensureUnusedCapacity(allocator, 1);
+
+        self.remote.appendAssumeCapacity(promise.promised_stream_id);
+        self.remote_index.putAssumeCapacityNoClobber(
+            promise.promised_stream_id,
+            self.remote.items.len - 1,
+        );
+        self.pending.appendAssumeCapacity(promise);
+        self.pending_index.putAssumeCapacityNoClobber(
+            promise.promised_stream_id,
+            self.pending.items.len - 1,
+        );
         self.last_peer_stream_id = promise.promised_stream_id;
     }
 
     pub fn take(self: *State) ?PromisedRequest {
         if (self.pendingCount() == 0) return null;
         const promise = self.pending.items[self.pending_head];
+        _ = self.pending_index.remove(promise.promised_stream_id);
         self.pending_head += 1;
         // PUSH_PROMISE delivery is FIFO.  Advancing a cursor makes each pop
         // O(1); occasional compaction reclaims stale slots whose header
@@ -146,28 +161,23 @@ pub const State = struct {
         return promise;
     }
 
-    pub fn hasPending(self: State, stream_id: u31) bool {
-        for (self.pending.items[self.pending_head..]) |promise| {
-            if (promise.promised_stream_id == stream_id) return true;
-        }
-        return false;
+    pub fn hasPending(self: *const State, stream_id: u31) bool {
+        return self.pending_index.contains(stream_id);
     }
 
-    pub fn isRemoteReserved(self: State, stream_id: u31) bool {
-        for (self.remote.items) |reserved| {
-            if (reserved == stream_id) return true;
-        }
-        return false;
+    pub fn isRemoteReserved(self: *const State, stream_id: u31) bool {
+        return self.remote_index.contains(stream_id);
     }
 
     pub fn releaseRemote(self: *State, stream_id: u31) bool {
-        for (self.remote.items, 0..) |reserved, index| {
-            if (reserved == stream_id) {
-                _ = self.remote.swapRemove(index);
-                return true;
-            }
+        const index = self.remote_index.get(stream_id) orelse return false;
+        _ = self.remote.swapRemove(index);
+        _ = self.remote_index.remove(stream_id);
+        if (index < self.remote.items.len) {
+            const moved = self.remote.items[index];
+            self.remote_index.getPtr(moved).?.* = index;
         }
-        return false;
+        return true;
     }
 
     /// Records a peer-side cancellation and destroys a queued notification if
@@ -178,18 +188,17 @@ pub const State = struct {
         stream_id: u31,
     ) bool {
         if (!self.releaseRemote(stream_id)) return false;
-        for (self.pending.items[self.pending_head..], self.pending_head..) |promise, index| {
-            if (promise.promised_stream_id == stream_id) {
-                var removed = self.pending.orderedRemove(index);
-                removed.deinit(allocator);
-                self.compactPendingIfSparse();
-                break;
-            }
+        if (self.pending_index.get(stream_id)) |index| {
+            var removed = self.pending.orderedRemove(index);
+            _ = self.pending_index.remove(stream_id);
+            removed.deinit(allocator);
+            self.rebuildPendingIndexAssumeCapacity();
+            self.compactPendingIfSparse();
         }
         return true;
     }
 
-    fn pendingCount(self: State) usize {
+    fn pendingCount(self: *const State) usize {
         return self.pending.items.len - self.pending_head;
     }
 
@@ -213,6 +222,17 @@ pub const State = struct {
         }
         self.pending.items.len = remaining;
         self.pending_head = 0;
+        self.rebuildPendingIndexAssumeCapacity();
+    }
+
+    fn rebuildPendingIndexAssumeCapacity(self: *State) void {
+        self.pending_index.clearRetainingCapacity();
+        for (self.pending.items[self.pending_head..], self.pending_head..) |promise, index| {
+            self.pending_index.putAssumeCapacityNoClobber(
+                promise.promised_stream_id,
+                index,
+            );
+        }
     }
 };
 
@@ -280,10 +300,62 @@ test "canceling a queued remote reservation frees its request" {
 
     try std.testing.expect(state.hasPending(2));
     try std.testing.expect(state.isRemoteReserved(2));
+    try std.testing.expectEqual(@as(usize, 1), state.pending_index.count());
+    try std.testing.expectEqual(@as(usize, 1), state.remote_index.count());
     try std.testing.expect(state.cancelRemote(allocator, 2));
     try std.testing.expect(!state.hasPending(2));
     try std.testing.expect(!state.isRemoteReserved(2));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_index.count());
+    try std.testing.expectEqual(@as(usize, 0), state.remote_index.count());
     try std.testing.expect(!state.cancelRemote(allocator, 2));
+}
+
+test "push reservation indexes track local remote and pending lifecycles" {
+    const allocator = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(allocator);
+
+    const first_local = try state.reserveLocal(allocator);
+    const second_local = try state.reserveLocal(allocator);
+    try std.testing.expectEqual(@as(u31, 2), first_local);
+    try std.testing.expectEqual(@as(u31, 4), second_local);
+    try std.testing.expectEqual(@as(?usize, 0), state.local_index.get(first_local));
+    try std.testing.expectEqual(@as(?usize, 1), state.local_index.get(second_local));
+    try std.testing.expect(state.releaseLocal(first_local));
+    try std.testing.expect(state.local_index.get(first_local) == null);
+    try std.testing.expectEqual(@as(?usize, 0), state.local_index.get(second_local));
+
+    for ([_]u31{ 2, 4, 6 }) |stream_id| {
+        try queueTestPromise(&state, allocator, allocator, stream_id);
+    }
+    try std.testing.expectEqual(@as(usize, 3), state.pending_index.count());
+    try std.testing.expectEqual(@as(usize, 3), state.remote_index.count());
+
+    var first = state.take() orelse return error.TestUnexpectedResult;
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 2), first.promised_stream_id);
+    try std.testing.expect(!state.hasPending(2));
+    try std.testing.expect(state.isRemoteReserved(2));
+    try std.testing.expectEqual(@as(?usize, 0), state.pending_index.get(4));
+    try std.testing.expectEqual(@as(?usize, 1), state.pending_index.get(6));
+
+    // Canceling a queued promise removes one pending entry with orderedRemove
+    // and one remote reservation with swapRemove. Both indexes must be repaired
+    // before callers can inspect, cancel, or consume the remaining promise.
+    try std.testing.expect(state.cancelRemote(allocator, 4));
+    try std.testing.expect(!state.hasPending(4));
+    try std.testing.expect(!state.isRemoteReserved(4));
+    try std.testing.expectEqual(@as(?usize, 0), state.pending_index.get(6));
+    try std.testing.expectEqual(@as(?usize, 0), state.remote_index.get(2));
+    try std.testing.expectEqual(@as(?usize, 1), state.remote_index.get(6));
+
+    var remaining = state.take() orelse return error.TestUnexpectedResult;
+    defer remaining.deinit(allocator);
+    try std.testing.expectEqual(@as(u31, 6), remaining.promised_stream_id);
+    try std.testing.expectEqual(@as(usize, 0), state.pending_index.count());
+    try std.testing.expect(state.releaseRemote(2));
+    try std.testing.expect(state.releaseRemote(6));
+    try std.testing.expectEqual(@as(usize, 0), state.remote_index.count());
 }
 
 test "pending push notifications reuse consumed FIFO slots" {
@@ -312,6 +384,7 @@ test "pending push notifications reuse consumed FIFO slots" {
     try queueTestPromise(&state, allocator, no_alloc.allocator(), 10);
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 4), state.pendingCount());
+    try std.testing.expectEqual(@as(usize, 4), state.pending_index.count());
 
     for ([_]u31{ 4, 6, 8, 10 }) |stream_id| {
         var promise = state.take() orelse return error.TestUnexpectedResult;
@@ -320,6 +393,7 @@ test "pending push notifications reuse consumed FIFO slots" {
     }
     try std.testing.expect(state.take() == null);
     try std.testing.expectEqual(@as(usize, 0), state.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), state.pending_index.count());
 }
 
 fn queueTestPromise(
