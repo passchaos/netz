@@ -96,6 +96,14 @@ pub const EarlyDataLease = struct {
     }
 };
 
+pub const CacheStats = struct {
+    entries: usize,
+    capacity: usize,
+    active_early_data_leases: usize,
+    consumed_early_data_tickets: usize,
+    reusable_early_data_tickets: usize,
+};
+
 const Entry = struct {
     server_id: []u8,
     alpn: []u8,
@@ -162,6 +170,28 @@ pub const Cache = struct {
 
     pub fn count(self: Cache) usize {
         return self.entries.items.len;
+    }
+
+    pub fn stats(self: Cache) CacheStats {
+        var active_leases: usize = 0;
+        var consumed: usize = 0;
+        var reusable_early_data: usize = 0;
+        for (self.entries.items) |entry| {
+            if (entry.lease_id != null) active_leases += 1;
+            if (entry.early_data_consumed) consumed += 1;
+            if (entry.allowsEarlyData()) reusable_early_data += 1;
+        }
+        return .{
+            .entries = self.entries.items.len,
+            .capacity = self.max_entries,
+            .active_early_data_leases = active_leases,
+            .consumed_early_data_tickets = consumed,
+            .reusable_early_data_tickets = reusable_early_data,
+        };
+    }
+
+    pub fn getStats(self: Cache) CacheStats {
+        return self.stats();
     }
 
     /// Return an owned session copy suitable for a normal PSK resumption.

@@ -662,6 +662,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.quic_lb, "decodeServerId"));
     try std.testing.expect(@hasDecl(netz.quic, "resumption"));
     try std.testing.expect(@hasDecl(netz.quic.resumption, "Cache"));
+    try std.testing.expect(@hasDecl(netz.quic.resumption, "CacheStats"));
+    try std.testing.expect(@hasDecl(netz.quic.resumption.Cache, "stats"));
+    try std.testing.expect(@hasDecl(netz.quic.resumption.Cache, "getStats"));
     try std.testing.expect(@hasDecl(netz.quic.resumption, "tls_psk"));
     try std.testing.expect(@hasDecl(netz.quic.resumption, "ticket"));
     try std.testing.expect(@hasDecl(

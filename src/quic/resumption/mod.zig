@@ -14,6 +14,7 @@ pub const Cache = cache.Cache;
 pub const Ticket = cache.Ticket;
 pub const Session = cache.Session;
 pub const EarlyDataLease = cache.EarlyDataLease;
+pub const CacheStats = cache.CacheStats;
 
 test {
     _ = @import("tests.zig");
