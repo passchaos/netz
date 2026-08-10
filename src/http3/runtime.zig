@@ -2661,6 +2661,35 @@ pub const HandshakeClient = struct {
         });
     }
 
+    pub fn requestUriAltSvcHeader(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        headers: []const http3.Qpack.HeaderField,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+    ) Error!OwnedHandshakeResponse {
+        var origin = try uriEndpoint(allocator, uri);
+        defer origin.deinit();
+        const target = (try http3.firstHttp3AltSvcTarget(
+            origin.tls_host,
+            headers,
+            origin.port,
+        )) orelse return error.InvalidHeader;
+        return try requestUriAltSvc(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            request_options,
+            limits,
+            options,
+        );
+    }
+
     pub fn deinit(self: *HandshakeClient) void {
         self.outbound_bodies.deinit();
         self.receive_packets.deinit();
@@ -14133,17 +14162,21 @@ test "HTTP/3 handshake client requests via Alt-Svc target" {
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     const server_address = server.address();
-    var response = try HandshakeClient.requestUriAltSvc(
+    var alt_svc_value_buf: [64]u8 = undefined;
+    const alt_svc_value = try std.fmt.bufPrint(
+        &alt_svc_value_buf,
+        "h3=\"127.0.0.1:{d}\"; ma=60",
+        .{server_address.ip4.port},
+    );
+    const alt_svc_headers = [_]http3.Qpack.HeaderField{
+        .{ .name = "alt-svc", .value = alt_svc_value },
+    };
+    var response = try HandshakeClient.requestUriAltSvcHeader(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
         uri,
-        .{
-            .alpn = "h3",
-            .connect_host = "127.0.0.1",
-            .origin_host = "origin.example",
-            .port = server_address.ip4.port,
-        },
+        &alt_svc_headers,
         .{},
         .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } },
         .{ .handshake = .{
