@@ -674,6 +674,141 @@ test "QUIC 1-RTT beginPeerMigration obeys disable_active_migration" {
     try std.testing.expectEqual(@as(usize, 0), connection.path_validation.pendingChallengeCount());
 }
 
+test "QUIC 1-RTT receive commits NAT rebinding after non-probing packet" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var original_client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer original_client_endpoint.deinit();
+    var rebound_client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer rebound_client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
+    const server_cid = [_]u8{ 0xf5, 0xf6, 0xf7, 0xf8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xf1} ** quic.protection.secret_len);
+
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = original_client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    try one_rtt.sendFrames(&rebound_client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &.{.{ .stream = .{ .stream_id = 0, .data = "rebinding" } }},
+    });
+
+    var packet = try server.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqualStrings("rebinding", packet.frames[0].stream.data);
+    try std.testing.expectEqual(rebound_client_endpoint.address(), server.config.peer);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), server.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
+}
+
+test "QUIC 1-RTT receive starts validation for new peer IP" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    var previous_peer = client_endpoint.address();
+    switch (previous_peer) {
+        .ip4 => |*ip4| ip4.bytes = .{ 127, 0, 0, 2 },
+        .ip6 => |*ip6| ip6.bytes[15] +%= 1,
+    }
+    const client_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const server_cid = [_]u8{ 0xe5, 0xe6, 0xe7, 0xe8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xe1} ** quic.protection.secret_len);
+
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = previous_peer,
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pmtud = true,
+        .pmtud_max_probe_size = 1300,
+    });
+    defer server.deinit();
+    server.pmtud.onProbeAcked(1300, 1300);
+    server.pacer.onPacketSentAt(100, server.pacer.maxBurstSize(), server.congestionWindow(), server.rtt_stats.smoothedOrInitial());
+
+    try one_rtt.sendFrames(&client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &.{.{ .stream = .{ .stream_id = 0, .data = "new-path" } }},
+    });
+
+    var packet = try server.receivePacket();
+    defer packet.deinit(allocator);
+    try std.testing.expectEqualStrings("new-path", packet.frames[0].stream.data);
+    try std.testing.expectEqual(client_endpoint.address(), server.config.peer);
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expect(server.antiAmplificationLimitRemaining().? > 0);
+    try std.testing.expectEqual(@as(usize, 1), server.path_validation.pendingChallengeCount());
+    try std.testing.expectEqual(quic.pmtu.min_udp_payload_size, server.pmtudCurrentSize());
+    try std.testing.expectEqual(server.pacer.maxBurstSize(), server.pacer.budget);
+}
+
+test "QUIC 1-RTT receive rejects active migration before mutation when disabled" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var original_client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer original_client_endpoint.deinit();
+    var rebound_client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer rebound_client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const server_cid = [_]u8{ 0xd5, 0xd6, 0xd7, 0xd8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xd1} ** quic.protection.secret_len);
+
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = original_client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .peer_disable_active_migration = true,
+    });
+    defer server.deinit();
+
+    try one_rtt.sendFrames(&rebound_client_endpoint, server_endpoint.address(), keys, .{
+        .destination_connection_id = &server_cid,
+        .packet_number = 0,
+        .frames = &.{.{ .stream = .{ .stream_id = 0, .data = "blocked" } }},
+    });
+    try std.testing.expectError(error.ActiveMigrationDisabled, server.receivePacket());
+    try std.testing.expectEqual(original_client_endpoint.address(), server.config.peer);
+    try std.testing.expectEqual(@as(usize, 0), server.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.received.ranges.items.len);
+}
+
 test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     const allocator = std.testing.allocator;
 

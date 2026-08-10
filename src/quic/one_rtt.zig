@@ -357,6 +357,25 @@ pub const RecvStreamStats = struct {
     stop_sending_sent: ?StopSendingInfo,
 };
 
+const PeerAddressUpdate = union(enum) {
+    none,
+    same_unvalidated: usize,
+    nat_rebinding: net.IpAddress,
+    new_path: struct {
+        from: net.IpAddress,
+        datagram_len: usize,
+        path_validation: quic.path_validation.State,
+    },
+
+    fn deinit(self: *PeerAddressUpdate) void {
+        switch (self.*) {
+            .new_path => |*new_path| new_path.path_validation.deinit(),
+            else => {},
+        }
+        self.* = .none;
+    }
+};
+
 const DatagramRecvQueue = struct {
     slots: std.ArrayList(?[]u8) = .empty,
     head: usize = 0,
@@ -3328,7 +3347,6 @@ pub const Connection = struct {
         now_ns: ?u64,
         keys: quic.protection.PacketProtectionKeys,
     ) Error!void {
-        _ = from;
         const packet = try quic.protection.openShortPacketInPlaceWithFixedBitPolicy(
             keys,
             bytes,
@@ -3342,6 +3360,12 @@ pub const Connection = struct {
             quic.deinitOwnedFrameSlice(self.receive_frame_buffer.items, self.endpoint.allocator);
             self.receive_frame_buffer.clearRetainingCapacity();
         }
+        var peer_address_update = try self.preparePeerAddressUpdate(
+            from,
+            bytes.len,
+            frames,
+        );
+        defer peer_address_update.deinit();
         try self.applyReceivedFramesForDestinationOrClose(
             packet.packet_number,
             frames,
@@ -3350,6 +3374,7 @@ pub const Connection = struct {
             packet.destination_connection_id,
         );
         self.updateSpinBitAfterReceive(packet.spin_bit);
+        self.commitPeerAddressUpdate(&peer_address_update);
         self.observePacketReceived(
             now_ns,
             packet.packet_number,
@@ -3417,11 +3442,18 @@ pub const Connection = struct {
             return err;
         };
         errdefer packet.deinit(self.endpoint.allocator);
+        var peer_address_update = try self.preparePeerAddressUpdate(
+            from,
+            bytes.len,
+            packet.frames,
+        );
+        defer peer_address_update.deinit();
         try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
         }
+        self.commitPeerAddressUpdate(&peer_address_update);
         self.observePacketReceived(
             now_ns,
             packet.packet.packet_number,
@@ -3492,11 +3524,18 @@ pub const Connection = struct {
             return err;
         };
         errdefer packet.deinit(self.endpoint.allocator);
+        var peer_address_update = try self.preparePeerAddressUpdate(
+            routed.datagram.from,
+            routed.datagram.bytes.len,
+            packet.frames,
+        );
+        defer peer_address_update.deinit();
         try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, routed.datagram.ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
         }
+        self.commitPeerAddressUpdate(&peer_address_update);
         self.observePacketReceived(
             now_ns,
             packet.packet.packet_number,
@@ -3518,11 +3557,18 @@ pub const Connection = struct {
             return err;
         };
         errdefer packet.deinit(self.endpoint.allocator);
+        var peer_address_update = try self.preparePeerAddressUpdate(
+            routed.datagram.from,
+            routed.datagram.bytes.len,
+            packet.frames,
+        );
+        defer peer_address_update.deinit();
         try self.applyReceivedFramesForDestinationOrClose(packet.packet.packet_number, packet.frames, now_ns, ecn, packet.packet.destination_connection_id);
         self.updateSpinBitAfterReceive(packet.packet.spin_bit);
         if (packet.peer_initiated_key_update) {
             try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
         }
+        self.commitPeerAddressUpdate(&peer_address_update);
         self.observePacketReceived(
             now_ns,
             packet.packet.packet_number,
@@ -3565,6 +3611,83 @@ pub const Connection = struct {
             .frames = frames,
             .peer_initiated_key_update = decoded.peer_initiated_key_update,
         };
+    }
+
+    fn preparePeerAddressUpdate(
+        self: *Connection,
+        from: net.IpAddress,
+        datagram_len: usize,
+        frames: []const quic.Frame,
+    ) Error!PeerAddressUpdate {
+        if (self.config.peer.eql(&from)) {
+            return if (self.peer_address_validated)
+                .none
+            else
+                .{ .same_unvalidated = datagram_len };
+        }
+        if (!hasNonProbingFrame(frames)) return .none;
+        if (self.config.peer_disable_active_migration) {
+            return error.ActiveMigrationDisabled;
+        }
+
+        const previous = self.config.peer;
+        if (peerAddressSameIp(previous, from)) {
+            return .{ .nat_rebinding = from };
+        }
+
+        var path_validation = try self.path_validation.clone(
+            self.endpoint.allocator,
+        );
+        errdefer path_validation.deinit();
+
+        var challenge: [8]u8 = undefined;
+        try std.Io.randomSecure(self.endpoint.io, &challenge);
+        try path_validation.queueChallenge(challenge);
+        return .{ .new_path = .{
+            .from = from,
+            .datagram_len = datagram_len,
+            .path_validation = path_validation,
+        } };
+    }
+
+    fn commitPeerAddressUpdate(
+        self: *Connection,
+        update: *PeerAddressUpdate,
+    ) void {
+        switch (update.*) {
+            .none => {},
+            .same_unvalidated => |datagram_len| {
+                self.recordPeerAddressBytesReceived(datagram_len);
+            },
+            .nat_rebinding => |from| {
+                self.config.peer = from;
+                self.peer_address_validated = true;
+                self.peer_address_bytes_received = 0;
+                self.peer_address_bytes_sent = 0;
+            },
+            .new_path => |*new_path| {
+                self.config.peer = new_path.from;
+                self.peer_address_validated = false;
+                self.peer_address_bytes_received = 0;
+                self.peer_address_bytes_sent = 0;
+                self.recordPeerAddressBytesReceived(new_path.datagram_len);
+                self.rtt_stats = .init(std.math.mul(
+                    u64,
+                    self.config.peer_max_ack_delay_ms,
+                    1_000_000,
+                ) catch quic.rtt.default_max_ack_delay_ns);
+                self.congestion = .initWithOptions(
+                    self.config.max_datagram_size,
+                    self.config.congestion_algorithm,
+                    self.config.enable_hystart,
+                );
+                self.pacer.reset();
+                self.pmtud.resetForPath();
+                self.path_validation.deinit();
+                self.path_validation = new_path.path_validation;
+            },
+        }
+        update.* = .none;
     }
 
     fn applyReceivedFrames(self: *Connection, packet_number: u64, frames: []const quic.Frame, now_ns: ?u64, ecn: quic.packet_space.EcnCodepoint) Error!void {
@@ -4615,6 +4738,35 @@ fn streamDirection(stream_id: u64) StreamDirection {
 
 fn streamCountForId(stream_id: u64) u64 {
     return (stream_id >> 2) + 1;
+}
+
+fn peerAddressSameIp(a: net.IpAddress, b: net.IpAddress) bool {
+    return switch (a) {
+        .ip4 => |a4| switch (b) {
+            .ip4 => |b4| std.mem.eql(u8, &a4.bytes, &b4.bytes),
+            .ip6 => false,
+        },
+        .ip6 => |a6| switch (b) {
+            .ip4 => false,
+            .ip6 => |b6| std.mem.eql(u8, &a6.bytes, &b6.bytes) and
+                a6.flow == b6.flow and
+                a6.interface.index == b6.interface.index,
+        },
+    };
+}
+
+fn isProbingFrame(frame: quic.Frame) bool {
+    return switch (frame) {
+        .padding, .new_connection_id, .path_challenge, .path_response => true,
+        else => false,
+    };
+}
+
+fn hasNonProbingFrame(frames: []const quic.Frame) bool {
+    for (frames) |frame| {
+        if (!isProbingFrame(frame)) return true;
+    }
+    return false;
 }
 
 fn maxBufferedForLimit(limit: u64) usize {
