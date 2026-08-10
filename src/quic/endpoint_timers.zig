@@ -20,6 +20,12 @@ pub const EndpointTimerDeadline = struct {
 pub const EndpointTimers = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayList(EndpointTimerDeadline) = .empty,
+    /// Maps endpoint-owned connection handles to their current slot in
+    /// `entries`. Endpoint loops call update/disarm/deadline lookups on every
+    /// packet or timer turn, so keep the common path independent of the number
+    /// of active connections. `entries` may swap-remove, therefore removals
+    /// must repair the moved connection's slot before future lookups.
+    entry_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     earliest_index: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator) EndpointTimers {
@@ -28,14 +34,20 @@ pub const EndpointTimers = struct {
 
     pub fn deinit(self: *EndpointTimers) void {
         self.entries.deinit(self.allocator);
+        self.entry_index.deinit(self.allocator);
         self.* = undefined;
     }
 
     pub fn ensureCapacity(self: *EndpointTimers, capacity: usize) Error!void {
         try self.entries.ensureTotalCapacity(self.allocator, capacity);
+        const index_capacity = std.math.cast(
+            @TypeOf(self.entry_index).Size,
+            capacity,
+        ) orelse return error.OutOfMemory;
+        try self.entry_index.ensureTotalCapacity(self.allocator, index_capacity);
     }
 
-    pub fn count(self: EndpointTimers) usize {
+    pub fn count(self: *const EndpointTimers) usize {
         return self.entries.items.len;
     }
 
@@ -65,7 +77,9 @@ pub const EndpointTimers = struct {
                 self.entries.items[existing] = entry;
                 self.refreshEarliestAfterUpdate(existing);
             } else {
-                try self.entries.append(self.allocator, entry);
+                try self.entries.ensureUnusedCapacity(self.allocator, 1);
+                try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
+                self.appendEntryAssumeCapacity(entry);
                 self.considerEarliestIndex(self.entries.items.len - 1);
             }
             return;
@@ -83,14 +97,14 @@ pub const EndpointTimers = struct {
     }
 
     pub fn deadlineForConnection(
-        self: EndpointTimers,
+        self: *const EndpointTimers,
         connection_id: u64,
     ) ?EndpointTimerDeadline {
         const index = self.findIndex(connection_id) orelse return null;
         return self.entries.items[index];
     }
 
-    pub fn earliestDeadline(self: EndpointTimers) ?EndpointTimerDeadline {
+    pub fn earliestDeadline(self: *const EndpointTimers) ?EndpointTimerDeadline {
         const index = self.earliest_index orelse return null;
         std.debug.assert(index < self.entries.items.len);
         return self.entries.items[index];
@@ -113,11 +127,14 @@ pub const EndpointTimers = struct {
         };
     }
 
-    fn findIndex(self: EndpointTimers, connection_id: u64) ?usize {
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.connection_id == connection_id) return index;
-        }
-        return null;
+    fn findIndex(self: *const EndpointTimers, connection_id: u64) ?usize {
+        return self.entry_index.get(connection_id);
+    }
+
+    fn appendEntryAssumeCapacity(self: *EndpointTimers, entry: EndpointTimerDeadline) void {
+        const index = self.entries.items.len;
+        self.entries.appendAssumeCapacity(entry);
+        self.entry_index.putAssumeCapacityNoClobber(entry.connection_id, index);
     }
 
     fn refreshEarliestAfterUpdate(
@@ -145,7 +162,12 @@ pub const EndpointTimers = struct {
 
     fn removeEntry(self: *EndpointTimers, index: usize) void {
         const old_len = self.entries.items.len;
-        _ = self.entries.swapRemove(index);
+        const removed = self.entries.swapRemove(index);
+        _ = self.entry_index.remove(removed.connection_id);
+        if (index != old_len - 1) {
+            const moved = self.entries.items[index];
+            self.entry_index.getPtr(moved.connection_id).?.* = index;
+        }
         self.refreshEarliestAfterSwapRemove(index, old_len);
     }
 
@@ -234,6 +256,8 @@ test "QUIC endpoint timers arm update earliest and disarm" {
     try timers.update(10, .{ .kind = .pto, .deadline_ns = 500 });
     try timers.update(20, .{ .kind = .ack_delay, .deadline_ns = 200 });
     try std.testing.expectEqual(@as(?usize, 1), timers.earliest_index);
+    try std.testing.expectEqual(@as(?usize, 0), timers.entry_index.get(10));
+    try std.testing.expectEqual(@as(?usize, 1), timers.entry_index.get(20));
     try std.testing.expectEqual(@as(usize, 2), timers.count());
     try std.testing.expectEqual(@as(u64, 20), timers.earliestDeadline().?.connection_id);
     try std.testing.expectEqual(
@@ -251,6 +275,9 @@ test "QUIC endpoint timers arm update earliest and disarm" {
     // by swapRemove.
     try std.testing.expectEqual(@as(u64, 30), timers.earliestDeadline().?.connection_id);
     try std.testing.expectEqual(@as(?usize, 2), timers.earliest_index);
+    try std.testing.expectEqual(@as(?usize, null), timers.entry_index.get(10));
+    try std.testing.expectEqual(@as(?usize, 0), timers.entry_index.get(40));
+    try std.testing.expectEqual(@as(?usize, 2), timers.entry_index.get(30));
     try std.testing.expectEqual(@as(usize, 3), timers.count());
     try timers.update(30, .{ .kind = .path_validation, .deadline_ns = 900 });
     try std.testing.expectEqual(@as(u64, 40), timers.earliestDeadline().?.connection_id);
@@ -259,6 +286,7 @@ test "QUIC endpoint timers arm update earliest and disarm" {
     try std.testing.expect(timers.disarmConnection(40));
     try std.testing.expect(!timers.disarmConnection(20));
     try std.testing.expect(timers.earliestDeadline() == null);
+    try std.testing.expectEqual(@as(usize, 0), timers.entry_index.count());
 }
 
 test "QUIC endpoint timers retain cached earliest moved by swapRemove" {
@@ -274,6 +302,8 @@ test "QUIC endpoint timers retain cached earliest moved by swapRemove" {
     try std.testing.expect(timers.disarmConnection(1));
     try std.testing.expectEqual(@as(u64, 3), timers.earliestDeadline().?.connection_id);
     try std.testing.expectEqual(@as(?usize, 0), timers.earliest_index);
+    try std.testing.expectEqual(@as(?usize, null), timers.entry_index.get(1));
+    try std.testing.expectEqual(@as(?usize, 0), timers.entry_index.get(3));
 }
 
 test "QUIC endpoint timers service connection and refresh deadline" {

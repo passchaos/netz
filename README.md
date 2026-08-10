@@ -240,7 +240,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   PTO-flooring, one-shot outstanding probes, and peer-activity reset, plus
   a single next-timer selector across loss/PTO/path-validation/keep-alive/idle/close/key-discard
   work with a due-timer service dispatcher for event-loop arming and an
-  endpoint-level timer scheduler for multi-connection loops, and
+  indexed endpoint-level timer scheduler for multi-connection loops, and
   peer-address validation hooks with RFC 9000 3x anti-amplification send
   budget enforcement for unvalidated server paths,
   1-RTT key-update derivation and key-phase state with ACK gating and retained
