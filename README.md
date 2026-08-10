@@ -381,6 +381,7 @@ zig build run-http1-hello
 zig build run-http2-h2c
 zig build run-websocket-echo
 zig build run-http3-fetch
+zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify
 # Linux only: raw std.os.linux.IoUring-backed clients
 zig build run-linux-io-uring-http1
 zig build run-linux-io-uring-http1-server
