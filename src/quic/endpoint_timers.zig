@@ -122,6 +122,7 @@ pub const EndpointTimers = struct {
         connection: anytype,
         now_ns: u64,
     ) Error!?EndpointTimerDeadline {
+        if (self.findIndex(connection_id) == null) return null;
         const serviced = try connection.serviceNextTimerAt(now_ns);
         const timer = serviced orelse return null;
         try self.armFromConnection(connection_id, connection);
@@ -239,6 +240,7 @@ const FakeConnection = struct {
     timer: ?one_rtt.TimerDeadline = null,
     serviced_before: ?one_rtt.TimerDeadline = null,
     replacement: ?one_rtt.TimerDeadline = null,
+    service_calls: usize = 0,
 
     fn nextTimerDeadline(self: *const FakeConnection) ?one_rtt.TimerDeadline {
         return self.timer;
@@ -248,6 +250,7 @@ const FakeConnection = struct {
         self: *FakeConnection,
         now_ns: u64,
     ) Error!?one_rtt.TimerDeadline {
+        self.service_calls += 1;
         const timer = self.timer orelse return null;
         if (now_ns < timer.deadline_ns) return null;
         self.serviced_before = timer;
@@ -313,6 +316,28 @@ test "QUIC endpoint timers retain cached earliest moved by swapRemove" {
     try std.testing.expectEqual(@as(?usize, 0), timers.earliest_index);
     try std.testing.expectEqual(@as(?usize, null), timers.entry_index.get(1));
     try std.testing.expectEqual(@as(?usize, 0), timers.entry_index.get(3));
+}
+
+test "QUIC endpoint timers skip service for unarmed connections" {
+    const allocator = std.testing.allocator;
+    var timers = EndpointTimers.init(allocator);
+    defer timers.deinit();
+
+    var connection = FakeConnection{
+        .timer = .{ .kind = .pto, .deadline_ns = 1 },
+    };
+    try std.testing.expectEqual(
+        @as(?EndpointTimerDeadline, null),
+        try timers.serviceConnection(9, &connection, 1),
+    );
+    // Multi-connection loops commonly dispatch from this scheduler's selected
+    // entry.  If the selected handle was already disarmed, avoid re-scanning
+    // or mutating that connection's aggregate transport timers.
+    try std.testing.expectEqual(@as(usize, 0), connection.service_calls);
+
+    try timers.armFromConnection(9, &connection);
+    _ = try timers.serviceConnection(9, &connection, 1);
+    try std.testing.expectEqual(@as(usize, 1), connection.service_calls);
 }
 
 test "QUIC endpoint timers service connection and refresh deadline" {
