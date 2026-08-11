@@ -29,13 +29,36 @@ pub const Config = struct {
         }
     }
 
-    pub fn timeout(self: Config, retry_count: u8) std.Io.Timeout {
+    pub fn timeoutMillis(self: Config, retry_count: u8) u64 {
         const shift: u5 = @intCast(@min(retry_count, 31));
         const scaled = std.math.shl(u64, self.initial_pto_ms, shift);
+        return @min(scaled, self.max_pto_ms);
+    }
+
+    pub fn timeout(self: Config, retry_count: u8) std.Io.Timeout {
+        return durationFromMillis(self.timeoutMillis(retry_count));
+    }
+
+    /// Timeout budget for passive waits after the peer has already proven
+    /// liveness with part of a flight.  Waiting only the first PTO here makes a
+    /// split Initial/Handshake response much more fragile than the active
+    /// retransmission path above; summing the same bounded PTO windows keeps
+    /// the blocking adapter aligned with mature QUIC stacks that separate PTO
+    /// probing from the final handshake timeout.
+    pub fn passiveTimeout(self: Config) std.Io.Timeout {
+        var total_ms: u64 = 0;
+        var retry_count: u16 = 0;
+        while (retry_count <= @as(u16, self.max_retries)) : (retry_count += 1) {
+            total_ms += self.timeoutMillis(@intCast(retry_count));
+        }
+        return durationFromMillis(total_ms);
+    }
+
+    fn durationFromMillis(milliseconds: u64) std.Io.Timeout {
         return .{ .duration = .{
             .raw = .fromMilliseconds(@intCast(@min(
-                scaled,
-                self.max_pto_ms,
+                milliseconds,
+                @as(u64, @intCast(std.math.maxInt(i64))),
             ))),
             .clock = .awake,
         } };

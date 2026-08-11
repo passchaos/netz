@@ -405,7 +405,7 @@ fn receiveNextServerDatagramWithTimeout(
     endpoint: *quic.runtime.Endpoint,
     recovery: retransmit.Config,
 ) Error!quic.runtime.OwnedBytes {
-    return endpoint.receiveBytesTimeout(recovery.timeout(0)) catch |err| switch (err) {
+    return endpoint.receiveBytesTimeout(recovery.passiveTimeout()) catch |err| switch (err) {
         error.Timeout => error.HandshakeTimeout,
         error.ConcurrencyUnavailable => error.HandshakeReceiveFailed,
         else => |other| @errorCast(other),

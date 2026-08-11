@@ -101,3 +101,29 @@ test "handshake PTO exhausts a bounded retry budget" {
     );
     try std.testing.expectEqual(@as(usize, 3), context.calls);
 }
+
+test "passive handshake wait uses the full bounded PTO budget" {
+    const config = target.Config{
+        .initial_pto_ms = 10,
+        .max_pto_ms = 25,
+        .max_retries = 4,
+    };
+
+    try std.testing.expectEqual(@as(u64, 10), config.timeoutMillis(0));
+    try std.testing.expectEqual(@as(u64, 20), config.timeoutMillis(1));
+    try std.testing.expectEqual(@as(u64, 25), config.timeoutMillis(2));
+    try std.testing.expectEqual(@as(u64, 25), config.timeoutMillis(3));
+    try std.testing.expectEqual(@as(u64, 25), config.timeoutMillis(4));
+
+    const passive = config.passiveTimeout();
+    switch (passive) {
+        .duration => |duration| {
+            try std.testing.expectEqual(std.Io.Clock.awake, duration.clock);
+            try std.testing.expectEqual(
+                @as(i64, 105),
+                duration.raw.toMilliseconds(),
+            );
+        },
+        else => return error.InvalidHandshakeRecovery,
+    }
+}
