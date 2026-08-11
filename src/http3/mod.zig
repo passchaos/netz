@@ -467,11 +467,24 @@ pub const Frame = struct {
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
         try validateFrameType(self.frame_type);
         try validateFramePayloadShape(self.frame_type, self.payload);
-        try quic.varint.encode(list, allocator, self.frame_type);
-        try quic.varint.encode(list, allocator, self.payload.len);
+        try writeFrameHeader(list, allocator, self.frame_type, self.payload.len);
         try list.appendSlice(allocator, self.payload);
     }
 };
+
+fn writeFrameHeader(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    frame_type: u64,
+    payload_len: usize,
+) Error!void {
+    if (frame_type <= 63 and payload_len <= 63) {
+        try list.appendSlice(allocator, &.{ @intCast(frame_type), @intCast(payload_len) });
+        return;
+    }
+    try quic.varint.encode(list, allocator, frame_type);
+    try quic.varint.encode(list, allocator, payload_len);
+}
 
 fn validateFrameType(frame_type: u64) Error!void {
     switch (frame_type) {
@@ -3305,6 +3318,8 @@ test "HTTP/3 frame settings and qpack literal block" {
     var encoded_frame: std.ArrayList(u8) = .empty;
     defer encoded_frame.deinit(allocator);
     try (Frame{ .frame_type = FrameType.settings, .payload = payload.items, .consumed = 0 }).write(&encoded_frame, allocator);
+    try std.testing.expectEqual(@as(u8, FrameType.settings), encoded_frame.items[0]);
+    try std.testing.expectEqual(@as(u8, @intCast(payload.items.len)), encoded_frame.items[1]);
     const frame = try Frame.parse(encoded_frame.items);
     const parsed_settings = try parseSettings(allocator, frame.payload);
     defer allocator.free(parsed_settings);
