@@ -28,6 +28,7 @@ pub const SendState = struct {
         fin: bool,
     ) Error!void {
         if (self.fin_sent) return error.FinalSizeMismatch;
+        if (data.len == 0 and !fin) return;
         if (max_frame_data_len == 0) return error.InvalidStreamRange;
         if (data.len == 0 and fin) {
             try (quic.Frame{ .stream = .{ .stream_id = self.stream_id, .offset = self.next_offset, .data = &.{}, .fin = true } }).write(list, allocator);
@@ -60,6 +61,7 @@ pub const SendState = struct {
         fin: bool,
     ) Error!void {
         if (self.fin_sent) return error.FinalSizeMismatch;
+        if (data.len == 0 and !fin) return;
         if (max_frame_data_len == 0) return error.InvalidStreamRange;
         if (data.len == 0 and fin) {
             try list.append(allocator, .{ .stream = .{ .stream_id = self.stream_id, .offset = self.next_offset, .data = &.{}, .fin = true } });
@@ -284,6 +286,34 @@ test "QUIC send stream state writes offset STREAM frames" {
     try std.testing.expectEqual(@as(u64, 10), third.frame.stream.offset);
     try std.testing.expectEqualStrings("d", third.frame.stream.data);
     try std.testing.expect(third.frame.stream.fin);
+}
+
+test "QUIC send stream state skips empty non-FIN writes" {
+    const allocator = std.testing.allocator;
+    var send = SendState.init(7);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try send.writeFrames(&encoded, allocator, &.{}, 0, false);
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+    try std.testing.expectEqual(@as(u64, 0), send.next_offset);
+    try std.testing.expect(!send.fin_sent);
+
+    var frames: std.ArrayList(quic.Frame) = .empty;
+    defer frames.deinit(allocator);
+    try send.appendFrames(&frames, allocator, &.{}, 0, false);
+    try std.testing.expectEqual(@as(usize, 0), frames.items.len);
+    try std.testing.expectEqual(@as(u64, 0), send.next_offset);
+    try std.testing.expect(!send.fin_sent);
+
+    try std.testing.expectError(
+        error.InvalidStreamRange,
+        send.writeFrames(&encoded, allocator, "x", 0, false),
+    );
+    try std.testing.expectError(
+        error.InvalidStreamRange,
+        send.appendFrames(&frames, allocator, "x", 0, false),
+    );
 }
 
 test "QUIC receive stream state reassembles out of order and tracks FIN" {
