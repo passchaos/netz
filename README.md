@@ -143,7 +143,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   bounded RFC 9002-style exponential PTO retries for synchronous client
   Initial/0-RTT and server Initial+Handshake flights with fresh packet numbers,
   passive split-flight waits that use the same bounded total PTO budget instead
-  of failing on the first PTO, plus configurable retry exhaustion and deterministic
+  of failing on the first PTO, Handshake-space CRYPTO-less packet skips, plus
+  configurable retry exhaustion and deterministic
   whole-flight loss injection tests, HMAC-based
   address-validation token helpers for Retry/NEW_TOKEN with lifetime, version,
   peer-address binding, Retry ODCID/RSCID binding, secret rotation,

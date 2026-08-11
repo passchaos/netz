@@ -2001,12 +2001,22 @@ fn receiveServerHandshakeCrypto(
         );
         errdefer packet.deinit(endpoint.allocator);
         next_expected = packet.packet_number + 1;
-        try quic.initial_exchange.insertCryptoPayload(
+        quic.initial_exchange.insertCryptoPayload(
             endpoint.allocator,
             &reassembler,
             packet.payload,
             .handshake,
-        );
+        ) catch |err| switch (err) {
+            // Servers can send Handshake-space ACK/PADDING packets before or
+            // between CRYPTO packets.  They advance packet-number state but do
+            // not contribute TLS bytes, so keep waiting instead of treating the
+            // packet as a malformed handshake flight.
+            error.MissingCryptoFrame => {
+                packet.deinit(endpoint.allocator);
+                continue;
+            },
+            else => |other| return other,
+        };
         if (first_packet == null) {
             first_packet = packet;
         } else {
@@ -2108,6 +2118,83 @@ test "QUIC handshake receive skips non-handshake coalesced tail packets" {
         false,
     ));
     try std.testing.expectEqual(@as(usize, 0), tail.len);
+}
+
+test "QUIC handshake receive skips CRYPTO-less Handshake packets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer endpoint.deinit();
+
+    const keys =
+        quic.protection.deriveAes128Keys([_]u8{0x53} ** quic.protection.secret_len);
+    const dcid = [_]u8{ 0x90, 0x91, 0x92, 0x93 };
+    const scid = [_]u8{ 0x94, 0x95, 0x96, 0x97 };
+
+    var ack_only_payload: std.ArrayList(u8) = .empty;
+    defer ack_only_payload.deinit(allocator);
+    try quic.appendPadding(&ack_only_payload, allocator, 1);
+    const ack_only = try quic.protection.sealHandshakePacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 0,
+            .payload = ack_only_payload.items,
+        },
+    );
+    defer allocator.free(ack_only);
+
+    const tls_flight = [_]u8{
+        0x08, 0x00, 0x00, 0x00, // EncryptedExtensions with an empty body.
+        0x14, 0x00, 0x00, 0x00, // Finished with an empty body.
+    };
+    var crypto_payload: std.ArrayList(u8) = .empty;
+    defer crypto_payload.deinit(allocator);
+    try quic.crypto_stream.writeCryptoFrames(
+        &crypto_payload,
+        allocator,
+        0,
+        &tls_flight,
+        tls_flight.len,
+    );
+    const crypto_packet = try quic.protection.sealHandshakePacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 1,
+            .payload = crypto_payload.items,
+        },
+    );
+    defer allocator.free(crypto_packet);
+
+    var coalesced: std.ArrayList(u8) = .empty;
+    defer coalesced.deinit(allocator);
+    try coalesced.appendSlice(allocator, ack_only);
+    try coalesced.appendSlice(allocator, crypto_packet);
+
+    var received = try receiveServerHandshakeCrypto(
+        &endpoint,
+        endpoint.address(),
+        coalesced.items,
+        keys,
+        0,
+        1024,
+        false,
+        false,
+        .{},
+    );
+    defer received.deinit(allocator);
+    try std.testing.expectEqualStrings(&tls_flight, received.crypto_data);
 }
 
 fn openClientEarlyData(
