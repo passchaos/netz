@@ -1395,15 +1395,13 @@ pub const QpackEncodeState = struct {
                 1,
             );
         }
-        var new_reference_count_entries: usize = 0;
-        for (owned) |absolute_index| {
-            if (!self.reference_counts.contains(absolute_index)) {
-                new_reference_count_entries += 1;
-            }
-        }
+        // `encodeDynamicBlockKnownReceived` already deduplicates references
+        // within this field section. Reserve the section's full reference
+        // count as a safe upper bound and update counts in one hash-map pass
+        // instead of probing once with `contains` and again with `getOrPut`.
         try self.reference_counts.ensureUnusedCapacity(
             self.allocator,
-            std.math.cast(u32, new_reference_count_entries) orelse
+            std.math.cast(u32, owned.len) orelse
                 return error.OutOfMemory,
         );
         for (owned) |absolute_index| {
