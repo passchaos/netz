@@ -525,12 +525,11 @@ pub const ResetStreamPayload = struct {
 
     pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_id: u31, error_code: ErrorCode) Error!void {
         if (stream_id == 0) return error.InvalidStreamId;
-        var payload: [4]u8 = undefined;
-        std.mem.writeInt(u32, &payload, @intFromEnum(error_code), .big);
-        try (Frame{
-            .header = .{ .length = 4, .frame_type = .rst_stream, .flags = 0, .stream_id = stream_id },
-            .payload = &payload,
-        }).write(list, allocator);
+        try wire.appendU24(list, allocator, 4);
+        try list.append(allocator, @intFromEnum(FrameType.rst_stream));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
+        try wire.appendInt(list, allocator, u32, @intFromEnum(error_code), .big);
     }
 };
 
@@ -2185,6 +2184,7 @@ test "HTTP/2 RST_STREAM payload helper" {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try ResetStreamPayload.write(&encoded, allocator, 3, .cancel);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 4, @intFromEnum(FrameType.rst_stream), 0, 0, 0, 0, 3 }, encoded.items[0..9]);
     const frame = try Frame.parse(encoded.items);
     const reset = try ResetStreamPayload.parse(frame);
     try std.testing.expectEqual(@as(u31, 3), reset.stream_id);
