@@ -5609,17 +5609,14 @@ const ResponseStreamSet = struct {
         stream_id: u62,
         application_error_code: u64,
     ) std.mem.Allocator.Error!void {
-        const needs_order_slot = !self.resets.contains(stream_id);
-        if (needs_order_slot) {
+        const slot = try self.resets.getOrPut(self.allocator, stream_id);
+        if (!slot.found_existing) {
             if (self.reset_head != 0 and
                 self.reset_order.items.len == self.reset_order.capacity)
             {
                 self.compactResetOrder();
             }
             try self.reset_order.ensureUnusedCapacity(self.allocator, 1);
-        }
-        const slot = try self.resets.getOrPut(self.allocator, stream_id);
-        if (!slot.found_existing and needs_order_slot) {
             self.reset_order.appendAssumeCapacity(stream_id);
         }
         slot.value_ptr.* = application_error_code;
@@ -8303,19 +8300,6 @@ fn recordClientResponseReset(
     stream_id: u62,
     application_error_code: u64,
 ) Error!bool {
-    const needs_order_slot = !response_streams.resets.contains(stream_id);
-    if (needs_order_slot) {
-        if (response_streams.reset_head != 0 and
-            response_streams.reset_order.items.len ==
-                response_streams.reset_order.capacity)
-        {
-            response_streams.compactResetOrder();
-        }
-        try response_streams.reset_order.ensureUnusedCapacity(
-            response_streams.allocator,
-            1,
-        );
-    }
     const reset_slot = try response_streams.resets.getOrPut(
         response_streams.allocator,
         stream_id,
@@ -8326,6 +8310,17 @@ fn recordClientResponseReset(
         }
         return false;
     }
+    if (response_streams.reset_head != 0 and
+        response_streams.reset_order.items.len ==
+            response_streams.reset_order.capacity)
+    {
+        response_streams.compactResetOrder();
+    }
+    try response_streams.reset_order.ensureUnusedCapacity(
+        response_streams.allocator,
+        1,
+    );
+
     var order_appended = false;
     errdefer {
         _ = response_streams.resets.remove(stream_id);
@@ -8361,10 +8356,8 @@ fn recordClientResponseReset(
         try qpack_decode.recordStreamCancellation(stream_id);
     }
 
-    if (needs_order_slot) {
-        response_streams.reset_order.appendAssumeCapacity(stream_id);
-        order_appended = true;
-    }
+    response_streams.reset_order.appendAssumeCapacity(stream_id);
+    order_appended = true;
     reset_slot.value_ptr.* = application_error_code;
     if (buffered_entry) |*entry| entry.deinit();
     buffered_entry = null;
