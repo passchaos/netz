@@ -121,8 +121,8 @@ pub const Controller = struct {
         now_ns: ?u64,
         smoothed_rtt_ns: ?u64,
     ) void {
-        self.discard(bytes);
         if (bytes == 0) return;
+        self.discard(bytes);
 
         if (self.congestion_recovery_start_time_ns) |recovery_start| {
             const sent_time = sent_time_ns orelse return;
@@ -220,8 +220,8 @@ pub const Controller = struct {
     }
 
     pub fn onLostAt(self: *Controller, bytes: usize, lost_sent_time_ns: ?u64, now_ns: ?u64) void {
-        self.discard(bytes);
         if (bytes == 0) return;
+        self.discard(bytes);
 
         if (self.congestion_recovery_start_time_ns) |recovery_start| {
             const lost_sent_time = lost_sent_time_ns orelse return;
@@ -297,10 +297,12 @@ pub const Controller = struct {
     }
 
     pub fn onPtoProbeSent(self: *Controller, bytes: usize) void {
+        if (bytes == 0) return;
         self.bytes_in_flight += bytes;
     }
 
     pub fn discard(self: *Controller, bytes: usize) void {
+        if (bytes == 0) return;
         self.bytes_in_flight -|= bytes;
     }
 
@@ -384,6 +386,27 @@ test "QUIC congestion controller suppresses repeated recovery losses and ACK gro
     try std.testing.expectEqual(@as(usize, 0), cc.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, null), cc.congestion_recovery_start_time_ns);
     try std.testing.expect(cc.congestion_window > recovery_window);
+}
+
+test "QUIC congestion controller skips zero-byte ACK loss and PTO events" {
+    var cc = Controller.init(1200);
+    try cc.reserve(2400);
+    cc.onLostAt(1200, 100, 200);
+
+    const recovery_window = cc.congestion_window;
+    const recovery_start = cc.congestion_recovery_start_time_ns;
+    const bytes_in_flight = cc.bytes_in_flight;
+    const slow_start_threshold = cc.slow_start_threshold;
+
+    cc.onAckedWithContext(0, 300, 400, 100_000_000);
+    cc.onLostAt(0, 300, 400);
+    cc.onPtoProbeSent(0);
+    cc.discard(0);
+
+    try std.testing.expectEqual(bytes_in_flight, cc.bytes_in_flight);
+    try std.testing.expectEqual(recovery_window, cc.congestion_window);
+    try std.testing.expectEqual(slow_start_threshold, cc.slow_start_threshold);
+    try std.testing.expectEqual(recovery_start, cc.congestion_recovery_start_time_ns);
 }
 
 test "QUIC congestion controller reacts to explicit ECN congestion once per recovery" {
