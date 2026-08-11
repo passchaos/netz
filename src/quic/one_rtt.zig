@@ -5040,6 +5040,7 @@ pub const Connection = struct {
                 return &self.stream_send_flows.items[index];
             }
         }
+        if (self.stream_send_index.count() == 0) return null;
         const index = self.stream_send_index.get(stream_id) orelse return null;
         if (index >= self.stream_send_flows.items.len) return null;
         if (self.stream_send_flows.items[index].stream_id != stream_id) return null;
@@ -5095,6 +5096,7 @@ pub const Connection = struct {
                 return &self.stream_recv_flows.items[index];
             }
         }
+        if (self.stream_recv_index.count() == 0) return null;
         const index = self.stream_recv_index.get(stream_id) orelse return null;
         if (index >= self.stream_recv_flows.items.len) return null;
         if (self.stream_recv_flows.items[index].stream_id != stream_id) return null;
