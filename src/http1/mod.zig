@@ -1099,6 +1099,10 @@ fn validHeaderNameByte(byte: u8) bool {
 
 pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunks: []const []const u8, trailers: []const Header) !void {
     try validateTrailers(trailers);
+    if (chunks.len == 0 and trailers.len == 0) {
+        try list.appendSlice(allocator, "0\r\n\r\n");
+        return;
+    }
     for (chunks) |chunk| {
         var tmp: [32]u8 = undefined;
         const rendered = try std.fmt.bufPrint(&tmp, "{x}\r\n", .{chunk.len});
@@ -1576,6 +1580,13 @@ test "HTTP/1 chunked codec" {
     defer decoded.deinit(allocator);
     try std.testing.expectEqualStrings("hello world", decoded.body);
     try std.testing.expectEqualStrings("sha-256=demo", decoded.trailers[0].value);
+
+    encoded.clearRetainingCapacity();
+    try encoded.ensureTotalCapacity(allocator, "0\r\n\r\n".len);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try encodeChunked(&encoded, no_alloc.allocator(), &.{}, &.{});
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings("0\r\n\r\n", encoded.items);
 }
 
 test "HTTP/1 chunked trailers reject forbidden fields" {
