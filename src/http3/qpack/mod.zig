@@ -775,6 +775,10 @@ fn freeFieldStorages(allocator: std.mem.Allocator, fields: []HeaderField) void {
 }
 
 fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    if (value.len == 0) {
+        try list.append(allocator, 0);
+        return;
+    }
     const huffman = try encodeHuffman(allocator, value);
     defer allocator.free(huffman);
     if (huffman.len < value.len) {

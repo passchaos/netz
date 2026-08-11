@@ -41,6 +41,16 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     try std.testing.expectEqualStrings("200", lower_decoded[0].value);
     try std.testing.expectEqualStrings("x-proto", lower_decoded[1].name);
     try std.testing.expectEqualStrings("QUIC", lower_decoded[1].value);
+
+    block.clearRetainingCapacity();
+    try block.ensureTotalCapacity(allocator, 8);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try Qpack.encodeLiteralBlock(&block, no_alloc.allocator(), &.{.{ .name = "x-empty", .value = "" }});
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    const empty_decoded = try Qpack.decodeLiteralBlock(allocator, block.items);
+    defer Qpack.freeDecodedFields(allocator, empty_decoded);
+    try std.testing.expectEqualStrings("x-empty", empty_decoded[0].name);
+    try std.testing.expectEqualStrings("", empty_decoded[0].value);
 }
 
 test "HTTP/3 QPACK static table name index preserves RFC lookup order" {
