@@ -1521,14 +1521,19 @@ pub const QpackEncodeState = struct {
     }
 
     fn releaseSection(self: *QpackEncodeState, index: usize) void {
-        var section = self.pending_sections.orderedRemove(index);
+        var section = if (index == self.pending_sections.items.len - 1)
+            self.pending_sections.pop().?
+        else
+            self.pending_sections.orderedRemove(index);
         const removed_stream_id = section.stream_id;
         const removed_was_first =
             self.pending_section_index.get(removed_stream_id) == index;
         if (removed_was_first) {
             _ = self.pending_section_index.remove(removed_stream_id);
         }
-        self.repairPendingSectionIndexFrom(index);
+        if (index < self.pending_sections.items.len) {
+            self.repairPendingSectionIndexFrom(index);
+        }
         self.releaseSectionReferences(&section);
     }
 
