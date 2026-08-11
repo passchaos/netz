@@ -285,7 +285,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   1-RTT PING+PADDING probe packets wired to ACK/loss feedback with
   ordinary-send and recovery-retransmit size enforcement from the currently
   validated path MTU,
-  an indexed 1-RTT recovery queue with single-lookup group/packet insertion, cached newest retransmission packet numbers, and aggregate queue stats for PTO plus packet-threshold and time-threshold
+  an indexed 1-RTT recovery queue with single-lookup group/packet insertion, empty-index group checks, cached newest retransmission packet numbers, and aggregate queue stats for PTO plus packet-threshold and time-threshold
   retransmission of unacknowledged ack-eliciting frame payloads with single-pass
   ACK-range retirement, no-op ACK short-circuiting, O(1) tail ACK/copy removal,
   single-pass sent-packet tracker stats, exact frame wire-length prediction,

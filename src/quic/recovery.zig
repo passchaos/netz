@@ -209,7 +209,8 @@ pub const Queue = struct {
     }
 
     pub fn containsGroupId(self: *const Queue, group_id: u64) bool {
-        return self.group_index.contains(group_id);
+        return self.group_index.count() != 0 and
+            self.group_index.contains(group_id);
     }
 
     pub fn ptoCandidate(self: *const Queue) ?Candidate {
