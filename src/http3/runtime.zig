@@ -6233,6 +6233,7 @@ const StreamingMessageSet = struct {
 
     fn remove(self: *StreamingMessageSet, stream_id: u62) void {
         self.removeEntry(stream_id);
+        if (self.reset_index.count() == 0) return;
         if (self.reset_index.get(stream_id)) |index| {
             self.removeResetAt(index);
             self.compactResetQueueIfSparse();
@@ -6245,6 +6246,7 @@ const StreamingMessageSet = struct {
     }
 
     fn takeEntry(self: *StreamingMessageSet, stream_id: u62) ?Entry {
+        if (self.entry_index.count() == 0) return null;
         const index = self.entry_index.get(stream_id) orelse return null;
         const last_index = self.entries.items.len - 1;
         const lowest = self.lowest_entry_index;
@@ -6393,7 +6395,8 @@ const StreamingMessageSet = struct {
     }
 
     fn contains(self: StreamingMessageSet, stream_id: u62) bool {
-        if (self.entry_index.contains(stream_id)) return true;
+        if (self.entry_index.count() != 0 and
+            self.entry_index.contains(stream_id)) return true;
         return self.reset_index.count() != 0 and
             self.reset_index.contains(stream_id);
     }
@@ -11450,6 +11453,9 @@ test "HTTP/3 streaming message set indexes active readers" {
     responses.removeEntry(0);
     try std.testing.expectEqual(@as(usize, 0), responses.entry_index.count());
     try std.testing.expectEqual(@as(?u62, null), responses.lowestEntryStream());
+    try std.testing.expect(!responses.contains(0));
+    responses.remove(0);
+    try std.testing.expect(responses.takeEntry(0) == null);
 }
 
 test "HTTP/3 buffered stream sets index reassembly entries" {
