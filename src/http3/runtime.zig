@@ -7296,6 +7296,7 @@ const OutboundBodySet = struct {
     }
 
     fn finish(self: *OutboundBodySet, stream_id: u62) bool {
+        if (self.entries.items.len == 0) return false;
         const index = if (self.last_entry_index) |cached| blk: {
             if (cached < self.entries.items.len and
                 self.entries.items[cached].send.stream_id == stream_id)
@@ -7316,6 +7317,7 @@ const OutboundBodySet = struct {
     }
 
     fn find(self: *OutboundBodySet, stream_id: u62) ?*Entry {
+        if (self.entries.items.len == 0) return null;
         if (self.last_entry_index) |index| {
             if (index < self.entries.items.len and
                 self.entries.items[index].send.stream_id == stream_id)
@@ -7514,6 +7516,8 @@ test "HTTP/3 outbound body set indexes open streaming bodies" {
     try std.testing.expect(bodies.finish(12));
     try std.testing.expectEqual(@as(usize, 0), bodies.entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), bodies.entry_index.count());
+    try std.testing.expect(!bodies.finish(16));
+    try std.testing.expect(bodies.find(16) == null);
 }
 
 fn messageBlockedByQpack(
