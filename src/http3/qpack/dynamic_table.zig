@@ -103,23 +103,37 @@ pub const DynamicTable = struct {
         // Reserve both indexes before eviction. Once table ownership
         // changes, every following operation is allocation-free and the
         // insertion cannot leave entries and indexes out of sync.
-        if (self.latest_name.get(name_hash) == null) {
-            try self.latest_name.ensureUnusedCapacity(self.allocator, 1);
-        }
+        const name_slot = try self.latest_name.getOrPut(
+            self.allocator,
+            name_hash,
+        );
+        errdefer if (!name_slot.found_existing) {
+            _ = self.latest_name.remove(name_hash);
+        };
         const exact_key = DynamicExactKey{
             .name_hash = name_hash,
             .value_hash = value_hash,
         };
-        if (self.latest_exact.get(exact_key) == null) {
-            try self.latest_exact.ensureUnusedCapacity(self.allocator, 1);
-        }
+        const exact_slot = try self.latest_exact.getOrPut(
+            self.allocator,
+            exact_key,
+        );
+        errdefer if (!exact_slot.found_existing) {
+            _ = self.latest_exact.remove(exact_key);
+        };
         const name_copy = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_copy);
         const value_copy = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(value_copy);
+        const absolute_index = self.insert_count;
+        // A capacity eviction below may retire the previous latest entry for
+        // this name/exact key. Point the index at the new absolute index before
+        // eviction so removing that old entry does not delete the freshly
+        // reserved slot.
+        name_slot.value_ptr.* = absolute_index;
+        exact_slot.value_ptr.* = absolute_index;
         self.evictToFit(entry_size);
 
-        const absolute_index = self.insert_count;
         self.entries.appendAssumeCapacity(.{
             .absolute_index = absolute_index,
             .name = name_copy,
@@ -127,8 +141,6 @@ pub const DynamicTable = struct {
             .name_hash = name_hash,
             .value_hash = value_hash,
         });
-        self.latest_name.putAssumeCapacity(name_hash, absolute_index);
-        self.latest_exact.putAssumeCapacity(exact_key, absolute_index);
         self.current_size += entry_size;
         self.insert_count = next_insert_count;
         return absolute_index;
