@@ -348,6 +348,7 @@ pub const Queue = struct {
             }
             write_index += 1;
         }
+        if (removed == 0) return 0;
         self.pending.items.len = write_index;
         self.rebuildIndexesAssumeCapacity();
         return removed;
