@@ -6733,11 +6733,11 @@ const PushStreamSet = struct {
     fn appendEntryAssumeCapacity(
         self: *PushStreamSet,
         entry: Entry,
+        stream_slot: *usize,
     ) *Entry {
         const index = self.entries.items.len;
-        const stream_id: u62 = @intCast(entry.streamId());
         self.entries.appendAssumeCapacity(entry);
-        self.stream_index.putAssumeCapacity(stream_id, index);
+        stream_slot.* = index;
         if (self.entries.items[index].push_id) |push_id| {
             self.push_index.putAssumeCapacity(push_id, index);
         }
@@ -6814,8 +6814,14 @@ const PushStreamSet = struct {
         if (self.entries.items.len >= self.max_streams) {
             return error.ExcessiveLoad;
         }
+        const stream_id: u62 = @intCast(frame.stream_id);
+        const stream_slot = try self.stream_index.getOrPut(
+            self.allocator,
+            stream_id,
+        );
+        std.debug.assert(!stream_slot.found_existing);
+        errdefer _ = self.stream_index.remove(stream_id);
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
-        try self.stream_index.ensureUnusedCapacity(self.allocator, 1);
         const entry = self.appendEntryAssumeCapacity(.{
             .receive = .init(
                 self.allocator,
@@ -6823,7 +6829,7 @@ const PushStreamSet = struct {
                 self.max_stream_buffer,
             ),
             .from = from,
-        });
+        }, stream_slot.value_ptr);
         errdefer {
             var removed = self.takeEntryAt(self.entries.items.len - 1);
             removed.deinit();
@@ -11457,7 +11463,11 @@ test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
     }) |item| {
         try pushes.registerPromise(item.push_id, 0);
         try pushes.entries.ensureUnusedCapacity(allocator, 1);
-        try pushes.stream_index.ensureUnusedCapacity(allocator, 1);
+        const stream_slot = try pushes.stream_index.getOrPut(
+            allocator,
+            @as(u62, @intCast(item.stream_id)),
+        );
+        std.debug.assert(!stream_slot.found_existing);
         try pushes.push_index.ensureUnusedCapacity(allocator, 1);
         _ = pushes.appendEntryAssumeCapacity(.{
             .receive = quic.stream_state.RecvState.init(
@@ -11466,7 +11476,7 @@ test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
                 512,
             ),
             .push_id = item.push_id,
-        });
+        }, stream_slot.value_ptr);
         try pushes.observePeerCancellation(item.push_id);
     }
     try std.testing.expectEqual(
@@ -11481,12 +11491,13 @@ test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
 
     try pushes.registerPromise(4, 0);
     try pushes.entries.ensureUnusedCapacity(allocator, 1);
-    try pushes.stream_index.ensureUnusedCapacity(allocator, 1);
+    const stream_slot = try pushes.stream_index.getOrPut(allocator, 27);
+    std.debug.assert(!stream_slot.found_existing);
     try pushes.push_index.ensureUnusedCapacity(allocator, 1);
     _ = pushes.appendEntryAssumeCapacity(.{
         .receive = quic.stream_state.RecvState.init(allocator, 27, 512),
         .push_id = 4,
-    });
+    }, stream_slot.value_ptr);
     try pushes.observePeerCancellation(4);
 
     for ([_]u62{ 19, 23, 27 }) |stream_id| {
