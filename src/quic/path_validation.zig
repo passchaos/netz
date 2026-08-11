@@ -258,20 +258,26 @@ pub const State = struct {
                 self.max_challenge_transmissions;
             if (will_fail) {
                 try self.failed_challenges.ensureUnusedCapacity(self.allocator, 1);
-            } else {
-                try self.pending_challenges.ensureUnusedCapacity(self.allocator, 1);
-                try self.pending_challenge_index.ensureUnusedCapacity(self.allocator, 1);
-            }
-
-            var challenge = self.removeOutstandingChallenge(i);
-            challenge.sent_time_ns = null;
-            challenge.deadline_ns = null;
-            expired += 1;
-            if (will_fail) {
+                var challenge = self.removeOutstandingChallenge(i);
+                challenge.sent_time_ns = null;
+                challenge.deadline_ns = null;
+                expired += 1;
                 self.failed_challenges.appendAssumeCapacity(challenge);
             } else {
+                try self.pending_challenges.ensureUnusedCapacity(self.allocator, 1);
+                const data = self.outstanding_challenges.items[i].data;
+                const slot = try self.pending_challenge_index.getOrPut(
+                    self.allocator,
+                    data,
+                );
+                std.debug.assert(!slot.found_existing);
+                errdefer _ = self.pending_challenge_index.remove(data);
+                var challenge = self.removeOutstandingChallenge(i);
+                challenge.sent_time_ns = null;
+                challenge.deadline_ns = null;
+                expired += 1;
                 self.pending_challenges.appendAssumeCapacity(challenge);
-                self.pending_challenge_index.putAssumeCapacityNoClobber(challenge.data, {});
+                slot.value_ptr.* = {};
             }
         }
         return expired;
