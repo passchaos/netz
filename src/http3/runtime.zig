@@ -5895,6 +5895,7 @@ const ResponseStreamSet = struct {
         table: http3.Qpack.DynamicTable,
         max_blocked_streams: u64,
     ) Error!?AssembledStream {
+        if (self.entry_index.count() == 0) return null;
         const index = self.entry_index.get(stream_id) orelse return null;
         const entry = &self.entries.items[index];
         const final_size = entry.receive.final_size orelse return null;
@@ -11578,6 +11579,7 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     responses.remove(16);
     responses.remove(0);
     try std.testing.expectEqual(@as(usize, 0), responses.entry_index.count());
+    try std.testing.expect((try responses.takeReady(16, table, 0)) == null);
     try std.testing.expect(responses.takeReceive(16) == null);
     try std.testing.expect(!try responses.requiresQpackCancellation(
         16,
