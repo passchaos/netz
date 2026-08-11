@@ -55,6 +55,7 @@ pub const Pacer = struct {
         smoothed_rtt_ns: u64,
     ) ?u64 {
         if (!self.enabled or packet_size == 0 or smoothed_rtt_ns == 0 or congestion_window == 0) return null;
+        if (packet_size <= self.budget) return null;
         const available = self.budgetAt(now_ns, congestion_window, smoothed_rtt_ns);
         if (packet_size <= available) return null;
 
@@ -120,6 +121,18 @@ test "QUIC pacer permits initial burst and computes exact deadline" {
     );
     try std.testing.expect(!pacer.canSendAt(8_999_999, 1200, 12_000, 100_000_000));
     try std.testing.expect(pacer.canSendAt(9_000_000, 1200, 12_000, 100_000_000));
+}
+
+test "QUIC pacer deadline uses current budget fast path" {
+    var pacer = Pacer.init(true, 1200, 10);
+    pacer.budget = 2400;
+    pacer.last_sent_time_ns = 0;
+
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        pacer.deadlineAt(1, 1200, 12_000, 100_000_000),
+    );
+    try std.testing.expect(pacer.canSendAt(1, 1200, 12_000, 100_000_000));
 }
 
 test "QUIC pacer replenishes and caps burst credit" {
