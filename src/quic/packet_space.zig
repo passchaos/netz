@@ -74,6 +74,7 @@ pub const ReceivedPacketTracker = struct {
                 if (isImmediatelyBefore(packet_number, oldest.start)) return true;
                 return self.ranges.items.len < self.max_ranges;
             }
+            if (packet_number <= oldest.end) return false;
         }
 
         for (self.ranges.items) |range| {
@@ -127,6 +128,7 @@ pub const ReceivedPacketTracker = struct {
                     .{ .start = packet_number, .end = packet_number },
                 );
             }
+            if (packet_number <= oldest.end) return false;
         }
 
         for (self.ranges.items, 0..) |*range, i| {
@@ -1387,6 +1389,29 @@ test "QUIC packet space extends newest ACK range before scanning" {
     try std.testing.expectEqual(@as(usize, 3), received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 13), received.ranges.items[0].start);
     try std.testing.expectEqual(@as(u64, 13), received.ranges.items[0].end);
+}
+
+test "QUIC packet space rejects oldest ACK range duplicates before scanning" {
+    const allocator = std.testing.allocator;
+    var received = ReceivedPacketTracker.init(allocator, 4);
+    defer received.deinit();
+
+    try std.testing.expect(try received.recordFresh(20));
+    try std.testing.expect(try received.recordFresh(10));
+    try std.testing.expect(try received.recordFresh(11));
+    try std.testing.expectEqual(@as(usize, 2), received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 10), received.ranges.items[1].start);
+    try std.testing.expectEqual(@as(u64, 11), received.ranges.items[1].end);
+
+    try std.testing.expect(!(try received.wouldRecordFresh(10)));
+    try std.testing.expect(!(try received.wouldRecordFresh(11)));
+    try std.testing.expect(!(try received.recordFresh(10)));
+    try std.testing.expect(!(try received.recordFresh(11)));
+    try std.testing.expectEqual(@as(u64, 3), received.retained_packet_count);
+
+    try std.testing.expect(try received.recordFresh(9));
+    try std.testing.expectEqual(@as(u64, 9), received.ranges.items[1].start);
+    try std.testing.expectEqual(@as(u64, 11), received.ranges.items[1].end);
 }
 
 test "QUIC packet space builds ACK ranges into caller storage" {
