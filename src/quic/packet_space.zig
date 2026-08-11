@@ -1153,6 +1153,10 @@ pub const SentPacketTracker = struct {
 
     fn findPacketIndex(self: SentPacketTracker, packet_number: u64) ?usize {
         if (self.packets.items.len == 0) return null;
+        const tail_index = self.packets.items.len - 1;
+        if (self.packets.items[tail_index].packet_number == packet_number) {
+            return tail_index;
+        }
         if (self.packet_index.count() != 0) {
             if (self.packet_index.get(packet_number)) |index| return index;
         }
@@ -1526,6 +1530,25 @@ test "QUIC sent packet tracker forgets tail without index slots" {
     try std.testing.expectEqual(@as(usize, 0), sent.packets.items.len);
     try std.testing.expectEqual(@as(?usize, null), sent.latest_ack_eliciting_in_flight_index);
     try std.testing.expect(!sent.forget(10));
+}
+
+test "QUIC sent packet tracker finds tail without index slots" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.packets.ensureTotalCapacity(allocator, 2);
+    try sent.sentAt(20, true, 100, .not_ect, 1_000);
+    try sent.sentAt(21, true, 100, .not_ect, 2_000);
+    try std.testing.expectEqual(@as(usize, 0), sent.packet_index.count());
+
+    // ACK processing often targets the newest packet in a packet-number
+    // space.  Keep exact lookups on that path independent of whether the
+    // optional map index was populated by this send batch.
+    try std.testing.expect(sent.markAcknowledged(21));
+    try std.testing.expect(sent.packets.items[1].acknowledged);
+    try std.testing.expectEqual(@as(?u64, 21), sent.largestAcknowledged());
+    try std.testing.expectEqual(@as(?usize, 0), sent.latest_ack_eliciting_in_flight_index);
 }
 
 test "QUIC sent packet tracker applies ACK ranges" {
