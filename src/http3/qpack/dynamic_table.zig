@@ -362,43 +362,21 @@ pub const DynamicTable = struct {
 
     fn removeLatestIndexes(self: *DynamicTable, entry: DynamicEntry) void {
         if (self.latest_name.get(entry.name_hash) == entry.absolute_index) {
+            // Eviction is strictly oldest-to-newest. If the "latest" entry for
+            // this hash is the one being evicted, no newer live representative
+            // can exist, so removal is sufficient and avoids a reverse scan on
+            // every capacity-pressure pop.
             _ = self.latest_name.remove(entry.name_hash);
-            // Hashes, rather than borrowed strings, are the stable map
-            // keys. Restore the newest surviving representative so an
-            // evicted colliding entry cannot hide an older live key.
-            var index = self.entries.items.len;
-            while (index > self.head + 1) {
-                index -= 1;
-                const candidate = self.entries.items[index];
-                if (candidate.name_hash == entry.name_hash) {
-                    self.latest_name.putAssumeCapacity(
-                        candidate.name_hash,
-                        candidate.absolute_index,
-                    );
-                    break;
-                }
-            }
         }
         const exact_key = DynamicExactKey{
             .name_hash = entry.name_hash,
             .value_hash = entry.value_hash,
         };
         if (self.latest_exact.get(exact_key) == entry.absolute_index) {
+            // Same FIFO invariant as above, but scoped to exact name/value
+            // hashes. Collisions are still verified by lookup; this only
+            // removes a stale newest pointer.
             _ = self.latest_exact.remove(exact_key);
-            var index = self.entries.items.len;
-            while (index > self.head + 1) {
-                index -= 1;
-                const candidate = self.entries.items[index];
-                if (candidate.name_hash == entry.name_hash and
-                    candidate.value_hash == entry.value_hash)
-                {
-                    self.latest_exact.putAssumeCapacity(.{
-                        .name_hash = candidate.name_hash,
-                        .value_hash = candidate.value_hash,
-                    }, candidate.absolute_index);
-                    break;
-                }
-            }
         }
     }
 
