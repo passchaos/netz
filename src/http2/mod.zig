@@ -1345,8 +1345,11 @@ pub const Hpack = struct {
     }
 
     pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(allocator);
+        if (encoded.len == 0) return @constCast(&[_]u8{});
+        const decoded_len = try huffmanDecodedLen(encoded);
+        const out = try allocator.alloc(u8, decoded_len);
+        errdefer allocator.free(out);
+        var out_index: usize = 0;
 
         var node: u16 = huffman_root_node;
         var pending_code: u32 = 0;
@@ -1363,7 +1366,8 @@ pub const Hpack = struct {
                 node = next;
                 if (huffman_decode_trie[node].symbol) |symbol| {
                     if (symbol == hpack_huffman.eos_symbol) return error.InvalidEncoding;
-                    try out.append(allocator, @intCast(symbol));
+                    out[out_index] = @intCast(symbol);
+                    out_index += 1;
                     node = huffman_root_node;
                     pending_code = 0;
                     pending_bits = 0;
@@ -1378,7 +1382,42 @@ pub const Hpack = struct {
             const padding = (@as(u32, 1) << @as(u5, @intCast(pending_bits))) - 1;
             if (pending_code != padding) return error.InvalidEncoding;
         }
-        return out.toOwnedSlice(allocator);
+        std.debug.assert(out_index == out.len);
+        return out;
+    }
+
+    pub fn huffmanDecodedLen(encoded: []const u8) !usize {
+        if (encoded.len == 0) return 0;
+        var len: usize = 0;
+        var node: u16 = huffman_root_node;
+        var pending_code: u32 = 0;
+        var pending_bits: u6 = 0;
+        for (encoded) |byte| {
+            var bit_index: u4 = 0;
+            while (bit_index < 8) : (bit_index += 1) {
+                const bit: u1 = @truncate((byte >> @intCast(7 - bit_index)) & 1);
+                pending_code = (pending_code << 1) | bit;
+                pending_bits += 1;
+                if (pending_bits > huffman_max_code_bits) return error.InvalidEncoding;
+
+                const next = huffman_decode_trie[node].child[bit] orelse return error.InvalidEncoding;
+                node = next;
+                if (huffman_decode_trie[node].symbol) |symbol| {
+                    if (symbol == hpack_huffman.eos_symbol) return error.InvalidEncoding;
+                    len = std.math.add(usize, len, 1) catch return error.IntegerOverflow;
+                    node = huffman_root_node;
+                    pending_code = 0;
+                    pending_bits = 0;
+                }
+            }
+        }
+
+        if (pending_bits != 0) {
+            if (pending_bits > 7) return error.InvalidEncoding;
+            const padding = (@as(u32, 1) << @as(u5, @intCast(pending_bits))) - 1;
+            if (pending_code != padding) return error.InvalidEncoding;
+        }
+        return len;
     }
 
     fn decodeBlockWithDynamicTable(
@@ -2245,6 +2284,13 @@ test "HTTP/2 HPACK Huffman and dynamic table state" {
     const decoded_huffman = try Hpack.decodeHuffman(allocator, huffman);
     defer allocator.free(decoded_huffman);
     try std.testing.expectEqualStrings("www.example.com", decoded_huffman);
+    try std.testing.expectEqual(decoded_huffman.len, try Hpack.huffmanDecodedLen(huffman));
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    const no_alloc_allocator = no_alloc.allocator();
+    const no_alloc_decoded = try Hpack.decodeHuffman(no_alloc_allocator, huffman);
+    defer no_alloc_allocator.free(no_alloc_decoded);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings("www.example.com", no_alloc_decoded);
 
     var encoder = Hpack.Encoder{};
     defer encoder.deinit(allocator);
