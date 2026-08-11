@@ -1111,7 +1111,7 @@ pub const Frame = union(enum) {
             .ping => 1,
             .ack => |ack| blk: {
                 try validateAckFrame(ack);
-                var len: usize = try varint.length(if (ack.ecn_counts == null) @intFromEnum(FrameType.ack) else @intFromEnum(FrameType.ack_ecn));
+                var len: usize = 1;
                 len = try addWireLen(len, try varint.length(ack.largest_acknowledged));
                 len = try addWireLen(len, try varint.length(ack.ack_delay));
                 len = try addWireLen(len, try varint.length(ack.ranges.len));
@@ -1161,24 +1161,24 @@ pub const Frame = union(enum) {
             },
             .max_streams_bidi => |frame| blk: {
                 try validateStreamCount(frame.maximum_streams);
-                break :blk try varintWireLen(&.{ @intFromEnum(FrameType.max_streams_bidi), frame.maximum_streams });
+                break :blk try singleVarintFrameWireLen(@intFromEnum(FrameType.max_streams_bidi), frame.maximum_streams);
             },
             .max_streams_uni => |frame| blk: {
                 try validateStreamCount(frame.maximum_streams);
-                break :blk try varintWireLen(&.{ @intFromEnum(FrameType.max_streams_uni), frame.maximum_streams });
+                break :blk try singleVarintFrameWireLen(@intFromEnum(FrameType.max_streams_uni), frame.maximum_streams);
             },
-            .data_blocked => |frame| try varintWireLen(&.{ @intFromEnum(FrameType.data_blocked), frame.maximum_data }),
+            .data_blocked => |frame| try singleVarintFrameWireLen(@intFromEnum(FrameType.data_blocked), frame.maximum_data),
             .stream_data_blocked => |frame| blk: {
                 const len = try addWireLen(1, try varint.length(frame.stream_id));
                 break :blk try addWireLen(len, try varint.length(frame.maximum_stream_data));
             },
             .streams_blocked_bidi => |frame| blk: {
                 try validateStreamCount(frame.maximum_streams);
-                break :blk try varintWireLen(&.{ @intFromEnum(FrameType.streams_blocked_bidi), frame.maximum_streams });
+                break :blk try singleVarintFrameWireLen(@intFromEnum(FrameType.streams_blocked_bidi), frame.maximum_streams);
             },
             .streams_blocked_uni => |frame| blk: {
                 try validateStreamCount(frame.maximum_streams);
-                break :blk try varintWireLen(&.{ @intFromEnum(FrameType.streams_blocked_uni), frame.maximum_streams });
+                break :blk try singleVarintFrameWireLen(@intFromEnum(FrameType.streams_blocked_uni), frame.maximum_streams);
             },
             .new_connection_id => |frame| blk: {
                 try validateConnectionIdLen(frame.connection_id.len);
@@ -1189,10 +1189,7 @@ pub const Frame = union(enum) {
                 len = try addWireLen(len, frame.connection_id.len);
                 break :blk try addWireLen(len, frame.stateless_reset_token.len);
             },
-            .retire_connection_id => |frame| try varintWireLen(&.{
-                @intFromEnum(FrameType.retire_connection_id),
-                frame.sequence_number,
-            }),
+            .retire_connection_id => |frame| try singleVarintFrameWireLen(@intFromEnum(FrameType.retire_connection_id), frame.sequence_number),
             .path_challenge, .path_response => 9,
             .connection_close => |close| blk: {
                 var prefix = try addWireLen(1, try varint.length(close.error_code));
@@ -1371,6 +1368,11 @@ fn varintWireLen(values: []const u64) Error!usize {
     var len: usize = 0;
     for (values) |value| len = try addWireLen(len, try varint.length(value));
     return len;
+}
+
+fn singleVarintFrameWireLen(frame_type: u64, value: u64) Error!usize {
+    std.debug.assert(frame_type <= 63);
+    return addWireLen(1, try varint.length(value));
 }
 
 pub const FramePacketType = enum {
