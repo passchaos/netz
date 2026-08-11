@@ -280,7 +280,11 @@ pub const Queue = struct {
         }
         for (entry.retransmission_packet_numbers.items, 0..) |candidate, retransmission_index| {
             if (candidate != packet_number) continue;
-            _ = entry.retransmission_packet_numbers.orderedRemove(retransmission_index);
+            if (retransmission_index == entry.retransmission_packet_numbers.items.len - 1) {
+                _ = entry.retransmission_packet_numbers.pop();
+            } else {
+                _ = entry.retransmission_packet_numbers.orderedRemove(retransmission_index);
+            }
             _ = self.packet_index.remove(packet_number);
             entry.refreshNewestPacketNumber();
             self.packet_number_copies -|= 1;
