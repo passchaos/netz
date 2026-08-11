@@ -460,26 +460,16 @@ pub const AltSvcPayload = struct {
         if ((stream_id == 0) != (origin.len != 0)) {
             return error.InvalidStreamId;
         }
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(allocator);
-        try wire.appendInt(
-            &payload,
-            allocator,
-            u16,
-            @intCast(origin.len),
-            .big,
-        );
-        try payload.appendSlice(allocator, origin);
-        try payload.appendSlice(allocator, field_value);
-        try (Frame{
-            .header = .{
-                .length = 0,
-                .frame_type = .altsvc,
-                .flags = 0,
-                .stream_id = stream_id,
-            },
-            .payload = payload.items,
-        }).write(list, allocator);
+        var payload_len = std.math.add(usize, 2, origin.len) catch return error.InvalidFrameSize;
+        payload_len = std.math.add(usize, payload_len, field_value.len) catch return error.InvalidFrameSize;
+
+        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
+        try list.append(allocator, @intFromEnum(FrameType.altsvc));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
+        try wire.appendInt(list, allocator, u16, @intCast(origin.len), .big);
+        try list.appendSlice(allocator, origin);
+        try list.appendSlice(allocator, field_value);
     }
 };
 
@@ -2012,6 +2002,21 @@ test "HTTP/2 ALTSVC frame validates connection and stream forms" {
         "h3=\":443\"; ma=3600",
         connection_alt.field_value,
     );
+    const connection_encoded = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(connection_encoded);
+    var no_alloc_connection: std.ArrayList(u8) = .empty;
+    defer no_alloc_connection.deinit(allocator);
+    try no_alloc_connection.ensureTotalCapacity(allocator, connection_encoded.len);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try AltSvcPayload.write(
+        &no_alloc_connection,
+        no_alloc.allocator(),
+        0,
+        "https://example.com",
+        "h3=\":443\"; ma=3600",
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, connection_encoded, no_alloc_connection.items);
 
     encoded.clearRetainingCapacity();
     try AltSvcPayload.write(
