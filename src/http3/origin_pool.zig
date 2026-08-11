@@ -171,8 +171,12 @@ pub fn Pool(comptime Handle: type) type {
         }
 
         fn removeEntryAt(self: *Self, index: usize) Entry {
+            const old_len = self.entries.items.len;
+            self.detachOriginIndex(index);
             const removed = self.entries.swapRemove(index);
-            self.rebuildOriginIndexAssumeCapacity();
+            if (index != old_len - 1) {
+                self.reindexMovedEntry(index);
+            }
             return removed;
         }
 
@@ -281,26 +285,43 @@ pub fn Pool(comptime Handle: type) type {
             }
         }
 
-        fn rebuildOriginIndexAssumeCapacity(self: *Self) void {
-            self.origin_index.clearRetainingCapacity();
-            for (self.entries.items) |*entry| {
-                entry.origin_prev = null;
-                entry.origin_next = null;
+        fn detachOriginIndex(self: *Self, index: usize) void {
+            const entry = self.entries.items[index];
+            const key = originIndexKey(entry.key.origin());
+            var bucket = self.origin_index.getPtr(key).?;
+            if (entry.origin_prev) |prev| {
+                self.entries.items[prev].origin_next = entry.origin_next;
+            } else {
+                bucket.head = entry.origin_next orelse index;
             }
-            for (self.entries.items, 0..) |*entry, index| {
-                const key = originIndexKey(entry.key.origin());
-                if (self.origin_index.getPtr(key)) |bucket| {
-                    entry.origin_prev = bucket.tail;
-                    self.entries.items[bucket.tail].origin_next = index;
-                    bucket.tail = index;
-                    bucket.count += 1;
-                } else {
-                    self.origin_index.putAssumeCapacityNoClobber(key, .{
-                        .head = index,
-                        .tail = index,
-                        .count = 1,
-                    });
-                }
+            if (entry.origin_next) |next| {
+                self.entries.items[next].origin_prev = entry.origin_prev;
+            } else {
+                bucket.tail = entry.origin_prev orelse index;
+            }
+            bucket.count -= 1;
+            if (bucket.count == 0) {
+                _ = self.origin_index.remove(key);
+                return;
+            }
+            self.origin_index.getKeyPtr(key).?.* = originIndexKey(
+                self.entries.items[bucket.head].key.origin(),
+            );
+        }
+
+        fn reindexMovedEntry(self: *Self, index: usize) void {
+            const moved = self.entries.items[index];
+            const key = originIndexKey(moved.key.origin());
+            const bucket = self.origin_index.getPtr(key).?;
+            if (moved.origin_prev) |prev| {
+                self.entries.items[prev].origin_next = index;
+            } else {
+                bucket.head = index;
+            }
+            if (moved.origin_next) |next| {
+                self.entries.items[next].origin_prev = index;
+            } else {
+                bucket.tail = index;
             }
         }
     };
