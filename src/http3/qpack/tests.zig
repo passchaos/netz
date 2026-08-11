@@ -147,6 +147,34 @@ test "HTTP/3 QPACK static table fast-matches common request headers" {
     try std.testing.expectEqual(@as(?u64, 31), Qpack.findStaticName("accept-encoding"));
 }
 
+test "HTTP/3 QPACK static table fast-matches common response headers" {
+    const common = [_]struct {
+        name: []const u8,
+        value: []const u8,
+        index: u64,
+    }{
+        .{ .name = "cache-control", .value = "max-age=0", .index = 36 },
+        .{ .name = "cache-control", .value = "no-cache", .index = 39 },
+        .{ .name = "cache-control", .value = "no-store", .index = 40 },
+        .{ .name = "content-type", .value = "application/json", .index = 46 },
+        .{ .name = "content-type", .value = "text/html; charset=utf-8", .index = 52 },
+        .{ .name = "content-type", .value = "text/plain", .index = 53 },
+    };
+    for (common) |field| {
+        const match = static_table.findMatch(field.name, field.value) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(match.full_match);
+        try std.testing.expectEqual(field.index, match.index);
+    }
+
+    const unmatched_type = static_table.findMatch("content-type", "application/problem+json") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!unmatched_type.full_match);
+    try std.testing.expectEqual(@as(u64, 44), unmatched_type.index);
+    try std.testing.expectEqual(@as(?u64, 36), Qpack.findStaticName("cache-control"));
+    try std.testing.expectEqual(@as(?u64, 44), Qpack.findStaticName("content-type"));
+}
+
 test "HTTP/3 QPACK dynamic table applies RFC 9204 Appendix B encoder stream" {
     const allocator = std.testing.allocator;
     var table = Qpack.DynamicTable.init(allocator, 220);

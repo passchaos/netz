@@ -247,10 +247,22 @@ fn fastPseudoHeaderMatch(
     if (std.mem.eql(u8, name, "accept")) {
         if (std.mem.eql(u8, value, "*/*")) return .{ .index = 29, .full_match = true };
         if (std.mem.eql(u8, value, "application/dns-message")) return .{ .index = 30, .full_match = true };
-        return .{ .index = 29, .full_match = false };
+        return null;
     }
     if (std.mem.eql(u8, name, "accept-encoding")) {
         return .{ .index = 31, .full_match = std.mem.eql(u8, value, "gzip, deflate, br") };
+    }
+    if (std.mem.eql(u8, name, "cache-control")) {
+        if (std.mem.eql(u8, value, "max-age=0")) return .{ .index = 36, .full_match = true };
+        if (std.mem.eql(u8, value, "no-cache")) return .{ .index = 39, .full_match = true };
+        if (std.mem.eql(u8, value, "no-store")) return .{ .index = 40, .full_match = true };
+        return null;
+    }
+    if (std.mem.eql(u8, name, "content-type")) {
+        if (std.mem.eql(u8, value, "application/json")) return .{ .index = 46, .full_match = true };
+        if (std.mem.eql(u8, value, "text/html; charset=utf-8")) return .{ .index = 52, .full_match = true };
+        if (std.mem.eql(u8, value, "text/plain")) return .{ .index = 53, .full_match = true };
+        return null;
     }
     return null;
 }
@@ -264,5 +276,7 @@ fn fastPseudoHeaderName(name: []const u8) ?u64 {
     if (std.mem.eql(u8, name, "content-length")) return 4;
     if (std.mem.eql(u8, name, "accept")) return 29;
     if (std.mem.eql(u8, name, "accept-encoding")) return 31;
+    if (std.mem.eql(u8, name, "cache-control")) return 36;
+    if (std.mem.eql(u8, name, "content-type")) return 44;
     return null;
 }
