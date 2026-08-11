@@ -43,6 +43,7 @@ pub const Filter = struct {
     /// `entries` is allowed to swap-remove for O(1) pruning/eviction, so every
     /// removal must update the moved entry's slot before any future lookup.
     entry_index: std.AutoHashMapUnmanaged([32]u8, usize) = .empty,
+    earliest_index: ?usize = null,
     max_entries: usize,
     mutex: std.Io.Mutex = .init,
 
@@ -136,8 +137,8 @@ pub const Filter = struct {
     pub fn nextExpiryMillis(self: *Filter) ?u64 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.entries.items.len == 0) return null;
-        return self.entries.items[self.earliestExpiryIndex()].expires_at_ms;
+        const index = self.earliest_index orelse return null;
+        return self.entries.items[index].expires_at_ms;
     }
 
     pub fn pruneExpired(self: *Filter, now_ms: u64) usize {
@@ -166,6 +167,7 @@ pub const Filter = struct {
             if (self.entry_index.get(entry.key)) |existing| {
                 if (entry.expires_at_ms > self.entries.items[existing].expires_at_ms) {
                     self.entries.items[existing].expires_at_ms = entry.expires_at_ms;
+                    if (self.earliest_index == existing) self.recomputeEarliest();
                 }
                 continue;
             }
@@ -192,19 +194,48 @@ pub const Filter = struct {
         const index = self.entries.items.len;
         self.entries.appendAssumeCapacity(entry);
         self.entry_index.putAssumeCapacityNoClobber(entry.key, index);
+        self.considerEarliest(index);
     }
 
     fn removeEntryAt(self: *Filter, index: usize) void {
         const last_index = self.entries.items.len - 1;
+        const earliest = self.earliest_index;
         const removed = self.entries.swapRemove(index);
         _ = self.entry_index.remove(removed.key);
         if (index != last_index) {
             const moved = self.entries.items[index];
             self.entry_index.getPtr(moved.key).?.* = index;
         }
+        if (self.entries.items.len == 0) {
+            self.earliest_index = null;
+        } else if (earliest == index) {
+            self.recomputeEarliest();
+        } else if (earliest == last_index) {
+            self.earliest_index = index;
+        }
     }
 
     fn earliestExpiryIndex(self: *const Filter) usize {
+        return self.earliest_index.?;
+    }
+
+    fn considerEarliest(self: *Filter, index: usize) void {
+        const earliest = self.earliest_index orelse {
+            self.earliest_index = index;
+            return;
+        };
+        if (self.entries.items[index].expires_at_ms <
+            self.entries.items[earliest].expires_at_ms)
+        {
+            self.earliest_index = index;
+        }
+    }
+
+    fn recomputeEarliest(self: *Filter) void {
+        if (self.entries.items.len == 0) {
+            self.earliest_index = null;
+            return;
+        }
         var earliest: usize = 0;
         for (self.entries.items[1..], 1..) |entry, index| {
             if (entry.expires_at_ms <
@@ -213,7 +244,7 @@ pub const Filter = struct {
                 earliest = index;
             }
         }
-        return earliest;
+        self.earliest_index = earliest;
     }
 };
 
@@ -238,11 +269,13 @@ test "0-RTT replay filter rejects duplicates and expires bounded entries" {
         filter.checkAndMark("first", 1001, 2000),
     );
     try filter.checkAndMark("second", 1001, 1500);
+    try std.testing.expectEqual(@as(?usize, 1), filter.earliest_index);
     try filter.checkAndMark("third", 1002, 3000);
     try std.testing.expectEqual(@as(usize, 2), filter.entryCount());
     try std.testing.expect(!filter.entry_index.contains(digestReplayKey("second")));
     try std.testing.expect(filter.entry_index.contains(digestReplayKey("third")));
     try std.testing.expectEqual(@as(?u64, 2000), filter.nextExpiryMillis());
+    try std.testing.expect(filter.earliest_index != null);
 
     try filter.checkAndMark("first", 3000, 4000);
     try std.testing.expectEqual(@as(usize, 1), filter.count());
@@ -344,6 +377,7 @@ test "0-RTT replay filter snapshot restore skips expired and duplicate entries" 
     defer restored.deinit();
     try std.testing.expectEqual(@as(usize, 2), restored.count());
     try std.testing.expectEqual(@as(usize, 2), restored.entry_index.count());
+    try std.testing.expect(restored.earliest_index != null);
     try std.testing.expectError(
         error.ReplayedEarlyData,
         restored.checkAndMark("first", 1001, 4000),
