@@ -127,7 +127,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   shared dynamic QPACK state, plus a
   `std.Io.async` request receive helper for the development runtime
 - QUIC varints with encode length reuse, long-header parsing, stream IDs, transport parameters, and core
-  frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with one-byte control-frame, single-varint, fixed PATH, STREAM flag-byte, CRYPTO, ACK/ACK_ECN, DATAGRAM, and ACK_FREQUENCY frame-type write fast paths, frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
+  frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with one-byte control-frame, single-varint, fixed PATH, STREAM flag-byte, CRYPTO, MAX_DATA, ACK/ACK_ECN, DATAGRAM, and ACK_FREQUENCY frame-type write fast paths, frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed
   RFC-defaulted transport-parameter encoding/validation (duplicate detection,
   endpoint-specific client/server parameter rules, preferred-address parsing and specified-address validation,

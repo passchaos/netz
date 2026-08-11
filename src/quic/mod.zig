@@ -1156,7 +1156,7 @@ pub const Frame = union(enum) {
                 len = try addWireLen(len, try varint.length(stream.data.len));
                 break :blk try addWireLen(len, stream.data.len);
             },
-            .max_data => |frame| try varintWireLen(&.{ @intFromEnum(FrameType.max_data), frame.maximum_data }),
+            .max_data => |frame| try addWireLen(1, try varint.length(frame.maximum_data)),
             .max_stream_data => |frame| try varintWireLen(&.{
                 @intFromEnum(FrameType.max_stream_data),
                 frame.stream_id,
@@ -1280,7 +1280,7 @@ pub const Frame = union(enum) {
                 try list.appendSlice(allocator, stream.data);
             },
             .max_data => |max_data| {
-                try varint.encode(list, allocator, @intFromEnum(FrameType.max_data));
+                try list.append(allocator, @intFromEnum(FrameType.max_data));
                 try varint.encode(list, allocator, max_data.maximum_data);
             },
             .max_stream_data => |max_stream_data| {
@@ -2627,6 +2627,20 @@ test "QUIC stream-count control frames reject values above RFC limit" {
     try varint.encode(&encoded, allocator, @intFromEnum(FrameType.streams_blocked_bidi));
     try varint.encode(&encoded, allocator, max_stream_count + 1);
     try std.testing.expectError(error.InvalidFrame, parseFrame(encoded.items));
+}
+
+test "QUIC MAX_DATA frame writes fixed frame type byte" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    const frame = Frame{ .max_data = .{ .maximum_data = 1000 } };
+    try frame.write(&encoded, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.max_data)), encoded.items[0]);
+    try std.testing.expectEqual(encoded.items.len, try frame.wireLen());
+
+    const parsed = try parseFrame(encoded.items);
+    try std.testing.expectEqual(@as(u64, 1000), parsed.frame.max_data.maximum_data);
 }
 
 test "QUIC ACK frame owned parser preserves sparse ranges" {
