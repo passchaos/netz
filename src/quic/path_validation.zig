@@ -229,6 +229,7 @@ pub const State = struct {
     }
 
     pub fn receiveResponseValidated(self: *State, data: [8]u8) bool {
+        if (self.outstanding_challenge_index.count() == 0) return false;
         const index = self.outstanding_challenge_index.get(data) orelse return false;
         _ = self.removeOutstandingChallenge(index);
         return true;
@@ -637,6 +638,7 @@ test "QUIC path validation indexes track queued outstanding and timed-out challe
     try std.testing.expect(state.pending_response_index.contains(second_response));
     _ = try state.nextResponseFrame();
     try std.testing.expectEqual(@as(usize, 0), state.pending_response_index.count());
+    try std.testing.expect(!state.receiveResponseValidated(first_response));
 
     const first = [_]u8{ '1', 0, 0, 0, 0, 0, 0, 1 };
     const second = [_]u8{ '2', 0, 0, 0, 0, 0, 0, 2 };
