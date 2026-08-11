@@ -263,7 +263,11 @@ pub const ReceivedPacketTracker = struct {
         if (rangesOverlapOrAdjacent(current.*, previous.*)) {
             previous.start = @min(previous.start, current.start);
             previous.end = @max(previous.end, current.end);
-            _ = self.ranges.orderedRemove(index);
+            if (index == self.ranges.items.len - 1) {
+                _ = self.ranges.pop();
+            } else {
+                _ = self.ranges.orderedRemove(index);
+            }
         }
     }
 
@@ -274,7 +278,12 @@ pub const ReceivedPacketTracker = struct {
         if (rangesOverlapOrAdjacent(next.*, current.*)) {
             current.start = @min(current.start, next.start);
             current.end = @max(current.end, next.end);
-            _ = self.ranges.orderedRemove(index + 1);
+            const remove_index = index + 1;
+            if (remove_index == self.ranges.items.len - 1) {
+                _ = self.ranges.pop();
+            } else {
+                _ = self.ranges.orderedRemove(remove_index);
+            }
         }
     }
 };
