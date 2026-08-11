@@ -667,6 +667,7 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn ackRttSample(self: SentPacketTracker, ack: quic.AckFrame, now_ns: u64, ack_delay_exponent: u64) Error!?RttSample {
+        if (self.ackDoesNotAdvanceLargest(ack.largest_acknowledged)) return null;
         const packet = self.findSentPacket(ack.largest_acknowledged) orelse return null;
         if (packet.acknowledged) return null;
         if (!self.ackContainsNewAckEliciting(ack)) return null;
@@ -1286,6 +1287,11 @@ pub const SentPacketTracker = struct {
         return false;
     }
 
+    fn ackDoesNotAdvanceLargest(self: SentPacketTracker, largest_acknowledged: u64) bool {
+        if (self.largest_acknowledged) |previous| return largest_acknowledged <= previous;
+        return false;
+    }
+
     fn observeAcknowledged(self: *SentPacketTracker, packet_number: u64) void {
         if (self.largest_acknowledged == null or packet_number > self.largest_acknowledged.?) {
             self.largest_acknowledged = packet_number;
@@ -1785,6 +1791,25 @@ test "QUIC sent packet tracker derives RTT sample from largest ACK" {
 
     const no_time = quic.AckFrame{ .largest_acknowledged = 99, .ack_delay = 0, .first_ack_range = 0 };
     try std.testing.expectEqual(@as(?SentPacketTracker.RttSample, null), try sent.ackRttSample(no_time, 10_000, 3));
+}
+
+test "QUIC sent packet tracker skips RTT samples for old ACKs" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(1, true, 100, .not_ect, 1_000);
+    try sent.sentAt(2, true, 100, .not_ect, 2_000);
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 2,
+        .ack_delay = 0,
+        .first_ack_range = 1,
+    };
+    _ = try sent.applyAckDetailed(ack);
+    try std.testing.expectEqual(
+        @as(?SentPacketTracker.RttSample, null),
+        try sent.ackRttSample(ack, 3_000, 3),
+    );
 }
 
 test "QUIC sent packet tracker accepts non-eliciting largest ACK when range newly ACKs eliciting data" {
