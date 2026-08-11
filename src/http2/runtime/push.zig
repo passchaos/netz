@@ -192,7 +192,7 @@ pub const State = struct {
             var removed = self.pending.orderedRemove(index);
             _ = self.pending_index.remove(stream_id);
             removed.deinit(allocator);
-            self.rebuildPendingIndexAssumeCapacity();
+            self.repairPendingIndexFrom(index);
             self.compactPendingIfSparse();
         }
         return true;
@@ -232,6 +232,14 @@ pub const State = struct {
                 promise.promised_stream_id,
                 index,
             );
+        }
+    }
+
+    fn repairPendingIndexFrom(self: *State, start_index: usize) void {
+        var index = @max(start_index, self.pending_head);
+        while (index < self.pending.items.len) : (index += 1) {
+            const stream_id = self.pending.items[index].promised_stream_id;
+            self.pending_index.getPtr(stream_id).?.* = index;
         }
     }
 };
