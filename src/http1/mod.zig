@@ -825,6 +825,7 @@ pub fn writeRequest(
     body: []const u8,
 ) !void {
     try validateRequestTargetForMethod(method, target);
+    try list.ensureUnusedCapacity(allocator, try requestWireLen(method, target, version, headers, body));
     try list.appendSlice(allocator, method.string());
     try list.append(allocator, ' ');
     try list.appendSlice(allocator, target);
@@ -846,6 +847,7 @@ pub fn writeRequestChecked(
     body: []const u8,
 ) Error!void {
     try validateRequestTargetForMethod(method, target);
+    try list.ensureUnusedCapacity(allocator, try requestWireLen(method, target, version, headers, body));
     try list.appendSlice(allocator, method.string());
     try list.append(allocator, ' ');
     try list.appendSlice(allocator, target);
@@ -855,6 +857,18 @@ pub fn writeRequestChecked(
     try writeHeadersChecked(list, allocator, headers);
     try list.appendSlice(allocator, "\r\n");
     try list.appendSlice(allocator, body);
+}
+
+fn requestWireLen(method: Method, target: []const u8, version: Version, headers: []const Header, body: []const u8) Error!usize {
+    var len = method.string().len;
+    len = std.math.add(usize, len, 1) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, target.len) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, 1) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, version.string().len) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, try headerBlockWireLen(headers)) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
+    return std.math.add(usize, len, body.len) catch return error.RenderBufferTooSmall;
 }
 
 pub fn writeResponse(
@@ -1400,6 +1414,14 @@ test "HTTP/1 request parse and serialize" {
     try writeRequest(&no_alloc_out, no_alloc.allocator(), req.method, req.target, req.version, req.headers, req.body);
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqualStrings(raw, no_alloc_out.items);
+
+    var one_alloc_out: std.ArrayList(u8) = .empty;
+    var one_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    const one_alloc_allocator = one_alloc.allocator();
+    defer one_alloc_out.deinit(one_alloc_allocator);
+    try writeRequest(&one_alloc_out, one_alloc_allocator, req.method, req.target, req.version, req.headers, req.body);
+    try std.testing.expect(!one_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings(raw, one_alloc_out.items);
 }
 
 test "HTTP/1 borrowed request heads parse pipelines without allocation" {
