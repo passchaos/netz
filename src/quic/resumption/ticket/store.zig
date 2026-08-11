@@ -121,8 +121,12 @@ pub const Store = struct {
         defer self.mutex.unlock(self.io);
         self.pruneExpired(issued.issued_at_ms);
 
-        const replacement = self.identity_index.get(issued.identity);
-        if (replacement) |index| {
+        const slot = try self.identity_index.getOrPut(
+            self.allocator,
+            issued.identity,
+        );
+        if (slot.found_existing) {
+            const index = slot.value_ptr.*;
             self.replaceEntryAt(index, .{
                 .identity = identity,
                 .secret = issued.secret,
@@ -135,24 +139,39 @@ pub const Store = struct {
             });
             return;
         }
+        errdefer _ = self.identity_index.remove(issued.identity);
 
         if (self.entries.items.len < self.max_entries) {
             try self.entries.ensureUnusedCapacity(self.allocator, 1);
-            try self.identity_index.ensureUnusedCapacity(self.allocator, 1);
+            self.appendEntryAssumeCapacity(.{
+                .identity = identity,
+                .secret = issued.secret,
+                .secret_value = secret_value,
+                .age_add = issued.age_add,
+                .cipher_suite = issued.cipher_suite,
+                .issued_at_ms = issued.issued_at_ms,
+                .lifetime_seconds = issued.lifetime_seconds,
+                .sequence = self.nextSequence(),
+            }, slot.key_ptr, slot.value_ptr);
         } else {
             var evicted = self.removeEntryAt(self.oldestIndex());
             evicted.deinit(self.allocator);
+            // `removeEntryAt` mutates the string map, so the pointers returned
+            // by the earlier getOrPut may no longer be stable on the eviction
+            // path. Reacquire them after the old ticket has been removed; the
+            // common non-evicting issue path above still performs one map
+            // lookup.
+            self.appendEntryAssumeCapacity(.{
+                .identity = identity,
+                .secret = issued.secret,
+                .secret_value = secret_value,
+                .age_add = issued.age_add,
+                .cipher_suite = issued.cipher_suite,
+                .issued_at_ms = issued.issued_at_ms,
+                .lifetime_seconds = issued.lifetime_seconds,
+                .sequence = self.nextSequence(),
+            }, self.identity_index.getKeyPtr(issued.identity).?, self.identity_index.getPtr(issued.identity).?);
         }
-        self.appendEntryAssumeCapacity(.{
-            .identity = identity,
-            .secret = issued.secret,
-            .secret_value = secret_value,
-            .age_add = issued.age_add,
-            .cipher_suite = issued.cipher_suite,
-            .issued_at_ms = issued.issued_at_ms,
-            .lifetime_seconds = issued.lifetime_seconds,
-            .sequence = self.nextSequence(),
-        });
     }
 
     pub fn lookup(
@@ -199,13 +218,16 @@ pub const Store = struct {
         }
     }
 
-    fn appendEntryAssumeCapacity(self: *Store, entry: Entry) void {
+    fn appendEntryAssumeCapacity(
+        self: *Store,
+        entry: Entry,
+        key_slot: *[]const u8,
+        index_slot: *usize,
+    ) void {
         const index = self.entries.items.len;
         self.entries.appendAssumeCapacity(entry);
-        self.identity_index.putAssumeCapacityNoClobber(
-            self.entries.items[index].identity,
-            index,
-        );
+        key_slot.* = self.entries.items[index].identity;
+        index_slot.* = index;
         self.considerOldest(index);
     }
 
