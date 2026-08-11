@@ -95,18 +95,27 @@ pub const Filter = struct {
         defer self.mutex.unlock(self.io);
 
         _ = self.pruneExpiredUnlocked(now_ms);
-        if (self.entry_index.contains(digest)) return error.ReplayedEarlyData;
+        const slot = try self.entry_index.getOrPut(self.allocator, digest);
+        if (slot.found_existing) return error.ReplayedEarlyData;
+        errdefer _ = self.entry_index.remove(digest);
 
         if (self.entries.items.len < self.max_entries) {
             try self.entries.ensureUnusedCapacity(self.allocator, 1);
-            try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
+            self.appendEntryAssumeCapacity(.{
+                .key = digest,
+                .expires_at_ms = expires_at_ms,
+            }, slot.value_ptr);
         } else {
             self.removeEntryAt(self.earliestExpiryIndex());
+            // Eviction mutates entry_index, so reacquire the slot after the
+            // old digest is removed. The non-evicting hot path above still
+            // performs one map lookup for duplicate detection and insertion.
+            const fresh_slot = self.entry_index.getPtr(digest).?;
+            self.appendEntryAssumeCapacity(.{
+                .key = digest,
+                .expires_at_ms = expires_at_ms,
+            }, fresh_slot);
         }
-        self.appendEntryAssumeCapacity(.{
-            .key = digest,
-            .expires_at_ms = expires_at_ms,
-        });
     }
 
     pub fn exportSnapshot(self: *Filter, allocator: std.mem.Allocator) Error!Snapshot {
@@ -174,7 +183,7 @@ pub const Filter = struct {
             if (self.entries.items.len < self.max_entries) {
                 try self.entries.ensureUnusedCapacity(self.allocator, 1);
                 try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
-                self.appendEntryAssumeCapacity(.{
+                self.appendEntryWithIndexAssumeCapacity(.{
                     .key = entry.key,
                     .expires_at_ms = entry.expires_at_ms,
                 });
@@ -183,14 +192,25 @@ pub const Filter = struct {
             const evict = self.earliestExpiryIndex();
             if (entry.expires_at_ms <= self.entries.items[evict].expires_at_ms) continue;
             self.removeEntryAt(evict);
-            self.appendEntryAssumeCapacity(.{
+            self.appendEntryWithIndexAssumeCapacity(.{
                 .key = entry.key,
                 .expires_at_ms = entry.expires_at_ms,
             });
         }
     }
 
-    fn appendEntryAssumeCapacity(self: *Filter, entry: Entry) void {
+    fn appendEntryAssumeCapacity(
+        self: *Filter,
+        entry: Entry,
+        index_slot: *usize,
+    ) void {
+        const index = self.entries.items.len;
+        self.entries.appendAssumeCapacity(entry);
+        index_slot.* = index;
+        self.considerEarliest(index);
+    }
+
+    fn appendEntryWithIndexAssumeCapacity(self: *Filter, entry: Entry) void {
         const index = self.entries.items.len;
         self.entries.appendAssumeCapacity(entry);
         self.entry_index.putAssumeCapacityNoClobber(entry.key, index);
