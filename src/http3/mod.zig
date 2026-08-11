@@ -780,10 +780,7 @@ pub const ControlState = struct {
             if (stream_id > previous) return error.GoAwayIdIncreased;
         }
 
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(allocator);
-        try quic.varint.encode(&payload, allocator, stream_id);
-        try (Frame{ .frame_type = FrameType.goaway, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+        try writeSingleVarintFrame(list, allocator, FrameType.goaway, stream_id);
         self.local_goaway_id = stream_id;
     }
 
@@ -1244,10 +1241,12 @@ pub fn validateResponsePushPromises(control: ControlState, bytes: []const u8) Er
 }
 
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try quic.varint.encode(&payload, allocator, value);
-    try (Frame{ .frame_type = frame_type, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+    try validateFrameType(frame_type);
+    const payload_len = try quic.varint.length(value);
+    try writeFrameHeader(list, allocator, frame_type, payload_len);
+    var payload: [8]u8 = undefined;
+    const encoded = try quic.varint.encodeInto(&payload, value);
+    try list.appendSlice(allocator, encoded);
 }
 
 fn parseSingleVarintPayload(payload: []const u8) Error!u64 {
@@ -3813,6 +3812,27 @@ test "HTTP/3 push control frames and state" {
         @as(usize, 2),
         peer_control.peer_cancelled_push_ids.items.len,
     );
+}
+
+test "HTTP/3 single-varint control frames avoid temporary payload allocation" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encoded.ensureTotalCapacity(allocator, 16);
+
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try writeCancelPushFrame(&encoded, no_alloc.allocator(), 7);
+    try writeMaxPushIdFrame(&encoded, no_alloc.allocator(), 4);
+
+    var control = ControlState{};
+    try control.writeGoAway(&encoded, no_alloc.allocator(), 12);
+
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, &.{
+        FrameType.cancel_push, 1, 7,
+        FrameType.max_push_id, 1, 4,
+        FrameType.goaway,      1, 12,
+    }, encoded.items);
 }
 
 test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
