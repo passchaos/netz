@@ -163,6 +163,7 @@ pub const Queue = struct {
         packet_number: u64,
         payload: []const u8,
     ) Error!u64 {
+        if (payload.len == 0) return error.EmptyPayload;
         const packet_slot = try self.packet_index.getOrPut(
             self.allocator,
             packet_number,
@@ -523,6 +524,14 @@ test "QUIC recovery queue keeps initial packet number allocation-free" {
     const allocator = counting.allocator();
     var queue = Queue.init(allocator);
     defer queue.deinit();
+
+    try std.testing.expectError(
+        error.EmptyPayload,
+        queue.trackSent(41, ""),
+    );
+    try std.testing.expect(!counting.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), queue.packet_index.count());
+    try std.testing.expectEqual(@as(usize, 0), queue.group_index.count());
 
     // Remove queue growth from the measurement. Tracking a new payload then
     // needs exactly one allocation for bytes that must survive caller reuse;
