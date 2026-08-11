@@ -62,6 +62,7 @@ pub const Reassembler = struct {
     }
 
     pub fn consume(self: *Reassembler, len: usize) Error!void {
+        if (len == 0) return;
         if (len > self.available().len) return error.NothingAvailable;
         self.read_offset += len;
     }
@@ -138,6 +139,8 @@ test "QUIC CRYPTO reassembler exposes only contiguous bytes" {
     try reassembler.insert(.{ .offset = 5, .data = "world" });
     try std.testing.expectEqual(@as(usize, 0), reassembler.available().len);
     try reassembler.insert(.{ .offset = 0, .data = "hello" });
+    try std.testing.expectEqualStrings("helloworld", reassembler.available());
+    try reassembler.consume(0);
     try std.testing.expectEqualStrings("helloworld", reassembler.available());
     try reassembler.consume(5);
     try std.testing.expectEqualStrings("world", reassembler.available());

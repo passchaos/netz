@@ -236,6 +236,7 @@ pub const RecvState = struct {
     }
 
     pub fn consume(self: *RecvState, len: usize) Error!void {
+        if (len == 0) return;
         if (len > self.available().len) return error.NothingAvailable;
         self.read_offset += len;
         self.compactConsumedPrefix();
@@ -334,6 +335,8 @@ test "QUIC receive stream state reassembles out of order and tracks FIN" {
     try recv.insert(.{ .stream_id = 0, .offset = 6, .data = "world", .fin = true });
     try std.testing.expectEqual(@as(usize, 0), recv.available().len);
     try recv.insert(.{ .stream_id = 0, .offset = 0, .data = "hello ", .fin = false });
+    try std.testing.expectEqualStrings("hello world", recv.available());
+    try recv.consume(0);
     try std.testing.expectEqualStrings("hello world", recv.available());
     try recv.consume("hello world".len);
     try std.testing.expect(recv.complete());
