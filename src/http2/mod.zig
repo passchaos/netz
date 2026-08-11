@@ -990,16 +990,12 @@ pub const Hpack = struct {
             physical_index: usize,
         ) void {
             if (self.latest_name.get(entry.name) == physical_index) {
+                // The dynamic table evicts strictly from oldest to newest. If
+                // the latest name entry still points at the removed physical
+                // slot, no newer live entry with this name exists; removing
+                // the map entry is enough and avoids a reverse scan on every
+                // capacity-pressure eviction.
                 _ = self.latest_name.remove(entry.name);
-                var index = self.entries.items.len;
-                while (index > self.head + 1) {
-                    index -= 1;
-                    const candidate = self.entries.items[index];
-                    if (std.mem.eql(u8, candidate.name, entry.name)) {
-                        self.latest_name.putAssumeCapacity(candidate.name, index);
-                        break;
-                    }
-                }
             }
 
             const exact_key = DynamicExactKey{
@@ -1007,21 +1003,8 @@ pub const Hpack = struct {
                 .value = entry.value,
             };
             if (self.latest_exact.get(exact_key) == physical_index) {
+                // Same FIFO invariant as above for exact name/value keys.
                 _ = self.latest_exact.remove(exact_key);
-                var index = self.entries.items.len;
-                while (index > self.head + 1) {
-                    index -= 1;
-                    const candidate = self.entries.items[index];
-                    if (std.mem.eql(u8, candidate.name, entry.name) and
-                        std.mem.eql(u8, candidate.value, entry.value))
-                    {
-                        self.latest_exact.putAssumeCapacity(.{
-                            .name = candidate.name,
-                            .value = candidate.value,
-                        }, index);
-                        break;
-                    }
-                }
             }
         }
 
