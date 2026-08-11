@@ -31,6 +31,12 @@ pub const Reassembler = struct {
         const offset = std.math.cast(usize, frame.offset) orelse return error.InvalidCryptoRange;
         const end = std.math.add(usize, offset, frame.data.len) catch return error.InvalidCryptoRange;
         if (end > self.max_buffered) return error.CryptoBufferTooLarge;
+        if (end <= self.received.items.len and end <= self.contiguous_end) {
+            if (!std.mem.eql(u8, self.buffer.items[offset..end], frame.data)) {
+                return error.ConflictingCryptoData;
+            }
+            return;
+        }
         for (frame.data, 0..) |byte, i| {
             const absolute = offset + i;
             if (absolute >= self.received.items.len) break;
@@ -157,6 +163,7 @@ test "QUIC CRYPTO reassembler rejects conflicting duplicate bytes" {
     try reassembler.insert(.{ .offset = 0, .data = "abcdef" });
     // Identical retransmission overlap is harmless.
     try reassembler.insert(.{ .offset = 2, .data = "cde" });
+    try reassembler.insert(.{ .offset = 0, .data = "abcdef" });
     try std.testing.expectEqualStrings("abcdef", reassembler.available());
 
     // A proven byte conflict is a protocol error; the old data remains intact.
