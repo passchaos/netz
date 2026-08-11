@@ -37,6 +37,7 @@ pub const PeerPool = struct {
     retire_queue_head: usize = 0,
     retire_queue_len: usize = 0,
     largest_retire_prior_to: u64 = 0,
+    in_use_count: usize = 0,
 
     pub fn add(self: *PeerPool, sequence_number: u64, connection_id: []const u8, token: [16]u8) Error!void {
         try self.addWithLimit(sequence_number, connection_id, token, max_pool_size);
@@ -89,6 +90,7 @@ pub const PeerPool = struct {
         for (&self.entries) |*entry| {
             if (entry.occupied and entry.sequence_number < sequence_number) {
                 try self.queueRetire(entry.sequence_number);
+                if (entry.in_use) self.in_use_count -|= 1;
                 entry.* = .{};
             }
         }
@@ -137,6 +139,7 @@ pub const PeerPool = struct {
         for (&self.entries) |*entry| {
             if (entry.occupied and !entry.in_use) {
                 entry.in_use = true;
+                self.in_use_count += 1;
                 return entry;
             }
         }
@@ -145,10 +148,12 @@ pub const PeerPool = struct {
 
     pub fn markInUse(self: *PeerPool, sequence_number: u64) Error!void {
         const entry = self.find(sequence_number) orelse return error.UnknownConnectionId;
+        if (!entry.in_use) self.in_use_count += 1;
         entry.in_use = true;
     }
 
     pub fn detectStatelessReset(self: *const PeerPool, datagram: []const u8) ?u64 {
+        if (self.in_use_count == 0) return null;
         const candidate = quic.stateless_reset.tokenCandidate(datagram) orelse
             return null;
         for (&self.entries) |*entry| {
@@ -387,9 +392,11 @@ test "QUIC peer CID pool stores retires and consumes IDs" {
     try std.testing.expectEqual(@as(usize, 1), pool.count());
     try std.testing.expectEqual(@as(usize, 1), pool.pendingRetireCount());
     try std.testing.expectEqual(@as(u64, 1), pool.peekRetireFrame().?.retire_connection_id.sequence_number);
+    try std.testing.expectEqual(@as(usize, 0), pool.in_use_count);
     const entry = pool.consumeUnused().?;
     try std.testing.expectEqual(@as(u64, 2), entry.sequence_number);
     try std.testing.expectEqualStrings("cid-two", entry.slice());
+    try std.testing.expectEqual(@as(usize, 1), pool.in_use_count);
     try std.testing.expect(pool.consumeUnused() == null);
 }
 
@@ -407,8 +414,13 @@ test "QUIC peer CID pool detects stateless reset token" {
     // must not be accepted until the CID is active.
     try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(datagram.items));
     try pool.markInUse(7);
+    try pool.markInUse(7);
+    try std.testing.expectEqual(@as(usize, 1), pool.in_use_count);
     try std.testing.expectEqual(@as(?u64, 7), pool.detectStatelessReset(datagram.items));
     try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(&.{ 0x40, 1, 2 }));
+    try pool.retirePriorTo(8);
+    try std.testing.expectEqual(@as(usize, 0), pool.in_use_count);
+    try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(datagram.items));
 }
 
 test "QUIC peer CID pool validates duplicate IDs tokens and active limit" {
