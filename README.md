@@ -4,7 +4,7 @@
 starts with deterministic parsers, serializers, and state helpers for:
 
 - HTTP/1.1 requests, responses, preallocated header-block writes, header field syntax validation, chunked transfer decoding with strict no-leading-OWS chunk-size grammar, empty-terminator write fast paths, extension newline rejection, and extension limits, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
-  transfer writing with validated and repeated-value-merged trailer fields, opt-in obsolete folded-field
+  transfer writing with preallocated chunks plus validated and repeated-value-merged trailer fields, opt-in obsolete folded-field
   unfolding, strict allocation-free borrowed request/response head parsing into
   caller header storage with exact Content-Length pipeline offsets and
   method/status-aware response boundaries, request-target/status/reason-phrase start-line validation with method-specific asterisk/authority-form and no-fragment rules, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined

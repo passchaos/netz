@@ -863,14 +863,7 @@ fn writeHeadersChecked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, h
 }
 
 fn writeHeadersDirect(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const Header) Error!void {
-    var len: usize = 0;
-    for (headers) |header| {
-        try validateHeader(header);
-        len = std.math.add(usize, len, header.name.len) catch return error.RenderBufferTooSmall;
-        len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
-        len = std.math.add(usize, len, header.value.len) catch return error.RenderBufferTooSmall;
-        len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
-    }
+    const len = try headerBlockWireLen(headers);
 
     const start = list.items.len;
     try list.ensureUnusedCapacity(allocator, len);
@@ -886,6 +879,18 @@ fn writeHeadersDirect(list: *std.ArrayList(u8), allocator: std.mem.Allocator, he
         @memcpy(list.items[pos..][0..2], "\r\n");
         pos += 2;
     }
+}
+
+fn headerBlockWireLen(headers: []const Header) Error!usize {
+    var len: usize = 0;
+    for (headers) |header| {
+        try validateHeader(header);
+        len = std.math.add(usize, len, header.name.len) catch return error.RenderBufferTooSmall;
+        len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
+        len = std.math.add(usize, len, header.value.len) catch return error.RenderBufferTooSmall;
+        len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
+    }
+    return len;
 }
 
 fn appendDecimal(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: anytype) !void {
@@ -1103,6 +1108,17 @@ pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chu
         try list.appendSlice(allocator, "0\r\n\r\n");
         return;
     }
+    var encoded_len: usize = 0;
+    for (chunks) |chunk| {
+        encoded_len = std.math.add(usize, encoded_len, hexDigitLen(chunk.len)) catch return error.RenderBufferTooSmall;
+        encoded_len = std.math.add(usize, encoded_len, 2) catch return error.RenderBufferTooSmall;
+        encoded_len = std.math.add(usize, encoded_len, chunk.len) catch return error.RenderBufferTooSmall;
+        encoded_len = std.math.add(usize, encoded_len, 2) catch return error.RenderBufferTooSmall;
+    }
+    encoded_len = std.math.add(usize, encoded_len, "0\r\n".len) catch return error.RenderBufferTooSmall;
+    encoded_len = std.math.add(usize, encoded_len, try headerBlockWireLen(trailers)) catch return error.RenderBufferTooSmall;
+    encoded_len = std.math.add(usize, encoded_len, 2) catch return error.RenderBufferTooSmall;
+    try list.ensureUnusedCapacity(allocator, encoded_len);
     for (chunks) |chunk| {
         var tmp: [32]u8 = undefined;
         const rendered = try std.fmt.bufPrint(&tmp, "{x}\r\n", .{chunk.len});
@@ -1113,6 +1129,13 @@ pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chu
     try list.appendSlice(allocator, "0\r\n");
     try writeHeaders(list, allocator, trailers);
     try list.appendSlice(allocator, "\r\n");
+}
+
+fn hexDigitLen(value: usize) usize {
+    var digits: usize = 1;
+    var remaining = value;
+    while (remaining >= 16) : (remaining >>= 4) digits += 1;
+    return digits;
 }
 
 pub const DecodedChunked = struct {
@@ -1580,10 +1603,19 @@ test "HTTP/1 chunked codec" {
     defer decoded.deinit(allocator);
     try std.testing.expectEqualStrings("hello world", decoded.body);
     try std.testing.expectEqualStrings("sha-256=demo", decoded.trailers[0].value);
+    const encoded_with_trailer = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(encoded_with_trailer);
+
+    encoded.clearRetainingCapacity();
+    try encoded.ensureTotalCapacity(allocator, encoded_with_trailer.len);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try encodeChunked(&encoded, no_alloc.allocator(), &chunks, &trailers);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings(encoded_with_trailer, encoded.items);
 
     encoded.clearRetainingCapacity();
     try encoded.ensureTotalCapacity(allocator, "0\r\n\r\n".len);
-    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     try encodeChunked(&encoded, no_alloc.allocator(), &.{}, &.{});
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqualStrings("0\r\n\r\n", encoded.items);
