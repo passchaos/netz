@@ -81,6 +81,7 @@ pub const State = struct {
         self: *const State,
         stream_id: u31,
     ) ?LocalStatus {
+        if (self.local_index.count() == 0) return null;
         const index = self.local_index.get(stream_id) orelse return null;
         return self.local.items[index].status;
     }
@@ -90,12 +91,14 @@ pub const State = struct {
     }
 
     pub fn cancelLocal(self: *State, stream_id: u31) bool {
+        if (self.local_index.count() == 0) return false;
         const index = self.local_index.get(stream_id) orelse return false;
         self.local.items[index].status = .canceled;
         return true;
     }
 
     pub fn releaseLocal(self: *State, stream_id: u31) bool {
+        if (self.local_index.count() == 0) return false;
         const index = self.local_index.get(stream_id) orelse return false;
         _ = self.local.swapRemove(index);
         _ = self.local_index.remove(stream_id);
@@ -347,6 +350,10 @@ test "push reservation indexes track local remote and pending lifecycles" {
     var state: State = .{};
     defer state.deinit(allocator);
 
+    try std.testing.expect(state.localStatus(2) == null);
+    try std.testing.expect(!state.cancelLocal(2));
+    try std.testing.expect(!state.releaseLocal(2));
+
     const first_local = try state.reserveLocal(allocator);
     const second_local = try state.reserveLocal(allocator);
     try std.testing.expectEqual(@as(u31, 2), first_local);
@@ -356,6 +363,8 @@ test "push reservation indexes track local remote and pending lifecycles" {
     try std.testing.expect(state.releaseLocal(first_local));
     try std.testing.expect(state.local_index.get(first_local) == null);
     try std.testing.expectEqual(@as(?usize, 0), state.local_index.get(second_local));
+    try std.testing.expect(state.releaseLocal(second_local));
+    try std.testing.expect(!state.releaseLocal(second_local));
 
     for ([_]u31{ 2, 4, 6 }) |stream_id| {
         try queueTestPromise(&state, allocator, allocator, stream_id);
