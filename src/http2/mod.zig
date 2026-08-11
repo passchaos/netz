@@ -54,7 +54,7 @@ pub const Flags = packed struct(u8) {
 };
 
 pub const FrameHeader = struct {
-    pub const encoded_len: u64 = 9;
+    pub const encoded_len: usize = 9;
 
     length: u24,
     frame_type: FrameType,
@@ -77,10 +77,15 @@ pub const FrameHeader = struct {
     }
 
     pub fn write(self: FrameHeader, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
-        try wire.appendU24(list, allocator, self.length);
-        try list.append(allocator, @intFromEnum(self.frame_type));
-        try list.append(allocator, self.flags);
-        try wire.appendInt(list, allocator, u32, @as(u32, self.stream_id), .big);
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, encoded_len);
+        list.items.len = start + encoded_len;
+        list.items[start] = @truncate(self.length >> 16);
+        list.items[start + 1] = @truncate(self.length >> 8);
+        list.items[start + 2] = @truncate(self.length);
+        list.items[start + 3] = @intFromEnum(self.frame_type);
+        list.items[start + 4] = self.flags;
+        std.mem.writeInt(u32, list.items[start + 5 ..][0..4], @as(u32, self.stream_id), .big);
     }
 };
 
@@ -1745,6 +1750,13 @@ test "HTTP/2 frame and settings roundtrip" {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try (Frame{ .header = .{ .length = 0, .frame_type = .settings, .flags = 0, .stream_id = 0 }, .payload = payload.items }).write(&encoded, allocator);
+    var no_alloc_frame: std.ArrayList(u8) = .empty;
+    defer no_alloc_frame.deinit(allocator);
+    try no_alloc_frame.ensureTotalCapacity(allocator, encoded.items.len);
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try (Frame{ .header = .{ .length = 0, .frame_type = .settings, .flags = 0, .stream_id = 0 }, .payload = payload.items }).write(&no_alloc_frame, no_alloc.allocator());
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, encoded.items, no_alloc_frame.items);
     const frame = try Frame.parse(encoded.items);
     try std.testing.expectEqual(FrameType.settings, frame.header.frame_type);
     const parsed = try parseSettings(allocator, frame.payload);
