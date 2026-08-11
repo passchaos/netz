@@ -1015,7 +1015,7 @@ pub const Connection = struct {
                     const headers = try self.readHeaderBlock(frame.frame);
                     errdefer freeHeaders(self.allocator, headers);
                     try validateHeaderBlock(headers, .request);
-                    const lookup = requestHeaderLookup(headers);
+                    const lookup = try requestHeaderLookup(headers);
                     const method = lookup.method orelse return error.MissingPseudoHeader;
                     const protocol = lookup.protocol orelse return error.InvalidHeader;
                     if (!methodIsConnect(method)) return error.InvalidHeader;
@@ -1100,13 +1100,13 @@ pub const Connection = struct {
                     var body: std.ArrayList(u8) = .empty;
                     errdefer body.deinit(self.allocator);
 
-                    const lookup = requestHeaderLookup(headers);
+                    const lookup = try requestHeaderLookup(headers);
                     const method = lookup.method orelse return error.MissingPseudoHeader;
                     const protocol = lookup.protocol;
                     if (protocol != null and !self.limits.enable_connect_protocol) {
                         return error.ExtendedConnectDisabled;
                     }
-                    const expected_request_len = try contentLength(headers);
+                    const expected_request_len = lookup.content_length;
                     const is_connect = methodIsConnect(method);
                     const is_extended_connect = is_connect and protocol != null;
                     if (is_connect and !is_extended_connect and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
@@ -1132,7 +1132,7 @@ pub const Connection = struct {
                                     if ((data_frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
                                     trailers = try self.readHeaderBlock(data_frame.frame);
                                     try validateHeaderBlock(trailers, .request_trailers);
-                                    try validateContentLength(headers, body.items.len);
+                                    try validateExpectedContentLength(lookup.content_length, body.items.len);
                                     break;
                                 },
                                 .rst_stream => return error.StreamReset,
@@ -1141,7 +1141,7 @@ pub const Connection = struct {
                         }
                     }
 
-                    try validateContentLength(headers, body.items.len);
+                    try validateExpectedContentLength(lookup.content_length, body.items.len);
                     try self.rememberResponseSemantics(stream_id, method, protocol);
                     return .{
                         .stream_id = stream_id,
@@ -1239,15 +1239,15 @@ pub const Connection = struct {
         body: []u8,
         trailers: []http2.Hpack.HeaderField,
     ) Error!OwnedRequest {
-        const lookup = requestHeaderLookup(headers);
+        const lookup = try requestHeaderLookup(headers);
         const method = lookup.method orelse return error.MissingPseudoHeader;
         const protocol = lookup.protocol;
         if (protocol != null and !self.limits.enable_connect_protocol) return error.ExtendedConnectDisabled;
-        const expected_request_len = try contentLength(headers);
+        const expected_request_len = lookup.content_length;
         const is_connect = methodIsConnect(method);
         const is_extended_connect = is_connect and protocol != null;
         if (is_connect and !is_extended_connect and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
-        try validateContentLength(headers, body.len);
+        try validateExpectedContentLength(lookup.content_length, body.len);
         try self.rememberResponseSemantics(stream_id, method, protocol);
         return .{
             .stream_id = stream_id,
@@ -3179,22 +3179,26 @@ fn contentLength(headers: []const http2.Hpack.HeaderField) Error!?usize {
     var found: ?usize = null;
     for (headers) |header| {
         if (!std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;
-        var parts = std.mem.splitScalar(u8, header.value, ',');
-        while (parts.next()) |raw_part| {
-            const part = std.mem.trim(u8, raw_part, " \t");
-            if (part.len == 0) return error.InvalidContentLength;
-            for (part) |byte| {
-                if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
-            }
-            const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
-            if (found) |existing| {
-                if (existing != parsed) return error.InvalidContentLength;
-            } else {
-                found = parsed;
-            }
-        }
+        try parseContentLengthHeaderValue(header.value, &found);
     }
     return found;
+}
+
+fn parseContentLengthHeaderValue(value: []const u8, found: *?usize) Error!void {
+    var parts = std.mem.splitScalar(u8, value, ',');
+    while (parts.next()) |raw_part| {
+        const part = std.mem.trim(u8, raw_part, " \t");
+        if (part.len == 0) return error.InvalidContentLength;
+        for (part) |byte| {
+            if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
+        }
+        const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
+        if (found.*) |existing| {
+            if (existing != parsed) return error.InvalidContentLength;
+        } else {
+            found.* = parsed;
+        }
+    }
 }
 
 const ResponseHeaderLookup = struct {
@@ -3210,20 +3214,7 @@ fn responseHeaderLookup(headers: []const http2.Hpack.HeaderField) Error!Response
             continue;
         }
         if (!std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;
-        var parts = std.mem.splitScalar(u8, header.value, ',');
-        while (parts.next()) |raw_part| {
-            const part = std.mem.trim(u8, raw_part, " \t");
-            if (part.len == 0) return error.InvalidContentLength;
-            for (part) |byte| {
-                if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
-            }
-            const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
-            if (lookup.content_length) |existing| {
-                if (existing != parsed) return error.InvalidContentLength;
-            } else {
-                lookup.content_length = parsed;
-            }
-        }
+        try parseContentLengthHeaderValue(header.value, &lookup.content_length);
     }
     return lookup;
 }
@@ -3740,13 +3731,14 @@ const RequestHeaderLookup = struct {
     host: ?[]const u8 = null,
     protocol: ?[]const u8 = null,
     priority: ?[]const u8 = null,
+    content_length: ?usize = null,
 
     fn requestAuthority(self: RequestHeaderLookup) ?[]const u8 {
         return self.authority orelse self.host;
     }
 };
 
-fn requestHeaderLookup(headers: []const http2.Hpack.HeaderField) RequestHeaderLookup {
+fn requestHeaderLookup(headers: []const http2.Hpack.HeaderField) Error!RequestHeaderLookup {
     var lookup: RequestHeaderLookup = .{};
     for (headers) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, ":method")) {
@@ -3763,6 +3755,8 @@ fn requestHeaderLookup(headers: []const http2.Hpack.HeaderField) RequestHeaderLo
             if (lookup.protocol == null) lookup.protocol = header.value;
         } else if (std.ascii.eqlIgnoreCase(header.name, "priority")) {
             if (lookup.priority == null) lookup.priority = header.value;
+        } else if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+            try parseContentLengthHeaderValue(header.value, &lookup.content_length);
         }
     }
     return lookup;
@@ -7462,11 +7456,22 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
     };
     try validateHeaderBlock(&host_only, .request);
     try std.testing.expectEqualStrings("example.com", requestAuthority(&host_only).?);
-    const host_lookup = requestHeaderLookup(&host_only);
+    const host_lookup = try requestHeaderLookup(&host_only);
     try std.testing.expectEqualStrings("GET", host_lookup.method.?);
     try std.testing.expectEqualStrings("/host-only", host_lookup.path.?);
     try std.testing.expectEqualStrings("https", host_lookup.scheme.?);
     try std.testing.expectEqualStrings("example.com", host_lookup.requestAuthority().?);
+
+    const lookup_with_length = [_]http2.Hpack.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/lookup" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "content-length", .value = "5, 5" },
+        .{ .name = "priority", .value = "u=1" },
+    };
+    const parsed_lookup = try requestHeaderLookup(&lookup_with_length);
+    try std.testing.expectEqual(@as(?usize, 5), parsed_lookup.content_length);
+    try std.testing.expectEqualStrings("u=1", parsed_lookup.priority.?);
 
     const matching_authorities = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "GET" },
