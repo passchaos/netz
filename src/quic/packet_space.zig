@@ -678,6 +678,7 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn applyAckDetailed(self: *SentPacketTracker, ack: quic.AckFrame) Error!AckResult {
+        if (self.packets.items.len == 0) return error.InvalidAckFrame;
         var stack_ranges: [32]AckedRange = undefined;
         const decoded = try decodeAckRanges(self.allocator, ack, &stack_ranges);
         defer decoded.deinit(self.allocator);
@@ -721,6 +722,7 @@ pub const SentPacketTracker = struct {
     /// mirrors mature stacks such as quicz/tquic and keeps malicious ACK ranges
     /// from advancing local state.
     pub fn validateAckCoversSentPackets(self: SentPacketTracker, ack: quic.AckFrame) Error!void {
+        if (self.packets.items.len == 0) return error.InvalidAckFrame;
         var stack_ranges: [32]AckedRange = undefined;
         const decoded = try decodeAckRanges(
             self.allocator,
@@ -1574,6 +1576,28 @@ test "QUIC sent packet tracker finds tail without index slots" {
     try std.testing.expect(sent.packets.items[1].acknowledged);
     try std.testing.expectEqual(@as(?u64, 21), sent.largestAcknowledged());
     try std.testing.expectEqual(@as(?usize, 0), sent.latest_ack_eliciting_in_flight_index);
+}
+
+test "QUIC sent packet tracker rejects ACKs before sent metadata" {
+    var no_alloc = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var sent = SentPacketTracker.init(no_alloc.allocator());
+    defer sent.deinit();
+
+    const ranges = [_]quic.AckRange{
+        .{ .gap = 0, .ack_range_length = 0 },
+    } ** 40;
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 80,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    };
+    try std.testing.expectError(error.InvalidAckFrame, sent.applyAckDetailed(ack));
+    try std.testing.expectError(error.InvalidAckFrame, sent.validateAckCoversSentPackets(ack));
+    try std.testing.expect(!no_alloc.has_induced_failure);
 }
 
 test "QUIC sent packet tracker applies ACK ranges" {
