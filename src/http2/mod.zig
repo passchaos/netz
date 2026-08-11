@@ -949,34 +949,10 @@ pub const Hpack = struct {
             return self.wireIndexForPhysical(physical_index);
         }
 
-        fn findIndexLinear(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
-            var item_index = self.entries.items.len;
-            var dynamic_index: usize = 0;
-            while (item_index > self.head) : (dynamic_index += 1) {
-                item_index -= 1;
-                const item = self.entries.items[item_index];
-                if (std.mem.eql(u8, item.name, name) and std.mem.eql(u8, item.value, value)) {
-                    return @intCast(static_table.len + dynamic_index + 1);
-                }
-            }
-            return null;
-        }
-
         fn findNameIndex(self: DynamicTable, name: []const u8) ?u64 {
             const physical_index = self.latest_name.get(name) orelse return null;
             if (!self.validPhysicalIndex(physical_index)) return null;
             return self.wireIndexForPhysical(physical_index);
-        }
-
-        fn findNameIndexLinear(self: DynamicTable, name: []const u8) ?u64 {
-            var item_index = self.entries.items.len;
-            var dynamic_index: usize = 0;
-            while (item_index > self.head) : (dynamic_index += 1) {
-                item_index -= 1;
-                const item = self.entries.items[item_index];
-                if (std.mem.eql(u8, item.name, name)) return @intCast(static_table.len + dynamic_index + 1);
-            }
-            return null;
         }
 
         fn evictToLimit(self: *DynamicTable, allocator: std.mem.Allocator) void {
