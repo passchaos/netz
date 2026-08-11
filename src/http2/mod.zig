@@ -80,12 +80,17 @@ pub const FrameHeader = struct {
         const start = list.items.len;
         try list.ensureUnusedCapacity(allocator, encoded_len);
         list.items.len = start + encoded_len;
-        list.items[start] = @truncate(self.length >> 16);
-        list.items[start + 1] = @truncate(self.length >> 8);
-        list.items[start + 2] = @truncate(self.length);
-        list.items[start + 3] = @intFromEnum(self.frame_type);
-        list.items[start + 4] = self.flags;
-        std.mem.writeInt(u32, list.items[start + 5 ..][0..4], @as(u32, self.stream_id), .big);
+        self.writeInto(list.items[start..][0..encoded_len]);
+    }
+
+    fn writeInto(self: FrameHeader, out: []u8) void {
+        std.debug.assert(out.len >= encoded_len);
+        out[0] = @truncate(self.length >> 16);
+        out[1] = @truncate(self.length >> 8);
+        out[2] = @truncate(self.length);
+        out[3] = @intFromEnum(self.frame_type);
+        out[4] = self.flags;
+        std.mem.writeInt(u32, out[5..][0..4], @as(u32, self.stream_id), .big);
     }
 };
 
@@ -107,8 +112,12 @@ pub const Frame = struct {
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
         var header = self.header;
         header.length = std.math.cast(u24, self.payload.len) orelse return error.InvalidFrameSize;
-        try header.write(list, allocator);
-        try list.appendSlice(allocator, self.payload);
+        const total_len = std.math.add(usize, FrameHeader.encoded_len, self.payload.len) catch return error.InvalidFrameSize;
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, total_len);
+        list.items.len = start + total_len;
+        header.writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        @memcpy(list.items[start + FrameHeader.encoded_len ..][0..self.payload.len], self.payload);
     }
 };
 
