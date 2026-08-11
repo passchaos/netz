@@ -508,6 +508,14 @@ fn appendReferenceUnique(
     allocator: std.mem.Allocator,
     absolute_index: u64,
 ) !void {
+    // Dynamic encoders often reference the same table entry for adjacent fields
+    // (for example repeated trailers or benchmark blocks). Check the tail first
+    // so that common duplicate case avoids scanning the whole reference set.
+    if (references.items.len != 0 and
+        references.items[references.items.len - 1] == absolute_index)
+    {
+        return;
+    }
     for (references.items) |existing| {
         if (existing == absolute_index) return;
     }
