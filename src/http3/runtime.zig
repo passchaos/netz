@@ -6679,11 +6679,8 @@ fn bufferedHasResponse(
     buffered: ResponseStreamSet,
     stream_id: u62,
 ) bool {
-    if (buffered.resets.contains(stream_id)) return true;
-    for (buffered.entries.items) |entry| {
-        if (entry.receive.stream_id == stream_id) return true;
-    }
-    return false;
+    return buffered.resets.contains(stream_id) or
+        buffered.entry_index.contains(stream_id);
 }
 
 const ClientRequestLifecycle = struct {
@@ -10848,6 +10845,13 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     responses.remove(8);
     try std.testing.expect(responses.entry_index.get(8) == null);
     try std.testing.expectEqual(@as(usize, 1), responses.entry_index.count());
+    try std.testing.expect(bufferedHasResponse(responses, 0));
+    try std.testing.expect(!bufferedHasResponse(responses, 4));
+    try std.testing.expect(!bufferedHasResponse(responses, 8));
+    try responses.recordReset(20, http3.ApplicationErrorCode.request_cancelled);
+    try std.testing.expect(bufferedHasResponse(responses, 20));
+    _ = responses.takeReset(20);
+    try std.testing.expect(!bufferedHasResponse(responses, 20));
 
     try responses.insert(from, .{
         .stream_id = 12,
