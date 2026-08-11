@@ -87,7 +87,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   indexed buffered-presence checks, short-circuit ready polling, and targeted ready-stream lookup, preserving interleaved responses and
   resets instead of discarding non-target streams. `receiveNextResponse`
   provides an indexed cursor-backed FIFO event-style response/reset queue with
-  single-probe reset recording and explicit stream IDs, while
+  empty-reset insert fast paths, single-probe reset recording, and explicit stream IDs, while
   outstanding request tracking uses single-probe client opens/server activation and rejects unknown or duplicate completion and
   enforces the configured concurrency bound. Protected clients and servers also
   expose `startRequest`/`sendRequestBody` and

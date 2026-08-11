@@ -5599,7 +5599,7 @@ const ResponseStreamSet = struct {
         frame: quic.StreamFrame,
     ) Error!void {
         const stream_id: u62 = @intCast(frame.stream_id);
-        if (self.resets.contains(stream_id)) return;
+        if (self.resets.count() != 0 and self.resets.contains(stream_id)) return;
         const entry = try self.getOrCreate(from, stream_id);
         try entry.receive.insert(frame);
     }
