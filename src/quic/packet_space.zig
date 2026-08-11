@@ -723,8 +723,13 @@ pub const SentPacketTracker = struct {
         const largest_lost = largest_acknowledged - packet_threshold;
 
         var lost: AckResult = .{};
+        const sorted_packets = self.packetsSortedAscending();
         for (self.packets.items) |*packet| {
-            if (packet.acknowledged or packet.lost or !packet.in_flight or packet.packet_number > largest_lost) continue;
+            if (packet.packet_number > largest_lost) {
+                if (sorted_packets) break;
+                continue;
+            }
+            if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             packet.lost = true;
             lost.packets += 1;
             lost.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
@@ -738,11 +743,15 @@ pub const SentPacketTracker = struct {
 
     pub fn detectTimeThresholdLoss(self: *SentPacketTracker, now_ns: u64, loss_delay_ns: u64, largest_acknowledged: ?u64) AckResult {
         var lost: AckResult = .{};
+        const sorted_packets = self.packetsSortedAscending();
         for (self.packets.items) |*packet| {
-            if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             if (largest_acknowledged) |largest| {
-                if (packet.packet_number > largest) continue;
+                if (packet.packet_number > largest) {
+                    if (sorted_packets) break;
+                    continue;
+                }
             }
+            if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             const sent_time = packet.sent_time_ns orelse continue;
             const lost_time = std.math.add(u64, sent_time, loss_delay_ns) catch std.math.maxInt(u64);
             if (now_ns < lost_time) continue;
@@ -759,11 +768,15 @@ pub const SentPacketTracker = struct {
 
     pub fn timeThresholdLossDeadline(self: SentPacketTracker, loss_delay_ns: u64, largest_acknowledged: ?u64) ?u64 {
         var deadline: ?u64 = null;
+        const sorted_packets = self.packetsSortedAscending();
         for (self.packets.items) |packet| {
-            if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             if (largest_acknowledged) |largest| {
-                if (packet.packet_number > largest) continue;
+                if (packet.packet_number > largest) {
+                    if (sorted_packets) break;
+                    continue;
+                }
             }
+            if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             const sent_time = packet.sent_time_ns orelse continue;
             const lost_time = std.math.add(u64, sent_time, loss_delay_ns) catch std.math.maxInt(u64);
             if (deadline == null or lost_time < deadline.?) deadline = lost_time;
@@ -1691,6 +1704,33 @@ test "QUIC persistent congestion period requires ack-eliciting boundaries" {
         @as(?SentPacketTracker.PersistentCongestionPeriod, null),
         sent.persistentCongestionPeriod(0, sent.largestAcknowledged(), null),
     );
+}
+
+test "QUIC sent packet tracker keeps unsorted loss scans conservative" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sent(5, true, 1200);
+    try sent.sent(0, true, 1200);
+    try sent.sent(1, true, 1200);
+    try std.testing.expect(!sent.packetsSortedAscending());
+
+    const lost = sent.detectPacketThresholdLoss(4, default_packet_threshold);
+    try std.testing.expectEqual(@as(usize, 2), lost.packets);
+    try std.testing.expect(!sent.packets.items[0].lost);
+    try std.testing.expect(sent.packets.items[1].lost);
+    try std.testing.expect(sent.packets.items[2].lost);
+
+    var timed = SentPacketTracker.init(allocator);
+    defer timed.deinit();
+    try timed.sentAt(5, true, 1200, .not_ect, 100);
+    try timed.sentAt(0, true, 1200, .not_ect, 100);
+    try std.testing.expect(!timed.packetsSortedAscending());
+    const time_lost = timed.detectTimeThresholdLoss(300, 100, 0);
+    try std.testing.expectEqual(@as(usize, 1), time_lost.packets);
+    try std.testing.expect(!timed.packets.items[0].lost);
+    try std.testing.expect(timed.packets.items[1].lost);
 }
 
 test "QUIC sent packet tracker detects packet-threshold loss" {
