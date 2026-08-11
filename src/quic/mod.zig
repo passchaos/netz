@@ -1108,7 +1108,7 @@ pub const Frame = union(enum) {
     pub fn wireLen(self: Frame) Error!usize {
         return switch (self) {
             .padding => |padding| padding.len,
-            .ping => @as(usize, try varint.length(@intFromEnum(FrameType.ping))),
+            .ping => 1,
             .ack => |ack| blk: {
                 try validateAckFrame(ack);
                 var len: usize = try varint.length(if (ack.ecn_counts == null) @intFromEnum(FrameType.ack) else @intFromEnum(FrameType.ack_ecn));
@@ -1221,8 +1221,8 @@ pub const Frame = union(enum) {
                 });
                 break :blk try addWireLen(prefix, close.reason_phrase.len);
             },
-            .handshake_done => @as(usize, try varint.length(@intFromEnum(FrameType.handshake_done))),
-            .immediate_ack => @as(usize, try varint.length(@intFromEnum(FrameType.immediate_ack))),
+            .handshake_done => 1,
+            .immediate_ack => 1,
             .datagram => |datagram| blk: {
                 var len: usize = try varint.length(if (datagram.length_present) @intFromEnum(FrameType.datagram_len) else @intFromEnum(FrameType.datagram));
                 if (datagram.length_present) len = try addWireLen(len, try varint.length(datagram.data.len));
@@ -1244,7 +1244,7 @@ pub const Frame = union(enum) {
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         switch (self) {
             .padding => |padding| try appendPadding(list, allocator, padding.len),
-            .ping => try varint.encode(list, allocator, @intFromEnum(FrameType.ping)),
+            .ping => try list.append(allocator, @intFromEnum(FrameType.ping)),
             .ack => |ack| {
                 try validateAckFrame(ack);
                 try varint.encode(list, allocator, if (ack.ecn_counts == null) @intFromEnum(FrameType.ack) else @intFromEnum(FrameType.ack_ecn));
@@ -1348,8 +1348,8 @@ pub const Frame = union(enum) {
                 try varint.encode(list, allocator, close.reason_phrase.len);
                 try list.appendSlice(allocator, close.reason_phrase);
             },
-            .handshake_done => try varint.encode(list, allocator, @intFromEnum(FrameType.handshake_done)),
-            .immediate_ack => try varint.encode(list, allocator, @intFromEnum(FrameType.immediate_ack)),
+            .handshake_done => try list.append(allocator, @intFromEnum(FrameType.handshake_done)),
+            .immediate_ack => try list.append(allocator, @intFromEnum(FrameType.immediate_ack)),
             .datagram => |datagram| {
                 try varint.encode(list, allocator, if (datagram.length_present) @intFromEnum(FrameType.datagram_len) else @intFromEnum(FrameType.datagram));
                 if (datagram.length_present) try varint.encode(list, allocator, datagram.data.len);
