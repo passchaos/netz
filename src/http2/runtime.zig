@@ -1798,6 +1798,7 @@ pub const Connection = struct {
     }
 
     fn forgetResponseSemantics(self: *Connection, stream_id: u31) void {
+        if (self.response_semantics_index.count() == 0) return;
         const index = self.response_semantics_index.get(stream_id) orelse return;
         const last_index = self.response_semantics.items.len - 1;
         const removed = self.response_semantics.swapRemove(index);
@@ -1810,6 +1811,7 @@ pub const Connection = struct {
 
     fn responseSemanticsFor(self: Connection, stream_id: u31, options: ResponseOptions) ResponseBodySemantics {
         if (options.request_method) |method| return responseSemanticsFromMethod(method, options.extended_connect);
+        if (self.response_semantics_index.count() == 0) return .{};
         if (self.response_semantics_index.get(stream_id)) |index| {
             const entry = self.response_semantics.items[index];
             return .{
@@ -9191,6 +9193,8 @@ test "HTTP/2 readGoAway records monotonic peer boundary" {
     try std.testing.expect((connection.responseSemanticsFor(1, .{})).head);
     connection.forgetResponseSemantics(1);
     try std.testing.expectEqual(@as(usize, 0), connection.response_semantics_index.count());
+    try std.testing.expect(!(connection.responseSemanticsFor(1, .{})).head);
+    connection.forgetResponseSemantics(1);
 
     try connection.recordPeerGoAway(.{ .last_stream_id = 7, .error_code = .no_error, .debug_data = &.{} });
     try std.testing.expectEqual(@as(?u31, 7), connection.peer_goaway_last_stream_id);
