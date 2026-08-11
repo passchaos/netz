@@ -2670,29 +2670,39 @@ pub const Connection = struct {
         origin_value: []const u8,
         field_value: []const u8,
     ) Error!void {
-        const origin = try self.allocator.dupe(u8, origin_value);
-        errdefer self.allocator.free(origin);
-        const value = try self.allocator.dupe(u8, field_value);
-        errdefer self.allocator.free(value);
         const key = AltSvcKey{
             .stream_id = stream_id,
             .origin = origin_value,
         };
+        if (self.alternative_service_index.count() != 0) {
+            if (self.alternative_service_index.get(key)) |index| {
+                const service = &self.alternative_services.items[index];
+                if (std.mem.eql(u8, service.field_value, field_value)) return;
+
+                const origin = try self.allocator.dupe(u8, origin_value);
+                errdefer self.allocator.free(origin);
+                const value = try self.allocator.dupe(u8, field_value);
+                errdefer self.allocator.free(value);
+                const key_ptr = self.alternative_service_index.getKeyPtr(key) orelse
+                    unreachable;
+                key_ptr.* = .{ .stream_id = stream_id, .origin = origin };
+                self.allocator.free(service.origin);
+                self.allocator.free(service.field_value);
+                service.origin = origin;
+                service.field_value = value;
+                return;
+            }
+        }
         const slot = try self.alternative_service_index.getOrPut(
             self.allocator,
             key,
         );
-        if (slot.found_existing) {
-            const index = slot.value_ptr.*;
-            const service = &self.alternative_services.items[index];
-            slot.key_ptr.* = .{ .stream_id = stream_id, .origin = origin };
-            self.allocator.free(service.origin);
-            self.allocator.free(service.field_value);
-            service.origin = origin;
-            service.field_value = value;
-            return;
-        }
+        std.debug.assert(!slot.found_existing);
         errdefer _ = self.alternative_service_index.remove(key);
+        const origin = try self.allocator.dupe(u8, origin_value);
+        errdefer self.allocator.free(origin);
+        const value = try self.allocator.dupe(u8, field_value);
+        errdefer self.allocator.free(value);
         const index = self.alternative_services.items.len;
         try self.alternative_services.append(self.allocator, .{
             .stream_id = stream_id,
@@ -4277,6 +4287,45 @@ test "HTTP/2 runtime receives connection and stream ALTSVC frames" {
     _ = try client.ping([_]u8{0x42} ** 8);
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 ALTSVC identical replacement does not allocate" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        for (connection.alternative_services.items) |*service| {
+            service.deinit(allocator);
+        }
+        connection.alternative_services.deinit(allocator);
+        connection.alternative_service_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    try connection.storeAlternativeService(
+        0,
+        "https://example.com",
+        "h3=\":443\"; ma=3600",
+    );
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const saved_allocator = connection.allocator;
+    connection.allocator = no_alloc.allocator();
+    defer connection.allocator = saved_allocator;
+    try connection.storeAlternativeService(
+        0,
+        "https://example.com",
+        "h3=\":443\"; ma=3600",
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), connection.alternative_services.items.len);
 }
 
 test "HTTP/2 h2c runtime client and server exchange over TCP" {

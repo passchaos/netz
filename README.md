@@ -18,7 +18,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
   with host verification plus OS/custom CA bundles, and a `std.Io.async`
   concurrent server helper
-- HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing, RFC 8336 single-probe exact-indexed ORIGIN origin-set state with empty-index membership skips, RFC 7838 single-probe exact-indexed ALTSVC connection/stream advertisements with per-target replacement, and active-stream reset propagation, a bootstrap
+- HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing, RFC 8336 single-probe exact-indexed ORIGIN origin-set state with empty-index membership skips, RFC 7838 single-probe exact-indexed ALTSVC connection/stream advertisements with identical replacement skips and per-target replacement, and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder with RFC 7541 Huffman strings,
   pseudo-header static fast paths, internal empty-dynamic-table lookup skips, single-lookup
   dynamic insert indexing, O(1)
