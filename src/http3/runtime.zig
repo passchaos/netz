@@ -6079,8 +6079,14 @@ const StreamingMessageSet = struct {
         {
             return error.ExcessiveLoad;
         }
+        const slot = try self.entry_index.getOrPut(
+            self.allocator,
+            stream_id,
+        );
+        std.debug.assert(!slot.found_existing);
+        errdefer _ = self.entry_index.remove(stream_id);
+
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
-        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
         if (buffered.takeReceive(stream_id)) |owned| {
             return self.appendEntryAssumeCapacity(.{
                 .reader = .{
@@ -6092,7 +6098,7 @@ const StreamingMessageSet = struct {
                     .credited_offset = owned.receive.read_offset,
                 },
                 .from = owned.from,
-            });
+            }, slot.value_ptr);
         }
         return self.appendEntryAssumeCapacity(.{
             .reader = .initResponse(
@@ -6101,7 +6107,7 @@ const StreamingMessageSet = struct {
                 self.max_stream_buffer,
                 self.settings,
             ),
-        });
+        }, slot.value_ptr);
     }
 
     fn activateBufferedResponses(
@@ -6155,8 +6161,14 @@ const StreamingMessageSet = struct {
         if (self.retainedCount() >= self.max_streams) {
             return error.ExcessiveLoad;
         }
+        const slot = try self.entry_index.getOrPut(
+            self.allocator,
+            stream_id,
+        );
+        std.debug.assert(!slot.found_existing);
+        errdefer _ = self.entry_index.remove(stream_id);
+
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
-        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
         if (buffered.takeReceive(stream_id)) |owned| {
             return self.appendEntryAssumeCapacity(.{
                 .reader = .{
@@ -6167,7 +6179,7 @@ const StreamingMessageSet = struct {
                     .credited_offset = owned.receive.read_offset,
                 },
                 .from = owned.from,
-            });
+            }, slot.value_ptr);
         }
         return self.appendEntryAssumeCapacity(.{
             .reader = .initRequest(
@@ -6176,7 +6188,7 @@ const StreamingMessageSet = struct {
                 self.max_stream_buffer,
                 self.settings,
             ),
-        });
+        }, slot.value_ptr);
     }
 
     fn insert(
@@ -6198,11 +6210,11 @@ const StreamingMessageSet = struct {
     fn appendEntryAssumeCapacity(
         self: *StreamingMessageSet,
         entry: Entry,
+        index_slot: *usize,
     ) *Entry {
         const index = self.entries.items.len;
-        const stream_id: u62 = @intCast(entry.reader.receive.stream_id);
         self.entries.appendAssumeCapacity(entry);
-        self.entry_index.putAssumeCapacity(stream_id, index);
+        index_slot.* = index;
         self.considerLowestEntry(index);
         return &self.entries.items[index];
     }
