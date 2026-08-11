@@ -914,13 +914,15 @@ pub const Hpack = struct {
 
             self.compactIfNeeded();
             try self.entries.ensureUnusedCapacity(allocator, 1);
-            if (self.latest_name.get(name) == null) {
-                try self.latest_name.ensureUnusedCapacity(allocator, 1);
-            }
+            const name_slot = try self.latest_name.getOrPut(allocator, name);
+            errdefer if (!name_slot.found_existing) {
+                _ = self.latest_name.remove(name);
+            };
             const exact_key = DynamicExactKey{ .name = name, .value = value };
-            if (self.latest_exact.get(exact_key) == null) {
-                try self.latest_exact.ensureUnusedCapacity(allocator, 1);
-            }
+            const exact_slot = try self.latest_exact.getOrPut(allocator, exact_key);
+            errdefer if (!exact_slot.found_existing) {
+                _ = self.latest_exact.remove(exact_key);
+            };
             const name_copy = try allocator.dupe(u8, name);
             errdefer allocator.free(name_copy);
             const value_copy = try allocator.dupe(u8, value);
@@ -931,8 +933,10 @@ pub const Hpack = struct {
                 .name = name_copy,
                 .value = value_copy,
             });
-            self.latest_name.putAssumeCapacity(name_copy, physical_index);
-            self.latest_exact.putAssumeCapacity(.{ .name = name_copy, .value = value_copy }, physical_index);
+            name_slot.key_ptr.* = name_copy;
+            name_slot.value_ptr.* = physical_index;
+            exact_slot.key_ptr.* = .{ .name = name_copy, .value = value_copy };
+            exact_slot.value_ptr.* = physical_index;
             self.used += size;
             self.evictToLimit(allocator);
         }
