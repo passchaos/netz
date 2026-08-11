@@ -1245,8 +1245,7 @@ pub const Frame = union(enum) {
             .padding => |padding| try appendPadding(list, allocator, padding.len),
             .ping => try list.append(allocator, @intFromEnum(FrameType.ping)),
             .ack => |ack| {
-                try validateAckFrame(ack);
-                try varint.encode(list, allocator, if (ack.ecn_counts == null) @intFromEnum(FrameType.ack) else @intFromEnum(FrameType.ack_ecn));
+                try list.append(allocator, if (ack.ecn_counts == null) @intFromEnum(FrameType.ack) else @intFromEnum(FrameType.ack_ecn));
                 try writeAckFields(list, allocator, ack);
             },
             .reset_stream => |reset| {
