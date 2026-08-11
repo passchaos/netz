@@ -73,7 +73,9 @@ pub const State = struct {
     ) (std.mem.Allocator.Error || error{
         PriorityCapacityExceeded,
     })!void {
-        if (self.containsIdleRequest(stream_id)) return;
+        const slot = try self.idle_index.getOrPut(allocator, stream_id);
+        if (slot.found_existing) return;
+        errdefer _ = self.idle_index.remove(stream_id);
         if (self.idle_requests.items.len >= max_idle_updates) {
             return error.PriorityCapacityExceeded;
         }
@@ -82,10 +84,9 @@ pub const State = struct {
                 return error.PriorityCapacityExceeded;
             }
         }
-        try self.idle_index.ensureUnusedCapacity(allocator, 1);
         const index = self.idle_requests.items.len;
         try self.idle_requests.append(allocator, stream_id);
-        self.idle_index.putAssumeCapacity(stream_id, index);
+        slot.value_ptr.* = index;
         self.considerLowestIdleRequest(index);
     }
 
