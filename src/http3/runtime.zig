@@ -9448,7 +9448,12 @@ fn applyControlStreamFrameForRoleWithPushes(
     role: ControlStreamRole,
     promised_push_ids: ?[]const u64,
 ) Error!bool {
-    if (role == .server and (stream.stream_id & 0x02) != 0 and stream.offset == 0) {
+    // HTTP/3 control, QPACK, and push streams are unidirectional.  Request and
+    // response STREAM frames are already validated by the message decoder, so
+    // skip the expensive control-state clone/rollback path for the common
+    // bidirectional data path.
+    if ((stream.stream_id & 0x02) == 0) return false;
+    if (role == .server and stream.offset == 0) {
         if (peekUniStreamType(stream) == .push) return error.StreamCreationError;
     }
     if (role == .client and
@@ -9740,6 +9745,24 @@ test "HTTP/3 server GOAWAY validates request stream ids" {
 
 test "HTTP/3 client rejects server-only control frames" {
     const allocator = std.testing.allocator;
+
+    var ignored_message_control = http3.ControlState{};
+    defer ignored_message_control.deinit(allocator);
+    try std.testing.expect(!try applyControlStreamFrameForRole(
+        &ignored_message_control,
+        allocator,
+        .{
+            .stream_id = 0,
+            .offset = 0,
+            .fin = false,
+            // On bidirectional request/response streams this is a DATA frame,
+            // not a unidirectional stream-type prefix.  Keep role validation
+            // from interpreting the DATA length as MAX_PUSH_ID and rejecting a
+            // message stream before the message decoder sees it.
+            .data = &.{ 0x00, 0x0d, 0x00 },
+        },
+        .client,
+    ));
 
     var stream_bytes: std.ArrayList(u8) = .empty;
     defer stream_bytes.deinit(allocator);
