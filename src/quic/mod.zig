@@ -1150,10 +1150,7 @@ pub const Frame = union(enum) {
             },
             .stream => |stream| blk: {
                 try validateEndOffset(stream.offset, stream.data.len);
-                var frame_type: u64 = @intFromEnum(FrameType.stream) | 0x02;
-                if (stream.offset != 0) frame_type |= 0x04;
-                if (stream.fin) frame_type |= 0x01;
-                var len = try varintWireLen(&.{ frame_type, stream.stream_id });
+                var len = try addWireLen(1, try varint.length(stream.stream_id));
                 if (stream.offset != 0) len = try addWireLen(len, try varint.length(stream.offset));
                 len = try addWireLen(len, try varint.length(stream.data.len));
                 break :blk try addWireLen(len, stream.data.len);
@@ -1274,10 +1271,10 @@ pub const Frame = union(enum) {
             },
             .stream => |stream| {
                 try validateEndOffset(stream.offset, stream.data.len);
-                var frame_type: u64 = @intFromEnum(FrameType.stream) | 0x02; // always include Length for unambiguous composition.
+                var frame_type: u8 = @intCast(@intFromEnum(FrameType.stream) | 0x02); // always include Length for unambiguous composition.
                 if (stream.offset != 0) frame_type |= 0x04;
                 if (stream.fin) frame_type |= 0x01;
-                try varint.encode(list, allocator, frame_type);
+                try list.append(allocator, frame_type);
                 try varint.encode(list, allocator, stream.stream_id);
                 if (stream.offset != 0) try varint.encode(list, allocator, stream.offset);
                 try varint.encode(list, allocator, stream.data.len);
@@ -2404,6 +2401,7 @@ test "QUIC stream and crypto frame codec" {
     var stream_bytes: std.ArrayList(u8) = .empty;
     defer stream_bytes.deinit(allocator);
     try (Frame{ .stream = .{ .stream_id = 7, .offset = 64, .fin = true, .data = "hello" } }).write(&stream_bytes, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.stream) | 0x07), stream_bytes.items[0]);
     const parsed_stream = try parseFrame(stream_bytes.items);
     try std.testing.expectEqual(@as(usize, stream_bytes.items.len), parsed_stream.consumed);
     try std.testing.expectEqual(@as(u64, 7), parsed_stream.frame.stream.stream_id);
