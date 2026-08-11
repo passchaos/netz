@@ -1868,6 +1868,8 @@ pub const Connection = struct {
         errdefer freeHeaders(self.allocator, trailers);
         var body: std.ArrayList(u8) = .empty;
         errdefer body.deinit(self.allocator);
+        var response_status: ?u16 = null;
+        var response_content_length: ?usize = null;
 
         while (true) {
             var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
@@ -1893,34 +1895,39 @@ pub const Connection = struct {
                 .headers => {
                     if (headers) |h| {
                         if ((frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
-                        try validateContentLength(h, body.items.len);
+                        _ = h;
+                        try validateExpectedContentLength(response_content_length, body.items.len);
                         trailers = try self.readHeaderBlock(frame.frame);
                         try validateHeaderBlock(trailers, .response_trailers);
                         break;
                     } else {
                         headers = try self.readHeaderBlock(frame.frame);
                         try validateHeaderBlock(headers.?, .response);
-                        const status_s = findHeader(headers.?, ":status") orelse return error.MissingPseudoHeader;
+                        const lookup = try responseHeaderLookup(headers.?);
+                        const status_s = lookup.status orelse return error.MissingPseudoHeader;
                         const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
+                        response_status = status;
+                        response_content_length = lookup.content_length;
                         if (informationalResponseToSkip(status)) {
                             if ((frame.frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
-                            if ((try contentLength(headers.?)) != null) return error.InvalidContentLength;
+                            if (lookup.content_length != null) return error.InvalidContentLength;
                             freeHeaders(self.allocator, headers.?);
                             headers = null;
+                            response_status = null;
+                            response_content_length = null;
                             continue;
                         }
                         if (responseForbidsBody(status, request_method, extended_connect)) {
-                            const response_content_length = try contentLength(headers.?);
                             const traditional_connect = methodIsConnect(request_method) and !extended_connect;
-                            if (traditional_connect and (response_content_length orelse 0) != 0) return error.InvalidContentLength;
-                            if ((statusIsInformational(status) or status == 204) and response_content_length != null) return error.InvalidContentLength;
+                            if (traditional_connect and (lookup.content_length orelse 0) != 0) return error.InvalidContentLength;
+                            if ((statusIsInformational(status) or status == 204) and lookup.content_length != null) return error.InvalidContentLength;
                             if (!traditional_connect and (frame.frame.header.flags & flag_end_stream) == 0) {
                                 try self.consumeForbiddenResponseBody(stream_id);
                             }
                             break;
                         }
                         if ((frame.frame.header.flags & flag_end_stream) != 0) {
-                            try validateContentLength(headers.?, 0);
+                            try validateExpectedContentLength(lookup.content_length, 0);
                             break;
                         }
                     }
@@ -1932,7 +1939,7 @@ pub const Connection = struct {
                     try body.appendSlice(self.allocator, data.data);
                     try self.maybeReleaseReceivedCapacity(stream_id);
                     if ((frame.frame.header.flags & flag_end_stream) != 0) {
-                        if (headers) |h| try validateContentLength(h, body.items.len);
+                        if (headers != null) try validateExpectedContentLength(response_content_length, body.items.len);
                         break;
                     }
                 },
@@ -1942,8 +1949,7 @@ pub const Connection = struct {
         }
 
         const final_headers = headers orelse return error.MissingPseudoHeader;
-        const status_s = findHeader(final_headers, ":status") orelse return error.MissingPseudoHeader;
-        const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
+        const status = response_status orelse return error.MissingPseudoHeader;
         return .{
             .headers = final_headers,
             .status = status,
@@ -1965,6 +1971,8 @@ pub const Connection = struct {
         errdefer freeHeaders(self.allocator, trailers);
         var body: std.ArrayList(u8) = .empty;
         errdefer body.deinit(self.allocator);
+        var response_status: ?u16 = null;
+        var response_content_length: ?usize = null;
         while (true) {
             var frame = try readFrame(
                 self.allocator,
@@ -1992,6 +2000,11 @@ pub const Connection = struct {
                     }
                     headers = try self.readHeaderBlock(frame.frame);
                     try validateHeaderBlock(headers.?, .response);
+                    const lookup = try responseHeaderLookup(headers.?);
+                    const status_text = lookup.status orelse return error.MissingPseudoHeader;
+                    response_status = std.fmt.parseInt(u16, status_text, 10) catch
+                        return error.InvalidStatus;
+                    response_content_length = lookup.content_length;
                     if ((frame.frame.header.flags & flag_end_stream) != 0) {
                         break;
                     }
@@ -2019,16 +2032,13 @@ pub const Connection = struct {
         }
         const final_headers = headers orelse
             return error.MissingPseudoHeader;
-        const status_text = findHeader(final_headers, ":status") orelse
-            return error.MissingPseudoHeader;
-        const status = std.fmt.parseInt(u16, status_text, 10) catch
-            return error.InvalidStatus;
+        const status = response_status orelse return error.MissingPseudoHeader;
         if (responseForbidsBody(status, request_method, false) and
             body.items.len != 0)
         {
             return error.InvalidContentLength;
         }
-        try validateContentLength(final_headers, body.items.len);
+        try validateExpectedContentLength(response_content_length, body.items.len);
         return .{
             .headers = final_headers,
             .status = status,
@@ -3219,8 +3229,12 @@ fn responseHeaderLookup(headers: []const http2.Hpack.HeaderField) Error!Response
 }
 
 fn validateContentLength(headers: []const http2.Hpack.HeaderField, actual: usize) Error!void {
-    if (try contentLength(headers)) |expected| {
-        if (expected != actual) return error.InvalidContentLength;
+    try validateExpectedContentLength(try contentLength(headers), actual);
+}
+
+fn validateExpectedContentLength(expected: ?usize, actual: usize) Error!void {
+    if (expected) |value| {
+        if (value != actual) return error.InvalidContentLength;
     }
 }
 
