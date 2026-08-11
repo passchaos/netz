@@ -87,6 +87,7 @@ pub const RecvFlow = struct {
     }
 
     pub fn consume(self: *RecvFlow, amount: u64) ?u64 {
+        if (amount == 0) return null;
         self.consumed = @min(self.highest_received, self.consumed +| amount);
         if (self.limit - self.consumed <= self.window / 2) {
             self.maybeGrowWindow();
@@ -163,6 +164,8 @@ test "QUIC receive flow emits MAX_DATA after consumption threshold" {
     var flow = try RecvFlow.init(100, 100);
     try flow.receive(80);
     try std.testing.expectError(error.FlowControlViolation, flow.receive(101));
+    try std.testing.expectEqual(@as(?u64, null), flow.consume(0));
+    try std.testing.expectEqual(@as(u64, 0), flow.consumed);
     try std.testing.expectEqual(@as(?u64, null), flow.consume(20));
     const new_limit = flow.consume(40).?;
     try std.testing.expectEqual(@as(u64, 160), new_limit);
