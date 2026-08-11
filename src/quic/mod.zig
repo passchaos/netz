@@ -1220,7 +1220,7 @@ pub const Frame = union(enum) {
             .handshake_done => 1,
             .immediate_ack => 1,
             .datagram => |datagram| blk: {
-                var len: usize = try varint.length(if (datagram.length_present) @intFromEnum(FrameType.datagram_len) else @intFromEnum(FrameType.datagram));
+                var len: usize = 1;
                 if (datagram.length_present) len = try addWireLen(len, try varint.length(datagram.data.len));
                 break :blk try addWireLen(len, datagram.data.len);
             },
@@ -1346,7 +1346,7 @@ pub const Frame = union(enum) {
             .handshake_done => try list.append(allocator, @intFromEnum(FrameType.handshake_done)),
             .immediate_ack => try list.append(allocator, @intFromEnum(FrameType.immediate_ack)),
             .datagram => |datagram| {
-                try varint.encode(list, allocator, if (datagram.length_present) @intFromEnum(FrameType.datagram_len) else @intFromEnum(FrameType.datagram));
+                try list.append(allocator, if (datagram.length_present) @intFromEnum(FrameType.datagram_len) else @intFromEnum(FrameType.datagram));
                 if (datagram.length_present) try varint.encode(list, allocator, datagram.data.len);
                 try list.appendSlice(allocator, datagram.data);
             },
@@ -2443,9 +2443,14 @@ test "QUIC ack close datagram and padding frames" {
     var datagram_bytes: std.ArrayList(u8) = .empty;
     defer datagram_bytes.deinit(allocator);
     try (Frame{ .datagram = .{ .data = "dgram", .length_present = false } }).write(&datagram_bytes, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.datagram)), datagram_bytes.items[0]);
     const datagram = try parseFrame(datagram_bytes.items);
     try std.testing.expect(!datagram.frame.datagram.length_present);
     try std.testing.expectEqualStrings("dgram", datagram.frame.datagram.data);
+
+    datagram_bytes.clearRetainingCapacity();
+    try (Frame{ .datagram = .{ .data = "dgram", .length_present = true } }).write(&datagram_bytes, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.datagram_len)), datagram_bytes.items[0]);
 
     const padding = try parseFrame(&.{ 0, 0, 0, @intFromEnum(FrameType.ping) });
     try std.testing.expectEqual(@as(usize, 3), padding.frame.padding.len);
