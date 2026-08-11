@@ -66,13 +66,13 @@ pub const State = struct {
             return error.InvalidStreamId;
         }
         const stream_id = self.next_local_stream_id;
+        const slot = try self.local_index.getOrPut(allocator, stream_id);
+        std.debug.assert(!slot.found_existing);
+        errdefer _ = self.local_index.remove(stream_id);
+
         try self.local.ensureUnusedCapacity(allocator, 1);
-        try self.local_index.ensureUnusedCapacity(allocator, 1);
         self.local.appendAssumeCapacity(.{ .stream_id = stream_id });
-        self.local_index.putAssumeCapacityNoClobber(
-            stream_id,
-            self.local.items.len - 1,
-        );
+        slot.value_ptr.* = self.local.items.len - 1;
         self.next_local_stream_id += 2;
         return stream_id;
     }
