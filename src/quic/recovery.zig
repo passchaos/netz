@@ -368,10 +368,15 @@ pub const Queue = struct {
     }
 
     fn removeGroupOrdered(self: *Queue, index: usize) PendingDatagram {
-        const removed = self.pending.orderedRemove(index);
+        const removed = if (index == self.pending.items.len - 1)
+            self.pending.pop().?
+        else
+            self.pending.orderedRemove(index);
         self.removeEntryIndexes(removed);
         self.removeEntryStats(removed);
-        self.refreshIndexesFrom(index);
+        if (index < self.pending.items.len) {
+            self.refreshIndexesFrom(index);
+        }
         return removed;
     }
 
