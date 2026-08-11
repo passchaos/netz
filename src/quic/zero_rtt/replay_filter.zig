@@ -181,21 +181,28 @@ pub const Filter = struct {
                 continue;
             }
             if (self.entries.items.len < self.max_entries) {
+                const slot = try self.entry_index.getOrPut(
+                    self.allocator,
+                    entry.key,
+                );
+                std.debug.assert(!slot.found_existing);
+                errdefer _ = self.entry_index.remove(entry.key);
                 try self.entries.ensureUnusedCapacity(self.allocator, 1);
-                try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
-                self.appendEntryWithIndexAssumeCapacity(.{
+                self.appendEntryAssumeCapacity(.{
                     .key = entry.key,
                     .expires_at_ms = entry.expires_at_ms,
-                });
+                }, slot.value_ptr);
                 continue;
             }
             const evict = self.earliestExpiryIndex();
             if (entry.expires_at_ms <= self.entries.items[evict].expires_at_ms) continue;
             self.removeEntryAt(evict);
-            self.appendEntryWithIndexAssumeCapacity(.{
+            const slot = self.entry_index.getOrPutAssumeCapacity(entry.key);
+            std.debug.assert(!slot.found_existing);
+            self.appendEntryAssumeCapacity(.{
                 .key = entry.key,
                 .expires_at_ms = entry.expires_at_ms,
-            });
+            }, slot.value_ptr);
         }
     }
 
@@ -207,13 +214,6 @@ pub const Filter = struct {
         const index = self.entries.items.len;
         self.entries.appendAssumeCapacity(entry);
         index_slot.* = index;
-        self.considerEarliest(index);
-    }
-
-    fn appendEntryWithIndexAssumeCapacity(self: *Filter, entry: Entry) void {
-        const index = self.entries.items.len;
-        self.entries.appendAssumeCapacity(entry);
-        self.entry_index.putAssumeCapacityNoClobber(entry.key, index);
         self.considerEarliest(index);
     }
 
