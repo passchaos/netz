@@ -1723,7 +1723,8 @@ pub const QpackEncodeState = struct {
     }
 
     fn entryEvictable(self: QpackEncodeState, absolute_index: u64) bool {
-        return absolute_index < self.known_received_count and
+        if (absolute_index >= self.known_received_count) return false;
+        return self.reference_counts.count() == 0 or
             !self.reference_counts.contains(absolute_index);
     }
 
