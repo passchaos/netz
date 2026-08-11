@@ -139,6 +139,7 @@ pub const Setting = struct {
 
 pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]Setting {
     if (payload.len % 6 != 0) return error.InvalidSetting;
+    if (payload.len == 0) return @constCast(&[_]Setting{});
     var cursor = wire.Cursor.init(payload);
     var settings: std.ArrayList(Setting) = .empty;
     errdefer settings.deinit(allocator);
@@ -1770,6 +1771,12 @@ test "HTTP/2 frame and settings roundtrip" {
     const parsed = try parseSettings(allocator, frame.payload);
     defer allocator.free(parsed);
     try std.testing.expectEqual(@as(u32, 100), parsed[0].value);
+
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const empty_settings = try parseSettings(no_alloc.allocator(), &.{});
+    defer no_alloc.allocator().free(empty_settings);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), empty_settings.len);
 }
 
 test "HTTP/2 payload helpers" {
