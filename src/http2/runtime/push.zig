@@ -178,6 +178,7 @@ pub const State = struct {
     }
 
     pub fn releaseRemote(self: *State, stream_id: u31) bool {
+        if (self.remote_index.count() == 0) return false;
         const index = self.remote_index.get(stream_id) orelse return false;
         _ = self.remote.swapRemove(index);
         _ = self.remote_index.remove(stream_id);
