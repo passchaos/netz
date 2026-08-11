@@ -5345,6 +5345,7 @@ const RequestStreamSet = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
     entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
+    lowest_stream_index: ?usize = null,
     max_stream_buffer: usize,
     max_streams: usize,
 
@@ -5450,18 +5451,27 @@ const RequestStreamSet = struct {
         const stream_id: u62 = @intCast(entry.receive.stream_id);
         self.entries.appendAssumeCapacity(entry);
         self.entry_index.putAssumeCapacity(stream_id, index);
+        self.considerLowestStream(index);
         return &self.entries.items[index];
     }
 
     fn takeEntry(self: *RequestStreamSet, stream_id: u62) ?Entry {
         const index = self.entry_index.get(stream_id) orelse return null;
         const last_index = self.entries.items.len - 1;
+        const lowest = self.lowest_stream_index;
         const removed = self.entries.swapRemove(index);
         _ = self.entry_index.remove(@intCast(removed.receive.stream_id));
         if (index != last_index) {
             const moved = self.entries.items[index];
             self.entry_index.getPtr(@intCast(moved.receive.stream_id)).?.* =
                 index;
+        }
+        if (self.entries.items.len == 0) {
+            self.lowest_stream_index = null;
+        } else if (lowest == index) {
+            self.recomputeLowestStream();
+        } else if (lowest == last_index) {
+            self.lowest_stream_index = index;
         }
         return removed;
     }
@@ -5512,6 +5522,30 @@ const RequestStreamSet = struct {
 
     fn contains(self: RequestStreamSet, stream_id: u62) bool {
         return self.entry_index.contains(stream_id);
+    }
+
+    fn lowestStream(self: RequestStreamSet) ?u62 {
+        const index = self.lowest_stream_index orelse return null;
+        return @intCast(self.entries.items[index].receive.stream_id);
+    }
+
+    fn considerLowestStream(self: *RequestStreamSet, index: usize) void {
+        const lowest = self.lowest_stream_index orelse {
+            self.lowest_stream_index = index;
+            return;
+        };
+        if (self.entries.items[index].receive.stream_id <
+            self.entries.items[lowest].receive.stream_id)
+        {
+            self.lowest_stream_index = index;
+        }
+    }
+
+    fn recomputeLowestStream(self: *RequestStreamSet) void {
+        self.lowest_stream_index = null;
+        for (self.entries.items, 0..) |_, index| {
+            self.considerLowestStream(index);
+        }
     }
 };
 
@@ -7035,8 +7069,8 @@ const ServerRequestLifecycle = struct {
         if (self.lowestActiveStream()) |stream_id| {
             if (stream_id < goaway_id) return false;
         }
-        for (request_streams.entries.items) |entry| {
-            if (entry.receive.stream_id < goaway_id) return false;
+        if (request_streams.lowestStream()) |stream_id| {
+            if (stream_id < goaway_id) return false;
         }
         for (streaming_requests.entries.items) |entry| {
             if (entry.reader.receive.stream_id < goaway_id) return false;
@@ -11004,14 +11038,19 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
         });
     }
     try std.testing.expect(requests.contains(4));
+    try std.testing.expectEqual(@as(?u62, 0), requests.lowestStream());
     var taken_request = requests.takeReceive(4) orelse
         return error.TestUnexpectedResult;
     taken_request.receive.deinit();
     try std.testing.expect(!requests.contains(4));
     try std.testing.expect(requests.contains(8));
+    try std.testing.expectEqual(@as(?u62, 0), requests.lowestStream());
     requests.remove(8);
     try std.testing.expect(!requests.contains(8));
-    try std.testing.expectEqual(@as(usize, 1), requests.entry_index.count());
+    try std.testing.expectEqual(@as(?u62, 0), requests.lowestStream());
+    requests.remove(0);
+    try std.testing.expectEqual(@as(?u62, null), requests.lowestStream());
+    try std.testing.expectEqual(@as(usize, 0), requests.entry_index.count());
 
     try requests.insert(from, .{
         .stream_id = 12,
