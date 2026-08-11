@@ -60,7 +60,8 @@ pub const State = struct {
         self: State,
         stream_id: u31,
     ) bool {
-        return self.idle_index.contains(stream_id);
+        return self.idle_index.count() != 0 and
+            self.idle_index.contains(stream_id);
     }
 
     pub fn reserveIdleRequest(
