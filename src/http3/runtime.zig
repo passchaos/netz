@@ -9456,6 +9456,14 @@ fn applyControlStreamFrameForRoleWithPushes(
     if (role == .server and stream.offset == 0) {
         if (peekUniStreamType(stream) == .push) return error.StreamCreationError;
     }
+    if (stream.offset == 0) {
+        switch (peekUniStreamType(stream) orelse return false) {
+            .control, .qpack_encoder, .qpack_decoder => {},
+            else => return false,
+        }
+    } else if (!isRegisteredCriticalStream(control.*, stream.stream_id)) {
+        return false;
+    }
     if (role == .client and
         try controlStreamContainsClientOnlyFrame(control.*, stream))
     {
@@ -9763,6 +9771,38 @@ test "HTTP/3 client rejects server-only control frames" {
         },
         .client,
     ));
+
+    var ignored_extension_control = http3.ControlState{};
+    defer ignored_extension_control.deinit(allocator);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expect(!try applyControlStreamFrameForRole(
+        &ignored_extension_control,
+        no_alloc.allocator(),
+        .{
+            .stream_id = 3,
+            .offset = 0,
+            .fin = false,
+            // Unknown unidirectional streams are extension-owned.  Role
+            // validation should ignore them without cloning control state.
+            .data = &.{ 0x21, 0x00 },
+        },
+        .client,
+    ));
+    try std.testing.expect(!try applyControlStreamFrameForRole(
+        &ignored_extension_control,
+        no_alloc.allocator(),
+        .{
+            .stream_id = 3,
+            .offset = 2,
+            .fin = false,
+            .data = &.{0x0d},
+        },
+        .client,
+    ));
+    try std.testing.expect(!no_alloc.has_induced_failure);
 
     var stream_bytes: std.ArrayList(u8) = .empty;
     defer stream_bytes.deinit(allocator);
