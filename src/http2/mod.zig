@@ -139,10 +139,19 @@ pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]
 }
 
 pub fn writeSettings(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: []const Setting) Error!void {
+    for (settings) |setting| try validateSetting(setting.id, setting.value);
+
+    const payload_len = std.math.mul(usize, settings.len, 6) catch return error.InvalidFrameSize;
+    const start = list.items.len;
+    try list.ensureUnusedCapacity(allocator, payload_len);
+    list.items.len = start + payload_len;
+
+    var pos = start;
     for (settings) |setting| {
-        try validateSetting(setting.id, setting.value);
-        try wire.appendInt(list, allocator, u16, @intFromEnum(setting.id), .big);
-        try wire.appendInt(list, allocator, u32, setting.value, .big);
+        std.mem.writeInt(u16, list.items[pos..][0..2], @intFromEnum(setting.id), .big);
+        pos += 2;
+        std.mem.writeInt(u32, list.items[pos..][0..4], setting.value, .big);
+        pos += 4;
     }
 }
 
@@ -1725,6 +1734,13 @@ test "HTTP/2 frame and settings roundtrip" {
         .{ .id = .initial_window_size, .value = 65535 },
     };
     try writeSettings(&payload, allocator, &settings);
+    var no_alloc_payload: std.ArrayList(u8) = .empty;
+    defer no_alloc_payload.deinit(allocator);
+    try no_alloc_payload.ensureTotalCapacity(allocator, payload.items.len);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try writeSettings(&no_alloc_payload, no_alloc.allocator(), &settings);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, payload.items, no_alloc_payload.items);
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
