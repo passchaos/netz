@@ -856,6 +856,7 @@ pub const SentPacketTracker = struct {
         var lost: AckResult = .{};
         var cached_latest_lost = false;
         const sorted_packets = self.packetsSortedAscending();
+        if (sorted_packets and self.largestBeforeFirstPacket(largest_acknowledged)) return lost;
         for (self.packets.items, 0..) |*packet, index| {
             if (largest_acknowledged) |largest| {
                 if (packet.packet_number > largest) {
@@ -884,6 +885,7 @@ pub const SentPacketTracker = struct {
     pub fn timeThresholdLossDeadline(self: SentPacketTracker, loss_delay_ns: u64, largest_acknowledged: ?u64) ?u64 {
         var deadline: ?u64 = null;
         const sorted_packets = self.packetsSortedAscending();
+        if (sorted_packets and self.largestBeforeFirstPacket(largest_acknowledged)) return null;
         for (self.packets.items) |packet| {
             if (largest_acknowledged) |largest| {
                 if (packet.packet_number > largest) {
@@ -1302,6 +1304,12 @@ pub const SentPacketTracker = struct {
             }
         }
         return low;
+    }
+
+    fn largestBeforeFirstPacket(self: SentPacketTracker, largest_acknowledged: ?u64) bool {
+        const largest = largest_acknowledged orelse return false;
+        return self.packets.items.len != 0 and
+            largest < self.packets.items[0].packet_number;
     }
 
     fn ackDoesNotAdvanceEcnLargest(self: SentPacketTracker, largest_acknowledged: u64) bool {
@@ -2047,6 +2055,21 @@ test "QUIC sent packet tracker detects time-threshold loss" {
     const remaining = sent.detectTimeThresholdLoss(1_000, 150, 2);
     try std.testing.expectEqual(@as(usize, 2), remaining.packets);
     try std.testing.expectEqual(@as(?u64, null), sent.timeThresholdLossDeadline(150, 2));
+}
+
+test "QUIC sent packet tracker skips time-threshold scan before first packet" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(10, true, 100, .not_ect, 1_000);
+    try sent.sentAt(11, true, 100, .not_ect, 2_000);
+
+    try std.testing.expectEqual(@as(?u64, null), sent.timeThresholdLossDeadline(100, 5));
+    const lost = sent.detectTimeThresholdLoss(10_000, 100, 5);
+    try std.testing.expectEqual(@as(usize, 0), lost.packets);
+    try std.testing.expect(!sent.packets.items[0].lost);
+    try std.testing.expect(!sent.packets.items[1].lost);
 }
 
 test "QUIC sent packet tracker reports latest ack-eliciting in-flight send time" {
