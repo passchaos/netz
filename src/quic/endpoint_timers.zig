@@ -67,24 +67,28 @@ pub const EndpointTimers = struct {
         connection_id: u64,
         timer: ?one_rtt.TimerDeadline,
     ) Error!void {
-        const index = self.findIndex(connection_id);
         if (timer) |deadline| {
             const entry = EndpointTimerDeadline{
                 .connection_id = connection_id,
                 .timer = deadline,
             };
-            if (index) |existing| {
+            const slot = try self.entry_index.getOrPut(
+                self.allocator,
+                connection_id,
+            );
+            if (slot.found_existing) {
+                const existing = slot.value_ptr.*;
                 self.entries.items[existing] = entry;
                 self.refreshEarliestAfterUpdate(existing);
             } else {
+                errdefer _ = self.entry_index.remove(connection_id);
                 try self.entries.ensureUnusedCapacity(self.allocator, 1);
-                try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
-                self.appendEntryAssumeCapacity(entry);
+                self.appendEntryAssumeCapacity(entry, slot.value_ptr);
                 self.considerEarliestIndex(self.entries.items.len - 1);
             }
             return;
         }
-        if (index) |existing| self.removeEntry(existing);
+        if (self.findIndex(connection_id)) |existing| self.removeEntry(existing);
     }
 
     pub fn disarmConnection(
@@ -131,10 +135,14 @@ pub const EndpointTimers = struct {
         return self.entry_index.get(connection_id);
     }
 
-    fn appendEntryAssumeCapacity(self: *EndpointTimers, entry: EndpointTimerDeadline) void {
+    fn appendEntryAssumeCapacity(
+        self: *EndpointTimers,
+        entry: EndpointTimerDeadline,
+        index_slot: *usize,
+    ) void {
         const index = self.entries.items.len;
         self.entries.appendAssumeCapacity(entry);
-        self.entry_index.putAssumeCapacityNoClobber(entry.connection_id, index);
+        index_slot.* = index;
     }
 
     fn refreshEarliestAfterUpdate(
