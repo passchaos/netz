@@ -918,7 +918,8 @@ pub const ControlState = struct {
     }
 
     pub fn pushCancelled(self: ControlState, push_id: u64) bool {
-        return self.peer_cancelled_push_index.contains(push_id);
+        return self.peer_cancelled_push_index.count() != 0 and
+            self.peer_cancelled_push_index.contains(push_id);
     }
 
     fn storePushCancellation(

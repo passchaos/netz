@@ -112,7 +112,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   on O(1) cursor pops, and emit ACK/MAX_DATA/MAX_STREAM_DATA so bodies can
   continue beyond their initially negotiated stream credit. Both
   protected clients also maintain persistent MAX_PUSH_ID/CANCEL_PUSH control
-  state with monotonic advertisement, per-ID cancellation retention, local
+  state with monotonic advertisement, per-ID cancellation retention and empty-cancel lookup skips, local
   STOP_SENDING of active cancelled pushes, single-probe cancellation recording,
   and advertised-range validation.
   Streaming response readers decode PUSH_PROMISE into owned promised-request
