@@ -784,15 +784,17 @@ fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: [
         try list.appendSlice(allocator, value);
         return;
     }
-    const huffman = try encodeHuffman(allocator, value);
-    defer allocator.free(huffman);
-    if (huffman.len < value.len) {
-        try encodePrefixedInteger(list, allocator, 7, 0x80, huffman.len);
-        try list.appendSlice(allocator, huffman);
-    } else {
+    const huffman_len = try huffmanEncodedLen(value);
+    if (huffman_len >= value.len) {
         try encodePrefixedInteger(list, allocator, 7, 0x00, value.len);
         try list.appendSlice(allocator, value);
+        return;
     }
+    const huffman = try encodeHuffman(allocator, value);
+    defer allocator.free(huffman);
+    std.debug.assert(huffman.len == huffman_len);
+    try encodePrefixedInteger(list, allocator, 7, 0x80, huffman.len);
+    try list.appendSlice(allocator, huffman);
 }
 
 const DecodedString = struct {
