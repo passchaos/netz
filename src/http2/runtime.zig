@@ -2698,13 +2698,18 @@ pub const Connection = struct {
     }
 
     fn storePeerOrigin(self: *Connection, origin: []const u8) Error!void {
-        if (self.peerOriginKnown(origin)) return;
-        try self.peer_origin_index.ensureUnusedCapacity(self.allocator, 1);
+        const slot = try self.peer_origin_index.getOrPut(
+            self.allocator,
+            origin,
+        );
+        if (slot.found_existing) return;
+        errdefer _ = self.peer_origin_index.remove(origin);
         const owned = try self.allocator.dupe(u8, origin);
         errdefer self.allocator.free(owned);
         const index = self.peer_origins.items.len;
         try self.peer_origins.append(self.allocator, owned);
-        self.peer_origin_index.putAssumeCapacityNoClobber(owned, index);
+        self.peer_origin_index.getKeyPtr(origin).?.* = owned;
+        slot.value_ptr.* = index;
     }
 
     fn applyLocalLimits(self: *Connection) void {
