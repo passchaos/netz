@@ -7145,6 +7145,7 @@ const ClientRequestLifecycle = struct {
     }
 
     fn finish(self: *ClientRequestLifecycle, stream_id: u62) bool {
+        if (self.outstanding_index.count() == 0) return false;
         const index = self.outstanding_index.get(stream_id) orelse return false;
         const last_index = self.outstanding.items.len - 1;
         const removed = self.outstanding.swapRemove(index);
