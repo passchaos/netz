@@ -1661,6 +1661,8 @@ fn chunkedWriteFraming(version: http1.Version, headers: []const http1.Header, tr
 
 fn renderTrailerHeaderValue(value: *std.ArrayList(u8), allocator: std.mem.Allocator, trailers: []const http1.Header) Error!void {
     value.clearRetainingCapacity();
+    var rendered_len: usize = 0;
+    var unique_count: usize = 0;
     for (trailers, 0..) |trailer, index| {
         var duplicate = false;
         for (trailers[0..index]) |prior| {
@@ -1670,8 +1672,23 @@ fn renderTrailerHeaderValue(value: *std.ArrayList(u8), allocator: std.mem.Alloca
             }
         }
         if (duplicate) continue;
-        if (value.items.len != 0) try value.appendSlice(allocator, ", ");
-        try value.appendSlice(allocator, trailer.name);
+        if (unique_count != 0) rendered_len = std.math.add(usize, rendered_len, 2) catch return error.InvalidTrailer;
+        rendered_len = std.math.add(usize, rendered_len, trailer.name.len) catch return error.InvalidTrailer;
+        unique_count += 1;
+    }
+    try value.ensureUnusedCapacity(allocator, rendered_len);
+
+    for (trailers, 0..) |trailer, index| {
+        var duplicate = false;
+        for (trailers[0..index]) |prior| {
+            if (trailer.eqlName(prior.name)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        if (value.items.len != 0) value.appendSliceAssumeCapacity(", ");
+        value.appendSliceAssumeCapacity(trailer.name);
     }
 }
 
