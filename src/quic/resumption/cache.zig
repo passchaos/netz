@@ -196,7 +196,13 @@ pub const Cache = struct {
     /// lease finish/ownership checks independent of cache size while preserving
     /// the existing lease ID wraparound semantics.
     lease_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    /// Cached hot-path state: LRU eviction and public stats are queried by
+    /// connection setup/recovery code, so maintain them transactionally instead
+    /// of rescanning the bounded ticket list on each read.
     evictable_lru_index: ?usize = null,
+    active_early_data_leases: usize = 0,
+    consumed_early_data_tickets: usize = 0,
+    reusable_early_data_tickets: usize = 0,
     max_entries: usize,
     access_clock: u64 = 0,
     next_lease_id: u64 = 1,
@@ -224,20 +230,12 @@ pub const Cache = struct {
     }
 
     pub fn stats(self: *const Cache) CacheStats {
-        var active_leases: usize = 0;
-        var consumed: usize = 0;
-        var reusable_early_data: usize = 0;
-        for (self.entries.items) |entry| {
-            if (entry.lease_id != null) active_leases += 1;
-            if (entry.early_data_consumed) consumed += 1;
-            if (entry.allowsEarlyData()) reusable_early_data += 1;
-        }
         return .{
             .entries = self.entries.items.len,
             .capacity = self.max_entries,
-            .active_early_data_leases = active_leases,
-            .consumed_early_data_tickets = consumed,
-            .reusable_early_data_tickets = reusable_early_data,
+            .active_early_data_leases = self.active_early_data_leases,
+            .consumed_early_data_tickets = self.consumed_early_data_tickets,
+            .reusable_early_data_tickets = self.reusable_early_data_tickets,
         };
     }
 
@@ -316,9 +314,11 @@ pub const Cache = struct {
         var session = try self.copySession(entry.*);
         errdefer session.deinit();
         const lease_id = self.nextLeaseId();
+        self.removeEntryStats(entry.*);
         entry.lease_id = lease_id;
         entry.last_used = self.nextAccess();
         self.lease_index.putAssumeCapacityNoClobber(lease_id, index);
+        self.addEntryStats(entry.*);
         if (self.evictable_lru_index == index) self.recomputeEvictableLru();
         return .{
             .owner = self,
@@ -381,10 +381,12 @@ pub const Cache = struct {
             return error.UnknownLease;
         var entry = &self.entries.items[index];
         if (entry.lease_id != lease.lease_id) return error.UnknownLease;
+        self.removeEntryStats(entry.*);
         entry.lease_id = null;
         _ = self.lease_index.remove(lease.lease_id);
         entry.early_data_consumed = consumed;
         entry.last_used = self.nextAccess();
+        self.addEntryStats(entry.*);
         self.considerEvictableLru(index);
         lease.state = if (consumed) .consumed else .released;
     }
@@ -482,16 +484,19 @@ pub const Cache = struct {
             self.entries.items[index].originAlpnKey(),
             index,
         );
+        self.addEntryStats(self.entries.items[index]);
         self.considerEvictableLru(index);
     }
 
     fn replaceEntryAt(self: *Cache, index: usize, replacement: Entry) void {
         var replaced = self.entries.items[index];
         std.debug.assert(replaced.lease_id == null);
+        self.removeEntryStats(replaced);
         self.entries.items[index] = replacement;
         const key_ptr = self.origin_index.getKeyPtr(replaced.originAlpnKey()) orelse
             unreachable;
         key_ptr.* = self.entries.items[index].originAlpnKey();
+        self.addEntryStats(self.entries.items[index]);
         if (self.evictable_lru_index == index) self.recomputeEvictableLru() else self.considerEvictableLru(index);
         replaced.deinit(self.allocator);
     }
@@ -500,6 +505,7 @@ pub const Cache = struct {
         const old_len = self.entries.items.len;
         const lru = self.evictable_lru_index;
         const removed = self.entries.swapRemove(index);
+        self.removeEntryStats(removed);
         _ = self.origin_index.remove(removed.originAlpnKey());
         if (removed.lease_id) |lease_id| {
             _ = self.lease_index.remove(lease_id);
@@ -515,6 +521,18 @@ pub const Cache = struct {
             self.evictable_lru_index = index;
         }
         return removed;
+    }
+
+    fn addEntryStats(self: *Cache, entry: Entry) void {
+        if (entry.lease_id != null) self.active_early_data_leases += 1;
+        if (entry.early_data_consumed) self.consumed_early_data_tickets += 1;
+        if (entry.allowsEarlyData()) self.reusable_early_data_tickets += 1;
+    }
+
+    fn removeEntryStats(self: *Cache, entry: Entry) void {
+        if (entry.lease_id != null) self.active_early_data_leases -|= 1;
+        if (entry.early_data_consumed) self.consumed_early_data_tickets -|= 1;
+        if (entry.allowsEarlyData()) self.reusable_early_data_tickets -|= 1;
     }
 
     fn reindexMovedEntry(self: *Cache, index: usize) void {

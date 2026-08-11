@@ -158,18 +158,26 @@ test "resumption cache stats expose lease and early-data state" {
     try std.testing.expectEqual(@as(usize, 0), initial.active_early_data_leases);
     try std.testing.expectEqual(@as(usize, 0), initial.consumed_early_data_tickets);
     try std.testing.expectEqual(@as(usize, 1), initial.reusable_early_data_tickets);
+    try std.testing.expectEqual(initial.active_early_data_leases, cache.active_early_data_leases);
+    try std.testing.expectEqual(initial.consumed_early_data_tickets, cache.consumed_early_data_tickets);
+    try std.testing.expectEqual(initial.reusable_early_data_tickets, cache.reusable_early_data_tickets);
 
     var lease = (try cache.beginEarlyData("early", "h3", 1001)).?;
     defer lease.deinit();
     const leased = cache.getStats();
     try std.testing.expectEqual(@as(usize, 1), leased.active_early_data_leases);
     try std.testing.expectEqual(@as(usize, 0), leased.reusable_early_data_tickets);
+    try std.testing.expectEqual(leased.active_early_data_leases, cache.active_early_data_leases);
+    try std.testing.expectEqual(leased.reusable_early_data_tickets, cache.reusable_early_data_tickets);
 
     try cache.consumeEarlyData(&lease);
     const consumed = cache.stats();
     try std.testing.expectEqual(@as(usize, 0), consumed.active_early_data_leases);
     try std.testing.expectEqual(@as(usize, 1), consumed.consumed_early_data_tickets);
     try std.testing.expectEqual(@as(usize, 0), consumed.reusable_early_data_tickets);
+    try std.testing.expectEqual(consumed.active_early_data_leases, cache.active_early_data_leases);
+    try std.testing.expectEqual(consumed.consumed_early_data_tickets, cache.consumed_early_data_tickets);
+    try std.testing.expectEqual(consumed.reusable_early_data_tickets, cache.reusable_early_data_tickets);
 }
 
 test "resumption cache expires tickets and validates lifetime" {
