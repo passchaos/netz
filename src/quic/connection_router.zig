@@ -104,6 +104,7 @@ pub const Router = struct {
 
     pub fn unregister(self: *Router, connection_id: []const u8) Error!bool {
         const key = try ConnectionIdKey.init(connection_id);
+        if (self.length_counts[key.len] == 0) return false;
         const removed = self.map.remove(key);
         if (removed) self.noteUnregisteredLength(key.len);
         return removed;
@@ -206,6 +207,8 @@ test "QUIC connection router maps and retires connection IDs" {
     try router.register("server-cid-b", .{ .connection_index = 1, .sequence_number = 2 });
     try std.testing.expectEqual(@as(usize, 2), router.length_counts[12]);
     try std.testing.expectError(error.DuplicateConnectionId, router.register("server-cid-a", .{ .connection_index = 9 }));
+    try std.testing.expect(!(try router.unregister("xy")));
+    try std.testing.expectEqual(@as(usize, 0), router.length_counts[2]);
 
     const first = (try router.lookup("server-cid-a")).?;
     try std.testing.expectEqual(@as(usize, 0), first.connection_index);
