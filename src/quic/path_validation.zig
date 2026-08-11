@@ -116,20 +116,30 @@ pub const State = struct {
     }
 
     pub fn queueChallenge(self: *State, data: [8]u8) Error!void {
-        if (self.pending_challenge_index.contains(data) or
-            self.outstanding_challenge_index.contains(data)) return;
+        if (self.outstanding_challenge_index.contains(data)) return;
+        const slot = try self.pending_challenge_index.getOrPut(
+            self.allocator,
+            data,
+        );
+        if (slot.found_existing) return;
+        errdefer _ = self.pending_challenge_index.remove(data);
+
         try self.pending_challenges.ensureUnusedCapacity(self.allocator, 1);
-        try self.pending_challenge_index.ensureUnusedCapacity(self.allocator, 1);
         self.pending_challenges.appendAssumeCapacity(.{ .data = data });
-        self.pending_challenge_index.putAssumeCapacityNoClobber(data, {});
+        slot.value_ptr.* = {};
     }
 
     pub fn receiveChallenge(self: *State, data: [8]u8) Error!bool {
-        if (self.pending_response_index.contains(data)) return false;
+        const slot = try self.pending_response_index.getOrPut(
+            self.allocator,
+            data,
+        );
+        if (slot.found_existing) return false;
+        errdefer _ = self.pending_response_index.remove(data);
+
         try self.pending_responses.ensureUnusedCapacity(self.allocator, 1);
-        try self.pending_response_index.ensureUnusedCapacity(self.allocator, 1);
         self.pending_responses.appendAssumeCapacity(data);
-        self.pending_response_index.putAssumeCapacityNoClobber(data, {});
+        slot.value_ptr.* = {};
         return true;
     }
 
