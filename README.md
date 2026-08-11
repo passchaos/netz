@@ -102,7 +102,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   outstanding response and reset. Both directions provide
   indexed active streaming readers, bounded-window network reads with automatic QPACK head/trailer feedback,
   interleaved-stream and reset identity preservation, Content-Length
-  validation, and no full-body aggregation. When UDP_GRO is enabled, protected
+  validation, prepared reset-record fast paths, and no full-body aggregation. When UDP_GRO is enabled, protected
   and handshake packet pumps retain the decrypted batch behind a one-packet
   cursor, and reuse compacted pending receive slots, amortizing recvmsg/decryption without bulk-inserting the whole GRO
   payload into a small HTTP/3 stream window. Handshake streaming readers return

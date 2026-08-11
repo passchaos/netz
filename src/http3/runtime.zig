@@ -6135,6 +6135,33 @@ const StreamingMessageSet = struct {
             reset.application_error_code = application_error_code;
             return;
         }
+        self.recordNewResetAssumeCapacity(
+            from,
+            stream_id,
+            application_error_code,
+        );
+    }
+
+    fn recordPreparedNewResetAssumeCapacity(
+        self: *StreamingMessageSet,
+        from: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    ) void {
+        std.debug.assert(self.reset_index.get(stream_id) == null);
+        self.recordNewResetAssumeCapacity(
+            from,
+            stream_id,
+            application_error_code,
+        );
+    }
+
+    fn recordNewResetAssumeCapacity(
+        self: *StreamingMessageSet,
+        from: net.IpAddress,
+        stream_id: u62,
+        application_error_code: u64,
+    ) void {
         var removed_entry = self.takeEntry(stream_id);
         if (self.reset_head != 0 and
             self.resets.items.len == self.resets.capacity)
@@ -8051,7 +8078,7 @@ fn applyServerRequestPacketFrames(
                     try qpack_decode.recordStreamCancellation(stream_id);
                     cancel_qpack = false;
                 }
-                streaming.recordResetAssumeCapacity(
+                streaming.recordPreparedNewResetAssumeCapacity(
                     from,
                     stream_id,
                     frame.reset_stream.application_error_code,
