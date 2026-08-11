@@ -308,7 +308,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   extraction with validated config rotation/lengths, Appendix B single-pass and
   nibble-correct four-pass AES vectors, caller-provided nonce entropy, and
   transactional local-CID/reset-token issuance,
-  transport/application CONNECTION_CLOSE state including frame-payload, ACK, ACK_FREQUENCY negotiation, DATAGRAM negotiation, stream-limit/state/flow-control/final-size/data-conflict, server-only frame, and selected semantic error close emission, indexed PATH_CHALLENGE/PATH_RESPONSE validation state with single-lookup duplicate challenge/response suppression and caller-storage batch drains/sends wired into 1-RTT,
+  transport/application CONNECTION_CLOSE state including frame-payload, ACK, ACK_FREQUENCY negotiation, DATAGRAM negotiation, stream-limit/state/flow-control/final-size/data-conflict, server-only frame, and selected semantic error close emission, indexed PATH_CHALLENGE/PATH_RESPONSE validation state with empty-outstanding lookup skips, single-lookup duplicate challenge/response suppression, and caller-storage batch drains/sends wired into 1-RTT,
   peer-migration helpers and authenticated non-probing packet receive handling
   that honor disable_active_migration, preserve congestion/PMTU state for NAT
   rebinding, apply a server preferred_address by selecting its CID/reset token

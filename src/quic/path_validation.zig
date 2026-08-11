@@ -116,7 +116,8 @@ pub const State = struct {
     }
 
     pub fn queueChallenge(self: *State, data: [8]u8) Error!void {
-        if (self.outstanding_challenge_index.contains(data)) return;
+        if (self.outstanding_challenge_index.count() != 0 and
+            self.outstanding_challenge_index.contains(data)) return;
         const slot = try self.pending_challenge_index.getOrPut(
             self.allocator,
             data,
