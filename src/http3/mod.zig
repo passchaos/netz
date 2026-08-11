@@ -1064,15 +1064,15 @@ pub const PriorityUpdatePayload = struct {
 };
 
 pub fn writeControlStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-    try quic.varint.encode(list, allocator, @intFromEnum(StreamType.control));
+    try list.append(allocator, @intFromEnum(StreamType.control));
 }
 
 pub fn writeQpackEncoderStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-    try quic.varint.encode(list, allocator, @intFromEnum(StreamType.qpack_encoder));
+    try list.append(allocator, @intFromEnum(StreamType.qpack_encoder));
 }
 
 pub fn writeQpackDecoderStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-    try quic.varint.encode(list, allocator, @intFromEnum(StreamType.qpack_decoder));
+    try list.append(allocator, @intFromEnum(StreamType.qpack_decoder));
 }
 
 pub fn writeSettingsFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
@@ -3368,6 +3368,22 @@ test "HTTP/3 frame header parses before payload arrives" {
             Frame.parseHeader(encoded.items[0..len]),
         );
     }
+}
+
+test "HTTP/3 unidirectional stream prefixes write fixed bytes" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try writeControlStreamPrefix(&encoded, allocator);
+    try writeQpackEncoderStreamPrefix(&encoded, allocator);
+    try writeQpackDecoderStreamPrefix(&encoded, allocator);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        @intFromEnum(StreamType.control),
+        @intFromEnum(StreamType.qpack_encoder),
+        @intFromEnum(StreamType.qpack_decoder),
+    }, encoded.items);
 }
 
 test "HTTP/3 rejects reserved HTTP/2 frame types" {
