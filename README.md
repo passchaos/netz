@@ -92,7 +92,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   enforces the configured concurrency bound. Protected clients and servers also
   expose `startRequest`/`sendRequestBody` and
   `startResponse`/`sendResponseBody`, preserving per-stream QUIC offsets across
-  multiple DATA chunks with single-lookup chunk accounting and enforcing declared Content-Length at FIN. Streaming
+  multiple DATA chunks with single-lookup chunk accounting plus cached FIN cleanup and enforcing declared Content-Length at FIN. Streaming
   messages can instead finish with dynamic QPACK trailer HEADERS through
   indexed streaming body state for
   `finishRequestTrailers`/`finishResponseTrailers`. Preconfigured-protection

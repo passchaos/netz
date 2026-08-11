@@ -7116,7 +7116,14 @@ const OutboundBodySet = struct {
     }
 
     fn finish(self: *OutboundBodySet, stream_id: u62) bool {
-        const index = self.entry_index.get(stream_id) orelse return false;
+        const index = if (self.last_entry_index) |cached| blk: {
+            if (cached < self.entries.items.len and
+                self.entries.items[cached].send.stream_id == stream_id)
+            {
+                break :blk cached;
+            }
+            break :blk self.entry_index.get(stream_id) orelse return false;
+        } else self.entry_index.get(stream_id) orelse return false;
         const last_index = self.entries.items.len - 1;
         const removed = self.entries.swapRemove(index);
         _ = self.entry_index.remove(@intCast(removed.send.stream_id));
