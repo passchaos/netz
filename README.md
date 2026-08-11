@@ -277,7 +277,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   reordered-ACK_ECN tolerance, and plain-ACK ECN fallback disablement, RFC 9002-style RTT/PTO estimation with negotiated ACK-delay
   encode/decode zero-exponent fast paths and zero-delay adjustment skips, pre-first packet/time-threshold loss skips, packet/time-threshold loss detection, earliest loss/PTO timer
   deadlines, capped exponential PTO backoff, two-probe PTO service, and persistent
-  congestion detection that collapses the congestion window and resets the RTT
+  congestion detection with already-reported period skips that collapses the congestion window and resets the RTT
   measurement epoch after long contiguous lost periods, default RFC 9002 token-bucket
   send pacing with configurable burst/disable controls, zero-packet sent no-ops, current-budget deadline skips, full-budget arithmetic skips, exact retry deadlines,
   ACK bypass, transactional rejection, and path-reset handling, allocation-free short-packet

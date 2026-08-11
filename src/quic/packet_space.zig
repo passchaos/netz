@@ -933,6 +933,11 @@ pub const SentPacketTracker = struct {
         after_packet_number: ?u64,
     ) ?PersistentCongestionPeriod {
         const first_sample_time = first_rtt_sample_time_ns orelse return null;
+        if (after_packet_number) |after| {
+            if (largest_acknowledged) |largest| {
+                if (after >= largest) return null;
+            }
+        }
 
         var best: ?PersistentCongestionPeriod = null;
         var current: ?PersistentCongestionBuilder = null;
@@ -2205,6 +2210,10 @@ test "QUIC sent packet tracker finds persistent congestion periods" {
     try std.testing.expectEqual(
         @as(?SentPacketTracker.PersistentCongestionPeriod, null),
         sent.persistentCongestionPeriod(500, sent.largestAcknowledged(), 4),
+    );
+    try std.testing.expectEqual(
+        @as(?SentPacketTracker.PersistentCongestionPeriod, null),
+        sent.persistentCongestionPeriod(500, sent.largestAcknowledged(), sent.largestAcknowledged()),
     );
 }
 
