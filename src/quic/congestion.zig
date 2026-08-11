@@ -96,6 +96,7 @@ pub const Controller = struct {
     }
 
     pub fn reserve(self: *Controller, bytes: usize) Error!void {
+        if (bytes == 0) return;
         if (!self.canSend(bytes)) return error.CongestionLimited;
         self.bytes_in_flight += bytes;
     }
@@ -344,6 +345,8 @@ pub fn minimumWindow(max_datagram_size: usize) usize {
 test "QUIC congestion controller gates sends and grows on ACK" {
     var cc = Controller.init(1200);
     try std.testing.expectEqual(@as(usize, 12_000), cc.congestion_window);
+    try cc.reserve(0);
+    try std.testing.expectEqual(@as(usize, 0), cc.bytes_in_flight);
     try cc.reserve(1200);
     try std.testing.expectEqual(@as(usize, 1200), cc.bytes_in_flight);
     cc.onAcked(1200);
