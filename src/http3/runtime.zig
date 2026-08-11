@@ -1553,7 +1553,8 @@ pub const QpackEncodeState = struct {
     }
 
     pub fn hasPendingSections(self: QpackEncodeState, stream_id: u64) bool {
-        return self.pending_section_index.contains(stream_id);
+        return self.pending_section_index.count() != 0 and
+            self.pending_section_index.contains(stream_id);
     }
 
     fn rollbackPendingSections(self: *QpackEncodeState, original_len: usize) void {
@@ -1597,6 +1598,7 @@ pub const QpackEncodeState = struct {
     }
 
     fn findPendingSection(self: QpackEncodeState, stream_id: u64) ?usize {
+        if (self.pending_section_index.count() == 0) return null;
         return self.pending_section_index.get(stream_id);
     }
 
@@ -1633,6 +1635,7 @@ pub const QpackEncodeState = struct {
         self: *QpackEncodeState,
         stream_id: u64,
     ) usize {
+        if (self.pending_section_index.count() == 0) return 0;
         const start_index = self.pending_section_index.get(stream_id) orelse return 0;
         var write_index: usize = start_index;
         var released: usize = 0;
@@ -10268,6 +10271,8 @@ test "HTTP/3 QPACK encoder state waits for insert acknowledgment before dynamic 
     });
     try std.testing.expectEqual(@as(usize, 0), encoder.pending_sections.items.len);
     try std.testing.expect(!encoder.reference_counts.contains(0));
+    try std.testing.expect(!encoder.hasPendingSections(4));
+    encoder.abandonStream(4);
 
     // Retransmitting the same decoder bytes cannot acknowledge twice.
     try encoder.applyDecoderStreamFrame(&control, .{
