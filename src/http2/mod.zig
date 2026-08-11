@@ -63,11 +63,10 @@ pub const FrameHeader = struct {
 
     pub fn parse(bytes: []const u8) Error!FrameHeader {
         if (bytes.len < encoded_len) return error.BufferTooShort;
-        var cursor = wire.Cursor.init(bytes);
-        const len = try wire.readU24(&cursor);
-        const typ: FrameType = @enumFromInt(try cursor.readByte());
-        const flags = try cursor.readByte();
-        const raw_stream = try cursor.readInt(u32, .big);
+        const len = (@as(u24, bytes[0]) << 16) | (@as(u24, bytes[1]) << 8) | @as(u24, bytes[2]);
+        const typ: FrameType = @enumFromInt(bytes[3]);
+        const flags = bytes[4];
+        const raw_stream = std.mem.readInt(u32, bytes[5..9], .big);
         return .{
             .length = len,
             .frame_type = typ,
