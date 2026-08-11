@@ -71,6 +71,35 @@ test "HTTP/3 QPACK static table name index preserves RFC lookup order" {
     try std.testing.expect(Qpack.findStaticName("x-not-static") == null);
 }
 
+test "HTTP/3 QPACK static table fast-matches pseudo headers" {
+    const pseudo = [_]struct {
+        name: []const u8,
+        value: []const u8,
+        index: u64,
+    }{
+        .{ .name = ":method", .value = "GET", .index = 17 },
+        .{ .name = ":method", .value = "POST", .index = 20 },
+        .{ .name = ":scheme", .value = "https", .index = 23 },
+        .{ .name = ":status", .value = "200", .index = 25 },
+        .{ .name = ":status", .value = "204", .index = 64 },
+        .{ .name = ":path", .value = "/", .index = 1 },
+        .{ .name = ":authority", .value = "", .index = 0 },
+    };
+    for (pseudo) |field| {
+        const match = static_table.findMatch(field.name, field.value) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(match.full_match);
+        try std.testing.expectEqual(field.index, match.index);
+    }
+
+    const unmatched_status = static_table.findMatch(":status", "201") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!unmatched_status.full_match);
+    try std.testing.expectEqual(@as(u64, 24), unmatched_status.index);
+    try std.testing.expectEqual(@as(?u64, 15), static_table.findName(":method"));
+    try std.testing.expectEqual(@as(?u64, 22), static_table.findName(":scheme"));
+}
+
 test "HTTP/3 QPACK dynamic table applies RFC 9204 Appendix B encoder stream" {
     const allocator = std.testing.allocator;
     var table = Qpack.DynamicTable.init(allocator, 220);

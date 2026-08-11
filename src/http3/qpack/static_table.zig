@@ -7,6 +7,11 @@ pub const Entry = struct {
     value: []const u8,
 };
 
+const StaticMatch = struct {
+    index: u64,
+    full_match: bool,
+};
+
 // RFC 9204 Appendix A static table.  Keeping the full table makes the
 // bootstrap encoder interoperate with peers that use common indexed field
 // lines without introducing dynamic-table state or head-of-line blocking.
@@ -172,7 +177,8 @@ const name_index = std.StaticStringMap([]const u8).initComptime(.{
     .{ "x-frame-options", &[_]u8{ 97, 98 } },
 });
 
-pub fn findMatch(name: []const u8, value: []const u8) ?struct { index: u64, full_match: bool } {
+pub fn findMatch(name: []const u8, value: []const u8) ?StaticMatch {
+    if (fastPseudoHeaderMatch(name, value)) |match| return match;
     const indexes = name_index.get(name) orelse return null;
     // QPACK encoders probe the static table for every field section.  The
     // reference Zig implementations under ~/Work scan all 99 entries; keep a
@@ -188,6 +194,61 @@ pub fn findMatch(name: []const u8, value: []const u8) ?struct { index: u64, full
 }
 
 pub fn findName(name: []const u8) ?u64 {
+    if (fastPseudoHeaderName(name)) |index| return index;
     const indexes = name_index.get(name) orelse return null;
     return indexes[0];
+}
+
+fn fastPseudoHeaderMatch(
+    name: []const u8,
+    value: []const u8,
+) ?StaticMatch {
+    if (std.mem.eql(u8, name, ":method")) {
+        if (std.mem.eql(u8, value, "CONNECT")) return .{ .index = 15, .full_match = true };
+        if (std.mem.eql(u8, value, "DELETE")) return .{ .index = 16, .full_match = true };
+        if (std.mem.eql(u8, value, "GET")) return .{ .index = 17, .full_match = true };
+        if (std.mem.eql(u8, value, "HEAD")) return .{ .index = 18, .full_match = true };
+        if (std.mem.eql(u8, value, "OPTIONS")) return .{ .index = 19, .full_match = true };
+        if (std.mem.eql(u8, value, "POST")) return .{ .index = 20, .full_match = true };
+        if (std.mem.eql(u8, value, "PUT")) return .{ .index = 21, .full_match = true };
+        return .{ .index = 15, .full_match = false };
+    }
+    if (std.mem.eql(u8, name, ":scheme")) {
+        if (std.mem.eql(u8, value, "http")) return .{ .index = 22, .full_match = true };
+        if (std.mem.eql(u8, value, "https")) return .{ .index = 23, .full_match = true };
+        return .{ .index = 22, .full_match = false };
+    }
+    if (std.mem.eql(u8, name, ":status")) {
+        if (std.mem.eql(u8, value, "103")) return .{ .index = 24, .full_match = true };
+        if (std.mem.eql(u8, value, "200")) return .{ .index = 25, .full_match = true };
+        if (std.mem.eql(u8, value, "304")) return .{ .index = 26, .full_match = true };
+        if (std.mem.eql(u8, value, "404")) return .{ .index = 27, .full_match = true };
+        if (std.mem.eql(u8, value, "503")) return .{ .index = 28, .full_match = true };
+        if (std.mem.eql(u8, value, "100")) return .{ .index = 63, .full_match = true };
+        if (std.mem.eql(u8, value, "204")) return .{ .index = 64, .full_match = true };
+        if (std.mem.eql(u8, value, "206")) return .{ .index = 65, .full_match = true };
+        if (std.mem.eql(u8, value, "302")) return .{ .index = 66, .full_match = true };
+        if (std.mem.eql(u8, value, "400")) return .{ .index = 67, .full_match = true };
+        if (std.mem.eql(u8, value, "403")) return .{ .index = 68, .full_match = true };
+        if (std.mem.eql(u8, value, "421")) return .{ .index = 69, .full_match = true };
+        if (std.mem.eql(u8, value, "425")) return .{ .index = 70, .full_match = true };
+        if (std.mem.eql(u8, value, "500")) return .{ .index = 71, .full_match = true };
+        return .{ .index = 24, .full_match = false };
+    }
+    if (std.mem.eql(u8, name, ":authority")) {
+        return .{ .index = 0, .full_match = value.len == 0 };
+    }
+    if (std.mem.eql(u8, name, ":path")) {
+        return .{ .index = 1, .full_match = std.mem.eql(u8, value, "/") };
+    }
+    return null;
+}
+
+fn fastPseudoHeaderName(name: []const u8) ?u64 {
+    if (std.mem.eql(u8, name, ":authority")) return 0;
+    if (std.mem.eql(u8, name, ":path")) return 1;
+    if (std.mem.eql(u8, name, ":method")) return 15;
+    if (std.mem.eql(u8, name, ":scheme")) return 22;
+    if (std.mem.eql(u8, name, ":status")) return 24;
+    return null;
 }
