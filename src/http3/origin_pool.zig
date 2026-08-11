@@ -144,6 +144,7 @@ pub fn Pool(comptime Handle: type) type {
         }
 
         pub fn idleCountForOrigin(self: *const Self, origin: http3.Origin) usize {
+            if (self.entries.items.len == 0) return 0;
             const bucket = self.origin_index.get(originIndexKey(origin)) orelse return 0;
             return bucket.count;
         }
@@ -164,7 +165,15 @@ pub fn Pool(comptime Handle: type) type {
         }
 
         pub fn acquire(self: *Self, origin: http3.Origin, now_ms: u64) ?Handle {
+            if (self.entries.items.len == 0) {
+                self.total_misses +|= 1;
+                return null;
+            }
             _ = self.pruneExpired(now_ms);
+            if (self.entries.items.len == 0) {
+                self.total_misses +|= 1;
+                return null;
+            }
             const bucket = self.origin_index.get(originIndexKey(origin)) orelse {
                 self.total_misses +|= 1;
                 return null;
