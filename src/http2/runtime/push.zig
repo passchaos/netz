@@ -189,16 +189,25 @@ pub const State = struct {
     ) bool {
         if (!self.releaseRemote(stream_id)) return false;
         if (self.pending_index.get(stream_id)) |index| {
-            var removed = if (index == self.pending.items.len - 1)
+            const removed_head = index == self.pending_head;
+            var removed = if (removed_head) removed: {
+                const promise = self.pending.items[self.pending_head];
+                self.pending_head += 1;
+                break :removed promise;
+            } else if (index == self.pending.items.len - 1)
                 self.pending.pop().?
             else
                 self.pending.orderedRemove(index);
             _ = self.pending_index.remove(stream_id);
             removed.deinit(allocator);
-            if (index < self.pending.items.len) {
+            if (removed_head) {
+                self.compactPendingIfSparse();
+            } else if (index < self.pending.items.len) {
                 self.repairPendingIndexFrom(index);
+                self.compactPendingIfSparse();
+            } else {
+                self.compactPendingIfSparse();
             }
-            self.compactPendingIfSparse();
         }
         return true;
     }
@@ -352,8 +361,8 @@ test "push reservation indexes track local remote and pending lifecycles" {
     try std.testing.expectEqual(@as(?usize, 0), state.pending_index.get(4));
     try std.testing.expectEqual(@as(?usize, 1), state.pending_index.get(6));
 
-    // Canceling a queued promise removes one pending entry with orderedRemove
-    // and one remote reservation with swapRemove. Both indexes must be repaired
+    // Canceling the queued head advances the FIFO cursor, while canceling a
+    // middle promise still uses orderedRemove. Both paths must repair indexes
     // before callers can inspect, cancel, or consume the remaining promise.
     try std.testing.expect(state.cancelRemote(allocator, 4));
     try std.testing.expect(!state.hasPending(4));
