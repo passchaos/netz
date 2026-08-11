@@ -1234,6 +1234,18 @@ pub const Hpack = struct {
             if (value.len == 0) return 1;
             return null;
         }
+        if (std.mem.eql(u8, name, "accept-encoding")) {
+            if (std.mem.eql(u8, value, "gzip, deflate")) return 16;
+            return null;
+        }
+        if (std.mem.eql(u8, name, "content-length")) {
+            if (value.len == 0) return 28;
+            return null;
+        }
+        if (std.mem.eql(u8, name, "content-type")) {
+            if (value.len == 0) return 31;
+            return null;
+        }
         return null;
     }
 
@@ -1243,6 +1255,9 @@ pub const Hpack = struct {
         if (std.mem.eql(u8, name, ":path")) return 4;
         if (std.mem.eql(u8, name, ":scheme")) return 6;
         if (std.mem.eql(u8, name, ":status")) return 8;
+        if (std.mem.eql(u8, name, "accept-encoding")) return 16;
+        if (std.mem.eql(u8, name, "content-length")) return 28;
+        if (std.mem.eql(u8, name, "content-type")) return 31;
         return null;
     }
 
@@ -2197,6 +2212,10 @@ test "HTTP/2 HPACK static lookup index preserves one-indexed table order" {
     try std.testing.expectEqual(@as(?u64, 4), Hpack.findStaticIndex(":path", "/"));
     try std.testing.expectEqual(@as(?u64, 7), Hpack.findStaticIndex(":scheme", "https"));
     try std.testing.expectEqual(@as(?u64, 9), Hpack.findStaticIndex(":status", "204"));
+    try std.testing.expectEqual(@as(?u64, 16), Hpack.findStaticIndex("accept-encoding", "gzip, deflate"));
+    try std.testing.expectEqual(@as(?u64, 28), Hpack.findStaticIndex("content-length", ""));
+    try std.testing.expectEqual(@as(?u64, 31), Hpack.findStaticIndex("content-type", ""));
+    try std.testing.expectEqual(@as(?u64, 16), Hpack.findStaticNameIndex("accept-encoding"));
     try std.testing.expect(Hpack.findStaticIndex(":status", "418") == null);
     try std.testing.expect(Hpack.findStaticNameIndex("x-not-static") == null);
 }
