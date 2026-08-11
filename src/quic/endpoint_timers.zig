@@ -132,6 +132,7 @@ pub const EndpointTimers = struct {
     }
 
     fn findIndex(self: *const EndpointTimers, connection_id: u64) ?usize {
+        if (self.entry_index.count() == 0) return null;
         return self.entry_index.get(connection_id);
     }
 
