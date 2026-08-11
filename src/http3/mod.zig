@@ -1105,11 +1105,13 @@ pub fn writePushPromiseFrame(
     push_id: u64,
     field_section: []const u8,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try quic.varint.encode(&payload, allocator, push_id);
-    try payload.appendSlice(allocator, field_section);
-    try (Frame{ .frame_type = FrameType.push_promise, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+    const push_id_len = try quic.varint.length(push_id);
+    const payload_len = std.math.add(usize, push_id_len, field_section.len) catch return error.IntegerOverflow;
+    try writeFrameHeader(list, allocator, FrameType.push_promise, payload_len);
+    var push_id_buf: [8]u8 = undefined;
+    const encoded_push_id = try quic.varint.encodeInto(&push_id_buf, push_id);
+    try list.appendSlice(allocator, encoded_push_id);
+    try list.appendSlice(allocator, field_section);
 }
 
 pub fn writePushPromiseDynamic(
@@ -3886,6 +3888,16 @@ test "HTTP/3 PUSH_PROMISE frame payload and limit validation" {
     try validateResponsePushPromises(.{ .local_max_push_id = 3 }, response_with_push.items);
     try std.testing.expectError(error.PushIdExceeded, validateResponsePushPromises(.{}, response_with_push.items));
     try std.testing.expectError(error.PushIdExceeded, validateResponsePushPromises(.{ .local_max_push_id = 2 }, response_with_push.items));
+
+    var no_alloc_encoded: std.ArrayList(u8) = .empty;
+    defer no_alloc_encoded.deinit(allocator);
+    try no_alloc_encoded.ensureTotalCapacity(allocator, 64);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try writePushPromiseFrame(&no_alloc_encoded, no_alloc.allocator(), 3, field_section.items);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    const no_alloc_frame = try Frame.parse(no_alloc_encoded.items);
+    try std.testing.expectEqual(FrameType.push_promise, no_alloc_frame.frame_type);
+    try std.testing.expectEqual(@as(u64, 3), (try parsePushPromisePayload(no_alloc_frame.payload)).push_id);
 }
 
 test "HTTP/3 enforces SETTINGS_MAX_FIELD_SECTION_SIZE" {
