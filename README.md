@@ -163,7 +163,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   no-new-ACK short-circuiting, tail-forget fast paths, cached sortedness for
   ACK/loss scans, and single-pass ACK marking,
   receive-frame semantic preflight before multi-frame side effects, and adaptive truncated packet-number
-  encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with
+  encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with single-lookup send-flow creation,
   duplicate-overlap conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,
   RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,

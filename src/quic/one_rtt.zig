@@ -4958,14 +4958,20 @@ pub const Connection = struct {
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             try self.validateLocalStreamCount(stream_id);
         }
+        const slot = try self.stream_send_index.getOrPut(
+            self.endpoint.allocator,
+            stream_id,
+        );
+        std.debug.assert(!slot.found_existing);
+        errdefer _ = self.stream_send_index.remove(stream_id);
+
         try self.stream_send_flows.ensureUnusedCapacity(self.endpoint.allocator, 1);
-        try self.stream_send_index.ensureUnusedCapacity(self.endpoint.allocator, 1);
         const index = self.stream_send_flows.items.len;
         self.stream_send_flows.appendAssumeCapacity(.{
             .stream_id = stream_id,
             .flow = .init(self.initialSendStreamDataLimit(stream_id)),
         });
-        self.stream_send_index.putAssumeCapacity(stream_id, index);
+        slot.value_ptr.* = index;
         self.last_send_stream_index = index;
         if (streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             self.outgoing_streams_created_count +|= 1;
