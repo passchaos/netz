@@ -7386,6 +7386,7 @@ const ServerRequestLifecycle = struct {
 
     fn markFinished(self: *ServerRequestLifecycle, stream_id: u64) void {
         const key = std.math.cast(u62, stream_id) orelse return;
+        if (self.active_stream_index.count() == 0) return;
         const index = self.active_stream_index.get(key) orelse return;
         const last_index = self.active_streams.items.len - 1;
         const lowest = self.lowest_active_stream_index;
@@ -7484,6 +7485,8 @@ test "HTTP/3 server request lifecycle indexes active streams" {
     lifecycle.markFinished(0);
     try std.testing.expectEqual(@as(?u62, null), lifecycle.lowestActiveStream());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.active_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.active_stream_index.count());
+    lifecycle.markFinished(16);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.active_stream_index.count());
 }
 
