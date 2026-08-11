@@ -105,8 +105,12 @@ pub fn write(
     value: []const u8,
 ) Error!void {
     const value_len = std.math.cast(u64, value.len) orelse return error.IntegerOverflow;
-    try quic.varint.encode(list, allocator, capsule_type);
-    try quic.varint.encode(list, allocator, value_len);
+    if (capsule_type <= 63 and value_len <= 63) {
+        try list.appendSlice(allocator, &.{ @intCast(capsule_type), @intCast(value_len) });
+    } else {
+        try quic.varint.encode(list, allocator, capsule_type);
+        try quic.varint.encode(list, allocator, value_len);
+    }
     try list.appendSlice(allocator, value);
 }
 
@@ -183,6 +187,7 @@ test "HTTP/3 capsule writes and parses generic DATAGRAM capsules" {
     defer encoded.deinit(allocator);
 
     try writeDatagram(&encoded, allocator, "hello capsule");
+    try std.testing.expectEqualSlices(u8, &.{ CapsuleType.datagram, "hello capsule".len }, encoded.items[0..2]);
     const parsed = try parse(encoded.items);
     try std.testing.expectEqual(CapsuleType.datagram, parsed.capsule.capsule_type);
     try std.testing.expect(parsed.capsule.isDatagram());

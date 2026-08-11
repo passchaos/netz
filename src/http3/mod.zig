@@ -3220,7 +3220,11 @@ pub const Datagram = struct {
     }
 
     pub fn write(self: Datagram, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
-        try quic.varint.encode(list, allocator, self.quarter_stream_id);
+        if (self.quarter_stream_id <= 63) {
+            try list.append(allocator, @intCast(self.quarter_stream_id));
+        } else {
+            try quic.varint.encode(list, allocator, self.quarter_stream_id);
+        }
         try list.appendSlice(allocator, self.payload);
     }
 };
@@ -4087,6 +4091,7 @@ test "HTTP/3 datagram" {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try (Datagram{ .quarter_stream_id = 4, .payload = "capsule" }).write(&encoded, allocator);
+    try std.testing.expectEqual(@as(u8, 4), encoded.items[0]);
     const parsed = try Datagram.parse(encoded.items);
     try std.testing.expectEqual(@as(u64, 4), parsed.quarter_stream_id);
     try std.testing.expectEqualStrings("capsule", parsed.payload);
