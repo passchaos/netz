@@ -222,7 +222,8 @@ pub const ReplayFilter = struct {
 
     pub fn contains(self: *const ReplayFilter, token: []const u8) Error!bool {
         const fp = try fingerprint(token);
-        return self.fingerprint_index.contains(fp);
+        return self.fingerprint_index.count() != 0 and
+            self.fingerprint_index.contains(fp);
     }
 
     pub fn rememberValidated(self: *ReplayFilter, token: []const u8) Error!void {
