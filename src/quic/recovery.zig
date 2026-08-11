@@ -204,6 +204,7 @@ pub const Queue = struct {
         self: *const Queue,
         packet_number: u64,
     ) ?u64 {
+        if (self.packet_index.count() == 0) return null;
         const index = self.packet_index.get(packet_number) orelse return null;
         return self.pending.items[index].group_id;
     }
@@ -250,6 +251,7 @@ pub const Queue = struct {
     }
 
     pub fn packetNumberCandidate(self: *const Queue, packet_number: u64) ?Candidate {
+        if (self.packet_index.count() == 0) return null;
         const group_index = self.packet_index.get(packet_number) orelse return null;
         const entry = self.pending.items[group_index];
         return .{
@@ -278,6 +280,7 @@ pub const Queue = struct {
     }
 
     pub fn acknowledgePacketNumber(self: *Queue, packet_number: u64) bool {
+        if (self.packet_index.count() == 0) return false;
         const index = self.packet_index.get(packet_number) orelse return false;
         var removed = self.removeGroupOrdered(index);
         removed.deinit(self.allocator);
@@ -285,6 +288,7 @@ pub const Queue = struct {
     }
 
     pub fn forgetPacketNumber(self: *Queue, packet_number: u64) bool {
+        if (self.packet_index.count() == 0) return false;
         const group_index = self.packet_index.get(packet_number) orelse return false;
         if (self.pending.items[group_index].packetCount() == 1) {
             var removed = self.removeGroupOrdered(group_index);
@@ -508,6 +512,10 @@ test "QUIC recovery queue groups retransmissions and ACKs any copy" {
     try std.testing.expectEqual(@as(usize, 0), empty_stats.packet_number_copies);
     try std.testing.expectEqual(@as(usize, 0), empty_stats.retransmission_copies);
     try std.testing.expectEqual(@as(usize, 0), empty_stats.payload_bytes);
+    try std.testing.expectEqual(@as(?u64, null), queue.groupIdForPacketNumber(4));
+    try std.testing.expect(queue.packetNumberCandidate(4) == null);
+    try std.testing.expect(!queue.acknowledgePacketNumber(4));
+    try std.testing.expect(!queue.forgetPacketNumber(4));
 }
 
 test "QUIC recovery queue keeps initial packet number allocation-free" {
