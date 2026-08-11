@@ -1311,6 +1311,7 @@ pub const Hpack = struct {
     pub fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
+        try out.ensureTotalCapacity(allocator, try huffmanEncodedLen(value));
 
         var bits: u64 = 0;
         var bits_left: u6 = 40;
@@ -1333,6 +1334,14 @@ pub const Hpack = struct {
             try out.append(allocator, @truncate(bits >> 32));
         }
         return out.toOwnedSlice(allocator);
+    }
+
+    pub fn huffmanEncodedLen(value: []const u8) !usize {
+        var bit_len: usize = 0;
+        for (value) |byte| {
+            bit_len = std.math.add(usize, bit_len, hpack_huffman.encode_table[byte].bits) catch return error.IntegerOverflow;
+        }
+        return std.math.divCeil(usize, bit_len, 8) catch unreachable;
     }
 
     pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
@@ -2232,6 +2241,7 @@ test "HTTP/2 HPACK Huffman and dynamic table state" {
     const huffman = try Hpack.encodeHuffman(allocator, "www.example.com");
     defer allocator.free(huffman);
     try std.testing.expectEqualSlices(u8, &.{ 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff }, huffman);
+    try std.testing.expectEqual(huffman.len, try Hpack.huffmanEncodedLen("www.example.com"));
     const decoded_huffman = try Hpack.decodeHuffman(allocator, huffman);
     defer allocator.free(decoded_huffman);
     try std.testing.expectEqualStrings("www.example.com", decoded_huffman);
