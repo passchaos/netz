@@ -21,6 +21,7 @@ pub const SendFlow = struct {
     }
 
     pub fn reserve(self: *SendFlow, amount: u64) Error!void {
+        if (amount == 0) return;
         if (amount > self.available()) return error.FlowControlBlocked;
         self.used += amount;
     }
@@ -134,6 +135,8 @@ pub const StreamFlow = struct {
 
 test "QUIC send flow reserves bytes and reports blocked" {
     var flow = SendFlow.init(10);
+    try flow.reserve(0);
+    try std.testing.expectEqual(@as(u64, 10), flow.available());
     try flow.reserve(7);
     try std.testing.expectEqual(@as(u64, 3), flow.available());
     try std.testing.expectError(error.FlowControlBlocked, flow.reserve(4));
