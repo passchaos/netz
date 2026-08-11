@@ -1198,20 +1198,14 @@ pub const Frame = union(enum) {
             }),
             .path_challenge, .path_response => 9,
             .connection_close => |close| blk: {
-                const prefix = try varintWireLen(&.{
-                    @intFromEnum(FrameType.connection_close),
-                    close.error_code,
-                    close.frame_type,
-                    close.reason_phrase.len,
-                });
+                var prefix = try addWireLen(1, try varint.length(close.error_code));
+                prefix = try addWireLen(prefix, try varint.length(close.frame_type));
+                prefix = try addWireLen(prefix, try varint.length(close.reason_phrase.len));
                 break :blk try addWireLen(prefix, close.reason_phrase.len);
             },
             .application_close => |close| blk: {
-                const prefix = try varintWireLen(&.{
-                    @intFromEnum(FrameType.connection_close_app),
-                    close.error_code,
-                    close.reason_phrase.len,
-                });
+                var prefix = try addWireLen(1, try varint.length(close.error_code));
+                prefix = try addWireLen(prefix, try varint.length(close.reason_phrase.len));
                 break :blk try addWireLen(prefix, close.reason_phrase.len);
             },
             .handshake_done => 1,
@@ -1326,14 +1320,14 @@ pub const Frame = union(enum) {
                 try list.appendSlice(allocator, &path.data);
             },
             .connection_close => |close| {
-                try varint.encode(list, allocator, @intFromEnum(FrameType.connection_close));
+                try list.append(allocator, @intFromEnum(FrameType.connection_close));
                 try varint.encode(list, allocator, close.error_code);
                 try varint.encode(list, allocator, close.frame_type);
                 try varint.encode(list, allocator, close.reason_phrase.len);
                 try list.appendSlice(allocator, close.reason_phrase);
             },
             .application_close => |close| {
-                try varint.encode(list, allocator, @intFromEnum(FrameType.connection_close_app));
+                try list.append(allocator, @intFromEnum(FrameType.connection_close_app));
                 try varint.encode(list, allocator, close.error_code);
                 try varint.encode(list, allocator, close.reason_phrase.len);
                 try list.appendSlice(allocator, close.reason_phrase);
@@ -2433,8 +2427,15 @@ test "QUIC ack close datagram and padding frames" {
     var close_bytes: std.ArrayList(u8) = .empty;
     defer close_bytes.deinit(allocator);
     try (Frame{ .connection_close = .{ .error_code = 0, .frame_type = @intFromEnum(FrameType.stream), .reason_phrase = "done" } }).write(&close_bytes, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.connection_close)), close_bytes.items[0]);
     const close = try parseFrame(close_bytes.items);
     try std.testing.expectEqualStrings("done", close.frame.connection_close.reason_phrase);
+
+    close_bytes.clearRetainingCapacity();
+    try (Frame{ .application_close = .{ .error_code = 1, .reason_phrase = "app" } }).write(&close_bytes, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.connection_close_app)), close_bytes.items[0]);
+    const app_close = try parseFrame(close_bytes.items);
+    try std.testing.expectEqualStrings("app", app_close.frame.application_close.reason_phrase);
 
     var datagram_bytes: std.ArrayList(u8) = .empty;
     defer datagram_bytes.deinit(allocator);
