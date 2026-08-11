@@ -18,6 +18,7 @@ test "HTTP/3 QPACK static name references and literal fallback" {
         .{ .name = "x-custom", .value = "value" },
     };
     try Qpack.encodeLiteralBlock(&block, allocator, &fields);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, block.items[0..2]);
     try std.testing.expectEqual(@as(u8, 0x5f), block.items[2]); // static name ref with extended index, content-type
 
     const decoded = try Qpack.decodeLiteralBlock(allocator, block.items);
