@@ -855,22 +855,36 @@ pub fn writeResponseChecked(
 }
 
 fn writeHeaders(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const Header) !void {
-    for (headers) |header| {
-        try validateHeader(header);
-        try list.appendSlice(allocator, header.name);
-        try list.appendSlice(allocator, ": ");
-        try list.appendSlice(allocator, header.value);
-        try list.appendSlice(allocator, "\r\n");
-    }
+    try writeHeadersDirect(list, allocator, headers);
 }
 
 fn writeHeadersChecked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const Header) Error!void {
+    try writeHeadersDirect(list, allocator, headers);
+}
+
+fn writeHeadersDirect(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const Header) Error!void {
+    var len: usize = 0;
     for (headers) |header| {
         try validateHeader(header);
-        try list.appendSlice(allocator, header.name);
-        try list.appendSlice(allocator, ": ");
-        try list.appendSlice(allocator, header.value);
-        try list.appendSlice(allocator, "\r\n");
+        len = std.math.add(usize, len, header.name.len) catch return error.RenderBufferTooSmall;
+        len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
+        len = std.math.add(usize, len, header.value.len) catch return error.RenderBufferTooSmall;
+        len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
+    }
+
+    const start = list.items.len;
+    try list.ensureUnusedCapacity(allocator, len);
+    list.items.len = start + len;
+    var pos = start;
+    for (headers) |header| {
+        @memcpy(list.items[pos..][0..header.name.len], header.name);
+        pos += header.name.len;
+        @memcpy(list.items[pos..][0..2], ": ");
+        pos += 2;
+        @memcpy(list.items[pos..][0..header.value.len], header.value);
+        pos += header.value.len;
+        @memcpy(list.items[pos..][0..2], "\r\n");
+        pos += 2;
     }
 }
 
@@ -1247,6 +1261,14 @@ test "HTTP/1 request parse and serialize" {
     defer out.deinit(allocator);
     try writeRequest(&out, allocator, req.method, req.target, req.version, req.headers, req.body);
     try std.testing.expectEqualStrings(raw, out.items);
+
+    var no_alloc_out: std.ArrayList(u8) = .empty;
+    defer no_alloc_out.deinit(allocator);
+    try no_alloc_out.ensureTotalCapacity(allocator, raw.len);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try writeRequest(&no_alloc_out, no_alloc.allocator(), req.method, req.target, req.version, req.headers, req.body);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings(raw, no_alloc_out.items);
 }
 
 test "HTTP/1 borrowed request heads parse pipelines without allocation" {
