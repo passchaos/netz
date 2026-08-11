@@ -264,6 +264,19 @@ fn fastPseudoHeaderMatch(
         if (std.mem.eql(u8, value, "text/plain")) return .{ .index = 53, .full_match = true };
         return null;
     }
+    if (std.mem.eql(u8, name, "content-encoding")) {
+        if (std.mem.eql(u8, value, "br")) return .{ .index = 42, .full_match = true };
+        if (std.mem.eql(u8, value, "gzip")) return .{ .index = 43, .full_match = true };
+        return null;
+    }
+    if (std.mem.eql(u8, name, "vary")) {
+        if (std.mem.eql(u8, value, "accept-encoding")) return .{ .index = 59, .full_match = true };
+        if (std.mem.eql(u8, value, "origin")) return .{ .index = 60, .full_match = true };
+        return null;
+    }
+    if (std.mem.eql(u8, name, "x-content-type-options")) {
+        return .{ .index = 61, .full_match = std.mem.eql(u8, value, "nosniff") };
+    }
     return null;
 }
 
@@ -278,5 +291,8 @@ fn fastPseudoHeaderName(name: []const u8) ?u64 {
     if (std.mem.eql(u8, name, "accept-encoding")) return 31;
     if (std.mem.eql(u8, name, "cache-control")) return 36;
     if (std.mem.eql(u8, name, "content-type")) return 44;
+    if (std.mem.eql(u8, name, "content-encoding")) return 42;
+    if (std.mem.eql(u8, name, "vary")) return 59;
+    if (std.mem.eql(u8, name, "x-content-type-options")) return 61;
     return null;
 }
