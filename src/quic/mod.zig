@@ -1202,8 +1202,7 @@ pub const Frame = union(enum) {
                 @intFromEnum(FrameType.retire_connection_id),
                 frame.sequence_number,
             }),
-            .path_challenge => try addWireLen(try varint.length(@intFromEnum(FrameType.path_challenge)), 8),
-            .path_response => try addWireLen(try varint.length(@intFromEnum(FrameType.path_response)), 8),
+            .path_challenge, .path_response => 9,
             .connection_close => |close| blk: {
                 const prefix = try varintWireLen(&.{
                     @intFromEnum(FrameType.connection_close),
@@ -1328,11 +1327,11 @@ pub const Frame = union(enum) {
             },
             .retire_connection_id => |retire| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.retire_connection_id), retire.sequence_number),
             .path_challenge => |path| {
-                try varint.encode(list, allocator, @intFromEnum(FrameType.path_challenge));
+                try list.append(allocator, @intFromEnum(FrameType.path_challenge));
                 try list.appendSlice(allocator, &path.data);
             },
             .path_response => |path| {
-                try varint.encode(list, allocator, @intFromEnum(FrameType.path_response));
+                try list.append(allocator, @intFromEnum(FrameType.path_response));
                 try list.appendSlice(allocator, &path.data);
             },
             .connection_close => |close| {
