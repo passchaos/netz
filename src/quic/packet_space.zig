@@ -455,13 +455,20 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn forget(self: *SentPacketTracker, packet_number: u64) bool {
+        if (self.packets.items.len == 0) return false;
+        const tail_index = self.packets.items.len - 1;
+        if (self.packets.items[tail_index].packet_number == packet_number) {
+            const latest = self.latest_ack_eliciting_in_flight_index;
+            _ = self.packets.pop();
+            _ = self.packet_index.remove(packet_number);
+            if (latest == tail_index) {
+                self.recomputeLatestAckElicitingInFlight();
+            }
+            return true;
+        }
         const index = self.findPacketIndex(packet_number) orelse return false;
         const latest = self.latest_ack_eliciting_in_flight_index;
-        if (index == self.packets.items.len - 1) {
-            _ = self.packets.pop();
-        } else {
-            _ = self.packets.orderedRemove(index);
-        }
+        _ = self.packets.orderedRemove(index);
         _ = self.packet_index.remove(packet_number);
         if (index < self.packets.items.len) {
             self.refreshPacketIndexFrom(index);
@@ -1454,6 +1461,31 @@ test "QUIC sent packet tracker indexes exact packet lookups" {
         @as(?SentPacketTracker.RttSample, null),
         try sent.ackRttSample(ack, 4_000, 3),
     );
+}
+
+test "QUIC sent packet tracker forgets tail without index slots" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.packets.ensureTotalCapacity(allocator, 2);
+    try sent.sentAt(10, true, 100, .not_ect, 1_000);
+    try sent.sentAt(11, true, 100, .not_ect, 2_000);
+    try std.testing.expectEqual(@as(usize, 0), sent.packet_index.count());
+    try std.testing.expectEqual(@as(?usize, 1), sent.latest_ack_eliciting_in_flight_index);
+
+    // Some batch send paths pre-reserve packet metadata and deliberately avoid
+    // populating the exact lookup index.  Tail rollback should still be a
+    // direct pop, not a binary/linear lookup followed by the same pop.
+    try std.testing.expect(sent.forget(11));
+    try std.testing.expectEqual(@as(usize, 1), sent.packets.items.len);
+    try std.testing.expectEqual(@as(u64, 10), sent.packets.items[0].packet_number);
+    try std.testing.expectEqual(@as(?usize, 0), sent.latest_ack_eliciting_in_flight_index);
+
+    try std.testing.expect(sent.forget(10));
+    try std.testing.expectEqual(@as(usize, 0), sent.packets.items.len);
+    try std.testing.expectEqual(@as(?usize, null), sent.latest_ack_eliciting_in_flight_index);
+    try std.testing.expect(!sent.forget(10));
 }
 
 test "QUIC sent packet tracker applies ACK ranges" {
