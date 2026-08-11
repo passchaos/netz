@@ -964,8 +964,10 @@ pub const ControlState = struct {
             frame_type,
             update.prioritized_element_id,
         );
-        if (self.priority_update_index.get(key)) |index| {
-            const stored = &self.priority_updates.items[index];
+        try self.priority_updates.ensureUnusedCapacity(allocator, 1);
+        const slot = try self.priority_update_index.getOrPut(allocator, key);
+        if (slot.found_existing) {
+            const stored = &self.priority_updates.items[slot.value_ptr.*];
             allocator.free(stored.payload.field_value);
             stored.payload.field_value = owned;
             self.latest_priority_update_type = frame_type;
@@ -976,9 +978,8 @@ pub const ControlState = struct {
             self.priority_update_generation = next_generation;
             return;
         }
+        errdefer _ = self.priority_update_index.remove(key);
 
-        try self.priority_updates.ensureUnusedCapacity(allocator, 1);
-        try self.priority_update_index.ensureUnusedCapacity(allocator, 1);
         const insert_index = self.priority_updates.items.len;
         self.priority_updates.appendAssumeCapacity(.{
             .frame_type = frame_type,
@@ -987,7 +988,7 @@ pub const ControlState = struct {
                 .field_value = owned,
             },
         });
-        self.priority_update_index.putAssumeCapacityNoClobber(key, insert_index);
+        slot.value_ptr.* = insert_index;
         self.latest_priority_update_type = frame_type;
         self.latest_priority_update = .{
             .prioritized_element_id = update.prioritized_element_id,
