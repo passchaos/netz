@@ -1153,6 +1153,14 @@ pub const DecodedChunked = struct {
 };
 
 pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!DecodedChunked {
+    if (std.mem.startsWith(u8, bytes, "0\r\n\r\n")) {
+        return .{
+            .body = @constCast(&[_]u8{}),
+            .trailers = @constCast(&[_]Header{}),
+            .trailer_value_storage = @constCast(&[_][]u8{}),
+            .consumed = "0\r\n\r\n".len,
+        };
+    }
     var pos: usize = 0;
     var extension_bytes: usize = 0;
     var out: std.ArrayList(u8) = .empty;
@@ -1619,6 +1627,14 @@ test "HTTP/1 chunked codec" {
     try encodeChunked(&encoded, no_alloc.allocator(), &.{}, &.{});
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqualStrings("0\r\n\r\n", encoded.items);
+
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var empty_decoded = try decodeChunked(no_alloc.allocator(), "0\r\n\r\nnext", .{});
+    defer empty_decoded.deinit(no_alloc.allocator());
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, "0\r\n\r\n".len), empty_decoded.consumed);
+    try std.testing.expectEqualStrings("", empty_decoded.body);
+    try std.testing.expectEqual(@as(usize, 0), empty_decoded.trailers.len);
 }
 
 test "HTTP/1 chunked trailers reject forbidden fields" {
