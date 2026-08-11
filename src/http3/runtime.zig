@@ -5686,8 +5686,12 @@ const ResponseStreamSet = struct {
         var index = self.reset_head;
         while (index < self.reset_order.items.len) : (index += 1) {
             if (self.reset_order.items[index] != stream_id) continue;
-            _ = self.reset_order.orderedRemove(index);
-            if (self.reset_head > index) self.reset_head -= 1;
+            if (index == self.reset_head) {
+                self.reset_head += 1;
+            } else {
+                _ = self.reset_order.orderedRemove(index);
+                if (self.reset_head > index) self.reset_head -= 1;
+            }
             self.compactResetOrderIfSparse();
             return;
         }
