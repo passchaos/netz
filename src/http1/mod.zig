@@ -1152,19 +1152,15 @@ pub const DecodedChunked = struct {
     }
 };
 
-pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!DecodedChunked {
-    if (std.mem.startsWith(u8, bytes, "0\r\n\r\n")) {
-        return .{
-            .body = @constCast(&[_]u8{}),
-            .trailers = @constCast(&[_]Header{}),
-            .trailer_value_storage = @constCast(&[_][]u8{}),
-            .consumed = "0\r\n\r\n".len,
-        };
-    }
+const ChunkedBodyScan = struct {
+    body_len: usize,
+    trailer_start: usize,
+};
+
+fn scanChunkedBody(bytes: []const u8) Error!ChunkedBodyScan {
     var pos: usize = 0;
     var extension_bytes: usize = 0;
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
+    var body_len: usize = 0;
 
     while (true) {
         const line_end_rel = std.mem.indexOf(u8, bytes[pos..], "\r\n") orelse return error.BufferTooShort;
@@ -1181,29 +1177,70 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
         const data_end = std.math.add(usize, pos, size) catch return error.ChunkSizeOverflow;
         const required_end = std.math.add(usize, data_end, 2) catch return error.ChunkSizeOverflow;
         if (bytes.len < required_end) return error.BufferTooShort;
-        if (size == 0) break;
-        try out.appendSlice(allocator, bytes[pos..data_end]);
+        if (size == 0) return .{ .body_len = body_len, .trailer_start = pos };
+        body_len = std.math.add(usize, body_len, size) catch return error.ChunkSizeOverflow;
         pos = data_end;
         if (!std.mem.eql(u8, bytes[pos .. pos + 2], "\r\n")) return error.InvalidChunk;
         pos += 2;
     }
+}
 
-    const trailer_end_rel = std.mem.indexOf(u8, bytes[pos..], "\r\n") orelse return error.BufferTooShort;
-    var trailer_block_end = pos + trailer_end_rel;
+fn copyChunkedBody(bytes: []const u8, out: []u8) Error!void {
+    var pos: usize = 0;
+    var out_pos: usize = 0;
+    while (true) {
+        const line_end_rel = std.mem.indexOf(u8, bytes[pos..], "\r\n") orelse return error.BufferTooShort;
+        const line = bytes[pos .. pos + line_end_rel];
+        pos += line_end_rel + 2;
+        const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
+        const size_part = try chunkSizePart(line[0..semi]);
+        const size = try parseChunkSize(size_part);
+        if (size == 0) return;
+        const data_end = pos + size;
+        @memcpy(out[out_pos..][0..size], bytes[pos..data_end]);
+        out_pos += size;
+        pos = data_end + 2;
+    }
+}
+
+pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!DecodedChunked {
+    if (std.mem.startsWith(u8, bytes, "0\r\n\r\n")) {
+        return .{
+            .body = @constCast(&[_]u8{}),
+            .trailers = @constCast(&[_]Header{}),
+            .trailer_value_storage = @constCast(&[_][]u8{}),
+            .consumed = "0\r\n\r\n".len,
+        };
+    }
+    const scan = try scanChunkedBody(bytes);
+    const body = if (scan.body_len == 0) @constCast(&[_]u8{}) else try allocator.alloc(u8, scan.body_len);
+    errdefer if (scan.body_len != 0) allocator.free(body);
+    try copyChunkedBody(bytes, body);
+
+    const trailer_end_rel = std.mem.indexOf(u8, bytes[scan.trailer_start..], "\r\n") orelse return error.BufferTooShort;
+    var trailer_block_end = scan.trailer_start + trailer_end_rel;
     // A zero-length trailer block is represented by the CRLF immediately after
     // the terminating zero-size chunk. Otherwise parse until the empty line.
     if (trailer_end_rel != 0) {
-        const full_end_rel = std.mem.indexOf(u8, bytes[pos..], "\r\n\r\n") orelse return error.BufferTooShort;
-        trailer_block_end = pos + full_end_rel;
+        const full_end_rel = std.mem.indexOf(u8, bytes[scan.trailer_start..], "\r\n\r\n") orelse return error.BufferTooShort;
+        trailer_block_end = scan.trailer_start + full_end_rel;
     }
-    var lines = std.mem.splitSequence(u8, bytes[pos..trailer_block_end], "\r\n");
+    const consumed = if (trailer_end_rel == 0) scan.trailer_start + 2 else trailer_block_end + 4;
+    if (trailer_end_rel == 0) {
+        return .{
+            .body = body,
+            .trailers = @constCast(&[_]Header{}),
+            .trailer_value_storage = @constCast(&[_][]u8{}),
+            .consumed = consumed,
+        };
+    }
+
+    var lines = std.mem.splitSequence(u8, bytes[scan.trailer_start..trailer_block_end], "\r\n");
     var parsed_trailers = try parseHeaderLines(allocator, &lines, options);
     errdefer parsed_trailers.deinit(allocator);
     try validateTrailers(parsed_trailers.headers);
-    const consumed = if (trailer_end_rel == 0) pos + 2 else trailer_block_end + 4;
-
     return .{
-        .body = try out.toOwnedSlice(allocator),
+        .body = body,
         .trailers = parsed_trailers.headers,
         .trailer_value_storage = parsed_trailers.value_storage,
         .consumed = consumed,
@@ -1635,6 +1672,13 @@ test "HTTP/1 chunked codec" {
     try std.testing.expectEqual(@as(usize, "0\r\n\r\n".len), empty_decoded.consumed);
     try std.testing.expectEqualStrings("", empty_decoded.body);
     try std.testing.expectEqual(@as(usize, 0), empty_decoded.trailers.len);
+
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    var body_only = try decodeChunked(no_alloc.allocator(), "5\r\nhello\r\n0\r\n\r\nnext", .{});
+    defer body_only.deinit(no_alloc.allocator());
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings("hello", body_only.body);
+    try std.testing.expectEqual(@as(usize, "5\r\nhello\r\n0\r\n\r\n".len), body_only.consumed);
 }
 
 test "HTTP/1 chunked trailers reject forbidden fields" {
