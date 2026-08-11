@@ -1778,15 +1778,18 @@ pub const Connection = struct {
             .traditional_connect = methodIsConnect(method) and protocol == null,
             .extended_connect = methodIsConnect(method) and protocol != null,
         };
-        if (self.response_semantics_index.get(stream_id)) |index| {
-            self.response_semantics.items[index] = semantics;
+        try self.response_semantics.ensureUnusedCapacity(self.allocator, 1);
+        const slot = try self.response_semantics_index.getOrPut(
+            self.allocator,
+            stream_id,
+        );
+        if (slot.found_existing) {
+            self.response_semantics.items[slot.value_ptr.*] = semantics;
             return;
         }
-        try self.response_semantics.ensureUnusedCapacity(self.allocator, 1);
-        try self.response_semantics_index.ensureUnusedCapacity(self.allocator, 1);
         const index = self.response_semantics.items.len;
         self.response_semantics.appendAssumeCapacity(semantics);
-        self.response_semantics_index.putAssumeCapacity(stream_id, index);
+        slot.value_ptr.* = index;
     }
 
     fn forgetResponseSemantics(self: *Connection, stream_id: u31) void {
