@@ -75,17 +75,19 @@ pub const State = struct {
     ) (std.mem.Allocator.Error || error{
         PriorityCapacityExceeded,
     })!void {
-        const slot = try self.idle_index.getOrPut(allocator, stream_id);
-        if (slot.found_existing) return;
-        errdefer _ = self.idle_index.remove(stream_id);
         if (self.idle_requests.items.len >= max_idle_updates) {
+            if (self.containsIdleRequest(stream_id)) return;
             return error.PriorityCapacityExceeded;
         }
         if (max_concurrent_streams) |limit| {
             if (active_stream_count + self.idle_requests.items.len >= limit) {
+                if (self.containsIdleRequest(stream_id)) return;
                 return error.PriorityCapacityExceeded;
             }
         }
+        const slot = try self.idle_index.getOrPut(allocator, stream_id);
+        if (slot.found_existing) return;
+        errdefer _ = self.idle_index.remove(stream_id);
         const index = self.idle_requests.items.len;
         try self.idle_requests.append(allocator, stream_id);
         slot.value_ptr.* = index;
@@ -249,6 +251,42 @@ test "priority updates replace state and bound idle reservations" {
     try std.testing.expectEqual(@as(?u31, null), state.lowestIdleRequest());
     try std.testing.expect(state.get(3) == null);
     try std.testing.expect(state.get(5) != null);
+}
+
+test "priority idle capacity rejection does not allocate" {
+    const allocator = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(allocator);
+
+    try state.reserveIdleRequest(allocator, 1, 0, null, 1);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+
+    try std.testing.expectError(
+        error.PriorityCapacityExceeded,
+        state.reserveIdleRequest(
+            no_alloc.allocator(),
+            3,
+            0,
+            null,
+            1,
+        ),
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+
+    // Repeating an existing reservation remains idempotent even when the
+    // configured idle-priority budget is full, and it should not need another
+    // hash-map insertion attempt.
+    try state.reserveIdleRequest(
+        no_alloc.allocator(),
+        1,
+        0,
+        null,
+        1,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
 }
 
 test "priority state indexes survive swap removals and replacements" {
