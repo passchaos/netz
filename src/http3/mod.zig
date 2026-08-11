@@ -905,6 +905,7 @@ pub const ControlState = struct {
         frame_type: u64,
         prioritized_element_id: u64,
     ) ?PriorityUpdatePayload {
+        if (self.priority_update_index.count() == 0) return null;
         const key = priorityUpdateKey(frame_type, prioritized_element_id);
         const index = self.priority_update_index.get(key) orelse return null;
         if (index >= self.priority_updates.items.len) return null;
@@ -3381,6 +3382,8 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
 
     var control = ControlState{};
     defer control.deinit(allocator);
+    try std.testing.expect(control.requestPriorityUpdate(8) == null);
+    try std.testing.expect(control.pushPriorityUpdate(3) == null);
     var settings_payload: std.ArrayList(u8) = .empty;
     defer settings_payload.deinit(allocator);
     try writeControlStreamPrefix(&settings_payload, allocator);
