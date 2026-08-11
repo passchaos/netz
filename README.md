@@ -178,7 +178,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   ACK threshold/max-delay/reordering behavior, plus automatic ACK coalescing
   that respects the negotiated threshold, max-delay timer, and IMMEDIATE_ACK
   override,
-  flow-control state with zero-byte reserve/consume no-ops for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
+  flow-control state with zero-byte reserve/consume and duplicate receive-offset no-ops for MAX_DATA/MAX_STREAM_DATA/BLOCKED frames wired into
   1-RTT DATA_BLOCKED/MAX_DATA and STREAM_DATA_BLOCKED/MAX_STREAM_DATA handling
   with one advisory BLOCKED emission per unchanged limit to avoid retry-loop
   packet storms and opt-in adaptive receive-window growth,

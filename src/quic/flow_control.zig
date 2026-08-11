@@ -83,7 +83,8 @@ pub const RecvFlow = struct {
 
     pub fn receive(self: *RecvFlow, end_offset: u64) Error!void {
         if (end_offset > self.limit) return error.FlowControlViolation;
-        self.highest_received = @max(self.highest_received, end_offset);
+        if (end_offset <= self.highest_received) return;
+        self.highest_received = end_offset;
     }
 
     pub fn consume(self: *RecvFlow, amount: u64) ?u64 {
@@ -163,6 +164,9 @@ test "QUIC send flow reserves bytes and reports blocked" {
 test "QUIC receive flow emits MAX_DATA after consumption threshold" {
     var flow = try RecvFlow.init(100, 100);
     try flow.receive(80);
+    try flow.receive(80);
+    try flow.receive(40);
+    try std.testing.expectEqual(@as(u64, 80), flow.highest_received);
     try std.testing.expectError(error.FlowControlViolation, flow.receive(101));
     try std.testing.expectEqual(@as(?u64, null), flow.consume(0));
     try std.testing.expectEqual(@as(u64, 0), flow.consumed);
