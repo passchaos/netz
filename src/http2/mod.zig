@@ -387,8 +387,7 @@ pub const OriginPayload = struct {
         allocator: std.mem.Allocator,
         origins: []const []const u8,
     ) Error!void {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(allocator);
+        var payload_len: usize = 0;
         for (origins) |origin| {
             if (origin.len == 0 or
                 origin.len > std.math.maxInt(u16) or
@@ -396,24 +395,18 @@ pub const OriginPayload = struct {
             {
                 return error.InvalidFrameSize;
             }
-            try wire.appendInt(
-                &payload,
-                allocator,
-                u16,
-                @intCast(origin.len),
-                .big,
-            );
-            try payload.appendSlice(allocator, origin);
+            payload_len = std.math.add(usize, payload_len, 2) catch return error.InvalidFrameSize;
+            payload_len = std.math.add(usize, payload_len, origin.len) catch return error.InvalidFrameSize;
         }
-        try (Frame{
-            .header = .{
-                .length = 0,
-                .frame_type = .origin,
-                .flags = 0,
-                .stream_id = 0,
-            },
-            .payload = payload.items,
-        }).write(list, allocator);
+
+        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
+        try list.append(allocator, @intFromEnum(FrameType.origin));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u32, 0, .big);
+        for (origins) |origin| {
+            try wire.appendInt(list, allocator, u16, @intCast(origin.len), .big);
+            try list.appendSlice(allocator, origin);
+        }
     }
 };
 
@@ -1951,6 +1944,15 @@ test "HTTP/2 ORIGIN frame round trips and validates ASCII entries" {
     try std.testing.expectEqual(@as(usize, 2), parsed.origins.len);
     try std.testing.expectEqualStrings(expected[0], parsed.origins[0]);
     try std.testing.expectEqualStrings(expected[1], parsed.origins[1]);
+    const origin_encoded = try allocator.dupe(u8, encoded.items);
+    defer allocator.free(origin_encoded);
+    var no_alloc_origin: std.ArrayList(u8) = .empty;
+    defer no_alloc_origin.deinit(allocator);
+    try no_alloc_origin.ensureTotalCapacity(allocator, origin_encoded.len);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try OriginPayload.write(&no_alloc_origin, no_alloc.allocator(), &expected);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, origin_encoded, no_alloc_origin.items);
 
     var empty: std.ArrayList(u8) = .empty;
     defer empty.deinit(allocator);
