@@ -593,10 +593,11 @@ pub const PingPayload = struct {
     }
 
     pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, data: [8]u8, ack: bool) Error!void {
-        try (Frame{
-            .header = .{ .length = 0, .frame_type = .ping, .flags = if (ack) 0x1 else 0, .stream_id = 0 },
-            .payload = &data,
-        }).write(list, allocator);
+        try wire.appendU24(list, allocator, 8);
+        try list.append(allocator, @intFromEnum(FrameType.ping));
+        try list.append(allocator, if (ack) 0x1 else 0);
+        try wire.appendInt(list, allocator, u32, 0, .big);
+        try list.appendSlice(allocator, &data);
     }
 };
 
@@ -2142,6 +2143,7 @@ test "HTTP/2 ping and goaway payload helpers" {
     defer ping_bytes.deinit(allocator);
     const ping_data = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
     try PingPayload.write(&ping_bytes, allocator, ping_data, true);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 8, @intFromEnum(FrameType.ping), 1, 0, 0, 0, 0 }, ping_bytes.items[0..9]);
     const ping_frame = try Frame.parse(ping_bytes.items);
     try std.testing.expectEqual(FrameType.ping, ping_frame.header.frame_type);
     try std.testing.expectEqual(@as(u8, 1), ping_frame.header.flags);
