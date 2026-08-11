@@ -340,6 +340,12 @@ pub const SentPacketTracker = struct {
     /// range scans; this index keeps exact packet operations from walking the
     /// whole sent-packet history.
     packet_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    /// PTO scheduling needs the newest still-in-flight ack-eliciting packet on
+    /// every timer query.  Keep its packet-list index cached, mirroring the
+    /// last-ack-eliciting timestamp maintained by production QUIC recovery
+    /// implementations, and recompute only when that exact packet is acked,
+    /// lost, or removed.
+    latest_ack_eliciting_in_flight_index: ?usize = null,
     largest_acknowledged: ?u64 = null,
     latest_ecn_counts: quic.EcnCounts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 0 },
     ecn_validation_failed: bool = false,
@@ -411,6 +417,7 @@ pub const SentPacketTracker = struct {
         if (self.packetIndexHasUnusedCapacity()) {
             self.packet_index.putAssumeCapacityNoClobber(packet_number, index);
         }
+        self.considerLatestAckElicitingInFlight(index);
         switch (ecn) {
             .not_ect => {},
             .ect0 => self.sent_ect0_count += 1,
@@ -421,15 +428,26 @@ pub const SentPacketTracker = struct {
 
     pub fn forget(self: *SentPacketTracker, packet_number: u64) bool {
         const index = self.findPacketIndex(packet_number) orelse return false;
+        const latest = self.latest_ack_eliciting_in_flight_index;
         _ = self.packets.orderedRemove(index);
         _ = self.packet_index.remove(packet_number);
         self.refreshPacketIndexFrom(index);
+        if (latest == index) {
+            self.recomputeLatestAckElicitingInFlight();
+        } else if (latest != null and latest.? > index) {
+            self.latest_ack_eliciting_in_flight_index = latest.? - 1;
+        }
         return true;
     }
 
     pub fn markAcknowledged(self: *SentPacketTracker, packet_number: u64) bool {
         const index = self.findPacketIndex(packet_number) orelse return false;
-        self.packets.items[index].acknowledged = true;
+        if (!self.packets.items[index].acknowledged) {
+            self.packets.items[index].acknowledged = true;
+            if (self.latest_ack_eliciting_in_flight_index == index) {
+                self.recomputeLatestAckElicitingInFlight();
+            }
+        }
         self.observeAcknowledged(packet_number);
         return true;
     }
@@ -445,7 +463,6 @@ pub const SentPacketTracker = struct {
         var acknowledged_packets: usize = 0;
         var lost_packets: usize = 0;
         var bytes_in_flight: usize = 0;
-        var latest_ack_eliciting_in_flight_sent_time_ns: ?u64 = null;
         for (self.packets.items) |packet| {
             if (packet.ack_eliciting) ack_eliciting_packets += 1;
             if (packet.in_flight and !packet.acknowledged and !packet.lost) {
@@ -453,13 +470,6 @@ pub const SentPacketTracker = struct {
                 bytes_in_flight += packet.bytes;
                 if (packet.ack_eliciting) {
                     ack_eliciting_in_flight_packets += 1;
-                    if (packet.sent_time_ns) |sent_time| {
-                        if (latest_ack_eliciting_in_flight_sent_time_ns == null or
-                            sent_time > latest_ack_eliciting_in_flight_sent_time_ns.?)
-                        {
-                            latest_ack_eliciting_in_flight_sent_time_ns = sent_time;
-                        }
-                    }
                 }
             }
             if (packet.acknowledged) acknowledged_packets += 1;
@@ -470,7 +480,7 @@ pub const SentPacketTracker = struct {
             .ack_eliciting_packets = ack_eliciting_packets,
             .in_flight_packets = in_flight_packets,
             .ack_eliciting_in_flight_packets = ack_eliciting_in_flight_packets,
-            .latest_ack_eliciting_in_flight_sent_time_ns = latest_ack_eliciting_in_flight_sent_time_ns,
+            .latest_ack_eliciting_in_flight_sent_time_ns = self.latestAckElicitingInFlightSentTime(),
             .acknowledged_packets = acknowledged_packets,
             .lost_packets = lost_packets,
             .bytes_in_flight = bytes_in_flight,
@@ -739,14 +749,17 @@ pub const SentPacketTracker = struct {
         const largest_lost = largest_acknowledged - packet_threshold;
 
         var lost: AckResult = .{};
+        var cached_latest_lost = false;
         const sorted_packets = self.packetsSortedAscending();
-        for (self.packets.items) |*packet| {
+        for (self.packets.items, 0..) |*packet, index| {
             if (packet.packet_number > largest_lost) {
                 if (sorted_packets) break;
                 continue;
             }
             if (packet.acknowledged or packet.lost or !packet.in_flight) continue;
             packet.lost = true;
+            cached_latest_lost = cached_latest_lost or
+                self.latest_ack_eliciting_in_flight_index == index;
             lost.packets += 1;
             lost.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
             lost.bytes += packet.bytes;
@@ -754,13 +767,15 @@ pub const SentPacketTracker = struct {
                 lost.ack_eliciting_packets += 1;
             }
         }
+        if (cached_latest_lost) self.recomputeLatestAckElicitingInFlight();
         return lost;
     }
 
     pub fn detectTimeThresholdLoss(self: *SentPacketTracker, now_ns: u64, loss_delay_ns: u64, largest_acknowledged: ?u64) AckResult {
         var lost: AckResult = .{};
+        var cached_latest_lost = false;
         const sorted_packets = self.packetsSortedAscending();
-        for (self.packets.items) |*packet| {
+        for (self.packets.items, 0..) |*packet, index| {
             if (largest_acknowledged) |largest| {
                 if (packet.packet_number > largest) {
                     if (sorted_packets) break;
@@ -772,6 +787,8 @@ pub const SentPacketTracker = struct {
             const lost_time = std.math.add(u64, sent_time, loss_delay_ns) catch std.math.maxInt(u64);
             if (now_ns < lost_time) continue;
             packet.lost = true;
+            cached_latest_lost = cached_latest_lost or
+                self.latest_ack_eliciting_in_flight_index == index;
             lost.packets += 1;
             lost.observe(packet.packet_number, packet.sent_time_ns, packet.pmtu_probe_size);
             lost.bytes += packet.bytes;
@@ -779,6 +796,7 @@ pub const SentPacketTracker = struct {
                 lost.ack_eliciting_packets += 1;
             }
         }
+        if (cached_latest_lost) self.recomputeLatestAckElicitingInFlight();
         return lost;
     }
 
@@ -801,13 +819,18 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn latestAckElicitingInFlightSentTime(self: SentPacketTracker) ?u64 {
-        var latest: ?u64 = null;
-        for (self.packets.items) |packet| {
-            if (!packet.ack_eliciting or packet.acknowledged or packet.lost) continue;
-            const sent_time = packet.sent_time_ns orelse continue;
-            if (latest == null or sent_time > latest.?) latest = sent_time;
+        const index = self.latest_ack_eliciting_in_flight_index orelse
+            return null;
+        if (index < self.packets.items.len) {
+            if (ackElicitingInFlightSentTime(self.packets.items[index])) |sent_time| {
+                return sent_time;
+            }
         }
-        return latest;
+        // Tests and same-module recovery code can still mutate packet metadata
+        // directly.  Production paths update the cache transactionally, but a
+        // defensive fallback keeps this query correct if an invariant is broken
+        // outside the tracker API.
+        return self.scanLatestAckElicitingInFlightSentTime();
     }
 
     /// Return the longest contiguous lost-packet period that can establish
@@ -966,6 +989,7 @@ pub const SentPacketTracker = struct {
         sorted_packets: bool,
     ) AckResult {
         var result: AckResult = .{};
+        var cached_latest_acked = false;
         if (sorted_packets) {
             var packet_index: usize = 0;
             var range_index = ranges.len;
@@ -983,17 +1007,20 @@ pub const SentPacketTracker = struct {
                     self.markPacketAcknowledged(
                         &self.packets.items[packet_index],
                         &result,
+                        &cached_latest_acked,
                     );
                     packet_index += 1;
                 }
             }
+            if (cached_latest_acked) self.recomputeLatestAckElicitingInFlight();
             return result;
         }
 
         for (self.packets.items) |*packet| {
             if (!ackRangesContain(ranges, packet.packet_number)) continue;
-            self.markPacketAcknowledged(packet, &result);
+            self.markPacketAcknowledged(packet, &result, &cached_latest_acked);
         }
+        if (cached_latest_acked) self.recomputeLatestAckElicitingInFlight();
         return result;
     }
 
@@ -1001,10 +1028,17 @@ pub const SentPacketTracker = struct {
         self: *SentPacketTracker,
         packet: *SentPacket,
         result: *AckResult,
+        cached_latest_acked: *bool,
     ) void {
         self.observeAcknowledged(packet.packet_number);
         if (packet.acknowledged) return;
+        const was_cached_latest = if (self.latest_ack_eliciting_in_flight_index) |index|
+            index < self.packets.items.len and
+                self.packets.items[index].packet_number == packet.packet_number
+        else
+            false;
         packet.acknowledged = true;
+        cached_latest_acked.* = cached_latest_acked.* or was_cached_latest;
         result.packets += 1;
         result.observe(
             packet.packet_number,
@@ -1066,6 +1100,45 @@ pub const SentPacketTracker = struct {
                 indexed.* = index;
             }
         }
+    }
+
+    fn considerLatestAckElicitingInFlight(self: *SentPacketTracker, index: usize) void {
+        const sent_time = ackElicitingInFlightSentTime(self.packets.items[index]) orelse
+            return;
+        const current = self.latest_ack_eliciting_in_flight_index orelse {
+            self.latest_ack_eliciting_in_flight_index = index;
+            return;
+        };
+        const current_time = ackElicitingInFlightSentTime(self.packets.items[current]) orelse {
+            self.latest_ack_eliciting_in_flight_index = index;
+            return;
+        };
+        if (sent_time > current_time) self.latest_ack_eliciting_in_flight_index = index;
+    }
+
+    fn recomputeLatestAckElicitingInFlight(self: *SentPacketTracker) void {
+        self.latest_ack_eliciting_in_flight_index = null;
+        for (self.packets.items, 0..) |packet, index| {
+            if (ackElicitingInFlightSentTime(packet) == null) continue;
+            self.considerLatestAckElicitingInFlight(index);
+        }
+    }
+
+    fn scanLatestAckElicitingInFlightSentTime(self: SentPacketTracker) ?u64 {
+        var latest: ?u64 = null;
+        for (self.packets.items) |packet| {
+            const sent_time = ackElicitingInFlightSentTime(packet) orelse
+                continue;
+            if (latest == null or sent_time > latest.?) latest = sent_time;
+        }
+        return latest;
+    }
+
+    fn ackElicitingInFlightSentTime(packet: SentPacket) ?u64 {
+        if (!packet.ack_eliciting or !packet.in_flight or packet.acknowledged or packet.lost) {
+            return null;
+        }
+        return packet.sent_time_ns;
     }
 
     fn packetIndexHasUnusedCapacity(self: SentPacketTracker) bool {
@@ -1638,6 +1711,7 @@ test "QUIC sent packet tracker reports latest ack-eliciting in-flight send time"
     try sent.sentAt(1, false, 0, .not_ect, 400);
     try sent.sentAt(2, true, 1200, .not_ect, 300);
     try sent.sentAt(3, true, 1200, .not_ect, null);
+    try std.testing.expectEqual(@as(?usize, 2), sent.latest_ack_eliciting_in_flight_index);
     try std.testing.expectEqual(@as(?u64, 300), sent.latestAckElicitingInFlightSentTime());
     try std.testing.expectEqual(
         @as(?u64, 300),
@@ -1645,6 +1719,7 @@ test "QUIC sent packet tracker reports latest ack-eliciting in-flight send time"
     );
 
     _ = sent.markAcknowledged(2);
+    try std.testing.expectEqual(@as(?usize, 0), sent.latest_ack_eliciting_in_flight_index);
     try std.testing.expectEqual(@as(?u64, 100), sent.latestAckElicitingInFlightSentTime());
     try std.testing.expectEqual(
         @as(?u64, 100),
@@ -1652,11 +1727,48 @@ test "QUIC sent packet tracker reports latest ack-eliciting in-flight send time"
     );
 
     sent.packets.items[0].lost = true;
+    // Same-module tests can still mutate packet state directly; the cached
+    // hot-path value is guarded by a correctness fallback for those cases.
     try std.testing.expectEqual(@as(?u64, null), sent.latestAckElicitingInFlightSentTime());
     try std.testing.expectEqual(
         @as(?u64, null),
         sent.stats().latest_ack_eliciting_in_flight_sent_time_ns,
     );
+}
+
+test "QUIC sent packet tracker repairs cached PTO base on ACK loss and forget" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(10, true, 1200, .not_ect, 100);
+    try sent.sentAt(11, true, 1200, .not_ect, 200);
+    try sent.sentAt(12, true, 1200, .not_ect, 300);
+    try std.testing.expectEqual(@as(?usize, 2), sent.latest_ack_eliciting_in_flight_index);
+
+    const ack_latest = quic.AckFrame{
+        .largest_acknowledged = 12,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    _ = try sent.applyAckDetailed(ack_latest);
+    _ = sent.markAcknowledged(10);
+    try std.testing.expectEqual(@as(?usize, 1), sent.latest_ack_eliciting_in_flight_index);
+    try std.testing.expectEqual(@as(?u64, 200), sent.latestAckElicitingInFlightSentTime());
+
+    // A newer packet with an older send time must not disturb the cached PTO
+    // base, but it becomes the fallback after the current base is declared lost.
+    try sent.sentAt(13, true, 1200, .not_ect, 150);
+    try std.testing.expectEqual(@as(?usize, 1), sent.latest_ack_eliciting_in_flight_index);
+
+    const lost = sent.detectPacketThresholdLoss(14, 3);
+    try std.testing.expectEqual(@as(usize, 1), lost.packets);
+    try std.testing.expectEqual(@as(?usize, 3), sent.latest_ack_eliciting_in_flight_index);
+    try std.testing.expectEqual(@as(?u64, 150), sent.latestAckElicitingInFlightSentTime());
+
+    try std.testing.expect(sent.forget(13));
+    try std.testing.expectEqual(@as(?usize, null), sent.latest_ack_eliciting_in_flight_index);
+    try std.testing.expectEqual(@as(?u64, null), sent.latestAckElicitingInFlightSentTime());
 }
 
 test "QUIC sent packet tracker accounts non-eliciting in-flight packets" {

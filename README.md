@@ -254,7 +254,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   default configurable RFC 9406 HyStart++ slow-start overshoot prevention with
   packet-number RTT rounds, Conservative Slow Start, jitter recovery, and public
   window/in-flight observability, high-BDP CUBIC performance regression coverage, and receive-side ECN counter
-  reporting, sent ECN counter validation, ACK_ECN CE congestion response,
+  reporting, cached PTO-base send-time selection, sent ECN counter validation, ACK_ECN CE congestion response,
   reordered-ACK_ECN tolerance, and plain-ACK ECN fallback disablement, RFC 9002-style RTT/PTO estimation with negotiated ACK-delay
   encode/decode and adjustment, packet/time-threshold loss detection, earliest loss/PTO timer
   deadlines, capped exponential PTO backoff, two-probe PTO service, and persistent
