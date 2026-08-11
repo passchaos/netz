@@ -6369,7 +6369,8 @@ const StreamingMessageSet = struct {
 
     fn contains(self: StreamingMessageSet, stream_id: u62) bool {
         if (self.entry_index.contains(stream_id)) return true;
-        return self.reset_index.contains(stream_id);
+        return self.reset_index.count() != 0 and
+            self.reset_index.contains(stream_id);
     }
 
     fn retainedCount(self: StreamingMessageSet) usize {

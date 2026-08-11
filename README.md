@@ -101,7 +101,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   per-stream `receiveResponseEvent`/`readResponseData` plus
   `receiveNextResponseEvent` for one tquic-style poll loop over every indexed
   outstanding response and reset. Both directions provide
-  indexed active streaming readers, bounded-window network reads with automatic QPACK head/trailer feedback,
+  indexed active streaming readers with empty-reset lookup skips, bounded-window network reads with automatic QPACK head/trailer feedback,
   interleaved-stream and reset identity preservation, Content-Length
   validation, prepared reset-record fast paths, and no full-body aggregation. When UDP_GRO is enabled, protected
   and handshake packet pumps retain the decrypted batch behind a one-packet
