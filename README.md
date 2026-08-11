@@ -275,7 +275,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   window/in-flight observability, high-BDP CUBIC performance regression coverage, and receive-side Not-ECT skips plus ECN counter
   reporting, cached PTO-base send-time selection, old-ACK RTT sample skips, sent ECN counter validation, ACK_ECN CE congestion response,
   reordered-ACK_ECN tolerance, and plain-ACK ECN fallback disablement, RFC 9002-style RTT/PTO estimation with negotiated ACK-delay
-  encode/decode zero-exponent fast paths and zero-delay adjustment skips, packet/time-threshold loss detection, earliest loss/PTO timer
+  encode/decode zero-exponent fast paths and zero-delay adjustment skips, pre-first packet-threshold skips, packet/time-threshold loss detection, earliest loss/PTO timer
   deadlines, capped exponential PTO backoff, two-probe PTO service, and persistent
   congestion detection that collapses the congestion window and resets the RTT
   measurement epoch after long contiguous lost periods, default RFC 9002 token-bucket

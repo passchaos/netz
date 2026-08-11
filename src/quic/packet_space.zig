@@ -827,6 +827,11 @@ pub const SentPacketTracker = struct {
         var lost: AckResult = .{};
         var cached_latest_lost = false;
         const sorted_packets = self.packetsSortedAscending();
+        if (sorted_packets and self.packets.items.len != 0 and
+            largest_lost < self.packets.items[0].packet_number)
+        {
+            return lost;
+        }
         for (self.packets.items, 0..) |*packet, index| {
             if (packet.packet_number > largest_lost) {
                 if (sorted_packets) break;
@@ -1696,6 +1701,19 @@ test "QUIC sent packet tracker applies ACK ranges" {
     try std.testing.expectEqual(@as(usize, 6), after.ack_eliciting_in_flight_packets);
     try std.testing.expectEqual(@as(usize, 6 * 1200), after.bytes_in_flight);
     try std.testing.expectEqual(@as(usize, 0), after.lost_packets);
+}
+
+test "QUIC sent packet tracker skips packet-threshold scan before first packet" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    try sent.sentAt(10, true, 100, .not_ect, 1_000);
+    try sent.sentAt(11, true, 100, .not_ect, 2_000);
+    const lost = sent.detectPacketThresholdLoss(12, default_packet_threshold);
+    try std.testing.expectEqual(@as(usize, 0), lost.packets);
+    try std.testing.expect(!sent.packets.items[0].lost);
+    try std.testing.expect(!sent.packets.items[1].lost);
 }
 
 test "QUIC sent packet tracker applies many ACK ranges in one decoded set" {
