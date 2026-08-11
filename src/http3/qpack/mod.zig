@@ -779,6 +779,11 @@ fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: [
         try list.append(allocator, 0);
         return;
     }
+    if (value.len <= 2) {
+        try list.append(allocator, @intCast(value.len));
+        try list.appendSlice(allocator, value);
+        return;
+    }
     const huffman = try encodeHuffman(allocator, value);
     defer allocator.free(huffman);
     if (huffman.len < value.len) {
