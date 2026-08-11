@@ -7078,6 +7078,17 @@ const OutboundBodySet = struct {
         fin: bool,
     ) Error!*Entry {
         const entry = self.find(stream_id) orelse return error.UnexpectedStream;
+        try self.prepareChunkForEntry(entry, chunk_len, fin);
+        return entry;
+    }
+
+    fn prepareChunkForEntry(
+        self: *OutboundBodySet,
+        entry: *Entry,
+        chunk_len: usize,
+        fin: bool,
+    ) Error!void {
+        _ = self;
         const next_written = std.math.add(
             usize,
             entry.written,
@@ -7091,7 +7102,6 @@ const OutboundBodySet = struct {
         }
         if (!fin and chunk_len == 0) return error.InvalidFrame;
         entry.written = next_written;
-        return entry;
     }
 
     fn prepareTrailers(
@@ -7802,7 +7812,7 @@ fn sendConnectionBodyChunk(
     const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
     const previous = entry.*;
     errdefer entry.* = previous;
-    _ = try bodies.prepareChunk(stream_id, data.len, fin);
+    try bodies.prepareChunkForEntry(entry, data.len, fin);
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(connection.endpoint.allocator);
     try writeDataFrame(&payload, connection.endpoint.allocator, data);
@@ -7837,7 +7847,7 @@ fn sendProtectedBodyChunk(
     const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
     const previous = entry.*;
     errdefer entry.* = previous;
-    _ = try bodies.prepareChunk(stream_id, data.len, fin);
+    try bodies.prepareChunkForEntry(entry, data.len, fin);
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(endpoint.allocator);
     try writeDataFrame(&payload, endpoint.allocator, data);
