@@ -153,8 +153,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   derivation for QUIC, an integrated minimal client/server handshake for QUIC v1/v2 that emits
   practical transport parameters and applies negotiated flow-control, stream,
   and UDP-payload limits to established 1-RTT connection objects with static-key-derived stateless reset token and packet helpers,
-  packet-number space ACK tracking with cached retained-packet counts, O(1)
-  oldest-range retirement and tail-merge removal, and bounded duplicate/old packet suppression,
+  packet-number space ACK tracking with cached retained-packet counts, tail
+  ACK-range append/removal fast paths, and bounded duplicate/old packet suppression,
   ACK range semantic validation plus indexed exact sent-packet lookup with
   tail-forget fast paths, cached sortedness for ACK/loss scans, and single-pass
   ACK marking,

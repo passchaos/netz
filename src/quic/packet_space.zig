@@ -244,7 +244,11 @@ pub const ReceivedPacketTracker = struct {
             _ = self.ranges.pop();
         }
 
-        try self.ranges.insert(self.allocator, index, range);
+        if (index == self.ranges.items.len) {
+            try self.ranges.append(self.allocator, range);
+        } else {
+            try self.ranges.insert(self.allocator, index, range);
+        }
         self.retained_packet_count += range.len();
         return true;
     }
