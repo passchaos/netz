@@ -227,8 +227,8 @@ pub const ReplayFilter = struct {
     }
 
     pub fn rememberValidated(self: *ReplayFilter, token: []const u8) Error!void {
-        const fp = try fingerprint(token);
         if (self.max_entries == 0) return;
+        const fp = try fingerprint(token);
         const slot = try self.fingerprint_index.getOrPut(self.allocator, fp);
         if (slot.found_existing) return error.TokenReplay;
         errdefer _ = self.fingerprint_index.remove(fp);
@@ -431,6 +431,17 @@ test "QUIC address validation replay filter rejects duplicate fingerprints" {
     try std.testing.expect(try replay.contains(token));
     try std.testing.expectEqual(@as(usize, 1), replay.fingerprint_index.count());
     try std.testing.expectError(error.TokenReplay, validateAnySecretAndRemember(&secrets, .retry, .version_1, 10, "peer", token, &replay));
+}
+
+test "QUIC address validation replay filter disabled remember skips fingerprints" {
+    var no_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var replay = ReplayFilter.init(no_alloc.allocator(), 0);
+    defer replay.deinit();
+
+    try replay.rememberValidated(&.{});
+    try replay.rememberValidated("not-a-token");
+    try std.testing.expectEqual(@as(usize, 0), replay.entryCount());
+    try std.testing.expectEqual(@as(usize, 0), replay.fingerprint_index.count());
 }
 
 test "QUIC address validation replay filter evicts oldest fingerprint" {
