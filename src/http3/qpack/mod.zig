@@ -376,30 +376,38 @@ fn encodeDynamicBlockWithReferenceLimit(
     reference_limit: u64,
     references: *std.ArrayList(u64),
 ) !void {
+    const dynamic_references_possible =
+        reference_limit != 0 and
+        table.entryCount() != 0 and
+        table.entries.items[table.head].absolute_index < reference_limit;
     const stack_match_capacity = 64;
     var stack_matches: [stack_match_capacity]?DynamicTable.Match =
         undefined;
-    const dynamic_matches = if (fields.len <= stack_matches.len)
+    const dynamic_matches: []?DynamicTable.Match = if (!dynamic_references_possible)
+        &.{}
+    else if (fields.len <= stack_matches.len)
         stack_matches[0..fields.len]
     else
         try allocator.alloc(?DynamicTable.Match, fields.len);
-    defer if (fields.len > stack_matches.len) {
+    defer if (dynamic_references_possible and fields.len > stack_matches.len) {
         allocator.free(dynamic_matches);
     };
 
     const base = table.insert_count;
     var required_insert_count: u64 = 0;
-    for (fields, dynamic_matches) |field, *dynamic_match| {
-        dynamic_match.* = table.findMatchBefore(
-            field.name,
-            field.value,
-            reference_limit,
-        );
-        if (dynamic_match.*) |match| {
-            required_insert_count = @max(
-                required_insert_count,
-                match.absolute_index + 1,
+    if (dynamic_references_possible) {
+        for (fields, dynamic_matches) |field, *dynamic_match| {
+            dynamic_match.* = table.findMatchBefore(
+                field.name,
+                field.value,
+                reference_limit,
             );
+            if (dynamic_match.*) |match| {
+                required_insert_count = @max(
+                    required_insert_count,
+                    match.absolute_index + 1,
+                );
+            }
         }
     }
 
@@ -419,7 +427,11 @@ fn encodeDynamicBlockWithReferenceLimit(
         base - required_insert_count,
     );
 
-    for (fields, dynamic_matches) |field, dynamic_match| {
+    for (fields, 0..) |field, index| {
+        const dynamic_match = if (dynamic_references_possible)
+            dynamic_matches[index]
+        else
+            null;
         if (!field.never_indexed) {
             if (dynamic_match) |match| {
                 if (match.full_match) {
