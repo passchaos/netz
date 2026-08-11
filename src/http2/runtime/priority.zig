@@ -49,6 +49,7 @@ pub const State = struct {
         self: State,
         stream_id: u31,
     ) ?StoredUpdate {
+        if (self.update_index.count() == 0) return null;
         const index = self.update_index.get(stream_id) orelse return null;
         if (index >= self.updates.items.len) return null;
         const update = self.updates.items[index];
@@ -164,6 +165,7 @@ pub const State = struct {
         allocator: std.mem.Allocator,
         stream_id: u31,
     ) bool {
+        if (self.update_index.count() == 0) return false;
         const index = self.update_index.get(stream_id) orelse return false;
         const last_index = self.updates.items.len - 1;
         var removed = self.updates.swapRemove(index);
@@ -286,4 +288,5 @@ test "priority state indexes survive swap removals and replacements" {
     try std.testing.expect(state.get(5) == null);
     try std.testing.expect(state.remove(allocator, 3));
     try std.testing.expect(state.get(3) == null);
+    try std.testing.expect(!state.remove(allocator, 9));
 }
