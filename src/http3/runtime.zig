@@ -7100,7 +7100,8 @@ fn bufferedHasResponse(
     buffered: ResponseStreamSet,
     stream_id: u62,
 ) bool {
-    return buffered.resets.contains(stream_id) or
+    return (buffered.resets.count() != 0 and
+        buffered.resets.contains(stream_id)) or
         buffered.entry_index.contains(stream_id);
 }
 
