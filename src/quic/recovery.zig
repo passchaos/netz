@@ -40,6 +40,7 @@ const PendingDatagram = struct {
     /// one-element ArrayList; only actual retransmissions grow dynamic storage.
     original_packet_number: ?u64,
     retransmission_packet_numbers: std.ArrayList(u64) = .empty,
+    newest_packet_number: u64,
     payload: []u8,
 
     fn init(
@@ -54,6 +55,7 @@ const PendingDatagram = struct {
         return .{
             .group_id = group_id,
             .original_packet_number = packet_number,
+            .newest_packet_number = packet_number,
             .payload = payload_copy,
         };
     }
@@ -65,10 +67,19 @@ const PendingDatagram = struct {
     }
 
     fn newestPacketNumber(self: PendingDatagram) u64 {
+        return self.newest_packet_number;
+    }
+
+    fn refreshNewestPacketNumber(self: *PendingDatagram) void {
         if (self.retransmission_packet_numbers.items.len != 0) {
-            return self.retransmission_packet_numbers.items[self.retransmission_packet_numbers.items.len - 1];
+            self.newest_packet_number = self.retransmission_packet_numbers.items[
+                self.retransmission_packet_numbers.items.len - 1
+            ];
+            return;
         }
-        return self.original_packet_number.?;
+        if (self.original_packet_number) |packet_number| {
+            self.newest_packet_number = packet_number;
+        }
     }
 
     fn containsRange(self: PendingDatagram, start: u64, end: u64) bool {
@@ -241,6 +252,7 @@ pub const Queue = struct {
         const entry = &self.pending.items[group_index];
         try self.packet_index.ensureUnusedCapacity(self.allocator, 1);
         try entry.retransmission_packet_numbers.append(self.allocator, packet_number);
+        entry.newest_packet_number = packet_number;
         self.packet_index.putAssumeCapacityNoClobber(packet_number, group_index);
     }
 
@@ -269,6 +281,7 @@ pub const Queue = struct {
             if (candidate != packet_number) continue;
             _ = entry.retransmission_packet_numbers.orderedRemove(retransmission_index);
             _ = self.packet_index.remove(packet_number);
+            entry.refreshNewestPacketNumber();
             return true;
         }
         unreachable;
@@ -475,9 +488,13 @@ test "QUIC recovery queue keeps stable group identity across retransmissions" {
         group_id,
         queue.groupIdForPacketNumber(8).?,
     );
+    try std.testing.expectEqual(@as(u64, 8), queue.pending.items[0].newestPacketNumber());
     try std.testing.expectEqual(@as(?usize, 0), queue.group_index.get(group_id));
     try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(4));
     try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(8));
+    try std.testing.expect(queue.forgetPacketNumber(8));
+    try std.testing.expectEqual(@as(u64, 4), queue.pending.items[0].newestPacketNumber());
+    try queue.recordRetransmission(0, 8);
     try std.testing.expect(queue.acknowledgePacketNumber(8));
     try std.testing.expect(!queue.containsGroupId(group_id));
     try std.testing.expect(queue.group_index.get(group_id) == null);
