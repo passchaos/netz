@@ -263,6 +263,13 @@ pub fn Pool(comptime Handle: type) type {
                     return;
                 }
                 try self.origin_index.ensureUnusedCapacity(self.allocator, 1);
+                self.appendEntryToNewBucketAssumeCapacity(.{
+                    .key = owned_key,
+                    .handle = handle,
+                    .pooled_at_ms = now_ms,
+                });
+                owned_key = undefined;
+                return;
             } else {
                 if (new_origin) try self.origin_index.ensureUnusedCapacity(self.allocator, 1);
                 // Idle pool entries are interchangeable for reuse decisions;
@@ -270,6 +277,15 @@ pub fn Pool(comptime Handle: type) type {
                 // O(1) instead of memmoving the rest of the pool.
                 var evicted = self.removeEntryAt(0);
                 self.destroyEntry(&evicted);
+                if (new_origin) {
+                    self.appendEntryToNewBucketAssumeCapacity(.{
+                        .key = owned_key,
+                        .handle = handle,
+                        .pooled_at_ms = now_ms,
+                    });
+                    owned_key = undefined;
+                    return;
+                }
             }
 
             self.appendEntryAssumeCapacity(.{
@@ -311,6 +327,20 @@ pub fn Pool(comptime Handle: type) type {
                     .count = 1,
                 });
             }
+        }
+
+        fn appendEntryToNewBucketAssumeCapacity(
+            self: *Self,
+            entry: Entry,
+        ) void {
+            const index = self.entries.items.len;
+            self.entries.appendAssumeCapacity(entry);
+            const key = originIndexKey(self.entries.items[index].key.origin());
+            self.origin_index.putAssumeCapacityNoClobber(key, .{
+                .head = index,
+                .tail = index,
+                .count = 1,
+            });
         }
 
         fn appendEntryToBucketAssumeCapacity(
