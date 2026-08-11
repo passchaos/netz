@@ -29,13 +29,18 @@ pub fn encodedLen(first: u8) u8 {
 pub fn encode(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64) !void {
     const len = try length(value);
     var tmp: [8]u8 = undefined;
-    _ = try encodeInto(&tmp, value);
+    encodeIntoWithLen(&tmp, value, len);
     try list.appendSlice(allocator, tmp[0..len]);
 }
 
 pub fn encodeInto(out: []u8, value: u64) Error![]u8 {
     const len = try length(value);
     if (out.len < len) return error.BufferTooShort;
+    encodeIntoWithLen(out, value, len);
+    return out[0..len];
+}
+
+fn encodeIntoWithLen(out: []u8, value: u64, len: u8) void {
     switch (len) {
         1 => out[0] = @truncate(value),
         2 => {
@@ -49,7 +54,6 @@ pub fn encodeInto(out: []u8, value: u64) Error![]u8 {
         },
         else => unreachable,
     }
-    return out[0..len];
 }
 
 pub fn decode(cursor: *wire.Cursor) Error!u64 {

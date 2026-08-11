@@ -126,7 +126,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   PUSH_PROMISE plus the corresponding unidirectional pushed response with
   shared dynamic QPACK state, plus a
   `std.Io.async` request receive helper for the development runtime
-- QUIC varints, long-header parsing, stream IDs, transport parameters, and core
+- QUIC varints with encode length reuse, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed
   RFC-defaulted transport-parameter encoding/validation (duplicate detection,
