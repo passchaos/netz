@@ -1238,12 +1238,32 @@ pub const Hpack = struct {
             if (std.mem.eql(u8, value, "gzip, deflate")) return 16;
             return null;
         }
+        if (std.mem.eql(u8, name, "accept")) {
+            if (value.len == 0) return 19;
+            return null;
+        }
+        if (std.mem.eql(u8, name, "cache-control")) {
+            if (value.len == 0) return 24;
+            return null;
+        }
         if (std.mem.eql(u8, name, "content-length")) {
             if (value.len == 0) return 28;
             return null;
         }
         if (std.mem.eql(u8, name, "content-type")) {
             if (value.len == 0) return 31;
+            return null;
+        }
+        if (std.mem.eql(u8, name, "server")) {
+            if (value.len == 0) return 54;
+            return null;
+        }
+        if (std.mem.eql(u8, name, "user-agent")) {
+            if (value.len == 0) return 58;
+            return null;
+        }
+        if (std.mem.eql(u8, name, "vary")) {
+            if (value.len == 0) return 59;
             return null;
         }
         return null;
@@ -1255,9 +1275,14 @@ pub const Hpack = struct {
         if (std.mem.eql(u8, name, ":path")) return 4;
         if (std.mem.eql(u8, name, ":scheme")) return 6;
         if (std.mem.eql(u8, name, ":status")) return 8;
+        if (std.mem.eql(u8, name, "accept")) return 19;
         if (std.mem.eql(u8, name, "accept-encoding")) return 16;
+        if (std.mem.eql(u8, name, "cache-control")) return 24;
         if (std.mem.eql(u8, name, "content-length")) return 28;
         if (std.mem.eql(u8, name, "content-type")) return 31;
+        if (std.mem.eql(u8, name, "server")) return 54;
+        if (std.mem.eql(u8, name, "user-agent")) return 58;
+        if (std.mem.eql(u8, name, "vary")) return 59;
         return null;
     }
 
@@ -2213,9 +2238,16 @@ test "HTTP/2 HPACK static lookup index preserves one-indexed table order" {
     try std.testing.expectEqual(@as(?u64, 7), Hpack.findStaticIndex(":scheme", "https"));
     try std.testing.expectEqual(@as(?u64, 9), Hpack.findStaticIndex(":status", "204"));
     try std.testing.expectEqual(@as(?u64, 16), Hpack.findStaticIndex("accept-encoding", "gzip, deflate"));
+    try std.testing.expectEqual(@as(?u64, 19), Hpack.findStaticIndex("accept", ""));
+    try std.testing.expectEqual(@as(?u64, 24), Hpack.findStaticIndex("cache-control", ""));
     try std.testing.expectEqual(@as(?u64, 28), Hpack.findStaticIndex("content-length", ""));
     try std.testing.expectEqual(@as(?u64, 31), Hpack.findStaticIndex("content-type", ""));
+    try std.testing.expectEqual(@as(?u64, 54), Hpack.findStaticIndex("server", ""));
+    try std.testing.expectEqual(@as(?u64, 58), Hpack.findStaticIndex("user-agent", ""));
+    try std.testing.expectEqual(@as(?u64, 59), Hpack.findStaticIndex("vary", ""));
+    try std.testing.expectEqual(@as(?u64, 19), Hpack.findStaticNameIndex("accept"));
     try std.testing.expectEqual(@as(?u64, 16), Hpack.findStaticNameIndex("accept-encoding"));
+    try std.testing.expectEqual(@as(?u64, 54), Hpack.findStaticNameIndex("server"));
     try std.testing.expect(Hpack.findStaticIndex(":status", "418") == null);
     try std.testing.expect(Hpack.findStaticNameIndex("x-not-static") == null);
 }
