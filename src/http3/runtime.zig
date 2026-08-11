@@ -1544,10 +1544,10 @@ pub const QpackEncodeState = struct {
         self: *QpackEncodeState,
         stream_id: u64,
     ) usize {
-        if (!self.pending_section_index.contains(stream_id)) return 0;
-        var write_index: usize = 0;
+        const start_index = self.pending_section_index.get(stream_id) orelse return 0;
+        var write_index: usize = start_index;
         var released: usize = 0;
-        for (self.pending_sections.items, 0..) |section, read_index| {
+        for (self.pending_sections.items[start_index..], start_index..) |section, read_index| {
             if (section.stream_id == stream_id) {
                 // QPACK Section Acknowledgment identifies only the stream, so
                 // multiple outstanding header/trailer sections on the same
