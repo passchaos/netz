@@ -5505,6 +5505,8 @@ const ResponseStreamSet = struct {
     entries: std.ArrayList(Entry) = .empty,
     entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     resets: std.AutoHashMapUnmanaged(u62, u64) = .empty,
+    reset_order: std.ArrayList(u62) = .empty,
+    reset_head: usize = 0,
     max_stream_buffer: usize,
     max_streams: usize,
 
@@ -5525,6 +5527,7 @@ const ResponseStreamSet = struct {
         self.entries.deinit(self.allocator);
         self.entry_index.deinit(self.allocator);
         self.resets.deinit(self.allocator);
+        self.reset_order.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -5544,17 +5547,27 @@ const ResponseStreamSet = struct {
         stream_id: u62,
         application_error_code: u64,
     ) std.mem.Allocator.Error!void {
-        try self.resets.put(
-            self.allocator,
-            stream_id,
-            application_error_code,
-        );
+        const needs_order_slot = !self.resets.contains(stream_id);
+        if (needs_order_slot) {
+            if (self.reset_head != 0 and
+                self.reset_order.items.len == self.reset_order.capacity)
+            {
+                self.compactResetOrder();
+            }
+            try self.reset_order.ensureUnusedCapacity(self.allocator, 1);
+        }
+        const slot = try self.resets.getOrPut(self.allocator, stream_id);
+        if (!slot.found_existing and needs_order_slot) {
+            self.reset_order.appendAssumeCapacity(stream_id);
+        }
+        slot.value_ptr.* = application_error_code;
         self.remove(stream_id);
     }
 
     fn takeReset(self: *ResponseStreamSet, stream_id: u62) ?u64 {
         const code = self.resets.get(stream_id) orelse return null;
         _ = self.resets.remove(stream_id);
+        self.removeResetOrder(stream_id);
         return code;
     }
 
@@ -5586,20 +5599,63 @@ const ResponseStreamSet = struct {
         return ready_stream_id;
     }
 
-    fn firstReset(self: ResponseStreamSet) ?struct {
+    fn firstReset(self: *ResponseStreamSet) ?struct {
         stream_id: u62,
         application_error_code: u64,
     } {
-        var iterator = self.resets.iterator();
-        const entry = iterator.next() orelse return null;
-        return .{
-            .stream_id = entry.key_ptr.*,
-            .application_error_code = entry.value_ptr.*,
-        };
+        while (self.resetCount() != 0) {
+            const stream_id = self.reset_order.items[self.reset_head];
+            if (self.resets.get(stream_id)) |code| {
+                return .{
+                    .stream_id = stream_id,
+                    .application_error_code = code,
+                };
+            }
+            self.reset_head += 1;
+            self.compactResetOrderIfSparse();
+        }
+        return null;
     }
 
     fn count(self: ResponseStreamSet) usize {
         return self.entries.items.len + self.resets.count();
+    }
+
+    fn resetCount(self: ResponseStreamSet) usize {
+        return self.reset_order.items.len - self.reset_head;
+    }
+
+    fn removeResetOrder(self: *ResponseStreamSet, stream_id: u62) void {
+        var index = self.reset_head;
+        while (index < self.reset_order.items.len) : (index += 1) {
+            if (self.reset_order.items[index] != stream_id) continue;
+            _ = self.reset_order.orderedRemove(index);
+            if (self.reset_head > index) self.reset_head -= 1;
+            self.compactResetOrderIfSparse();
+            return;
+        }
+    }
+
+    fn compactResetOrderIfSparse(self: *ResponseStreamSet) void {
+        if (self.reset_head == 0) return;
+        if (self.reset_head == self.reset_order.items.len or
+            self.reset_head >= self.reset_order.items.len / 2)
+        {
+            self.compactResetOrder();
+        }
+    }
+
+    fn compactResetOrder(self: *ResponseStreamSet) void {
+        if (self.reset_head == 0) return;
+        const remaining = self.resetCount();
+        if (remaining != 0) {
+            @memmove(
+                self.reset_order.items[0..remaining],
+                self.reset_order.items[self.reset_head..],
+            );
+        }
+        self.reset_order.items.len = remaining;
+        self.reset_head = 0;
     }
 
     fn takeReady(
@@ -8057,6 +8113,19 @@ fn recordClientResponseReset(
     stream_id: u62,
     application_error_code: u64,
 ) Error!bool {
+    const needs_order_slot = !response_streams.resets.contains(stream_id);
+    if (needs_order_slot) {
+        if (response_streams.reset_head != 0 and
+            response_streams.reset_order.items.len ==
+                response_streams.reset_order.capacity)
+        {
+            response_streams.compactResetOrder();
+        }
+        try response_streams.reset_order.ensureUnusedCapacity(
+            response_streams.allocator,
+            1,
+        );
+    }
     const reset_slot = try response_streams.resets.getOrPut(
         response_streams.allocator,
         stream_id,
@@ -8067,7 +8136,11 @@ fn recordClientResponseReset(
         }
         return false;
     }
-    errdefer _ = response_streams.resets.remove(stream_id);
+    var order_appended = false;
+    errdefer {
+        _ = response_streams.resets.remove(stream_id);
+        if (order_appended) response_streams.removeResetOrder(stream_id);
+    }
 
     var buffered_entry = response_streams.takeEntry(stream_id);
     errdefer if (buffered_entry) |entry| {
@@ -8098,6 +8171,10 @@ fn recordClientResponseReset(
         try qpack_decode.recordStreamCancellation(stream_id);
     }
 
+    if (needs_order_slot) {
+        response_streams.reset_order.appendAssumeCapacity(stream_id);
+        order_appended = true;
+    }
     reset_slot.value_ptr.* = application_error_code;
     if (buffered_entry) |*entry| entry.deinit();
     buffered_entry = null;
@@ -10850,8 +10927,21 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     try std.testing.expect(!bufferedHasResponse(responses, 8));
     try responses.recordReset(20, http3.ApplicationErrorCode.request_cancelled);
     try std.testing.expect(bufferedHasResponse(responses, 20));
+    try std.testing.expectEqual(@as(usize, 1), responses.resetCount());
     _ = responses.takeReset(20);
     try std.testing.expect(!bufferedHasResponse(responses, 20));
+    try std.testing.expectEqual(@as(usize, 0), responses.resetCount());
+
+    try responses.recordReset(24, 0x24);
+    try responses.recordReset(28, 0x28);
+    try responses.recordReset(24, 0x42); // update without duplicating FIFO slot.
+    try std.testing.expectEqual(@as(usize, 2), responses.resetCount());
+    try std.testing.expectEqual(@as(u62, 24), responses.firstReset().?.stream_id);
+    try std.testing.expectEqual(@as(u64, 0x42), responses.firstReset().?.application_error_code);
+    try std.testing.expectEqual(@as(u64, 0x42), responses.takeReset(24).?);
+    try std.testing.expectEqual(@as(u62, 28), responses.firstReset().?.stream_id);
+    try std.testing.expectEqual(@as(u64, 0x28), responses.takeReset(28).?);
+    try std.testing.expect(responses.firstReset() == null);
 
     try responses.insert(from, .{
         .stream_id = 12,
