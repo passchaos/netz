@@ -218,7 +218,7 @@ pub const ReceivedPacketTracker = struct {
             const oldest = &self.ranges.items[last_index];
             if (oldest.end <= largest_acknowledged) {
                 self.retained_packet_count -|= oldest.len();
-                _ = self.ranges.orderedRemove(last_index);
+                _ = self.ranges.pop();
                 continue;
             }
             if (oldest.start <= largest_acknowledged) {
@@ -241,7 +241,7 @@ pub const ReceivedPacketTracker = struct {
             const oldest = self.ranges.items[self.ranges.items.len - 1];
             self.forgetThrough(oldest.end);
             self.retained_packet_count -|= oldest.len();
-            _ = self.ranges.orderedRemove(self.ranges.items.len - 1);
+            _ = self.ranges.pop();
         }
 
         try self.ranges.insert(self.allocator, index, range);
