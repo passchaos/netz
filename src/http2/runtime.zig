@@ -2720,33 +2720,41 @@ pub const Connection = struct {
 
     fn sendStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
         if (stream_id == 0) return error.InvalidStreamId;
-        if (self.send_stream_window_index.get(stream_id)) |index| {
-            return &self.send_stream_windows.items[index].window;
+        const slot = try self.send_stream_window_index.getOrPut(
+            self.allocator,
+            stream_id,
+        );
+        if (slot.found_existing) {
+            return &self.send_stream_windows.items[slot.value_ptr.*].window;
         }
+        errdefer _ = self.send_stream_window_index.remove(stream_id);
         try self.send_stream_windows.ensureUnusedCapacity(self.allocator, 1);
-        try self.send_stream_window_index.ensureUnusedCapacity(self.allocator, 1);
         const index = self.send_stream_windows.items.len;
         self.send_stream_windows.appendAssumeCapacity(.{
             .stream_id = stream_id,
             .window = .{ .value = self.peer_initial_stream_window },
         });
-        self.send_stream_window_index.putAssumeCapacity(stream_id, index);
+        slot.value_ptr.* = index;
         return &self.send_stream_windows.items[index].window;
     }
 
     fn recvStreamWindow(self: *Connection, stream_id: u31) Error!*FlowWindow {
         if (stream_id == 0) return error.InvalidStreamId;
-        if (self.recv_stream_window_index.get(stream_id)) |index| {
-            return &self.recv_stream_windows.items[index].window;
+        const slot = try self.recv_stream_window_index.getOrPut(
+            self.allocator,
+            stream_id,
+        );
+        if (slot.found_existing) {
+            return &self.recv_stream_windows.items[slot.value_ptr.*].window;
         }
+        errdefer _ = self.recv_stream_window_index.remove(stream_id);
         try self.recv_stream_windows.ensureUnusedCapacity(self.allocator, 1);
-        try self.recv_stream_window_index.ensureUnusedCapacity(self.allocator, 1);
         const index = self.recv_stream_windows.items.len;
         self.recv_stream_windows.appendAssumeCapacity(.{
             .stream_id = stream_id,
             .window = .{ .value = @intCast(self.limits.initial_window_size) },
         });
-        self.recv_stream_window_index.putAssumeCapacity(stream_id, index);
+        slot.value_ptr.* = index;
         return &self.recv_stream_windows.items[index].window;
     }
 
