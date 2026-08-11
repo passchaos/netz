@@ -70,6 +70,7 @@ pub const State = struct {
     }
 
     pub fn onProbeAcked(self: *State, size: usize, peer_max_udp_payload: usize) void {
+        if (size <= self.current_size) return;
         self.current_size = @max(self.current_size, size);
         self.consecutive_failures = 0;
         self.probe_size = null;
@@ -135,6 +136,9 @@ test "QUIC PMTUD validates maximum probe immediately" {
     const size = state.probeSize(60_000).?;
     try std.testing.expectEqual(max_ipv4_udp_payload_size, size);
     state.onProbeSent(size);
+    state.onProbeAcked(size, 60_000);
+    try std.testing.expectEqual(max_ipv4_udp_payload_size, state.currentSize());
+    try std.testing.expect(!state.shouldProbe());
     state.onProbeAcked(size, 60_000);
     try std.testing.expectEqual(max_ipv4_udp_payload_size, state.currentSize());
     try std.testing.expect(!state.shouldProbe());
