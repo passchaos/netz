@@ -1999,51 +1999,34 @@ pub fn decodeRequestHeadFieldSectionWithDynamicTable(
         settings.max_field_section_size,
     );
 
-    var method: ?[]const u8 = null;
-    var path: ?[]const u8 = null;
-    var scheme: ?[]const u8 = null;
-    var authority: ?[]const u8 = null;
-    for (decoded.fields) |header| {
-        if (std.mem.eql(u8, header.name, ":method")) {
-            method = header.value;
-        } else if (std.mem.eql(u8, header.name, ":path")) {
-            path = header.value;
-        } else if (std.mem.eql(u8, header.name, ":scheme")) {
-            scheme = header.value;
-        } else if (std.mem.eql(u8, header.name, ":authority")) {
-            authority = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, "host") and
-            authority == null)
-        {
-            authority = header.value;
-        }
-    }
-    const method_value = method orelse return error.MissingMethod;
-    const has_protocol = requestHasProtocolPseudo(decoded.fields);
+    const lookup = try requestHeaderLookup(decoded.fields);
+    const method_value = lookup.method(decoded.fields) orelse return error.MissingMethod;
+    const has_protocol = lookup.hasProtocol();
     if (has_protocol and !settings.enable_connect_protocol) {
         return error.ExtendedConnectDisabled;
     }
     const plain_connect = std.mem.eql(u8, method_value, "CONNECT") and
         !has_protocol;
-    const declared_length = try contentLength(decoded.fields);
+    const declared_length = lookup.content_length;
     if (plain_connect and declared_length != null) {
         return error.InvalidContentLength;
     }
     // validateHeaderBlock above guarantees these pseudo fields. Resolve all
     // fallible semantic choices before transferring field ownership so no
     // error path can double-free the decoder output.
-    _ = path orelse if (plain_connect) "" else return error.MissingPath;
-    _ = scheme orelse if (plain_connect) "" else return error.InvalidHeader;
+    _ = lookup.path(decoded.fields) orelse
+        if (plain_connect) "" else return error.MissingPath;
+    _ = lookup.scheme(decoded.fields) orelse
+        if (plain_connect) "" else return error.InvalidHeader;
     const owned_fields = try ownHeaderFields(allocator, decoded.fields);
     Qpack.freeDecodedFields(allocator, decoded.fields);
     return .{
-        .method = ownedFieldValue(owned_fields, ":method").?,
-        .path = ownedFieldValue(owned_fields, ":path") orelse
+        .method = lookup.method(owned_fields).?,
+        .path = lookup.path(owned_fields) orelse
             if (plain_connect) "" else return error.MissingPath,
-        .scheme = ownedFieldValue(owned_fields, ":scheme") orelse
+        .scheme = lookup.scheme(owned_fields) orelse
             if (plain_connect) "" else return error.InvalidHeader,
-        .authority = ownedFieldValue(owned_fields, ":authority") orelse
-            ownedFieldValueCaseInsensitive(owned_fields, "host"),
+        .authority = lookup.requestAuthority(owned_fields),
         .headers = owned_fields,
         .content_length = declared_length,
         .body_allowed = !plain_connect,
@@ -2095,8 +2078,9 @@ pub fn decodeResponseHeadFieldSectionWithDynamicTable(
         decoded.fields,
         settings.max_field_section_size,
     );
-    const status = try responseStatus(decoded.fields);
-    const declared_length = try contentLength(decoded.fields);
+    const lookup = try responseHeaderLookup(decoded.fields);
+    const status = lookup.status orelse return error.MissingStatus;
+    const declared_length = lookup.content_length;
     if (status == 204 and declared_length != null) {
         return error.InvalidContentLength;
     }
@@ -2228,38 +2212,30 @@ fn decodeRequestWithOptions(
 
     try validateHeaderBlock(message.headers, .request);
     try validateHeaderBlock(message.trailers, .trailers);
-    try validateRequestBodyForMethod(message.headers, message.body, message.trailers);
-    try validateContentLength(message.headers, message.body.len);
-
-    var method: ?[]const u8 = null;
-    var path: ?[]const u8 = null;
-    var scheme: ?[]const u8 = null;
-    var authority: ?[]const u8 = null;
-    for (message.headers) |header| {
-        if (std.mem.eql(u8, header.name, ":method")) {
-            method = header.value;
-        } else if (std.mem.eql(u8, header.name, ":path")) {
-            path = header.value;
-        } else if (std.mem.eql(u8, header.name, ":scheme")) {
-            scheme = header.value;
-        } else if (std.mem.eql(u8, header.name, ":authority")) {
-            authority = header.value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, "host") and authority == null) {
-            authority = header.value;
-        }
-    }
-    const method_value = method orelse return error.MissingMethod;
-    const has_protocol = requestHasProtocolPseudo(message.headers);
+    const lookup = try requestHeaderLookup(message.headers);
+    const method_value = lookup.method(message.headers) orelse
+        return error.MissingMethod;
+    const has_protocol = lookup.hasProtocol();
     if (enforce_extended_connect_setting and has_protocol and !settings.enable_connect_protocol) {
         return error.ExtendedConnectDisabled;
     }
     const plain_connect = std.mem.eql(u8, method_value, "CONNECT") and !has_protocol;
+    try validateRequestBodyForMethodValue(
+        method_value,
+        has_protocol,
+        lookup.content_length,
+        message.body,
+        message.trailers,
+    );
+    try validateContentLengthValue(lookup.content_length, message.body.len);
 
     return .{
         .method = method_value,
-        .path = path orelse if (plain_connect) "" else return error.MissingPath,
-        .scheme = scheme orelse if (plain_connect) "" else return error.InvalidHeader,
-        .authority = authority,
+        .path = lookup.path(message.headers) orelse
+            if (plain_connect) "" else return error.MissingPath,
+        .scheme = lookup.scheme(message.headers) orelse
+            if (plain_connect) "" else return error.InvalidHeader,
+        .authority = lookup.requestAuthority(message.headers),
         .headers = message.headers,
         .trailers = message.trailers,
         .body = message.body,
@@ -2308,9 +2284,19 @@ fn decodeResponseWithFieldDecoder(
     try validateHeaderBlock(message.headers, .response);
     try validateHeaderBlock(message.trailers, .trailers);
 
-    const final_status = try responseStatus(message.headers);
-    try validateResponseBodyForStatus(final_status, message.headers, message.body, message.trailers);
-    try validateContentLengthForStatus(final_status, message.headers, message.body.len);
+    const lookup = try responseHeaderLookup(message.headers);
+    const final_status = lookup.status orelse return error.MissingStatus;
+    try validateResponseBodyForStatusWithLength(
+        final_status,
+        lookup.content_length,
+        message.body,
+        message.trailers,
+    );
+    try validateContentLengthForStatusValue(
+        final_status,
+        lookup.content_length,
+        message.body.len,
+    );
 
     return .{
         .status = final_status,
@@ -2500,15 +2486,19 @@ fn requestStreamForbiddenFrame(frame_type: u64) bool {
 fn responseStatus(headers: []const Qpack.HeaderField) Error!u16 {
     for (headers) |header| {
         if (!std.mem.eql(u8, header.name, ":status")) continue;
-        if (header.value.len != 3) return error.InvalidStatus;
-        for (header.value) |byte| {
-            if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
-        }
-        const status = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidStatus;
-        if (status < 100 or status > 999) return error.InvalidStatus;
-        return status;
+        return parseStatusValue(header.value);
     }
     return error.MissingStatus;
+}
+
+fn parseStatusValue(value: []const u8) Error!u16 {
+    if (value.len != 3) return error.InvalidStatus;
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte)) return error.InvalidStatus;
+    }
+    const status = std.fmt.parseInt(u16, value, 10) catch return error.InvalidStatus;
+    if (status < 100 or status > 999) return error.InvalidStatus;
+    return status;
 }
 
 fn decodeResponseMessage(
@@ -2681,22 +2671,99 @@ fn contentLength(headers: []const Qpack.HeaderField) Error!?usize {
     var found: ?usize = null;
     for (headers) |header| {
         if (!std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;
-        var parts = std.mem.splitScalar(u8, header.value, ',');
-        while (parts.next()) |raw_part| {
-            const part = std.mem.trim(u8, raw_part, " \t");
-            if (part.len == 0) return error.InvalidContentLength;
-            for (part) |byte| {
-                if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
-            }
-            const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
-            if (found) |existing| {
-                if (existing != parsed) return error.InvalidContentLength;
-            } else {
-                found = parsed;
-            }
-        }
+        try parseContentLengthHeaderValue(header.value, &found);
     }
     return found;
+}
+
+fn parseContentLengthHeaderValue(value: []const u8, found: *?usize) Error!void {
+    var parts = std.mem.splitScalar(u8, value, ',');
+    while (parts.next()) |raw_part| {
+        const part = std.mem.trim(u8, raw_part, " \t");
+        if (part.len == 0) return error.InvalidContentLength;
+        for (part) |byte| {
+            if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
+        }
+        const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
+        if (found.*) |existing| {
+            if (existing != parsed) return error.InvalidContentLength;
+        } else {
+            found.* = parsed;
+        }
+    }
+}
+
+const RequestHeaderLookup = struct {
+    method_index: ?usize = null,
+    path_index: ?usize = null,
+    scheme_index: ?usize = null,
+    authority_index: ?usize = null,
+    host_index: ?usize = null,
+    has_protocol_pseudo: bool = false,
+    content_length: ?usize = null,
+
+    fn method(self: RequestHeaderLookup, headers: []const Qpack.HeaderField) ?[]const u8 {
+        const index = self.method_index orelse return null;
+        return headers[index].value;
+    }
+
+    fn path(self: RequestHeaderLookup, headers: []const Qpack.HeaderField) ?[]const u8 {
+        const index = self.path_index orelse return null;
+        return headers[index].value;
+    }
+
+    fn scheme(self: RequestHeaderLookup, headers: []const Qpack.HeaderField) ?[]const u8 {
+        const index = self.scheme_index orelse return null;
+        return headers[index].value;
+    }
+
+    fn requestAuthority(self: RequestHeaderLookup, headers: []const Qpack.HeaderField) ?[]const u8 {
+        const index = self.authority_index orelse self.host_index orelse return null;
+        return headers[index].value;
+    }
+
+    fn hasProtocol(self: RequestHeaderLookup) bool {
+        return self.has_protocol_pseudo;
+    }
+};
+
+fn requestHeaderLookup(headers: []const Qpack.HeaderField) Error!RequestHeaderLookup {
+    var lookup: RequestHeaderLookup = .{};
+    for (headers, 0..) |header, index| {
+        if (std.mem.eql(u8, header.name, ":method")) {
+            if (lookup.method_index == null) lookup.method_index = index;
+        } else if (std.mem.eql(u8, header.name, ":path")) {
+            if (lookup.path_index == null) lookup.path_index = index;
+        } else if (std.mem.eql(u8, header.name, ":scheme")) {
+            if (lookup.scheme_index == null) lookup.scheme_index = index;
+        } else if (std.mem.eql(u8, header.name, ":authority")) {
+            if (lookup.authority_index == null) lookup.authority_index = index;
+        } else if (std.mem.eql(u8, header.name, ":protocol")) {
+            lookup.has_protocol_pseudo = true;
+        } else if (std.ascii.eqlIgnoreCase(header.name, "host")) {
+            if (lookup.host_index == null) lookup.host_index = index;
+        } else if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+            try parseContentLengthHeaderValue(header.value, &lookup.content_length);
+        }
+    }
+    return lookup;
+}
+
+const ResponseHeaderLookup = struct {
+    status: ?u16 = null,
+    content_length: ?usize = null,
+};
+
+fn responseHeaderLookup(headers: []const Qpack.HeaderField) Error!ResponseHeaderLookup {
+    var lookup: ResponseHeaderLookup = .{};
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.name, ":status")) {
+            if (lookup.status == null) lookup.status = try parseStatusValue(header.value);
+        } else if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+            try parseContentLengthHeaderValue(header.value, &lookup.content_length);
+        }
+    }
+    return lookup;
 }
 
 fn validateRequestBodyForMethod(headers: []const Qpack.HeaderField, body: []const u8, trailers: []const Qpack.HeaderField) Error!void {
