@@ -82,6 +82,7 @@ pub fn writeCryptoFrames(
     bytes: []const u8,
     max_frame_data_len: usize,
 ) Error!void {
+    if (bytes.len == 0) return;
     if (max_frame_data_len == 0) return error.InvalidCryptoRange;
     var written: usize = 0;
     while (written < bytes.len) {
@@ -169,4 +170,13 @@ test "QUIC CRYPTO reassembler rejects conflicting duplicate bytes" {
     // A proven byte conflict is a protocol error; the old data remains intact.
     try std.testing.expectError(error.ConflictingCryptoData, reassembler.insert(.{ .offset = 3, .data = "XYZ" }));
     try std.testing.expectEqualStrings("abcdef", reassembler.available());
+}
+
+test "QUIC CRYPTO stream writer skips empty payloads" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try writeCryptoFrames(&encoded, allocator, 10, &.{}, 0);
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
 }
