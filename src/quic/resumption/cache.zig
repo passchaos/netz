@@ -196,6 +196,7 @@ pub const Cache = struct {
     /// lease finish/ownership checks independent of cache size while preserving
     /// the existing lease ID wraparound semantics.
     lease_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+    evictable_lru_index: ?usize = null,
     max_entries: usize,
     access_clock: u64 = 0,
     next_lease_id: u64 = 1,
@@ -257,6 +258,7 @@ pub const Cache = struct {
             return null;
         const session = try self.copySession(self.entries.items[index]);
         self.entries.items[index].last_used = self.nextAccess();
+        if (self.evictable_lru_index == index) self.recomputeEvictableLru();
         return session;
     }
 
@@ -317,6 +319,7 @@ pub const Cache = struct {
         entry.lease_id = lease_id;
         entry.last_used = self.nextAccess();
         self.lease_index.putAssumeCapacityNoClobber(lease_id, index);
+        if (self.evictable_lru_index == index) self.recomputeEvictableLru();
         return .{
             .owner = self,
             .session = session,
@@ -382,6 +385,7 @@ pub const Cache = struct {
         _ = self.lease_index.remove(lease.lease_id);
         entry.early_data_consumed = consumed;
         entry.last_used = self.nextAccess();
+        self.considerEvictableLru(index);
         lease.state = if (consumed) .consumed else .released;
     }
 
@@ -404,16 +408,7 @@ pub const Cache = struct {
     }
 
     fn lruEvictableIndex(self: *const Cache) ?usize {
-        var best: ?usize = null;
-        for (self.entries.items, 0..) |entry, index| {
-            if (entry.lease_id != null) continue;
-            if (best == null or
-                entry.last_used < self.entries.items[best.?].last_used)
-            {
-                best = index;
-            }
-        }
-        return best;
+        return self.evictable_lru_index;
     }
 
     fn copyEntry(self: *const Cache, ticket: Ticket) Error!Entry {
@@ -487,6 +482,7 @@ pub const Cache = struct {
             self.entries.items[index].originAlpnKey(),
             index,
         );
+        self.considerEvictableLru(index);
     }
 
     fn replaceEntryAt(self: *Cache, index: usize, replacement: Entry) void {
@@ -496,11 +492,13 @@ pub const Cache = struct {
         const key_ptr = self.origin_index.getKeyPtr(replaced.originAlpnKey()) orelse
             unreachable;
         key_ptr.* = self.entries.items[index].originAlpnKey();
+        if (self.evictable_lru_index == index) self.recomputeEvictableLru() else self.considerEvictableLru(index);
         replaced.deinit(self.allocator);
     }
 
     fn removeEntryAt(self: *Cache, index: usize) Entry {
         const old_len = self.entries.items.len;
+        const lru = self.evictable_lru_index;
         const removed = self.entries.swapRemove(index);
         _ = self.origin_index.remove(removed.originAlpnKey());
         if (removed.lease_id) |lease_id| {
@@ -508,6 +506,13 @@ pub const Cache = struct {
         }
         if (index != old_len - 1) {
             self.reindexMovedEntry(index);
+        }
+        if (self.entries.items.len == 0) {
+            self.evictable_lru_index = null;
+        } else if (lru == index) {
+            self.recomputeEvictableLru();
+        } else if (lru == old_len - 1) {
+            self.evictable_lru_index = index;
         }
         return removed;
     }
@@ -517,6 +522,25 @@ pub const Cache = struct {
         self.origin_index.getPtr(moved.originAlpnKey()).?.* = index;
         if (moved.lease_id) |lease_id| {
             self.lease_index.getPtr(lease_id).?.* = index;
+        }
+    }
+
+    fn considerEvictableLru(self: *Cache, index: usize) void {
+        if (self.entries.items[index].lease_id != null) return;
+        const current = self.evictable_lru_index orelse {
+            self.evictable_lru_index = index;
+            return;
+        };
+        if (self.entries.items[index].last_used < self.entries.items[current].last_used) {
+            self.evictable_lru_index = index;
+        }
+    }
+
+    fn recomputeEvictableLru(self: *Cache) void {
+        self.evictable_lru_index = null;
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.lease_id != null) continue;
+            self.considerEvictableLru(index);
         }
     }
 };

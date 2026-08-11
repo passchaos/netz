@@ -68,16 +68,21 @@ test "resumption cache uses LRU eviction and protects active leases" {
         resumption.cache.quic_early_data_size,
         1,
     ));
+    try std.testing.expectEqual(@as(?usize, 0), cache.evictable_lru_index);
     try cache.store(ticket("b", "h3", "b-ticket", 2, 100, null, 2));
+    try std.testing.expectEqual(@as(?usize, 0), cache.evictable_lru_index);
 
     // Touch a; inserting c must evict b, the least recently used entry.
     var touched = (try cache.acquire("a", "h3", 3)).?;
     touched.deinit();
+    try std.testing.expectEqual(@as(?usize, 1), cache.evictable_lru_index);
     try cache.store(ticket("c", "h3", "c-ticket", 3, 100, null, 3));
+    try std.testing.expect(cache.evictable_lru_index != null);
     try std.testing.expect((try cache.acquire("b", "h3", 3)) == null);
 
     var lease = (try cache.beginEarlyData("a", "h3", 4)).?;
     defer lease.deinit();
+    try std.testing.expect(cache.evictable_lru_index != cache.origin_index.get(.{ .server_id = "a", .alpn = "h3" }));
     // Replacement cannot invalidate the active lease.
     try std.testing.expectError(
         error.CacheBusy,
@@ -85,6 +90,7 @@ test "resumption cache uses LRU eviction and protects active leases" {
     );
     try std.testing.expectEqualStrings("a-ticket", lease.session.ticket);
     try cache.releaseEarlyData(&lease);
+    try std.testing.expect(cache.evictable_lru_index != null);
 }
 
 test "resumption early-data lease is exclusive and one shot after consume" {
@@ -274,6 +280,7 @@ test "resumption cache indexes survive eviction moving an active lease" {
     // origin+ALPN and lease indexes must be repaired before later lookups.
     try cache.store(ticket("d", "h3", "d-ticket", 1004, 100, null, 4));
     try std.testing.expectEqual(@as(usize, 3), cache.origin_index.count());
+    try std.testing.expect(cache.evictable_lru_index != null);
     try std.testing.expectEqual(@as(?usize, 0), cache.lease_index.get(lease.lease_id));
     try std.testing.expect(cache.ownsActiveLease(lease));
     try std.testing.expect((try cache.acquire("a", "h3", 1004)) == null);
