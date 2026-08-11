@@ -1113,21 +1113,29 @@ pub const Hpack = struct {
 
             for (fields) |field| {
                 const never_index = field.never_index or sensitiveHeaderName(field.name);
-                const skip_value_index = skipValueIndex(field.name);
                 if (!never_index) {
                     if (findStaticIndex(field.name, field.value)) |index| {
                         try encodeInteger(list, allocator, 7, 0x80, index);
                         continue;
                     }
-                    if (self.dynamic_table.findIndex(field.name, field.value)) |index| {
+                    const dynamic_exact_index = if (self.dynamic_table.entryCount() != 0)
+                        self.dynamic_table.findIndex(field.name, field.value)
+                    else
+                        null;
+                    if (dynamic_exact_index) |index| {
                         try encodeInteger(list, allocator, 7, 0x80, index);
                         continue;
                     }
                 }
 
+                const skip_value_index = skipValueIndex(field.name);
                 const can_incrementally_index = !never_index and !skip_value_index and shouldIndexField(field, self.dynamic_table.size_limit);
                 const literal_without_indexing_prefix: u8 = if (never_index) 0x10 else 0x00;
-                if (findStaticNameIndex(field.name) orelse self.dynamic_table.findNameIndex(field.name)) |name_index| {
+                const dynamic_name_index = if (self.dynamic_table.entryCount() != 0)
+                    self.dynamic_table.findNameIndex(field.name)
+                else
+                    null;
+                if (findStaticNameIndex(field.name) orelse dynamic_name_index) |name_index| {
                     if (can_incrementally_index) {
                         try encodeInteger(list, allocator, 6, 0x40, name_index);
                     } else {
