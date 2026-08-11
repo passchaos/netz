@@ -140,16 +140,17 @@ pub const Setting = struct {
 pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]Setting {
     if (payload.len % 6 != 0) return error.InvalidSetting;
     if (payload.len == 0) return @constCast(&[_]Setting{});
-    var cursor = wire.Cursor.init(payload);
-    var settings: std.ArrayList(Setting) = .empty;
-    errdefer settings.deinit(allocator);
-    while (!cursor.eof()) {
-        const id: SettingId = @enumFromInt(try cursor.readInt(u16, .big));
-        const value = try cursor.readInt(u32, .big);
+    const settings = try allocator.alloc(Setting, payload.len / 6);
+    errdefer allocator.free(settings);
+
+    for (settings, 0..) |*setting, index| {
+        const offset = index * 6;
+        const id: SettingId = @enumFromInt(std.mem.readInt(u16, payload[offset..][0..2], .big));
+        const value = std.mem.readInt(u32, payload[offset + 2 ..][0..4], .big);
         try validateSetting(id, value);
-        try settings.append(allocator, .{ .id = id, .value = value });
+        setting.* = .{ .id = id, .value = value };
     }
-    return settings.toOwnedSlice(allocator);
+    return settings;
 }
 
 pub fn writeSettings(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: []const Setting) Error!void {
@@ -1772,6 +1773,12 @@ test "HTTP/2 frame and settings roundtrip" {
     const parsed = try parseSettings(allocator, frame.payload);
     defer allocator.free(parsed);
     try std.testing.expectEqual(@as(u32, 100), parsed[0].value);
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    const no_alloc_parsed_allocator = no_alloc.allocator();
+    const no_alloc_parsed = try parseSettings(no_alloc_parsed_allocator, frame.payload);
+    defer no_alloc_parsed_allocator.free(no_alloc_parsed);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(parsed[1].value, no_alloc_parsed[1].value);
 
     no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     const empty_settings = try parseSettings(no_alloc.allocator(), &.{});
