@@ -48,6 +48,17 @@ pub const UriEndpoint = struct {
             .host => |host| try resolveHostName(io, host, self.port),
         };
     }
+
+    pub fn resolveAll(
+        self: UriEndpoint,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+    ) Error![]net.IpAddress {
+        return switch (self.target) {
+            .ip => |address| try ownedSingleAddress(allocator, address),
+            .host => |host| try resolveHostAddresses(allocator, io, host, self.port),
+        };
+    }
 };
 
 pub const UriRequestOptions = struct {
@@ -129,10 +140,74 @@ fn resolveHostName(io: std.Io, host: net.HostName, port: u16) Error!net.IpAddres
     return first orelse error.NoAddressReturned;
 }
 
+fn resolveHostAddresses(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: net.HostName,
+    port: u16,
+) Error![]net.IpAddress {
+    var lookup_buffer: [32]net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(net.HostName.LookupResult) = .init(&lookup_buffer);
+    try net.HostName.lookup(host, io, &lookup_queue, .{ .port = port });
+
+    var addresses: [32]net.IpAddress = undefined;
+    var address_count: usize = 0;
+    while (lookup_queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |address| appendUniqueResolvedAddress(
+                &addresses,
+                &address_count,
+                address,
+            ),
+            .canonical_name => {},
+        }
+    } else |err| switch (err) {
+        error.Closed => {},
+        error.Canceled => return error.Canceled,
+    }
+    if (address_count == 0) return error.NoAddressReturned;
+    return try allocator.dupe(net.IpAddress, addresses[0..address_count]);
+}
+
+fn appendUniqueResolvedAddress(
+    addresses: *[32]net.IpAddress,
+    address_count: *usize,
+    address: net.IpAddress,
+) void {
+    for (addresses[0..address_count.*]) |*existing| {
+        if (existing.eql(&address)) return;
+    }
+    if (address_count.* == addresses.len) return;
+    addresses[address_count.*] = address;
+    address_count.* += 1;
+}
+
 fn resolveHostPort(io: std.Io, host: []const u8, port: u16) Error!net.IpAddress {
     if (net.IpAddress.parse(host, port)) |address| return address else |_| {}
     const host_name = try net.HostName.init(host);
     return try resolveHostName(io, host_name, port);
+}
+
+fn resolveHostPortAddresses(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: []const u8,
+    port: u16,
+) Error![]net.IpAddress {
+    if (net.IpAddress.parse(host, port)) |address| {
+        return try ownedSingleAddress(allocator, address);
+    } else |_| {}
+    const host_name = try net.HostName.init(host);
+    return try resolveHostAddresses(allocator, io, host_name, port);
+}
+
+fn ownedSingleAddress(
+    allocator: std.mem.Allocator,
+    address: net.IpAddress,
+) std.mem.Allocator.Error![]net.IpAddress {
+    const addresses = try allocator.alloc(net.IpAddress, 1);
+    addresses[0] = address;
+    return addresses;
 }
 
 fn uriPathAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
@@ -2633,6 +2708,76 @@ pub const HandshakeClient = struct {
         };
     }
 
+    /// Try every DNS result that can be reached from `local_address`.
+    ///
+    /// Public HTTP/3 origins often publish many CDN anycast addresses.  A
+    /// single edge can temporarily black-hole UDP/443, which otherwise surfaces
+    /// as a QUIC `HandshakeTimeout` even though another address from the same
+    /// DNS answer is healthy.  This helper keeps protocol/authentication errors
+    /// fail-fast, but treats path-level failures as per-address and falls back
+    /// to the next resolved endpoint before giving up.
+    fn connectAnyResolvedAddress(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        servers: []const net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+    ) Error!HandshakeClient {
+        if (servers.len == 0) return error.NoAddressReturned;
+
+        var attempted = false;
+        var last_err: ?Error = null;
+        for (servers) |server| {
+            if (!sameIpAddressFamily(local_address, server)) continue;
+            attempted = true;
+            return connect(
+                allocator,
+                io,
+                local_address,
+                server,
+                limits,
+                options,
+            ) catch |err| {
+                last_err = err;
+                if (shouldTryNextResolvedAddress(err)) continue;
+                return err;
+            };
+        }
+        if (!attempted) return error.AddressFamilyUnsupported;
+        return last_err orelse error.NoAddressReturned;
+    }
+
+    fn sameIpAddressFamily(a: net.IpAddress, b: net.IpAddress) bool {
+        return switch (a) {
+            .ip4 => switch (b) {
+                .ip4 => true,
+                .ip6 => false,
+            },
+            .ip6 => switch (b) {
+                .ip4 => false,
+                .ip6 => true,
+            },
+        };
+    }
+
+    fn shouldTryNextResolvedAddress(err: Error) bool {
+        return switch (err) {
+            error.HandshakeTimeout,
+            error.HandshakeSendFailed,
+            error.HandshakeReceiveFailed,
+            error.AddressFamilyUnsupported,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkDown,
+            error.NetworkUnreachable,
+            error.PortUnreachable,
+            => true,
+            else => false,
+        };
+    }
+
     pub fn connectUri(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2643,16 +2788,17 @@ pub const HandshakeClient = struct {
     ) Error!HandshakeClient {
         var endpoint = try uriEndpoint(allocator, uri);
         defer endpoint.deinit();
-        const server = try endpoint.resolve(io);
+        const servers = try endpoint.resolveAll(allocator, io);
+        defer allocator.free(servers);
         var connect_options = options;
         if (connect_options.handshake.server_name == null) {
             connect_options.handshake.server_name = endpoint.tls_host;
         }
-        return try connect(
+        return try connectAnyResolvedAddress(
             allocator,
             io,
             local_address,
-            server,
+            servers,
             limits,
             connect_options,
         );
@@ -2671,14 +2817,20 @@ pub const HandshakeClient = struct {
         defer endpoint.deinit();
         const path = try uriPathAlloc(allocator, uri);
         defer allocator.free(path);
+        const servers = try endpoint.resolveAll(allocator, io);
+        defer allocator.free(servers);
 
-        var client = try connectUri(
+        var connect_options = options;
+        if (connect_options.handshake.server_name == null) {
+            connect_options.handshake.server_name = endpoint.tls_host;
+        }
+        var client = try connectAnyResolvedAddress(
             allocator,
             io,
             local_address,
-            uri,
+            servers,
             limits,
-            options,
+            connect_options,
         );
         defer client.deinit();
 
@@ -2708,16 +2860,22 @@ pub const HandshakeClient = struct {
         defer origin.deinit();
         const path = try uriPathAlloc(allocator, uri);
         defer allocator.free(path);
-        const server = try resolveHostPort(io, target.connect_host, target.port);
+        const servers = try resolveHostPortAddresses(
+            allocator,
+            io,
+            target.connect_host,
+            target.port,
+        );
+        defer allocator.free(servers);
 
         var connect_options = options;
         connect_options.handshake.server_name = origin.tls_host;
         connect_options.handshake.alpn_protocols = &.{target.alpn};
-        var client = try connect(
+        var client = try connectAnyResolvedAddress(
             allocator,
             io,
             local_address,
-            server,
+            servers,
             limits,
             connect_options,
         );

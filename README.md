@@ -427,6 +427,10 @@ zig build run-linux-io-uring-websocket
 `run-http3-handshake` is the self-contained local HTTP/3 counterpart to the
 public fetch tool: it binds a QUIC/H3 server on loopback, performs a protected
 client handshake, exchanges one request/response, and exits.
+The public HTTP/3 URI client resolves all same-family DNS answers and retries
+transient UDP path failures such as QUIC handshake timeouts on the next
+address, which makes CDN-backed origins more robust when one anycast edge is
+temporarily dropping UDP/443.
 
 Native microbenchmarks are also wired into the build.  Prefer `ReleaseFast`
 when collecting performance evidence:
