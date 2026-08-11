@@ -1961,28 +1961,36 @@ fn receiveServerHandshakeCrypto(
     var next_expected = expected_packet_number;
     var attempts: usize = 0;
     var pending_tail = coalesced_tail;
+    var pending_tail_storage: ?[]u8 = null;
+    defer if (pending_tail_storage) |storage| endpoint.allocator.free(storage);
 
     while (attempts < 8) : (attempts += 1) {
         var owned_datagram: ?quic.runtime.OwnedBytes = null;
         defer if (owned_datagram) |*datagram| datagram.deinit(endpoint.allocator);
-        const bytes = if (pending_tail.len != 0) blk: {
-            const info = try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
-                pending_tail,
-                allow_zero_fixed_bit,
-            );
-            if (info.packet_type != .handshake) return error.InvalidHandshakeFlight;
-            break :blk pending_tail[0..info.len];
-        } else blk: {
+        const bytes = if (try nextHandshakePacketFromCoalescedTail(
+            &pending_tail,
+            allow_zero_fixed_bit,
+        )) |packet| packet else blk: {
             owned_datagram = try receiveNextServerDatagramWithTimeout(endpoint, recovery);
             response_from = owned_datagram.?.from;
-            const info = quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
-                owned_datagram.?.bytes,
+            var datagram_tail: []const u8 = owned_datagram.?.bytes;
+            const packet = (nextHandshakePacketFromCoalescedTail(
+                &datagram_tail,
                 allow_zero_fixed_bit,
-            ) catch continue;
-            if (info.packet_type != .handshake) continue;
-            break :blk owned_datagram.?.bytes[0..info.len];
+            ) catch continue) orelse continue;
+            if (datagram_tail.len != 0) {
+                if (pending_tail_storage) |storage| {
+                    endpoint.allocator.free(storage);
+                    pending_tail_storage = null;
+                }
+                pending_tail_storage = try endpoint.allocator.dupe(
+                    u8,
+                    datagram_tail,
+                );
+                pending_tail = pending_tail_storage.?;
+            }
+            break :blk packet;
         };
-        pending_tail = &.{};
 
         var packet = try quic.protection.openHandshakePacketWithFixedBitPolicy(
             endpoint.allocator,
@@ -2022,6 +2030,84 @@ fn receiveServerHandshakeCrypto(
         }
     }
     return error.InvalidHandshakeFlight;
+}
+
+fn nextHandshakePacketFromCoalescedTail(
+    tail: *[]const u8,
+    allow_zero_fixed_bit: bool,
+) Error!?[]const u8 {
+    while (tail.*.len != 0) {
+        if ((tail.*[0] & 0x80) == 0) {
+            tail.* = &.{};
+            return null;
+        }
+        const info = try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+            tail.*,
+            allow_zero_fixed_bit,
+        );
+        const packet = tail.*[0..info.len];
+        tail.* = tail.*[info.len..];
+        if (info.packet_type == .handshake) return packet;
+    }
+    return null;
+}
+
+test "QUIC handshake receive skips non-handshake coalesced tail packets" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0x80, 0x81, 0x82, 0x83 };
+    const scid = [_]u8{ 0x84, 0x85, 0x86, 0x87 };
+    const initial_keys =
+        quic.protection.deriveInitialSecrets(&dcid).server;
+    var initial_payload: std.ArrayList(u8) = .empty;
+    defer initial_payload.deinit(allocator);
+    try quic.appendPadding(&initial_payload, allocator, 1);
+    const initial = try quic.protection.sealInitialPacket(
+        allocator,
+        initial_keys,
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 0,
+            .payload = initial_payload.items,
+        },
+    );
+    defer allocator.free(initial);
+
+    const handshake_keys =
+        quic.protection.deriveAes128Keys([_]u8{0x52} ** quic.protection.secret_len);
+    var handshake_payload: std.ArrayList(u8) = .empty;
+    defer handshake_payload.deinit(allocator);
+    try quic.appendPadding(&handshake_payload, allocator, 1);
+    const handshake_packet = try quic.protection.sealHandshakePacket(
+        allocator,
+        handshake_keys,
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 0,
+            .payload = handshake_payload.items,
+        },
+    );
+    defer allocator.free(handshake_packet);
+
+    var coalesced: std.ArrayList(u8) = .empty;
+    defer coalesced.deinit(allocator);
+    try coalesced.appendSlice(allocator, initial);
+    try coalesced.appendSlice(allocator, handshake_packet);
+    try coalesced.append(allocator, 0x40);
+
+    var tail: []const u8 = coalesced.items;
+    const found = (try nextHandshakePacketFromCoalescedTail(
+        &tail,
+        false,
+    )) orelse return error.InvalidHandshakeFlight;
+    try std.testing.expectEqualSlices(u8, handshake_packet, found);
+    try std.testing.expectEqual(@as(usize, 1), tail.len);
+    try std.testing.expectEqual(@as(?[]const u8, null), try nextHandshakePacketFromCoalescedTail(
+        &tail,
+        false,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), tail.len);
 }
 
 fn openClientEarlyData(
