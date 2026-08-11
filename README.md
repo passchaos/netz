@@ -272,7 +272,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   deterministic timestamp injection plus automatic monotonic runtime timing,
   default configurable RFC 9406 HyStart++ slow-start overshoot prevention with
   packet-number RTT rounds, Conservative Slow Start, jitter recovery, and public
-  window/in-flight observability, high-BDP CUBIC performance regression coverage, and receive-side ECN counter
+  window/in-flight observability, high-BDP CUBIC performance regression coverage, and receive-side Not-ECT skips plus ECN counter
   reporting, cached PTO-base send-time selection, sent ECN counter validation, ACK_ECN CE congestion response,
   reordered-ACK_ECN tolerance, and plain-ACK ECN fallback disablement, RFC 9002-style RTT/PTO estimation with negotiated ACK-delay
   encode/decode zero-exponent fast paths and zero-delay adjustment skips, packet/time-threshold loss detection, earliest loss/PTO timer

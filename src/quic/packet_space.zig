@@ -54,7 +54,7 @@ pub const ReceivedPacketTracker = struct {
 
     pub fn recordWithEcn(self: *ReceivedPacketTracker, packet_number: u64, ecn: EcnCodepoint) Error!bool {
         const fresh = try self.recordFresh(packet_number);
-        if (fresh) self.recordEcn(ecn);
+        if (fresh and ecn != .not_ect) self.recordEcn(ecn);
         return fresh;
     }
 
@@ -1351,6 +1351,19 @@ test "QUIC packet space tracks retained packet count incrementally" {
     try std.testing.expectEqual(@as(u64, 1), received.retained_packet_count);
     try std.testing.expectEqual(@as(usize, 1), received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 10), received.ranges.items[0].start);
+}
+
+test "QUIC packet space skips Not-ECT receive ECN counters" {
+    const allocator = std.testing.allocator;
+    var received = ReceivedPacketTracker.init(allocator, 8);
+    defer received.deinit();
+
+    try std.testing.expect(try received.recordWithEcn(1, .not_ect));
+    try std.testing.expect(received.latestEcnCounts() == null);
+    try std.testing.expect(!received.saw_ecn);
+
+    try std.testing.expect(try received.recordWithEcn(2, .ect0));
+    try std.testing.expectEqual(@as(u64, 1), received.latestEcnCounts().?.ect0_count);
 }
 
 test "QUIC packet space records first ACK range without scanning" {
