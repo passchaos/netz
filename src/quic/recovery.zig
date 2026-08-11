@@ -176,8 +176,14 @@ pub const Queue = struct {
             group_id,
             1,
         ) catch return error.InvalidRetransmission;
+        const group_slot = try self.group_index.getOrPut(
+            self.allocator,
+            group_id,
+        );
+        std.debug.assert(!group_slot.found_existing);
+        errdefer _ = self.group_index.remove(group_id);
+
         try self.pending.ensureUnusedCapacity(self.allocator, 1);
-        try self.group_index.ensureUnusedCapacity(self.allocator, 1);
         var entry = try PendingDatagram.init(
             self.allocator,
             group_id,
@@ -185,7 +191,11 @@ pub const Queue = struct {
             payload,
         );
         errdefer entry.deinit(self.allocator);
-        self.appendGroupAssumeCapacity(entry, packet_slot.value_ptr);
+        self.appendGroupAssumeCapacity(
+            entry,
+            group_slot.value_ptr,
+            packet_slot.value_ptr,
+        );
         self.next_group_id = next_group_id;
         return group_id;
     }
@@ -377,11 +387,12 @@ pub const Queue = struct {
     fn appendGroupAssumeCapacity(
         self: *Queue,
         entry: PendingDatagram,
+        group_slot: *usize,
         original_packet_slot: *usize,
     ) void {
         const index = self.pending.items.len;
         self.pending.appendAssumeCapacity(entry);
-        self.group_index.putAssumeCapacityNoClobber(entry.group_id, index);
+        group_slot.* = index;
         original_packet_slot.* = index;
         self.addEntryStats(entry);
     }
