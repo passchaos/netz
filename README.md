@@ -83,7 +83,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   owned and retained per request stream or push ID rather than collapsing
   unrelated elements into one connection-global value.
   Protected clients also expose split `sendRequest`/`receiveResponse` APIs with
-  indexed bounded per-stream request/response reassembly with indexed buffered-presence checks, short-circuit ready polling, and targeted ready-stream lookup, preserving interleaved responses and
+  indexed bounded per-stream request/response reassembly with single-probe buffered stream creation,
+  indexed buffered-presence checks, short-circuit ready polling, and targeted ready-stream lookup, preserving interleaved responses and
   resets instead of discarding non-target streams. `receiveNextResponse`
   provides an indexed cursor-backed FIFO event-style response/reset queue with
   single-probe reset recording and explicit stream IDs, while

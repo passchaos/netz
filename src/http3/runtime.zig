@@ -5423,20 +5423,27 @@ const RequestStreamSet = struct {
         stream_id: u64,
     ) Error!*Entry {
         const key: u62 = @intCast(stream_id);
-        if (self.entry_index.get(key)) |index| {
-            const entry = &self.entries.items[index];
+        if (self.entries.items.len >= self.max_streams) {
+            if (self.entry_index.get(key)) |index| {
+                const entry = &self.entries.items[index];
+                if (!entry.from.eql(&from)) return error.UnexpectedStream;
+                return entry;
+            }
+            return error.ExcessiveLoad;
+        }
+        const slot = try self.entry_index.getOrPut(self.allocator, key);
+        if (slot.found_existing) {
+            const entry = &self.entries.items[slot.value_ptr.*];
             // A single HTTP/3 connection has one peer address in these
             // runtimes; accepting one stream from multiple sources would
             // merge unrelated connection state.
             if (!entry.from.eql(&from)) return error.UnexpectedStream;
             return entry;
         }
-        if (self.entries.items.len >= self.max_streams) {
-            return error.ExcessiveLoad;
-        }
+        errdefer _ = self.entry_index.remove(key);
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
-        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
-        return self.appendEntryAssumeCapacity(.{
+        const index = self.entries.items.len;
+        self.entries.appendAssumeCapacity(.{
             .receive = .init(
                 self.allocator,
                 stream_id,
@@ -5444,6 +5451,9 @@ const RequestStreamSet = struct {
             ),
             .from = from,
         });
+        slot.value_ptr.* = index;
+        self.considerLowestStream(index);
+        return &self.entries.items[index];
     }
 
     fn appendEntryAssumeCapacity(
@@ -5822,17 +5832,24 @@ const ResponseStreamSet = struct {
         from: net.IpAddress,
         stream_id: u62,
     ) Error!*Entry {
-        if (self.entry_index.get(stream_id)) |index| {
-            const entry = &self.entries.items[index];
+        if (self.entries.items.len >= self.max_streams) {
+            if (self.entry_index.get(stream_id)) |index| {
+                const entry = &self.entries.items[index];
+                if (!entry.from.eql(&from)) return error.UnexpectedStream;
+                return entry;
+            }
+            return error.ExcessiveLoad;
+        }
+        const slot = try self.entry_index.getOrPut(self.allocator, stream_id);
+        if (slot.found_existing) {
+            const entry = &self.entries.items[slot.value_ptr.*];
             if (!entry.from.eql(&from)) return error.UnexpectedStream;
             return entry;
         }
-        if (self.entries.items.len >= self.max_streams) {
-            return error.ExcessiveLoad;
-        }
+        errdefer _ = self.entry_index.remove(stream_id);
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
-        try self.entry_index.ensureUnusedCapacity(self.allocator, 1);
-        return self.appendEntryAssumeCapacity(.{
+        const index = self.entries.items.len;
+        self.entries.appendAssumeCapacity(.{
             .receive = .init(
                 self.allocator,
                 stream_id,
@@ -5840,6 +5857,8 @@ const ResponseStreamSet = struct {
             ),
             .from = from,
         });
+        slot.value_ptr.* = index;
+        return &self.entries.items[index];
     }
 };
 
