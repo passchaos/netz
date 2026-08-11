@@ -256,25 +256,19 @@ pub const PriorityUpdatePayload = struct {
         _ = priority_field.Priority.parseStrict(field_value) catch {
             return error.InvalidFrameSize;
         };
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(allocator);
+        const payload_len = std.math.add(usize, 4, field_value.len) catch return error.InvalidFrameSize;
+        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
+        try list.append(allocator, @intFromEnum(FrameType.priority_update));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u32, 0, .big);
         try wire.appendInt(
-            &payload,
+            list,
             allocator,
             u32,
             prioritized_stream_id,
             .big,
         );
-        try payload.appendSlice(allocator, field_value);
-        try (Frame{
-            .header = .{
-                .length = 0,
-                .frame_type = .priority_update,
-                .flags = 0,
-                .stream_id = 0,
-            },
-            .payload = payload.items,
-        }).write(list, allocator);
+        try list.appendSlice(allocator, field_value);
     }
 
     pub fn writePriority(
@@ -1850,6 +1844,14 @@ test "HTTP/2 PRIORITY_UPDATE payload helper" {
         update.priorityValue().urgency,
     );
     try std.testing.expect(update.priorityValue().incremental);
+
+    var no_alloc_update: std.ArrayList(u8) = .empty;
+    defer no_alloc_update.deinit(allocator);
+    try no_alloc_update.ensureTotalCapacity(allocator, 32);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try PriorityUpdatePayload.write(&no_alloc_update, no_alloc.allocator(), 5, "u=1, i");
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, encoded.items, no_alloc_update.items);
 
     try std.testing.expectError(
         error.InvalidStreamId,
