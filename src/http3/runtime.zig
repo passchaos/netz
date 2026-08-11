@@ -7140,7 +7140,8 @@ const ClientRequestLifecycle = struct {
     }
 
     fn contains(self: ClientRequestLifecycle, stream_id: u62) bool {
-        return self.outstanding_index.contains(stream_id);
+        return self.outstanding_index.count() != 0 and
+            self.outstanding_index.contains(stream_id);
     }
 
     fn finish(self: *ClientRequestLifecycle, stream_id: u62) bool {
