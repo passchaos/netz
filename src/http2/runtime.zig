@@ -1659,18 +1659,20 @@ pub const Connection = struct {
     }
 
     fn addActiveLocalStream(self: *Connection, stream_id: u31) Error!void {
-        try self.active_local_streams.ensureUnusedCapacity(self.allocator, 1);
         const slot = try self.active_local_index.getOrPut(self.allocator, stream_id);
         if (slot.found_existing) return;
+        errdefer _ = self.active_local_index.remove(stream_id);
+        try self.active_local_streams.ensureUnusedCapacity(self.allocator, 1);
         const index = self.active_local_streams.items.len;
         self.active_local_streams.appendAssumeCapacity(stream_id);
         slot.value_ptr.* = index;
     }
 
     fn addActivePeerStream(self: *Connection, stream_id: u31) Error!void {
-        try self.active_peer_streams.ensureUnusedCapacity(self.allocator, 1);
         const slot = try self.active_peer_index.getOrPut(self.allocator, stream_id);
         if (slot.found_existing) return;
+        errdefer _ = self.active_peer_index.remove(stream_id);
+        try self.active_peer_streams.ensureUnusedCapacity(self.allocator, 1);
         const index = self.active_peer_streams.items.len;
         self.active_peer_streams.appendAssumeCapacity(stream_id);
         slot.value_ptr.* = index;
