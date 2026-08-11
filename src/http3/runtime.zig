@@ -6936,11 +6936,15 @@ const ClientRequestLifecycle = struct {
         if (self.outstanding.items.len >= self.max_streams) {
             return error.ExcessiveLoad;
         }
-        if (self.contains(stream_id)) return error.UnexpectedStream;
-        try self.outstanding_index.ensureUnusedCapacity(self.allocator, 1);
+        const slot = try self.outstanding_index.getOrPut(
+            self.allocator,
+            stream_id,
+        );
+        if (slot.found_existing) return error.UnexpectedStream;
+        errdefer _ = self.outstanding_index.remove(stream_id);
         const index = self.outstanding.items.len;
         try self.outstanding.append(self.allocator, stream_id);
-        self.outstanding_index.putAssumeCapacity(stream_id, index);
+        slot.value_ptr.* = index;
     }
 
     fn contains(self: ClientRequestLifecycle, stream_id: u62) bool {
