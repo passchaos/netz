@@ -132,19 +132,20 @@ pub const State = struct {
     ) std.mem.Allocator.Error!void {
         const owned = try allocator.dupe(u8, field_value);
         errdefer allocator.free(owned);
-        if (self.update_index.get(stream_id)) |index| {
-            const update = &self.updates.items[index];
+        const slot = try self.update_index.getOrPut(allocator, stream_id);
+        if (slot.found_existing) {
+            const update = &self.updates.items[slot.value_ptr.*];
             allocator.free(update.field_value);
             update.field_value = owned;
             return;
         }
-        try self.update_index.ensureUnusedCapacity(allocator, 1);
+        errdefer _ = self.update_index.remove(stream_id);
         const index = self.updates.items.len;
         try self.updates.append(allocator, .{
             .stream_id = stream_id,
             .field_value = owned,
         });
-        self.update_index.putAssumeCapacity(stream_id, index);
+        slot.value_ptr.* = index;
     }
 
     pub fn remove(
