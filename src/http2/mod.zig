@@ -202,15 +202,14 @@ pub const PriorityPayload = struct {
     ) Error!void {
         if (stream_id == 0) return error.InvalidStreamId;
         if (stream_dependency == stream_id) return error.InvalidStreamId;
-        var payload: [5]u8 = undefined;
         var dep = @as(u32, stream_dependency);
         if (exclusive) dep |= 0x8000_0000;
-        std.mem.writeInt(u32, payload[0..4], dep, .big);
-        payload[4] = weight;
-        try (Frame{
-            .header = .{ .length = 0, .frame_type = .priority, .flags = 0, .stream_id = stream_id },
-            .payload = &payload,
-        }).write(list, allocator);
+        try wire.appendU24(list, allocator, 5);
+        try list.append(allocator, @intFromEnum(FrameType.priority));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
+        try wire.appendInt(list, allocator, u32, dep, .big);
+        try list.append(allocator, weight);
     }
 };
 
@@ -1773,6 +1772,7 @@ test "HTTP/2 PRIORITY payload helper" {
     defer encoded.deinit(allocator);
 
     try PriorityPayload.write(&encoded, allocator, 5, true, 3, 200);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 5, @intFromEnum(FrameType.priority), 0, 0, 0, 0, 5 }, encoded.items[0..9]);
     const frame = try Frame.parse(encoded.items);
     try std.testing.expectEqual(FrameType.priority, frame.header.frame_type);
     const priority = try PriorityPayload.parse(frame);
