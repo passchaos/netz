@@ -6882,6 +6882,7 @@ const PushStreamSet = struct {
         target_push_id: ?u64,
     ) Error!?ReadyEvent {
         if (target_push_id) |push_id| {
+            if (self.push_index.count() == 0) return null;
             const index = self.push_index.get(push_id) orelse return null;
             return self.nextEntryEvent(
                 index,
@@ -7071,6 +7072,7 @@ const PushStreamSet = struct {
 
     fn removeStream(self: *PushStreamSet, stream_id: u64) void {
         const key = std.math.cast(u62, stream_id) orelse return;
+        if (self.stream_index.count() == 0) return;
         const index = self.stream_index.get(key) orelse return;
         var removed = self.takeEntryAt(index);
         removed.deinit();
@@ -11574,6 +11576,10 @@ test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
     try std.testing.expectEqual(@as(usize, 0), pushes.cancelledStreamCount());
     try std.testing.expectEqual(@as(usize, 0), pushes.stream_index.count());
     try std.testing.expectEqual(@as(usize, 0), pushes.push_index.count());
+    pushes.removeByStreamId(27);
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    try std.testing.expect((try pushes.next(table, 0, 4)) == null);
     try std.testing.expectEqual(@as(usize, 4), pushes.promise_index.count());
 }
 
