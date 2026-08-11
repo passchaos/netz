@@ -2674,28 +2674,29 @@ pub const Connection = struct {
             .stream_id = stream_id,
             .origin = origin_value,
         };
-        if (self.alternative_service_index.get(key)) |index| {
+        const slot = try self.alternative_service_index.getOrPut(
+            self.allocator,
+            key,
+        );
+        if (slot.found_existing) {
+            const index = slot.value_ptr.*;
             const service = &self.alternative_services.items[index];
-            const key_ptr = self.alternative_service_index.getKeyPtr(key) orelse
-                unreachable;
-            key_ptr.* = .{ .stream_id = stream_id, .origin = origin };
+            slot.key_ptr.* = .{ .stream_id = stream_id, .origin = origin };
             self.allocator.free(service.origin);
             self.allocator.free(service.field_value);
             service.origin = origin;
             service.field_value = value;
             return;
         }
-        try self.alternative_service_index.ensureUnusedCapacity(self.allocator, 1);
+        errdefer _ = self.alternative_service_index.remove(key);
         const index = self.alternative_services.items.len;
         try self.alternative_services.append(self.allocator, .{
             .stream_id = stream_id,
             .origin = origin,
             .field_value = value,
         });
-        self.alternative_service_index.putAssumeCapacityNoClobber(
-            .{ .stream_id = stream_id, .origin = origin },
-            index,
-        );
+        slot.key_ptr.* = .{ .stream_id = stream_id, .origin = origin };
+        slot.value_ptr.* = index;
     }
 
     fn peerOriginKnown(self: Connection, origin: []const u8) bool {
