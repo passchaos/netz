@@ -384,6 +384,7 @@ pub const OriginPayload = struct {
             return error.InvalidFrameSize;
         }
         if (frame.header.stream_id != 0) return error.InvalidStreamId;
+        if (frame.payload.len == 0) return .{ .origins = @constCast(&[_][]const u8{}) };
         var cursor = wire.Cursor.init(frame.payload);
         var origins: std.ArrayList([]const u8) = .empty;
         errdefer origins.deinit(allocator);
@@ -2005,6 +2006,11 @@ test "HTTP/2 ORIGIN frame round trips and validates ASCII entries" {
     );
     defer empty_parsed.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), empty_parsed.origins.len);
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var no_alloc_empty = try OriginPayload.parse(no_alloc.allocator(), try Frame.parse(empty.items));
+    defer no_alloc_empty.deinit(no_alloc.allocator());
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), no_alloc_empty.origins.len);
 
     try std.testing.expectError(
         error.InvalidFrameSize,
