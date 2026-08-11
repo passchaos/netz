@@ -5621,6 +5621,7 @@ const RequestStreamSet = struct {
     }
 
     fn takeEntry(self: *RequestStreamSet, stream_id: u62) ?Entry {
+        if (self.entry_index.count() == 0) return null;
         const index = self.entry_index.get(stream_id) orelse return null;
         const last_index = self.entries.items.len - 1;
         const lowest = self.lowest_stream_index;
@@ -5944,6 +5945,7 @@ const ResponseStreamSet = struct {
     }
 
     fn takeEntry(self: *ResponseStreamSet, stream_id: u62) ?Entry {
+        if (self.entry_index.count() == 0) return null;
         const index = self.entry_index.get(stream_id) orelse return null;
         const last_index = self.entries.items.len - 1;
         const removed = self.entries.swapRemove(index);
@@ -11405,6 +11407,8 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     requests.remove(0);
     try std.testing.expectEqual(@as(?u62, null), requests.lowestStream());
     try std.testing.expectEqual(@as(usize, 0), requests.entry_index.count());
+    requests.remove(20);
+    try std.testing.expect(requests.takeReceive(20) == null);
 
     try requests.insert(from, .{
         .stream_id = 12,
@@ -11487,6 +11491,10 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     try std.testing.expectEqualStrings("target", ready.bytes);
     try std.testing.expect(responses.entry_index.get(12) == null);
     try std.testing.expect(responses.entry_index.get(16) != null);
+    responses.remove(16);
+    responses.remove(0);
+    try std.testing.expectEqual(@as(usize, 0), responses.entry_index.count());
+    try std.testing.expect(responses.takeReceive(16) == null);
 }
 
 test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
