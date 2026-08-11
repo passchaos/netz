@@ -28,6 +28,13 @@ pub fn tokenCandidate(datagram: []const u8) ?[token_len]u8 {
 
 pub fn matches(datagram: []const u8, expected_token: [token_len]u8) bool {
     const candidate = tokenCandidate(datagram) orelse return false;
+    return matchesToken(candidate, expected_token);
+}
+
+pub fn matchesToken(
+    candidate: [token_len]u8,
+    expected_token: [token_len]u8,
+) bool {
     return vail.crypto.mac.verifyTruncated(
         token_len,
         candidate,
@@ -86,6 +93,7 @@ test "QUIC stateless reset encodes and matches trailing token" {
 
     try std.testing.expect(datagram.items.len == min_datagram_len);
     try std.testing.expect(matches(datagram.items, token));
+    try std.testing.expect(matchesToken(tokenCandidate(datagram.items).?, token));
     try std.testing.expect(!matches(datagram.items, [_]u8{0x5a} ** token_len));
     try std.testing.expectEqual(token, tokenCandidate(datagram.items).?);
 }

@@ -149,9 +149,14 @@ pub const PeerPool = struct {
     }
 
     pub fn detectStatelessReset(self: *const PeerPool, datagram: []const u8) ?u64 {
+        const candidate = quic.stateless_reset.tokenCandidate(datagram) orelse
+            return null;
         for (&self.entries) |*entry| {
             if (!entry.occupied or !entry.in_use) continue;
-            if (quic.stateless_reset.matches(datagram, entry.stateless_reset_token)) return entry.sequence_number;
+            if (quic.stateless_reset.matchesToken(
+                candidate,
+                entry.stateless_reset_token,
+            )) return entry.sequence_number;
         }
         return null;
     }
