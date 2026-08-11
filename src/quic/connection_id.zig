@@ -74,15 +74,11 @@ pub const PeerPool = struct {
             entry.occupied = true;
             return;
         }
-        if (self.findByConnectionId(connection_id) != null) return error.DuplicateConnectionId;
-        if (self.findByResetToken(token) != null) return error.DuplicateResetToken;
-        if (self.count() >= active_limit) return error.ActiveConnectionIdLimit;
-        for (&self.entries) |*entry| {
-            if (!entry.occupied) {
-                entry.* = .{ .sequence_number = sequence_number, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .occupied = true };
-                @memcpy(entry.connection_id[0..connection_id.len], connection_id);
-                return;
-            }
+        const slot = try self.availableAddSlot(connection_id, token, active_limit);
+        if (slot) |entry| {
+            entry.* = .{ .sequence_number = sequence_number, .connection_id_len = @intCast(connection_id.len), .stateless_reset_token = token, .occupied = true };
+            @memcpy(entry.connection_id[0..connection_id.len], connection_id);
+            return;
         }
         return error.PoolFull;
     }
@@ -163,18 +159,31 @@ pub const PeerPool = struct {
         return null;
     }
 
-    fn findByConnectionId(self: *PeerPool, connection_id: []const u8) ?*Entry {
+    fn availableAddSlot(
+        self: *PeerPool,
+        connection_id: []const u8,
+        token: [16]u8,
+        active_limit: usize,
+    ) Error!?*Entry {
+        var first_empty: ?*Entry = null;
+        var occupied_count: usize = 0;
+        var duplicate_token = false;
         for (&self.entries) |*entry| {
-            if (entry.occupied and std.mem.eql(u8, entry.slice(), connection_id)) return entry;
+            if (!entry.occupied) {
+                if (first_empty == null) first_empty = entry;
+                continue;
+            }
+            occupied_count += 1;
+            if (std.mem.eql(u8, entry.slice(), connection_id)) {
+                return error.DuplicateConnectionId;
+            }
+            if (std.mem.eql(u8, &entry.stateless_reset_token, &token)) {
+                duplicate_token = true;
+            }
         }
-        return null;
-    }
-
-    fn findByResetToken(self: *PeerPool, token: [16]u8) ?*Entry {
-        for (&self.entries) |*entry| {
-            if (entry.occupied and std.mem.eql(u8, &entry.stateless_reset_token, &token)) return entry;
-        }
-        return null;
+        if (duplicate_token) return error.DuplicateResetToken;
+        if (occupied_count >= active_limit) return error.ActiveConnectionIdLimit;
+        return first_empty;
     }
 };
 
@@ -398,6 +407,9 @@ test "QUIC peer CID pool validates duplicate IDs tokens and active limit" {
     try std.testing.expectError(error.DuplicateConnectionId, pool.addWithLimit(1, "cid-a", token_b, 2));
     try std.testing.expectError(error.DuplicateResetToken, pool.addWithLimit(1, "cid-b", token_a, 2));
     try pool.addWithLimit(1, "cid-b", token_b, 2);
+    // When both a CID and another reset token would collide, the single-pass
+    // scan must preserve the historical DuplicateConnectionId priority.
+    try std.testing.expectError(error.DuplicateConnectionId, pool.addWithLimit(2, "cid-a", token_b, 3));
     try std.testing.expectError(error.ActiveConnectionIdLimit, pool.addWithLimit(2, "cid-c", [_]u8{0xcc} ** 16, 2));
 }
 
