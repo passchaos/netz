@@ -143,6 +143,12 @@ pub fn processClient(allocator: std.mem.Allocator, options: ProcessOptions, data
         return null;
     }
 
+    switch (try preflightClient(options, datagram)) {
+        .ignore => return null,
+        .invalid => return error.InvalidVersionNegotiation,
+        .valid => {},
+    }
+
     var packet = try quic.parseVersionNegotiationPacket(allocator, datagram);
     errdefer packet.deinit(allocator);
 
@@ -168,6 +174,63 @@ pub fn processClient(allocator: std.mem.Allocator, options: ProcessOptions, data
             options.original_destination_connection_id,
         ),
     };
+}
+
+const PreflightResult = enum {
+    ignore,
+    invalid,
+    valid,
+};
+
+fn preflightClient(options: ProcessOptions, datagram: []const u8) Error!PreflightResult {
+    if (datagram.len < 7) return error.InvalidVersionNegotiation;
+    if ((datagram[0] & 0x80) == 0) return error.InvalidVersionNegotiation;
+    if (std.mem.readInt(u32, datagram[1..5], .big) != quic.Version.negotiation.wireValue()) {
+        return error.InvalidVersionNegotiation;
+    }
+
+    const dcid_len = datagram[5];
+    try validateConnectionIdLen(dcid_len);
+    const dcid_start: usize = 6;
+    const dcid_end = dcid_start + @as(usize, dcid_len);
+    if (datagram.len < dcid_end + 1) return error.InvalidVersionNegotiation;
+    if (!std.mem.eql(u8, datagram[dcid_start..dcid_end], options.initial_source_connection_id)) {
+        return .ignore;
+    }
+
+    const scid_len = datagram[dcid_end];
+    try validateConnectionIdLen(scid_len);
+    const scid_start = dcid_end + 1;
+    const scid_end = scid_start + @as(usize, scid_len);
+    if (datagram.len < scid_end) return error.InvalidVersionNegotiation;
+    if (!std.mem.eql(u8, datagram[scid_start..scid_end], options.original_destination_connection_id)) {
+        return .ignore;
+    }
+
+    const versions = datagram[scid_end..];
+    if (versions.len == 0 or (versions.len % 4) != 0) return error.InvalidVersionNegotiation;
+    var saw_mutual = false;
+    var offset: usize = 0;
+    while (offset < versions.len) : (offset += 4) {
+        const version = std.mem.readInt(u32, versions[offset..][0..4], .big);
+        if (version == quic.Version.negotiation.wireValue()) {
+            return error.InvalidVersionNegotiation;
+        }
+        if (quic.isReservedVersionWire(version)) continue;
+        if (version == options.chosen_version.wireValue()) return .ignore;
+        if (!saw_mutual) {
+            for (options.available_versions) |available| {
+                if (available == .negotiation) continue;
+                const wire = available.wireValue();
+                if (quic.isReservedVersionWire(wire)) continue;
+                if (wire == version) {
+                    saw_mutual = true;
+                    break;
+                }
+            }
+        }
+    }
+    return if (saw_mutual) .valid else .invalid;
 }
 
 pub fn selectMutualVersion(available_versions: []const quic.Version, server_versions: []const u32) ?quic.Version {
@@ -201,6 +264,10 @@ fn validateVersionList(chosen_version: quic.Version, available_versions: []const
 
 fn validateConnectionId(cid: []const u8) Error!void {
     if (cid.len > 20) return error.InvalidConnectionIdLength;
+}
+
+fn validateConnectionIdLen(len: usize) Error!void {
+    if (len > 20) return error.InvalidConnectionIdLength;
 }
 
 fn writeNegotiation(
@@ -343,4 +410,26 @@ test "QUIC client Version Negotiation rejects no mutual version" {
     var greased = try ClientState.init(allocator, .version_1, &.{ .version_1, @enumFromInt(0x0a0a0a0a) }, &odcid, &client_scid);
     defer greased.deinit();
     try std.testing.expectEqual(@as(usize, 2), greased.available_versions.len);
+}
+
+test "QUIC client Version Negotiation ignores mismatched packets without allocation" {
+    const allocator = std.testing.allocator;
+    const odcid = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const client_scid = [_]u8{ 9, 10, 11, 12 };
+    const other_cid = [_]u8{ 0xaa, 0xbb, 0xcc };
+    const v2_only = [_]u32{quic.Version.version_2.wireValue()};
+    const wrong_dcid = try writeNegotiation(allocator, &other_cid, &odcid, &v2_only);
+    defer allocator.free(wrong_dcid);
+    const contains_original = try writeNegotiation(allocator, &client_scid, &odcid, &.{quic.Version.version_1.wireValue()});
+    defer allocator.free(contains_original);
+
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const options = ProcessOptions{
+        .chosen_version = .version_1,
+        .available_versions = &.{ .version_1, .version_2 },
+        .original_destination_connection_id = &odcid,
+        .initial_source_connection_id = &client_scid,
+    };
+    try std.testing.expect((try processClient(no_alloc.allocator(), options, wrong_dcid)) == null);
+    try std.testing.expect((try processClient(no_alloc.allocator(), options, contains_original)) == null);
 }
