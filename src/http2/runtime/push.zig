@@ -197,6 +197,7 @@ pub const State = struct {
         stream_id: u31,
     ) bool {
         if (!self.releaseRemote(stream_id)) return false;
+        if (self.pending_index.count() == 0) return true;
         if (self.pending_index.get(stream_id)) |index| {
             const removed_head = index == self.pending_head;
             var removed = if (removed_head) removed: {
