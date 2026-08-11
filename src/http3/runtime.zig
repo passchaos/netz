@@ -7138,13 +7138,15 @@ const ServerRequestLifecycle = struct {
         self: *ServerRequestLifecycle,
         stream_id: u62,
     ) Error!void {
-        if (self.active_stream_index.contains(stream_id)) {
-            return error.UnexpectedStream;
-        }
-        try self.active_stream_index.ensureUnusedCapacity(self.allocator, 1);
+        const slot = try self.active_stream_index.getOrPut(
+            self.allocator,
+            stream_id,
+        );
+        if (slot.found_existing) return error.UnexpectedStream;
+        errdefer _ = self.active_stream_index.remove(stream_id);
         const index = self.active_streams.items.len;
         try self.active_streams.append(self.allocator, stream_id);
-        self.active_stream_index.putAssumeCapacity(stream_id, index);
+        slot.value_ptr.* = index;
         self.considerLowestActiveStream(index);
         self.highest_processed_stream_id = if (self.highest_processed_stream_id) |highest|
             @max(highest, stream_id)

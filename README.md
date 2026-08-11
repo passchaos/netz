@@ -87,7 +87,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   resets instead of discarding non-target streams. `receiveNextResponse`
   provides an indexed cursor-backed FIFO event-style response/reset queue with
   single-probe reset recording and explicit stream IDs, while
-  outstanding request tracking uses single-probe opens and rejects unknown or duplicate completion and
+  outstanding request tracking uses single-probe client opens/server activation and rejects unknown or duplicate completion and
   enforces the configured concurrency bound. Protected clients and servers also
   expose `startRequest`/`sendRequestBody` and
   `startResponse`/`sendResponseBody`, preserving per-stream QUIC offsets across
