@@ -2053,16 +2053,17 @@ pub const Connection = struct {
                     const headers = try self.readHeaderBlock(frame.frame);
                     errdefer freeHeaders(self.allocator, headers);
                     try validateHeaderBlock(headers, .response);
-                    const status_s = findHeader(headers, ":status") orelse return error.MissingPseudoHeader;
+                    const lookup = try responseHeaderLookup(headers);
+                    const status_s = lookup.status orelse return error.MissingPseudoHeader;
                     const status = std.fmt.parseInt(u16, status_s, 10) catch return error.InvalidStatus;
                     if (informationalResponseToSkip(status)) {
                         if ((frame.frame.header.flags & flag_end_stream) != 0) return error.UnexpectedFrame;
-                        if ((try contentLength(headers)) != null) return error.InvalidContentLength;
+                        if (lookup.content_length != null) return error.InvalidContentLength;
                         freeHeaders(self.allocator, headers);
                         continue;
                     }
                     if (status < 200 or status > 299) return error.InvalidStatus;
-                    if ((try contentLength(headers)) orelse 0 != 0) return error.InvalidContentLength;
+                    if ((lookup.content_length orelse 0) != 0) return error.InvalidContentLength;
                     if ((frame.frame.header.flags & flag_end_stream) != 0) return error.ConnectionClosed;
                     return .{
                         .status = status,
@@ -3184,6 +3185,37 @@ fn contentLength(headers: []const http2.Hpack.HeaderField) Error!?usize {
         }
     }
     return found;
+}
+
+const ResponseHeaderLookup = struct {
+    status: ?[]const u8 = null,
+    content_length: ?usize = null,
+};
+
+fn responseHeaderLookup(headers: []const http2.Hpack.HeaderField) Error!ResponseHeaderLookup {
+    var lookup: ResponseHeaderLookup = .{};
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, ":status")) {
+            if (lookup.status == null) lookup.status = header.value;
+            continue;
+        }
+        if (!std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;
+        var parts = std.mem.splitScalar(u8, header.value, ',');
+        while (parts.next()) |raw_part| {
+            const part = std.mem.trim(u8, raw_part, " \t");
+            if (part.len == 0) return error.InvalidContentLength;
+            for (part) |byte| {
+                if (!std.ascii.isDigit(byte)) return error.InvalidContentLength;
+            }
+            const parsed = std.fmt.parseInt(usize, part, 10) catch return error.InvalidContentLength;
+            if (lookup.content_length) |existing| {
+                if (existing != parsed) return error.InvalidContentLength;
+            } else {
+                lookup.content_length = parsed;
+            }
+        }
+    }
+    return lookup;
 }
 
 fn validateContentLength(headers: []const http2.Hpack.HeaderField, actual: usize) Error!void {
@@ -7360,6 +7392,14 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
         .{ .name = ":scheme", .value = "https" },
     };
     try std.testing.expectError(error.InvalidHeader, validateHeaderBlock(&empty_path, .request));
+
+    const response_lookup_headers = [_]http2.Hpack.HeaderField{
+        .{ .name = ":status", .value = "204" },
+        .{ .name = "content-length", .value = "0, 0" },
+    };
+    const response_lookup = try responseHeaderLookup(&response_lookup_headers);
+    try std.testing.expectEqualStrings("204", response_lookup.status.?);
+    try std.testing.expectEqual(@as(?usize, 0), response_lookup.content_length);
 
     const bad_status = [_]http2.Hpack.HeaderField{
         .{ .name = ":status", .value = "20x" },
