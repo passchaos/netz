@@ -7216,7 +7216,8 @@ const OutboundBodySet = struct {
         self: *OutboundBodySet,
         stream_id: u62,
     ) Error!void {
-        if (self.find(stream_id) != null) return error.UnexpectedStream;
+        if (self.entries.items.len != 0 and
+            self.find(stream_id) != null) return error.UnexpectedStream;
         if (self.entries.items.len >= self.max_streams) {
             return error.ExcessiveLoad;
         }
