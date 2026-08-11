@@ -6967,6 +6967,7 @@ const ServerRequestLifecycle = struct {
     allocator: std.mem.Allocator,
     active_streams: std.ArrayList(u62) = .empty,
     active_stream_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
+    lowest_active_stream_index: ?usize = null,
     highest_processed_stream_id: ?u62 = null,
     shutdown_state: ShutdownState = .active,
 
@@ -6991,6 +6992,7 @@ const ServerRequestLifecycle = struct {
         const index = self.active_streams.items.len;
         try self.active_streams.append(self.allocator, stream_id);
         self.active_stream_index.putAssumeCapacity(stream_id, index);
+        self.considerLowestActiveStream(index);
         self.highest_processed_stream_id = if (self.highest_processed_stream_id) |highest|
             @max(highest, stream_id)
         else
@@ -7001,11 +7003,19 @@ const ServerRequestLifecycle = struct {
         const key = std.math.cast(u62, stream_id) orelse return;
         const index = self.active_stream_index.get(key) orelse return;
         const last_index = self.active_streams.items.len - 1;
+        const lowest = self.lowest_active_stream_index;
         const removed = self.active_streams.swapRemove(index);
         _ = self.active_stream_index.remove(removed);
         if (index != last_index) {
             const moved = self.active_streams.items[index];
             self.active_stream_index.getPtr(moved).?.* = index;
+        }
+        if (self.active_streams.items.len == 0) {
+            self.lowest_active_stream_index = null;
+        } else if (lowest == index) {
+            self.recomputeLowestActiveStream();
+        } else if (lowest == last_index) {
+            self.lowest_active_stream_index = index;
         }
     }
 
@@ -7022,7 +7032,7 @@ const ServerRequestLifecycle = struct {
     ) bool {
         if (self.shutdown_state != .final_goaway) return false;
         const goaway_id = local_goaway_id orelse return false;
-        for (self.active_streams.items) |stream_id| {
+        if (self.lowestActiveStream()) |stream_id| {
             if (stream_id < goaway_id) return false;
         }
         for (request_streams.entries.items) |entry| {
@@ -7036,6 +7046,31 @@ const ServerRequestLifecycle = struct {
         }
         return true;
     }
+
+    fn lowestActiveStream(self: ServerRequestLifecycle) ?u62 {
+        const index = self.lowest_active_stream_index orelse return null;
+        return self.active_streams.items[index];
+    }
+
+    fn considerLowestActiveStream(
+        self: *ServerRequestLifecycle,
+        index: usize,
+    ) void {
+        const lowest = self.lowest_active_stream_index orelse {
+            self.lowest_active_stream_index = index;
+            return;
+        };
+        if (self.active_streams.items[index] < self.active_streams.items[lowest]) {
+            self.lowest_active_stream_index = index;
+        }
+    }
+
+    fn recomputeLowestActiveStream(self: *ServerRequestLifecycle) void {
+        self.lowest_active_stream_index = null;
+        for (self.active_streams.items, 0..) |_, index| {
+            self.considerLowestActiveStream(index);
+        }
+    }
 };
 
 test "HTTP/3 server request lifecycle indexes active streams" {
@@ -7044,8 +7079,10 @@ test "HTTP/3 server request lifecycle indexes active streams" {
     defer lifecycle.deinit();
 
     try lifecycle.markReceived(0);
+    try std.testing.expectEqual(@as(?u62, 0), lifecycle.lowestActiveStream());
     try lifecycle.markReceived(4);
     try lifecycle.markReceived(8);
+    try std.testing.expectEqual(@as(?u62, 0), lifecycle.lowestActiveStream());
     try std.testing.expectError(error.UnexpectedStream, lifecycle.markReceived(4));
     try std.testing.expectEqual(@as(?u62, 8), lifecycle.highest_processed_stream_id);
     try std.testing.expectEqual(@as(u64, 12), try lifecycle.finalGoAwayId());
@@ -7053,11 +7090,14 @@ test "HTTP/3 server request lifecycle indexes active streams" {
     lifecycle.markFinished(4);
     try std.testing.expect(!lifecycle.active_stream_index.contains(4));
     try std.testing.expect(lifecycle.active_stream_index.contains(8));
+    try std.testing.expectEqual(@as(?u62, 0), lifecycle.lowestActiveStream());
     lifecycle.markFinished(8);
     try std.testing.expect(!lifecycle.active_stream_index.contains(8));
+    try std.testing.expectEqual(@as(?u62, 0), lifecycle.lowestActiveStream());
     lifecycle.markFinished(999);
     try std.testing.expect(lifecycle.active_stream_index.contains(0));
     lifecycle.markFinished(0);
+    try std.testing.expectEqual(@as(?u62, null), lifecycle.lowestActiveStream());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.active_streams.items.len);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.active_stream_index.count());
 }
