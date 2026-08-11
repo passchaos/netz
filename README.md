@@ -186,7 +186,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   the same per-limit duplicate suppression for stream-count exhaustion,
   protected 0-RTT long-header packet seal/open and frame datagram helpers with
   0-RTT packet-type restrictions, an indexed owning origin+ALPN session cache with
-  cached transactional LRU eviction and stats, expiry, independent TLS session copies, stable
+  cached transactional LRU eviction and stats, expired-hit eviction, independent TLS session copies, stable
   cache/lease/early-data stats, exclusive single-use early-data leases with
   single-lookup lease indexing and empty-index acquisition/lease checks, RFC
   9000 §7.4.1 remembered-parameter

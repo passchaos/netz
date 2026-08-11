@@ -406,7 +406,13 @@ pub const Cache = struct {
         now_ms: u64,
     ) ?usize {
         const index = self.find(server_id, alpn) orelse return null;
-        if (self.entries.items[index].expired(now_ms)) return null;
+        if (self.entries.items[index].expired(now_ms)) {
+            if (self.entries.items[index].lease_id == null) {
+                var expired = self.removeEntryAt(index);
+                expired.deinit(self.allocator);
+            }
+            return null;
+        }
         return index;
     }
 

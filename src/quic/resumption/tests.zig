@@ -189,8 +189,9 @@ test "resumption cache expires tickets and validates lifetime" {
     // Strictly after the lifetime is expired; exactly at expiry remains usable
     // as in TLS ticket lifetime arithmetic.
     try std.testing.expect((try cache.acquire("valid", "h3", 2001)) == null);
-    try std.testing.expectEqual(@as(usize, 1), cache.pruneExpired(2001));
     try std.testing.expectEqual(@as(usize, 0), cache.count());
+    try std.testing.expectEqual(@as(usize, 0), cache.origin_index.count());
+    try std.testing.expectEqual(@as(usize, 0), cache.pruneExpired(2001));
 
     try std.testing.expectError(
         error.InvalidTicketLifetime,
@@ -255,6 +256,37 @@ test "resumption cache will not evict active leases" {
     );
     try std.testing.expectEqual(@as(usize, 0), cache.pruneExpired(200_000));
     try std.testing.expectEqual(@as(usize, 1), cache.count());
+}
+
+test "resumption cache drops expired hits during lookup" {
+    var cache = try resumption.Cache.init(std.testing.allocator, 2);
+    defer cache.deinit();
+    try cache.store(ticket("expired", "h3", "ticket", 1000, 1, null, 1));
+    try cache.store(ticket(
+        "leased",
+        "h3",
+        "leased-ticket",
+        1000,
+        1,
+        resumption.cache.quic_early_data_size,
+        2,
+    ));
+
+    var lease = (try cache.beginEarlyData("leased", "h3", 1500)).?;
+    defer lease.deinit();
+    try std.testing.expectEqual(@as(usize, 2), cache.count());
+
+    try std.testing.expect((try cache.acquire("expired", "h3", 2001)) == null);
+    try std.testing.expectEqual(@as(usize, 1), cache.count());
+    try std.testing.expect(cache.origin_index.get(.{ .server_id = "expired", .alpn = "h3" }) == null);
+    try std.testing.expect(cache.ownsActiveLease(lease));
+
+    try std.testing.expect((try cache.beginEarlyData("leased", "h3", 2001)) == null);
+    try std.testing.expectEqual(@as(usize, 1), cache.count());
+    try std.testing.expect(cache.ownsActiveLease(lease));
+    try cache.releaseEarlyData(&lease);
+    try std.testing.expectEqual(@as(usize, 1), cache.pruneExpired(2001));
+    try std.testing.expectEqual(@as(usize, 0), cache.count());
 }
 
 test "resumption cache indexes survive eviction moving an active lease" {
