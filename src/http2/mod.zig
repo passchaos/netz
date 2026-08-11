@@ -651,12 +651,11 @@ pub const WindowUpdatePayload = struct {
 
     pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_id: u31, increment: u31) Error!void {
         if (increment == 0) return error.InvalidFrameSize;
-        var payload: [4]u8 = undefined;
-        std.mem.writeInt(u32, &payload, @as(u32, increment), .big);
-        try (Frame{
-            .header = .{ .length = 0, .frame_type = .window_update, .flags = 0, .stream_id = stream_id },
-            .payload = &payload,
-        }).write(list, allocator);
+        try wire.appendU24(list, allocator, 4);
+        try list.append(allocator, @intFromEnum(FrameType.window_update));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
+        try wire.appendInt(list, allocator, u32, @as(u32, increment), .big);
     }
 };
 
@@ -2172,6 +2171,7 @@ test "HTTP/2 window update payload helper" {
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try WindowUpdatePayload.write(&encoded, allocator, 3, 1024);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 4, @intFromEnum(FrameType.window_update), 0, 0, 0, 0, 3 }, encoded.items[0..9]);
     const frame = try Frame.parse(encoded.items);
     const update = try WindowUpdatePayload.parse(frame);
     try std.testing.expectEqual(@as(u31, 3), update.stream_id);
