@@ -16,6 +16,11 @@ pub const Challenge = struct {
     deadline_ns: ?u64 = null,
 };
 
+const RemovedChallenge = struct {
+    challenge: Challenge,
+    removed_cached_deadline: bool,
+};
+
 fn Fifo(comptime T: type) type {
     return struct {
         items: std.ArrayList(T) = .empty,
@@ -261,6 +266,11 @@ pub const State = struct {
         if (now_ns < earliest_deadline) return 0;
 
         var expired: usize = 0;
+        // Multiple PATH_CHALLENGEs often share a retransmission deadline.  Do
+        // not rebuild the cached minimum after every swapRemove; the scan works
+        // from per-challenge deadlines, so one recompute at the end preserves
+        // correctness while avoiding repeated O(n) passes in timeout bursts.
+        var deadline_recompute_needed = false;
         var i: usize = 0;
         while (i < self.outstanding_challenges.items.len) {
             const deadline = self.outstanding_challenges.items[i].deadline_ns orelse {
@@ -276,7 +286,10 @@ pub const State = struct {
                 self.max_challenge_transmissions;
             if (will_fail) {
                 try self.failed_challenges.ensureUnusedCapacity(self.allocator, 1);
-                var challenge = self.removeOutstandingChallenge(i);
+                const removed = self.removeOutstandingChallengeDeferredDeadline(i);
+                deadline_recompute_needed = deadline_recompute_needed or
+                    removed.removed_cached_deadline;
+                var challenge = removed.challenge;
                 challenge.sent_time_ns = null;
                 challenge.deadline_ns = null;
                 expired += 1;
@@ -290,7 +303,10 @@ pub const State = struct {
                 );
                 std.debug.assert(!slot.found_existing);
                 errdefer _ = self.pending_challenge_index.remove(data);
-                var challenge = self.removeOutstandingChallenge(i);
+                const removed = self.removeOutstandingChallengeDeferredDeadline(i);
+                deadline_recompute_needed = deadline_recompute_needed or
+                    removed.removed_cached_deadline;
+                var challenge = removed.challenge;
                 challenge.sent_time_ns = null;
                 challenge.deadline_ns = null;
                 expired += 1;
@@ -298,6 +314,7 @@ pub const State = struct {
                 slot.value_ptr.* = {};
             }
         }
+        if (deadline_recompute_needed) self.recomputeOutstandingDeadline();
         return expired;
     }
 
@@ -332,6 +349,12 @@ pub const State = struct {
     }
 
     fn removeOutstandingChallenge(self: *State, index: usize) Challenge {
+        const removed = self.removeOutstandingChallengeDeferredDeadline(index);
+        if (removed.removed_cached_deadline) self.recomputeOutstandingDeadline();
+        return removed.challenge;
+    }
+
+    fn removeOutstandingChallengeDeferredDeadline(self: *State, index: usize) RemovedChallenge {
         const old_len = self.outstanding_challenges.items.len;
         const removed = self.outstanding_challenges.swapRemove(index);
         _ = self.outstanding_challenge_index.remove(removed.data);
@@ -339,12 +362,11 @@ pub const State = struct {
             const moved = self.outstanding_challenges.items[index];
             self.outstanding_challenge_index.getPtr(moved.data).?.* = index;
         }
-        if (removed.deadline_ns != null and
-            removed.deadline_ns == self.earliest_outstanding_deadline_ns)
-        {
-            self.recomputeOutstandingDeadline();
-        }
-        return removed;
+        return .{
+            .challenge = removed,
+            .removed_cached_deadline = removed.deadline_ns != null and
+                removed.deadline_ns == self.earliest_outstanding_deadline_ns,
+        };
     }
 
     fn considerOutstandingDeadline(self: *State, deadline: ?u64) void {

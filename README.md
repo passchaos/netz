@@ -319,6 +319,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   cache path-validation deadlines, skip early timeout scans, requeue timed-out
   challenges with single-lookup indexing, expose failed validation attempts in connection stats, and
   validate the new path on a matching PATH_RESPONSE,
+  batch PATH_CHALLENGE timeout deadline recomputation across burst expirations,
   streaming qlog 0.4 observability with RFC 7464 JSON-SEQ framing, strict JSON
   escaping, caller-visible sink failures, allocation-free event views, complete
   ACK-range/ECN and packet-frame emission without fixed-size truncation, plus
