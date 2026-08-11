@@ -96,6 +96,7 @@ pub const State = struct {
         self: *State,
         stream_id: u31,
     ) bool {
+        if (self.idle_index.count() == 0) return false;
         const index = self.idle_index.get(stream_id) orelse return false;
         self.removeIdleRequestAt(index);
         return true;
@@ -289,4 +290,5 @@ test "priority state indexes survive swap removals and replacements" {
     try std.testing.expect(state.remove(allocator, 3));
     try std.testing.expect(state.get(3) == null);
     try std.testing.expect(!state.remove(allocator, 9));
+    try std.testing.expect(!state.activateRequest(9));
 }
