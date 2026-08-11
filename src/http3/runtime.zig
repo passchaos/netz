@@ -5850,6 +5850,8 @@ const ResponseStreamSet = struct {
             if (self.reset_order.items[index] != stream_id) continue;
             if (index == self.reset_head) {
                 self.reset_head += 1;
+            } else if (index == self.reset_order.items.len - 1) {
+                _ = self.reset_order.pop();
             } else {
                 _ = self.reset_order.orderedRemove(index);
                 if (self.reset_head > index) self.reset_head -= 1;
@@ -11444,6 +11446,10 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     try responses.recordReset(24, 0x24);
     try responses.recordReset(28, 0x28);
     try responses.recordReset(24, 0x42); // update without duplicating FIFO slot.
+    try std.testing.expectEqual(@as(usize, 2), responses.resetCount());
+    try std.testing.expectEqual(@as(u64, 0x28), responses.takeReset(28).?);
+    try std.testing.expectEqual(@as(usize, 1), responses.resetCount());
+    try responses.recordReset(28, 0x28);
     try std.testing.expectEqual(@as(usize, 2), responses.resetCount());
     try std.testing.expectEqual(@as(u62, 24), responses.firstReset().?.stream_id);
     try std.testing.expectEqual(@as(u64, 0x42), responses.firstReset().?.application_error_code);
