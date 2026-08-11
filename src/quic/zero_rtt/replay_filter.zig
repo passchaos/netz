@@ -157,6 +157,9 @@ pub const Filter = struct {
     }
 
     fn pruneExpiredUnlocked(self: *Filter, now_ms: u64) usize {
+        const earliest = self.earliest_index orelse return 0;
+        if (self.entries.items[earliest].expires_at_ms > now_ms) return 0;
+
         var removed: usize = 0;
         var index: usize = 0;
         while (index < self.entries.items.len) {
