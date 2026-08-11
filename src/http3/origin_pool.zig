@@ -33,9 +33,15 @@ const OriginIndexContext = struct {
     }
 
     fn updateLower(hasher: *std.hash.Wyhash, bytes: []const u8) void {
-        for (bytes) |byte| {
-            const lowered = [1]u8{std.ascii.toLower(byte)};
-            hasher.update(&lowered);
+        var lowered: [64]u8 = undefined;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const chunk_len = @min(lowered.len, bytes.len - offset);
+            for (bytes[offset..][0..chunk_len], lowered[0..chunk_len]) |byte, *out| {
+                out.* = std.ascii.toLower(byte);
+            }
+            hasher.update(lowered[0..chunk_len]);
+            offset += chunk_len;
         }
     }
 };
