@@ -1145,7 +1145,8 @@ pub const Frame = union(enum) {
             },
             .crypto => |crypto| blk: {
                 try validateEndOffset(crypto.offset, crypto.data.len);
-                const prefix = try varintWireLen(&.{ @intFromEnum(FrameType.crypto), crypto.offset, crypto.data.len });
+                var prefix = try addWireLen(1, try varint.length(crypto.offset));
+                prefix = try addWireLen(prefix, try varint.length(crypto.data.len));
                 break :blk try addWireLen(prefix, crypto.data.len);
             },
             .stream => |stream| blk: {
@@ -1262,7 +1263,7 @@ pub const Frame = union(enum) {
             },
             .crypto => |crypto| {
                 try validateEndOffset(crypto.offset, crypto.data.len);
-                try varint.encode(list, allocator, @intFromEnum(FrameType.crypto));
+                try list.append(allocator, @intFromEnum(FrameType.crypto));
                 try varint.encode(list, allocator, crypto.offset);
                 try varint.encode(list, allocator, crypto.data.len);
                 try list.appendSlice(allocator, crypto.data);
@@ -2410,6 +2411,7 @@ test "QUIC stream and crypto frame codec" {
     var crypto_bytes: std.ArrayList(u8) = .empty;
     defer crypto_bytes.deinit(allocator);
     try (Frame{ .crypto = .{ .offset = 0, .data = "tls" } }).write(&crypto_bytes, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.crypto)), crypto_bytes.items[0]);
     const parsed_crypto = try parseFrame(crypto_bytes.items);
     try std.testing.expectEqualStrings("tls", parsed_crypto.frame.crypto.data);
 }
