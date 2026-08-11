@@ -189,10 +189,15 @@ pub const State = struct {
     ) bool {
         if (!self.releaseRemote(stream_id)) return false;
         if (self.pending_index.get(stream_id)) |index| {
-            var removed = self.pending.orderedRemove(index);
+            var removed = if (index == self.pending.items.len - 1)
+                self.pending.pop().?
+            else
+                self.pending.orderedRemove(index);
             _ = self.pending_index.remove(stream_id);
             removed.deinit(allocator);
-            self.repairPendingIndexFrom(index);
+            if (index < self.pending.items.len) {
+                self.repairPendingIndexFrom(index);
+            }
             self.compactPendingIfSparse();
         }
         return true;
