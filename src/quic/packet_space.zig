@@ -1122,9 +1122,31 @@ pub const SentPacketTracker = struct {
     }
 
     fn findPacketIndex(self: SentPacketTracker, packet_number: u64) ?usize {
-        if (self.packet_index.get(packet_number)) |index| return index;
+        if (self.packets.items.len == 0) return null;
+        if (self.packet_index.count() != 0) {
+            if (self.packet_index.get(packet_number)) |index| return index;
+        }
+        if (self.packetsSortedAscending()) {
+            return self.findSortedPacketIndex(packet_number);
+        }
         for (self.packets.items, 0..) |packet, index| {
             if (packet.packet_number == packet_number) return index;
+        }
+        return null;
+    }
+
+    fn findSortedPacketIndex(self: SentPacketTracker, packet_number: u64) ?usize {
+        var low: usize = 0;
+        var high = self.packets.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const current = self.packets.items[mid].packet_number;
+            if (current == packet_number) return mid;
+            if (current < packet_number) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
         }
         return null;
     }
