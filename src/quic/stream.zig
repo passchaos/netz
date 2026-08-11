@@ -156,6 +156,16 @@ pub const RecvState = struct {
         if (relative_end > self.max_buffered) return error.StreamBufferTooLarge;
 
         const old_len = self.received.items.len;
+        if (relative_end <= old_len and absolute_end <= self.contiguous_end) {
+            if (!std.mem.eql(u8, self.buffer.items[relative_offset..relative_end], data)) {
+                return error.ConflictingStreamData;
+            }
+            if (frame.fin and absolute_end < self.highest_received_end) {
+                return error.FinalSizeMismatch;
+            }
+            if (frame.fin) self.final_size = absolute_end;
+            return 0;
+        }
         var newly_received: u64 = 0;
         if (relative_offset >= old_len) {
             newly_received = data.len;
@@ -345,7 +355,10 @@ test "QUIC receive stream rejects conflicting duplicate bytes" {
     try recv.insert(.{ .stream_id = 0, .offset = 0, .data = "abcdef", .fin = false });
     // Identical overlap can be a benign retransmission and must not duplicate
     // bytes or regress contiguous availability.
-    try recv.insert(.{ .stream_id = 0, .offset = 2, .data = "cde", .fin = false });
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        try recv.insertTracked(.{ .stream_id = 0, .offset = 2, .data = "cde", .fin = false }),
+    );
     try std.testing.expectEqualStrings("abcdef", recv.available());
 
     try std.testing.expectError(error.ConflictingStreamData, recv.insert(.{
