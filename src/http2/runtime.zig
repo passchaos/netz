@@ -1015,8 +1015,9 @@ pub const Connection = struct {
                     const headers = try self.readHeaderBlock(frame.frame);
                     errdefer freeHeaders(self.allocator, headers);
                     try validateHeaderBlock(headers, .request);
-                    const method = findHeader(headers, ":method") orelse return error.MissingPseudoHeader;
-                    const protocol = findHeader(headers, ":protocol") orelse return error.InvalidHeader;
+                    const lookup = requestHeaderLookup(headers);
+                    const method = lookup.method orelse return error.MissingPseudoHeader;
+                    const protocol = lookup.protocol orelse return error.InvalidHeader;
                     if (!methodIsConnect(method)) return error.InvalidHeader;
                     if (!std.mem.eql(u8, protocol, expected_protocol)) return error.InvalidHeader;
 
@@ -1024,15 +1025,15 @@ pub const Connection = struct {
                         .stream_id = stream_id,
                         .headers = headers,
                         .method = method,
-                        .path = findHeader(headers, ":path") orelse "",
-                        .scheme = findHeader(headers, ":scheme") orelse "",
-                        .authority = requestAuthority(headers),
+                        .path = lookup.path orelse "",
+                        .scheme = lookup.scheme orelse "",
+                        .authority = lookup.requestAuthority(),
                         .protocol = protocol,
                         .priority = if (self.peerPriority(stream_id)) |value|
                             value
                         else
                             http2.ExtensiblePriority.parse(
-                                findHeader(headers, "priority") orelse "",
+                                lookup.priority orelse "",
                             ),
                     };
                 },
@@ -1099,8 +1100,9 @@ pub const Connection = struct {
                     var body: std.ArrayList(u8) = .empty;
                     errdefer body.deinit(self.allocator);
 
-                    const method = findHeader(headers, ":method") orelse return error.MissingPseudoHeader;
-                    const protocol = findHeader(headers, ":protocol");
+                    const lookup = requestHeaderLookup(headers);
+                    const method = lookup.method orelse return error.MissingPseudoHeader;
+                    const protocol = lookup.protocol;
                     if (protocol != null and !self.limits.enable_connect_protocol) {
                         return error.ExtendedConnectDisabled;
                     }
@@ -1145,9 +1147,9 @@ pub const Connection = struct {
                         .stream_id = stream_id,
                         .headers = headers,
                         .method = method,
-                        .path = findHeader(headers, ":path") orelse "",
-                        .scheme = findHeader(headers, ":scheme") orelse "",
-                        .authority = requestAuthority(headers),
+                        .path = lookup.path orelse "",
+                        .scheme = lookup.scheme orelse "",
+                        .authority = lookup.requestAuthority(),
                         .protocol = protocol,
                         .body = try body.toOwnedSlice(self.allocator),
                         .trailers = trailers,
@@ -1155,7 +1157,7 @@ pub const Connection = struct {
                             value
                         else
                             http2.ExtensiblePriority.parse(
-                                findHeader(headers, "priority") orelse "",
+                                lookup.priority orelse "",
                             ),
                     };
                 },
@@ -1237,8 +1239,9 @@ pub const Connection = struct {
         body: []u8,
         trailers: []http2.Hpack.HeaderField,
     ) Error!OwnedRequest {
-        const method = findHeader(headers, ":method") orelse return error.MissingPseudoHeader;
-        const protocol = findHeader(headers, ":protocol");
+        const lookup = requestHeaderLookup(headers);
+        const method = lookup.method orelse return error.MissingPseudoHeader;
+        const protocol = lookup.protocol;
         if (protocol != null and !self.limits.enable_connect_protocol) return error.ExtendedConnectDisabled;
         const expected_request_len = try contentLength(headers);
         const is_connect = methodIsConnect(method);
@@ -1250,9 +1253,9 @@ pub const Connection = struct {
             .stream_id = stream_id,
             .headers = headers,
             .method = method,
-            .path = findHeader(headers, ":path") orelse "",
-            .scheme = findHeader(headers, ":scheme") orelse "",
-            .authority = requestAuthority(headers),
+            .path = lookup.path orelse "",
+            .scheme = lookup.scheme orelse "",
+            .authority = lookup.requestAuthority(),
             .protocol = protocol,
             .body = body,
             .trailers = trailers,
@@ -1260,7 +1263,7 @@ pub const Connection = struct {
                 value
             else
                 http2.ExtensiblePriority.parse(
-                    findHeader(headers, "priority") orelse "",
+                    lookup.priority orelse "",
                 ),
         };
     }
@@ -3681,6 +3684,42 @@ fn informationalResponseToSkip(status: u16) bool {
 
 fn statusIsInformational(status: u16) bool {
     return status >= 100 and status < 200;
+}
+
+const RequestHeaderLookup = struct {
+    method: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    scheme: ?[]const u8 = null,
+    authority: ?[]const u8 = null,
+    host: ?[]const u8 = null,
+    protocol: ?[]const u8 = null,
+    priority: ?[]const u8 = null,
+
+    fn requestAuthority(self: RequestHeaderLookup) ?[]const u8 {
+        return self.authority orelse self.host;
+    }
+};
+
+fn requestHeaderLookup(headers: []const http2.Hpack.HeaderField) RequestHeaderLookup {
+    var lookup: RequestHeaderLookup = .{};
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, ":method")) {
+            if (lookup.method == null) lookup.method = header.value;
+        } else if (std.ascii.eqlIgnoreCase(header.name, ":path")) {
+            if (lookup.path == null) lookup.path = header.value;
+        } else if (std.ascii.eqlIgnoreCase(header.name, ":scheme")) {
+            if (lookup.scheme == null) lookup.scheme = header.value;
+        } else if (std.ascii.eqlIgnoreCase(header.name, ":authority")) {
+            if (lookup.authority == null) lookup.authority = header.value;
+        } else if (std.ascii.eqlIgnoreCase(header.name, "host")) {
+            if (lookup.host == null) lookup.host = header.value;
+        } else if (std.ascii.eqlIgnoreCase(header.name, ":protocol")) {
+            if (lookup.protocol == null) lookup.protocol = header.value;
+        } else if (std.ascii.eqlIgnoreCase(header.name, "priority")) {
+            if (lookup.priority == null) lookup.priority = header.value;
+        }
+    }
+    return lookup;
 }
 
 fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
@@ -7369,6 +7408,11 @@ test "HTTP/2 runtime validates pseudo headers and lowercase names" {
     };
     try validateHeaderBlock(&host_only, .request);
     try std.testing.expectEqualStrings("example.com", requestAuthority(&host_only).?);
+    const host_lookup = requestHeaderLookup(&host_only);
+    try std.testing.expectEqualStrings("GET", host_lookup.method.?);
+    try std.testing.expectEqualStrings("/host-only", host_lookup.path.?);
+    try std.testing.expectEqualStrings("https", host_lookup.scheme.?);
+    try std.testing.expectEqualStrings("example.com", host_lookup.requestAuthority().?);
 
     const matching_authorities = [_]http2.Hpack.HeaderField{
         .{ .name = ":method", .value = "GET" },
