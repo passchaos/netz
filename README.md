@@ -102,7 +102,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   per-stream `receiveResponseEvent`/`readResponseData` plus
   `receiveNextResponseEvent` for one tquic-style poll loop over every indexed
   outstanding response and reset. Both directions provide
-  indexed active streaming readers with single-lookup activation and empty-reset lookup skips, bounded-window network reads with automatic QPACK head/trailer feedback,
+  indexed active streaming readers with single-lookup activation and empty-index/reset lookup skips, bounded-window network reads with automatic QPACK head/trailer feedback,
   interleaved-stream and reset identity preservation, Content-Length
   validation, prepared reset-record fast paths, and no full-body aggregation. When UDP_GRO is enabled, protected
   and handshake packet pumps retain the decrypted batch behind a one-packet
@@ -120,7 +120,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   heads, preserve the push ID, enforce the advertised limit, and account
   dynamic QPACK section feedback instead of discarding promised fields like
   the current reference runtimes. Push promise registration uses single-probe
-  indexes, push stream insertion/binding reuse one map probe, and protected and handshake runtimes also bind
+  indexes, push stream insertion/binding reuse one map probe, empty-index targeted push lookups, and protected and handshake runtimes also bind
   reordered server-initiated push streams to indexed promises, expose indexed targeted
   streaming and owned aggregate pushed-response APIs, and can emit
   PUSH_PROMISE plus the corresponding unidirectional pushed response with

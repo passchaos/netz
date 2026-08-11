@@ -5683,7 +5683,8 @@ const RequestStreamSet = struct {
     }
 
     fn contains(self: RequestStreamSet, stream_id: u62) bool {
-        return self.entry_index.contains(stream_id);
+        return self.entry_index.count() != 0 and
+            self.entry_index.contains(stream_id);
     }
 
     fn lowestStream(self: RequestStreamSet) ?u62 {
@@ -6255,6 +6256,7 @@ const StreamingMessageSet = struct {
     }
 
     fn find(self: *StreamingMessageSet, stream_id: u62) ?*Entry {
+        if (self.entry_index.count() == 0) return null;
         const index = self.entry_index.get(stream_id) orelse return null;
         if (index >= self.entries.items.len) return null;
         if (self.entries.items[index].reader.receive.stream_id != stream_id) {
@@ -7044,12 +7046,14 @@ const PushStreamSet = struct {
 
     fn findByStreamId(self: *PushStreamSet, stream_id: u64) ?*Entry {
         const key = std.math.cast(u62, stream_id) orelse return null;
+        if (self.stream_index.count() == 0) return null;
         const index = self.stream_index.get(key) orelse return null;
         if (index >= self.entries.items.len) return null;
         return &self.entries.items[index];
     }
 
     fn findByPushId(self: *PushStreamSet, push_id: u64) ?*Entry {
+        if (self.push_index.count() == 0) return null;
         const index = self.push_index.get(push_id) orelse return null;
         if (index >= self.entries.items.len) return null;
         return &self.entries.items[index];
@@ -7091,6 +7095,7 @@ const PushStreamSet = struct {
     }
 
     fn findPromise(self: PushStreamSet, push_id: u64) ?*Promise {
+        if (self.promise_index.count() == 0) return null;
         const index = self.promise_index.get(push_id) orelse return null;
         if (index >= self.promises.items.len) return null;
         return &self.promises.items[index];
@@ -7103,7 +7108,8 @@ fn bufferedHasResponse(
 ) bool {
     return (buffered.resets.count() != 0 and
         buffered.resets.contains(stream_id)) or
-        buffered.entry_index.contains(stream_id);
+        (buffered.entry_index.count() != 0 and
+            buffered.entry_index.contains(stream_id));
 }
 
 const ClientRequestLifecycle = struct {
