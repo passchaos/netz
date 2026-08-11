@@ -1321,19 +1321,33 @@ pub const Request = struct {
     pub fn writeWithSettings(self: Request, list: *std.ArrayList(u8), allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         var fields = try self.headerFields(&fields_buf);
+        const extended_connect = std.mem.eql(u8, self.method, "CONNECT") and
+            requestHasProtocolPseudo(self.headers);
         var content_length_buf: [32]u8 = undefined;
-        if (requestShouldDefaultContentLength(self.method, fields, self.body.len)) {
+        var declared_content_length = try contentLength(fields);
+        if (requestShouldDefaultContentLengthValue(
+            self.method,
+            declared_content_length,
+            self.body.len,
+        )) {
             var field_count = fields.len;
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{self.body.len}) catch unreachable;
             try appendHeaderField(&fields_buf, &field_count, .{ .name = "content-length", .value = content_length });
             fields = fields_buf[0..field_count];
+            declared_content_length = self.body.len;
         }
         try validateHeaderBlock(fields, .request);
         try validateHeaderBlock(self.trailers, .trailers);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
-        try validateRequestBodyForMethod(fields, self.body, self.trailers);
-        try validateContentLength(fields, self.body.len);
+        try validateRequestBodyForMethodValue(
+            self.method,
+            extended_connect,
+            declared_content_length,
+            self.body,
+            self.trailers,
+        );
+        try validateContentLengthValue(declared_content_length, self.body.len);
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 
@@ -1347,8 +1361,15 @@ pub const Request = struct {
     ) Error!void {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         var fields = try self.headerFields(&fields_buf);
+        const extended_connect = std.mem.eql(u8, self.method, "CONNECT") and
+            requestHasProtocolPseudo(self.headers);
         var content_length_buf: [32]u8 = undefined;
-        if (requestShouldDefaultContentLength(self.method, fields, self.body.len)) {
+        var declared_content_length = try contentLength(fields);
+        if (requestShouldDefaultContentLengthValue(
+            self.method,
+            declared_content_length,
+            self.body.len,
+        )) {
             var field_count = fields.len;
             const content_length = std.fmt.bufPrint(
                 &content_length_buf,
@@ -1360,13 +1381,20 @@ pub const Request = struct {
                 .value = content_length,
             });
             fields = fields_buf[0..field_count];
+            declared_content_length = self.body.len;
         }
         try validateHeaderBlock(fields, .request);
         try validateHeaderBlock(self.trailers, .trailers);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
-        try validateRequestBodyForMethod(fields, self.body, self.trailers);
-        try validateContentLength(fields, self.body.len);
+        try validateRequestBodyForMethodValue(
+            self.method,
+            extended_connect,
+            declared_content_length,
+            self.body,
+            self.trailers,
+        );
+        try validateContentLengthValue(declared_content_length, self.body.len);
         try writeHeadersAndDataDynamic(
             list,
             allocator,
@@ -1401,18 +1429,27 @@ pub const Request = struct {
         var fields_buf: [64]Qpack.HeaderField = undefined;
         var fields = try self.headerFields(&fields_buf);
         var content_length_buf: [32]u8 = undefined;
+        const extended_connect = std.mem.eql(u8, self.method, "CONNECT") and
+            requestHasProtocolPseudo(self.headers);
         const plain_connect = std.mem.eql(u8, self.method, "CONNECT") and
-            !requestHasProtocolPseudo(self.headers);
+            !extended_connect;
         if (plain_connect) {
             if (body_length) |length| {
                 if (length != 0) return error.InvalidContentLength;
             }
+            const declared_content_length = try contentLength(fields);
             try validateHeaderBlock(fields, .request);
             try validateFieldSectionSize(
                 fields,
                 peer_settings.max_field_section_size,
             );
-            try validateRequestBodyForMethod(fields, &.{}, &.{});
+            try validateRequestBodyForMethodValue(
+                self.method,
+                extended_connect,
+                declared_content_length,
+                &.{},
+                &.{},
+            );
             try writeHeadersFrameDynamic(
                 list,
                 allocator,
@@ -1434,7 +1471,13 @@ pub const Request = struct {
             fields,
             peer_settings.max_field_section_size,
         );
-        try validateRequestBodyForMethod(fields, &.{}, &.{});
+        try validateRequestBodyForMethodValue(
+            self.method,
+            extended_connect,
+            effective_length,
+            &.{},
+            &.{},
+        );
         try writeHeadersFrameDynamic(
             list,
             allocator,
@@ -1457,7 +1500,7 @@ fn requestHasProtocolPseudo(headers: []const Qpack.HeaderField) bool {
     return false;
 }
 
-fn requestShouldDefaultContentLength(method: []const u8, headers: []const Qpack.HeaderField, body_len: usize) bool {
+fn requestShouldDefaultContentLengthValue(method: []const u8, declared_content_length: ?usize, body_len: usize) bool {
     if (std.mem.eql(u8, method, "CONNECT")) return false;
     // Align the HTTP/3 convenience writer with Hyper's h2 shaping and our
     // HTTP/2 runtime: known non-empty bodies get an explicit length, and empty
@@ -1465,7 +1508,7 @@ fn requestShouldDefaultContentLength(method: []const u8, headers: []const Qpack.
     // get `content-length: 0` so intermediaries and applications do not have
     // to infer intent from the absence of DATA frames.
     if (body_len == 0 and !methodHasDefinedPayloadSemantics(method)) return false;
-    return (contentLength(headers) catch return false) == null;
+    return declared_content_length == null;
 }
 
 fn methodHasDefinedPayloadSemantics(method: []const u8) bool {
@@ -1511,18 +1554,33 @@ pub const Response = struct {
         var status_buf: [3]u8 = undefined;
         var fields = try self.headerFields(&fields_buf, &status_buf);
         var content_length_buf: [32]u8 = undefined;
-        if (responseShouldDefaultContentLength(self.status, fields, self.body.len)) {
+        var declared_content_length = try contentLength(fields);
+        if (responseShouldDefaultContentLengthValue(
+            self.status,
+            declared_content_length,
+            self.body.len,
+        )) {
             var field_count = fields.len;
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{self.body.len}) catch unreachable;
             try appendHeaderField(&fields_buf, &field_count, .{ .name = "content-length", .value = content_length });
             fields = fields_buf[0..field_count];
+            declared_content_length = self.body.len;
         }
         try validateHeaderBlock(fields, .response);
         try validateHeaderBlock(self.trailers, .trailers);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
-        try validateResponseBodyForStatus(self.status, fields, self.body, self.trailers);
-        try validateContentLengthForStatus(self.status, fields, self.body.len);
+        try validateResponseBodyForStatusWithLength(
+            self.status,
+            declared_content_length,
+            self.body,
+            self.trailers,
+        );
+        try validateContentLengthForStatusValue(
+            self.status,
+            declared_content_length,
+            self.body.len,
+        );
         try writeHeadersAndData(list, allocator, fields, self.body, self.trailers);
     }
 
@@ -1538,7 +1596,12 @@ pub const Response = struct {
         var status_buf: [3]u8 = undefined;
         var fields = try self.headerFields(&fields_buf, &status_buf);
         var content_length_buf: [32]u8 = undefined;
-        if (responseShouldDefaultContentLength(self.status, fields, self.body.len)) {
+        var declared_content_length = try contentLength(fields);
+        if (responseShouldDefaultContentLengthValue(
+            self.status,
+            declared_content_length,
+            self.body.len,
+        )) {
             var field_count = fields.len;
             const content_length = std.fmt.bufPrint(
                 &content_length_buf,
@@ -1550,13 +1613,23 @@ pub const Response = struct {
                 .value = content_length,
             });
             fields = fields_buf[0..field_count];
+            declared_content_length = self.body.len;
         }
         try validateHeaderBlock(fields, .response);
         try validateHeaderBlock(self.trailers, .trailers);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
-        try validateResponseBodyForStatus(self.status, fields, self.body, self.trailers);
-        try validateContentLengthForStatus(self.status, fields, self.body.len);
+        try validateResponseBodyForStatusWithLength(
+            self.status,
+            declared_content_length,
+            self.body,
+            self.trailers,
+        );
+        try validateContentLengthForStatusValue(
+            self.status,
+            declared_content_length,
+            self.body.len,
+        );
         try writeHeadersAndDataDynamic(
             list,
             allocator,
@@ -1588,10 +1661,8 @@ pub const Response = struct {
         var fields = try self.headerFields(&fields_buf, &status_buf);
         const body_forbidden = self.status == 204 or self.status == 304;
         if (body_forbidden) {
-            if (self.status == 204 and findHeader(
-                self.headers,
-                "content-length",
-            ) != null) {
+            const declared_content_length = try contentLength(fields);
+            if (self.status == 204 and declared_content_length != null) {
                 return error.InvalidContentLength;
             }
             if (body_length) |length| {
@@ -1602,9 +1673,9 @@ pub const Response = struct {
                 fields,
                 peer_settings.max_field_section_size,
             );
-            try validateResponseBodyForStatus(
+            try validateResponseBodyForStatusWithLength(
                 self.status,
-                fields,
+                declared_content_length,
                 &.{},
                 &.{},
             );
@@ -1672,10 +1743,10 @@ fn applyStreamingContentLength(
     return expected;
 }
 
-fn responseShouldDefaultContentLength(status: u16, headers: []const Qpack.HeaderField, body_len: usize) bool {
+fn responseShouldDefaultContentLengthValue(status: u16, declared_content_length: ?usize, body_len: usize) bool {
     if (body_len == 0) return false;
     if ((status >= 100 and status < 200) or status == 204 or status == 304) return false;
-    return (contentLength(headers) catch return false) == null;
+    return declared_content_length == null;
 }
 
 pub const InformationalResponse = struct {
@@ -2636,23 +2707,47 @@ fn validateRequestBodyForMethod(headers: []const Qpack.HeaderField, body: []cons
         if (std.mem.eql(u8, header.name, ":protocol")) has_protocol = true;
     }
     if (method) |value| {
-        if (std.mem.eql(u8, value, "CONNECT") and !has_protocol) {
-            if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
-            if ((try contentLength(headers)) != null) return error.InvalidContentLength;
-        }
+        try validateRequestBodyForMethodValue(
+            value,
+            has_protocol,
+            try contentLength(headers),
+            body,
+            trailers,
+        );
+    }
+}
+
+fn validateRequestBodyForMethodValue(
+    method: []const u8,
+    extended_connect: bool,
+    declared_content_length: ?usize,
+    body: []const u8,
+    trailers: []const Qpack.HeaderField,
+) Error!void {
+    if (std.mem.eql(u8, method, "CONNECT") and !extended_connect) {
+        if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
+        if (declared_content_length != null) return error.InvalidContentLength;
     }
 }
 
 fn validateContentLength(headers: []const Qpack.HeaderField, actual: usize) Error!void {
-    if (try contentLength(headers)) |expected| {
-        if (expected != actual) return error.InvalidContentLength;
+    try validateContentLengthValue(try contentLength(headers), actual);
+}
+
+fn validateContentLengthValue(expected: ?usize, actual: usize) Error!void {
+    if (expected) |value| {
+        if (value != actual) return error.InvalidContentLength;
     }
 }
 
 fn validateContentLengthForStatus(status: u16, headers: []const Qpack.HeaderField, actual: usize) Error!void {
-    if (try contentLength(headers)) |expected| {
+    try validateContentLengthForStatusValue(status, try contentLength(headers), actual);
+}
+
+fn validateContentLengthForStatusValue(status: u16, expected: ?usize, actual: usize) Error!void {
+    if (expected) |value| {
         if (status == 304 and actual == 0) return;
-        if (expected != actual) return error.InvalidContentLength;
+        if (value != actual) return error.InvalidContentLength;
     }
 }
 
@@ -2662,9 +2757,22 @@ fn validateResponseBodyForStatus(
     body: []const u8,
     trailers: []const Qpack.HeaderField,
 ) Error!void {
+    try validateResponseBodyForStatusWithLength(
+        status,
+        try contentLength(headers),
+        body,
+        trailers,
+    );
+}
+
+fn validateResponseBodyForStatusWithLength(
+    status: u16,
+    declared_content_length: ?usize,
+    body: []const u8,
+    trailers: []const Qpack.HeaderField,
+) Error!void {
     if (!((status >= 100 and status < 200) or status == 204 or status == 304)) return;
     if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
-    const declared_content_length = try contentLength(headers);
     if (status != 304 and declared_content_length != null) return error.InvalidContentLength;
 }
 

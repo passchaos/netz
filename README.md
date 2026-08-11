@@ -52,7 +52,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   RFC 9218 Priority field parsing/serialization,
   request/response message encoding/decoding with ordered HEADERS/DATA/trailer handling, static or dynamic QPACK field-section decoding with indexed per-stream Section Acknowledgment/cancellation accounting with targeted index repair and prefix-skipping cancellation compaction, non-blocking Known-Received dynamic writers for request/response/interim/trailer sections with sensitive-field exclusion and speculative future inserts, inbound and outbound SETTINGS_MAX_FIELD_SECTION_SIZE enforcement, response-side PUSH_PROMISE tolerance, interim 1xx response skipping and runtime emission before final responses, and forbidden trailer-field rejection,
   HEADERS-only dynamic request/response writers for incremental DATA sending
-  with Content-Length generation/verification and CONNECT/204/304 body guards,
+  with Content-Length generation/verification, parsed length reuse, and
+  CONNECT/204/304 body guards,
   an incremental message reader that emits owned request/response heads,
   bounded-window DATA availability, dynamic trailers, and FIN while validating
   informational responses and Content-Length without aggregating body bytes,
