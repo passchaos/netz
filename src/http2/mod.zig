@@ -1309,9 +1309,13 @@ pub const Hpack = struct {
     }
 
     pub fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+        return encodeHuffmanWithLen(allocator, value, try huffmanEncodedLen(value));
+    }
+
+    pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, encoded_len: usize) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
-        try out.ensureTotalCapacity(allocator, try huffmanEncodedLen(value));
+        try out.ensureTotalCapacity(allocator, encoded_len);
 
         var bits: u64 = 0;
         var bits_left: u6 = 40;
@@ -1333,6 +1337,7 @@ pub const Hpack = struct {
             bits |= (@as(u64, 1) << bits_left) - 1;
             try out.append(allocator, @truncate(bits >> 32));
         }
+        std.debug.assert(out.items.len == encoded_len);
         return out.toOwnedSlice(allocator);
     }
 
@@ -1580,15 +1585,26 @@ pub const Hpack = struct {
     }
 
     fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
-        const huffman = try encodeHuffman(allocator, value);
-        defer allocator.free(huffman);
-        if (huffman.len < value.len) {
-            try encodeInteger(list, allocator, 7, 0x80, huffman.len);
-            try list.appendSlice(allocator, huffman);
-        } else {
+        if (value.len == 0) {
+            try list.append(allocator, 0);
+            return;
+        }
+        if (value.len <= 2) {
+            try list.append(allocator, @intCast(value.len));
+            try list.appendSlice(allocator, value);
+            return;
+        }
+        const huffman_len = try huffmanEncodedLen(value);
+        if (huffman_len >= value.len) {
             try encodeInteger(list, allocator, 7, 0x00, value.len);
             try list.appendSlice(allocator, value);
+            return;
         }
+        const huffman = try encodeHuffmanWithLen(allocator, value, huffman_len);
+        defer allocator.free(huffman);
+        std.debug.assert(huffman.len == huffman_len);
+        try encodeInteger(list, allocator, 7, 0x80, huffman.len);
+        try list.appendSlice(allocator, huffman);
     }
 
     const DecodedString = struct {
@@ -2291,6 +2307,23 @@ test "HTTP/2 HPACK Huffman and dynamic table state" {
     defer no_alloc_allocator.free(no_alloc_decoded);
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqualStrings("www.example.com", no_alloc_decoded);
+
+    var no_alloc_block: std.ArrayList(u8) = .empty;
+    defer no_alloc_block.deinit(allocator);
+    try no_alloc_block.ensureTotalCapacity(allocator, 96);
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const raw_preferred = [_]u8{ 0xff, 0xff, 0xff };
+    try Hpack.encodeLiteralBlock(&no_alloc_block, no_alloc.allocator(), &.{
+        .{ .name = "accept-encoding", .value = "", .never_index = true },
+        .{ .name = "accept-encoding", .value = "ok", .never_index = true },
+        .{ .name = "accept-encoding", .value = &raw_preferred, .never_index = true },
+    });
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    const fast_decoded = try Hpack.decodeLiteralBlock(allocator, no_alloc_block.items);
+    defer Hpack.freeDecodedFields(allocator, fast_decoded);
+    try std.testing.expectEqualStrings("", fast_decoded[0].value);
+    try std.testing.expectEqualStrings("ok", fast_decoded[1].value);
+    try std.testing.expectEqualSlices(u8, &raw_preferred, fast_decoded[2].value);
 
     var encoder = Hpack.Encoder{};
     defer encoder.deinit(allocator);
