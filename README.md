@@ -76,7 +76,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   tooling; both server paths retain indexed bounded per-request-stream reassembly state
   so interleaved streams are not dropped, surface RESET_STREAM request
   cancellation, and expose client/server cancel helpers that send
-  RESET_STREAM+STOP_SENDING with conditional QPACK stream cancellation. Servers
+  RESET_STREAM+STOP_SENDING with conditional QPACK stream cancellation and empty-buffer skips. Servers
   also expose two-phase GOAWAY initiation/completion and drain-completion
   tracking over queued and indexed application-owned requests. Clients can send
   pre-request or live RFC 9218 PRIORITY_UPDATE frames on persistent control

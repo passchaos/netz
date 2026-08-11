@@ -5659,6 +5659,7 @@ const RequestStreamSet = struct {
         table: http3.Qpack.DynamicTable,
     ) Error!bool {
         const key = std.math.cast(u62, stream_id) orelse return false;
+        if (self.entry_index.count() == 0) return false;
         const index = self.entry_index.get(key) orelse return false;
         return try bufferedReceiveUsesDynamicQpack(
             self.entries.items[index].receive,
@@ -5977,6 +5978,7 @@ const ResponseStreamSet = struct {
         stream_id: u62,
         table: http3.Qpack.DynamicTable,
     ) Error!bool {
+        if (self.entry_index.count() == 0) return false;
         const index = self.entry_index.get(stream_id) orelse return false;
         return try bufferedReceiveUsesDynamicQpack(
             self.entries.items[index].receive,
@@ -11409,6 +11411,12 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     try std.testing.expectEqual(@as(usize, 0), requests.entry_index.count());
     requests.remove(20);
     try std.testing.expect(requests.takeReceive(20) == null);
+    var empty_table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer empty_table.deinit();
+    try std.testing.expect(!try requests.requiresQpackCancellation(
+        20,
+        empty_table,
+    ));
 
     try requests.insert(from, .{
         .stream_id = 12,
@@ -11495,6 +11503,10 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     responses.remove(0);
     try std.testing.expectEqual(@as(usize, 0), responses.entry_index.count());
     try std.testing.expect(responses.takeReceive(16) == null);
+    try std.testing.expect(!try responses.requiresQpackCancellation(
+        16,
+        table,
+    ));
 }
 
 test "HTTP/3 push cancellation queue reuses consumed FIFO slots" {
