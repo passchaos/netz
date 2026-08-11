@@ -1208,11 +1208,13 @@ pub fn writePriorityUpdateFrameRaw(
     field_value: []const u8,
 ) Error!void {
     if (frame_type != FrameType.priority_update_request and frame_type != FrameType.priority_update_push) return error.InvalidPriorityUpdate;
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try quic.varint.encode(&payload, allocator, prioritized_element_id);
-    try payload.appendSlice(allocator, field_value);
-    try (Frame{ .frame_type = frame_type, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+    const id_len = try quic.varint.length(prioritized_element_id);
+    const payload_len = std.math.add(usize, id_len, field_value.len) catch return error.IntegerOverflow;
+    try writeFrameHeader(list, allocator, frame_type, payload_len);
+    var id_buf: [8]u8 = undefined;
+    const encoded_id = try quic.varint.encodeInto(&id_buf, prioritized_element_id);
+    try list.appendSlice(allocator, encoded_id);
+    try list.appendSlice(allocator, field_value);
 }
 
 pub fn parsePriorityUpdatePayload(payload: []const u8) Error!PriorityUpdatePayload {
@@ -3535,6 +3537,23 @@ test "HTTP/3 priority field and PRIORITY_UPDATE frame" {
     try writePriorityUpdateFrameRaw(&invalid_priority, allocator, FrameType.priority_update_request, 1, "u=1");
     const invalid_frame = try Frame.parse(invalid_priority.items);
     try std.testing.expectError(error.UnexpectedFrame, control.applyFrame(allocator, invalid_frame));
+
+    var no_alloc_priority: std.ArrayList(u8) = .empty;
+    defer no_alloc_priority.deinit(allocator);
+    try no_alloc_priority.ensureTotalCapacity(allocator, 32);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try writePriorityUpdateFrameRaw(
+        &no_alloc_priority,
+        no_alloc.allocator(),
+        FrameType.priority_update_request,
+        16,
+        "u=2",
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    const no_alloc_frame = try Frame.parse(no_alloc_priority.items);
+    const no_alloc_payload = try parsePriorityUpdatePayload(no_alloc_frame.payload);
+    try std.testing.expectEqual(@as(u64, 16), no_alloc_payload.prioritized_element_id);
+    try std.testing.expectEqualStrings("u=2", no_alloc_payload.field_value);
 }
 
 fn checkPriorityUpdateStateAllocationFailure(
