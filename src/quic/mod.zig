@@ -1127,17 +1127,15 @@ pub const Frame = union(enum) {
                 }
                 break :blk len;
             },
-            .reset_stream => |reset| try varintWireLen(&.{
-                @intFromEnum(FrameType.reset_stream),
-                reset.stream_id,
-                reset.application_error_code,
-                reset.final_size,
-            }),
-            .stop_sending => |stop| try varintWireLen(&.{
-                @intFromEnum(FrameType.stop_sending),
-                stop.stream_id,
-                stop.application_error_code,
-            }),
+            .reset_stream => |reset| blk: {
+                var len = try addWireLen(1, try varint.length(reset.stream_id));
+                len = try addWireLen(len, try varint.length(reset.application_error_code));
+                break :blk try addWireLen(len, try varint.length(reset.final_size));
+            },
+            .stop_sending => |stop| blk: {
+                const len = try addWireLen(1, try varint.length(stop.stream_id));
+                break :blk try addWireLen(len, try varint.length(stop.application_error_code));
+            },
             .new_token => |new_token| blk: {
                 if (new_token.token.len == 0) return error.InvalidFrame;
                 const prefix = try varintWireLen(&.{ @intFromEnum(FrameType.new_token), new_token.token.len });
@@ -1243,13 +1241,13 @@ pub const Frame = union(enum) {
                 try writeAckFields(list, allocator, ack);
             },
             .reset_stream => |reset| {
-                try varint.encode(list, allocator, @intFromEnum(FrameType.reset_stream));
+                try list.append(allocator, @intFromEnum(FrameType.reset_stream));
                 try varint.encode(list, allocator, reset.stream_id);
                 try varint.encode(list, allocator, reset.application_error_code);
                 try varint.encode(list, allocator, reset.final_size);
             },
             .stop_sending => |stop| {
-                try varint.encode(list, allocator, @intFromEnum(FrameType.stop_sending));
+                try list.append(allocator, @intFromEnum(FrameType.stop_sending));
                 try varint.encode(list, allocator, stop.stream_id);
                 try varint.encode(list, allocator, stop.application_error_code);
             },
@@ -2668,6 +2666,37 @@ test "QUIC stream flow-control frames write fixed frame type bytes" {
     parsed = try parseFrame(encoded.items);
     try std.testing.expectEqual(@as(u64, 4), parsed.frame.stream_data_blocked.stream_id);
     try std.testing.expectEqual(@as(u64, 1000), parsed.frame.stream_data_blocked.maximum_stream_data);
+}
+
+test "QUIC stream reset control frames write fixed frame type bytes" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    const reset_stream = Frame{ .reset_stream = .{
+        .stream_id = 4,
+        .application_error_code = 7,
+        .final_size = 99,
+    } };
+    try reset_stream.write(&encoded, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.reset_stream)), encoded.items[0]);
+    try std.testing.expectEqual(encoded.items.len, try reset_stream.wireLen());
+    var parsed = try parseFrame(encoded.items);
+    try std.testing.expectEqual(@as(u64, 4), parsed.frame.reset_stream.stream_id);
+    try std.testing.expectEqual(@as(u64, 7), parsed.frame.reset_stream.application_error_code);
+    try std.testing.expectEqual(@as(u64, 99), parsed.frame.reset_stream.final_size);
+
+    encoded.clearRetainingCapacity();
+    const stop_sending = Frame{ .stop_sending = .{
+        .stream_id = 4,
+        .application_error_code = 7,
+    } };
+    try stop_sending.write(&encoded, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.stop_sending)), encoded.items[0]);
+    try std.testing.expectEqual(encoded.items.len, try stop_sending.wireLen());
+    parsed = try parseFrame(encoded.items);
+    try std.testing.expectEqual(@as(u64, 4), parsed.frame.stop_sending.stream_id);
+    try std.testing.expectEqual(@as(u64, 7), parsed.frame.stop_sending.application_error_code);
 }
 
 test "QUIC ACK frame owned parser preserves sparse ranges" {
