@@ -136,6 +136,12 @@ pub const State = struct {
         stream_id: u31,
         field_value: []const u8,
     ) std.mem.Allocator.Error!void {
+        if (self.update_index.count() != 0) {
+            if (self.update_index.get(stream_id)) |index| {
+                const update = &self.updates.items[index];
+                if (std.mem.eql(u8, update.field_value, field_value)) return;
+            }
+        }
         const owned = try allocator.dupe(u8, field_value);
         errdefer allocator.free(owned);
         const slot = try self.update_index.getOrPut(allocator, stream_id);
@@ -287,6 +293,22 @@ test "priority idle capacity rejection does not allocate" {
         1,
     );
     try std.testing.expect(!no_alloc.has_induced_failure);
+}
+
+test "priority update identical replacement does not allocate" {
+    const allocator = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(allocator);
+
+    try state.store(allocator, 1, "u=2, i");
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+
+    try state.store(no_alloc.allocator(), 1, "u=2, i");
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings("u=2, i", state.get(1).?.field_value);
 }
 
 test "priority state indexes survive swap removals and replacements" {
