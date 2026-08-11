@@ -131,22 +131,28 @@ pub const State = struct {
         {
             self.compactPending();
         }
-        try self.remote.ensureUnusedCapacity(allocator, 1);
-        try self.remote_index.ensureUnusedCapacity(allocator, 1);
-        try self.pending.ensureUnusedCapacity(allocator, 1);
-        try self.pending_index.ensureUnusedCapacity(allocator, 1);
+        const stream_id = promise.promised_stream_id;
+        const remote_slot = try self.remote_index.getOrPut(
+            allocator,
+            stream_id,
+        );
+        std.debug.assert(!remote_slot.found_existing);
+        errdefer _ = self.remote_index.remove(stream_id);
+        const pending_slot = try self.pending_index.getOrPut(
+            allocator,
+            stream_id,
+        );
+        std.debug.assert(!pending_slot.found_existing);
+        errdefer _ = self.pending_index.remove(stream_id);
 
-        self.remote.appendAssumeCapacity(promise.promised_stream_id);
-        self.remote_index.putAssumeCapacityNoClobber(
-            promise.promised_stream_id,
-            self.remote.items.len - 1,
-        );
+        try self.remote.ensureUnusedCapacity(allocator, 1);
+        try self.pending.ensureUnusedCapacity(allocator, 1);
+
+        self.remote.appendAssumeCapacity(stream_id);
+        remote_slot.value_ptr.* = self.remote.items.len - 1;
         self.pending.appendAssumeCapacity(promise);
-        self.pending_index.putAssumeCapacityNoClobber(
-            promise.promised_stream_id,
-            self.pending.items.len - 1,
-        );
-        self.last_peer_stream_id = promise.promised_stream_id;
+        pending_slot.value_ptr.* = self.pending.items.len - 1;
+        self.last_peer_stream_id = stream_id;
     }
 
     pub fn take(self: *State) ?PromisedRequest {
