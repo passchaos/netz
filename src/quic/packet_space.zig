@@ -64,6 +64,7 @@ pub const ReceivedPacketTracker = struct {
         if (self.forgotten_through) |forgotten| {
             if (packet_number <= forgotten) return false;
         }
+        if (self.ranges.items.len == 0) return true;
         if (self.ranges.items.len != 0) {
             const oldest = self.ranges.items[self.ranges.items.len - 1];
             if (packet_number < oldest.start) {
@@ -89,6 +90,12 @@ pub const ReceivedPacketTracker = struct {
         if (packet_number > quic.varint.max_value) return error.InvalidPacketNumber;
         if (self.forgotten_through) |forgotten| {
             if (packet_number <= forgotten) return false;
+        }
+        if (self.ranges.items.len == 0) {
+            return try self.insertRange(0, .{
+                .start = packet_number,
+                .end = packet_number,
+            });
         }
         if (self.ranges.items.len != 0) {
             const oldest_index = self.ranges.items.len - 1;
@@ -1313,6 +1320,22 @@ test "QUIC packet space tracks retained packet count incrementally" {
     try std.testing.expectEqual(@as(u64, 1), received.retained_packet_count);
     try std.testing.expectEqual(@as(usize, 1), received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 10), received.ranges.items[0].start);
+}
+
+test "QUIC packet space records first ACK range without scanning" {
+    const allocator = std.testing.allocator;
+    var received = ReceivedPacketTracker.init(allocator, 1);
+    defer received.deinit();
+
+    try std.testing.expect(try received.wouldRecordFresh(42));
+    try std.testing.expect(try received.recordFresh(42));
+    try std.testing.expectEqual(@as(usize, 1), received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 42), received.largestReceived().?);
+
+    var disabled = ReceivedPacketTracker.init(allocator, 0);
+    defer disabled.deinit();
+    try std.testing.expect(!(try disabled.wouldRecordFresh(42)));
+    try std.testing.expect(!(try disabled.recordFresh(42)));
 }
 
 test "QUIC packet space builds ACK ranges into caller storage" {
