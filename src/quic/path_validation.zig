@@ -227,6 +227,10 @@ pub const State = struct {
     }
 
     pub fn checkTimeouts(self: *State, now_ns: u64) Error!usize {
+        const earliest_deadline = self.earliest_outstanding_deadline_ns orelse
+            return 0;
+        if (now_ns < earliest_deadline) return 0;
+
         var expired: usize = 0;
         var i: usize = 0;
         while (i < self.outstanding_challenges.items.len) {
