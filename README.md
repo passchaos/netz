@@ -55,9 +55,10 @@ starts with deterministic parsers, serializers, and state helpers for:
   with Content-Length generation/verification, parsed length reuse, and
   CONNECT/204/304 body guards,
   an incremental message reader that emits owned request/response heads,
-  reuses parsed pseudo-header/Content-Length lookups, exposes bounded-window
-  DATA availability, dynamic trailers, and FIN while validating informational
-  responses and Content-Length without aggregating body bytes,
+  reuses parsed pseudo-header/Content-Length lookups, preallocates aggregated
+  DATA bodies from declared lengths under buffered-byte caps, exposes
+  bounded-window DATA availability, dynamic trailers, and FIN while validating
+  informational responses and Content-Length without aggregating body bytes,
   HTTP/3 pseudo-header/lowercase field-name, `:method` token validation with case-sensitive CONNECT/OPTIONS semantics, SETTINGS-gated `:protocol` token, URI scheme/origin-form path/authority, Host/`:authority`, traditional CONNECT body rules, and connection-specific header validation,
   DATA-frame aggregation, pure-digit content-length, three-digit `:status`, and status-forbidden response-body validation, stateless QPACK helpers with RFC 9204 static-table references, Huffman string literals, and literal fallback, a cleartext development runtime over the QUIC
   UDP frame endpoint, a protected 1-RTT QUIC STREAM runtime with STREAM frame

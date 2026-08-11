@@ -2210,9 +2210,9 @@ fn decodeRequestWithOptions(
     );
     errdefer message.deinit(allocator);
 
-    try validateHeaderBlock(message.headers, .request);
     try validateHeaderBlock(message.trailers, .trailers);
-    const lookup = try requestHeaderLookup(message.headers);
+    const lookup = message.request_lookup orelse
+        try requestHeaderLookup(message.headers);
     const method_value = lookup.method(message.headers) orelse
         return error.MissingMethod;
     const has_protocol = lookup.hasProtocol();
@@ -2281,10 +2281,10 @@ fn decodeResponseWithFieldDecoder(
     );
     errdefer message.deinit(allocator);
 
-    try validateHeaderBlock(message.headers, .response);
     try validateHeaderBlock(message.trailers, .trailers);
 
-    const lookup = try responseHeaderLookup(message.headers);
+    const lookup = message.response_lookup orelse
+        try responseHeaderLookup(message.headers);
     const final_status = lookup.status orelse return error.MissingStatus;
     try validateResponseBodyForStatusWithLength(
         final_status,
@@ -2314,6 +2314,8 @@ const DecodedMessage = struct {
     trailers: []Qpack.HeaderField = &.{},
     body: []const u8,
     body_storage: ?[]u8 = null,
+    request_lookup: ?RequestHeaderLookup = null,
+    response_lookup: ?ResponseHeaderLookup = null,
     consumed: usize,
     qpack_section_acknowledgments: usize = 0,
 
@@ -2523,7 +2525,8 @@ fn decodeResponseMessage(
         defer if (decoded_owned) Qpack.freeDecodedFields(allocator, decoded.fields);
         try validateHeaderBlock(decoded.fields, .response);
         try validateFieldSectionSize(decoded.fields, max_field_section_size);
-        const status = try responseStatus(decoded.fields);
+        const lookup = try responseHeaderLookup(decoded.fields);
+        const status = lookup.status orelse return error.MissingStatus;
         if (status < 200) {
             informational_acknowledgments += @intFromBool(decoded.requires_acknowledgment);
             Qpack.freeDecodedFields(allocator, decoded.fields);
@@ -2541,7 +2544,9 @@ fn decodeResponseMessage(
             field_decoder,
             decoded,
             offset + frame.consumed,
+            lookup.content_length,
         );
+        message.response_lookup = lookup;
         message.qpack_section_acknowledgments += informational_acknowledgments;
         return message;
     }
@@ -2576,8 +2581,19 @@ fn decodeMessage(
     var headers_owned = true;
     errdefer if (headers_owned) Qpack.freeDecodedFields(allocator, decoded_headers.fields);
     try validateFieldSectionSize(decoded_headers.fields, max_field_section_size);
+    try validateHeaderBlock(
+        decoded_headers.fields,
+        switch (kind) {
+            .request => .request,
+            .response => .response,
+        },
+    );
+    const request_lookup = if (kind == .request)
+        try requestHeaderLookup(decoded_headers.fields)
+    else
+        null;
     headers_owned = false;
-    return decodeMessageAfterHeaders(
+    var message = try decodeMessageAfterHeaders(
         allocator,
         bytes,
         kind,
@@ -2585,7 +2601,10 @@ fn decodeMessage(
         field_decoder,
         decoded_headers,
         offset + headers_frame.consumed,
+        if (request_lookup) |lookup| lookup.content_length else null,
     );
+    message.request_lookup = request_lookup;
+    return message;
 }
 
 fn decodeMessageAfterHeaders(
@@ -2596,11 +2615,23 @@ fn decodeMessageAfterHeaders(
     field_decoder: FieldSectionDecoder,
     decoded_headers: DecodedFieldSection,
     initial_consumed: usize,
+    declared_content_length: ?usize,
 ) Error!DecodedMessage {
     errdefer Qpack.freeDecodedFields(allocator, decoded_headers.fields);
     var consumed = initial_consumed;
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(allocator);
+    if (declared_content_length) |expected_body_len| {
+        // A malicious peer can declare a huge Content-Length and then send no
+        // DATA.  Cap eager reservation to bytes already present on this
+        // complete message buffer; appends below still grow if the actual DATA
+        // frames justify it.
+        const remaining_bytes = bytes.len - initial_consumed;
+        const reservation = @min(expected_body_len, remaining_bytes);
+        if (reservation != 0) {
+            try body.ensureTotalCapacity(allocator, reservation);
+        }
+    }
     var trailers: []Qpack.HeaderField = &.{};
     errdefer Qpack.freeDecodedFields(allocator, trailers);
     var saw_trailers = false;
