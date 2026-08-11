@@ -883,6 +883,7 @@ pub fn writeResponse(
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
     try validateResponseBodyForStatus(status, headers, body, &.{});
+    try list.ensureUnusedCapacity(allocator, try responseWireLen(version, status, reason, headers, body));
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
     try appendDecimal(list, allocator, status);
@@ -908,6 +909,7 @@ pub fn writeResponseChecked(
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
     try validateResponseBodyForStatus(status, headers, body, &.{});
+    try list.ensureUnusedCapacity(allocator, try responseWireLen(version, status, reason, headers, body));
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
     try appendDecimalChecked(list, allocator, status);
@@ -919,6 +921,27 @@ pub fn writeResponseChecked(
     try writeHeadersChecked(list, allocator, headers);
     try list.appendSlice(allocator, "\r\n");
     try list.appendSlice(allocator, body);
+}
+
+fn responseWireLen(version: Version, status: u16, reason: []const u8, headers: []const Header, body: []const u8) Error!usize {
+    var len = version.string().len;
+    len = std.math.add(usize, len, 1) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, decimalDigitLen(status)) catch return error.RenderBufferTooSmall;
+    if (reason.len > 0) {
+        len = std.math.add(usize, len, 1) catch return error.RenderBufferTooSmall;
+        len = std.math.add(usize, len, reason.len) catch return error.RenderBufferTooSmall;
+    }
+    len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, try headerBlockWireLen(headers)) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
+    return std.math.add(usize, len, body.len) catch return error.RenderBufferTooSmall;
+}
+
+fn decimalDigitLen(value: u16) usize {
+    if (value >= 1000) return 4;
+    if (value >= 100) return 3;
+    if (value >= 10) return 2;
+    return 1;
 }
 
 fn writeHeaders(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const Header) !void {
@@ -1699,6 +1722,14 @@ test "HTTP/1 writers reject forbidden response bodies" {
     const allocator = std.testing.allocator;
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
+
+    var no_alloc_response: std.ArrayList(u8) = .empty;
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    const no_alloc_allocator = no_alloc.allocator();
+    defer no_alloc_response.deinit(no_alloc_allocator);
+    try writeResponseChecked(&no_alloc_response, no_alloc_allocator, .http_1_1, 200, "OK", &.{.{ .name = "Content-Length", .value = "4" }}, "pong");
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong", no_alloc_response.items);
 
     try std.testing.expectError(error.InvalidContentLength, writeResponseChecked(&encoded, allocator, .http_1_1, 204, "No Content", &.{}, "body"));
     try std.testing.expectError(error.InvalidTransferEncoding, writeResponseChecked(&encoded, allocator, .http_1_1, 204, "No Content", &.{.{
