@@ -1396,12 +1396,13 @@ fn appendRequestHeadersWithHost(
     host: ?[]const u8,
 ) Error!void {
     var has_host = false;
+    try list.ensureUnusedCapacity(allocator, headers.len + 1);
     for (headers) |header| {
         if (header.eqlName("host")) has_host = true;
-        try list.append(allocator, header);
+        list.appendAssumeCapacity(header);
     }
     if (!has_host) {
-        if (host) |value| try list.append(allocator, .{ .name = "Host", .value = value });
+        if (host) |value| list.appendAssumeCapacity(.{ .name = "Host", .value = value });
     }
 }
 
@@ -1479,22 +1480,23 @@ fn appendDefaultedHeaders(
     var has_content_length = false;
     var has_transfer_encoding = false;
     var has_trailer = false;
+    try list.ensureUnusedCapacity(allocator, headers.len + 2);
     for (headers) |header| {
         if (header.eqlName("content-length")) has_content_length = true;
         if (header.eqlName("transfer-encoding")) has_transfer_encoding = true;
         if (header.eqlName("trailer")) has_trailer = true;
         if (use_chunked and header.eqlName("content-length")) continue;
-        try list.append(allocator, header);
+        list.appendAssumeCapacity(header);
     }
     if (use_chunked) {
-        if (!has_transfer_encoding) try list.append(allocator, .{ .name = "Transfer-Encoding", .value = "chunked" });
+        if (!has_transfer_encoding) list.appendAssumeCapacity(.{ .name = "Transfer-Encoding", .value = "chunked" });
         if (trailers.len != 0 and !has_trailer) {
             try renderTrailerHeaderValue(trailer_value, allocator, trailers);
-            try list.append(allocator, .{ .name = "Trailer", .value = trailer_value.items });
+            list.appendAssumeCapacity(.{ .name = "Trailer", .value = trailer_value.items });
         }
     } else if (add_default_content_length and !has_content_length) {
         const rendered = std.fmt.bufPrint(len_buf, "{}", .{body_len}) catch unreachable;
-        try list.append(allocator, .{ .name = "Content-Length", .value = rendered });
+        list.appendAssumeCapacity(.{ .name = "Content-Length", .value = rendered });
     }
 }
 
