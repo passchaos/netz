@@ -35,6 +35,7 @@ pub const ReceivedPacketTracker = struct {
     ranges: std.ArrayList(PacketRange) = .empty,
     max_ranges: usize = 64,
     forgotten_through: ?u64 = null,
+    retained_packet_count: u64 = 0,
     ecn_counts: quic.EcnCounts = .{ .ect0_count = 0, .ect1_count = 0, .ecn_ce_count = 0 },
     saw_ecn: bool = false,
 
@@ -95,6 +96,7 @@ pub const ReceivedPacketTracker = struct {
             if (packet_number < oldest.start) {
                 if (isImmediatelyBefore(packet_number, oldest.start)) {
                     oldest.start = packet_number;
+                    self.retained_packet_count += 1;
                     return true;
                 }
                 return try self.insertRange(
@@ -108,11 +110,13 @@ pub const ReceivedPacketTracker = struct {
             if (packet_number >= range.start and packet_number <= range.end) return false;
             if (isImmediatelyBefore(range.end, packet_number)) {
                 range.end = packet_number;
+                self.retained_packet_count += 1;
                 try self.mergeForward(i);
                 return true;
             }
             if (isImmediatelyBefore(packet_number, range.start)) {
                 range.start = packet_number;
+                self.retained_packet_count += 1;
                 try self.mergeBackward(i);
                 return true;
             }
@@ -190,11 +194,9 @@ pub const ReceivedPacketTracker = struct {
     }
 
     pub fn stats(self: ReceivedPacketTracker) ReceivedPacketStats {
-        var retained_packets: u64 = 0;
-        for (self.ranges.items) |range| retained_packets +|= range.len();
         return .{
             .ack_ranges = self.ranges.items.len,
-            .retained_packets = retained_packets,
+            .retained_packets = self.retained_packet_count,
             .largest_received = self.largestReceived(),
             .oldest_retained = if (self.ranges.items.len == 0)
                 null
@@ -215,10 +217,12 @@ pub const ReceivedPacketTracker = struct {
             const last_index = self.ranges.items.len - 1;
             const oldest = &self.ranges.items[last_index];
             if (oldest.end <= largest_acknowledged) {
+                self.retained_packet_count -|= oldest.len();
                 _ = self.ranges.orderedRemove(last_index);
                 continue;
             }
             if (oldest.start <= largest_acknowledged) {
+                self.retained_packet_count -|= largest_acknowledged - oldest.start + 1;
                 oldest.start = largest_acknowledged + 1;
             }
             break;
@@ -236,10 +240,12 @@ pub const ReceivedPacketTracker = struct {
 
             const oldest = self.ranges.items[self.ranges.items.len - 1];
             self.forgetThrough(oldest.end);
+            self.retained_packet_count -|= oldest.len();
             _ = self.ranges.orderedRemove(self.ranges.items.len - 1);
         }
 
         try self.ranges.insert(self.allocator, index, range);
+        self.retained_packet_count += range.len();
         return true;
     }
 
@@ -1128,6 +1134,7 @@ test "QUIC packet space generates ACK ranges" {
     for ([_]u64{ 1, 2, 3, 7, 8, 10 }) |pn| {
         try std.testing.expect(try received.recordFresh(pn));
     }
+    try std.testing.expectEqual(@as(u64, 6), received.retained_packet_count);
     const ack = try received.ackFrame(allocator, 0);
     defer allocator.free(ack.ranges);
 
@@ -1138,6 +1145,27 @@ test "QUIC packet space generates ACK ranges" {
     try std.testing.expectEqual(@as(u64, 1), ack.ranges[0].ack_range_length); // 7..8
     try std.testing.expectEqual(@as(u64, 2), ack.ranges[1].gap); // missing 4..6
     try std.testing.expectEqual(@as(u64, 2), ack.ranges[1].ack_range_length); // 1..3
+}
+
+test "QUIC packet space tracks retained packet count incrementally" {
+    const allocator = std.testing.allocator;
+    var received = ReceivedPacketTracker.init(allocator, 8);
+    defer received.deinit();
+
+    for ([_]u64{ 1, 2, 3, 7, 8, 10 }) |pn| {
+        try std.testing.expect(try received.recordFresh(pn));
+    }
+    try std.testing.expectEqual(@as(u64, 6), received.stats().retained_packets);
+
+    received.pruneAckedRanges(2);
+    try std.testing.expectEqual(@as(u64, 4), received.retained_packet_count);
+    try std.testing.expectEqual(@as(u64, 4), received.stats().retained_packets);
+    try std.testing.expectEqual(@as(u64, 3), received.ranges.items[2].start);
+
+    received.pruneAckedRanges(8);
+    try std.testing.expectEqual(@as(u64, 1), received.retained_packet_count);
+    try std.testing.expectEqual(@as(usize, 1), received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 10), received.ranges.items[0].start);
 }
 
 test "QUIC packet space builds ACK ranges into caller storage" {
