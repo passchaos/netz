@@ -445,12 +445,22 @@ pub const SentPacketTracker = struct {
         var acknowledged_packets: usize = 0;
         var lost_packets: usize = 0;
         var bytes_in_flight: usize = 0;
+        var latest_ack_eliciting_in_flight_sent_time_ns: ?u64 = null;
         for (self.packets.items) |packet| {
             if (packet.ack_eliciting) ack_eliciting_packets += 1;
             if (packet.in_flight and !packet.acknowledged and !packet.lost) {
                 in_flight_packets += 1;
                 bytes_in_flight += packet.bytes;
-                if (packet.ack_eliciting) ack_eliciting_in_flight_packets += 1;
+                if (packet.ack_eliciting) {
+                    ack_eliciting_in_flight_packets += 1;
+                    if (packet.sent_time_ns) |sent_time| {
+                        if (latest_ack_eliciting_in_flight_sent_time_ns == null or
+                            sent_time > latest_ack_eliciting_in_flight_sent_time_ns.?)
+                        {
+                            latest_ack_eliciting_in_flight_sent_time_ns = sent_time;
+                        }
+                    }
+                }
             }
             if (packet.acknowledged) acknowledged_packets += 1;
             if (packet.lost) lost_packets += 1;
@@ -460,7 +470,7 @@ pub const SentPacketTracker = struct {
             .ack_eliciting_packets = ack_eliciting_packets,
             .in_flight_packets = in_flight_packets,
             .ack_eliciting_in_flight_packets = ack_eliciting_in_flight_packets,
-            .latest_ack_eliciting_in_flight_sent_time_ns = self.latestAckElicitingInFlightSentTime(),
+            .latest_ack_eliciting_in_flight_sent_time_ns = latest_ack_eliciting_in_flight_sent_time_ns,
             .acknowledged_packets = acknowledged_packets,
             .lost_packets = lost_packets,
             .bytes_in_flight = bytes_in_flight,
