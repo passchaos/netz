@@ -42,6 +42,7 @@ pub fn encodedLen(value: []const u8) !usize {
 
 /// Decode an RFC 9204/HPACK canonical Huffman string.
 pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
+    if (encoded.len == 0) return @constCast(&[_]u8{});
     const decoded_len = try decodedLen(encoded);
     const out = try allocator.alloc(u8, decoded_len);
     errdefer allocator.free(out);
@@ -85,6 +86,7 @@ pub fn decodeHuffman(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
 }
 
 pub fn decodedLen(encoded: []const u8) !usize {
+    if (encoded.len == 0) return 0;
     var len: usize = 0;
     var node: u16 = huffman_root_node;
     var pending_code: u32 = 0;

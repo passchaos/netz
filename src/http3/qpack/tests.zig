@@ -20,6 +20,11 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     defer no_alloc_allocator.free(no_alloc_decoded);
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqualStrings("www.example.com", no_alloc_decoded);
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const empty_huffman = try Qpack.decodeHuffman(no_alloc.allocator(), "");
+    defer no_alloc.allocator().free(empty_huffman);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings("", empty_huffman);
 
     const fields = [_]Qpack.HeaderField{
         .{ .name = "content-type", .value = "application/problem+json" },
