@@ -1723,7 +1723,9 @@ pub const Connection = struct {
     }
 
     fn outboundStreamIsActive(self: Connection, stream_id: u31) bool {
-        return self.active_local_index.contains(stream_id) or
+        if (self.active_local_index.count() != 0 and
+            self.active_local_index.contains(stream_id)) return true;
+        return self.active_peer_index.count() != 0 and
             self.active_peer_index.contains(stream_id);
     }
 
