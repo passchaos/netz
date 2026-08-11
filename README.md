@@ -155,7 +155,9 @@ starts with deterministic parsers, serializers, and state helpers for:
   and UDP-payload limits to established 1-RTT connection objects with static-key-derived stateless reset token and packet helpers,
   packet-number space ACK tracking with cached retained-packet counts, O(1)
   oldest-range retirement, and bounded duplicate/old packet suppression,
-  ACK range semantic validation plus indexed exact sent-packet lookup, cached sortedness for ACK/loss scans, and single-pass ACK marking,
+  ACK range semantic validation plus indexed exact sent-packet lookup with
+  tail-forget fast paths, cached sortedness for ACK/loss scans, and single-pass
+  ACK marking,
   receive-frame semantic preflight before multi-frame side effects, and adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with
   duplicate-overlap conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING

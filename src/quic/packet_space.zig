@@ -429,9 +429,15 @@ pub const SentPacketTracker = struct {
     pub fn forget(self: *SentPacketTracker, packet_number: u64) bool {
         const index = self.findPacketIndex(packet_number) orelse return false;
         const latest = self.latest_ack_eliciting_in_flight_index;
-        _ = self.packets.orderedRemove(index);
+        if (index == self.packets.items.len - 1) {
+            _ = self.packets.pop();
+        } else {
+            _ = self.packets.orderedRemove(index);
+        }
         _ = self.packet_index.remove(packet_number);
-        self.refreshPacketIndexFrom(index);
+        if (index < self.packets.items.len) {
+            self.refreshPacketIndexFrom(index);
+        }
         if (latest == index) {
             self.recomputeLatestAckElicitingInFlight();
         } else if (latest != null and latest.? > index) {
