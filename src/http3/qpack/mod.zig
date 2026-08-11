@@ -819,3 +819,4 @@ const huffman_codec = @import("huffman.zig");
 pub const encodeHuffman = huffman_codec.encodeHuffman;
 pub const decodeHuffman = huffman_codec.decodeHuffman;
 pub const huffmanEncodedLen = huffman_codec.encodedLen;
+pub const huffmanDecodedLen = huffman_codec.decodedLen;

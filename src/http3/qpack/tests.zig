@@ -13,6 +13,13 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     const decoded_huffman = try Qpack.decodeHuffman(allocator, huffman);
     defer allocator.free(decoded_huffman);
     try std.testing.expectEqualStrings("www.example.com", decoded_huffman);
+    try std.testing.expectEqual(decoded_huffman.len, try Qpack.huffmanDecodedLen(huffman));
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    const no_alloc_allocator = no_alloc.allocator();
+    const no_alloc_decoded = try Qpack.decodeHuffman(no_alloc_allocator, huffman);
+    defer no_alloc_allocator.free(no_alloc_decoded);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings("www.example.com", no_alloc_decoded);
 
     const fields = [_]Qpack.HeaderField{
         .{ .name = "content-type", .value = "application/problem+json" },
@@ -45,7 +52,7 @@ test "HTTP/3 QPACK static name references and literal fallback" {
 
     block.clearRetainingCapacity();
     try block.ensureTotalCapacity(allocator, 8);
-    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     try Qpack.encodeLiteralBlock(&block, no_alloc.allocator(), &.{.{ .name = "x-empty", .value = "" }});
     try std.testing.expect(!no_alloc.has_induced_failure);
     const empty_decoded = try Qpack.decodeLiteralBlock(allocator, block.items);
