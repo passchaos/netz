@@ -2719,11 +2719,13 @@ pub const Connection = struct {
     }
 
     fn storePeerOrigin(self: *Connection, origin: []const u8) Error!void {
+        if (self.peer_origin_index.count() != 0 and
+            self.peer_origin_index.contains(origin)) return;
         const slot = try self.peer_origin_index.getOrPut(
             self.allocator,
             origin,
         );
-        if (slot.found_existing) return;
+        std.debug.assert(!slot.found_existing);
         errdefer _ = self.peer_origin_index.remove(origin);
         const owned = try self.allocator.dupe(u8, origin);
         errdefer self.allocator.free(owned);
@@ -4115,6 +4117,35 @@ test "HTTP/2 runtime accumulates server ORIGIN entries" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 duplicate ORIGIN entry does not allocate" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        for (connection.peer_origins.items) |origin| allocator.free(origin);
+        connection.peer_origins.deinit(allocator);
+        connection.peer_origin_index.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    try connection.storePeerOrigin("https://example.com");
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const saved_allocator = connection.allocator;
+    connection.allocator = no_alloc.allocator();
+    defer connection.allocator = saved_allocator;
+    try connection.storePeerOrigin("https://example.com");
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), connection.peer_origins.items.len);
 }
 
 test "HTTP/2 runtime ignores invalid ORIGIN envelope and client origin" {
