@@ -336,21 +336,18 @@ pub const PushPromisePayload = struct {
     ) Error!void {
         if (stream_id == 0) return error.InvalidStreamId;
         if (promised_stream_id == 0) return error.InvalidStreamId;
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(allocator);
-        if (options.padding_len != 0) try payload.append(allocator, options.padding_len);
-        try wire.appendInt(&payload, allocator, u32, @as(u32, promised_stream_id), .big);
-        try payload.appendSlice(allocator, header_block);
-        try payload.appendNTimes(allocator, 0, options.padding_len);
-        try (Frame{
-            .header = .{
-                .length = 0,
-                .frame_type = .push_promise,
-                .flags = (if (options.end_headers) @as(u8, 0x4) else 0) | if (options.padding_len != 0) @as(u8, 0x8) else 0,
-                .stream_id = stream_id,
-            },
-            .payload = payload.items,
-        }).write(list, allocator);
+        var payload_len = std.math.add(usize, 4, header_block.len) catch return error.InvalidFrameSize;
+        payload_len = std.math.add(usize, payload_len, options.padding_len) catch return error.InvalidFrameSize;
+        if (options.padding_len != 0) payload_len = std.math.add(usize, payload_len, 1) catch return error.InvalidFrameSize;
+
+        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
+        try list.append(allocator, @intFromEnum(FrameType.push_promise));
+        try list.append(allocator, (if (options.end_headers) @as(u8, 0x4) else 0) | if (options.padding_len != 0) @as(u8, 0x8) else 0);
+        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
+        if (options.padding_len != 0) try list.append(allocator, options.padding_len);
+        try wire.appendInt(list, allocator, u32, @as(u32, promised_stream_id), .big);
+        try list.appendSlice(allocator, header_block);
+        try list.appendNTimes(allocator, 0, options.padding_len);
     }
 };
 
@@ -1927,6 +1924,14 @@ test "HTTP/2 PUSH_PROMISE payload helper" {
     const fields = try Hpack.decodeLiteralBlock(allocator, promise.header_block);
     defer Hpack.freeDecodedFields(allocator, fields);
     try std.testing.expectEqualStrings("/pushed.css", fields[1].value);
+
+    var no_alloc_encoded: std.ArrayList(u8) = .empty;
+    defer no_alloc_encoded.deinit(allocator);
+    try no_alloc_encoded.ensureTotalCapacity(allocator, encoded.items.len);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try PushPromisePayload.write(&no_alloc_encoded, no_alloc.allocator(), 1, 2, block.items, .{ .padding_len = 3 });
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, encoded.items, no_alloc_encoded.items);
 
     try std.testing.expectError(error.InvalidStreamId, PushPromisePayload.write(&encoded, allocator, 0, 2, block.items, .{}));
     try std.testing.expectError(error.InvalidStreamId, PushPromisePayload.write(&encoded, allocator, 1, 0, block.items, .{}));
