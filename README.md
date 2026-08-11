@@ -203,7 +203,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   verification, selected-identity signaling, unknown-identity full-handshake
   fallback, and matching-identity bad-binder rejection,
   post-handshake NewSessionTicket issue/parse over 1-RTT CRYPTO, transcript-
-  bound resumption PSK derivation, indexed bounded owning server ticket storage with cached LRU eviction, empty-store lookup skips, and single-lookup issue insertion,
+  bound resumption PSK derivation, indexed bounded owning server ticket storage with cached LRU eviction, earliest-expiry scan skips, empty-store lookup skips, and single-lookup issue insertion,
   client cache insertion, and origin+ALPN automatic ticket selection on both
   sides of the next connection,
   plus allocation-free AES-256-GCM stateless tickets with origin+ALPN

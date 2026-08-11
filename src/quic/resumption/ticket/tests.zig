@@ -184,6 +184,8 @@ test "server ticket store owns, expires, and evicts LRU entries" {
     });
     try std.testing.expectEqual(@as(usize, 2), store.identity_index.count());
     try std.testing.expectEqual(@as(?usize, 0), store.oldest_index);
+    try std.testing.expect(store.earliest_expiry_index != null);
+    try std.testing.expect(store.latest_issued_index != null);
     var first = (try store.lookup("one", 1001)).?;
     first.deinit();
     try std.testing.expectEqual(@as(?usize, 1), store.oldest_index);
@@ -205,6 +207,8 @@ test "server ticket store owns, expires, and evicts LRU entries" {
     try std.testing.expectEqual(@as(usize, 0), store.count(12_001));
     try std.testing.expectEqual(@as(usize, 0), store.identity_index.count());
     try std.testing.expectEqual(@as(?usize, null), store.oldest_index);
+    try std.testing.expectEqual(@as(?usize, null), store.earliest_expiry_index);
+    try std.testing.expectEqual(@as(?usize, null), store.latest_issued_index);
 }
 
 test "server ticket store index tracks replacements" {
@@ -238,6 +242,79 @@ test "server ticket store index tracks replacements" {
     defer lease.deinit();
     try std.testing.expectEqual(@as(u8, 0x22), lease.secret[0]);
     try std.testing.expectEqual(@as(u32, 22), lease.age_add);
+}
+
+test "server ticket store caches earliest expiry and future issue time" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var store = try ticket.ServerStore.init(
+        std.testing.allocator,
+        threaded.io(),
+        3,
+    );
+    defer store.deinit();
+
+    try store.issue(.{
+        .identity = "long",
+        .secret = [_]u8{1} ** 32,
+        .age_add = 1,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 100,
+    });
+    try store.issue(.{
+        .identity = "short",
+        .secret = [_]u8{2} ** 32,
+        .age_add = 2,
+        .issued_at_ms = 1500,
+        .lifetime_seconds = 1,
+    });
+    try std.testing.expectEqual(
+        store.identity_index.get("short"),
+        store.earliest_expiry_index,
+    );
+    try std.testing.expectEqual(
+        store.identity_index.get("short"),
+        store.latest_issued_index,
+    );
+
+    // Before every stored ticket's issue time, the fast expiry cache must not
+    // skip the existing "future issued" invalidation rule.
+    try std.testing.expectEqual(@as(usize, 1), store.count(1200));
+    try std.testing.expect(store.identity_index.get("short") == null);
+    try std.testing.expectEqual(
+        store.identity_index.get("long"),
+        store.earliest_expiry_index,
+    );
+    try std.testing.expectEqual(
+        store.identity_index.get("long"),
+        store.latest_issued_index,
+    );
+
+    try store.issue(.{
+        .identity = "long",
+        .secret = [_]u8{3} ** 32,
+        .age_add = 3,
+        .issued_at_ms = 2000,
+        .lifetime_seconds = 100,
+    });
+    try store.issue(.{
+        .identity = "short",
+        .secret = [_]u8{4} ** 32,
+        .age_add = 4,
+        .issued_at_ms = 2000,
+        .lifetime_seconds = 1,
+    });
+    try std.testing.expectEqual(@as(usize, 2), store.count(2500));
+    try std.testing.expectEqual(
+        store.identity_index.get("short"),
+        store.earliest_expiry_index,
+    );
+    try std.testing.expectEqual(@as(usize, 1), store.count(3001));
+    try std.testing.expect(store.identity_index.get("short") == null);
+    try std.testing.expectEqual(
+        store.identity_index.get("long"),
+        store.earliest_expiry_index,
+    );
 }
 
 fn checkCodecAllocationFailure(allocator: std.mem.Allocator) !void {

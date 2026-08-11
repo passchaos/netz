@@ -85,6 +85,8 @@ pub const Store = struct {
     /// swap-remove path must repair the moved entry's slot.
     identity_index: IdentityIndex = .empty,
     oldest_index: ?usize = null,
+    earliest_expiry_index: ?usize = null,
+    latest_issued_index: ?usize = null,
     next_sequence: u64 = 1,
     mutex: std.Io.Mutex = .init,
 
@@ -208,6 +210,18 @@ pub const Store = struct {
     }
 
     fn pruneExpired(self: *Store, now_ms: u64) void {
+        const earliest = self.earliest_expiry_index orelse return;
+        const latest_issued = self.latest_issued_index orelse return;
+        // `Entry.expired` intentionally treats timestamps before issued_at as
+        // unusable.  The expiry cache can skip a full scan only once `now_ms`
+        // is at or beyond every stored issue time; before that, a future-dated
+        // entry might be expired even if the earliest lifetime deadline is not.
+        if (now_ms >= self.entries.items[latest_issued].issued_at_ms and
+            !self.entries.items[earliest].expired(now_ms))
+        {
+            return;
+        }
+
         var index: usize = 0;
         while (index < self.entries.items.len) {
             if (!self.entries.items[index].expired(now_ms)) {
@@ -230,6 +244,8 @@ pub const Store = struct {
         key_slot.* = self.entries.items[index].identity;
         index_slot.* = index;
         self.considerOldest(index);
+        self.considerEarliestExpiry(index);
+        self.considerLatestIssued(index);
     }
 
     fn replaceEntryAt(self: *Store, index: usize, replacement: Entry) void {
@@ -239,12 +255,16 @@ pub const Store = struct {
             unreachable;
         key_ptr.* = self.entries.items[index].identity;
         if (self.oldest_index == index) self.recomputeOldest() else self.considerOldest(index);
+        if (self.earliest_expiry_index == index) self.recomputeEarliestExpiry() else self.considerEarliestExpiry(index);
+        if (self.latest_issued_index == index) self.recomputeLatestIssued() else self.considerLatestIssued(index);
         replaced.deinit(self.allocator);
     }
 
     fn removeEntryAt(self: *Store, index: usize) Entry {
         const old_len = self.entries.items.len;
         const oldest = self.oldest_index;
+        const earliest_expiry = self.earliest_expiry_index;
+        const latest_issued = self.latest_issued_index;
         const removed = self.entries.swapRemove(index);
         _ = self.identity_index.remove(removed.identity);
         if (index != old_len - 1) {
@@ -257,6 +277,20 @@ pub const Store = struct {
             self.recomputeOldest();
         } else if (oldest == old_len - 1) {
             self.oldest_index = index;
+        }
+        if (self.entries.items.len == 0) {
+            self.earliest_expiry_index = null;
+        } else if (earliest_expiry == index) {
+            self.recomputeEarliestExpiry();
+        } else if (earliest_expiry == old_len - 1) {
+            self.earliest_expiry_index = index;
+        }
+        if (self.entries.items.len == 0) {
+            self.latest_issued_index = null;
+        } else if (latest_issued == index) {
+            self.recomputeLatestIssued();
+        } else if (latest_issued == old_len - 1) {
+            self.latest_issued_index = index;
         }
         return removed;
     }
@@ -289,6 +323,56 @@ pub const Store = struct {
         self.oldest_index = oldest;
     }
 
+    fn considerEarliestExpiry(self: *Store, index: usize) void {
+        const earliest = self.earliest_expiry_index orelse {
+            self.earliest_expiry_index = index;
+            return;
+        };
+        if (entryExpiresBefore(self.entries.items[index], self.entries.items[earliest])) {
+            self.earliest_expiry_index = index;
+        }
+    }
+
+    fn recomputeEarliestExpiry(self: *Store) void {
+        if (self.entries.items.len == 0) {
+            self.earliest_expiry_index = null;
+            return;
+        }
+        var earliest: usize = 0;
+        for (self.entries.items[1..], 1..) |entry, index| {
+            if (entryExpiresBefore(entry, self.entries.items[earliest])) {
+                earliest = index;
+            }
+        }
+        self.earliest_expiry_index = earliest;
+    }
+
+    fn considerLatestIssued(self: *Store, index: usize) void {
+        const latest = self.latest_issued_index orelse {
+            self.latest_issued_index = index;
+            return;
+        };
+        if (self.entries.items[index].issued_at_ms >
+            self.entries.items[latest].issued_at_ms)
+        {
+            self.latest_issued_index = index;
+        }
+    }
+
+    fn recomputeLatestIssued(self: *Store) void {
+        if (self.entries.items.len == 0) {
+            self.latest_issued_index = null;
+            return;
+        }
+        var latest: usize = 0;
+        for (self.entries.items[1..], 1..) |entry, index| {
+            if (entry.issued_at_ms > self.entries.items[latest].issued_at_ms) {
+                latest = index;
+            }
+        }
+        self.latest_issued_index = latest;
+    }
+
     fn nextSequence(self: *Store) u64 {
         const current = self.next_sequence;
         self.next_sequence +%= 1;
@@ -296,6 +380,21 @@ pub const Store = struct {
         return current;
     }
 };
+
+fn entryExpiresBefore(lhs: Entry, rhs: Entry) bool {
+    const lhs_expires = entryExpiryDeadlineMs(lhs);
+    const rhs_expires = entryExpiryDeadlineMs(rhs);
+    if (lhs_expires < rhs_expires) return true;
+    if (lhs_expires > rhs_expires) return false;
+    return lhs.issued_at_ms < rhs.issued_at_ms;
+}
+
+fn entryExpiryDeadlineMs(entry: Entry) u64 {
+    const lifetime_ms = @as(u64, entry.lifetime_seconds) *
+        std.time.ms_per_s;
+    return std.math.add(u64, entry.issued_at_ms, lifetime_ms) catch
+        std.math.maxInt(u64);
+}
 
 fn validateIssued(issued: Issued) Error!void {
     if (issued.identity.len == 0) return error.InvalidTicket;
