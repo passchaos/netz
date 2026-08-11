@@ -2700,7 +2700,8 @@ pub const Connection = struct {
     }
 
     fn peerOriginKnown(self: Connection, origin: []const u8) bool {
-        return self.peer_origin_index.contains(origin);
+        return self.peer_origin_index.count() != 0 and
+            self.peer_origin_index.contains(origin);
     }
 
     fn storePeerOrigin(self: *Connection, origin: []const u8) Error!void {
