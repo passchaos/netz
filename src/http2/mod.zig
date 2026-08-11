@@ -387,8 +387,7 @@ pub const OriginPayload = struct {
         if (frame.header.stream_id != 0) return error.InvalidStreamId;
         if (frame.payload.len == 0) return .{ .origins = @constCast(&[_][]const u8{}) };
         var cursor = wire.Cursor.init(frame.payload);
-        var origins: std.ArrayList([]const u8) = .empty;
-        errdefer origins.deinit(allocator);
+        var count: usize = 0;
         while (!cursor.eof()) {
             const len = try cursor.readInt(u16, .big);
             const origin = cursor.readSlice(len) catch
@@ -396,9 +395,16 @@ pub const OriginPayload = struct {
             if (origin.len == 0 or !validOriginAscii(origin)) {
                 return error.InvalidFrameSize;
             }
-            try origins.append(allocator, origin);
+            count += 1;
         }
-        return .{ .origins = try origins.toOwnedSlice(allocator) };
+        const origins = try allocator.alloc([]const u8, count);
+        errdefer allocator.free(origins);
+        cursor = wire.Cursor.init(frame.payload);
+        for (origins) |*out| {
+            const len = try cursor.readInt(u16, .big);
+            out.* = try cursor.readSlice(len);
+        }
+        return .{ .origins = origins };
     }
 
     pub fn deinit(self: *OriginPayload, allocator: std.mem.Allocator) void {
@@ -1994,6 +2000,11 @@ test "HTTP/2 ORIGIN frame round trips and validates ASCII entries" {
     try std.testing.expectEqual(@as(usize, 2), parsed.origins.len);
     try std.testing.expectEqualStrings(expected[0], parsed.origins[0]);
     try std.testing.expectEqualStrings(expected[1], parsed.origins[1]);
+    var parse_no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    var parsed_once = try OriginPayload.parse(parse_no_alloc.allocator(), frame);
+    defer parsed_once.deinit(parse_no_alloc.allocator());
+    try std.testing.expect(!parse_no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings(expected[1], parsed_once.origins[1]);
     const origin_encoded = try allocator.dupe(u8, encoded.items);
     defer allocator.free(origin_encoded);
     var no_alloc_origin: std.ArrayList(u8) = .empty;
