@@ -85,6 +85,7 @@ pub const State = struct {
     pending_response_index: std.AutoHashMapUnmanaged([8]u8, void) = .empty,
     pending_challenge_index: std.AutoHashMapUnmanaged([8]u8, void) = .empty,
     outstanding_challenge_index: std.AutoHashMapUnmanaged([8]u8, usize) = .empty,
+    earliest_outstanding_deadline_ns: ?u64 = null,
     max_challenge_transmissions: u8 = default_max_challenge_transmissions,
 
     pub fn init(allocator: std.mem.Allocator) State {
@@ -222,12 +223,7 @@ pub const State = struct {
     }
 
     pub fn earliestChallengeDeadline(self: *const State) ?u64 {
-        var deadline: ?u64 = null;
-        for (self.outstanding_challenges.items) |challenge| {
-            const candidate = challenge.deadline_ns orelse continue;
-            if (deadline == null or candidate < deadline.?) deadline = candidate;
-        }
-        return deadline;
+        return self.earliest_outstanding_deadline_ns;
     }
 
     pub fn checkTimeouts(self: *State, now_ns: u64) Error!usize {
@@ -290,6 +286,7 @@ pub const State = struct {
             challenge.data,
             index,
         );
+        self.considerOutstandingDeadline(challenge.deadline_ns);
         return challenge;
     }
 
@@ -301,7 +298,28 @@ pub const State = struct {
             const moved = self.outstanding_challenges.items[index];
             self.outstanding_challenge_index.getPtr(moved.data).?.* = index;
         }
+        if (removed.deadline_ns != null and
+            removed.deadline_ns == self.earliest_outstanding_deadline_ns)
+        {
+            self.recomputeOutstandingDeadline();
+        }
         return removed;
+    }
+
+    fn considerOutstandingDeadline(self: *State, deadline: ?u64) void {
+        const candidate = deadline orelse return;
+        if (self.earliest_outstanding_deadline_ns == null or
+            candidate < self.earliest_outstanding_deadline_ns.?)
+        {
+            self.earliest_outstanding_deadline_ns = candidate;
+        }
+    }
+
+    fn recomputeOutstandingDeadline(self: *State) void {
+        self.earliest_outstanding_deadline_ns = null;
+        for (self.outstanding_challenges.items) |challenge| {
+            self.considerOutstandingDeadline(challenge.deadline_ns);
+        }
     }
 
     fn rebuildIndexes(self: *State) Error!void {
@@ -336,11 +354,13 @@ pub const State = struct {
         for (self.pending_challenges.activeConst()) |challenge| {
             self.pending_challenge_index.putAssumeCapacityNoClobber(challenge.data, {});
         }
+        self.earliest_outstanding_deadline_ns = null;
         for (self.outstanding_challenges.items, 0..) |challenge, index| {
             self.outstanding_challenge_index.putAssumeCapacityNoClobber(
                 challenge.data,
                 index,
             );
+            self.considerOutstandingDeadline(challenge.deadline_ns);
         }
     }
 };
@@ -596,6 +616,7 @@ test "QUIC path validation indexes track queued outstanding and timed-out challe
     try std.testing.expectEqual(@as(?usize, 0), state.outstanding_challenge_index.get(first));
     try std.testing.expectEqual(@as(?usize, 1), state.outstanding_challenge_index.get(second));
     try std.testing.expectEqual(@as(?usize, 2), state.outstanding_challenge_index.get(third));
+    try std.testing.expectEqual(@as(?u64, 150), state.earliestChallengeDeadline());
 
     // Removing the middle challenge swap-moves the last challenge into its
     // slot; the data->slot index must be repaired before another response or
@@ -604,10 +625,12 @@ test "QUIC path validation indexes track queued outstanding and timed-out challe
     try std.testing.expect(!state.outstanding_challenge_index.contains(second));
     try std.testing.expectEqual(@as(?usize, 0), state.outstanding_challenge_index.get(first));
     try std.testing.expectEqual(@as(?usize, 1), state.outstanding_challenge_index.get(third));
+    try std.testing.expectEqual(@as(?u64, 150), state.earliestChallengeDeadline());
 
     try std.testing.expectEqual(@as(usize, 2), try state.checkTimeouts(150));
     try std.testing.expectEqual(@as(usize, 2), state.pending_challenge_index.count());
     try std.testing.expect(state.pending_challenge_index.contains(first));
     try std.testing.expect(state.pending_challenge_index.contains(third));
     try std.testing.expectEqual(@as(usize, 0), state.outstanding_challenge_index.count());
+    try std.testing.expectEqual(@as(?u64, null), state.earliestChallengeDeadline());
 }
