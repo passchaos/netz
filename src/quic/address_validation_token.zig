@@ -227,19 +227,20 @@ pub const ReplayFilter = struct {
 
     pub fn rememberValidated(self: *ReplayFilter, token: []const u8) Error!void {
         const fp = try fingerprint(token);
-        if (self.fingerprint_index.contains(fp)) return error.TokenReplay;
         if (self.max_entries == 0) return;
+        const slot = try self.fingerprint_index.getOrPut(self.allocator, fp);
+        if (slot.found_existing) return error.TokenReplay;
+        errdefer _ = self.fingerprint_index.remove(fp);
 
         if (self.len < self.max_entries) {
             try self.fingerprints.ensureUnusedCapacity(self.allocator, 1);
-            try self.fingerprint_index.ensureUnusedCapacity(self.allocator, 1);
             const tail = if (self.fingerprints.items.len == 0) 0 else (self.head + self.len) % self.max_entries;
             if (tail < self.fingerprints.items.len) {
                 self.fingerprints.items[tail] = fp;
             } else {
                 self.fingerprints.appendAssumeCapacity(fp);
             }
-            self.fingerprint_index.putAssumeCapacityNoClobber(fp, {});
+            slot.value_ptr.* = {};
             self.len += 1;
             return;
         }
@@ -251,7 +252,7 @@ pub const ReplayFilter = struct {
         // changing the visible "oldest token is forgotten first" policy.
         _ = self.fingerprint_index.remove(self.fingerprints.items[self.head]);
         self.fingerprints.items[self.head] = fp;
-        self.fingerprint_index.putAssumeCapacityNoClobber(fp, {});
+        self.fingerprint_index.getPtr(fp).?.* = {};
         self.head = (self.head + 1) % self.fingerprints.items.len;
     }
 
