@@ -229,12 +229,16 @@ pub fn Pool(comptime Handle: type) type {
                 owned_key.deinit();
                 return;
             }
-            if (self.idleCountForOrigin(owned_key.origin()) >= self.config.max_idle_per_origin) {
-                self.dropHandle(handle);
-                owned_key.deinit();
-                return;
+            const origin_key = originIndexKey(owned_key.origin());
+            const existing_bucket = self.origin_index.get(origin_key);
+            if (existing_bucket) |bucket| {
+                if (bucket.count >= self.config.max_idle_per_origin) {
+                    self.dropHandle(handle);
+                    owned_key.deinit();
+                    return;
+                }
             }
-            const new_origin = !self.origin_index.contains(originIndexKey(owned_key.origin()));
+            const new_origin = existing_bucket == null;
             if (self.entries.items.len < self.config.max_idle_total) {
                 // Reserve the new slot before any capacity eviction below.
                 // If allocation fails, neither an existing pooled handle nor
