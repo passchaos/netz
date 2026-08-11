@@ -162,6 +162,8 @@ test "server ticket store owns, expires, and evicts LRU entries" {
     );
     defer store.deinit();
 
+    try std.testing.expect((try store.lookup("missing", 1000)) == null);
+
     var first_identity = [_]u8{ 'o', 'n', 'e' };
     try store.issue(.{
         .identity = &first_identity,

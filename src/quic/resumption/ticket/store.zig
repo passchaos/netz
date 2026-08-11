@@ -182,6 +182,7 @@ pub const Store = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.pruneExpired(now_ms);
+        if (self.identity_index.count() == 0) return null;
         const index = self.identity_index.get(identity) orelse return null;
         var entry = &self.entries.items[index];
         const identity_copy = try self.allocator.dupe(u8, entry.identity);
