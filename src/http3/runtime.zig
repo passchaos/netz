@@ -1389,12 +1389,13 @@ pub const QpackEncodeState = struct {
         const owned = try references.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(owned);
         try self.pending_sections.ensureUnusedCapacity(self.allocator, 1);
-        if (!self.pending_section_index.contains(stream_id)) {
-            try self.pending_section_index.ensureUnusedCapacity(
-                self.allocator,
-                1,
-            );
-        }
+        const pending_slot = try self.pending_section_index.getOrPut(
+            self.allocator,
+            stream_id,
+        );
+        errdefer if (!pending_slot.found_existing) {
+            _ = self.pending_section_index.remove(stream_id);
+        };
         // `encodeDynamicBlockKnownReceived` already deduplicates references
         // within this field section. Reserve the section's full reference
         // count as a safe upper bound and update counts in one hash-map pass
@@ -1411,11 +1412,15 @@ pub const QpackEncodeState = struct {
             if (!entry.found_existing) entry.value_ptr.* = 0;
             entry.value_ptr.* += 1;
         }
-        self.appendPendingSectionAssumeCapacity(.{
+        const pending_index = self.pending_sections.items.len;
+        self.pending_sections.appendAssumeCapacity(.{
             .stream_id = stream_id,
             .required_insert_count = maxReferencedInsertCount(owned),
             .references = owned,
         });
+        if (!pending_slot.found_existing) {
+            pending_slot.value_ptr.* = pending_index;
+        }
     }
 
     pub fn applyDecoderStreamFrame(
@@ -1577,21 +1582,6 @@ pub const QpackEncodeState = struct {
         _ = self.pending_section_index.remove(stream_id);
         self.repairPendingSectionIndexFrom(start_index);
         return released;
-    }
-
-    fn appendPendingSectionAssumeCapacity(
-        self: *QpackEncodeState,
-        section: PendingSection,
-    ) void {
-        const index = self.pending_sections.items.len;
-        const stream_id = section.stream_id;
-        self.pending_sections.appendAssumeCapacity(section);
-        if (!self.pending_section_index.contains(stream_id)) {
-            self.pending_section_index.putAssumeCapacityNoClobber(
-                stream_id,
-                index,
-            );
-        }
     }
 
     fn rebuildPendingSectionIndexAssumeCapacity(self: *QpackEncodeState) void {
