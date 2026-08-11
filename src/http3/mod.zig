@@ -959,29 +959,40 @@ pub const ControlState = struct {
             self.priority_update_generation,
             1,
         ) catch return error.InvalidPriorityUpdate;
-        const owned = try allocator.dupe(u8, update.field_value);
-        errdefer allocator.free(owned);
 
         const key = priorityUpdateKey(
             frame_type,
             update.prioritized_element_id,
         );
-        try self.priority_updates.ensureUnusedCapacity(allocator, 1);
-        const slot = try self.priority_update_index.getOrPut(allocator, key);
-        if (slot.found_existing) {
-            const stored = &self.priority_updates.items[slot.value_ptr.*];
-            allocator.free(stored.payload.field_value);
-            stored.payload.field_value = owned;
-            self.latest_priority_update_type = frame_type;
-            self.latest_priority_update = .{
-                .prioritized_element_id = update.prioritized_element_id,
-                .field_value = owned,
-            };
-            self.priority_update_generation = next_generation;
-            return;
+        if (self.priority_update_index.count() != 0) {
+            if (self.priority_update_index.get(key)) |index| {
+                const stored = &self.priority_updates.items[index];
+                if (std.mem.eql(u8, stored.payload.field_value, update.field_value)) {
+                    self.latest_priority_update_type = frame_type;
+                    self.latest_priority_update = stored.payload;
+                    self.priority_update_generation = next_generation;
+                    return;
+                }
+                const owned = try allocator.dupe(u8, update.field_value);
+                errdefer allocator.free(owned);
+                allocator.free(stored.payload.field_value);
+                stored.payload.field_value = owned;
+                self.latest_priority_update_type = frame_type;
+                self.latest_priority_update = .{
+                    .prioritized_element_id = update.prioritized_element_id,
+                    .field_value = owned,
+                };
+                self.priority_update_generation = next_generation;
+                return;
+            }
         }
+        const slot = try self.priority_update_index.getOrPut(allocator, key);
+        std.debug.assert(!slot.found_existing);
         errdefer _ = self.priority_update_index.remove(key);
 
+        const owned = try allocator.dupe(u8, update.field_value);
+        errdefer allocator.free(owned);
+        try self.priority_updates.ensureUnusedCapacity(allocator, 1);
         const insert_index = self.priority_updates.items.len;
         self.priority_updates.appendAssumeCapacity(.{
             .frame_type = frame_type,
@@ -3539,6 +3550,42 @@ test "HTTP/3 per-element priority state is allocation-failure safe" {
         std.testing.allocator,
         checkPriorityUpdateStateAllocationFailure,
         .{},
+    );
+}
+
+test "HTTP/3 identical priority update replacement does not allocate" {
+    const allocator = std.testing.allocator;
+    var control = ControlState{ .settings = .{ .received = true } };
+    defer control.deinit(allocator);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writePriorityUpdateFrame(
+        &encoded,
+        allocator,
+        0,
+        .{ .urgency = 1, .incremental = true },
+    );
+    const frame = try Frame.parse(encoded.items);
+    try control.applyFrame(allocator, frame);
+    const generation = control.priority_update_generation;
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try control.applyFrame(no_alloc.allocator(), frame);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(
+        generation + 1,
+        control.priority_update_generation,
+    );
+    try std.testing.expectEqual(
+        @as(u3, 1),
+        control.requestPriorityUpdate(0).?.priority().urgency,
+    );
+    try std.testing.expect(
+        control.requestPriorityUpdate(0).?.priority().incremental,
     );
 }
 
