@@ -644,15 +644,14 @@ pub const GoAwayPayload = struct {
         error_code: ErrorCode,
         debug_data: []const u8,
     ) Error!void {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(allocator);
-        try wire.appendInt(&payload, allocator, u32, @as(u32, last_stream_id), .big);
-        try wire.appendInt(&payload, allocator, u32, @intFromEnum(error_code), .big);
-        try payload.appendSlice(allocator, debug_data);
-        try (Frame{
-            .header = .{ .length = 0, .frame_type = .goaway, .flags = 0, .stream_id = 0 },
-            .payload = payload.items,
-        }).write(list, allocator);
+        const payload_len = std.math.add(usize, 8, debug_data.len) catch return error.InvalidFrameSize;
+        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
+        try list.append(allocator, @intFromEnum(FrameType.goaway));
+        try list.append(allocator, 0);
+        try wire.appendInt(list, allocator, u32, 0, .big);
+        try wire.appendInt(list, allocator, u32, @as(u32, last_stream_id), .big);
+        try wire.appendInt(list, allocator, u32, @intFromEnum(error_code), .big);
+        try list.appendSlice(allocator, debug_data);
     }
 };
 
@@ -2152,6 +2151,14 @@ test "HTTP/2 ping and goaway payload helpers" {
     try std.testing.expectEqual(@as(u31, 7), goaway.last_stream_id);
     try std.testing.expectEqual(ErrorCode.no_error, goaway.error_code);
     try std.testing.expectEqualStrings("bye", goaway.debug_data);
+
+    var no_alloc_goaway: std.ArrayList(u8) = .empty;
+    defer no_alloc_goaway.deinit(allocator);
+    try no_alloc_goaway.ensureTotalCapacity(allocator, goaway_bytes.items.len);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try GoAwayPayload.write(&no_alloc_goaway, no_alloc.allocator(), 7, .no_error, "bye");
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, goaway_bytes.items, no_alloc_goaway.items);
 }
 
 test "HTTP/2 window update payload helper" {
