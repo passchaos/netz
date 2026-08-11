@@ -1524,8 +1524,14 @@ pub const QpackEncodeState = struct {
 
     fn releaseSection(self: *QpackEncodeState, index: usize) void {
         var section = self.pending_sections.orderedRemove(index);
+        const removed_stream_id = section.stream_id;
+        const removed_was_first =
+            self.pending_section_index.get(removed_stream_id) == index;
+        if (removed_was_first) {
+            _ = self.pending_section_index.remove(removed_stream_id);
+        }
+        self.repairPendingSectionIndexFrom(index);
         self.releaseSectionReferences(&section);
-        self.rebuildPendingSectionIndexAssumeCapacity();
     }
 
     fn releaseSectionReferences(
@@ -1565,7 +1571,8 @@ pub const QpackEncodeState = struct {
             write_index += 1;
         }
         self.pending_sections.items.len = write_index;
-        self.rebuildPendingSectionIndexAssumeCapacity();
+        _ = self.pending_section_index.remove(stream_id);
+        self.repairPendingSectionIndexFrom(start_index);
         return released;
     }
 
@@ -1590,6 +1597,24 @@ pub const QpackEncodeState = struct {
             if (!self.pending_section_index.contains(section.stream_id)) {
                 self.pending_section_index.putAssumeCapacityNoClobber(
                     section.stream_id,
+                    index,
+                );
+            }
+        }
+    }
+
+    fn repairPendingSectionIndexFrom(
+        self: *QpackEncodeState,
+        start_index: usize,
+    ) void {
+        var index = start_index;
+        while (index < self.pending_sections.items.len) : (index += 1) {
+            const stream_id = self.pending_sections.items[index].stream_id;
+            if (self.pending_section_index.getPtr(stream_id)) |mapped| {
+                if (mapped.* > index) mapped.* = index;
+            } else {
+                self.pending_section_index.putAssumeCapacityNoClobber(
+                    stream_id,
                     index,
                 );
             }
@@ -10006,6 +10031,68 @@ test "HTTP/3 QPACK stream cancellation compacts pending sections stably" {
     try std.testing.expect(!encoder.reference_counts.contains(0));
     try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(1));
     try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(2));
+}
+
+test "HTTP/3 QPACK pending section index repairs shifted streams" {
+    const allocator = std.testing.allocator;
+    var encoder = QpackEncodeState.init(allocator, 512, 4096);
+    defer encoder.deinit();
+    try encoder.setCapacity(512);
+    _ = try encoder.insertField("x-one", "one");
+    _ = try encoder.insertField("x-two", "two");
+    encoder.known_received_count = encoder.table.insert_count;
+
+    var first: std.ArrayList(u8) = .empty;
+    defer first.deinit(allocator);
+    try encoder.encodeFieldSection(&first, 4, &.{
+        .{ .name = "x-one", .value = "one" },
+    });
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    try encoder.encodeFieldSection(&second, 8, &.{
+        .{ .name = "x-two", .value = "two" },
+    });
+    var third: std.ArrayList(u8) = .empty;
+    defer third.deinit(allocator);
+    try encoder.encodeFieldSection(&third, 4, &.{
+        .{ .name = "x-two", .value = "two" },
+    });
+    try std.testing.expectEqual(@as(?usize, 0), encoder.pending_section_index.get(4));
+    try std.testing.expectEqual(@as(?usize, 1), encoder.pending_section_index.get(8));
+
+    var control = http3.ControlState{};
+    var feedback: std.ArrayList(u8) = .empty;
+    defer feedback.deinit(allocator);
+    try http3.writeQpackDecoderStreamPrefix(&feedback, allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &feedback,
+        allocator,
+        .{ .section_acknowledgment = 4 },
+    );
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = 0,
+        .data = feedback.items,
+    });
+    try std.testing.expectEqual(@as(usize, 2), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), encoder.pending_section_index.get(8));
+    try std.testing.expectEqual(@as(?usize, 1), encoder.pending_section_index.get(4));
+
+    var cancel: std.ArrayList(u8) = .empty;
+    defer cancel.deinit(allocator);
+    try http3.Qpack.writeDecoderInstruction(
+        &cancel,
+        allocator,
+        .{ .stream_cancellation = 8 },
+    );
+    try encoder.applyDecoderStreamFrame(&control, .{
+        .stream_id = client_qpack_decoder_stream_id,
+        .offset = feedback.items.len,
+        .data = cancel.items,
+    });
+    try std.testing.expectEqual(@as(usize, 1), encoder.pending_sections.items.len);
+    try std.testing.expect(!encoder.pending_section_index.contains(8));
+    try std.testing.expectEqual(@as(?usize, 0), encoder.pending_section_index.get(4));
 }
 
 test "HTTP/3 QPACK encoder state rejects invalid decoder feedback" {
