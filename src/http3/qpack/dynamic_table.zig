@@ -202,6 +202,10 @@ pub const DynamicTable = struct {
         value: []const u8,
         absolute_index_limit: u64,
     ) ?Match {
+        // Non-blocking encoders often pass Known Received Count as the limit.
+        // Before the decoder acknowledges any inserts (or after the table is
+        // emptied) no dynamic reference can be legal, so skip hash-map probes.
+        if (absolute_index_limit == 0 or self.entryCount() == 0) return null;
         const name_hash = dynamicStringHash(name);
         const value_hash = dynamicStringHash(value);
         const exact_key = DynamicExactKey{
@@ -300,6 +304,7 @@ pub const DynamicTable = struct {
         name: []const u8,
         absolute_index_limit: u64,
     ) ?u64 {
+        if (absolute_index_limit == 0 or self.entryCount() == 0) return null;
         const name_hash = dynamicStringHash(name);
         if (self.latest_name.get(name_hash)) |absolute_index| {
             if (absolute_index < absolute_index_limit) {
