@@ -1205,8 +1205,13 @@ pub const SentPacketTracker = struct {
     }
 
     fn rangeContainsNewAckEliciting(self: SentPacketTracker, start: u64, end: u64) bool {
+        const sorted_packets = self.packetsSortedAscending();
         for (self.packets.items) |packet| {
-            if (packet.packet_number < start or packet.packet_number > end) continue;
+            if (packet.packet_number < start) continue;
+            if (packet.packet_number > end) {
+                if (sorted_packets) break;
+                continue;
+            }
             if (packet.acknowledged or !packet.ack_eliciting) continue;
             return true;
         }
