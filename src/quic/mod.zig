@@ -1369,10 +1369,10 @@ pub const Frame = union(enum) {
 
 pub fn deinitOwnedFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
-        // `parseFrameOwned` allocates ACK ranges because the wire can carry an
-        // arbitrary number of sparse ranges.  Other frame payload slices still
-        // borrow from the containing packet/datagram bytes.
-        .ack => |ack| allocator.free(ack.ranges),
+        // `parseFrameOwned` allocates only non-empty ACK range slices because
+        // the wire can carry an arbitrary number of sparse ranges.  Other frame
+        // payload slices still borrow from the containing packet/datagram bytes.
+        .ack => |ack| if (ack.ranges.len != 0) allocator.free(ack.ranges),
         else => {},
     }
     frame.* = undefined;
@@ -1721,10 +1721,12 @@ fn parseAckFrame(allocator: ?std.mem.Allocator, cursor: *wire.Cursor, has_ecn: b
     const first_ack_range = try varint.decode(cursor);
     try validateAckRangePayloadFits(cursor.remaining(), range_count, has_ecn);
 
-    const ranges: []AckRange = if (allocator) |gpa| try gpa.alloc(AckRange, range_count) else ranges: {
-        if (range_count != 0) return error.InvalidAckRange;
-        break :ranges &.{};
-    };
+    const ranges: []AckRange = if (range_count == 0)
+        &.{}
+    else if (allocator) |gpa|
+        try gpa.alloc(AckRange, range_count)
+    else
+        return error.InvalidAckRange;
     errdefer if (allocator) |gpa| gpa.free(ranges);
     for (ranges) |*range| {
         range.* = .{
@@ -2430,6 +2432,10 @@ test "QUIC ack close datagram and padding frames" {
     const ack = try parseFrame(ack_bytes.items);
     try std.testing.expectEqual(@as(u64, 10), ack.frame.ack.largest_acknowledged);
     try std.testing.expectEqual(@as(u64, 3), ack.frame.ack.ecn_counts.?.ecn_ce_count);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var owned_ack = try parseFrameOwned(no_alloc.allocator(), ack_bytes.items);
+    defer owned_ack.deinitOwned(no_alloc.allocator());
+    try std.testing.expectEqual(@as(usize, 0), owned_ack.frame.ack.ranges.len);
 
     var close_bytes: std.ArrayList(u8) = .empty;
     defer close_bytes.deinit(allocator);
