@@ -176,12 +176,14 @@ pub const Filter = struct {
     fn restoreSnapshot(self: *Filter, snapshot: Snapshot, now_ms: u64) Error!void {
         for (snapshot.entries) |entry| {
             if (entry.expires_at_ms <= now_ms) continue;
-            if (self.entry_index.get(entry.key)) |existing| {
-                if (entry.expires_at_ms > self.entries.items[existing].expires_at_ms) {
-                    self.entries.items[existing].expires_at_ms = entry.expires_at_ms;
-                    if (self.earliest_index == existing) self.recomputeEarliest();
+            if (self.entry_index.count() != 0) {
+                if (self.entry_index.get(entry.key)) |existing| {
+                    if (entry.expires_at_ms > self.entries.items[existing].expires_at_ms) {
+                        self.entries.items[existing].expires_at_ms = entry.expires_at_ms;
+                        if (self.earliest_index == existing) self.recomputeEarliest();
+                    }
+                    continue;
                 }
-                continue;
             }
             if (self.entries.items.len < self.max_entries) {
                 const slot = try self.entry_index.getOrPut(

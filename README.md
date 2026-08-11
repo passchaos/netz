@@ -191,7 +191,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   single-lookup lease indexing and empty-index acquisition/lease checks, RFC
   9000 §7.4.1 remembered-parameter
   filtering/reduction checks, RFC 9221 DATAGRAM restoration, snapshot-capable
-  0-RTT replay filters with digest-indexed single-lookup duplicate checks and snapshot restores, cached earliest expiry scan skips, explicit expiry
+  0-RTT replay filters with digest-indexed single-lookup duplicate checks and empty-index snapshot restores, cached earliest expiry scan skips, explicit expiry
   pruning, and next-expiry observability for worker handoff, and a lease-backed
   sender that consumes a ticket after the first successful 0-RTT packet,
   plus automatic TLS early_data signaling, ClientHello-bound early traffic
