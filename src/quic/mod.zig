@@ -1816,7 +1816,8 @@ fn writeAckFields(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: A
 }
 
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
-    try varint.encode(list, allocator, frame_type);
+    std.debug.assert(frame_type <= 63);
+    try list.append(allocator, @intCast(frame_type));
     try varint.encode(list, allocator, value);
 }
 
