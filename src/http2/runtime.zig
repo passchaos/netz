@@ -1679,6 +1679,7 @@ pub const Connection = struct {
     }
 
     fn removeActiveLocalStream(self: *Connection, stream_id: u31) bool {
+        if (self.active_local_index.count() == 0) return false;
         const index = self.active_local_index.get(stream_id) orelse return false;
         const last_index = self.active_local_streams.items.len - 1;
         const removed = self.active_local_streams.swapRemove(index);
@@ -1691,6 +1692,7 @@ pub const Connection = struct {
     }
 
     fn removeActivePeerStream(self: *Connection, stream_id: u31) bool {
+        if (self.active_peer_index.count() == 0) return false;
         const index = self.active_peer_index.get(stream_id) orelse return false;
         const last_index = self.active_peer_streams.items.len - 1;
         const removed = self.active_peer_streams.swapRemove(index);
@@ -9392,6 +9394,41 @@ test "HTTP/2 client stream id allocation detects overflow" {
     try std.testing.expectError(error.InvalidStreamId, connection.reserveNextClientStreamId());
     try std.testing.expectEqual(@as(u31, std.math.maxInt(u31)), connection.next_client_stream_id);
     try std.testing.expectEqual(@as(usize, 0), connection.active_local_streams.items.len);
+}
+
+test "HTTP/2 active stream releases skip empty indexes" {
+    var connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.send_stream_windows.deinit(std.testing.allocator);
+        connection.send_stream_window_index.deinit(std.testing.allocator);
+        connection.recv_stream_windows.deinit(std.testing.allocator);
+        connection.recv_stream_window_index.deinit(std.testing.allocator);
+        connection.active_local_streams.deinit(std.testing.allocator);
+        connection.active_local_index.deinit(std.testing.allocator);
+        connection.active_peer_streams.deinit(std.testing.allocator);
+        connection.active_peer_index.deinit(std.testing.allocator);
+        connection.push_state.deinit(std.testing.allocator);
+        connection.priority_state.deinit(std.testing.allocator);
+        connection.response_semantics.deinit(std.testing.allocator);
+        connection.response_semantics_index.deinit(std.testing.allocator);
+        connection.hpack_decoder.deinit(std.testing.allocator);
+        connection.hpack_encoder.deinit(std.testing.allocator);
+    }
+
+    // Release paths are frequently called from reset/cleanup code for streams
+    // that may already be gone.  With empty indexes they should stay as cheap
+    // no-ops and avoid probing the hash maps.
+    try std.testing.expect(!connection.removeActiveLocalStream(1));
+    try std.testing.expect(!connection.removeActivePeerStream(1));
+    connection.releaseLocalStream(1);
+    connection.releasePeerStream(1);
+    try std.testing.expectEqual(@as(usize, 0), connection.active_local_index.count());
+    try std.testing.expectEqual(@as(usize, 0), connection.active_peer_index.count());
 }
 
 test "HTTP/2 local max concurrent streams limits peer opened streams" {
