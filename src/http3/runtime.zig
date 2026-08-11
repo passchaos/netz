@@ -1544,6 +1544,7 @@ pub const QpackEncodeState = struct {
         self: *QpackEncodeState,
         stream_id: u64,
     ) usize {
+        if (!self.pending_section_index.contains(stream_id)) return 0;
         var write_index: usize = 0;
         var released: usize = 0;
         for (self.pending_sections.items, 0..) |section, read_index| {
@@ -9907,6 +9908,10 @@ test "HTTP/3 QPACK stream cancellation compacts pending sections stably" {
     try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(0));
     try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(1));
     try std.testing.expectEqual(@as(?usize, 1), encoder.reference_counts.get(2));
+
+    try std.testing.expectEqual(@as(usize, 0), encoder.releaseSectionsForStream(8));
+    try std.testing.expectEqual(@as(usize, 3), encoder.pending_sections.items.len);
+    try std.testing.expectEqual(@as(usize, 1), encoder.pending_section_index.count());
 
     var ack_first: std.ArrayList(u8) = .empty;
     defer ack_first.deinit(allocator);
