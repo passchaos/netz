@@ -619,6 +619,29 @@ pub const Settings = struct {
         if (self.webtransport_initial_max_streams_bidi != 0) try writeSetting(list, allocator, .webtransport_initial_max_streams_bidi, self.webtransport_initial_max_streams_bidi);
     }
 
+    pub fn payloadLen(self: Settings) Error!usize {
+        try self.validateLocal();
+        var len: usize = 0;
+        if (self.qpack_max_table_capacity != 0) len = try addSettingLen(len, .qpack_max_table_capacity, self.qpack_max_table_capacity);
+        if (self.max_field_section_size != std.math.maxInt(u64)) len = try addSettingLen(len, .max_field_section_size, self.max_field_section_size);
+        if (self.qpack_blocked_streams != 0) len = try addSettingLen(len, .qpack_blocked_streams, self.qpack_blocked_streams);
+        if (self.enable_connect_protocol) len = try addSettingLen(len, .enable_connect_protocol, 1);
+        if (self.h3_datagram) len = try addSettingLen(len, .h3_datagram, 1);
+        const webtransport_enabled = self.enable_webtransport or self.webtransport_max_sessions != 0;
+        if (webtransport_enabled) {
+            len = try addSettingLen(len, .webtransport_max_sessions, 1);
+            len = try addSettingLen(len, .enable_webtransport, 1);
+        }
+        if (self.webtransport_max_sessions != 0) {
+            len = try addSettingLen(len, .webtransport_max_sessions_draft, self.webtransport_max_sessions);
+            len = try addSettingLen(len, .webtransport_max_sessions_v13, self.webtransport_max_sessions);
+        }
+        if (self.webtransport_initial_max_data != 0) len = try addSettingLen(len, .webtransport_initial_max_data, self.webtransport_initial_max_data);
+        if (self.webtransport_initial_max_streams_uni != 0) len = try addSettingLen(len, .webtransport_initial_max_streams_uni, self.webtransport_initial_max_streams_uni);
+        if (self.webtransport_initial_max_streams_bidi != 0) len = try addSettingLen(len, .webtransport_initial_max_streams_bidi, self.webtransport_initial_max_streams_bidi);
+        return len;
+    }
+
     pub fn validateLocal(self: Settings) Error!void {
         if (self.qpack_blocked_streams > max_supported_qpack_blocked_streams) {
             return error.QpackDynamicTableUnsupported;
@@ -628,6 +651,19 @@ pub const Settings = struct {
         }
     }
 };
+
+fn addFrameLen(a: usize, b: usize) Error!usize {
+    return std.math.add(usize, a, b) catch error.IntegerOverflow;
+}
+
+fn settingLen(id: SettingId, value: u64) Error!usize {
+    const id_len = try quic.varint.length(@intFromEnum(id));
+    return addFrameLen(id_len, try quic.varint.length(value));
+}
+
+fn addSettingLen(current: usize, id: SettingId, value: u64) Error!usize {
+    return addFrameLen(current, try settingLen(id, value));
+}
 
 fn writeSetting(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: SettingId, value: u64) Error!void {
     try quic.varint.encode(list, allocator, @intFromEnum(id));
@@ -1073,10 +1109,9 @@ pub fn writeQpackDecoderStreamPrefix(list: *std.ArrayList(u8), allocator: std.me
 }
 
 pub fn writeSettingsFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try settings.writePayload(&payload, allocator);
-    try (Frame{ .frame_type = FrameType.settings, .payload = payload.items, .consumed = 0 }).write(list, allocator);
+    const payload_len = try settings.payloadLen();
+    try writeFrameHeader(list, allocator, FrameType.settings, payload_len);
+    try settings.writePayload(list, allocator);
 }
 
 pub fn parseGoAwayPayload(payload: []const u8) Error!u64 {
@@ -3695,6 +3730,7 @@ test "HTTP/3 typed settings state tracks negotiation" {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(allocator);
     try local.writePayload(&payload, allocator);
+    try std.testing.expectEqual(payload.items.len, try local.payloadLen());
     const raw = try parseSettings(allocator, payload.items);
     defer allocator.free(raw);
     const decoded = Settings.fromList(raw);
@@ -3711,6 +3747,16 @@ test "HTTP/3 typed settings state tracks negotiation" {
     state.markReceived(decoded);
     try std.testing.expect(state.ready());
     try std.testing.expect(state.peer.h3_datagram);
+
+    var direct_frame: std.ArrayList(u8) = .empty;
+    defer direct_frame.deinit(allocator);
+    try direct_frame.ensureTotalCapacity(allocator, payload.items.len + 2);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try writeSettingsFrame(&direct_frame, no_alloc.allocator(), local);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    const parsed_frame = try Frame.parse(direct_frame.items);
+    try std.testing.expectEqual(FrameType.settings, parsed_frame.frame_type);
+    try std.testing.expectEqualSlices(u8, payload.items, parsed_frame.payload);
 }
 
 test "HTTP/3 control stream enforces SETTINGS first and GOAWAY monotonicity" {
