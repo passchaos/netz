@@ -186,7 +186,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   protected 0-RTT long-header packet seal/open and frame datagram helpers with
   0-RTT packet-type restrictions, an indexed owning origin+ALPN session cache with
   cached transactional LRU eviction and stats, expiry, independent TLS session copies, stable
-  cache/lease/early-data stats, exclusive single-use early-data leases, RFC
+  cache/lease/early-data stats, exclusive single-use early-data leases with
+  single-lookup lease indexing, RFC
   9000 §7.4.1 remembered-parameter
   filtering/reduction checks, RFC 9221 DATAGRAM restoration, snapshot-capable
   0-RTT replay filters with digest-indexed duplicate checks, cached earliest expiry, explicit expiry

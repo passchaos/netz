@@ -310,14 +310,20 @@ pub const Cache = struct {
         var entry = &self.entries.items[index];
         if (!entry.allowsEarlyData()) return null;
 
-        try self.lease_index.ensureUnusedCapacity(self.allocator, 1);
+        const lease_id = self.nextLeaseId();
+        const lease_slot = try self.lease_index.getOrPut(
+            self.allocator,
+            lease_id,
+        );
+        std.debug.assert(!lease_slot.found_existing);
+        errdefer _ = self.lease_index.remove(lease_id);
+
         var session = try self.copySession(entry.*);
         errdefer session.deinit();
-        const lease_id = self.nextLeaseId();
         self.removeEntryStats(entry.*);
         entry.lease_id = lease_id;
         entry.last_used = self.nextAccess();
-        self.lease_index.putAssumeCapacityNoClobber(lease_id, index);
+        lease_slot.value_ptr.* = index;
         self.addEntryStats(entry.*);
         if (self.evictable_lru_index == index) self.recomputeEvictableLru();
         return .{
