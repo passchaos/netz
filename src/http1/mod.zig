@@ -522,6 +522,12 @@ fn parseHeaderLines(
         });
     }
 
+    if (headers.items.len == 0 and value_storage.items.len == 0) {
+        return .{
+            .headers = @constCast(&[_]Header{}),
+            .value_storage = @constCast(&[_][]u8{}),
+        };
+    }
     const owned_headers = try headers.toOwnedSlice(allocator);
     errdefer allocator.free(owned_headers);
     const owned_value_storage = try value_storage.toOwnedSlice(allocator);
@@ -1782,6 +1788,13 @@ test "HTTP/1 response body framing helpers" {
     try std.testing.expectEqual(@as(usize, raw.len - "hello".len), resp.consumed);
     try std.testing.expectEqualStrings("", resp.body);
     try std.testing.expect(!resp.keepAlive());
+
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var empty_head = try parseResponse(no_alloc.allocator(), "HTTP/1.1 204 No Content\r\n\r\nnext", .{});
+    defer empty_head.deinit(no_alloc.allocator());
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, "HTTP/1.1 204 No Content\r\n\r\n".len), empty_head.consumed);
+    try std.testing.expectEqual(@as(usize, 0), empty_head.headers.len);
 
     const chunked = "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nTransfer-Encoding: chunked\r\n\r\n4\r\npong\r\n0\r\n\r\n";
     var chunked_resp = try parseResponse(allocator, chunked, .{});
