@@ -790,7 +790,7 @@ fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: [
         try list.appendSlice(allocator, value);
         return;
     }
-    const huffman = try encodeHuffman(allocator, value);
+    const huffman = try huffmanEncodeWithLen(allocator, value, huffman_len);
     defer allocator.free(huffman);
     std.debug.assert(huffman.len == huffman_len);
     try encodePrefixedInteger(list, allocator, 7, 0x80, huffman.len);
@@ -820,3 +820,4 @@ pub const encodeHuffman = huffman_codec.encodeHuffman;
 pub const decodeHuffman = huffman_codec.decodeHuffman;
 pub const huffmanEncodedLen = huffman_codec.encodedLen;
 pub const huffmanDecodedLen = huffman_codec.decodedLen;
+const huffmanEncodeWithLen = huffman_codec.encodeHuffmanWithLen;

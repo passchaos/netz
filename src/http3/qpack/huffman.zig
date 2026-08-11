@@ -5,9 +5,13 @@ const hpack_huffman = @import("../../http2/hpack_huffman.zig");
 
 /// Encode an RFC 9204/HPACK canonical Huffman string.
 pub fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    return encodeHuffmanWithLen(allocator, value, try encodedLen(value));
+}
+
+pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, encoded_len: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.ensureTotalCapacity(allocator, try encodedLen(value));
+    try out.ensureTotalCapacity(allocator, encoded_len);
 
     var bits: u64 = 0;
     var bits_left: u6 = 40;
@@ -29,6 +33,7 @@ pub fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
         bits |= (@as(u64, 1) << bits_left) - 1;
         try out.append(allocator, @truncate(bits >> 32));
     }
+    std.debug.assert(out.items.len == encoded_len);
     return out.toOwnedSlice(allocator);
 }
 
