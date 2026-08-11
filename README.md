@@ -20,7 +20,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   concurrent server helper
 - HTTP/2 frame headers, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing, RFC 8336 single-probe exact-indexed ORIGIN origin-set state with empty-index membership skips, RFC 7838 single-probe exact-indexed ALTSVC connection/stream advertisements with per-target replacement, and active-stream reset propagation, a bootstrap
   HPACK static/literal encoder-decoder with RFC 7541 Huffman strings,
-  pseudo-header static fast paths, empty-dynamic-table lookup skips, single-lookup
+  pseudo-header static fast paths, internal empty-dynamic-table lookup skips, single-lookup
   dynamic insert indexing, O(1)
   FIFO dynamic-index eviction, and single-pass request/response pseudo-header
   and length extraction, plus

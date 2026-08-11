@@ -948,12 +948,14 @@ pub const Hpack = struct {
         }
 
         fn findIndex(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
+            if (self.entryCount() == 0) return null;
             const physical_index = self.latest_exact.get(.{ .name = name, .value = value }) orelse return null;
             if (!self.validPhysicalIndex(physical_index)) return null;
             return self.wireIndexForPhysical(physical_index);
         }
 
         fn findNameIndex(self: DynamicTable, name: []const u8) ?u64 {
+            if (self.entryCount() == 0) return null;
             const physical_index = self.latest_name.get(name) orelse return null;
             if (!self.validPhysicalIndex(physical_index)) return null;
             return self.wireIndexForPhysical(physical_index);
@@ -2158,6 +2160,9 @@ test "HTTP/2 HPACK dynamic lookup indexes survive eviction and clear" {
     var table = Hpack.DynamicTable{};
     defer table.deinit(allocator);
     table.setLimit(allocator, 68);
+
+    try std.testing.expect(table.findNameIndex("x") == null);
+    try std.testing.expect(table.findIndex("x", "a") == null);
 
     try table.add(allocator, "x", "a");
     try table.add(allocator, "x", "b");
