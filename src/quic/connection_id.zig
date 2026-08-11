@@ -154,11 +154,11 @@ pub const PeerPool = struct {
 
     pub fn detectStatelessReset(self: *const PeerPool, datagram: []const u8) ?u64 {
         if (self.in_use_count == 0) return null;
-        const candidate = quic.stateless_reset.tokenCandidate(datagram) orelse
-            return null;
+        if (datagram.len < quic.stateless_reset.min_datagram_len) return null;
+        const candidate = datagram[datagram.len - quic.stateless_reset.token_len ..];
         for (&self.entries) |*entry| {
             if (!entry.occupied or !entry.in_use) continue;
-            if (quic.stateless_reset.matchesToken(
+            if (quic.stateless_reset.matchesTokenSlice(
                 candidate,
                 entry.stateless_reset_token,
             )) return entry.sequence_number;
@@ -418,6 +418,10 @@ test "QUIC peer CID pool detects stateless reset token" {
     try std.testing.expectEqual(@as(usize, 1), pool.in_use_count);
     try std.testing.expectEqual(@as(?u64, 7), pool.detectStatelessReset(datagram.items));
     try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(&.{ 0x40, 1, 2 }));
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        pool.detectStatelessReset(datagram.items[1..]),
+    );
     try pool.retirePriorTo(8);
     try std.testing.expectEqual(@as(usize, 0), pool.in_use_count);
     try std.testing.expectEqual(@as(?u64, null), pool.detectStatelessReset(datagram.items));
