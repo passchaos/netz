@@ -39,6 +39,12 @@ pub const ConnectionIdKey = struct {
 
     pub fn init(connection_id: []const u8) Error!ConnectionIdKey {
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidConnectionId;
+        return initAssumeValid(connection_id);
+    }
+
+    fn initAssumeValid(connection_id: []const u8) ConnectionIdKey {
+        std.debug.assert(connection_id.len != 0);
+        std.debug.assert(connection_id.len <= max_connection_id_len);
         var key: ConnectionIdKey = .{ .len = @intCast(connection_id.len) };
         @memcpy(key.bytes[0..connection_id.len], connection_id);
         return key;
@@ -143,7 +149,8 @@ pub const Router = struct {
         if (packet.len < dcid_end) return error.InvalidPacket;
         const dcid = packet[dcid_start..dcid_end];
         if (self.length_counts[dcid_len] == 0) return null;
-        const route = try self.lookup(dcid) orelse return null;
+        const route = self.map.get(ConnectionIdKey.initAssumeValid(dcid)) orelse
+            return null;
         return .{ .route = route, .destination_connection_id = dcid };
     }
 
@@ -156,7 +163,7 @@ pub const Router = struct {
         while (len != 0) : (len -= 1) {
             if (self.length_counts[len] == 0) continue;
             const candidate = packet[1 .. 1 + len];
-            const route = self.map.get(ConnectionIdKey.init(candidate) catch return null) orelse continue;
+            const route = self.map.get(ConnectionIdKey.initAssumeValid(candidate)) orelse continue;
             return .{ .route = route, .destination_connection_id = candidate };
         }
         return null;
@@ -292,6 +299,27 @@ test "QUIC connection router routes short and long header datagrams" {
         @as(usize, 1),
         greased_long_route.route.connection_index,
     );
+}
+
+test "QUIC connection router probes short-header CID lengths without revalidation" {
+    const allocator = std.testing.allocator;
+    var router = Router.init(allocator);
+    defer router.deinit();
+
+    try router.register("a", .{ .connection_index = 1 });
+    try router.register("abcd", .{ .connection_index = 4 });
+    try router.register(&([_]u8{'x'} ** max_connection_id_len), .{ .connection_index = 20 });
+    try std.testing.expectEqual(@as(u8, max_connection_id_len), router.longest_connection_id_len);
+
+    const short = [_]u8{ 0x40, 'a', 'b', 'c', 'd', 0, 1, 2 };
+    const routed = (try router.routeDatagram(&short)).?;
+    try std.testing.expectEqual(@as(usize, 4), routed.route.connection_index);
+    try std.testing.expectEqualStrings("abcd", routed.destination_connection_id);
+
+    try std.testing.expect(try router.unregister("abcd"));
+    const fallback = (try router.routeDatagram(&short)).?;
+    try std.testing.expectEqual(@as(usize, 1), fallback.route.connection_index);
+    try std.testing.expectEqualStrings("a", fallback.destination_connection_id);
 }
 
 test "QUIC connection router rejects changed paths when migration disabled" {

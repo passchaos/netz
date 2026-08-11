@@ -303,7 +303,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   ownership, in-place current-key 1-RTT decryption, reusable frame scratch,
   and strict wire-order low-peak batch servicing,
   endpoint-level connection-ID routing with single-probe registration and empty-length unregister skips,
-  max-length-cached short-header dispatch, empty-length long-header skips, unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
+  max-length-cached short-header dispatch with validated-key construction, empty-length long-header skips, unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route
   rejection, NEW_CONNECTION_ID receive/send active-limit, single-pass receive/send duplicate-CID/reset-token validation, in-use-count-gated single-extract stateless-reset token matching, and cursor-backed RETIRE_CONNECTION_ID lifecycle/preflight state with NEW/RETIRE CID-error close mapping wired into
