@@ -89,6 +89,7 @@ pub const RecvFlow = struct {
 
     pub fn consume(self: *RecvFlow, amount: u64) ?u64 {
         if (amount == 0) return null;
+        if (self.consumed >= self.highest_received) return null;
         self.consumed = @min(self.highest_received, self.consumed +| amount);
         if (self.limit - self.consumed <= self.window / 2) {
             self.maybeGrowWindow();
@@ -210,6 +211,16 @@ test "QUIC receive flow consumes and expands near varint ceiling safely" {
     try std.testing.expectEqual(quic.varint.max_value - 1, flow.consumed);
     try std.testing.expectEqual(@as(?u64, null), flow.consume(1));
     try std.testing.expectEqual(quic.varint.max_value, flow.limit);
+}
+
+test "QUIC receive flow skips saturated consume work" {
+    var flow = try RecvFlow.init(100, 100);
+    try flow.receive(40);
+    try std.testing.expectEqual(@as(?u64, null), flow.consume(40));
+    try std.testing.expectEqual(@as(u64, 40), flow.consumed);
+    try std.testing.expectEqual(@as(?u64, null), flow.consume(1));
+    try std.testing.expectEqual(@as(u64, 100), flow.limit);
+    try std.testing.expectEqual(@as(u64, 40), flow.consumed);
 }
 
 test "QUIC stream flow produces stream-specific frames" {
