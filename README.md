@@ -159,7 +159,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   and UDP-payload limits to established 1-RTT connection objects with static-key-derived stateless reset token and packet helpers,
   packet-number space ACK tracking with cached retained-packet counts, tail
   ACK-range append/removal fast paths, and bounded duplicate/old packet suppression,
-  ACK range semantic validation plus indexed exact sent-packet lookup with
+  ACK range semantic validation plus monotonic sent-packet insertion fast paths and indexed exact sent-packet lookup with
   no-new-ACK short-circuiting, tail-forget fast paths, cached sortedness for
   ACK/loss scans, and single-pass ACK marking,
   receive-frame semantic preflight before multi-frame side effects, and adaptive truncated packet-number

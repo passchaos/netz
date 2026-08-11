@@ -401,7 +401,17 @@ pub const SentPacketTracker = struct {
     }
 
     pub fn sentInFlightAtWithMetadata(self: *SentPacketTracker, packet_number: u64, ack_eliciting: bool, in_flight: bool, bytes: usize, ecn: EcnCodepoint, sent_time_ns: ?u64, pmtu_probe_size: ?usize, largest_acknowledged_sent: ?u64) !void {
-        if (self.findPacketIndex(packet_number) != null) return error.DuplicatePacket;
+        const monotonic_append = self.packets.items.len == 0 or
+            packet_number > self.packets.items[self.packets.items.len - 1].packet_number;
+        // Packet numbers issued by a QUIC packet number space are normally
+        // strictly increasing. In that hot path, the tail comparison proves the
+        // packet is new and avoids an exact-index lookup before every send.
+        // Tests and rollback helpers can still insert out of order, so the
+        // conservative duplicate check remains for the uncommon non-monotonic
+        // path.
+        if (!monotonic_append) {
+            if (self.findPacketIndex(packet_number) != null) return error.DuplicatePacket;
+        }
         const packet_storage_available = self.packets.items.len < self.packets.capacity;
         // Some send paths pre-reserve packet metadata and deliberately run
         // under a no-allocation guard to verify protected packet storage reuse.
@@ -411,9 +421,7 @@ pub const SentPacketTracker = struct {
         if (!packet_storage_available) {
             try self.packet_index.ensureUnusedCapacity(self.allocator, 1);
         }
-        if (self.packets.items.len != 0 and
-            packet_number <= self.packets.items[self.packets.items.len - 1].packet_number)
-        {
+        if (!monotonic_append) {
             self.packets_sorted_ascending = false;
         }
         try self.packets.append(self.allocator, .{
