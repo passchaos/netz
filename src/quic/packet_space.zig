@@ -238,17 +238,20 @@ pub const ReceivedPacketTracker = struct {
 
     pub fn pruneAckedRanges(self: *ReceivedPacketTracker, largest_acknowledged: u64) void {
         self.forgetThrough(largest_acknowledged);
+        if (self.ranges.items.len == 0) return;
+        const oldest = self.ranges.items[self.ranges.items.len - 1];
+        if (largest_acknowledged < oldest.start) return;
         while (self.ranges.items.len != 0) {
             const last_index = self.ranges.items.len - 1;
-            const oldest = &self.ranges.items[last_index];
-            if (oldest.end <= largest_acknowledged) {
-                self.retained_packet_count -|= oldest.len();
+            const oldest_range = &self.ranges.items[last_index];
+            if (oldest_range.end <= largest_acknowledged) {
+                self.retained_packet_count -|= oldest_range.len();
                 _ = self.ranges.pop();
                 continue;
             }
-            if (oldest.start <= largest_acknowledged) {
-                self.retained_packet_count -|= largest_acknowledged - oldest.start + 1;
-                oldest.start = largest_acknowledged + 1;
+            if (oldest_range.start <= largest_acknowledged) {
+                self.retained_packet_count -|= largest_acknowledged - oldest_range.start + 1;
+                oldest_range.start = largest_acknowledged + 1;
             }
             break;
         }
@@ -1351,6 +1354,20 @@ test "QUIC packet space tracks retained packet count incrementally" {
     try std.testing.expectEqual(@as(u64, 1), received.retained_packet_count);
     try std.testing.expectEqual(@as(usize, 1), received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 10), received.ranges.items[0].start);
+}
+
+test "QUIC packet space skips prune scan before oldest range" {
+    const allocator = std.testing.allocator;
+    var received = ReceivedPacketTracker.init(allocator, 8);
+    defer received.deinit();
+
+    try std.testing.expect(try received.recordFresh(10));
+    try std.testing.expect(try received.recordFresh(20));
+    received.pruneAckedRanges(5);
+    try std.testing.expectEqual(@as(?u64, 5), received.forgotten_through);
+    try std.testing.expectEqual(@as(usize, 2), received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 2), received.retained_packet_count);
+    try std.testing.expectEqual(@as(u64, 10), received.ranges.items[1].start);
 }
 
 test "QUIC packet space skips Not-ECT receive ECN counters" {
