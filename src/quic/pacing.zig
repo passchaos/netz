@@ -32,15 +32,17 @@ pub const Pacer = struct {
     }
 
     pub fn budgetAt(self: Pacer, now_ns: u64, congestion_window: usize, smoothed_rtt_ns: u64) usize {
-        if (!self.enabled or smoothed_rtt_ns == 0) return self.maxBurstSize();
-        const last_sent = self.last_sent_time_ns orelse return self.maxBurstSize();
+        const max_burst = self.maxBurstSize();
+        if (!self.enabled or smoothed_rtt_ns == 0) return max_burst;
+        const last_sent = self.last_sent_time_ns orelse return max_burst;
+        if (self.budget >= max_burst) return max_burst;
         const elapsed_ns = now_ns -| last_sent;
         if (elapsed_ns == 0 or congestion_window == 0) return self.budget;
 
         const numerator = @as(u128, congestion_window) *| rate_numerator *| elapsed_ns;
         const denominator = @as(u128, smoothed_rtt_ns) * rate_denominator;
         const replenished = std.math.cast(usize, numerator / denominator) orelse std.math.maxInt(usize);
-        return @min(self.maxBurstSize(), self.budget +| replenished);
+        return @min(max_burst, self.budget +| replenished);
     }
 
     /// Earliest timestamp at which `packet_size` bytes may be emitted.
@@ -122,6 +124,8 @@ test "QUIC pacer permits initial burst and computes exact deadline" {
 
 test "QUIC pacer replenishes and caps burst credit" {
     var pacer = Pacer.init(true, 1200, 10);
+    pacer.last_sent_time_ns = 0;
+    try std.testing.expectEqual(@as(usize, 12_000), pacer.budgetAt(1_000_000, 48_000, 100_000_000));
     pacer.onPacketSentAt(0, 12_000, 48_000, 100_000_000);
     try std.testing.expectEqual(@as(usize, 0), pacer.budget);
     try std.testing.expectEqual(@as(usize, 600), pacer.budgetAt(1_000_000, 48_000, 100_000_000));

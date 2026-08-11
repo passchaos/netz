@@ -279,7 +279,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   deadlines, capped exponential PTO backoff, two-probe PTO service, and persistent
   congestion detection that collapses the congestion window and resets the RTT
   measurement epoch after long contiguous lost periods, default RFC 9002 token-bucket
-  send pacing with configurable burst/disable controls, zero-packet sent no-ops, exact retry deadlines,
+  send pacing with configurable burst/disable controls, zero-packet sent no-ops, full-budget arithmetic skips, exact retry deadlines,
   ACK bypass, transactional rejection, and path-reset handling, allocation-free short-packet
   sealing into caller storage and connection-level plaintext/protected send-buffer
   reuse (while retaining stable recovery payload ownership), PMTUD/DPLPMTUD path MTU
