@@ -1226,13 +1226,11 @@ pub const Frame = union(enum) {
             },
             .ack_frequency => |frame| blk: {
                 try validateAckFrequencyFrame(frame);
-                break :blk try varintWireLen(&.{
-                    @intFromEnum(FrameType.ack_frequency),
-                    frame.sequence_number,
-                    frame.ack_eliciting_threshold,
-                    frame.request_max_ack_delay,
-                    frame.reordering_threshold,
-                });
+                var len: usize = 2;
+                len = try addWireLen(len, try varint.length(frame.sequence_number));
+                len = try addWireLen(len, try varint.length(frame.ack_eliciting_threshold));
+                len = try addWireLen(len, try varint.length(frame.request_max_ack_delay));
+                break :blk try addWireLen(len, try varint.length(frame.reordering_threshold));
             },
         };
     }
@@ -1352,7 +1350,7 @@ pub const Frame = union(enum) {
             },
             .ack_frequency => |ack_frequency| {
                 try validateAckFrequencyFrame(ack_frequency);
-                try varint.encode(list, allocator, @intFromEnum(FrameType.ack_frequency));
+                try list.appendSlice(allocator, &[_]u8{ 0x40, @intCast(@intFromEnum(FrameType.ack_frequency)) });
                 try varint.encode(list, allocator, ack_frequency.sequence_number);
                 try varint.encode(list, allocator, ack_frequency.ack_eliciting_threshold);
                 try varint.encode(list, allocator, ack_frequency.request_max_ack_delay);
@@ -2475,6 +2473,7 @@ test "QUIC ACK_FREQUENCY and IMMEDIATE_ACK frames" {
         .request_max_ack_delay = 2500,
         .reordering_threshold = 3,
     } }).write(&encoded, allocator);
+    try std.testing.expectEqualSlices(u8, &.{ 0x40, @intFromEnum(FrameType.ack_frequency) }, encoded.items[0..2]);
     const parsed = try parseFrame(encoded.items);
     try std.testing.expectEqual(@as(u64, 9), parsed.frame.ack_frequency.sequence_number);
     try std.testing.expectEqual(@as(u64, 4), parsed.frame.ack_frequency.ack_eliciting_threshold);
