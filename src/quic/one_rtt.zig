@@ -1477,6 +1477,7 @@ pub const Connection = struct {
     }
 
     pub fn sendStreamStats(self: Connection, stream_id: u64) ?SendStreamStats {
+        if (self.stream_send_index.count() == 0) return null;
         const index = self.stream_send_index.get(stream_id) orelse return null;
         if (index >= self.stream_send_flows.items.len) return null;
         const entry = &self.stream_send_flows.items[index];
@@ -1489,6 +1490,7 @@ pub const Connection = struct {
     }
 
     pub fn recvStreamStats(self: Connection, stream_id: u64) ?RecvStreamStats {
+        if (self.stream_recv_index.count() == 0) return null;
         const index = self.stream_recv_index.get(stream_id) orelse return null;
         if (index >= self.stream_recv_flows.items.len) return null;
         const entry = &self.stream_recv_flows.items[index];
@@ -2753,6 +2755,7 @@ pub const Connection = struct {
     }
 
     pub fn streamResetReceived(self: Connection, stream_id: u64) ?StreamResetInfo {
+        if (self.stream_recv_index.count() == 0) return null;
         const index = self.stream_recv_index.get(stream_id) orelse return null;
         if (index >= self.stream_recv_flows.items.len) return null;
         const entry = self.stream_recv_flows.items[index];
@@ -2768,6 +2771,7 @@ pub const Connection = struct {
         allocator: std.mem.Allocator,
         stream_id: u64,
     ) Error!?[]u8 {
+        if (self.stream_recv_index.count() == 0) return null;
         const index = self.stream_recv_index.get(stream_id) orelse return null;
         if (index >= self.stream_recv_flows.items.len) return null;
         const entry = self.stream_recv_flows.items[index];
@@ -2776,6 +2780,7 @@ pub const Connection = struct {
     }
 
     pub fn streamStopped(self: Connection, stream_id: u64) ?StopSendingInfo {
+        if (self.stream_send_index.count() == 0) return null;
         const index = self.stream_send_index.get(stream_id) orelse return null;
         if (index >= self.stream_send_flows.items.len) return null;
         const entry = self.stream_send_flows.items[index];

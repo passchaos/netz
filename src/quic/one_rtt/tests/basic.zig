@@ -667,6 +667,11 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expectEqual(@as(u64, 0), initial.packets_sent);
     try std.testing.expectEqual(@as(?u64, null), initial.smoothed_rtt_ns);
     try std.testing.expectEqual(@as(f64, 0.0), initial.lossRate());
+    try std.testing.expect(client.getSendStreamStats(0) == null);
+    try std.testing.expect(client.streamStopped(0) == null);
+    try std.testing.expect(server.getRecvStreamStats(0) == null);
+    try std.testing.expect((try server.copyReceivedStream(allocator, 0)) == null);
+    try std.testing.expect(server.streamResetReceived(0) == null);
 
     const request = [_]quic.Frame{.{ .stream = .{
         .stream_id = 0,
