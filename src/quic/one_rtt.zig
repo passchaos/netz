@@ -5057,8 +5057,14 @@ pub const Connection = struct {
             self.config.max_stream_receive_window orelse
                 self.config.stream_receive_window,
         );
+        const slot = try self.stream_recv_index.getOrPut(
+            self.endpoint.allocator,
+            stream_id,
+        );
+        std.debug.assert(!slot.found_existing);
+        errdefer _ = self.stream_recv_index.remove(stream_id);
+
         try self.stream_recv_flows.ensureUnusedCapacity(self.endpoint.allocator, 1);
-        try self.stream_recv_index.ensureUnusedCapacity(self.endpoint.allocator, 1);
         const index = self.stream_recv_flows.items.len;
         self.stream_recv_flows.appendAssumeCapacity(.{
             .stream_id = stream_id,
@@ -5073,7 +5079,7 @@ pub const Connection = struct {
                 maxBufferedForLimit(max_buffered),
             ),
         });
-        self.stream_recv_index.putAssumeCapacity(stream_id, index);
+        slot.value_ptr.* = index;
         self.last_recv_stream_index = index;
         if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             self.incoming_streams_created_count +|= 1;
