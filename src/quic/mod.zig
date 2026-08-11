@@ -1157,11 +1157,10 @@ pub const Frame = union(enum) {
                 break :blk try addWireLen(len, stream.data.len);
             },
             .max_data => |frame| try addWireLen(1, try varint.length(frame.maximum_data)),
-            .max_stream_data => |frame| try varintWireLen(&.{
-                @intFromEnum(FrameType.max_stream_data),
-                frame.stream_id,
-                frame.maximum_stream_data,
-            }),
+            .max_stream_data => |frame| blk: {
+                const len = try addWireLen(1, try varint.length(frame.stream_id));
+                break :blk try addWireLen(len, try varint.length(frame.maximum_stream_data));
+            },
             .max_streams_bidi => |frame| blk: {
                 try validateStreamCount(frame.maximum_streams);
                 break :blk try varintWireLen(&.{ @intFromEnum(FrameType.max_streams_bidi), frame.maximum_streams });
@@ -1171,11 +1170,10 @@ pub const Frame = union(enum) {
                 break :blk try varintWireLen(&.{ @intFromEnum(FrameType.max_streams_uni), frame.maximum_streams });
             },
             .data_blocked => |frame| try varintWireLen(&.{ @intFromEnum(FrameType.data_blocked), frame.maximum_data }),
-            .stream_data_blocked => |frame| try varintWireLen(&.{
-                @intFromEnum(FrameType.stream_data_blocked),
-                frame.stream_id,
-                frame.maximum_stream_data,
-            }),
+            .stream_data_blocked => |frame| blk: {
+                const len = try addWireLen(1, try varint.length(frame.stream_id));
+                break :blk try addWireLen(len, try varint.length(frame.maximum_stream_data));
+            },
             .streams_blocked_bidi => |frame| blk: {
                 try validateStreamCount(frame.maximum_streams);
                 break :blk try varintWireLen(&.{ @intFromEnum(FrameType.streams_blocked_bidi), frame.maximum_streams });
@@ -1284,7 +1282,7 @@ pub const Frame = union(enum) {
                 try varint.encode(list, allocator, max_data.maximum_data);
             },
             .max_stream_data => |max_stream_data| {
-                try varint.encode(list, allocator, @intFromEnum(FrameType.max_stream_data));
+                try list.append(allocator, @intFromEnum(FrameType.max_stream_data));
                 try varint.encode(list, allocator, max_stream_data.stream_id);
                 try varint.encode(list, allocator, max_stream_data.maximum_stream_data);
             },
@@ -1298,7 +1296,7 @@ pub const Frame = union(enum) {
             },
             .data_blocked => |blocked| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.data_blocked), blocked.maximum_data),
             .stream_data_blocked => |blocked| {
-                try varint.encode(list, allocator, @intFromEnum(FrameType.stream_data_blocked));
+                try list.append(allocator, @intFromEnum(FrameType.stream_data_blocked));
                 try varint.encode(list, allocator, blocked.stream_id);
                 try varint.encode(list, allocator, blocked.maximum_stream_data);
             },
@@ -2641,6 +2639,35 @@ test "QUIC MAX_DATA frame writes fixed frame type byte" {
 
     const parsed = try parseFrame(encoded.items);
     try std.testing.expectEqual(@as(u64, 1000), parsed.frame.max_data.maximum_data);
+}
+
+test "QUIC stream flow-control frames write fixed frame type bytes" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    const max_stream_data = Frame{ .max_stream_data = .{
+        .stream_id = 4,
+        .maximum_stream_data = 1000,
+    } };
+    try max_stream_data.write(&encoded, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.max_stream_data)), encoded.items[0]);
+    try std.testing.expectEqual(encoded.items.len, try max_stream_data.wireLen());
+    var parsed = try parseFrame(encoded.items);
+    try std.testing.expectEqual(@as(u64, 4), parsed.frame.max_stream_data.stream_id);
+    try std.testing.expectEqual(@as(u64, 1000), parsed.frame.max_stream_data.maximum_stream_data);
+
+    encoded.clearRetainingCapacity();
+    const stream_data_blocked = Frame{ .stream_data_blocked = .{
+        .stream_id = 4,
+        .maximum_stream_data = 1000,
+    } };
+    try stream_data_blocked.write(&encoded, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.stream_data_blocked)), encoded.items[0]);
+    try std.testing.expectEqual(encoded.items.len, try stream_data_blocked.wireLen());
+    parsed = try parseFrame(encoded.items);
+    try std.testing.expectEqual(@as(u64, 4), parsed.frame.stream_data_blocked.stream_id);
+    try std.testing.expectEqual(@as(u64, 1000), parsed.frame.stream_data_blocked.maximum_stream_data);
 }
 
 test "QUIC ACK frame owned parser preserves sparse ranges" {
