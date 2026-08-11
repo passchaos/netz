@@ -294,7 +294,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   opt-in Linux `UDP_GRO` receive coalescing with shared zero-copy segment
   ownership, in-place current-key 1-RTT decryption, reusable frame scratch,
   and strict wire-order low-peak batch servicing,
-  endpoint-level connection-ID routing with length-indexed short-header dispatch and unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
+  endpoint-level connection-ID routing with single-probe registration,
+  length-indexed short-header dispatch and unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
   delivery, including peer-path binding and active-migration-disabled route
   rejection, NEW_CONNECTION_ID receive/send active-limit, single-pass receive/send duplicate-CID/reset-token validation and RETIRE_CONNECTION_ID lifecycle/preflight state with NEW/RETIRE CID-error close mapping wired into

@@ -79,16 +79,17 @@ pub const Router = struct {
 
     pub fn register(self: *Router, connection_id: []const u8, route: Route) Error!void {
         const key = try ConnectionIdKey.init(connection_id);
-        if (self.map.contains(key)) return error.DuplicateConnectionId;
-        try self.map.put(key, route);
+        const entry = try self.map.getOrPut(key);
+        if (entry.found_existing) return error.DuplicateConnectionId;
+        entry.value_ptr.* = route;
         self.length_counts[key.len] += 1;
     }
 
     pub fn registerOrReplace(self: *Router, connection_id: []const u8, route: Route) Error!void {
         const key = try ConnectionIdKey.init(connection_id);
-        const existed = self.map.contains(key);
-        try self.map.put(key, route);
-        if (!existed) self.length_counts[key.len] += 1;
+        const entry = try self.map.getOrPut(key);
+        if (!entry.found_existing) self.length_counts[key.len] += 1;
+        entry.value_ptr.* = route;
     }
 
     pub fn lookup(self: Router, connection_id: []const u8) Error!?Route {
