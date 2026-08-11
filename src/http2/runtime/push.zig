@@ -168,11 +168,13 @@ pub const State = struct {
     }
 
     pub fn hasPending(self: *const State, stream_id: u31) bool {
-        return self.pending_index.contains(stream_id);
+        return self.pending_index.count() != 0 and
+            self.pending_index.contains(stream_id);
     }
 
     pub fn isRemoteReserved(self: *const State, stream_id: u31) bool {
-        return self.remote_index.contains(stream_id);
+        return self.remote_index.count() != 0 and
+            self.remote_index.contains(stream_id);
     }
 
     pub fn releaseRemote(self: *State, stream_id: u31) bool {
