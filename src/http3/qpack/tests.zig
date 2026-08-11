@@ -121,6 +121,32 @@ test "HTTP/3 QPACK static table fast-matches pseudo headers" {
     try std.testing.expectEqual(@as(?u64, 22), static_table.findName(":scheme"));
 }
 
+test "HTTP/3 QPACK static table fast-matches common request headers" {
+    const common = [_]struct {
+        name: []const u8,
+        value: []const u8,
+        index: u64,
+    }{
+        .{ .name = "content-length", .value = "0", .index = 4 },
+        .{ .name = "accept", .value = "*/*", .index = 29 },
+        .{ .name = "accept", .value = "application/dns-message", .index = 30 },
+        .{ .name = "accept-encoding", .value = "gzip, deflate, br", .index = 31 },
+    };
+    for (common) |field| {
+        const match = static_table.findMatch(field.name, field.value) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(match.full_match);
+        try std.testing.expectEqual(field.index, match.index);
+    }
+
+    const unmatched_length = static_table.findMatch("content-length", "42") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!unmatched_length.full_match);
+    try std.testing.expectEqual(@as(u64, 4), unmatched_length.index);
+    try std.testing.expectEqual(@as(?u64, 29), Qpack.findStaticName("accept"));
+    try std.testing.expectEqual(@as(?u64, 31), Qpack.findStaticName("accept-encoding"));
+}
+
 test "HTTP/3 QPACK dynamic table applies RFC 9204 Appendix B encoder stream" {
     const allocator = std.testing.allocator;
     var table = Qpack.DynamicTable.init(allocator, 220);

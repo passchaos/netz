@@ -241,6 +241,17 @@ fn fastPseudoHeaderMatch(
     if (std.mem.eql(u8, name, ":path")) {
         return .{ .index = 1, .full_match = std.mem.eql(u8, value, "/") };
     }
+    if (std.mem.eql(u8, name, "content-length")) {
+        return .{ .index = 4, .full_match = std.mem.eql(u8, value, "0") };
+    }
+    if (std.mem.eql(u8, name, "accept")) {
+        if (std.mem.eql(u8, value, "*/*")) return .{ .index = 29, .full_match = true };
+        if (std.mem.eql(u8, value, "application/dns-message")) return .{ .index = 30, .full_match = true };
+        return .{ .index = 29, .full_match = false };
+    }
+    if (std.mem.eql(u8, name, "accept-encoding")) {
+        return .{ .index = 31, .full_match = std.mem.eql(u8, value, "gzip, deflate, br") };
+    }
     return null;
 }
 
@@ -250,5 +261,8 @@ fn fastPseudoHeaderName(name: []const u8) ?u64 {
     if (std.mem.eql(u8, name, ":method")) return 15;
     if (std.mem.eql(u8, name, ":scheme")) return 22;
     if (std.mem.eql(u8, name, ":status")) return 24;
+    if (std.mem.eql(u8, name, "content-length")) return 4;
+    if (std.mem.eql(u8, name, "accept")) return 29;
+    if (std.mem.eql(u8, name, "accept-encoding")) return 31;
     return null;
 }
