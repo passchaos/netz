@@ -171,6 +171,7 @@ test "server ticket store owns, expires, and evicts LRU entries" {
         .lifetime_seconds = 10,
     });
     try std.testing.expectEqual(@as(usize, 1), store.identity_index.count());
+    try std.testing.expectEqual(@as(?usize, 0), store.oldest_index);
     @memset(&first_identity, 'x');
     try store.issue(.{
         .identity = "two",
@@ -180,8 +181,10 @@ test "server ticket store owns, expires, and evicts LRU entries" {
         .lifetime_seconds = 10,
     });
     try std.testing.expectEqual(@as(usize, 2), store.identity_index.count());
+    try std.testing.expectEqual(@as(?usize, 0), store.oldest_index);
     var first = (try store.lookup("one", 1001)).?;
     first.deinit();
+    try std.testing.expectEqual(@as(?usize, 1), store.oldest_index);
     try store.issue(.{
         .identity = "three",
         .secret = [_]u8{3} ** 32,
@@ -192,12 +195,14 @@ test "server ticket store owns, expires, and evicts LRU entries" {
     try std.testing.expect((try store.lookup("two", 1002)) == null);
     try std.testing.expectEqual(@as(?usize, null), store.identity_index.get("two"));
     try std.testing.expectEqual(@as(usize, 2), store.identity_index.count());
+    try std.testing.expect(store.oldest_index != null);
     var one = (try store.lookup("one", 1002)).?;
     one.deinit();
     var three = (try store.lookup("three", 1002)).?;
     three.deinit();
     try std.testing.expectEqual(@as(usize, 0), store.count(12_001));
     try std.testing.expectEqual(@as(usize, 0), store.identity_index.count());
+    try std.testing.expectEqual(@as(?usize, null), store.oldest_index);
 }
 
 test "server ticket store index tracks replacements" {

@@ -84,6 +84,7 @@ pub const Store = struct {
     /// retarget the stored key before freeing old identity bytes and every
     /// swap-remove path must repair the moved entry's slot.
     identity_index: IdentityIndex = .empty,
+    oldest_index: ?usize = null,
     next_sequence: u64 = 1,
     mutex: std.Io.Mutex = .init,
 
@@ -166,6 +167,7 @@ pub const Store = struct {
         var entry = &self.entries.items[index];
         const identity_copy = try self.allocator.dupe(u8, entry.identity);
         entry.sequence = self.nextSequence();
+        if (self.oldest_index == index) self.recomputeOldest();
         return .{
             .allocator = self.allocator,
             .identity = identity_copy,
@@ -204,6 +206,7 @@ pub const Store = struct {
             self.entries.items[index].identity,
             index,
         );
+        self.considerOldest(index);
     }
 
     fn replaceEntryAt(self: *Store, index: usize, replacement: Entry) void {
@@ -212,28 +215,55 @@ pub const Store = struct {
         const key_ptr = self.identity_index.getKeyPtr(replaced.identity) orelse
             unreachable;
         key_ptr.* = self.entries.items[index].identity;
+        if (self.oldest_index == index) self.recomputeOldest() else self.considerOldest(index);
         replaced.deinit(self.allocator);
     }
 
     fn removeEntryAt(self: *Store, index: usize) Entry {
         const old_len = self.entries.items.len;
+        const oldest = self.oldest_index;
         const removed = self.entries.swapRemove(index);
         _ = self.identity_index.remove(removed.identity);
         if (index != old_len - 1) {
             const moved = self.entries.items[index];
             self.identity_index.getPtr(moved.identity).?.* = index;
         }
+        if (self.entries.items.len == 0) {
+            self.oldest_index = null;
+        } else if (oldest == index) {
+            self.recomputeOldest();
+        } else if (oldest == old_len - 1) {
+            self.oldest_index = index;
+        }
         return removed;
     }
 
     fn oldestIndex(self: *Store) usize {
+        return self.oldest_index.?;
+    }
+
+    fn considerOldest(self: *Store, index: usize) void {
+        const oldest = self.oldest_index orelse {
+            self.oldest_index = index;
+            return;
+        };
+        if (self.entries.items[index].sequence < self.entries.items[oldest].sequence) {
+            self.oldest_index = index;
+        }
+    }
+
+    fn recomputeOldest(self: *Store) void {
+        if (self.entries.items.len == 0) {
+            self.oldest_index = null;
+            return;
+        }
         var oldest: usize = 0;
         for (self.entries.items[1..], 1..) |entry, index| {
             if (entry.sequence < self.entries.items[oldest].sequence) {
                 oldest = index;
             }
         }
-        return oldest;
+        self.oldest_index = oldest;
     }
 
     fn nextSequence(self: *Store) u64 {
