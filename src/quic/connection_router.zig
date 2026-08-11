@@ -61,6 +61,12 @@ pub const Context = struct {
 
 pub const Router = struct {
     map: std.HashMap(ConnectionIdKey, Route, Context, 80),
+    /// Number of registered CIDs per length. Short-header packets do not carry
+    /// a CID length, so routing used to scan every registered CID looking for
+    /// the longest prefix match. This compact histogram lets the hot path probe
+    /// only lengths that can actually match, longest first, using the map's
+    /// exact key lookup.
+    length_counts: [max_connection_id_len + 1]usize = .{0} ** (max_connection_id_len + 1),
 
     pub fn init(allocator: std.mem.Allocator) Router {
         return .{ .map = .initContext(allocator, .{}) };
@@ -75,10 +81,14 @@ pub const Router = struct {
         const key = try ConnectionIdKey.init(connection_id);
         if (self.map.contains(key)) return error.DuplicateConnectionId;
         try self.map.put(key, route);
+        self.length_counts[key.len] += 1;
     }
 
     pub fn registerOrReplace(self: *Router, connection_id: []const u8, route: Route) Error!void {
-        try self.map.put(try ConnectionIdKey.init(connection_id), route);
+        const key = try ConnectionIdKey.init(connection_id);
+        const existed = self.map.contains(key);
+        try self.map.put(key, route);
+        if (!existed) self.length_counts[key.len] += 1;
     }
 
     pub fn lookup(self: Router, connection_id: []const u8) Error!?Route {
@@ -86,7 +96,10 @@ pub const Router = struct {
     }
 
     pub fn unregister(self: *Router, connection_id: []const u8) Error!bool {
-        return self.map.remove(try ConnectionIdKey.init(connection_id));
+        const key = try ConnectionIdKey.init(connection_id);
+        const removed = self.map.remove(key);
+        if (removed) self.length_counts[key.len] -= 1;
+        return removed;
     }
 
     pub fn routeDatagram(self: Router, packet: []const u8) Error!?RoutedDatagram {
@@ -126,17 +139,15 @@ pub const Router = struct {
     }
 
     fn routeShortHeaderDatagram(self: Router, packet: []const u8) ?RoutedDatagram {
-        var iter = self.map.iterator();
-        var best: ?RoutedDatagram = null;
-        while (iter.next()) |entry| {
-            const cid = entry.key_ptr.slice();
-            if (packet.len < 1 + cid.len) continue;
-            if (!std.mem.eql(u8, packet[1 .. 1 + cid.len], cid)) continue;
-            if (best == null or cid.len > best.?.destination_connection_id.len) {
-                best = .{ .route = entry.value_ptr.*, .destination_connection_id = packet[1 .. 1 + cid.len] };
-            }
+        if (packet.len <= 1) return null;
+        var len = @min(@as(usize, max_connection_id_len), packet.len - 1);
+        while (len != 0) : (len -= 1) {
+            if (self.length_counts[len] == 0) continue;
+            const candidate = packet[1 .. 1 + len];
+            const route = self.map.get(ConnectionIdKey.init(candidate) catch return null) orelse continue;
+            return .{ .route = route, .destination_connection_id = candidate };
         }
-        return best;
+        return null;
     }
 
     pub fn count(self: Router) usize {
@@ -158,6 +169,7 @@ test "QUIC connection router maps and retires connection IDs" {
 
     try router.register("server-cid-a", .{ .connection_index = 0, .sequence_number = 1 });
     try router.register("server-cid-b", .{ .connection_index = 1, .sequence_number = 2 });
+    try std.testing.expectEqual(@as(usize, 2), router.length_counts[12]);
     try std.testing.expectError(error.DuplicateConnectionId, router.register("server-cid-a", .{ .connection_index = 9 }));
 
     const first = (try router.lookup("server-cid-a")).?;
@@ -168,8 +180,10 @@ test "QUIC connection router maps and retires connection IDs" {
     try std.testing.expectEqual(@as(usize, 2), router.count());
 
     try router.registerOrReplace("server-cid-a", .{ .connection_index = 3, .sequence_number = 7 });
+    try std.testing.expectEqual(@as(usize, 2), router.length_counts[12]);
     try std.testing.expectEqual(@as(usize, 3), (try router.lookup("server-cid-a")).?.connection_index);
     try std.testing.expect(try router.unregister("server-cid-b"));
+    try std.testing.expectEqual(@as(usize, 1), router.length_counts[12]);
     try std.testing.expectEqual(@as(?Route, null), try router.lookup("server-cid-b"));
     try std.testing.expectEqual(@as(usize, 1), router.count());
 }
@@ -181,6 +195,8 @@ test "QUIC connection router routes short and long header datagrams" {
 
     try router.register("abc", .{ .connection_index = 1, .sequence_number = 10 });
     try router.register("abcdef", .{ .connection_index = 2, .sequence_number = 20 });
+    try std.testing.expectEqual(@as(usize, 1), router.length_counts[3]);
+    try std.testing.expectEqual(@as(usize, 1), router.length_counts[6]);
 
     const short = [_]u8{ 0x40, 'a', 'b', 'c', 'd', 'e', 'f', 0x00, 0x01 };
     const short_route = (try router.routeDatagram(&short)).?;
