@@ -34,6 +34,7 @@ pub const max_retire_queue_len: usize = max_pool_size * 4;
 pub const PeerPool = struct {
     entries: [max_pool_size]Entry = .{Entry{}} ** max_pool_size,
     retire_queue: [max_retire_queue_len]u64 = .{0} ** max_retire_queue_len,
+    retire_queue_head: usize = 0,
     retire_queue_len: usize = 0,
     largest_retire_prior_to: u64 = 0,
 
@@ -100,25 +101,36 @@ pub const PeerPool = struct {
 
     pub fn peekRetireFrame(self: *const PeerPool) ?quic.Frame {
         if (self.retire_queue_len == 0) return null;
-        return .{ .retire_connection_id = .{ .sequence_number = self.retire_queue[0] } };
+        return .{ .retire_connection_id = .{
+            .sequence_number = self.retire_queue[self.retireQueueIndex(0)],
+        } };
     }
 
     pub fn discardRetireFrame(self: *PeerPool) void {
         if (self.retire_queue_len == 0) return;
-        if (self.retire_queue_len > 1) {
-            std.mem.copyForwards(u64, self.retire_queue[0 .. self.retire_queue_len - 1], self.retire_queue[1..self.retire_queue_len]);
-        }
+        const head = self.retireQueueIndex(0);
+        self.retire_queue[head] = 0;
         self.retire_queue_len -= 1;
-        self.retire_queue[self.retire_queue_len] = 0;
+        if (self.retire_queue_len == 0) {
+            self.retire_queue_head = 0;
+        } else {
+            self.retire_queue_head = self.retireQueueIndex(1);
+        }
     }
 
     fn queueRetire(self: *PeerPool, sequence_number: u64) Error!void {
-        for (self.retire_queue[0..self.retire_queue_len]) |queued| {
+        for (0..self.retire_queue_len) |offset| {
+            const queued = self.retire_queue[self.retireQueueIndex(offset)];
             if (queued == sequence_number) return;
         }
         if (self.retire_queue_len >= self.retire_queue.len) return error.RetireQueueFull;
-        self.retire_queue[self.retire_queue_len] = sequence_number;
+        const tail = self.retireQueueIndex(self.retire_queue_len);
+        self.retire_queue[tail] = sequence_number;
         self.retire_queue_len += 1;
+    }
+
+    fn retireQueueIndex(self: *const PeerPool, offset: usize) usize {
+        return (self.retire_queue_head + offset) % self.retire_queue.len;
     }
 
     pub fn consumeUnused(self: *PeerPool) ?*Entry {
@@ -442,6 +454,40 @@ test "QUIC peer CID pool queues retire frames for retire_prior_to" {
 
     pool.discardRetireFrame();
     try std.testing.expectEqual(@as(usize, 0), pool.pendingRetireCount());
+}
+
+test "QUIC peer CID retire queue reuses consumed slots after wrap" {
+    var pool = PeerPool{};
+
+    for (0..max_retire_queue_len) |sequence_number| {
+        try pool.queueRetire(@intCast(sequence_number));
+    }
+    try std.testing.expectError(
+        error.RetireQueueFull,
+        pool.queueRetire(max_retire_queue_len),
+    );
+    pool.discardRetireFrame();
+    pool.discardRetireFrame();
+    try std.testing.expectEqual(@as(usize, 2), pool.retire_queue_head);
+
+    // Reusing freed head slots keeps FIFO retirement delivery without the
+    // per-discard memmove that would otherwise run when several CIDs are
+    // retired by one Retire Prior To update.
+    try pool.queueRetire(max_retire_queue_len);
+    try pool.queueRetire(max_retire_queue_len + 1);
+    try std.testing.expectEqual(max_retire_queue_len, pool.pendingRetireCount());
+
+    try pool.queueRetire(max_retire_queue_len + 1);
+    try std.testing.expectEqual(max_retire_queue_len, pool.pendingRetireCount());
+    for (2..max_retire_queue_len + 2) |expected| {
+        try std.testing.expectEqual(
+            @as(u64, @intCast(expected)),
+            pool.peekRetireFrame().?.retire_connection_id.sequence_number,
+        );
+        pool.discardRetireFrame();
+    }
+    try std.testing.expectEqual(@as(usize, 0), pool.pendingRetireCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.retire_queue_head);
 }
 
 test "QUIC local CID pool rejects retiring packet DCID" {
