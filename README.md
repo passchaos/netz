@@ -283,7 +283,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   ACK bypass, transactional rejection, and path-reset handling, allocation-free short-packet
   sealing into caller storage and connection-level plaintext/protected send-buffer
   reuse (while retaining stable recovery payload ownership), PMTUD/DPLPMTUD path MTU
-  probe sizing state with IPv4/IPv6 ceilings, duplicate-ACK no-ops, loss-driven search backoff, and
+  probe sizing state with IPv4/IPv6 ceilings, duplicate-ACK and stale-loss no-ops, loss-driven search backoff, and
   1-RTT PING+PADDING probe packets wired to ACK/loss feedback with
   ordinary-send and recovery-retransmit size enforcement from the currently
   validated path MTU,
