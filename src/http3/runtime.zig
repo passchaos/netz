@@ -6558,19 +6558,21 @@ const PushStreamSet = struct {
         // RFC 9114 permits the same push to be promised by multiple request
         // streams. The first parent remains the canonical correlation exposed
         // on push events.
-        if (self.promise_index.contains(push_id)) return;
         if (self.promises.items.len == self.promises.capacity) {
+            if (self.promise_index.contains(push_id)) return;
             // MAX_PUSH_ID reserves one slot for every legal unique ID before
             // it is put on the wire, making event application allocation-free
             // after the request reader has transactionally consumed bytes.
             return error.ExcessiveLoad;
         }
+        const slot = self.promise_index.getOrPutAssumeCapacity(push_id);
+        if (slot.found_existing) return;
         const index = self.promises.items.len;
         self.promises.appendAssumeCapacity(.{
             .push_id = push_id,
             .request_stream_id = request_stream_id,
         });
-        self.promise_index.putAssumeCapacity(push_id, index);
+        slot.value_ptr.* = index;
         errdefer {
             _ = self.promise_index.remove(push_id);
             _ = self.promises.pop();
