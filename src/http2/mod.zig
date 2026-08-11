@@ -828,9 +828,32 @@ pub const Hpack = struct {
     }
 
     const DynamicExactKey = struct {
-        name_hash: u64,
-        value_hash: u64,
+        name: []const u8,
+        value: []const u8,
     };
+
+    const DynamicExactContext = struct {
+        pub fn hash(_: @This(), key: DynamicExactKey) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            std.hash.autoHash(&hasher, key.name.len);
+            hasher.update(key.name);
+            std.hash.autoHash(&hasher, key.value.len);
+            hasher.update(key.value);
+            return hasher.final();
+        }
+
+        pub fn eql(_: @This(), lhs: DynamicExactKey, rhs: DynamicExactKey) bool {
+            return std.mem.eql(u8, lhs.name, rhs.name) and
+                std.mem.eql(u8, lhs.value, rhs.value);
+        }
+    };
+
+    const DynamicExactIndex = std.HashMapUnmanaged(
+        DynamicExactKey,
+        usize,
+        DynamicExactContext,
+        std.hash_map.default_max_load_percentage,
+    );
 
     pub const HeaderField = struct {
         name: []const u8,
@@ -845,13 +868,11 @@ pub const Hpack = struct {
 
     pub const DynamicTable = struct {
         entries: std.ArrayList(HeaderField) = .empty,
-        /// Hash indexes point at the latest physical entry for a name or
-        /// name/value hash pair.  Entries own their strings and can move during
-        /// compaction, so every hit is byte-verified and indexes are rebuilt
-        /// after compaction.  Collisions preserve correctness by falling back
-        /// to the reverse scan.
-        latest_name: std.AutoHashMapUnmanaged(u64, usize) = .empty,
-        latest_exact: std.AutoHashMapUnmanaged(DynamicExactKey, usize) = .empty,
+        /// Exact indexes point at the latest physical entry for a name or
+        /// name/value pair. Keys borrow entry-owned strings and are rebuilt
+        /// after compaction or redirected when evicting the current latest.
+        latest_name: std.StringHashMapUnmanaged(usize) = .empty,
+        latest_exact: DynamicExactIndex = .empty,
         size_limit: usize = default_dynamic_table_size,
         used: usize = 0,
         head: usize = 0,
@@ -893,15 +914,10 @@ pub const Hpack = struct {
 
             self.compactIfNeeded();
             try self.entries.ensureUnusedCapacity(allocator, 1);
-            const name_hash = dynamicStringHash(name);
-            const value_hash = dynamicStringHash(value);
-            const exact_key = DynamicExactKey{
-                .name_hash = name_hash,
-                .value_hash = value_hash,
-            };
-            if (self.latest_name.get(name_hash) == null) {
+            if (self.latest_name.get(name) == null) {
                 try self.latest_name.ensureUnusedCapacity(allocator, 1);
             }
+            const exact_key = DynamicExactKey{ .name = name, .value = value };
             if (self.latest_exact.get(exact_key) == null) {
                 try self.latest_exact.ensureUnusedCapacity(allocator, 1);
             }
@@ -915,8 +931,8 @@ pub const Hpack = struct {
                 .name = name_copy,
                 .value = value_copy,
             });
-            self.latest_name.putAssumeCapacity(name_hash, physical_index);
-            self.latest_exact.putAssumeCapacity(exact_key, physical_index);
+            self.latest_name.putAssumeCapacity(name_copy, physical_index);
+            self.latest_exact.putAssumeCapacity(.{ .name = name_copy, .value = value_copy }, physical_index);
             self.used += size;
             self.evictToLimit(allocator);
         }
@@ -928,24 +944,9 @@ pub const Hpack = struct {
         }
 
         fn findIndex(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
-            const name_hash = dynamicStringHash(name);
-            const value_hash = dynamicStringHash(value);
-            const exact_key = DynamicExactKey{
-                .name_hash = name_hash,
-                .value_hash = value_hash,
-            };
-            if (self.latest_exact.get(exact_key)) |physical_index| {
-                if (self.validPhysicalIndex(physical_index)) {
-                    const item = self.entries.items[physical_index];
-                    if (std.mem.eql(u8, item.name, name) and
-                        std.mem.eql(u8, item.value, value))
-                    {
-                        return self.wireIndexForPhysical(physical_index);
-                    }
-                }
-                return self.findIndexLinear(name, value);
-            }
-            return null;
+            const physical_index = self.latest_exact.get(.{ .name = name, .value = value }) orelse return null;
+            if (!self.validPhysicalIndex(physical_index)) return null;
+            return self.wireIndexForPhysical(physical_index);
         }
 
         fn findIndexLinear(self: DynamicTable, name: []const u8, value: []const u8) ?u64 {
@@ -962,17 +963,9 @@ pub const Hpack = struct {
         }
 
         fn findNameIndex(self: DynamicTable, name: []const u8) ?u64 {
-            const name_hash = dynamicStringHash(name);
-            if (self.latest_name.get(name_hash)) |physical_index| {
-                if (self.validPhysicalIndex(physical_index)) {
-                    const item = self.entries.items[physical_index];
-                    if (std.mem.eql(u8, item.name, name)) {
-                        return self.wireIndexForPhysical(physical_index);
-                    }
-                }
-                return self.findNameIndexLinear(name);
-            }
-            return null;
+            const physical_index = self.latest_name.get(name) orelse return null;
+            if (!self.validPhysicalIndex(physical_index)) return null;
+            return self.wireIndexForPhysical(physical_index);
         }
 
         fn findNameIndexLinear(self: DynamicTable, name: []const u8) ?u64 {
@@ -1020,23 +1013,22 @@ pub const Hpack = struct {
             entry: HeaderField,
             physical_index: usize,
         ) void {
-            const name_hash = dynamicStringHash(entry.name);
-            if (self.latest_name.get(name_hash) == physical_index) {
-                _ = self.latest_name.remove(name_hash);
+            if (self.latest_name.get(entry.name) == physical_index) {
+                _ = self.latest_name.remove(entry.name);
                 var index = self.entries.items.len;
                 while (index > self.head + 1) {
                     index -= 1;
                     const candidate = self.entries.items[index];
-                    if (dynamicStringHash(candidate.name) == name_hash) {
-                        self.latest_name.putAssumeCapacity(name_hash, index);
+                    if (std.mem.eql(u8, candidate.name, entry.name)) {
+                        self.latest_name.putAssumeCapacity(candidate.name, index);
                         break;
                     }
                 }
             }
 
             const exact_key = DynamicExactKey{
-                .name_hash = name_hash,
-                .value_hash = dynamicStringHash(entry.value),
+                .name = entry.name,
+                .value = entry.value,
             };
             if (self.latest_exact.get(exact_key) == physical_index) {
                 _ = self.latest_exact.remove(exact_key);
@@ -1044,10 +1036,13 @@ pub const Hpack = struct {
                 while (index > self.head + 1) {
                     index -= 1;
                     const candidate = self.entries.items[index];
-                    if (dynamicStringHash(candidate.name) == exact_key.name_hash and
-                        dynamicStringHash(candidate.value) == exact_key.value_hash)
+                    if (std.mem.eql(u8, candidate.name, entry.name) and
+                        std.mem.eql(u8, candidate.value, entry.value))
                     {
-                        self.latest_exact.putAssumeCapacity(exact_key, index);
+                        self.latest_exact.putAssumeCapacity(.{
+                            .name = candidate.name,
+                            .value = candidate.value,
+                        }, index);
                         break;
                     }
                 }
@@ -1068,12 +1063,10 @@ pub const Hpack = struct {
             self.latest_name.clearRetainingCapacity();
             self.latest_exact.clearRetainingCapacity();
             for (self.entries.items, 0..) |entry, index| {
-                const name_hash = dynamicStringHash(entry.name);
-                const value_hash = dynamicStringHash(entry.value);
-                self.latest_name.putAssumeCapacity(name_hash, index);
+                self.latest_name.putAssumeCapacity(entry.name, index);
                 self.latest_exact.putAssumeCapacity(.{
-                    .name_hash = name_hash,
-                    .value_hash = value_hash,
+                    .name = entry.name,
+                    .value = entry.value,
                 }, index);
             }
         }
@@ -2158,6 +2151,8 @@ test "HTTP/2 HPACK dynamic lookup indexes survive eviction and clear" {
         @as(?u64, Hpack.static_table.len + 2),
         table.findIndex("x", "b"),
     );
+    try std.testing.expectEqual(@as(?usize, 0), table.latest_name.get("x"));
+    try std.testing.expectEqual(@as(?usize, 0), table.latest_exact.get(.{ .name = "x", .value = "b" }));
     try std.testing.expect(table.findIndex("x", "a") == null);
 
     try table.add(allocator, "z", "d");
