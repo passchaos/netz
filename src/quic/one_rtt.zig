@@ -4460,10 +4460,12 @@ pub const Connection = struct {
     }
 
     fn hasAcknowledgedPacketAtOrAbove(self: Connection, threshold: u64) bool {
-        for (self.sent.packets.items) |packet| {
-            if (packet.acknowledged and packet.packet_number >= threshold) return true;
-        }
-        return false;
+        // `SentPacketTracker` maintains the largest acknowledged packet number
+        // incrementally while applying ACK ranges.  Use that cached value for
+        // the key-update ACK gate instead of rescanning the sent-packet list on
+        // every ACK frame, matching the largest-acked bookkeeping used by
+        // production recovery implementations.
+        return self.sent.hasAcknowledgedAtOrAbove(threshold);
     }
 
     fn receiveNewToken(self: *Connection, new_token: quic.NewTokenFrame) Error!void {

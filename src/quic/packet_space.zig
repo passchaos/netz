@@ -456,6 +456,11 @@ pub const SentPacketTracker = struct {
         return self.largest_acknowledged;
     }
 
+    pub fn hasAcknowledgedAtOrAbove(self: SentPacketTracker, threshold: u64) bool {
+        const largest = self.largest_acknowledged orelse return false;
+        return largest >= threshold;
+    }
+
     pub fn stats(self: SentPacketTracker) SentPacketStats {
         var ack_eliciting_packets: usize = 0;
         var in_flight_packets: usize = 0;
@@ -1444,6 +1449,8 @@ test "QUIC sent packet tracker applies many ACK ranges in one decoded set" {
     try std.testing.expectEqual(@as(usize, 41), result.ect0_packets);
     try std.testing.expectEqual(@as(u64, 41), sent.latest_ecn_counts.ect0_count);
     try std.testing.expectEqual(@as(?u64, 80), sent.largestAcknowledged());
+    try std.testing.expect(sent.hasAcknowledgedAtOrAbove(80));
+    try std.testing.expect(!sent.hasAcknowledgedAtOrAbove(81));
     for (sent.packets.items, 0..) |packet, index| {
         try std.testing.expectEqual(index % 2 == 0, packet.acknowledged);
     }

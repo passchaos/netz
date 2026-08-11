@@ -245,7 +245,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   budget enforcement for unvalidated server paths,
   1-RTT key-update derivation and key-phase state with ACK gating and retained
   previous receive/send generations for reordered short-header packets, peer-triggered
-  send-key synchronization before ACK, and negotiated-suite RFC 9001
+  send-key synchronization before ACK, cached ACK-gate clearing for local
+  key updates, and negotiated-suite RFC 9001
   confidentiality/integrity limits with proactive key rotation and terminal
   limit handling,
   configurable RFC 9438 CUBIC (default) and NewReno congestion-window control with
