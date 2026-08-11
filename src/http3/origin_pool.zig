@@ -239,7 +239,7 @@ pub fn Pool(comptime Handle: type) type {
                 return;
             }
             const origin_key = originIndexKey(owned_key.origin());
-            const existing_bucket = self.origin_index.get(origin_key);
+            const existing_bucket = self.origin_index.getPtr(origin_key);
             if (existing_bucket) |bucket| {
                 if (bucket.count >= self.config.max_idle_per_origin) {
                     self.dropHandle(handle);
@@ -253,7 +253,16 @@ pub fn Pool(comptime Handle: type) type {
                 // If allocation fails, neither an existing pooled handle nor
                 // the caller's handle has been dropped.
                 try self.entries.ensureUnusedCapacity(self.allocator, 1);
-                if (new_origin) try self.origin_index.ensureUnusedCapacity(self.allocator, 1);
+                if (existing_bucket) |bucket| {
+                    self.appendEntryToBucketAssumeCapacity(.{
+                        .key = owned_key,
+                        .handle = handle,
+                        .pooled_at_ms = now_ms,
+                    }, bucket);
+                    owned_key = undefined;
+                    return;
+                }
+                try self.origin_index.ensureUnusedCapacity(self.allocator, 1);
             } else {
                 if (new_origin) try self.origin_index.ensureUnusedCapacity(self.allocator, 1);
                 // Idle pool entries are interchangeable for reuse decisions;
@@ -302,6 +311,19 @@ pub fn Pool(comptime Handle: type) type {
                     .count = 1,
                 });
             }
+        }
+
+        fn appendEntryToBucketAssumeCapacity(
+            self: *Self,
+            entry: Entry,
+            bucket: *OriginBucket,
+        ) void {
+            const index = self.entries.items.len;
+            self.entries.appendAssumeCapacity(entry);
+            self.entries.items[index].origin_prev = bucket.tail;
+            self.entries.items[bucket.tail].origin_next = index;
+            bucket.tail = index;
+            bucket.count += 1;
         }
 
         fn detachOriginIndex(self: *Self, index: usize) void {
