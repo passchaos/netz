@@ -313,7 +313,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   peer-migration helpers and authenticated non-probing packet receive handling
   that honor disable_active_migration, preserve congestion/PMTU state for NAT
   rebinding, apply a server preferred_address by selecting its CID/reset token
-  and peer IP/port, reset anti-amplification and PMTUD path state, queue PATH_CHALLENGE, retain cursor-backed PATH_RESPONSE targets,
+  and peer IP/port, reset anti-amplification and PMTUD path state, queue PATH_CHALLENGE with single-lookup outstanding indexing, retain cursor-backed PATH_RESPONSE targets,
   cache path-validation deadlines, skip early timeout scans, requeue timed-out
   challenges with single-lookup indexing, expose failed validation attempts in connection stats, and
   validate the new path on a matching PATH_RESPONSE,

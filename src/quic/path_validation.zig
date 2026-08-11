@@ -183,9 +183,19 @@ pub const State = struct {
 
     pub fn nextChallengeFrameAt(self: *State, now_ns: ?u64, timeout_ns: ?u64) Error!quic.Frame {
         if (self.pending_challenges.len() == 0) return error.NoPendingPathChallenge;
+        const data = self.peekPendingChallengeData();
+        const slot = try self.outstanding_challenge_index.getOrPut(
+            self.allocator,
+            data,
+        );
+        std.debug.assert(!slot.found_existing);
+        errdefer _ = self.outstanding_challenge_index.remove(data);
         try self.outstanding_challenges.ensureUnusedCapacity(self.allocator, 1);
-        try self.outstanding_challenge_index.ensureUnusedCapacity(self.allocator, 1);
-        const challenge = self.popPendingChallengeToOutstanding(now_ns, timeout_ns);
+        const challenge = self.popPendingChallengeToOutstanding(
+            now_ns,
+            timeout_ns,
+            slot.value_ptr,
+        );
         return .{ .path_challenge = .{ .data = challenge.data } };
     }
 
@@ -201,7 +211,14 @@ pub const State = struct {
 
         var written: usize = 0;
         while (written < count) : (written += 1) {
-            const challenge = self.popPendingChallengeToOutstanding(now_ns, timeout_ns);
+            const data = self.peekPendingChallengeData();
+            const slot = self.outstanding_challenge_index.getOrPutAssumeCapacity(data);
+            std.debug.assert(!slot.found_existing);
+            const challenge = self.popPendingChallengeToOutstanding(
+                now_ns,
+                timeout_ns,
+                slot.value_ptr,
+            );
             out[written] = .{ .path_challenge = .{ .data = challenge.data } };
         }
         return written;
@@ -287,6 +304,7 @@ pub const State = struct {
         self: *State,
         now_ns: ?u64,
         timeout_ns: ?u64,
+        index_slot: *usize,
     ) Challenge {
         var challenge = self.pending_challenges.popFront().?;
         _ = self.pending_challenge_index.remove(challenge.data);
@@ -303,12 +321,13 @@ pub const State = struct {
         }
         const index = self.outstanding_challenges.items.len;
         self.outstanding_challenges.appendAssumeCapacity(challenge);
-        self.outstanding_challenge_index.putAssumeCapacityNoClobber(
-            challenge.data,
-            index,
-        );
+        index_slot.* = index;
         self.considerOutstandingDeadline(challenge.deadline_ns);
         return challenge;
+    }
+
+    fn peekPendingChallengeData(self: State) [8]u8 {
+        return self.pending_challenges.items.items[self.pending_challenges.head].data;
     }
 
     fn removeOutstandingChallenge(self: *State, index: usize) Challenge {
