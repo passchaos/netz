@@ -926,18 +926,22 @@ pub const ControlState = struct {
         allocator: std.mem.Allocator,
         push_id: u64,
     ) Error!void {
-        if (self.pushCancelled(push_id)) {
+        const slot = try self.peer_cancelled_push_index.getOrPut(
+            allocator,
+            push_id,
+        );
+        if (slot.found_existing) {
             self.peer_cancelled_push_id = push_id;
             return;
         }
+        errdefer _ = self.peer_cancelled_push_index.remove(push_id);
         const next_generation = std.math.add(
             u64,
             self.push_cancellation_generation,
             1,
         ) catch return error.InvalidFrame;
-        try self.peer_cancelled_push_index.ensureUnusedCapacity(allocator, 1);
         try self.peer_cancelled_push_ids.append(allocator, push_id);
-        self.peer_cancelled_push_index.putAssumeCapacity(push_id, {});
+        slot.value_ptr.* = {};
         self.peer_cancelled_push_id = push_id;
         self.push_cancellation_generation = next_generation;
     }

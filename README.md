@@ -113,7 +113,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   continue beyond their initially negotiated stream credit. Both
   protected clients also maintain persistent MAX_PUSH_ID/CANCEL_PUSH control
   state with monotonic advertisement, per-ID cancellation retention, local
-  STOP_SENDING of active cancelled pushes, and advertised-range validation.
+  STOP_SENDING of active cancelled pushes, single-probe cancellation recording,
+  and advertised-range validation.
   Streaming response readers decode PUSH_PROMISE into owned promised-request
   heads, preserve the push ID, enforce the advertised limit, and account
   dynamic QPACK section feedback instead of discarding promised fields like
