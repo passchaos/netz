@@ -1829,6 +1829,11 @@ fn readMessageBytesWithContext(
         };
         break len;
     };
+    // Once framing has identified the complete message length, reserve the
+    // final owned buffer size before the bulk body read.  This keeps
+    // Content-Length responses from repeatedly growing the ArrayList while
+    // preserving the one-byte reads required before chunked length discovery.
+    try bytes.ensureTotalCapacity(allocator, target_len);
     while (bytes.items.len < target_len) {
         const read_buf = scratch[0..@min(scratch.len, target_len - bytes.items.len)];
         const n = try transport.read(read_buf);
@@ -1967,6 +1972,11 @@ fn readMessageBytesBufferedWithContext(
         break len;
     };
 
+    // Buffered reads may deliberately carry bytes from the following pipelined
+    // message, so this is only a lower-bound reservation.  It still avoids
+    // repeated growth for the common case where the current message body is not
+    // fully buffered yet.
+    try inbuf.ensureTotalCapacity(allocator, target_len);
     while (inbuf.items.len < target_len) {
         const n = try transport.read(&scratch);
         if (n == 0) return error.ConnectionClosed;
