@@ -1138,7 +1138,7 @@ pub const Frame = union(enum) {
             },
             .new_token => |new_token| blk: {
                 if (new_token.token.len == 0) return error.InvalidFrame;
-                const prefix = try varintWireLen(&.{ @intFromEnum(FrameType.new_token), new_token.token.len });
+                const prefix = try addWireLen(1, try varint.length(new_token.token.len));
                 break :blk try addWireLen(prefix, new_token.token.len);
             },
             .crypto => |crypto| blk: {
@@ -1253,7 +1253,7 @@ pub const Frame = union(enum) {
             },
             .new_token => |new_token| {
                 if (new_token.token.len == 0) return error.InvalidFrame;
-                try varint.encode(list, allocator, @intFromEnum(FrameType.new_token));
+                try list.append(allocator, @intFromEnum(FrameType.new_token));
                 try varint.encode(list, allocator, new_token.token.len);
                 try list.appendSlice(allocator, new_token.token);
             },
@@ -2697,6 +2697,20 @@ test "QUIC stream reset control frames write fixed frame type bytes" {
     parsed = try parseFrame(encoded.items);
     try std.testing.expectEqual(@as(u64, 4), parsed.frame.stop_sending.stream_id);
     try std.testing.expectEqual(@as(u64, 7), parsed.frame.stop_sending.application_error_code);
+}
+
+test "QUIC NEW_TOKEN frame writes fixed frame type byte" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    const frame = Frame{ .new_token = .{ .token = "token" } };
+    try frame.write(&encoded, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.new_token)), encoded.items[0]);
+    try std.testing.expectEqual(encoded.items.len, try frame.wireLen());
+
+    const parsed = try parseFrame(encoded.items);
+    try std.testing.expectEqualStrings("token", parsed.frame.new_token.token);
 }
 
 test "QUIC ACK frame owned parser preserves sparse ranges" {
