@@ -308,7 +308,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   no-allocation 1-RTT `stats`/`getStats` snapshot with lifetime packet/byte,
   loss, stream, DATAGRAM, RTT, congestion, recovery, sent/received-packet
   including retained ACK-history plus ack-eliciting in-flight size and latest send time, ECN,
-  authentication, and key-update counters plus per-stream send/receive stat snapshots with
+  authentication, and key-update counters plus indexed per-stream send/receive stat snapshots with
   remaining credit for fast telemetry loops,
   plus NSS SSLKEYLOGFILE-compatible handshake/application traffic-secret
   streaming from both integrated handshake roles with caller-visible sink

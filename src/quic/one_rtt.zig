@@ -363,6 +363,33 @@ pub const RecvStreamStats = struct {
     stop_sending_sent: ?StopSendingInfo,
 };
 
+fn sendStreamStatsFromEntry(entry: *const StreamFlowEntry) SendStreamStats {
+    return .{
+        .bytes_sent = entry.flow.used,
+        .highest_sent_offset = entry.highest_sent_end,
+        .send_limit = entry.flow.limit,
+        .send_available = entry.flow.available(),
+        .blocked = entry.flow.available() == 0,
+        .stopped = entry.stopped,
+        .reset = entry.reset_sent,
+    };
+}
+
+fn recvStreamStatsFromEntry(entry: *const StreamRecvFlowEntry) RecvStreamStats {
+    return .{
+        .bytes_received = entry.recv_state.receivedByteCount(),
+        .bytes_read = std.math.cast(u64, entry.recv_state.read_offset) orelse
+            std.math.maxInt(u64),
+        .highest_received_offset = entry.highest_received_end,
+        .available_bytes = entry.recv_state.available().len,
+        .receive_limit = entry.flow.limit,
+        .receive_window_available = entry.flow.limit -| entry.flow.highest_received,
+        .final_size = entry.final_size,
+        .reset = entry.reset,
+        .stop_sending_sent = entry.stop_sending_sent,
+    };
+}
+
 const PeerAddressUpdate = union(enum) {
     none,
     same_unvalidated: usize,
@@ -1450,19 +1477,11 @@ pub const Connection = struct {
     }
 
     pub fn sendStreamStats(self: Connection, stream_id: u64) ?SendStreamStats {
-        for (self.stream_send_flows.items) |entry| {
-            if (entry.stream_id != stream_id) continue;
-            return .{
-                .bytes_sent = entry.flow.used,
-                .highest_sent_offset = entry.highest_sent_end,
-                .send_limit = entry.flow.limit,
-                .send_available = entry.flow.available(),
-                .blocked = entry.flow.available() == 0,
-                .stopped = entry.stopped,
-                .reset = entry.reset_sent,
-            };
-        }
-        return null;
+        const index = self.stream_send_index.get(stream_id) orelse return null;
+        if (index >= self.stream_send_flows.items.len) return null;
+        const entry = &self.stream_send_flows.items[index];
+        if (entry.stream_id != stream_id) return null;
+        return sendStreamStatsFromEntry(entry);
     }
 
     pub fn getSendStreamStats(self: Connection, stream_id: u64) ?SendStreamStats {
@@ -1470,22 +1489,11 @@ pub const Connection = struct {
     }
 
     pub fn recvStreamStats(self: Connection, stream_id: u64) ?RecvStreamStats {
-        for (self.stream_recv_flows.items) |entry| {
-            if (entry.stream_id != stream_id) continue;
-            return .{
-                .bytes_received = entry.recv_state.receivedByteCount(),
-                .bytes_read = std.math.cast(u64, entry.recv_state.read_offset) orelse
-                    std.math.maxInt(u64),
-                .highest_received_offset = entry.highest_received_end,
-                .available_bytes = entry.recv_state.available().len,
-                .receive_limit = entry.flow.limit,
-                .receive_window_available = entry.flow.limit -| entry.flow.highest_received,
-                .final_size = entry.final_size,
-                .reset = entry.reset,
-                .stop_sending_sent = entry.stop_sending_sent,
-            };
-        }
-        return null;
+        const index = self.stream_recv_index.get(stream_id) orelse return null;
+        if (index >= self.stream_recv_flows.items.len) return null;
+        const entry = &self.stream_recv_flows.items[index];
+        if (entry.stream_id != stream_id) return null;
+        return recvStreamStatsFromEntry(entry);
     }
 
     pub fn getRecvStreamStats(self: Connection, stream_id: u64) ?RecvStreamStats {
@@ -2745,10 +2753,11 @@ pub const Connection = struct {
     }
 
     pub fn streamResetReceived(self: Connection, stream_id: u64) ?StreamResetInfo {
-        for (self.stream_recv_flows.items) |entry| {
-            if (entry.stream_id == stream_id) return entry.reset;
-        }
-        return null;
+        const index = self.stream_recv_index.get(stream_id) orelse return null;
+        if (index >= self.stream_recv_flows.items.len) return null;
+        const entry = self.stream_recv_flows.items[index];
+        if (entry.stream_id != stream_id) return null;
+        return entry.reset;
     }
 
     /// Copy the currently assembled receive bytes for diagnostics and
@@ -2759,18 +2768,19 @@ pub const Connection = struct {
         allocator: std.mem.Allocator,
         stream_id: u64,
     ) Error!?[]u8 {
-        for (self.stream_recv_flows.items) |entry| {
-            if (entry.stream_id != stream_id) continue;
-            return try allocator.dupe(u8, entry.recv_state.available());
-        }
-        return null;
+        const index = self.stream_recv_index.get(stream_id) orelse return null;
+        if (index >= self.stream_recv_flows.items.len) return null;
+        const entry = self.stream_recv_flows.items[index];
+        if (entry.stream_id != stream_id) return null;
+        return try allocator.dupe(u8, entry.recv_state.available());
     }
 
     pub fn streamStopped(self: Connection, stream_id: u64) ?StopSendingInfo {
-        for (self.stream_send_flows.items) |entry| {
-            if (entry.stream_id == stream_id) return entry.stopped;
-        }
-        return null;
+        const index = self.stream_send_index.get(stream_id) orelse return null;
+        if (index >= self.stream_send_flows.items.len) return null;
+        const entry = self.stream_send_flows.items[index];
+        if (entry.stream_id != stream_id) return null;
+        return entry.stopped;
     }
 
     pub fn queuePathChallenge(self: *Connection, data: [8]u8) Error!void {
