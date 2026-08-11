@@ -6601,11 +6601,14 @@ const PushStreamSet = struct {
         entry: *const Entry,
     ) Error!void {
         const push_id = entry.push_id orelse return;
-        if (self.push_index.contains(push_id)) return;
-        try self.push_index.ensureUnusedCapacity(self.allocator, 1);
         const stream_id: u62 = @intCast(entry.streamId());
         const index = self.stream_index.get(stream_id) orelse return;
-        self.push_index.putAssumeCapacity(push_id, index);
+        const slot = try self.push_index.getOrPut(self.allocator, push_id);
+        if (slot.found_existing) {
+            if (slot.value_ptr.* != index) return error.DuplicatePushId;
+            return;
+        }
+        slot.value_ptr.* = index;
     }
 
     fn takeEntryAt(self: *PushStreamSet, index: usize) Entry {
