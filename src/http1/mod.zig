@@ -493,6 +493,8 @@ fn parseHeaderLines(
     lines: *std.mem.SplitIterator(u8, .sequence),
     options: ParseOptions,
 ) Error!ParsedHeaders {
+    if (!options.allow_obs_fold) return parseHeaderLinesNoFold(allocator, lines.*, options);
+
     var headers: std.ArrayList(Header) = .empty;
     var value_storage: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -532,6 +534,51 @@ fn parseHeaderLines(
     errdefer allocator.free(owned_headers);
     const owned_value_storage = try value_storage.toOwnedSlice(allocator);
     return .{ .headers = owned_headers, .value_storage = owned_value_storage };
+}
+
+fn parseHeaderLinesNoFold(
+    allocator: std.mem.Allocator,
+    lines: std.mem.SplitIterator(u8, .sequence),
+    options: ParseOptions,
+) Error!ParsedHeaders {
+    var scan = lines;
+    var count: usize = 0;
+    while (scan.next()) |line| {
+        if (line.len == 0) continue;
+        if (line[0] == ' ' or line[0] == '\t') return error.MalformedHeader;
+        if (count >= options.max_headers) return error.TooManyHeaders;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.MalformedHeader;
+        if (colon == 0) return error.MalformedHeader;
+        try validateHeaderName(line[0..colon]);
+        const value = wire.trimOws(line[colon + 1 ..]);
+        try validateHeaderValue(value);
+        count += 1;
+    }
+
+    if (count == 0) {
+        return .{
+            .headers = @constCast(&[_]Header{}),
+            .value_storage = @constCast(&[_][]u8{}),
+        };
+    }
+
+    const headers = try allocator.alloc(Header, count);
+    errdefer allocator.free(headers);
+    var fill = lines;
+    var index: usize = 0;
+    while (fill.next()) |line| {
+        if (line.len == 0) continue;
+        const colon = std.mem.indexOfScalar(u8, line, ':').?;
+        headers[index] = .{
+            .name = line[0..colon],
+            .value = wire.trimOws(line[colon + 1 ..]),
+        };
+        index += 1;
+    }
+    return .{
+        .headers = headers,
+        .value_storage = @constCast(&[_][]u8{}),
+    };
 }
 
 fn appendFoldedHeaderValue(
@@ -1334,6 +1381,12 @@ test "HTTP/1 request parse and serialize" {
     try std.testing.expectEqualStrings("hello", req.body);
     try std.testing.expect(wire.containsToken(req.header("connection").?, "upgrade"));
     try std.testing.expectEqualStrings("websocket", req.upgradeProtocol().?);
+
+    var no_alloc_parse = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    var get_no_body = try parseRequest(no_alloc_parse.allocator(), "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n", .{});
+    defer get_no_body.deinit(no_alloc_parse.allocator());
+    try std.testing.expect(!no_alloc_parse.has_induced_failure);
+    try std.testing.expectEqualStrings("example.com", get_no_body.header("host").?);
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
