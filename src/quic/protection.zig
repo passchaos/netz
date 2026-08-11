@@ -1311,9 +1311,18 @@ fn shortHeaderFirstByte(options: ShortPacketOptions, packet_number_len: usize) u
 fn writeTruncatedPacketNumber(out: []u8, packet_number: u64) Error!void {
     if (out.len == 0 or out.len > 4) return error.InvalidPacketNumberLength;
     try validatePacketNumber(packet_number);
-    var full: [8]u8 = undefined;
-    std.mem.writeInt(u64, &full, packet_number, .big);
-    @memcpy(out, full[8 - out.len ..]);
+    writeTruncatedPacketNumberAssumeValid(out, packet_number);
+}
+
+pub fn writeTruncatedPacketNumberAssumeValid(out: []u8, packet_number: u64) void {
+    std.debug.assert(out.len != 0);
+    std.debug.assert(out.len <= 4);
+    std.debug.assert(packet_number <= max_packet_number);
+    const shift: u6 = @intCast((out.len - 1) * 8);
+    for (out, 0..) |*byte, index| {
+        const remaining_shift: u6 = shift - @as(u6, @intCast(index * 8));
+        byte.* = @truncate(packet_number >> remaining_shift);
+    }
 }
 
 pub fn openShortPacket(
@@ -1761,9 +1770,10 @@ fn validateShortHeaderReservedBits(first_byte: u8) Error!void {
 fn appendTruncatedPacketNumber(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet_number: u64, packet_number_len: u8) Error!void {
     try validatePacketNumberLen(packet_number_len);
     try validatePacketNumber(packet_number);
-    var full: [8]u8 = undefined;
-    std.mem.writeInt(u64, &full, packet_number, .big);
-    try list.appendSlice(allocator, full[8 - packet_number_len ..]);
+    var truncated: [4]u8 = undefined;
+    const bytes = truncated[0..packet_number_len];
+    writeTruncatedPacketNumberAssumeValid(bytes, packet_number);
+    try list.appendSlice(allocator, bytes);
 }
 
 /// Reconstruct a full packet number from its one-to-four-byte wire encoding.

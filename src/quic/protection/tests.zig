@@ -274,6 +274,24 @@ test "QUIC packet number length grows for tiny unpadded payloads" {
     try std.testing.expectEqual(@as(u8, 1), protection.packetNumberLenForPayload(1, 0, 3));
 }
 
+test "QUIC packet number writer emits shortest big-endian suffix" {
+    var one: [1]u8 = undefined;
+    protection.writeTruncatedPacketNumberAssumeValid(&one, 0x1234);
+    try std.testing.expectEqualSlices(u8, &.{0x34}, &one);
+
+    var two: [2]u8 = undefined;
+    protection.writeTruncatedPacketNumberAssumeValid(&two, 0x1234);
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34 }, &two);
+
+    var three: [3]u8 = undefined;
+    protection.writeTruncatedPacketNumberAssumeValid(&three, 0x123456);
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56 }, &three);
+
+    var four: [4]u8 = undefined;
+    protection.writeTruncatedPacketNumberAssumeValid(&four, 0x12345678);
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56, 0x78 }, &four);
+}
+
 test "QUIC packet number reconstruction validates bounds" {
     try std.testing.expectEqual(
         @as(u64, 0xa82f9b32),

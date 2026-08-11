@@ -163,7 +163,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   ACK range semantic validation plus empty-sent-space rejection, monotonic sent-packet insertion fast paths, and indexed-or-sorted exact sent-packet lookup with tail fast paths,
   no-new-ACK short-circuiting with sorted-range scan breaks, lookup-free tail-forget fast paths, cached sortedness for
   ACK/loss scans, and single-pass ACK marking,
-  receive-frame semantic preflight before multi-frame side effects, and adaptive truncated packet-number
+  receive-frame semantic preflight before multi-frame side effects, and direct adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with empty non-FIN send no-ops, single-lookup flow creation and empty-index lookup skips,
   duplicate-overlap conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,
