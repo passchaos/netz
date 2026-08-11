@@ -1780,7 +1780,6 @@ pub const Connection = struct {
             .traditional_connect = methodIsConnect(method) and protocol == null,
             .extended_connect = methodIsConnect(method) and protocol != null,
         };
-        try self.response_semantics.ensureUnusedCapacity(self.allocator, 1);
         const slot = try self.response_semantics_index.getOrPut(
             self.allocator,
             stream_id,
@@ -1789,6 +1788,8 @@ pub const Connection = struct {
             self.response_semantics.items[slot.value_ptr.*] = semantics;
             return;
         }
+        errdefer _ = self.response_semantics_index.remove(stream_id);
+        try self.response_semantics.ensureUnusedCapacity(self.allocator, 1);
         const index = self.response_semantics.items.len;
         self.response_semantics.appendAssumeCapacity(semantics);
         slot.value_ptr.* = index;
