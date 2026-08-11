@@ -3132,13 +3132,16 @@ fn writeFrame(
     stream_id: u31,
     payload: []const u8,
 ) Error!void {
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try (http2.Frame{
-        .header = .{ .length = 0, .frame_type = frame_type, .flags = flags, .stream_id = stream_id },
-        .payload = payload,
-    }).write(&encoded, allocator);
-    try writeAll(io, stream, encoded.items);
+    _ = allocator;
+    const payload_len = std.math.cast(u24, payload.len) orelse return error.InvalidFrameSize;
+    var header: [http2.FrameHeader.encoded_len]u8 = undefined;
+    header[0] = @truncate(payload_len >> 16);
+    header[1] = @truncate(payload_len >> 8);
+    header[2] = @truncate(payload_len);
+    header[3] = @intFromEnum(frame_type);
+    header[4] = flags;
+    std.mem.writeInt(u32, header[5..9], @as(u32, stream_id), .big);
+    try writeAllHeaderPayload(io, stream, &header, payload);
 }
 
 fn validateLocalLimits(limits: Limits) Error!void {
@@ -4037,6 +4040,31 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
         const n = try io.vtable.netWrite(io.userdata, stream.socket.handle, bytes[written..], &.{""}, 0);
         if (n == 0) return error.SocketUnconnected;
         written += n;
+    }
+}
+
+fn writeAllHeaderPayload(io: std.Io, stream: net.Stream, header: []const u8, payload: []const u8) net.Stream.Writer.Error!void {
+    if (payload.len == 0) {
+        try writeAll(io, stream, header);
+        return;
+    }
+    var header_written: usize = 0;
+    var payload_written: usize = 0;
+    while (header_written < header.len or payload_written < payload.len) {
+        const data = if (payload_written < payload.len)
+            &[_][]const u8{payload[payload_written..]}
+        else
+            &[_][]const u8{};
+        const n = if (header_written < header.len)
+            try io.vtable.netWrite(io.userdata, stream.socket.handle, header[header_written..], data, 0)
+        else
+            try io.vtable.netWrite(io.userdata, stream.socket.handle, payload[payload_written..], &.{""}, 0);
+        if (n == 0) return error.SocketUnconnected;
+
+        const header_remaining = header.len - header_written;
+        const header_advance = @min(n, header_remaining);
+        header_written += header_advance;
+        payload_written += n - header_advance;
     }
 }
 
