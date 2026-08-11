@@ -5861,9 +5861,11 @@ const StreamingMessageSet = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayList(Entry) = .empty,
     entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
+    lowest_entry_index: ?usize = null,
     resets: std.ArrayList(Reset) = .empty,
     reset_head: usize = 0,
     reset_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
+    lowest_reset_index: ?usize = null,
     max_streams: usize,
     max_stream_buffer: usize,
     settings: http3.Settings,
@@ -6030,18 +6032,14 @@ const StreamingMessageSet = struct {
         const stream_id: u62 = @intCast(entry.reader.receive.stream_id);
         self.entries.appendAssumeCapacity(entry);
         self.entry_index.putAssumeCapacity(stream_id, index);
+        self.considerLowestEntry(index);
         return &self.entries.items[index];
     }
 
     fn remove(self: *StreamingMessageSet, stream_id: u62) void {
         self.removeEntry(stream_id);
         if (self.reset_index.get(stream_id)) |index| {
-            _ = self.resets.swapRemove(index);
-            _ = self.reset_index.remove(stream_id);
-            if (index < self.resets.items.len) {
-                const moved = self.resets.items[index];
-                self.reset_index.getPtr(moved.stream_id).?.* = index;
-            }
+            self.removeResetAt(index);
             self.compactResetQueueIfSparse();
         }
     }
@@ -6054,12 +6052,20 @@ const StreamingMessageSet = struct {
     fn takeEntry(self: *StreamingMessageSet, stream_id: u62) ?Entry {
         const index = self.entry_index.get(stream_id) orelse return null;
         const last_index = self.entries.items.len - 1;
+        const lowest = self.lowest_entry_index;
         const removed = self.entries.swapRemove(index);
         _ = self.entry_index.remove(@intCast(removed.reader.receive.stream_id));
         if (index != last_index) {
             const moved = self.entries.items[index];
             self.entry_index.getPtr(@intCast(moved.reader.receive.stream_id)).?.* =
                 index;
+        }
+        if (self.entries.items.len == 0) {
+            self.lowest_entry_index = null;
+        } else if (lowest == index) {
+            self.recomputeLowestEntry();
+        } else if (lowest == last_index) {
+            self.lowest_entry_index = index;
         }
         return removed;
     }
@@ -6131,6 +6137,7 @@ const StreamingMessageSet = struct {
         {
             self.compactResetQueue();
         }
+        const index = self.resets.items.len;
         self.resets.appendAssumeCapacity(.{
             .from = from,
             .stream_id = stream_id,
@@ -6138,16 +6145,23 @@ const StreamingMessageSet = struct {
         });
         self.reset_index.putAssumeCapacityNoClobber(
             stream_id,
-            self.resets.items.len - 1,
+            index,
         );
+        self.considerLowestReset(index);
         if (removed_entry) |*entry| entry.deinit();
     }
 
     fn takeFirstReset(self: *StreamingMessageSet) ?Reset {
         if (self.resetCount() == 0) return null;
-        const reset = self.resets.items[self.reset_head];
+        const old_head = self.reset_head;
+        const reset = self.resets.items[old_head];
         _ = self.reset_index.remove(reset.stream_id);
         self.reset_head += 1;
+        if (self.resetCount() == 0) {
+            self.lowest_reset_index = null;
+        } else if (self.lowest_reset_index == old_head) {
+            self.recomputeLowestReset();
+        }
         // Reset delivery is FIFO but may happen in bursts. Advancing a cursor
         // keeps each pop O(1); occasional compaction reclaims consumed slots
         // before a bounded max-stream queue would otherwise appear full.
@@ -6223,6 +6237,17 @@ const StreamingMessageSet = struct {
         return entry.reader.hasUnacknowledgedDynamicSection(table);
     }
 
+    fn lowestEntryStream(self: StreamingMessageSet) ?u62 {
+        const index = self.lowest_entry_index orelse return null;
+        return @intCast(self.entries.items[index].reader.receive.stream_id);
+    }
+
+    fn lowestResetStream(self: StreamingMessageSet) ?u62 {
+        const index = self.lowest_reset_index orelse return null;
+        if (index < self.reset_head or index >= self.resets.items.len) return null;
+        return self.resets.items[index].stream_id;
+    }
+
     fn resetCount(self: StreamingMessageSet) usize {
         return self.resets.items.len - self.reset_head;
     }
@@ -6248,12 +6273,71 @@ const StreamingMessageSet = struct {
         self.resets.items.len = remaining;
         self.reset_head = 0;
         self.rebuildResetIndexAssumeCapacity();
+        self.recomputeLowestReset();
+    }
+
+    fn removeResetAt(self: *StreamingMessageSet, index: usize) void {
+        const last_index = self.resets.items.len - 1;
+        const lowest = self.lowest_reset_index;
+        const removed = self.resets.swapRemove(index);
+        _ = self.reset_index.remove(removed.stream_id);
+        if (index < self.resets.items.len) {
+            const moved = self.resets.items[index];
+            self.reset_index.getPtr(moved.stream_id).?.* = index;
+        }
+        if (self.resetCount() == 0) {
+            self.lowest_reset_index = null;
+        } else if (lowest == index) {
+            self.recomputeLowestReset();
+        } else if (lowest == last_index) {
+            self.lowest_reset_index = index;
+        }
     }
 
     fn rebuildResetIndexAssumeCapacity(self: *StreamingMessageSet) void {
         self.reset_index.clearRetainingCapacity();
         for (self.resets.items[self.reset_head..], self.reset_head..) |reset, index| {
             self.reset_index.putAssumeCapacityNoClobber(reset.stream_id, index);
+        }
+    }
+
+    fn considerLowestEntry(self: *StreamingMessageSet, index: usize) void {
+        const lowest = self.lowest_entry_index orelse {
+            self.lowest_entry_index = index;
+            return;
+        };
+        if (self.entries.items[index].reader.receive.stream_id <
+            self.entries.items[lowest].reader.receive.stream_id)
+        {
+            self.lowest_entry_index = index;
+        }
+    }
+
+    fn recomputeLowestEntry(self: *StreamingMessageSet) void {
+        self.lowest_entry_index = null;
+        for (self.entries.items, 0..) |_, index| {
+            self.considerLowestEntry(index);
+        }
+    }
+
+    fn considerLowestReset(self: *StreamingMessageSet, index: usize) void {
+        if (index < self.reset_head) return;
+        const lowest = self.lowest_reset_index orelse {
+            self.lowest_reset_index = index;
+            return;
+        };
+        if (self.resets.items[index].stream_id <
+            self.resets.items[lowest].stream_id)
+        {
+            self.lowest_reset_index = index;
+        }
+    }
+
+    fn recomputeLowestReset(self: *StreamingMessageSet) void {
+        self.lowest_reset_index = null;
+        var index = self.reset_head;
+        while (index < self.resets.items.len) : (index += 1) {
+            self.considerLowestReset(index);
         }
     }
 };
@@ -7072,11 +7156,11 @@ const ServerRequestLifecycle = struct {
         if (request_streams.lowestStream()) |stream_id| {
             if (stream_id < goaway_id) return false;
         }
-        for (streaming_requests.entries.items) |entry| {
-            if (entry.reader.receive.stream_id < goaway_id) return false;
+        if (streaming_requests.lowestEntryStream()) |stream_id| {
+            if (stream_id < goaway_id) return false;
         }
-        for (streaming_requests.resets.items[streaming_requests.reset_head..]) |reset| {
-            if (reset.stream_id < goaway_id) return false;
+        if (streaming_requests.lowestResetStream()) |stream_id| {
+            if (stream_id < goaway_id) return false;
         }
         return true;
     }
@@ -10950,6 +11034,7 @@ test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
     }
     try std.testing.expectEqual(@as(usize, 3), requests.resetCount());
     try std.testing.expectEqual(@as(usize, 3), requests.reset_index.count());
+    try std.testing.expectEqual(@as(?u62, 0), requests.lowestResetStream());
     try std.testing.expect(requests.contains(4));
 
     const first = requests.takeFirstReset() orelse
@@ -10957,6 +11042,7 @@ test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
     try std.testing.expectEqual(@as(u62, 0), first.stream_id);
     try std.testing.expectEqual(@as(usize, 2), requests.resetCount());
     try std.testing.expectEqual(@as(usize, 2), requests.reset_index.count());
+    try std.testing.expectEqual(@as(?u62, 4), requests.lowestResetStream());
     try std.testing.expect(!requests.contains(0));
 
     // The queue has consumed a head element. Adding a replacement must reuse
@@ -10973,6 +11059,7 @@ test "HTTP/3 streaming request reset queue reuses consumed FIFO slots" {
     requests.remove(8);
     try std.testing.expect(!requests.contains(8));
     try std.testing.expectEqual(@as(usize, 2), requests.reset_index.count());
+    try std.testing.expectEqual(@as(?u62, 4), requests.lowestResetStream());
 
     for ([_]u62{ 4, 12 }) |stream_id| {
         const reset = requests.takeFirstReset() orelse
@@ -11008,6 +11095,7 @@ test "HTTP/3 streaming message set indexes active readers" {
     _ = try responses.activateResponse(&buffered, 4);
     _ = try responses.activateResponse(&buffered, 8);
     try std.testing.expect(responses.find(4) != null);
+    try std.testing.expectEqual(@as(?u62, 0), responses.lowestEntryStream());
 
     responses.removeEntry(4);
     try std.testing.expect(responses.find(4) == null);
@@ -11015,14 +11103,17 @@ test "HTTP/3 streaming message set indexes active readers" {
     // stream-id index must follow it so later DATA, reset, or QPACK-cancel
     // checks can find the active reader without a linear scan.
     try std.testing.expect(responses.find(8) != null);
+    try std.testing.expectEqual(@as(?u62, 0), responses.lowestEntryStream());
 
     const taken = responses.takeEntry(8) orelse return error.TestUnexpectedResult;
     var owned = taken;
     defer owned.deinit();
     try std.testing.expect(responses.find(8) == null);
     try std.testing.expectEqual(@as(usize, 1), responses.entry_index.count());
+    try std.testing.expectEqual(@as(?u62, 0), responses.lowestEntryStream());
     responses.removeEntry(0);
     try std.testing.expectEqual(@as(usize, 0), responses.entry_index.count());
+    try std.testing.expectEqual(@as(?u62, null), responses.lowestEntryStream());
 }
 
 test "HTTP/3 buffered stream sets index reassembly entries" {
