@@ -2771,7 +2771,8 @@ pub const Connection = struct {
     }
 
     fn hasRecvStreamWindow(self: Connection, stream_id: u31) bool {
-        return self.recv_stream_window_index.contains(stream_id);
+        return self.recv_stream_window_index.count() != 0 and
+            self.recv_stream_window_index.contains(stream_id);
     }
 };
 
