@@ -303,11 +303,16 @@ pub const Queue = struct {
             if (candidate != packet_number) continue;
             if (retransmission_index == entry.retransmission_packet_numbers.items.len - 1) {
                 _ = entry.retransmission_packet_numbers.pop();
+                entry.refreshNewestPacketNumber();
             } else {
-                _ = entry.retransmission_packet_numbers.orderedRemove(retransmission_index);
+                // Retransmission packet numbers only need membership for ACK
+                // retirement and the newest copy for PTO scheduling. Preserve
+                // newest_packet_number and avoid orderedRemove's memmove when
+                // forgetting an older middle copy.
+                const last = entry.retransmission_packet_numbers.pop().?;
+                entry.retransmission_packet_numbers.items[retransmission_index] = last;
             }
             _ = self.packet_index.remove(packet_number);
-            entry.refreshNewestPacketNumber();
             self.packet_number_copies -|= 1;
             self.retransmission_copies -|= 1;
             return true;
@@ -558,6 +563,25 @@ test "QUIC recovery queue keeps stable group identity across retransmissions" {
     try std.testing.expect(queue.group_index.get(group_id) == null);
     try std.testing.expect(queue.packet_index.get(4) == null);
     try std.testing.expect(queue.packet_index.get(8) == null);
+}
+
+test "QUIC recovery queue forgets middle retransmission without losing newest" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    _ = try queue.trackSent(1, "payload");
+    try queue.recordRetransmission(0, 2);
+    try queue.recordRetransmission(0, 3);
+    try queue.recordRetransmission(0, 4);
+
+    try std.testing.expect(queue.forgetPacketNumber(2));
+    try std.testing.expectEqual(@as(u64, 4), queue.pending.items[0].newestPacketNumber());
+    try std.testing.expectEqual(@as(usize, 3), queue.pending.items[0].packetCount());
+    try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(1));
+    try std.testing.expect(queue.packet_index.get(2) == null);
+    try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(3));
+    try std.testing.expectEqual(@as(?usize, 0), queue.packet_index.get(4));
 }
 
 test "QUIC recovery queue indexes survive ordered removals and ACK compaction" {

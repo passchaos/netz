@@ -287,7 +287,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   validated path MTU,
   an indexed 1-RTT recovery queue with single-lookup group/packet insertion, empty-index group checks, cached newest retransmission packet numbers, and aggregate queue stats for PTO plus packet-threshold and time-threshold
   retransmission of unacknowledged ack-eliciting frame payloads with single-pass
-  ACK-range retirement, no-op ACK short-circuiting, O(1) tail ACK/copy removal,
+  ACK-range retirement, no-op ACK short-circuiting, O(1) tail ACK/copy removal and middle retransmission-copy retirement,
   single-pass sent-packet tracker stats, exact frame wire-length prediction,
   allocation-free caller-storage multi-packet protection,
   single-allocation batch wrappers, and stateful connection batches that
