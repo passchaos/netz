@@ -372,6 +372,7 @@ pub const Cache = struct {
     ) bool {
         if (lease.owner != self) return false;
         if (lease.state != .active) return false;
+        if (self.lease_index.count() == 0) return false;
         const index = self.lease_index.get(lease.lease_id) orelse return false;
         return self.entries.items[index].lease_id == lease.lease_id;
     }
@@ -383,6 +384,7 @@ pub const Cache = struct {
     ) Error!void {
         if (lease.state != .active) return error.LeaseAlreadyFinished;
         if (lease.owner != self) return error.UnknownLease;
+        if (self.lease_index.count() == 0) return error.UnknownLease;
         const index = self.lease_index.get(lease.lease_id) orelse
             return error.UnknownLease;
         var entry = &self.entries.items[index];
@@ -409,6 +411,7 @@ pub const Cache = struct {
     }
 
     fn find(self: *const Cache, server_id: []const u8, alpn: []const u8) ?usize {
+        if (self.origin_index.count() == 0) return null;
         return self.origin_index.get(.{
             .server_id = server_id,
             .alpn = alpn,
@@ -480,7 +483,8 @@ pub const Cache = struct {
     }
 
     fn leaseIdActive(self: *const Cache, id: u64) bool {
-        return self.lease_index.contains(id);
+        return self.lease_index.count() != 0 and
+            self.lease_index.contains(id);
     }
 
     fn appendEntryAssumeCapacity(self: *Cache, entry: Entry) void {
