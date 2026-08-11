@@ -1183,11 +1183,8 @@ pub const Frame = union(enum) {
             .new_connection_id => |frame| blk: {
                 try validateConnectionIdLen(frame.connection_id.len);
                 if (frame.retire_prior_to > frame.sequence_number) return error.InvalidFrame;
-                var len = try varintWireLen(&.{
-                    @intFromEnum(FrameType.new_connection_id),
-                    frame.sequence_number,
-                    frame.retire_prior_to,
-                });
+                var len = try addWireLen(1, try varint.length(frame.sequence_number));
+                len = try addWireLen(len, try varint.length(frame.retire_prior_to));
                 len = try addWireLen(len, 1);
                 len = try addWireLen(len, frame.connection_id.len);
                 break :blk try addWireLen(len, frame.stateless_reset_token.len);
@@ -1303,7 +1300,7 @@ pub const Frame = union(enum) {
             .new_connection_id => |new_connection_id| {
                 try validateConnectionIdLen(new_connection_id.connection_id.len);
                 if (new_connection_id.retire_prior_to > new_connection_id.sequence_number) return error.InvalidFrame;
-                try varint.encode(list, allocator, @intFromEnum(FrameType.new_connection_id));
+                try list.append(allocator, @intFromEnum(FrameType.new_connection_id));
                 try varint.encode(list, allocator, new_connection_id.sequence_number);
                 try varint.encode(list, allocator, new_connection_id.retire_prior_to);
                 try list.append(allocator, @intCast(new_connection_id.connection_id.len));
@@ -2712,6 +2709,29 @@ test "QUIC NEW_TOKEN frame writes fixed frame type byte" {
 
     const parsed = try parseFrame(encoded.items);
     try std.testing.expectEqualStrings("token", parsed.frame.new_token.token);
+}
+
+test "QUIC NEW_CONNECTION_ID frame writes fixed frame type byte" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    const token = [_]u8{0xa5} ** 16;
+    const frame = Frame{ .new_connection_id = .{
+        .sequence_number = 2,
+        .retire_prior_to = 1,
+        .connection_id = "cid",
+        .stateless_reset_token = token,
+    } };
+    try frame.write(&encoded, allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(FrameType.new_connection_id)), encoded.items[0]);
+    try std.testing.expectEqual(encoded.items.len, try frame.wireLen());
+
+    const parsed = try parseFrame(encoded.items);
+    try std.testing.expectEqual(@as(u64, 2), parsed.frame.new_connection_id.sequence_number);
+    try std.testing.expectEqual(@as(u64, 1), parsed.frame.new_connection_id.retire_prior_to);
+    try std.testing.expectEqualStrings("cid", parsed.frame.new_connection_id.connection_id);
+    try std.testing.expectEqualSlices(u8, &token, &parsed.frame.new_connection_id.stateless_reset_token);
 }
 
 test "QUIC ACK frame owned parser preserves sparse ranges" {
