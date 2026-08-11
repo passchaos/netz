@@ -85,7 +85,7 @@ pub const Pacer = struct {
         congestion_window: usize,
         smoothed_rtt_ns: u64,
     ) void {
-        if (!self.enabled) return;
+        if (!self.enabled or packet_size == 0) return;
         self.budget = self.budgetAt(now_ns, congestion_window, smoothed_rtt_ns) -| packet_size;
         self.last_sent_time_ns = now_ns;
     }
@@ -99,6 +99,9 @@ pub const Pacer = struct {
 test "QUIC pacer permits initial burst and computes exact deadline" {
     var pacer = Pacer.init(true, 1200, 10);
     try std.testing.expectEqual(@as(usize, 12_000), pacer.budget);
+    pacer.onPacketSentAt(1_000_000, 0, 12_000, 100_000_000);
+    try std.testing.expectEqual(@as(usize, 12_000), pacer.budget);
+    try std.testing.expectEqual(@as(?u64, null), pacer.last_sent_time_ns);
 
     var packet: usize = 0;
     while (packet < 10) : (packet += 1) {
