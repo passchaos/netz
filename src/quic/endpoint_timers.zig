@@ -123,8 +123,8 @@ pub const EndpointTimers = struct {
         now_ns: u64,
     ) Error!?EndpointTimerDeadline {
         const serviced = try connection.serviceNextTimerAt(now_ns);
-        try self.armFromConnection(connection_id, connection);
         const timer = serviced orelse return null;
+        try self.armFromConnection(connection_id, connection);
         return .{
             .connection_id = connection_id,
             .timer = timer,
