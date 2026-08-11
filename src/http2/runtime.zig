@@ -401,12 +401,12 @@ pub const Client = struct {
         connection.applyLocalLimits();
         errdefer connection.close();
 
-        var settings_payload: std.ArrayList(u8) = .empty;
-        defer settings_payload.deinit(allocator);
-        try writeSettingsPayloadForLimits(allocator, &settings_payload, limits, .client);
-        const settings_value = try allocator.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(settings_payload.items.len));
+        const h2c_settings = try settingsForLimits(limits, .client);
+        var settings_payload_buf: [max_settings_payload_len]u8 = undefined;
+        const settings_payload = try encodeSettingsPayloadInto(&settings_payload_buf, h2c_settings.buf[0..h2c_settings.count]);
+        const settings_value = try allocator.alloc(u8, std.base64.url_safe_no_pad.Encoder.calcSize(settings_payload.len));
         defer allocator.free(settings_value);
-        _ = std.base64.url_safe_no_pad.Encoder.encode(settings_value, settings_payload.items);
+        _ = std.base64.url_safe_no_pad.Encoder.encode(settings_value, settings_payload);
 
         var headers: std.ArrayList(http1.Header) = .empty;
         defer headers.deinit(allocator);
@@ -442,7 +442,7 @@ pub const Client = struct {
         if (!containsHttpToken(connection_header, "upgrade")) return error.InvalidResponse;
 
         try writeAll(io, stream, http2.connection_preface);
-        try writeFrame(allocator, io, stream, .settings, 0, 0, settings_payload.items);
+        try writeFrame(allocator, io, stream, .settings, 0, 0, settings_payload);
         var server_settings = try readFrame(allocator, io, stream, limits);
         defer server_settings.deinit(allocator);
         if (server_settings.frame.header.frame_type != .settings or (server_settings.frame.header.flags & flag_ack) != 0) return error.UnexpectedFrame;
@@ -3158,10 +3158,10 @@ fn calcMaxContinuationFrames(header_max: usize, frame_max: usize) usize {
 }
 
 fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits, role: Role) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try writeSettingsPayloadForLimits(allocator, &payload, limits, role);
-    try writeFrame(allocator, io, stream, .settings, 0, 0, payload.items);
+    const settings = try settingsForLimits(limits, role);
+    var payload_buf: [max_settings_payload_len]u8 = undefined;
+    const payload = try encodeSettingsPayloadInto(&payload_buf, settings.buf[0..settings.count]);
+    try writeFrame(allocator, io, stream, .settings, 0, 0, payload);
 }
 
 fn cloneDecodedHeaders(
@@ -3970,7 +3970,14 @@ fn headersContainHttpToken(headers: []const http1.Header, name: []const u8, need
     return false;
 }
 
-fn writeSettingsPayloadForLimits(allocator: std.mem.Allocator, payload: *std.ArrayList(u8), limits: Limits, role: Role) Error!void {
+const max_settings_payload_len = 8 * 6;
+
+const SettingsForLimits = struct {
+    buf: [8]http2.Setting,
+    count: usize,
+};
+
+fn settingsForLimits(limits: Limits, role: Role) Error!SettingsForLimits {
     try validateLocalLimits(limits);
     var settings_buf: [8]http2.Setting = undefined;
     var count: usize = 0;
@@ -4006,7 +4013,24 @@ fn writeSettingsPayloadForLimits(allocator: std.mem.Allocator, payload: *std.Arr
         };
         count += 1;
     }
-    try http2.writeSettings(payload, allocator, settings_buf[0..count]);
+    return .{ .buf = settings_buf, .count = count };
+}
+
+fn encodeSettingsPayloadInto(out: *[max_settings_payload_len]u8, settings: []const http2.Setting) Error![]const u8 {
+    var pos: usize = 0;
+    for (settings) |setting| {
+        try http2.validateSetting(setting.id, setting.value);
+        std.mem.writeInt(u16, out[pos..][0..2], @intFromEnum(setting.id), .big);
+        pos += 2;
+        std.mem.writeInt(u32, out[pos..][0..4], setting.value, .big);
+        pos += 4;
+    }
+    return out[0..pos];
+}
+
+fn writeSettingsPayloadForLimits(allocator: std.mem.Allocator, payload: *std.ArrayList(u8), limits: Limits, role: Role) Error!void {
+    const settings = try settingsForLimits(limits, role);
+    try http2.writeSettings(payload, allocator, settings.buf[0..settings.count]);
 }
 
 fn limitsToHttp1(limits: Limits) http1_runtime.Limits {
