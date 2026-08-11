@@ -1186,6 +1186,7 @@ pub const Hpack = struct {
     };
 
     pub fn findStaticIndex(name: []const u8, value: []const u8) ?u64 {
+        if (fastStaticPseudoIndex(name, value)) |index| return index;
         const indexes = static_name_index.get(name) orelse return null;
         // HPACK field encoding queries the static table for every header.  The
         // Work reference implementations scan the whole 61-entry table; this
@@ -1201,8 +1202,51 @@ pub const Hpack = struct {
     }
 
     pub fn findStaticNameIndex(name: []const u8) ?u64 {
+        if (fastStaticPseudoNameIndex(name)) |index| return index;
         const indexes = static_name_index.get(name) orelse return null;
         return indexes[0];
+    }
+
+    fn fastStaticPseudoIndex(name: []const u8, value: []const u8) ?u64 {
+        if (std.mem.eql(u8, name, ":method")) {
+            if (std.mem.eql(u8, value, "GET")) return 2;
+            if (std.mem.eql(u8, value, "POST")) return 3;
+            return null;
+        }
+        if (std.mem.eql(u8, name, ":path")) {
+            if (std.mem.eql(u8, value, "/")) return 4;
+            if (std.mem.eql(u8, value, "/index.html")) return 5;
+            return null;
+        }
+        if (std.mem.eql(u8, name, ":scheme")) {
+            if (std.mem.eql(u8, value, "http")) return 6;
+            if (std.mem.eql(u8, value, "https")) return 7;
+            return null;
+        }
+        if (std.mem.eql(u8, name, ":status")) {
+            if (std.mem.eql(u8, value, "200")) return 8;
+            if (std.mem.eql(u8, value, "204")) return 9;
+            if (std.mem.eql(u8, value, "206")) return 10;
+            if (std.mem.eql(u8, value, "304")) return 11;
+            if (std.mem.eql(u8, value, "400")) return 12;
+            if (std.mem.eql(u8, value, "404")) return 13;
+            if (std.mem.eql(u8, value, "500")) return 14;
+            return null;
+        }
+        if (std.mem.eql(u8, name, ":authority")) {
+            if (value.len == 0) return 1;
+            return null;
+        }
+        return null;
+    }
+
+    fn fastStaticPseudoNameIndex(name: []const u8) ?u64 {
+        if (std.mem.eql(u8, name, ":authority")) return 1;
+        if (std.mem.eql(u8, name, ":method")) return 2;
+        if (std.mem.eql(u8, name, ":path")) return 4;
+        if (std.mem.eql(u8, name, ":scheme")) return 6;
+        if (std.mem.eql(u8, name, ":status")) return 8;
+        return null;
     }
 
     pub fn sensitiveHeaderName(name: []const u8) bool {
@@ -2087,6 +2131,11 @@ test "HTTP/2 HPACK static lookup index preserves one-indexed table order" {
     try std.testing.expectEqual(@as(?u64, 2), Hpack.findStaticNameIndex(":method"));
     try std.testing.expectEqual(@as(?u64, 8), Hpack.findStaticNameIndex(":status"));
     try std.testing.expectEqual(@as(?u64, 31), Hpack.findStaticNameIndex("content-type"));
+    try std.testing.expectEqual(@as(?u64, 2), Hpack.findStaticIndex(":method", "GET"));
+    try std.testing.expectEqual(@as(?u64, 3), Hpack.findStaticIndex(":method", "POST"));
+    try std.testing.expectEqual(@as(?u64, 4), Hpack.findStaticIndex(":path", "/"));
+    try std.testing.expectEqual(@as(?u64, 7), Hpack.findStaticIndex(":scheme", "https"));
+    try std.testing.expectEqual(@as(?u64, 9), Hpack.findStaticIndex(":status", "204"));
     try std.testing.expect(Hpack.findStaticIndex(":status", "418") == null);
     try std.testing.expect(Hpack.findStaticNameIndex("x-not-static") == null);
 }
