@@ -5789,6 +5789,7 @@ const ResponseStreamSet = struct {
     }
 
     fn takeReset(self: *ResponseStreamSet, stream_id: u62) ?u64 {
+        if (self.resets.count() == 0) return null;
         const code = self.resets.get(stream_id) orelse return null;
         _ = self.resets.remove(stream_id);
         self.removeResetOrder(stream_id);
@@ -11466,6 +11467,7 @@ test "HTTP/3 buffered stream sets index reassembly entries" {
     _ = responses.takeReset(20);
     try std.testing.expect(!bufferedHasResponse(responses, 20));
     try std.testing.expectEqual(@as(usize, 0), responses.resetCount());
+    try std.testing.expect(responses.takeReset(20) == null);
 
     try responses.recordReset(24, 0x24);
     try responses.recordReset(28, 0x28);
