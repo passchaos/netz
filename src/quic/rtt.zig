@@ -56,7 +56,7 @@ pub const Stats = struct {
         self.min_rtt = @min(self.min_rtt, send_delta_ns);
 
         var adjusted_rtt = send_delta_ns;
-        if (handshake_confirmed) {
+        if (handshake_confirmed and ack_delay_ns != 0 and self.max_ack_delay != 0) {
             const effective_ack_delay = @min(ack_delay_ns, self.max_ack_delay);
             if (adjusted_rtt > self.min_rtt + effective_ack_delay) {
                 adjusted_rtt -= effective_ack_delay;
@@ -149,6 +149,16 @@ test "QUIC RTT estimator applies capped ACK delay after handshake" {
     stats.update(150_000_000, 50_000_000, true);
     try std.testing.expect(stats.latest_rtt == 150_000_000);
     try std.testing.expect(stats.smoothed_rtt < 110_000_000);
+
+    var zero_delay = Stats{};
+    zero_delay.update(100_000_000, 0, false);
+    zero_delay.update(120_000_000, 0, true);
+    try std.testing.expect(zero_delay.smoothed_rtt > 102_000_000);
+
+    var zero_cap = Stats.init(0);
+    zero_cap.update(100_000_000, 0, false);
+    zero_cap.update(120_000_000, 30_000_000, true);
+    try std.testing.expectEqual(zero_delay.smoothed_rtt, zero_cap.smoothed_rtt);
 }
 
 test "QUIC RTT estimator loss and persistent congestion thresholds" {
