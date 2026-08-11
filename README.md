@@ -161,7 +161,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   packet-number space ACK tracking with cached retained-packet counts, first/newest/oldest-range fast paths, tail
   ACK-range append/removal fast paths, and bounded duplicate/old packet suppression,
   ACK range semantic validation plus empty-sent-space rejection, pre-oldest ACK prune skips, monotonic sent-packet insertion fast paths, and indexed-or-sorted exact sent-packet lookup with tail fast paths,
-  no-new-ACK short-circuiting with sorted-range scan breaks, lookup-free tail-forget fast paths, cached sortedness for
+  no-new-ACK short-circuiting with sorted-range scan breaks and lower-bound ACK probes, lookup-free tail-forget fast paths, cached sortedness for
   ACK/loss scans, and single-pass ACK marking,
   receive-frame semantic preflight before multi-frame side effects, and direct adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with empty non-FIN send no-ops, single-lookup flow creation and empty-index lookup skips,

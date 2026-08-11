@@ -1270,7 +1270,9 @@ pub const SentPacketTracker = struct {
 
     fn rangeContainsNewAckEliciting(self: SentPacketTracker, start: u64, end: u64) bool {
         const sorted_packets = self.packetsSortedAscending();
-        for (self.packets.items) |packet| {
+        var index: usize = if (sorted_packets) self.lowerBoundPacketIndex(start) else 0;
+        while (index < self.packets.items.len) : (index += 1) {
+            const packet = self.packets.items[index];
             if (packet.packet_number < start) continue;
             if (packet.packet_number > end) {
                 if (sorted_packets) break;
@@ -1280,6 +1282,20 @@ pub const SentPacketTracker = struct {
             return true;
         }
         return false;
+    }
+
+    fn lowerBoundPacketIndex(self: SentPacketTracker, packet_number: u64) usize {
+        var low: usize = 0;
+        var high = self.packets.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (self.packets.items[mid].packet_number < packet_number) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
     }
 
     fn ackDoesNotAdvanceEcnLargest(self: SentPacketTracker, largest_acknowledged: u64) bool {
@@ -1825,6 +1841,25 @@ test "QUIC sent packet tracker accepts non-eliciting largest ACK when range newl
     try std.testing.expectEqual(@as(u64, 10_000), sample.latest_rtt_ns);
     try std.testing.expectEqual(@as(u64, 1), sample.largest_acknowledged);
     try std.testing.expectEqual(@as(u64, 2_000), sample.sent_time_ns);
+}
+
+test "QUIC sent packet tracker lower-bounds sorted ACK RTT scans" {
+    const allocator = std.testing.allocator;
+    var sent = SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    for (0..64) |packet_number| {
+        try sent.sentAt(@intCast(packet_number), packet_number == 63, 100, .not_ect, @intCast(1_000 + packet_number));
+    }
+    try std.testing.expect(sent.packetsSortedAscending());
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 63,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+    const sample = (try sent.ackRttSample(ack, 10_000, 3)).?;
+    try std.testing.expectEqual(@as(u64, 63), sample.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 1_063), sample.sent_time_ns);
 }
 
 test "QUIC sent packet tracker validates ACK_ECN counters" {
