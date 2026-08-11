@@ -156,8 +156,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   packet-number space ACK tracking with cached retained-packet counts, tail
   ACK-range append/removal fast paths, and bounded duplicate/old packet suppression,
   ACK range semantic validation plus indexed exact sent-packet lookup with
-  tail-forget fast paths, cached sortedness for ACK/loss scans, and single-pass
-  ACK marking,
+  no-new-ACK short-circuiting, tail-forget fast paths, cached sortedness for
+  ACK/loss scans, and single-pass ACK marking,
   receive-frame semantic preflight before multi-frame side effects, and adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with
   duplicate-overlap conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING

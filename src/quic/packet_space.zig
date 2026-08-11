@@ -580,11 +580,13 @@ pub const SentPacketTracker = struct {
     const AckPrecheck = struct {
         total_span: u64 = 0,
         sent_packets: u64 = 0,
+        newly_acked_packets: usize = 0,
         newly_acked_ect: NewlyAckedEctCounts = .{},
 
         fn observeSentPacket(self: *AckPrecheck, packet: SentPacket) void {
             self.sent_packets += 1;
             if (packet.acknowledged) return;
+            self.newly_acked_packets += 1;
             switch (packet.ecn) {
                 .not_ect => {},
                 .ect0 => self.newly_acked_ect.ect0 += 1,
@@ -646,7 +648,10 @@ pub const SentPacketTracker = struct {
             precheck,
         );
 
-        var acked = self.markRanges(decoded.ranges, sorted);
+        var acked: AckResult = .{};
+        if (precheck.newly_acked_packets != 0) {
+            acked = self.markRanges(decoded.ranges, sorted);
+        }
         if (ack.ecn_counts) |ecn_counts| {
             if (ecn_validation.update_counts) {
                 self.latest_ecn_counts = ecn_counts;
