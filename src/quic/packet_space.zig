@@ -155,6 +155,7 @@ pub const ReceivedPacketTracker = struct {
     pub fn ackFrame(self: ReceivedPacketTracker, allocator: std.mem.Allocator, ack_delay: u64) Error!quic.AckFrame {
         if (self.ranges.items.len == 0) return error.InvalidAckFrame;
         const extra_count = self.ranges.items.len - 1;
+        if (extra_count == 0) return self.ackFrameInto(&.{}, ack_delay);
         const ack_ranges = try allocator.alloc(quic.AckRange, extra_count);
         errdefer allocator.free(ack_ranges);
         return self.ackFrameInto(ack_ranges, ack_delay);
@@ -1414,6 +1415,11 @@ test "QUIC packet space records first ACK range without scanning" {
     try std.testing.expect(try received.recordFresh(42));
     try std.testing.expectEqual(@as(usize, 1), received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 42), received.largestReceived().?);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const ack = try received.ackFrame(no_alloc.allocator(), 7);
+    try std.testing.expectEqual(@as(u64, 42), ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(usize, 0), ack.ranges.len);
+    try std.testing.expectEqual(@as(u64, 7), ack.ack_delay);
 
     var disabled = ReceivedPacketTracker.init(allocator, 0);
     defer disabled.deinit();
