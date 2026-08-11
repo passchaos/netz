@@ -9,6 +9,7 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     const huffman = try Qpack.encodeHuffman(allocator, "www.example.com");
     defer allocator.free(huffman);
     try std.testing.expectEqualSlices(u8, &.{ 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff }, huffman);
+    try std.testing.expectEqual(huffman.len, try Qpack.huffmanEncodedLen("www.example.com"));
     const decoded_huffman = try Qpack.decodeHuffman(allocator, huffman);
     defer allocator.free(decoded_huffman);
     try std.testing.expectEqualStrings("www.example.com", decoded_huffman);
