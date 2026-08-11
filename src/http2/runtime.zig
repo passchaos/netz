@@ -1286,10 +1286,11 @@ pub const Connection = struct {
         if (semantics.traditional_connect and options.status >= 200 and options.status < 300) {
             try stripSuccessfulConnectContentLength(&fields);
         }
-        try validateResponseBodyForStatus(options.status, fields.items, options.body, options.trailers);
-        try validateResponseBodyForRequestSemantics(options.status, semantics, fields.items, options.body, options.trailers);
-        try validateDeclaredResponseLength(options.status, semantics, fields.items, options.body.len);
-        if (responseShouldDefaultContentLength(options.status, semantics, fields.items, options.body.len)) {
+        const declared_response_length = try contentLength(fields.items);
+        try validateResponseBodyForStatusWithLength(options.status, declared_response_length, options.body, options.trailers);
+        try validateResponseBodyForRequestSemanticsWithLength(options.status, semantics, declared_response_length, options.body, options.trailers);
+        try validateDeclaredResponseLengthValue(options.status, semantics, declared_response_length, options.body.len);
+        if (responseShouldDefaultContentLengthValue(options.status, semantics, declared_response_length, options.body.len)) {
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{options.body.len}) catch unreachable;
             try fields.append(self.allocator, .{ .name = "content-length", .value = content_length });
         }
@@ -3653,9 +3654,22 @@ fn validateResponseBodyForStatus(
     body: []const u8,
     trailers: []const http2.Hpack.HeaderField,
 ) Error!void {
+    try validateResponseBodyForStatusWithLength(
+        status,
+        try contentLength(headers),
+        body,
+        trailers,
+    );
+}
+
+fn validateResponseBodyForStatusWithLength(
+    status: u16,
+    declared_content_length: ?usize,
+    body: []const u8,
+    trailers: []const http2.Hpack.HeaderField,
+) Error!void {
     if (!((status >= 100 and status < 200) or status == 204 or status == 304)) return;
     if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
-    const declared_content_length = try contentLength(headers);
     // As in HTTP/1, 304 may describe the selected representation length, but
     // 1xx and 204 responses terminate at the HEADERS block and must not carry a
     // Content-Length that could be mistaken for DATA on this stream.
@@ -3669,9 +3683,25 @@ fn validateResponseBodyForRequestSemantics(
     body: []const u8,
     trailers: []const http2.Hpack.HeaderField,
 ) Error!void {
+    try validateResponseBodyForRequestSemanticsWithLength(
+        status,
+        semantics,
+        try contentLength(headers),
+        body,
+        trailers,
+    );
+}
+
+fn validateResponseBodyForRequestSemanticsWithLength(
+    status: u16,
+    semantics: ResponseBodySemantics,
+    declared_content_length: ?usize,
+    body: []const u8,
+    trailers: []const http2.Hpack.HeaderField,
+) Error!void {
     if (semantics.head) {
         if (trailers.len != 0) return error.InvalidContentLength;
-        if (try contentLength(headers)) |len| {
+        if (declared_content_length) |len| {
             if (body.len != 0 and len != body.len) return error.InvalidContentLength;
         }
         return;
@@ -3682,7 +3712,7 @@ fn validateResponseBodyForRequestSemantics(
         // the peer. Reject them at the server writer boundary rather than
         // silently framing an ambiguous response.
         if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
-        if (((try contentLength(headers)) orelse 0) != 0) return error.InvalidContentLength;
+        if ((declared_content_length orelse 0) != 0) return error.InvalidContentLength;
     }
 }
 
@@ -3692,9 +3722,23 @@ fn validateDeclaredResponseLength(
     headers: []const http2.Hpack.HeaderField,
     body_len: usize,
 ) Error!void {
+    try validateDeclaredResponseLengthValue(
+        status,
+        semantics,
+        try contentLength(headers),
+        body_len,
+    );
+}
+
+fn validateDeclaredResponseLengthValue(
+    status: u16,
+    semantics: ResponseBodySemantics,
+    declared_content_length: ?usize,
+    body_len: usize,
+) Error!void {
     if ((status >= 100 and status < 200) or status == 204) return;
     if (semantics.traditional_connect and status >= 200 and status < 300) return;
-    if (try contentLength(headers)) |len| {
+    if (declared_content_length) |len| {
         // 304 and HEAD responses may describe the selected representation, so
         // only require equality when an actual DATA body is sent.  For normal
         // responses, writing a declared length that differs from DATA bytes
@@ -3710,9 +3754,23 @@ fn responseShouldDefaultContentLength(
     headers: []const http2.Hpack.HeaderField,
     body_len: usize,
 ) bool {
+    return responseShouldDefaultContentLengthValue(
+        status,
+        semantics,
+        contentLength(headers) catch return false,
+        body_len,
+    );
+}
+
+fn responseShouldDefaultContentLengthValue(
+    status: u16,
+    semantics: ResponseBodySemantics,
+    declared_content_length: ?usize,
+    body_len: usize,
+) bool {
     if (body_len == 0) return false;
     if (responseWriteSuppressesBodySemantics(status, semantics)) return false;
-    return (contentLength(headers) catch return false) == null;
+    return declared_content_length == null;
 }
 
 fn informationalResponseToSkip(status: u16) bool {
