@@ -511,7 +511,7 @@ fn transferEndpointDatagramSize(streams: usize) usize {
 }
 
 fn transferOneRttDatagramSize(streams: usize) usize {
-    return if (streams == 1) single_stream_one_rtt_datagram_size else multi_stream_one_rtt_datagram_size;
+    return if (streams == 1) single_stream_one_rtt_datagram_size else default_endpoint_datagram_size;
 }
 
 fn transferPacedBodyChunkBytes(streams: usize) usize {
