@@ -1119,9 +1119,12 @@ pub const Frame = union(enum) {
             },
             .crypto => |crypto| blk: {
                 try validateEndOffset(crypto.offset, crypto.data.len);
-                var prefix = try addWireLen(1, try varint.length(crypto.offset));
-                prefix = try addWireLen(prefix, try varint.length(crypto.data.len));
-                break :blk try addWireLen(prefix, crypto.data.len);
+                break :blk try doubleVarintPayloadFrameWireLen(
+                    @intFromEnum(FrameType.crypto),
+                    crypto.offset,
+                    crypto.data.len,
+                    crypto.data.len,
+                );
             },
             .stream => |stream| blk: {
                 try validateEndOffset(stream.offset, stream.data.len);
@@ -1209,10 +1212,14 @@ pub const Frame = union(enum) {
             },
             .crypto => |crypto| {
                 try validateEndOffset(crypto.offset, crypto.data.len);
-                try list.append(allocator, @intFromEnum(FrameType.crypto));
-                try varint.encode(list, allocator, crypto.offset);
-                try varint.encode(list, allocator, crypto.data.len);
-                try list.appendSlice(allocator, crypto.data);
+                try writeDoubleVarintPayloadFrame(
+                    list,
+                    allocator,
+                    @intFromEnum(FrameType.crypto),
+                    crypto.offset,
+                    crypto.data.len,
+                    crypto.data,
+                );
             },
             .stream => |stream| {
                 try validateEndOffset(stream.offset, stream.data.len);
@@ -1343,6 +1350,11 @@ fn tripleVarintFrameWireLen(frame_type: u64, first: u64, second: u64, third: u64
     var len = try addWireLen(1, try varint.length(first));
     len = try addWireLen(len, try varint.length(second));
     return addWireLen(len, try varint.length(third));
+}
+
+fn doubleVarintPayloadFrameWireLen(frame_type: u64, first: u64, second: u64, payload_len: usize) Error!usize {
+    const len = try doubleVarintFrameWireLen(frame_type, first, second);
+    return addWireLen(len, payload_len);
 }
 
 pub const FramePacketType = enum {
@@ -1841,6 +1853,27 @@ fn writeTripleVarintFrame(
     try appendVarintAssumeCapacity(list, first);
     try appendVarintAssumeCapacity(list, second);
     try appendVarintAssumeCapacity(list, third);
+}
+
+fn writeDoubleVarintPayloadFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    payload: []const u8,
+) Error!void {
+    const frame_len = try doubleVarintPayloadFrameWireLen(
+        frame_type,
+        first,
+        second,
+        payload.len,
+    );
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    list.appendAssumeCapacity(@intCast(frame_type));
+    try appendVarintAssumeCapacity(list, first);
+    try appendVarintAssumeCapacity(list, second);
+    list.appendSliceAssumeCapacity(payload);
 }
 
 fn usizeFromVarint(value: u64) Error!usize {
