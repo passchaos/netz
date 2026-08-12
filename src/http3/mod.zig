@@ -1322,11 +1322,15 @@ pub fn validateResponsePushPromises(control: ControlState, bytes: []const u8) Er
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
     try validateFrameType(frame_type);
     const payload_len = try quic.varint.length(value);
-    const header_len = try frameHeaderWireLen(frame_type, payload_len);
-    try list.ensureUnusedCapacity(allocator, header_len + payload_len);
-    try appendVarintAssumeCapacity(list, frame_type);
-    try appendVarintAssumeCapacity(list, payload_len);
-    try appendVarintAssumeCapacity(list, value);
+    const frame_type_len = try quic.varint.length(frame_type);
+    const payload_len_len = try quic.varint.length(payload_len);
+    try list.ensureUnusedCapacity(
+        allocator,
+        @as(usize, frame_type_len) + payload_len_len + payload_len,
+    );
+    quic.varint.encodeWithLenAssumeCapacity(list, frame_type, frame_type_len);
+    quic.varint.encodeWithLenAssumeCapacity(list, payload_len, payload_len_len);
+    quic.varint.encodeWithLenAssumeCapacity(list, value, payload_len);
 }
 
 fn writeVarintPayloadFrame(
