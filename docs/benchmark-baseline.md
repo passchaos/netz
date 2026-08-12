@@ -220,6 +220,38 @@ optimization target is packet batching across concurrent streams and reducing
 per-DATA-frame send overhead. A completion audit cannot pass
 until this gap is closed with measured same-host evidence.
 
+### Allocation / peak-live evidence
+
+`bench-http3-handshake-transfer` supports `--stats`, which wraps the benchmark's
+allocator and reports allocation counts, remaps, total allocated/freed bytes,
+live bytes, and peak live bytes. This is intended to make transfer-path memory
+work visible before further optimization.
+
+```sh
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1 --stats
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=upload --streams=1 --stats
+```
+
+Current stats samples:
+
+```text
+16 MiB upload streams=1:
+  alloc count: 102636
+  remap count: 4697
+  total allocated bytes: 326402938
+  peak live bytes: 17064487
+
+64 MiB upload streams=1:
+  alloc count: 414772
+  remap count: 18527
+  total allocated bytes: 1316295798
+  peak live bytes: 69767885
+```
+
+The 64 MiB upload currently allocates about 1.3 GiB cumulatively, which confirms
+that the next throughput work should reduce per-DATA-frame temporary allocation,
+frame-slice construction, and remap churn rather than only tuning QUIC windows.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is

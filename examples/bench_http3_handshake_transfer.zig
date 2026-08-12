@@ -20,7 +20,8 @@ const Mode = enum {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.smp_allocator;
+    var stats_allocator = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = stats_allocator.allocator();
     const config = try parseArgs(init, allocator);
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -181,6 +182,7 @@ pub fn main(init: std.process.Init) !void {
         \\  MiB/s: {d}
         \\
     , .{ @tagName(config.mode), config.streams, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    if (config.stats) stats_allocator.print();
 }
 
 fn serveUpload(
@@ -518,12 +520,102 @@ fn transferPacedBodyChunkBytes(streams: usize) usize {
     return if (streams == 1) single_stream_paced_body_chunk_bytes else multi_stream_paced_body_chunk_bytes;
 }
 
+const CountingAllocator = struct {
+    backing: std.mem.Allocator,
+    current_bytes: usize = 0,
+    peak_bytes: usize = 0,
+    total_allocated: usize = 0,
+    total_freed: usize = 0,
+    alloc_count: usize = 0,
+    free_count: usize = 0,
+    resize_count: usize = 0,
+    remap_count: usize = 0,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn init(backing: std.mem.Allocator) CountingAllocator {
+        return .{ .backing = backing };
+    }
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const ptr = self.backing.rawAlloc(len, alignment, ret_addr) orelse return null;
+        self.alloc_count += 1;
+        self.total_allocated += len;
+        self.current_bytes += len;
+        self.peak_bytes = @max(self.peak_bytes, self.current_bytes);
+        return ptr;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.backing.rawResize(memory, alignment, new_len, ret_addr)) return false;
+        self.resize_count += 1;
+        self.recordResize(memory.len, new_len);
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const ptr = self.backing.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        self.remap_count += 1;
+        self.recordResize(memory.len, new_len);
+        return ptr;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        self.free_count += 1;
+        self.total_freed += memory.len;
+        self.current_bytes -|= memory.len;
+        self.backing.rawFree(memory, alignment, ret_addr);
+    }
+
+    fn recordResize(self: *CountingAllocator, old_len: usize, new_len: usize) void {
+        if (new_len > old_len) {
+            const delta = new_len - old_len;
+            self.total_allocated += delta;
+            self.current_bytes += delta;
+            self.peak_bytes = @max(self.peak_bytes, self.current_bytes);
+        } else {
+            const delta = old_len - new_len;
+            self.total_freed += delta;
+            self.current_bytes -|= delta;
+        }
+    }
+
+    fn print(self: CountingAllocator) void {
+        std.debug.print(
+            "allocator stats\n" ++
+                "  alloc count: {d}\n" ++
+                "  free count: {d}\n" ++
+                "  resize count: {d}\n" ++
+                "  remap count: {d}\n" ++
+                "  total allocated bytes: {d}\n" ++
+                "  total freed bytes: {d}\n" ++
+                "  live bytes: {d}\n" ++
+                "  peak live bytes: {d}\n",
+            .{ self.alloc_count, self.free_count, self.resize_count, self.remap_count, self.total_allocated, self.total_freed, self.current_bytes, self.peak_bytes },
+        );
+    }
+};
+
 const Config = struct {
     iterations: usize = default_iterations,
     body_bytes: usize = default_body_bytes,
     max_stream_frame_data: usize = default_max_stream_frame_data,
     streams: usize = default_streams,
     mode: Mode = .upload,
+    stats: bool = false,
 };
 
 fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
@@ -542,6 +634,8 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.streams = try parsePositiveUsize(arg["--streams=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--mode=")) {
             config.mode = try parseMode(arg["--mode=".len..]);
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            config.stats = true;
         } else {
             return error.InvalidArgument;
         }
