@@ -555,11 +555,16 @@ pub const ResetStreamPayload = struct {
 
     pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_id: u31, error_code: ErrorCode) Error!void {
         if (stream_id == 0) return error.InvalidStreamId;
-        try wire.appendU24(list, allocator, 4);
-        try list.append(allocator, @intFromEnum(FrameType.rst_stream));
-        try list.append(allocator, 0);
-        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
-        try wire.appendInt(list, allocator, u32, @intFromEnum(error_code), .big);
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, FrameHeader.encoded_len + 4);
+        list.items.len = start + FrameHeader.encoded_len + 4;
+        (FrameHeader{
+            .length = 4,
+            .frame_type = .rst_stream,
+            .flags = 0,
+            .stream_id = stream_id,
+        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        std.mem.writeInt(u32, list.items[start + FrameHeader.encoded_len ..][0..4], @intFromEnum(error_code), .big);
     }
 };
 
@@ -624,11 +629,16 @@ pub const PingPayload = struct {
     }
 
     pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, data: [8]u8, ack: bool) Error!void {
-        try wire.appendU24(list, allocator, 8);
-        try list.append(allocator, @intFromEnum(FrameType.ping));
-        try list.append(allocator, if (ack) 0x1 else 0);
-        try wire.appendInt(list, allocator, u32, 0, .big);
-        try list.appendSlice(allocator, &data);
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, FrameHeader.encoded_len + 8);
+        list.items.len = start + FrameHeader.encoded_len + 8;
+        (FrameHeader{
+            .length = 8,
+            .frame_type = .ping,
+            .flags = if (ack) 0x1 else 0,
+            .stream_id = 0,
+        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        @memcpy(list.items[start + FrameHeader.encoded_len ..][0..8], &data);
     }
 };
 
@@ -658,13 +668,21 @@ pub const GoAwayPayload = struct {
         debug_data: []const u8,
     ) Error!void {
         const payload_len = std.math.add(usize, 8, debug_data.len) catch return error.InvalidFrameSize;
-        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
-        try list.append(allocator, @intFromEnum(FrameType.goaway));
-        try list.append(allocator, 0);
-        try wire.appendInt(list, allocator, u32, 0, .big);
-        try wire.appendInt(list, allocator, u32, @as(u32, last_stream_id), .big);
-        try wire.appendInt(list, allocator, u32, @intFromEnum(error_code), .big);
-        try list.appendSlice(allocator, debug_data);
+        const payload_len_u24 = std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize;
+        const total_len = FrameHeader.encoded_len + payload_len;
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, total_len);
+        list.items.len = start + total_len;
+        (FrameHeader{
+            .length = payload_len_u24,
+            .frame_type = .goaway,
+            .flags = 0,
+            .stream_id = 0,
+        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        const payload = list.items[start + FrameHeader.encoded_len ..][0..payload_len];
+        std.mem.writeInt(u32, payload[0..4], @as(u32, last_stream_id), .big);
+        std.mem.writeInt(u32, payload[4..8], @intFromEnum(error_code), .big);
+        @memcpy(payload[8..], debug_data);
     }
 };
 
@@ -682,11 +700,16 @@ pub const WindowUpdatePayload = struct {
 
     pub fn write(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_id: u31, increment: u31) Error!void {
         if (increment == 0) return error.InvalidFrameSize;
-        try wire.appendU24(list, allocator, 4);
-        try list.append(allocator, @intFromEnum(FrameType.window_update));
-        try list.append(allocator, 0);
-        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
-        try wire.appendInt(list, allocator, u32, @as(u32, increment), .big);
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, FrameHeader.encoded_len + 4);
+        list.items.len = start + FrameHeader.encoded_len + 4;
+        (FrameHeader{
+            .length = 4,
+            .frame_type = .window_update,
+            .flags = 0,
+            .stream_id = stream_id,
+        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        std.mem.writeInt(u32, list.items[start + FrameHeader.encoded_len ..][0..4], @as(u32, increment), .big);
     }
 };
 
