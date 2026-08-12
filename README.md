@@ -8,7 +8,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   unfolding, exact-allocation/empty-header owned-parse fast paths, strict allocation-free borrowed request/response head parsing into
   caller header storage with exact Content-Length pipeline offsets and
   method/status-aware response boundaries, request-target/status/reason-phrase start-line validation with method-specific asterisk/authority-form and no-fragment rules, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
-  byte buffering, preallocated runtime header/trailer assembly for persistent connections, method-aware response body
+  byte buffering with exact-message ownership transfer, preallocated runtime header/trailer assembly for persistent connections, method-aware response body
   handling for HEAD and successful CONNECT, Host/authority delimiter validation, strict authority-form CONNECT target delimiter/userinfo rejection, malformed absolute-form authority validation including bracketed IPv6, and CONNECT tunnel helpers, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling even when body bytes are pre-read with invalid-head suppression, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection

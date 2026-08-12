@@ -1984,9 +1984,35 @@ fn readMessageBytesBufferedWithContext(
         if (inbuf.items.len > head_end.? + 4 + limits.max_body_bytes) return error.BodyTooLarge;
     }
 
+    if (inbuf.items.len == target_len) {
+        return inbuf.toOwnedSlice(allocator);
+    }
     const bytes = try allocator.dupe(u8, inbuf.items[0..target_len]);
     discardPrefix(inbuf, target_len);
     return bytes;
+}
+
+test "HTTP/1 buffered reader transfers exact message buffer ownership" {
+    const allocator = std.testing.allocator;
+    const raw = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+    var inbuf: std.ArrayList(u8) = .fromOwnedSlice(try allocator.dupe(u8, raw));
+    const original_ptr = inbuf.items.ptr;
+
+    const bytes = try readMessageBytesBufferedWithContext(
+        allocator,
+        .{ .tcp = .{ .io = undefined, .stream = undefined } },
+        .{},
+        .{},
+        &inbuf,
+        null,
+        false,
+        true,
+    );
+    defer allocator.free(bytes);
+
+    try std.testing.expectEqual(original_ptr, bytes.ptr);
+    try std.testing.expectEqual(@as(usize, 0), inbuf.items.len);
+    try std.testing.expectEqualStrings(raw, bytes);
 }
 
 fn maybeWriteContinue(transport: RuntimeTransport, head: []const u8, already_buffered_body_bytes: usize, auto_continue: bool) Error!void {
