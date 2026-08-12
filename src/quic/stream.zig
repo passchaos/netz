@@ -142,8 +142,10 @@ pub const RecvState = struct {
     pub fn clone(self: RecvState, allocator: std.mem.Allocator) Error!RecvState {
         var copy = RecvState.init(allocator, self.stream_id, self.max_buffered);
         errdefer copy.deinit();
-        try copy.buffer.appendSlice(allocator, self.buffer.items);
-        try copy.received.appendSlice(allocator, self.received.items);
+        try copy.buffer.ensureUnusedCapacity(allocator, self.buffer.items.len);
+        copy.buffer.appendSliceAssumeCapacity(self.buffer.items);
+        try copy.received.ensureUnusedCapacity(allocator, self.received.items.len);
+        copy.received.appendSliceAssumeCapacity(self.received.items);
         copy.storage_offset = self.storage_offset;
         copy.read_offset = self.read_offset;
         copy.contiguous_end = self.contiguous_end;
