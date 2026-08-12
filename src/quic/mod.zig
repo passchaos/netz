@@ -730,10 +730,9 @@ fn encodeIntegerTransportParameter(
     value: u64,
 ) Error!void {
     try validateTransportInteger(id, value);
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try varint.encode(&encoded, allocator, value);
-    try encodeTransportParameter(list, allocator, @intFromEnum(id), encoded.items);
+    var encoded: [8]u8 = undefined;
+    const value_bytes = try varint.encodeInto(&encoded, value);
+    try encodeTransportParameter(list, allocator, @intFromEnum(id), value_bytes);
 }
 
 fn encodePreferredAddressTransportParameter(
