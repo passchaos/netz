@@ -703,13 +703,46 @@ fn transportParameterCount(bytes: []const u8) Error!usize {
     return count;
 }
 
-pub fn encodeTransportParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: u64, value: []const u8) !void {
+const TransportParameterHeader = struct {
+    value_len: u64,
+    id_len: u8,
+    value_len_len: u8,
+    total_len: usize,
+};
+
+fn transportParameterHeader(id: u64, value_len: usize) Error!TransportParameterHeader {
+    const value_len_u64 = std.math.cast(u64, value_len) orelse
+        return error.InvalidTransportParameterLength;
     const id_len = try varint.length(id);
-    const value_len_len = try varint.length(value.len);
-    const total_len = try addWireLen(try addWireLen(id_len, value_len_len), value.len);
-    try list.ensureUnusedCapacity(allocator, total_len);
-    try appendVarintAssumeCapacity(list, id);
-    try appendVarintAssumeCapacity(list, value.len);
+    const value_len_len = try varint.length(value_len_u64);
+    return .{
+        .value_len = value_len_u64,
+        .id_len = id_len,
+        .value_len_len = value_len_len,
+        .total_len = try addWireLen(
+            try addWireLen(id_len, value_len_len),
+            value_len,
+        ),
+    };
+}
+
+fn appendTransportParameterHeaderAssumeCapacity(
+    list: *std.ArrayList(u8),
+    id: u64,
+    header: TransportParameterHeader,
+) void {
+    varint.encodeWithLenAssumeCapacity(list, id, header.id_len);
+    varint.encodeWithLenAssumeCapacity(
+        list,
+        header.value_len,
+        header.value_len_len,
+    );
+}
+
+pub fn encodeTransportParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: u64, value: []const u8) !void {
+    const header = try transportParameterHeader(id, value.len);
+    try list.ensureUnusedCapacity(allocator, header.total_len);
+    appendTransportParameterHeaderAssumeCapacity(list, id, header);
     list.appendSliceAssumeCapacity(value);
 }
 
@@ -731,10 +764,9 @@ pub fn encodeVersionInformationFromVersions(
         std.math.mul(usize, available_versions.len, 4) catch return error.InvalidTransportParameterLength,
     ) catch return error.InvalidTransportParameterLength;
     const id = @intFromEnum(TransportParameterId.version_information);
-    const total_len = try addWireLen(try addWireLen(try varint.length(id), try varint.length(value_len)), value_len);
-    try list.ensureUnusedCapacity(allocator, total_len);
-    try appendVarintAssumeCapacity(list, id);
-    try appendVarintAssumeCapacity(list, value_len);
+    const header = try transportParameterHeader(id, value_len);
+    try list.ensureUnusedCapacity(allocator, header.total_len);
+    appendTransportParameterHeaderAssumeCapacity(list, id, header);
     appendU32AssumeCapacity(list, chosen_version.wireValue());
     for (available_versions) |available| {
         try validateAvailableVersion(available);
@@ -771,9 +803,12 @@ fn encodeIntegerTransportParameter(
     value: u64,
 ) Error!void {
     try validateTransportInteger(id, value);
-    var encoded: [8]u8 = undefined;
-    const value_bytes = try varint.encodeInto(&encoded, value);
-    try encodeTransportParameter(list, allocator, @intFromEnum(id), value_bytes);
+    const id_wire = @intFromEnum(id);
+    const value_len = try varint.length(value);
+    const header = try transportParameterHeader(id_wire, value_len);
+    try list.ensureUnusedCapacity(allocator, header.total_len);
+    appendTransportParameterHeaderAssumeCapacity(list, id_wire, header);
+    varint.encodeWithLenAssumeCapacity(list, value, value_len);
 }
 
 fn encodePreferredAddressTransportParameter(
@@ -785,10 +820,9 @@ fn encodePreferredAddressTransportParameter(
 
     const value_len = try addWireLen(41, preferred.connection_id.len);
     const id = @intFromEnum(TransportParameterId.preferred_address);
-    const total_len = try addWireLen(try addWireLen(try varint.length(id), try varint.length(value_len)), value_len);
-    try list.ensureUnusedCapacity(allocator, total_len);
-    try appendVarintAssumeCapacity(list, id);
-    try appendVarintAssumeCapacity(list, value_len);
+    const header = try transportParameterHeader(id, value_len);
+    try list.ensureUnusedCapacity(allocator, header.total_len);
+    appendTransportParameterHeaderAssumeCapacity(list, id, header);
     list.appendSliceAssumeCapacity(&preferred.ipv4_address);
     appendU16AssumeCapacity(list, preferred.ipv4_port);
     list.appendSliceAssumeCapacity(&preferred.ipv6_address);
@@ -807,10 +841,9 @@ fn encodeVersionInformationTransportParameter(
     const value_len = std.math.add(usize, 4, version_information.available_versions_wire.len) catch
         return error.InvalidTransportParameterLength;
     const id = @intFromEnum(TransportParameterId.version_information);
-    const total_len = try addWireLen(try addWireLen(try varint.length(id), try varint.length(value_len)), value_len);
-    try list.ensureUnusedCapacity(allocator, total_len);
-    try appendVarintAssumeCapacity(list, id);
-    try appendVarintAssumeCapacity(list, value_len);
+    const header = try transportParameterHeader(id, value_len);
+    try list.ensureUnusedCapacity(allocator, header.total_len);
+    appendTransportParameterHeaderAssumeCapacity(list, id, header);
     appendU32AssumeCapacity(list, version_information.chosen_version.wireValue());
     list.appendSliceAssumeCapacity(version_information.available_versions_wire);
 }
