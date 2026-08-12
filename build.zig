@@ -111,7 +111,7 @@ pub fn build(b: *std.Build) void {
             .exe_name = "netz-bench-http3-handshake-transfer",
             .path = "examples/bench_http3_handshake_transfer.zig",
             .run_step = "bench-http3-handshake-transfer",
-            .description = "Benchmark HTTP/3 real-handshake paced upload throughput",
+            .description = "Benchmark HTTP/3 real-handshake paced transfer throughput",
         },
         .{
             .exe_name = "netz-http3-fetch",
