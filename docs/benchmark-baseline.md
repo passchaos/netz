@@ -101,13 +101,34 @@ multi-stream upload/download helpers; the default is 64 KiB, while smaller
 values are useful for probing ACK/credit fairness without editing source.
 `--one-rtt-datagram-size` and `--paced-body-chunk-bytes` override the benchmark's
 default single-stream/multi-stream transfer sizing knobs, making it possible to
-search stable packet-size-aware configurations without source edits.
+search stable packet-size-aware configurations without source edits. The
+benchmark now creates a fresh loopback server/client pair per iteration and
+reports mean/stddev MiB/s, matching quicz's multi-iteration benchmark shape.
 
 ```sh
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=4
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=5 --body-bytes=1048576 --mode=upload --streams=1
+```
+
+Current 5-iteration 1 MiB upload smoke sample:
+
+```text
+HTTP/3 real-handshake transfer benchmark
+  mode: upload
+  streams: 1
+  iterations: 5
+  body bytes/iteration: 1048576
+  total body bytes: 5242880
+  status total: 1000
+  ns/iteration: 5055264
+  bytes/s: 207422566
+  MiB/s: 197
+  mean MiB/s: 201.88
+  stddev MiB/s: 26.15
+  stddev percent: 12.95
 ```
 
 Current 16 MiB single-stream upload result:
@@ -311,10 +332,6 @@ Rejected experiments after validation:
 - Multi-stream `--round-robin-chunk-bytes` scans did not find a better stable
   default either: 16 KiB timed out on upload and hit `StreamBufferTooLarge` on
   download; 32 KiB improved download to ~40 MiB/s but still timed out on upload.
-- Adding quicz-style mean/stddev output exposed that `--iterations>1` can hit a
-  loopback `HandshakeTimeout` in this benchmark harness; multi-iteration
-  summaries should be added only after the repeated-handshake accept/connect
-  loop is made reliable.
 
 Future multi-stream payload-buffer work needs per-send or per-stream lifetime
 isolation, not one shared mutable buffer or a change that increases the

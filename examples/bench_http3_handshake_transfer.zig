@@ -36,12 +36,96 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(transfer_body);
     @memset(transfer_body, 'x');
 
+    const throughput_samples = try allocator.alloc(f64, config.iterations);
+    defer allocator.free(throughput_samples);
+    const started = nowNs(io);
+    var status_total: usize = 0;
+    var bytes_total: usize = 0;
+    for (0..config.iterations) |iteration| {
+        const iteration_started = nowNs(io);
+        const result = try runIteration(
+            allocator,
+            io,
+            config,
+            transfer_body,
+            iteration,
+        );
+        const iteration_elapsed = nowNs(io) -| iteration_started;
+        throughput_samples[iteration] = mibPerSecond(config.body_bytes, iteration_elapsed);
+        status_total += result.status_total;
+        bytes_total += result.bytes_total;
+    }
+    const elapsed = nowNs(io) -| started;
+
+    const bytes_per_second: u128 = if (elapsed == 0) 0 else (@as(u128, bytes_total) * std.time.ns_per_s) / elapsed;
+    std.debug.print(
+        \\HTTP/3 real-handshake transfer benchmark
+        \\  mode: {s}
+        \\  streams: {d}
+        \\  iterations: {d}
+        \\  body bytes/iteration: {d}
+        \\  total body bytes: {d}
+        \\  status total: {d}
+        \\  ns/iteration: {d}
+        \\  bytes/s: {d}
+        \\  MiB/s: {d}
+        \\
+    , .{ @tagName(config.mode), config.streams, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    const summary = summarizeThroughput(throughput_samples);
+    std.debug.print(
+        "  mean MiB/s: {d:.2}\n" ++
+            "  stddev MiB/s: {d:.2}\n" ++
+            "  stddev percent: {d:.2}\n",
+        .{ summary.mean, summary.stddev, if (summary.mean == 0) 0 else summary.stddev * 100.0 / summary.mean },
+    );
+    if (config.stats) stats_allocator.print();
+}
+
+const ThroughputSummary = struct {
+    mean: f64,
+    stddev: f64,
+};
+
+fn mibPerSecond(bytes: usize, elapsed_ns: u64) f64 {
+    if (elapsed_ns == 0) return 0;
+    const mib = @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0);
+    const seconds = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
+    return mib / seconds;
+}
+
+fn summarizeThroughput(samples: []const f64) ThroughputSummary {
+    if (samples.len == 0) return .{ .mean = 0, .stddev = 0 };
+    var mean: f64 = 0;
+    for (samples) |sample| mean += sample;
+    mean /= @as(f64, @floatFromInt(samples.len));
+    var variance: f64 = 0;
+    for (samples) |sample| {
+        const delta = sample - mean;
+        variance += delta * delta;
+    }
+    variance /= @as(f64, @floatFromInt(samples.len));
+    return .{ .mean = mean, .stddev = @sqrt(variance) };
+}
+
+const IterationResult = struct {
+    status_total: usize,
+    bytes_total: usize,
+};
+
+fn runIteration(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: Config,
+    transfer_body: []const u8,
+    iteration: usize,
+) !IterationResult {
     const endpoint_datagram_size = transferEndpointDatagramSize(config);
     const one_rtt_datagram_size = transferOneRttDatagramSize(config);
     const paced_body_chunk_bytes = transferPacedBodyChunkBytes(config);
     const enable_data_prefix_fast_path = config.streams == 1;
 
-    const server_cid = [_]u8{ 0x44, 0x45, 0x46, 0x47 };
+    var server_cid = [_]u8{ 0x44, 0x45, 0x46, 0x47 };
+    server_cid[0] +%= @truncate(iteration);
     var server = try netz.http3.runtime.HandshakeServer.bind(
         allocator,
         io,
@@ -68,14 +152,12 @@ pub fn main(init: std.process.Init) !void {
 
     const Shared = struct {
         server: *netz.http3.runtime.HandshakeServer,
-        iterations: usize,
         body_bytes: usize,
         streams: usize,
         round_robin_chunk_bytes: usize,
         mode: Mode,
         body: []const u8,
         err: ?anyerror = null,
-        handled: usize = 0,
 
         fn run(shared: *@This()) void {
             runFallible(shared) catch |err| {
@@ -84,30 +166,27 @@ pub fn main(init: std.process.Init) !void {
         }
 
         fn runFallible(shared: *@This()) !void {
-            while (shared.handled < shared.iterations) : (shared.handled += 1) {
-                var session = try shared.server.accept();
-                defer session.deinit();
-                switch (shared.mode) {
-                    .upload => try serveUpload(
-                        &session,
-                        shared.body_bytes,
-                        shared.streams,
-                    ),
-                    .download => try serveDownload(
-                        &session,
-                        shared.body_bytes,
-                        shared.streams,
-                        shared.round_robin_chunk_bytes,
-                        shared.body,
-                    ),
-                }
+            var session = try shared.server.accept();
+            defer session.deinit();
+            switch (shared.mode) {
+                .upload => try serveUpload(
+                    &session,
+                    shared.body_bytes,
+                    shared.streams,
+                ),
+                .download => try serveDownload(
+                    &session,
+                    shared.body_bytes,
+                    shared.streams,
+                    shared.round_robin_chunk_bytes,
+                    shared.body,
+                ),
             }
         }
     };
 
     var shared = Shared{
         .server = &server,
-        .iterations = config.iterations,
         .body_bytes = config.body_bytes,
         .streams = config.streams,
         .round_robin_chunk_bytes = config.round_robin_chunk_bytes,
@@ -116,85 +195,66 @@ pub fn main(init: std.process.Init) !void {
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    const started = nowNs(io);
-    var status_total: usize = 0;
-    var bytes_total: usize = 0;
-    for (0..config.iterations) |_| {
-        var original_dcid: [8]u8 = undefined;
-        var local_cid: [8]u8 = undefined;
-        try std.Io.randomSecure(io, &original_dcid);
-        try std.Io.randomSecure(io, &local_cid);
+    var original_dcid: [8]u8 = undefined;
+    var local_cid: [8]u8 = undefined;
+    try std.Io.randomSecure(io, &original_dcid);
+    try std.Io.randomSecure(io, &local_cid);
 
-        var client = try netz.http3.runtime.HandshakeClient.connect(
-            allocator,
-            io,
-            .{ .ip4 = .loopback(0) },
-            server.address(),
-            .{ .quic = .{ .max_datagram_size = endpoint_datagram_size, .max_frames_per_datagram = 32 } },
-            .{
-                .handshake = .{
-                    .original_destination_connection_id = &original_dcid,
-                    .local_connection_id = &local_cid,
-                    .server_name = "localhost",
-                    .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size, .enable_hystart = config.streams != 1 },
-                    .max_crypto_buffer = 64 * 1024,
-                    .handshake_recovery = .{ .initial_pto_ms = 250, .max_pto_ms = 2000, .max_retries = 4, .max_duration_ms = 10_000 },
-                },
-                .session = .{
-                    .max_stream_buffer = default_max_stream_buffer,
-                    .max_stream_frame_data = config.max_stream_frame_data,
-                    .paced_body_chunk_bytes = paced_body_chunk_bytes,
-                    .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
-                    .max_concurrent_request_streams = max_streams,
-                },
+    var client = try netz.http3.runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{ .max_datagram_size = endpoint_datagram_size, .max_frames_per_datagram = 32 } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &local_cid,
+                .server_name = "localhost",
+                .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size, .enable_hystart = config.streams != 1 },
+                .max_crypto_buffer = 64 * 1024,
+                .handshake_recovery = .{ .initial_pto_ms = 250, .max_pto_ms = 2000, .max_retries = 4, .max_duration_ms = 10_000 },
             },
-        );
-        defer client.deinit();
+            .session = .{
+                .max_stream_buffer = default_max_stream_buffer,
+                .max_stream_frame_data = config.max_stream_frame_data,
+                .paced_body_chunk_bytes = paced_body_chunk_bytes,
+                .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
+                .max_concurrent_request_streams = max_streams,
+            },
+        },
+    );
+    defer client.deinit();
 
-        switch (config.mode) {
-            .upload => {
-                status_total += try runUploadClient(
-                    allocator,
-                    &client,
-                    config.body_bytes,
-                    config.streams,
-                    config.round_robin_chunk_bytes,
-                    transfer_body,
-                );
-                bytes_total += config.body_bytes;
-            },
-            .download => {
-                const result = try runDownloadClient(
-                    allocator,
-                    &client,
-                    config.body_bytes,
-                    config.streams,
-                    config.round_robin_chunk_bytes,
-                );
-                status_total += result.status;
-                bytes_total += result.bytes;
-            },
-        }
+    var result: IterationResult = .{ .status_total = 0, .bytes_total = 0 };
+    switch (config.mode) {
+        .upload => {
+            result.status_total += try runUploadClient(
+                allocator,
+                &client,
+                config.body_bytes,
+                config.streams,
+                config.round_robin_chunk_bytes,
+                transfer_body,
+            );
+            result.bytes_total += config.body_bytes;
+        },
+        .download => {
+            const download = try runDownloadClient(
+                allocator,
+                &client,
+                config.body_bytes,
+                config.streams,
+                config.round_robin_chunk_bytes,
+            );
+            result.status_total += download.status;
+            result.bytes_total += download.bytes;
+        },
     }
-    const elapsed = nowNs(io) -| started;
+
     thread.join();
     if (shared.err) |err| return err;
-
-    const bytes_per_second: u128 = if (elapsed == 0) 0 else (@as(u128, bytes_total) * std.time.ns_per_s) / elapsed;
-    std.debug.print(
-        \\HTTP/3 real-handshake transfer benchmark
-        \\  mode: {s}
-        \\  streams: {d}
-        \\  iterations: {d}
-        \\  body bytes/iteration: {d}
-        \\  total body bytes: {d}
-        \\  status total: {d}
-        \\  ns/iteration: {d}
-        \\  bytes/s: {d}
-        \\  MiB/s: {d}
-        \\
-    , .{ @tagName(config.mode), config.streams, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
-    if (config.stats) stats_allocator.print();
+    return result;
 }
 
 fn serveUpload(
