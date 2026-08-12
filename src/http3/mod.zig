@@ -1164,11 +1164,14 @@ pub fn writePushPromiseFrame(
 ) Error!void {
     const push_id_len = try quic.varint.length(push_id);
     const payload_len = std.math.add(usize, push_id_len, field_section.len) catch return error.IntegerOverflow;
-    try writeFrameHeader(list, allocator, FrameType.push_promise, payload_len);
-    var push_id_buf: [8]u8 = undefined;
-    const encoded_push_id = try quic.varint.encodeInto(&push_id_buf, push_id);
-    try list.appendSlice(allocator, encoded_push_id);
-    try list.appendSlice(allocator, field_section);
+    try writeVarintPayloadFrame(
+        list,
+        allocator,
+        FrameType.push_promise,
+        push_id,
+        payload_len,
+        field_section,
+    );
 }
 
 pub fn writePushPromiseDynamic(
@@ -1267,11 +1270,14 @@ pub fn writePriorityUpdateFrameRaw(
     if (frame_type != FrameType.priority_update_request and frame_type != FrameType.priority_update_push) return error.InvalidPriorityUpdate;
     const id_len = try quic.varint.length(prioritized_element_id);
     const payload_len = std.math.add(usize, id_len, field_value.len) catch return error.IntegerOverflow;
-    try writeFrameHeader(list, allocator, frame_type, payload_len);
-    var id_buf: [8]u8 = undefined;
-    const encoded_id = try quic.varint.encodeInto(&id_buf, prioritized_element_id);
-    try list.appendSlice(allocator, encoded_id);
-    try list.appendSlice(allocator, field_value);
+    try writeVarintPayloadFrame(
+        list,
+        allocator,
+        frame_type,
+        prioritized_element_id,
+        payload_len,
+        field_value,
+    );
 }
 
 pub fn parsePriorityUpdatePayload(payload: []const u8) Error!PriorityUpdatePayload {
@@ -1311,6 +1317,23 @@ fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator
     var payload: [8]u8 = undefined;
     const encoded = try quic.varint.encodeInto(&payload, value);
     list.appendSliceAssumeCapacity(encoded);
+}
+
+fn writeVarintPayloadFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    frame_type: u64,
+    value: u64,
+    payload_len: usize,
+    tail: []const u8,
+) Error!void {
+    try validateFrameType(frame_type);
+    const header_len = try frameHeaderWireLen(frame_type, payload_len);
+    try list.ensureUnusedCapacity(allocator, header_len + payload_len);
+    try appendVarintAssumeCapacity(list, frame_type);
+    try appendVarintAssumeCapacity(list, payload_len);
+    try appendVarintAssumeCapacity(list, value);
+    list.appendSliceAssumeCapacity(tail);
 }
 
 fn parseSingleVarintPayload(payload: []const u8) Error!u64 {
