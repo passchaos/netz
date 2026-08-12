@@ -1556,13 +1556,15 @@ fn parseServerKeyShare(payload: []const u8) Error!ParsedKeyShare {
 fn appendInt(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime T: type, value: T) !void {
     var tmp: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
     std.mem.writeInt(T, &tmp, value, .big);
-    try list.appendSlice(allocator, &tmp);
+    try list.ensureUnusedCapacity(allocator, tmp.len);
+    list.appendSliceAssumeCapacity(&tmp);
 }
 
 fn appendU24(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u24) !void {
-    try list.append(allocator, @truncate(value >> 16));
-    try list.append(allocator, @truncate(value >> 8));
-    try list.append(allocator, @truncate(value));
+    try list.ensureUnusedCapacity(allocator, 3);
+    list.appendAssumeCapacity(@truncate(value >> 16));
+    list.appendAssumeCapacity(@truncate(value >> 8));
+    list.appendAssumeCapacity(@truncate(value));
 }
 
 fn writeHandshakeMessage(
