@@ -123,9 +123,7 @@ fn cryptoFramesWireLen(offset: u64, bytes_len: usize, max_frame_data_len: usize)
 }
 
 fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
-    var buffer: [8]u8 = undefined;
-    const encoded = try quic.varint.encodeInto(&buffer, value);
-    list.appendSliceAssumeCapacity(encoded);
+    try quic.varint.encodeAssumeCapacity(list, value);
 }
 
 test "QUIC CRYPTO stream frames split and reassemble out of order" {
