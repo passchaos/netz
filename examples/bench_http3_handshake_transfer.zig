@@ -171,6 +171,8 @@ fn runIteration(
         round_robin_chunk_bytes: usize,
         mode: Mode,
         body: []const u8,
+        trace: bool,
+        iteration: usize,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -183,11 +185,15 @@ fn runIteration(
             var session = try shared.server.accept();
             defer session.deinit();
             switch (shared.mode) {
-                .upload => try serveUpload(
-                    &session,
-                    shared.body_bytes,
-                    shared.streams,
-                ),
+                .upload => {
+                    if (shared.trace) std.debug.print("  [iter {d}] server upload start\n", .{shared.iteration});
+                    try serveUpload(
+                        &session,
+                        shared.body_bytes,
+                        shared.streams,
+                    );
+                    if (shared.trace) std.debug.print("  [iter {d}] server upload done\n", .{shared.iteration});
+                },
                 .download => try serveDownload(
                     &session,
                     shared.body_bytes,
@@ -206,6 +212,8 @@ fn runIteration(
         .round_robin_chunk_bytes = config.round_robin_chunk_bytes,
         .mode = config.mode,
         .body = transfer_body,
+        .trace = config.trace_iteration,
+        .iteration = iteration,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     traceIteration(config, iteration, "server thread spawned");
@@ -249,9 +257,8 @@ fn runIteration(
             result.status_total += try runUploadClient(
                 allocator,
                 &client,
-                config.body_bytes,
-                config.streams,
-                config.round_robin_chunk_bytes,
+                config,
+                iteration,
                 transfer_body,
             );
             result.bytes_total += config.body_bytes;
@@ -433,11 +440,14 @@ fn sendDownloadBodies(
 fn runUploadClient(
     allocator: std.mem.Allocator,
     client: *netz.http3.runtime.HandshakeClient,
-    body_bytes: usize,
-    streams: usize,
-    round_robin_chunk_bytes: usize,
+    config: Config,
+    iteration: usize,
     body: []const u8,
 ) !usize {
+    const body_bytes = config.body_bytes;
+    const streams = config.streams;
+    const round_robin_chunk_bytes = config.round_robin_chunk_bytes;
+    traceIteration(config, iteration, "upload open streams");
     const stream_ids = try allocator.alloc(u62, streams);
     defer allocator.free(stream_ids);
     for (stream_ids, 0..) |*stream_id, index| {
@@ -448,10 +458,13 @@ fn runUploadClient(
             .authority = "localhost",
         }, transferBytesForStream(body_bytes, streams, index));
     }
+    traceIteration(config, iteration, "upload send bodies start");
     try sendUploadBodies(client, stream_ids, body_bytes, streams, round_robin_chunk_bytes, body);
+    traceIteration(config, iteration, "upload send bodies done");
 
     var status_total: usize = 0;
     var received: usize = 0;
+    traceIteration(config, iteration, "upload receive responses start");
     while (received < streams) {
         var event = try client.receiveNextResponse();
         defer event.deinit(allocator);
@@ -466,6 +479,7 @@ fn runUploadClient(
             .reset => return error.InvalidFrame,
         }
     }
+    traceIteration(config, iteration, "upload receive responses done");
     return status_total;
 }
 

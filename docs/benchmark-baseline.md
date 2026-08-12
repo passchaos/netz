@@ -269,11 +269,12 @@ completed iteration 0 at 33.92 MiB/s, then timed out before iteration 1 printed
 within 900 seconds. Follow-up experiments that created a fresh
 `std.Io.Threaded` per iteration, sent a client-side QUIC application close at
 iteration end, or drained readable datagrams from old client/server UDP sockets
-still timed out after iteration 0. The stall is therefore not only reuse of the
-top-level Io backend, lack of a local close frame, or queued datagrams on the
-old sockets. This narrows the multi-iteration gap to cleanup/reuse across fresh
-server/client pairs after a completed large 4-stream transfer, rather than the
-first transfer itself.
+still timed out after iteration 0. Additional `--trace-iteration` instrumentation
+shows iteration 1 reaches `connect done`, `upload open streams`, server-side
+`upload start`, and then stalls inside client-side `upload send bodies start`.
+The stall is therefore not only reuse of the top-level Io backend, lack of a
+local close frame, queued datagrams on the old sockets, bind, handshake, or
+stream opening; it occurs while sending the second large 4-stream request body.
 
 This same-host comparison shows netz is **improved but not yet
 performance-competitive** on large real-handshake transfers. Raising the
