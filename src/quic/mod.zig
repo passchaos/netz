@@ -1109,24 +1109,7 @@ pub const Frame = union(enum) {
         return switch (self) {
             .padding => |padding| padding.len,
             .ping => 1,
-            .ack => |ack| blk: {
-                try validateAckFrame(ack);
-                var len: usize = 1;
-                len = try addWireLen(len, try varint.length(ack.largest_acknowledged));
-                len = try addWireLen(len, try varint.length(ack.ack_delay));
-                len = try addWireLen(len, try varint.length(ack.ranges.len));
-                len = try addWireLen(len, try varint.length(ack.first_ack_range));
-                for (ack.ranges) |range| {
-                    len = try addWireLen(len, try varint.length(range.gap));
-                    len = try addWireLen(len, try varint.length(range.ack_range_length));
-                }
-                if (ack.ecn_counts) |ecn| {
-                    len = try addWireLen(len, try varint.length(ecn.ect0_count));
-                    len = try addWireLen(len, try varint.length(ecn.ect1_count));
-                    len = try addWireLen(len, try varint.length(ecn.ecn_ce_count));
-                }
-                break :blk len;
-            },
+            .ack => |ack| try ackFrameWireLen(ack),
             .reset_stream => |reset| blk: {
                 var len = try addWireLen(1, try varint.length(reset.stream_id));
                 len = try addWireLen(len, try varint.length(reset.application_error_code));
@@ -1224,10 +1207,7 @@ pub const Frame = union(enum) {
         switch (self) {
             .padding => |padding| try appendPadding(list, allocator, padding.len),
             .ping => try list.append(allocator, @intFromEnum(FrameType.ping)),
-            .ack => |ack| {
-                try list.append(allocator, if (ack.ecn_counts == null) @intFromEnum(FrameType.ack) else @intFromEnum(FrameType.ack_ecn));
-                try writeAckFields(list, allocator, ack);
-            },
+            .ack => |ack| try writeAckFrame(list, allocator, ack),
             .reset_stream => |reset| {
                 try list.append(allocator, @intFromEnum(FrameType.reset_stream));
                 try varint.encode(list, allocator, reset.stream_id);
@@ -1782,21 +1762,55 @@ pub fn appendPadding(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len
     @memset(list.items[start..], @intFromEnum(FrameType.padding));
 }
 
-fn writeAckFields(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: AckFrame) Error!void {
-    try validateAckFrame(ack);
-    try varint.encode(list, allocator, ack.largest_acknowledged);
-    try varint.encode(list, allocator, ack.ack_delay);
-    try varint.encode(list, allocator, ack.ranges.len);
-    try varint.encode(list, allocator, ack.first_ack_range);
+fn writeAckFieldsAssumeCapacity(list: *std.ArrayList(u8), ack: AckFrame) Error!void {
+    try appendVarintAssumeCapacity(list, ack.largest_acknowledged);
+    try appendVarintAssumeCapacity(list, ack.ack_delay);
+    try appendVarintAssumeCapacity(list, ack.ranges.len);
+    try appendVarintAssumeCapacity(list, ack.first_ack_range);
     for (ack.ranges) |range| {
-        try varint.encode(list, allocator, range.gap);
-        try varint.encode(list, allocator, range.ack_range_length);
+        try appendVarintAssumeCapacity(list, range.gap);
+        try appendVarintAssumeCapacity(list, range.ack_range_length);
     }
     if (ack.ecn_counts) |ecn| {
-        try varint.encode(list, allocator, ecn.ect0_count);
-        try varint.encode(list, allocator, ecn.ect1_count);
-        try varint.encode(list, allocator, ecn.ecn_ce_count);
+        try appendVarintAssumeCapacity(list, ecn.ect0_count);
+        try appendVarintAssumeCapacity(list, ecn.ect1_count);
+        try appendVarintAssumeCapacity(list, ecn.ecn_ce_count);
     }
+}
+
+fn ackFrameWireLen(ack: AckFrame) Error!usize {
+    try validateAckFrame(ack);
+    var len: usize = 1;
+    len = try addWireLen(len, try varint.length(ack.largest_acknowledged));
+    len = try addWireLen(len, try varint.length(ack.ack_delay));
+    len = try addWireLen(len, try varint.length(ack.ranges.len));
+    len = try addWireLen(len, try varint.length(ack.first_ack_range));
+    for (ack.ranges) |range| {
+        len = try addWireLen(len, try varint.length(range.gap));
+        len = try addWireLen(len, try varint.length(range.ack_range_length));
+    }
+    if (ack.ecn_counts) |ecn| {
+        len = try addWireLen(len, try varint.length(ecn.ect0_count));
+        len = try addWireLen(len, try varint.length(ecn.ect1_count));
+        len = try addWireLen(len, try varint.length(ecn.ecn_ce_count));
+    }
+    return len;
+}
+
+fn writeAckFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: AckFrame) Error!void {
+    const frame_len = try ackFrameWireLen(ack);
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    list.appendAssumeCapacity(if (ack.ecn_counts == null)
+        @intFromEnum(FrameType.ack)
+    else
+        @intFromEnum(FrameType.ack_ecn));
+    try writeAckFieldsAssumeCapacity(list, ack);
+}
+
+fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
+    var buffer: [8]u8 = undefined;
+    const encoded = try varint.encodeInto(&buffer, value);
+    list.appendSliceAssumeCapacity(encoded);
 }
 
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
