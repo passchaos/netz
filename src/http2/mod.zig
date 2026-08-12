@@ -504,13 +504,21 @@ pub const AltSvcPayload = struct {
         var payload_len = std.math.add(usize, 2, origin.len) catch return error.InvalidFrameSize;
         payload_len = std.math.add(usize, payload_len, field_value.len) catch return error.InvalidFrameSize;
 
-        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
-        try list.append(allocator, @intFromEnum(FrameType.altsvc));
-        try list.append(allocator, 0);
-        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
-        try wire.appendInt(list, allocator, u16, @intCast(origin.len), .big);
-        try list.appendSlice(allocator, origin);
-        try list.appendSlice(allocator, field_value);
+        const payload_len_u24 = std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize;
+        const total_len = FrameHeader.encoded_len + payload_len;
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, total_len);
+        list.items.len = start + total_len;
+        (FrameHeader{
+            .length = payload_len_u24,
+            .frame_type = .altsvc,
+            .flags = 0,
+            .stream_id = stream_id,
+        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        const payload = list.items[start + FrameHeader.encoded_len ..][0..payload_len];
+        std.mem.writeInt(u16, payload[0..2], @intCast(origin.len), .big);
+        @memcpy(payload[2..][0..origin.len], origin);
+        @memcpy(payload[2 + origin.len ..], field_value);
     }
 };
 
