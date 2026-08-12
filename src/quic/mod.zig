@@ -2070,16 +2070,26 @@ fn writeAckFrequencyFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator
 }
 
 fn writeStreamFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream: StreamFrame) Error!void {
-    const frame_len = try streamFrameWireLen(stream);
-    try list.ensureUnusedCapacity(allocator, frame_len);
+    const stream_id_len = try varint.length(stream.stream_id);
+    const offset_len = if (stream.offset == 0)
+        0
+    else
+        try varint.length(stream.offset);
+    const data_len_len = try varint.length(stream.data.len);
+    try list.ensureUnusedCapacity(
+        allocator,
+        1 + @as(usize, stream_id_len) + offset_len + data_len_len + stream.data.len,
+    );
 
     var frame_type: u8 = @intCast(@intFromEnum(FrameType.stream) | 0x02); // always include Length for unambiguous composition.
     if (stream.offset != 0) frame_type |= 0x04;
     if (stream.fin) frame_type |= 0x01;
     list.appendAssumeCapacity(frame_type);
-    try appendVarintAssumeCapacity(list, stream.stream_id);
-    if (stream.offset != 0) try appendVarintAssumeCapacity(list, stream.offset);
-    try appendVarintAssumeCapacity(list, stream.data.len);
+    varint.encodeWithLenAssumeCapacity(list, stream.stream_id, stream_id_len);
+    if (stream.offset != 0) {
+        varint.encodeWithLenAssumeCapacity(list, stream.offset, offset_len);
+    }
+    varint.encodeWithLenAssumeCapacity(list, stream.data.len, data_len_len);
     list.appendSliceAssumeCapacity(stream.data);
 }
 
