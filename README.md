@@ -40,7 +40,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
   open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, and a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`,
   `http://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support, allocation-free HTTP/2 runtime SETTINGS/frame sends, and a `std.Io.async` concurrent server helper
-- HTTP/3 frame headers, SETTINGS, single-varint control frames, PUSH_PROMISE/PRIORITY_UPDATE, DATAGRAM/Capsule, and unidirectional stream prefixes with small-varint write fast paths, request/response HEADERS+DATA helpers,
+- HTTP/3 frame headers, SETTINGS, single-varint control frames, PUSH_PROMISE/PRIORITY_UPDATE, DATAGRAM/Capsule, and unidirectional stream prefixes with preallocated small-varint write fast paths, request/response HEADERS+DATA helpers,
   RFC 9297 Capsule Protocol TLV parsing/writing with allocation-free
   caller-buffer encoding, `Capsule-Protocol` structured-field validation, and
   an incremental iterator for CONNECT stream data, borrowed and owning

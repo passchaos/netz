@@ -1097,15 +1097,20 @@ pub const PriorityUpdatePayload = struct {
 };
 
 pub fn writeControlStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-    try list.append(allocator, @intFromEnum(StreamType.control));
+    try writeStreamPrefix(list, allocator, .control);
 }
 
 pub fn writeQpackEncoderStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-    try list.append(allocator, @intFromEnum(StreamType.qpack_encoder));
+    try writeStreamPrefix(list, allocator, .qpack_encoder);
 }
 
 pub fn writeQpackDecoderStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-    try list.append(allocator, @intFromEnum(StreamType.qpack_decoder));
+    try writeStreamPrefix(list, allocator, .qpack_decoder);
+}
+
+fn writeStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream_type: StreamType) Error!void {
+    try list.ensureUnusedCapacity(allocator, 1);
+    list.appendAssumeCapacity(@intCast(@intFromEnum(stream_type)));
 }
 
 pub fn writeSettingsFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
