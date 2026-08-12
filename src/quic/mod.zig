@@ -1165,15 +1165,21 @@ pub const Frame = union(enum) {
             .retire_connection_id => |frame| try singleVarintFrameWireLen(@intFromEnum(FrameType.retire_connection_id), frame.sequence_number),
             .path_challenge, .path_response => 9,
             .connection_close => |close| blk: {
-                var prefix = try addWireLen(1, try varint.length(close.error_code));
-                prefix = try addWireLen(prefix, try varint.length(close.frame_type));
-                prefix = try addWireLen(prefix, try varint.length(close.reason_phrase.len));
-                break :blk try addWireLen(prefix, close.reason_phrase.len);
+                break :blk try tripleVarintPayloadFrameWireLen(
+                    @intFromEnum(FrameType.connection_close),
+                    close.error_code,
+                    close.frame_type,
+                    close.reason_phrase.len,
+                    close.reason_phrase.len,
+                );
             },
             .application_close => |close| blk: {
-                var prefix = try addWireLen(1, try varint.length(close.error_code));
-                prefix = try addWireLen(prefix, try varint.length(close.reason_phrase.len));
-                break :blk try addWireLen(prefix, close.reason_phrase.len);
+                break :blk try doubleVarintPayloadFrameWireLen(
+                    @intFromEnum(FrameType.connection_close_app),
+                    close.error_code,
+                    close.reason_phrase.len,
+                    close.reason_phrase.len,
+                );
             },
             .handshake_done => 1,
             .immediate_ack => 1,
@@ -1273,17 +1279,25 @@ pub const Frame = union(enum) {
                 try list.appendSlice(allocator, &path.data);
             },
             .connection_close => |close| {
-                try list.append(allocator, @intFromEnum(FrameType.connection_close));
-                try varint.encode(list, allocator, close.error_code);
-                try varint.encode(list, allocator, close.frame_type);
-                try varint.encode(list, allocator, close.reason_phrase.len);
-                try list.appendSlice(allocator, close.reason_phrase);
+                try writeTripleVarintPayloadFrame(
+                    list,
+                    allocator,
+                    @intFromEnum(FrameType.connection_close),
+                    close.error_code,
+                    close.frame_type,
+                    close.reason_phrase.len,
+                    close.reason_phrase,
+                );
             },
             .application_close => |close| {
-                try list.append(allocator, @intFromEnum(FrameType.connection_close_app));
-                try varint.encode(list, allocator, close.error_code);
-                try varint.encode(list, allocator, close.reason_phrase.len);
-                try list.appendSlice(allocator, close.reason_phrase);
+                try writeDoubleVarintPayloadFrame(
+                    list,
+                    allocator,
+                    @intFromEnum(FrameType.connection_close_app),
+                    close.error_code,
+                    close.reason_phrase.len,
+                    close.reason_phrase,
+                );
             },
             .handshake_done => try list.append(allocator, @intFromEnum(FrameType.handshake_done)),
             .immediate_ack => try list.append(allocator, @intFromEnum(FrameType.immediate_ack)),
@@ -1352,6 +1366,11 @@ fn singleVarintPayloadFrameWireLen(frame_type: u64, value: u64, payload_len: usi
 
 fn doubleVarintPayloadFrameWireLen(frame_type: u64, first: u64, second: u64, payload_len: usize) Error!usize {
     const len = try doubleVarintFrameWireLen(frame_type, first, second);
+    return addWireLen(len, payload_len);
+}
+
+fn tripleVarintPayloadFrameWireLen(frame_type: u64, first: u64, second: u64, third: u64, payload_len: usize) Error!usize {
+    const len = try tripleVarintFrameWireLen(frame_type, first, second, third);
     return addWireLen(len, payload_len);
 }
 
@@ -1902,6 +1921,30 @@ fn writeDoubleVarintPayloadFrame(
     list.appendAssumeCapacity(@intCast(frame_type));
     try appendVarintAssumeCapacity(list, first);
     try appendVarintAssumeCapacity(list, second);
+    list.appendSliceAssumeCapacity(payload);
+}
+
+fn writeTripleVarintPayloadFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    third: u64,
+    payload: []const u8,
+) Error!void {
+    const frame_len = try tripleVarintPayloadFrameWireLen(
+        frame_type,
+        first,
+        second,
+        third,
+        payload.len,
+    );
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    list.appendAssumeCapacity(@intCast(frame_type));
+    try appendVarintAssumeCapacity(list, first);
+    try appendVarintAssumeCapacity(list, second);
+    try appendVarintAssumeCapacity(list, third);
     list.appendSliceAssumeCapacity(payload);
 }
 
