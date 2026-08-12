@@ -36,9 +36,9 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(transfer_body);
     @memset(transfer_body, 'x');
 
-    const endpoint_datagram_size = transferEndpointDatagramSize(config.streams);
-    const one_rtt_datagram_size = transferOneRttDatagramSize(config.streams);
-    const paced_body_chunk_bytes = transferPacedBodyChunkBytes(config.streams);
+    const endpoint_datagram_size = transferEndpointDatagramSize(config);
+    const one_rtt_datagram_size = transferOneRttDatagramSize(config);
+    const paced_body_chunk_bytes = transferPacedBodyChunkBytes(config);
     const enable_data_prefix_fast_path = config.streams == 1;
 
     const server_cid = [_]u8{ 0x44, 0x45, 0x46, 0x47 };
@@ -526,16 +526,19 @@ fn findStreamIndex(stream_ids: []const u62, stream_id: u62) ?usize {
     return null;
 }
 
-fn transferEndpointDatagramSize(streams: usize) usize {
-    return if (streams == 1) single_stream_one_rtt_datagram_size else default_endpoint_datagram_size;
+fn transferEndpointDatagramSize(config: Config) usize {
+    return config.one_rtt_datagram_size orelse
+        if (config.streams == 1) single_stream_one_rtt_datagram_size else default_endpoint_datagram_size;
 }
 
-fn transferOneRttDatagramSize(streams: usize) usize {
-    return if (streams == 1) single_stream_one_rtt_datagram_size else default_endpoint_datagram_size;
+fn transferOneRttDatagramSize(config: Config) usize {
+    return config.one_rtt_datagram_size orelse
+        if (config.streams == 1) single_stream_one_rtt_datagram_size else default_endpoint_datagram_size;
 }
 
-fn transferPacedBodyChunkBytes(streams: usize) usize {
-    return if (streams == 1) single_stream_paced_body_chunk_bytes else multi_stream_paced_body_chunk_bytes;
+fn transferPacedBodyChunkBytes(config: Config) usize {
+    return config.paced_body_chunk_bytes orelse
+        if (config.streams == 1) single_stream_paced_body_chunk_bytes else multi_stream_paced_body_chunk_bytes;
 }
 
 const CountingAllocator = struct {
@@ -662,6 +665,8 @@ const Config = struct {
     max_stream_frame_data: usize = default_max_stream_frame_data,
     streams: usize = default_streams,
     round_robin_chunk_bytes: usize = default_round_robin_chunk_bytes,
+    one_rtt_datagram_size: ?usize = null,
+    paced_body_chunk_bytes: ?usize = null,
     mode: Mode = .upload,
     stats: bool = false,
 };
@@ -680,6 +685,10 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.max_stream_frame_data = try parsePositiveUsize(arg["--max-stream-frame-data=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--round-robin-chunk-bytes=")) {
             config.round_robin_chunk_bytes = try parsePositiveUsize(arg["--round-robin-chunk-bytes=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--one-rtt-datagram-size=")) {
+            config.one_rtt_datagram_size = try parsePositiveUsize(arg["--one-rtt-datagram-size=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--paced-body-chunk-bytes=")) {
+            config.paced_body_chunk_bytes = try parsePositiveUsize(arg["--paced-body-chunk-bytes=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--streams=")) {
             config.streams = try parsePositiveUsize(arg["--streams=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--mode=")) {

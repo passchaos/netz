@@ -99,6 +99,9 @@ request streams, matching the shape of quicz's 4-stream aggregate benchmark.
 `--round-robin-chunk-bytes` controls the per-stream scheduling quantum used by
 multi-stream upload/download helpers; the default is 64 KiB, while smaller
 values are useful for probing ACK/credit fairness without editing source.
+`--one-rtt-datagram-size` and `--paced-body-chunk-bytes` override the benchmark's
+default single-stream/multi-stream transfer sizing knobs, making it possible to
+search stable packet-size-aware configurations without source edits.
 
 ```sh
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
