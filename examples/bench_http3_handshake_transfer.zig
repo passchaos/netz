@@ -11,6 +11,8 @@ const round_robin_chunk_bytes: usize = 64 * 1024;
 const default_endpoint_datagram_size: usize = 4096;
 const single_stream_one_rtt_datagram_size: usize = 8192;
 const single_stream_paced_body_chunk_bytes: usize = 7200;
+const multi_stream_one_rtt_datagram_size: usize = 4096;
+const multi_stream_paced_body_chunk_bytes: usize = 2800;
 
 const Mode = enum {
     upload,
@@ -509,11 +511,11 @@ fn transferEndpointDatagramSize(streams: usize) usize {
 }
 
 fn transferOneRttDatagramSize(streams: usize) usize {
-    return if (streams == 1) single_stream_one_rtt_datagram_size else netz.quic.congestion.default_max_datagram_size;
+    return if (streams == 1) single_stream_one_rtt_datagram_size else multi_stream_one_rtt_datagram_size;
 }
 
 fn transferPacedBodyChunkBytes(streams: usize) usize {
-    return if (streams == 1) single_stream_paced_body_chunk_bytes else 1024;
+    return if (streams == 1) single_stream_paced_body_chunk_bytes else multi_stream_paced_body_chunk_bytes;
 }
 
 const Config = struct {

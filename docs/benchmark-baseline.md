@@ -144,9 +144,9 @@ HTTP/3 real-handshake transfer benchmark
   body bytes/iteration: 16777216
   total body bytes: 16777216
   status total: 800
-  ns/iteration: 632215439
-  bytes/s: 26537181
-  MiB/s: 25
+  ns/iteration: 136766171
+  bytes/s: 122670802
+  MiB/s: 116
 ```
 
 Current 16 MiB / 4-stream download result:
@@ -159,9 +159,9 @@ HTTP/3 real-handshake transfer benchmark
   body bytes/iteration: 16777216
   total body bytes: 16777216
   status total: 800
-  ns/iteration: 662296871
-  bytes/s: 25331866
-  MiB/s: 24
+  ns/iteration: 134534611
+  bytes/s: 124705574
+  MiB/s: 118
 ```
 
 This is now a real-handshake, paced single-stream and 4-stream upload/download
@@ -203,19 +203,19 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 ```
 
 ```text
-netz upload streams=1:   117 MiB/s, 123,052,305 bytes/s, ns/iter 545,368,603
-netz download streams=1: 120 MiB/s, 125,876,150 bytes/s, ns/iter 533,134,067
-netz upload streams=4:   3 MiB/s,  3,295,552 bytes/s, ns/iter 20,363,465,593
-netz download streams=4: 3 MiB/s,  3,450,680 bytes/s, ns/iter 19,448,009,875
+netz upload streams=1:   126 MiB/s, 132,534,851 bytes/s, ns/iter 506,348,808
+netz download streams=1: 118 MiB/s, 124,416,235 bytes/s, ns/iter 539,389,927
+netz upload streams=4:   34 MiB/s, 36,694,417 bytes/s, ns/iter 1,828,857,592
+netz download streams=4: 32 MiB/s, 34,337,775 bytes/s, ns/iter 1,954,374,257
 ```
 
 This same-host comparison shows netz is **improved but not yet
 performance-competitive** on large real-handshake transfers. Raising the
 single-stream 1-RTT datagram budget to 8192 bytes and the paced DATA chunk to
 7200 bytes closes much of the previous 3 MiB/s cliff, but quicz still leads on
-64 MiB single-stream upload and 4-stream aggregate throughput. The next
-optimization target is the multi-stream paced body pump / receive-credit loop
-and packet batching across concurrent streams. A completion audit cannot pass
+64 MiB 4-stream aggregate throughput. The next optimization target is the
+multi-stream paced body pump / receive-credit loop and packet batching across
+concurrent streams. A completion audit cannot pass
 until this gap is closed with measured same-host evidence.
 
 ## Reference context from `~/Work`
