@@ -147,7 +147,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   of failing on the first PTO, Handshake-space CRYPTO-less packet skips, plus
   configurable retry exhaustion and deterministic
   whole-flight loss injection tests, HMAC-based
-  address-validation token helpers for Retry/NEW_TOKEN with lifetime, version,
+  address-validation token helpers with exact Retry peer bindings for Retry/NEW_TOKEN with lifetime, version,
   peer-address binding, Retry ODCID/RSCID binding, secret rotation,
   digest-indexed single-lookup replay filtering with disabled-filter fingerprint skips, empty-index membership skips, and export/restore snapshots, Retry datagram issue/validate helpers, client-side Retry
   processing that enforces one-Retry/early-Retry rules, automatically resends

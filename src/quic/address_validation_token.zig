@@ -305,15 +305,21 @@ pub fn validateAnySecretAndRemember(secrets: []const Secret, expected_kind: Kind
 
 fn retryPeerBinding(allocator: std.mem.Allocator, peer_address: []const u8, odcid: []const u8, rscid: []const u8) Error![]u8 {
     if (odcid.len == 0 or odcid.len > 20 or rscid.len == 0 or rscid.len > 20) return error.InvalidToken;
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, peer_address);
-    try out.append(allocator, 0xff);
-    try out.append(allocator, @intCast(odcid.len));
-    try out.appendSlice(allocator, odcid);
-    try out.append(allocator, @intCast(rscid.len));
-    try out.appendSlice(allocator, rscid);
-    return out.toOwnedSlice(allocator);
+    const len = peer_address.len + 3 + odcid.len + rscid.len;
+    const out = try allocator.alloc(u8, len);
+    var pos: usize = 0;
+    @memcpy(out[pos..][0..peer_address.len], peer_address);
+    pos += peer_address.len;
+    out[pos] = 0xff;
+    pos += 1;
+    out[pos] = @intCast(odcid.len);
+    pos += 1;
+    @memcpy(out[pos..][0..odcid.len], odcid);
+    pos += odcid.len;
+    out[pos] = @intCast(rscid.len);
+    pos += 1;
+    @memcpy(out[pos..][0..rscid.len], rscid);
+    return out;
 }
 
 fn validateContext(context: Context) Error!void {
