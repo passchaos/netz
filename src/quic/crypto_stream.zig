@@ -92,10 +92,12 @@ pub fn writeCryptoFrames(
     var written: usize = 0;
     while (written < bytes.len) {
         const chunk_len = @min(max_frame_data_len, bytes.len - written);
-        try (quic.Frame{ .crypto = .{
-            .offset = offset + written,
-            .data = bytes[written .. written + chunk_len],
-        } }).write(list, allocator);
+        const frame_offset = std.math.add(u64, offset, written) catch
+            return error.InvalidCryptoRange;
+        list.appendAssumeCapacity(@intFromEnum(quic.FrameType.crypto));
+        try appendVarintAssumeCapacity(list, frame_offset);
+        try appendVarintAssumeCapacity(list, chunk_len);
+        list.appendSliceAssumeCapacity(bytes[written .. written + chunk_len]);
         written += chunk_len;
     }
 }
@@ -118,6 +120,12 @@ fn cryptoFramesWireLen(offset: u64, bytes_len: usize, max_frame_data_len: usize)
         written += chunk_len;
     }
     return len;
+}
+
+fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
+    var buffer: [8]u8 = undefined;
+    const encoded = try quic.varint.encodeInto(&buffer, value);
+    list.appendSliceAssumeCapacity(encoded);
 }
 
 test "QUIC CRYPTO stream frames split and reassemble out of order" {
