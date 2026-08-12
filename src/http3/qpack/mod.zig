@@ -80,8 +80,13 @@ pub fn writeEncoderInstruction(
             try encodeString(list, allocator, reference.value);
         },
         .insert_literal => |literal| {
+            try list.ensureUnusedCapacity(
+                allocator,
+                prefixed_integer.encodedLen(5, literal.name.len) +
+                    literal.name.len,
+            );
             try encodePrefixedInteger(list, allocator, 5, 0x40, literal.name.len);
-            try list.appendSlice(allocator, literal.name);
+            list.appendSliceAssumeCapacity(literal.name);
             try encodeString(list, allocator, literal.value);
         },
         .set_capacity => |capacity| try encodePrefixedInteger(list, allocator, 5, 0x20, capacity),
