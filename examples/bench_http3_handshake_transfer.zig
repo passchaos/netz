@@ -118,6 +118,12 @@ const IterationResult = struct {
     bytes_total: usize,
 };
 
+fn traceIteration(config: Config, iteration: usize, message: []const u8) void {
+    if (config.trace_iteration) {
+        std.debug.print("  [iter {d}] {s}\n", .{ iteration, message });
+    }
+}
+
 fn runIteration(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -130,6 +136,7 @@ fn runIteration(
     const paced_body_chunk_bytes = transferPacedBodyChunkBytes(config);
     const enable_data_prefix_fast_path = config.streams == 1;
 
+    traceIteration(config, iteration, "bind server");
     var server_cid = [_]u8{ 0x44, 0x45, 0x46, 0x47 };
     server_cid[0] +%= @truncate(iteration);
     var server = try netz.http3.runtime.HandshakeServer.bind(
@@ -155,6 +162,7 @@ fn runIteration(
         },
     );
     defer server.deinit();
+    traceIteration(config, iteration, "server bound");
 
     const Shared = struct {
         server: *netz.http3.runtime.HandshakeServer,
@@ -200,12 +208,14 @@ fn runIteration(
         .body = transfer_body,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    traceIteration(config, iteration, "server thread spawned");
 
     var original_dcid: [8]u8 = undefined;
     var local_cid: [8]u8 = undefined;
     try std.Io.randomSecure(io, &original_dcid);
     try std.Io.randomSecure(io, &local_cid);
 
+    traceIteration(config, iteration, "connect start");
     var client = try netz.http3.runtime.HandshakeClient.connect(
         allocator,
         io,
@@ -231,6 +241,7 @@ fn runIteration(
         },
     );
     defer client.deinit();
+    traceIteration(config, iteration, "connect done");
 
     var result: IterationResult = .{ .status_total = 0, .bytes_total = 0 };
     switch (config.mode) {
@@ -257,8 +268,10 @@ fn runIteration(
             result.bytes_total += download.bytes;
         },
     }
+    traceIteration(config, iteration, "transfer done");
 
     thread.join();
+    traceIteration(config, iteration, "server thread joined");
     if (shared.err) |err| return err;
     return result;
 }
@@ -736,6 +749,7 @@ const Config = struct {
     mode: Mode = .upload,
     stats: bool = false,
     verbose: bool = false,
+    trace_iteration: bool = false,
 };
 
 fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
@@ -764,6 +778,8 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.stats = true;
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
+        } else if (std.mem.eql(u8, arg, "--trace-iteration")) {
+            config.trace_iteration = true;
         } else {
             return error.InvalidArgument;
         }
