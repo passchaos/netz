@@ -212,6 +212,13 @@ netz upload streams=4:   34 MiB/s, 36,504,241 bytes/s, ns/iter 1,838,385,370
 netz download streams=4: 32 MiB/s, 34,579,902 bytes/s, ns/iter 1,940,689,776
 ```
 
+Same-host throughput ratio against the quicz real-handshake upload baselines:
+
+| Scenario | quicz | netz | netz/quicz |
+|---|---:|---:|---:|
+| 64 MiB single-stream upload | 228.77 MB/s | 118 MiB/s | ~0.52x |
+| 64 MiB 4-stream aggregate upload | 244.85 MB/s | 34 MiB/s | ~0.14x |
+
 This same-host comparison shows netz is **improved but not yet
 performance-competitive** on large real-handshake transfers. Raising the
 single-stream 1-RTT datagram budget to 8192 bytes and the paced DATA chunk to
