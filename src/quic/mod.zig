@@ -616,13 +616,14 @@ pub fn parseTransportParametersTyped(
     var params = TransportParameters{};
     var seen: std.ArrayList(u64) = .empty;
     defer seen.deinit(allocator);
+    try seen.ensureUnusedCapacity(allocator, try transportParameterCount(bytes));
 
     while (!cursor.eof()) {
         const id = try varint.decode(&cursor);
         for (seen.items) |seen_id| {
             if (seen_id == id) return error.DuplicateTransportParameter;
         }
-        try seen.append(allocator, id);
+        seen.appendAssumeCapacity(id);
 
         const len = try usizeFromVarint(try varint.decode(&cursor));
         const value = try cursor.readSlice(len);
@@ -688,6 +689,18 @@ pub fn parseTransportParametersTyped(
 
     try validateTransportParameters(params, source);
     return params;
+}
+
+fn transportParameterCount(bytes: []const u8) Error!usize {
+    var cursor = wire.Cursor.init(bytes);
+    var count: usize = 0;
+    while (!cursor.eof()) {
+        _ = try varint.decode(&cursor);
+        const len = try usizeFromVarint(try varint.decode(&cursor));
+        try cursor.skip(len);
+        count += 1;
+    }
+    return count;
 }
 
 pub fn encodeTransportParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: u64, value: []const u8) !void {

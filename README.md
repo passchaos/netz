@@ -129,7 +129,7 @@ starts with deterministic parsers, serializers, and state helpers for:
 - QUIC varints with encode length reuse, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with one-byte control-frame, single-varint write/length, fixed PATH, STREAM flag-byte, reset/stop, NEW_TOKEN, NEW_CONNECTION_ID, CRYPTO, MAX_DATA, stream flow-control, close, ACK/ACK_ECN, DATAGRAM, and ACK_FREQUENCY frame-type write fast paths, frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed
-  RFC-defaulted transport-parameter encoding/validation with stack-buffered integer values and preallocated parameter writes (duplicate detection, exact-allocation raw parsing,
+  RFC-defaulted transport-parameter encoding/validation with stack-buffered integer values and preallocated parameter writes (preallocated duplicate detection, exact-allocation raw parsing,
   endpoint-specific client/server parameter rules, stack-written preferred-address encoding plus parsing and specified-address validation,
   max UDP payload 1200..65527/idle-timeout/ACK delay/stream-count bounds), Retry packet codec with preallocated writes
   and version-specific integrity-tag verification, plus CRYPTO stream reassembly with empty-frame/write/consume no-op handling, pre-reserved assume-capacity CRYPTO frame batches, contiguous duplicate fast paths, and duplicate-overlap conflict detection,
