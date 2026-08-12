@@ -1346,15 +1346,23 @@ fn parseSingleVarintPayload(payload: []const u8) Error!u64 {
 pub fn parseSettings(allocator: std.mem.Allocator, payload: []const u8) Error![]Setting {
     if (payload.len > max_settings_payload_size) return error.InvalidSetting;
     var cursor = wire.Cursor.init(payload);
-    var settings: std.ArrayList(Setting) = .empty;
-    errdefer settings.deinit(allocator);
+    var count: usize = 0;
     while (!cursor.eof()) {
+        _ = quic.varint.decode(&cursor) catch return error.InvalidSetting;
+        _ = quic.varint.decode(&cursor) catch return error.InvalidSetting;
+        count += 1;
+    }
+
+    const settings = try allocator.alloc(Setting, count);
+    errdefer allocator.free(settings);
+    cursor = wire.Cursor.init(payload);
+    for (settings, 0..) |*setting, index| {
         const id = quic.varint.decode(&cursor) catch return error.InvalidSetting;
         const value = quic.varint.decode(&cursor) catch return error.InvalidSetting;
-        try validateSetting(id, value, settings.items);
-        try settings.append(allocator, .{ .id = id, .value = value });
+        try validateSetting(id, value, settings[0..index]);
+        setting.* = .{ .id = id, .value = value };
     }
-    return settings.toOwnedSlice(allocator);
+    return settings;
 }
 
 fn validateSetting(id: u64, value: u64, seen: []const Setting) Error!void {
