@@ -879,24 +879,24 @@ pub fn sealInitialPacket(
         options.packet_number_len,
         options.fixed_bit,
     );
-    try out.append(allocator, first_byte);
+    out.appendAssumeCapacity(first_byte);
     var version_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_bytes, options.version, .big);
-    try out.appendSlice(allocator, &version_bytes);
-    try out.append(allocator, @intCast(options.destination_connection_id.len));
-    try out.appendSlice(allocator, options.destination_connection_id);
-    try out.append(allocator, @intCast(options.source_connection_id.len));
-    try out.appendSlice(allocator, options.source_connection_id);
-    try varint.encode(&out, allocator, options.token.len);
-    try out.appendSlice(allocator, options.token);
+    out.appendSliceAssumeCapacity(&version_bytes);
+    out.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
+    out.appendSliceAssumeCapacity(options.destination_connection_id);
+    out.appendAssumeCapacity(@intCast(options.source_connection_id.len));
+    out.appendSliceAssumeCapacity(options.source_connection_id);
+    try varint.encodeAssumeCapacity(&out, options.token.len);
+    out.appendSliceAssumeCapacity(options.token);
 
     const protected_payload_len = options.payload.len + aead_tag_len;
-    try varint.encode(&out, allocator, pn_len + protected_payload_len);
+    try varint.encodeAssumeCapacity(&out, pn_len + protected_payload_len);
     const pn_offset = out.items.len;
-    try appendTruncatedPacketNumber(&out, allocator, options.packet_number, options.packet_number_len);
+    try appendTruncatedPacketNumberAssumeCapacity(&out, options.packet_number, options.packet_number_len);
     const payload_offset = out.items.len;
 
-    try out.resize(allocator, payload_offset + options.payload.len + aead_tag_len);
+    out.items.len = payload_offset + options.payload.len + aead_tag_len;
     const ciphertext = out.items[payload_offset .. payload_offset + options.payload.len];
     const tag = out.items[payload_offset + options.payload.len ..][0..aead_tag_len];
     try protectPayload(keys, options.packet_number, out.items[0..payload_offset], options.payload, ciphertext, tag);
@@ -1023,22 +1023,22 @@ pub fn sealHandshakePacket(
         options.packet_number_len,
         options.fixed_bit,
     );
-    try out.append(allocator, first_byte);
+    out.appendAssumeCapacity(first_byte);
     var version_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_bytes, options.version, .big);
-    try out.appendSlice(allocator, &version_bytes);
-    try out.append(allocator, @intCast(options.destination_connection_id.len));
-    try out.appendSlice(allocator, options.destination_connection_id);
-    try out.append(allocator, @intCast(options.source_connection_id.len));
-    try out.appendSlice(allocator, options.source_connection_id);
+    out.appendSliceAssumeCapacity(&version_bytes);
+    out.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
+    out.appendSliceAssumeCapacity(options.destination_connection_id);
+    out.appendAssumeCapacity(@intCast(options.source_connection_id.len));
+    out.appendSliceAssumeCapacity(options.source_connection_id);
 
     const protected_payload_len = options.payload.len + aead_tag_len;
-    try varint.encode(&out, allocator, pn_len + protected_payload_len);
+    try varint.encodeAssumeCapacity(&out, pn_len + protected_payload_len);
     const pn_offset = out.items.len;
-    try appendTruncatedPacketNumber(&out, allocator, options.packet_number, options.packet_number_len);
+    try appendTruncatedPacketNumberAssumeCapacity(&out, options.packet_number, options.packet_number_len);
     const payload_offset = out.items.len;
 
-    try out.resize(allocator, payload_offset + options.payload.len + aead_tag_len);
+    out.items.len = payload_offset + options.payload.len + aead_tag_len;
     const ciphertext = out.items[payload_offset .. payload_offset + options.payload.len];
     const tag = out.items[payload_offset + options.payload.len ..][0..aead_tag_len];
     try protectPayload(keys, options.packet_number, out.items[0..payload_offset], options.payload, ciphertext, tag);
@@ -1157,22 +1157,22 @@ pub fn sealZeroRttPacket(
         options.packet_number_len,
         options.fixed_bit,
     );
-    try out.append(allocator, first_byte);
+    out.appendAssumeCapacity(first_byte);
     var version_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &version_bytes, options.version, .big);
-    try out.appendSlice(allocator, &version_bytes);
-    try out.append(allocator, @intCast(options.destination_connection_id.len));
-    try out.appendSlice(allocator, options.destination_connection_id);
-    try out.append(allocator, @intCast(options.source_connection_id.len));
-    try out.appendSlice(allocator, options.source_connection_id);
+    out.appendSliceAssumeCapacity(&version_bytes);
+    out.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
+    out.appendSliceAssumeCapacity(options.destination_connection_id);
+    out.appendAssumeCapacity(@intCast(options.source_connection_id.len));
+    out.appendSliceAssumeCapacity(options.source_connection_id);
 
     const protected_payload_len = options.payload.len + aead_tag_len;
-    try varint.encode(&out, allocator, pn_len + protected_payload_len);
+    try varint.encodeAssumeCapacity(&out, pn_len + protected_payload_len);
     const pn_offset = out.items.len;
-    try appendTruncatedPacketNumber(&out, allocator, options.packet_number, options.packet_number_len);
+    try appendTruncatedPacketNumberAssumeCapacity(&out, options.packet_number, options.packet_number_len);
     const payload_offset = out.items.len;
 
-    try out.resize(allocator, payload_offset + options.payload.len + aead_tag_len);
+    out.items.len = payload_offset + options.payload.len + aead_tag_len;
     const ciphertext = out.items[payload_offset .. payload_offset + options.payload.len];
     const tag = out.items[payload_offset + options.payload.len ..][0..aead_tag_len];
     try protectPayload(keys, options.packet_number, out.items[0..payload_offset], options.payload, ciphertext, tag);
@@ -1828,13 +1828,13 @@ fn validateShortHeaderReservedBits(first_byte: u8) Error!void {
     if ((first_byte & 0x18) != 0) return error.InvalidInitialPacket;
 }
 
-fn appendTruncatedPacketNumber(list: *std.ArrayList(u8), allocator: std.mem.Allocator, packet_number: u64, packet_number_len: u8) Error!void {
+fn appendTruncatedPacketNumberAssumeCapacity(list: *std.ArrayList(u8), packet_number: u64, packet_number_len: u8) Error!void {
     try validatePacketNumberLen(packet_number_len);
     try validatePacketNumber(packet_number);
     var truncated: [4]u8 = undefined;
     const bytes = truncated[0..packet_number_len];
     writeTruncatedPacketNumberAssumeValid(bytes, packet_number);
-    try list.appendSlice(allocator, bytes);
+    list.appendSliceAssumeCapacity(bytes);
 }
 
 /// Reconstruct a full packet number from its one-to-four-byte wire encoding.
