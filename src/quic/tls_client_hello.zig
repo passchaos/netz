@@ -1243,36 +1243,26 @@ fn writeKeyShareExtension(
     allocator: std.mem.Allocator,
     key_shares: []const KeyShare,
 ) Error!void {
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    var shares: std.ArrayList(u8) = .empty;
-    defer shares.deinit(allocator);
+    var shares_len: usize = 0;
     for (key_shares) |*share| {
         if (!share.validForClientHello()) {
             return error.InvalidClientHello;
         }
-        try appendInt(
-            &shares,
-            allocator,
-            u16,
-            @intFromEnum(share.group()),
-        );
-        try appendU16Len(
-            &shares,
-            allocator,
-            share.bytes().len,
-            error.InvalidClientHello,
-        );
-        try shares.appendSlice(allocator, share.bytes());
+        if (share.bytes().len > std.math.maxInt(u16)) return error.InvalidClientHello;
+        shares_len = std.math.add(usize, shares_len, 4 + share.bytes().len) catch
+            return error.InvalidClientHello;
     }
-    try appendU16Len(
-        &payload,
-        allocator,
-        shares.items.len,
-        error.InvalidClientHello,
-    );
-    try payload.appendSlice(allocator, shares.items);
-    try writeExtension(list, allocator, ext_key_share, payload.items);
+    if (shares_len > std.math.maxInt(u16)) return error.InvalidClientHello;
+    const payload_len = 2 + shares_len;
+    try list.ensureUnusedCapacity(allocator, 4 + payload_len);
+    appendU16AssumeCapacity(list, ext_key_share);
+    appendU16AssumeCapacity(list, @intCast(payload_len));
+    appendU16AssumeCapacity(list, @intCast(shares_len));
+    for (key_shares) |*share| {
+        appendU16AssumeCapacity(list, @intFromEnum(share.group()));
+        appendU16AssumeCapacity(list, @intCast(share.bytes().len));
+        list.appendSliceAssumeCapacity(share.bytes());
+    }
 }
 
 fn writeServerKeyShareExtension(
@@ -1281,22 +1271,14 @@ fn writeServerKeyShareExtension(
     share: KeyShare,
 ) Error!void {
     if (!share.validForServerHello()) return error.InvalidServerHello;
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try appendInt(
-        &payload,
-        allocator,
-        u16,
-        @intFromEnum(share.group()),
-    );
-    try appendU16Len(
-        &payload,
-        allocator,
-        share.bytes().len,
-        error.InvalidServerHello,
-    );
-    try payload.appendSlice(allocator, share.bytes());
-    try writeExtension(list, allocator, ext_key_share, payload.items);
+    if (share.bytes().len > std.math.maxInt(u16)) return error.InvalidServerHello;
+    const payload_len = 4 + share.bytes().len;
+    try list.ensureUnusedCapacity(allocator, 4 + payload_len);
+    appendU16AssumeCapacity(list, ext_key_share);
+    appendU16AssumeCapacity(list, @intCast(payload_len));
+    appendU16AssumeCapacity(list, @intFromEnum(share.group()));
+    appendU16AssumeCapacity(list, @intCast(share.bytes().len));
+    list.appendSliceAssumeCapacity(share.bytes());
 }
 
 fn writeExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, typ: u16, payload: []const u8) Error!void {
