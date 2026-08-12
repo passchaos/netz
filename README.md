@@ -140,7 +140,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   cross-datagram TLS-message reassembly for large post-quantum
   ClientHello/ServerHello flights, client-carried Initial address tokens,
   server-side token validation hooks, and server-issued address-validation
-  NEW_TOKEN frames, coalesced Initial+Handshake CRYPTO datagram helpers,
+  NEW_TOKEN frames, preallocated coalesced Initial+Handshake CRYPTO datagram helpers,
   bounded RFC 9002-style exponential PTO retries for synchronous client
   Initial/0-RTT and server Initial+Handshake flights with fresh packet numbers,
   passive split-flight waits that use the same bounded total PTO budget instead

@@ -105,10 +105,19 @@ pub fn sendCoalescedInitialHandshakeCrypto(
     });
     defer endpoint.allocator.free(handshake_packet);
 
+    const coalesced_len = std.math.add(
+        usize,
+        initial_packet.len,
+        handshake_packet.len,
+    ) catch return error.DatagramTooLarge;
     var coalesced: std.ArrayList(u8) = .empty;
     defer coalesced.deinit(endpoint.allocator);
-    try coalesced.appendSlice(endpoint.allocator, initial_packet);
-    try coalesced.appendSlice(endpoint.allocator, handshake_packet);
+    try coalesced.ensureTotalCapacity(
+        endpoint.allocator,
+        coalesced_len,
+    );
+    coalesced.appendSliceAssumeCapacity(initial_packet);
+    coalesced.appendSliceAssumeCapacity(handshake_packet);
     try endpoint.sendBytes(to, coalesced.items);
 }
 
