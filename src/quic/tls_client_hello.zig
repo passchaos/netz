@@ -1502,20 +1502,6 @@ fn parseServerKeyShare(payload: []const u8) Error!ParsedKeyShare {
     return .{ .group = group, .key = key };
 }
 
-fn appendInt(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime T: type, value: T) !void {
-    var tmp: [@divExact(@typeInfo(T).int.bits, 8)]u8 = undefined;
-    std.mem.writeInt(T, &tmp, value, .big);
-    try list.ensureUnusedCapacity(allocator, tmp.len);
-    list.appendSliceAssumeCapacity(&tmp);
-}
-
-fn appendU24(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u24) !void {
-    try list.ensureUnusedCapacity(allocator, 3);
-    list.appendAssumeCapacity(@truncate(value >> 16));
-    list.appendAssumeCapacity(@truncate(value >> 8));
-    list.appendAssumeCapacity(@truncate(value));
-}
-
 fn writeHandshakeMessage(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -1544,16 +1530,6 @@ fn writeFinishedBytes(
     list.appendAssumeCapacity(@truncate(verify_data.len >> 8));
     list.appendAssumeCapacity(@truncate(verify_data.len));
     list.appendSliceAssumeCapacity(verify_data);
-}
-
-fn appendU16Len(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len: usize, err: Error) Error!void {
-    if (len > std.math.maxInt(u16)) return err;
-    try appendInt(list, allocator, u16, @intCast(len));
-}
-
-fn appendU24Len(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len: usize, err: Error) Error!void {
-    if (len > std.math.maxInt(u24)) return err;
-    try appendU24(list, allocator, @intCast(len));
 }
 
 fn readU24(cursor: *wire.Cursor) !usize {
