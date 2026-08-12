@@ -949,6 +949,25 @@ pub const StreamingMessageReader = struct {
         return count;
     }
 
+    pub fn skipData(self: *StreamingMessageReader) Error!usize {
+        const header = self.current_frame orelse return error.UnexpectedFrame;
+        if (header.frame_type != http3.FrameType.data or self.phase != .body) {
+            return error.UnexpectedFrame;
+        }
+        const remaining = header.payload_length - self.current_payload_read;
+        const count = @min(remaining, self.receive.available().len);
+        if (count == 0) return 0;
+        try self.receive.consume(count);
+        self.current_payload_read += count;
+        self.body_read += count;
+        if (self.current_payload_read == header.payload_length) {
+            self.current_frame = null;
+            self.current_header_consumed = false;
+            self.current_payload_read = 0;
+        }
+        return count;
+    }
+
     fn uncreditedConsumed(self: StreamingMessageReader) usize {
         std.debug.assert(self.receive.read_offset >= self.credited_offset);
         return self.receive.read_offset - self.credited_offset;
@@ -2300,6 +2319,19 @@ pub const HandshakeServerSession = struct {
         return entry.reader.readData(out);
     }
 
+    pub fn skipRequestData(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!usize {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
+        return entry.reader.skipData();
+    }
+
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
         try self.sendResponseWithInformational(stream_id, &.{}, response);
     }
@@ -2428,6 +2460,59 @@ pub const HandshakeServerSession = struct {
         if (fin) self.request_lifecycle.markFinished(stream_id);
     }
 
+    /// Send response DATA while driving the receive side when QUIC
+    /// backpressure says the peer must first ACK or extend flow-control
+    /// credit.
+    ///
+    /// The plain `sendResponseBody` API intentionally exposes
+    /// `CongestionLimited`/`FlowControlBlocked` for event-loop integrations
+    /// that already own their writable scheduling. This helper is the blocking
+    /// counterpart for simple runtimes and benchmarks: it processes
+    /// request-side packets, preserving ACK/MAX_* progress, then retries the
+    /// same small DATA chunk.
+    pub fn sendResponseBodyPaced(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        if (data.len == 0) {
+            try self.sendResponseBodyPacedChunk(stream_id, data, fin);
+            return;
+        }
+        const chunk_limit = pacedBodyChunkLimit(
+            self.options.max_stream_frame_data,
+        );
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const end = @min(data.len, offset + chunk_limit);
+            try self.sendResponseBodyPacedChunk(
+                stream_id,
+                data[offset..end],
+                fin and end == data.len,
+            );
+            offset = end;
+        }
+    }
+
+    fn sendResponseBodyPacedChunk(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        while (true) {
+            self.sendResponseBody(stream_id, data, fin) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveRequestPacket();
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
+    }
+
     pub fn finishResponseTrailers(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -2445,6 +2530,25 @@ pub const HandshakeServerSession = struct {
             self.options,
         );
         self.request_lifecycle.markFinished(stream_id);
+    }
+
+    /// Blocking counterpart to `finishResponseTrailers` that keeps receiving
+    /// request-side packets until the response trailers can be written.
+    pub fn finishResponseTrailersPaced(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        while (true) {
+            self.finishResponseTrailers(stream_id, trailers) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveRequestPacket();
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
     }
 
     pub fn sendResponseWithInformational(
@@ -3055,6 +3159,58 @@ pub const HandshakeClient = struct {
         );
     }
 
+    /// Send request DATA and synchronously pump peer packets when QUIC
+    /// congestion or flow-control state is not yet writable.
+    ///
+    /// This mirrors production event loops (quicz/tquic style): a failed write
+    /// due to `CongestionLimited` or `FlowControlBlocked` is not terminal, it
+    /// means the connection must process ACK/MAX_* frames before retrying. The
+    /// method keeps aggregate `receiveResponse` usable by routing those packets
+    /// through the normal response queues instead of activating the streaming
+    /// response reader.
+    pub fn sendRequestBodyPaced(
+        self: *HandshakeClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        if (data.len == 0) {
+            try self.sendRequestBodyPacedChunk(stream_id, data, fin);
+            return;
+        }
+        const chunk_limit = pacedBodyChunkLimit(
+            self.options.max_stream_frame_data,
+        );
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const end = @min(data.len, offset + chunk_limit);
+            try self.sendRequestBodyPacedChunk(
+                stream_id,
+                data[offset..end],
+                fin and end == data.len,
+            );
+            offset = end;
+        }
+    }
+
+    fn sendRequestBodyPacedChunk(
+        self: *HandshakeClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        while (true) {
+            self.sendRequestBody(stream_id, data, fin) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveResponseProgressForSend(stream_id);
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
+    }
+
     pub fn finishRequestTrailers(
         self: *HandshakeClient,
         stream_id: u62,
@@ -3074,6 +3230,25 @@ pub const HandshakeClient = struct {
             &self.qpack_encoder_prefix_sent,
             self.options,
         );
+    }
+
+    /// Blocking counterpart to `finishRequestTrailers` that keeps processing
+    /// response-side ACK/MAX_* packets until the trailer section is writable.
+    pub fn finishRequestTrailersPaced(
+        self: *HandshakeClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        while (true) {
+            self.finishRequestTrailers(stream_id, trailers) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveResponseProgressForSend(stream_id);
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
     }
 
     pub fn receiveResponse(
@@ -3265,6 +3440,19 @@ pub const HandshakeClient = struct {
             &entry.reader,
         );
         return entry.reader.readData(out);
+    }
+
+    pub fn skipResponseData(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!usize {
+        const entry = self.streaming_responses.find(stream_id) orelse
+            return error.UnexpectedStream;
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
+        return entry.reader.skipData();
     }
 
     /// Poll one promised response without aggregating its DATA payload.
@@ -3678,6 +3866,37 @@ pub const HandshakeClient = struct {
             &self.qpack_decoder_prefix_sent,
             self.options,
         );
+    }
+
+    fn receiveResponseProgressForSend(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!void {
+        try self.failIfRequestResetForSend(stream_id);
+        try receiveConnectionResponsePacket(
+            &self.established.connection,
+            &self.receive_packets,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.response_streams,
+            &self.streaming_responses,
+            &self.push_streams,
+            &self.request_lifecycle,
+        );
+        try self.failIfRequestResetForSend(stream_id);
+    }
+
+    fn failIfRequestResetForSend(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!void {
+        const code = self.response_streams.takeReset(stream_id) orelse return;
+        try self.sendQpackFeedback();
+        _ = self.request_lifecycle.finish(stream_id);
+        _ = self.outbound_bodies.finish(stream_id);
+        self.qpack_encode.abandonStream(stream_id);
+        return responseResetError(code);
     }
 
     fn applyStreamingResponseEvent(
@@ -8020,6 +8239,22 @@ fn writeDataFrame(
     }).write(list, allocator);
 }
 
+const paced_body_chunk_ceiling: usize = 1024;
+const paced_body_frame_overhead_margin: usize = 8;
+
+fn pacedBodyChunkLimit(max_stream_frame_data: usize) usize {
+    // The paced helpers are usually used with the default 1200-byte QUIC path
+    // MTU. Keep each retry unit comfortably below one datagram after HTTP/3
+    // DATA framing, QUIC STREAM framing, packet-number, and AEAD overhead. The
+    // caller's configured HTTP/3 stream-frame cap is still honored for tests
+    // that intentionally exercise tiny fragmentation.
+    const frame_data_limit = if (max_stream_frame_data > paced_body_frame_overhead_margin)
+        max_stream_frame_data - paced_body_frame_overhead_margin
+    else
+        1;
+    return @max(@as(usize, 1), @min(frame_data_limit, paced_body_chunk_ceiling));
+}
+
 fn sendConnectionBodyChunk(
     connection: *quic.one_rtt.Connection,
     bodies: *OutboundBodySet,
@@ -8272,6 +8507,14 @@ const RequestStreamReset = struct {
 };
 
 fn requestResetError(application_error_code: u64) Error {
+    return if (application_error_code ==
+        http3.ApplicationErrorCode.request_rejected)
+        error.RequestRejected
+    else
+        error.RequestCancelled;
+}
+
+fn responseResetError(application_error_code: u64) Error {
     return if (application_error_code ==
         http3.ApplicationErrorCode.request_rejected)
         error.RequestRejected
@@ -17092,58 +17335,17 @@ test "HTTP/3 handshake server streams large request through small window" {
     var remaining = body_len;
     while (remaining != 0) {
         const count = @min(chunk.len, remaining);
-        while (true) {
-            client.sendRequestBody(
-                stream_id,
-                chunk[0..count],
-                false,
-            ) catch |err| switch (err) {
-                error.FlowControlBlocked, error.CongestionLimited => {
-                    // Match an event loop's writable retry: process ACK and
-                    // MAX_* packets while preserving any HTTP/3 frames in the
-                    // normal response queues.
-                    try receiveConnectionResponsePacket(
-                        &client.established.connection,
-                        &client.receive_packets,
-                        &client.control,
-                        &client.qpack_decode,
-                        &client.qpack_encode,
-                        &client.response_streams,
-                        &client.streaming_responses,
-                        &client.push_streams,
-                        &client.request_lifecycle,
-                    );
-                    continue;
-                },
-                else => return err,
-            };
-            break;
-        }
+        try client.sendRequestBodyPaced(
+            stream_id,
+            chunk[0..count],
+            false,
+        );
         remaining -= count;
     }
-    while (true) {
-        client.finishRequestTrailers(stream_id, &.{.{
-            .name = "x-request-finished",
-            .value = "yes",
-        }}) catch |err| switch (err) {
-            error.FlowControlBlocked, error.CongestionLimited => {
-                try receiveConnectionResponsePacket(
-                    &client.established.connection,
-                    &client.receive_packets,
-                    &client.control,
-                    &client.qpack_decode,
-                    &client.qpack_encode,
-                    &client.response_streams,
-                    &client.streaming_responses,
-                    &client.push_streams,
-                    &client.request_lifecycle,
-                );
-                continue;
-            },
-            else => return err,
-        };
-        break;
-    }
+    try client.finishRequestTrailersPaced(stream_id, &.{.{
+        .name = "x-request-finished",
+        .value = "yes",
+    }});
     var response = try client.receiveResponse(stream_id);
     defer response.deinit(allocator);
     thread.join();
@@ -17259,39 +17461,17 @@ test "HTTP/3 handshake client streams dynamic response through small window" {
                 var remaining = body_len;
                 while (remaining != 0) {
                     const count = @min(chunk.len, remaining);
-                    while (true) {
-                        session.sendResponseBody(
-                            request.stream_id,
-                            chunk[0..count],
-                            false,
-                        ) catch |err| switch (err) {
-                            error.FlowControlBlocked,
-                            error.CongestionLimited,
-                            => {
-                                try session.receiveRequestPacket();
-                                continue;
-                            },
-                            else => return err,
-                        };
-                        break;
-                    }
+                    try session.sendResponseBodyPaced(
+                        request.stream_id,
+                        chunk[0..count],
+                        false,
+                    );
                     remaining -= count;
                 }
-                while (true) {
-                    session.finishResponseTrailers(
-                        request.stream_id,
-                        response.trailers,
-                    ) catch |err| switch (err) {
-                        error.FlowControlBlocked,
-                        error.CongestionLimited,
-                        => {
-                            try session.receiveRequestPacket();
-                            continue;
-                        },
-                        else => return err,
-                    };
-                    break;
-                }
+                try session.finishResponseTrailersPaced(
+                    request.stream_id,
+                    response.trailers,
+                );
                 return;
             }
         }

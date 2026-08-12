@@ -191,12 +191,15 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receiveNextResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "readResponseData"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "skipResponseData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receivePush"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "receivePushEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "readPushData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBody"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBodyPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "finishRequestTrailers"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "finishRequestTrailersPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "OwnedHandshakeResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "rejectRequest"));
@@ -205,9 +208,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "drainComplete"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "receiveRequestEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "readRequestData"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "skipRequestData"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "startResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseBody"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseBodyPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "finishResponseTrailers"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "finishResponseTrailersPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ShutdownState"));
     try std.testing.expect(@hasDecl(netz.http3, "SettingsState"));
     try std.testing.expectEqual(

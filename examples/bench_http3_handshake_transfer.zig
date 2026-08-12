@@ -2,8 +2,9 @@ const std = @import("std");
 const netz = @import("netz");
 
 const default_iterations: usize = 1;
-const default_body_bytes: usize = 4096;
-const default_max_stream_frame_data: usize = 512;
+const default_body_bytes: usize = 64 * 1024;
+const default_max_stream_frame_data: usize = 1024;
+const default_max_stream_buffer: usize = 64 * 1024;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -31,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
                 .max_crypto_buffer = 64 * 1024,
             },
             .session = .{
-                .max_stream_buffer = @max(64 * 1024, config.body_bytes + 4096),
+                .max_stream_buffer = default_max_stream_buffer,
                 .max_stream_frame_data = config.max_stream_frame_data,
             },
         },
@@ -55,10 +56,52 @@ pub fn main(init: std.process.Init) !void {
             while (shared.handled < shared.iterations) : (shared.handled += 1) {
                 var session = try shared.server.accept();
                 defer session.deinit();
-                var request = try session.receiveRequest();
-                defer request.deinit(session.established.connection.endpoint.allocator);
-                if (request.request.body.len != shared.body_bytes) return error.InvalidFrame;
-                try session.sendResponse(request.stream_id, .{
+
+                var saw_head = false;
+                var saw_finished = false;
+                var stream_id: ?u62 = null;
+                var body_read: usize = 0;
+                while (!saw_finished) {
+                    var event = try session.receiveRequestEvent();
+                    defer event.deinit(
+                        session.established.connection.endpoint.allocator,
+                    );
+                    if (event != .message) return error.InvalidFrame;
+                    const message = &event.message;
+                    if (stream_id) |expected| {
+                        if (message.stream_id != expected) return error.InvalidFrame;
+                    } else {
+                        stream_id = message.stream_id;
+                    }
+                    switch (message.value) {
+                        .head => |head| {
+                            if (head != .request) return error.InvalidFrame;
+                            if (head.request.content_length != shared.body_bytes) {
+                                return error.InvalidFrame;
+                            }
+                            saw_head = true;
+                        },
+                        .data_available => {
+                            if (!saw_head) return error.InvalidFrame;
+                            const skipped = try session.skipRequestData(
+                                message.stream_id,
+                            );
+                            body_read += skipped;
+                            if (body_read > shared.body_bytes) {
+                                return error.InvalidFrame;
+                            }
+                        },
+                        .finished => {
+                            if (!saw_head) return error.InvalidFrame;
+                            if (body_read != shared.body_bytes) {
+                                return error.InvalidFrame;
+                            }
+                            saw_finished = true;
+                        },
+                        .push_promise, .trailers => return error.InvalidFrame,
+                    }
+                }
+                try session.sendResponse(stream_id orelse return error.InvalidFrame, .{
                     .status = 200,
                     .headers = &.{.{ .name = "server", .value = "netz-transfer-bench" }},
                     .body = "ok",
@@ -94,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
                     .handshake_recovery = .{ .initial_pto_ms = 250, .max_pto_ms = 2000, .max_retries = 4, .max_duration_ms = 10_000 },
                 },
                 .session = .{
-                    .max_stream_buffer = @max(64 * 1024, config.body_bytes + 4096),
+                    .max_stream_buffer = default_max_stream_buffer,
                     .max_stream_frame_data = config.max_stream_frame_data,
                 },
             },
@@ -107,13 +150,7 @@ pub fn main(init: std.process.Init) !void {
             .scheme = "https",
             .authority = "localhost",
         }, config.body_bytes);
-        var sent: usize = 0;
-        while (sent < request_body.len) {
-            const chunk_len = @min(config.max_stream_frame_data, request_body.len - sent);
-            const end = sent + chunk_len;
-            try client.sendRequestBody(stream_id, request_body[sent..end], end == request_body.len);
-            sent = end;
-        }
+        try client.sendRequestBodyPaced(stream_id, request_body, true);
         var response = try client.receiveResponse(stream_id);
         defer response.deinit(allocator);
         if (response.response.status != 200) return error.InvalidFrame;

@@ -23,7 +23,7 @@ Build mode: -Doptimize=ReleaseFast
 
 ```sh
 zig build bench-http3-qpack -Doptimize=ReleaseFast
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=4096
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
@@ -83,34 +83,36 @@ QUIC UDP receive benchmark
   total datagrams/path: 270000
 ```
 
-### HTTP/3 real-handshake upload smoke
+### HTTP/3 real-handshake paced upload
 
 `bench-http3-handshake-transfer` starts a loopback HTTP/3 server, creates a
 fresh QUIC/H3 client connection per iteration, streams a fixed-size request
-body, and reports aggregate bytes/s.  The current default is intentionally small
-because larger synchronous uploads can hit the current congestion-window send
-limit before a full transfer pump is added.
+body, and reports aggregate bytes/s. The client now uses the handshake runtime's
+paced body sender: `CongestionLimited` and `FlowControlBlocked` drive response
+packet processing so ACK/MAX_* frames can reopen send credit instead of turning
+large uploads into synchronous failures.
 
 ```sh
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=4096
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216
 ```
 
-Current smoke result:
+Current 16 MiB upload result:
 
 ```text
 HTTP/3 real-handshake upload benchmark
   iterations: 1
-  body bytes/request: 4096
-  total request bytes: 4096
+  body bytes/request: 16777216
+  total request bytes: 16777216
   status total: 200
-  ns/iteration: 3879465
-  bytes/s: 1055815
-  MiB/s: 1
+  ns/iteration: 648112262
+  bytes/s: 25886280
+  MiB/s: 24
 ```
 
-This is a reachability/measurement harness, not yet a quicz-style 16 MiB
-throughput result.  The next benchmark step is to add a paced transfer pump that
-can keep sending as ACKs reopen congestion credit.
+This is now a real-handshake, paced single-stream upload result with the same
+16 MiB transfer size as the quicz reference benchmark family. It is still not a
+completion claim: the next evidence step is to add response-download and
+multi-stream modes, then compare against quicz on the same host/run shape.
 
 ## Reference context from `~/Work`
 
@@ -128,17 +130,17 @@ different benchmark definitions, but they define the comparison target shape:
 - quicz documentation also highlights platform effects: Linux GSO/GRO can
   dominate throughput comparisons and must be recorded separately.
 
-For netz, the current results above are microbenchmarks plus a small
-real-handshake upload smoke benchmark, not a quicz-style end-to-end transfer
-throughput result.  The next evidence-building step is to expand the upload
-smoke into a paced real-handshake transfer benchmark comparable to quicz's
-`quic_bench_hs` methodology before claiming performance parity or superiority.
+For netz, the current results above are microbenchmarks plus one paced
+real-handshake 16 MiB upload benchmark.  This now matches the single-stream
+upload size used by the quicz benchmark family, but it still lacks the
+same-host reference run, response-download coverage, multi-stream aggregate
+coverage, and memory/allocation evidence required before claiming performance
+parity or superiority.
 
 ## Gaps before a completion audit can pass
 
-- Expand the current real-handshake upload smoke benchmark into a paced
-  transfer benchmark with configurable payload size, stream count, and
-  iteration count.
+- Expand the current real-handshake paced upload benchmark with response-download
+  and multi-stream transfer modes.
 - Run the same or equivalent scenario against at least one `~/Work` reference
   implementation on the same host.
 - Record allocation/peak-memory metrics for the benchmark processes.
