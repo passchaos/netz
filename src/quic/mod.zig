@@ -1910,10 +1910,10 @@ fn appendU32AssumeCapacity(list: *std.ArrayList(u8), value: u32) void {
 
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
     std.debug.assert(frame_type <= 63);
-    const frame_len = try singleVarintFrameWireLen(frame_type, value);
-    try list.ensureUnusedCapacity(allocator, frame_len);
+    const value_len = try varint.length(value);
+    try list.ensureUnusedCapacity(allocator, 1 + value_len);
     list.appendAssumeCapacity(@intCast(frame_type));
-    try appendVarintAssumeCapacity(list, value);
+    varint.encodeWithLenAssumeCapacity(list, value, value_len);
 }
 
 fn writeDoubleVarintFrame(
@@ -1924,11 +1924,15 @@ fn writeDoubleVarintFrame(
     second: u64,
 ) Error!void {
     std.debug.assert(frame_type <= 63);
-    const frame_len = try doubleVarintFrameWireLen(frame_type, first, second);
-    try list.ensureUnusedCapacity(allocator, frame_len);
+    const first_len = try varint.length(first);
+    const second_len = try varint.length(second);
+    try list.ensureUnusedCapacity(
+        allocator,
+        1 + @as(usize, first_len) + second_len,
+    );
     list.appendAssumeCapacity(@intCast(frame_type));
-    try appendVarintAssumeCapacity(list, first);
-    try appendVarintAssumeCapacity(list, second);
+    varint.encodeWithLenAssumeCapacity(list, first, first_len);
+    varint.encodeWithLenAssumeCapacity(list, second, second_len);
 }
 
 fn writeTripleVarintFrame(
@@ -1940,12 +1944,17 @@ fn writeTripleVarintFrame(
     third: u64,
 ) Error!void {
     std.debug.assert(frame_type <= 63);
-    const frame_len = try tripleVarintFrameWireLen(frame_type, first, second, third);
-    try list.ensureUnusedCapacity(allocator, frame_len);
+    const first_len = try varint.length(first);
+    const second_len = try varint.length(second);
+    const third_len = try varint.length(third);
+    try list.ensureUnusedCapacity(
+        allocator,
+        1 + @as(usize, first_len) + second_len + third_len,
+    );
     list.appendAssumeCapacity(@intCast(frame_type));
-    try appendVarintAssumeCapacity(list, first);
-    try appendVarintAssumeCapacity(list, second);
-    try appendVarintAssumeCapacity(list, third);
+    varint.encodeWithLenAssumeCapacity(list, first, first_len);
+    varint.encodeWithLenAssumeCapacity(list, second, second_len);
+    varint.encodeWithLenAssumeCapacity(list, third, third_len);
 }
 
 fn writeSingleVarintPayloadFrame(
