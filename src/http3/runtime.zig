@@ -7723,12 +7723,23 @@ fn encodePushMessages(
         request_stream_id,
         qpack,
     );
-    try quic.varint.encode(
-        pushed,
+    const push_stream_type = @intFromEnum(http3.StreamType.push);
+    const push_stream_type_len = try quic.varint.length(push_stream_type);
+    const push_id_len = try quic.varint.length(push.push_id);
+    try pushed.ensureUnusedCapacity(
         allocator,
-        @intFromEnum(http3.StreamType.push),
+        @as(usize, push_stream_type_len) + push_id_len,
     );
-    try quic.varint.encode(pushed, allocator, push.push_id);
+    quic.varint.encodeWithLenAssumeCapacity(
+        pushed,
+        push_stream_type,
+        push_stream_type_len,
+    );
+    quic.varint.encodeWithLenAssumeCapacity(
+        pushed,
+        push.push_id,
+        push_id_len,
+    );
     try push.response.writeDynamic(
         pushed,
         allocator,
