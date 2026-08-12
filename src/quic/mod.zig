@@ -280,16 +280,21 @@ pub fn writeRetryPacket(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
 
     const start = list.items.len;
     const type_bits = longHeaderPacketTypeBits(options.version, .retry);
-    try list.append(allocator, 0x80 | 0x40 | (type_bits << 4) | @as(u8, options.type_specific_bits));
-    try wire.appendInt(list, allocator, u32, options.version, .big);
-    try list.append(allocator, @intCast(options.destination_connection_id.len));
-    try list.appendSlice(allocator, options.destination_connection_id);
-    try list.append(allocator, @intCast(options.source_connection_id.len));
-    try list.appendSlice(allocator, options.source_connection_id);
-    try list.appendSlice(allocator, options.token);
+    var retry_len: usize = 1 + 4 + 1 + 1 + retry_integrity_tag_len;
+    retry_len = try addWireLen(retry_len, options.destination_connection_id.len);
+    retry_len = try addWireLen(retry_len, options.source_connection_id.len);
+    retry_len = try addWireLen(retry_len, options.token.len);
+    try list.ensureUnusedCapacity(allocator, retry_len);
+    list.appendAssumeCapacity(0x80 | 0x40 | (type_bits << 4) | @as(u8, options.type_specific_bits));
+    appendU32AssumeCapacity(list, options.version);
+    list.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
+    list.appendSliceAssumeCapacity(options.destination_connection_id);
+    list.appendAssumeCapacity(@intCast(options.source_connection_id.len));
+    list.appendSliceAssumeCapacity(options.source_connection_id);
+    list.appendSliceAssumeCapacity(options.token);
 
     const tag = try retryIntegrityTag(allocator, options.original_destination_connection_id, list.items[start..]);
-    try list.appendSlice(allocator, &tag);
+    list.appendSliceAssumeCapacity(&tag);
 }
 
 pub fn retryIntegrityTag(
