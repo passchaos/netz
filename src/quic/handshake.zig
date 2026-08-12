@@ -401,28 +401,40 @@ fn isVersionNegotiationDatagram(bytes: []const u8) bool {
     return std.mem.readInt(u32, bytes[1..5], .big) == quic.Version.negotiation.wireValue();
 }
 
-fn receiveNextServerDatagramWithTimeout(
+fn receiveNextServerDatagramUntil(
     endpoint: *quic.runtime.Endpoint,
-    recovery: retransmit.Config,
+    deadline: std.Io.Timeout,
 ) Error!quic.runtime.OwnedBytes {
-    return endpoint.receiveBytesTimeout(recovery.passiveTimeout()) catch |err| switch (err) {
+    if (timeoutExpired(endpoint.io, deadline)) return error.HandshakeTimeout;
+    return endpoint.receiveBytesTimeout(deadline) catch |err| switch (err) {
         error.Timeout => error.HandshakeTimeout,
         error.ConcurrencyUnavailable => error.HandshakeReceiveFailed,
         else => |other| @errorCast(other),
     };
 }
 
-fn replaceServerDatagram(
+fn replaceServerDatagramUntil(
     endpoint: *quic.runtime.Endpoint,
-    recovery: retransmit.Config,
+    deadline: std.Io.Timeout,
     datagram: *quic.runtime.OwnedBytes,
 ) Error!void {
-    const next_datagram = try receiveNextServerDatagramWithTimeout(
+    const next_datagram = try receiveNextServerDatagramUntil(
         endpoint,
-        recovery,
+        deadline,
     );
     datagram.deinit(endpoint.allocator);
     datagram.* = next_datagram;
+}
+
+fn timeoutExpired(io: std.Io, timeout: std.Io.Timeout) bool {
+    switch (timeout) {
+        .deadline => |deadline| {
+            std.debug.assert(deadline.clock == .awake);
+            return std.Io.Clock.awake.now(io).nanoseconds >=
+                deadline.raw.nanoseconds;
+        },
+        .none, .duration => return false,
+    }
 }
 
 fn peekExpectedServerInitial(
@@ -871,11 +883,10 @@ fn connectAttempt(
         return connectAttempt(endpoint, peer, next, true);
     }
 
-    var server_initial_attempts: usize = 0;
+    const server_initial_deadline =
+        options.handshake_recovery.passiveTimeout().toDeadline(endpoint.io);
     var server_initial_info: quic.protection.ProtectedLongPacketInfo = undefined;
     var server_initial_flight = while (true) {
-        if (server_initial_attempts >= 8) return error.MissingCryptoFrame;
-        server_initial_attempts += 1;
         server_initial_info = peekExpectedServerInitial(
             server_datagram.bytes,
             options.version,
@@ -888,18 +899,18 @@ fn connectAttempt(
             error.BufferTooShort,
             error.UnsupportedVersion,
             => {
-                try replaceServerDatagram(
+                try replaceServerDatagramUntil(
                     endpoint,
-                    options.handshake_recovery,
+                    server_initial_deadline,
                     &server_datagram,
                 );
                 continue;
             },
             else => |other| return other,
         } orelse {
-            try replaceServerDatagram(
+            try replaceServerDatagramUntil(
                 endpoint,
-                options.handshake_recovery,
+                server_initial_deadline,
                 &server_datagram,
             );
             continue;
@@ -923,9 +934,9 @@ fn connectAttempt(
             error.BufferTooShort,
             error.AuthenticationFailed,
             => {
-                try replaceServerDatagram(
+                try replaceServerDatagramUntil(
                     endpoint,
-                    options.handshake_recovery,
+                    server_initial_deadline,
                     &server_datagram,
                 );
                 continue;
@@ -2075,19 +2086,22 @@ fn receiveServerHandshakeCrypto(
     errdefer if (first_packet) |*packet| packet.deinit(endpoint.allocator);
     var response_from = from;
     var next_expected = expected_packet_number;
-    var attempts: usize = 0;
+    const passive_deadline = recovery.passiveTimeout().toDeadline(endpoint.io);
     var pending_tail = coalesced_tail;
     var pending_tail_storage: ?[]u8 = null;
     defer if (pending_tail_storage) |storage| endpoint.allocator.free(storage);
 
-    while (attempts < 8) : (attempts += 1) {
+    while (true) {
         var owned_datagram: ?quic.runtime.OwnedBytes = null;
         defer if (owned_datagram) |*datagram| datagram.deinit(endpoint.allocator);
         const bytes = if (try nextHandshakePacketFromCoalescedTail(
             &pending_tail,
             allow_zero_fixed_bit,
         )) |packet| packet else blk: {
-            owned_datagram = try receiveNextServerDatagramWithTimeout(endpoint, recovery);
+            owned_datagram = try receiveNextServerDatagramUntil(
+                endpoint,
+                passive_deadline,
+            );
             response_from = owned_datagram.?.from;
             var datagram_tail: []const u8 = owned_datagram.?.bytes;
             const packet = (nextHandshakePacketFromCoalescedTail(
@@ -2155,7 +2169,6 @@ fn receiveServerHandshakeCrypto(
             else => |other| return other,
         }
     }
-    return error.InvalidHandshakeFlight;
 }
 
 fn nextHandshakePacketFromCoalescedTail(
@@ -2236,7 +2249,7 @@ test "QUIC handshake receive skips non-handshake coalesced tail packets" {
     try std.testing.expectEqual(@as(usize, 0), tail.len);
 }
 
-test "QUIC handshake receive skips CRYPTO-less Handshake packets" {
+test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -2253,20 +2266,26 @@ test "QUIC handshake receive skips CRYPTO-less Handshake packets" {
     const dcid = [_]u8{ 0x90, 0x91, 0x92, 0x93 };
     const scid = [_]u8{ 0x94, 0x95, 0x96, 0x97 };
 
-    var ack_only_payload: std.ArrayList(u8) = .empty;
-    defer ack_only_payload.deinit(allocator);
-    try quic.appendPadding(&ack_only_payload, allocator, 1);
-    const ack_only = try quic.protection.sealHandshakePacket(
-        allocator,
-        keys,
-        .{
-            .destination_connection_id = &dcid,
-            .source_connection_id = &scid,
-            .packet_number = 0,
-            .payload = ack_only_payload.items,
-        },
-    );
-    defer allocator.free(ack_only);
+    var coalesced: std.ArrayList(u8) = .empty;
+    defer coalesced.deinit(allocator);
+    var ack_packet_number: u64 = 0;
+    while (ack_packet_number < 9) : (ack_packet_number += 1) {
+        var ack_only_payload: std.ArrayList(u8) = .empty;
+        defer ack_only_payload.deinit(allocator);
+        try quic.appendPadding(&ack_only_payload, allocator, 1);
+        const ack_only = try quic.protection.sealHandshakePacket(
+            allocator,
+            keys,
+            .{
+                .destination_connection_id = &dcid,
+                .source_connection_id = &scid,
+                .packet_number = ack_packet_number,
+                .payload = ack_only_payload.items,
+            },
+        );
+        defer allocator.free(ack_only);
+        try coalesced.appendSlice(allocator, ack_only);
+    }
 
     const tls_flight = [_]u8{
         0x08, 0x00, 0x00, 0x00, // EncryptedExtensions with an empty body.
@@ -2287,15 +2306,11 @@ test "QUIC handshake receive skips CRYPTO-less Handshake packets" {
         .{
             .destination_connection_id = &dcid,
             .source_connection_id = &scid,
-            .packet_number = 1,
+            .packet_number = ack_packet_number,
             .payload = crypto_payload.items,
         },
     );
     defer allocator.free(crypto_packet);
-
-    var coalesced: std.ArrayList(u8) = .empty;
-    defer coalesced.deinit(allocator);
-    try coalesced.appendSlice(allocator, ack_only);
     try coalesced.appendSlice(allocator, crypto_packet);
 
     var received = try receiveServerHandshakeCrypto(
