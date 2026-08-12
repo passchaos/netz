@@ -1,7 +1,7 @@
 # netz
 
 `netz` is a Zig 0.16 protocol toolkit for modern application networking.  It
-starts with deterministic parsers, serializers, and state helpers for:
+starts with deterministic parsers, serializers, preallocated fixed-width wire-integer helpers, and state helpers for:
 
 - HTTP/1.1 requests, responses, preallocated request/response/header-block writes, header field syntax validation, chunked transfer decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and extension limits, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with preallocated chunks plus validated and repeated-value-merged trailer fields, opt-in obsolete folded-field
