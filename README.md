@@ -306,7 +306,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   Linux `UDP_SEGMENT` offload for
   contiguous equal-sized packet batches with one-shot capability fallback and
   opt-in Linux `UDP_GRO` receive coalescing with shared zero-copy segment
-  ownership, in-place current-key 1-RTT decryption, reusable frame scratch,
+  ownership, preallocated 1-RTT frame payload encoding, in-place current-key 1-RTT decryption, reusable frame scratch,
   and strict wire-order low-peak batch servicing,
   endpoint-level connection-ID routing with single-probe registration and empty-length unregister skips,
   max-length-cached short-header dispatch with validated-key construction, empty-length long-header skips, unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
