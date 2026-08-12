@@ -508,6 +508,10 @@ fn encodeDynamicBlockWithReferenceLimit(
             continue;
         }
 
+        try list.ensureUnusedCapacity(
+            allocator,
+            prefixed_integer.encodedLen(3, field.name.len) + field.name.len,
+        );
         try encodePrefixedInteger(
             list,
             allocator,
@@ -515,7 +519,7 @@ fn encodeDynamicBlockWithReferenceLimit(
             0x20 | if (field.never_indexed) @as(u8, 0x10) else 0,
             field.name.len,
         );
-        try list.appendSlice(allocator, field.name);
+        list.appendSliceAssumeCapacity(field.name);
         try encodeString(list, allocator, field.value);
     }
 }
@@ -701,8 +705,12 @@ pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator
                 try encodeString(list, allocator, field.value);
             }
         } else {
+            try list.ensureUnusedCapacity(
+                allocator,
+                prefixed_integer.encodedLen(3, name.len) + name.len,
+            );
             try encodePrefixedInteger(list, allocator, 3, 0x20, name.len);
-            try list.appendSlice(allocator, name);
+            list.appendSliceAssumeCapacity(name);
             try encodeString(list, allocator, field.value);
         }
     }
