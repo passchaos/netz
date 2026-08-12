@@ -233,3 +233,54 @@ test "Initial CRYPTO flight reassembles reordered packets" {
     if (shared.err) |err| return err;
     try std.testing.expectEqualSlices(u8, &message, &shared.received);
 }
+
+test "Initial CRYPTO payload extraction skips ACK without allocation" {
+    const allocator = std.testing.allocator;
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+
+    try (quic.Frame{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }).write(&payload, allocator);
+    try quic.crypto_stream.writeCryptoFrames(
+        &payload,
+        allocator,
+        0,
+        "hello",
+        16,
+    );
+
+    var reassembler = quic.crypto_stream.Reassembler.init(allocator, 32);
+    defer reassembler.deinit();
+    try target.insertCryptoPayload(
+        allocator,
+        &reassembler,
+        payload.items,
+        .initial,
+    );
+    try std.testing.expectEqualStrings("hello", reassembler.available());
+}
+
+test "Initial CRYPTO payload extraction rejects forbidden frames" {
+    const allocator = std.testing.allocator;
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    try (quic.Frame{ .stream = .{ .stream_id = 0, .data = "bad" } }).write(
+        &payload,
+        allocator,
+    );
+
+    var reassembler = quic.crypto_stream.Reassembler.init(allocator, 32);
+    defer reassembler.deinit();
+    try std.testing.expectError(
+        error.InvalidFrame,
+        target.insertCryptoPayload(
+            allocator,
+            &reassembler,
+            payload.items,
+            .initial,
+        ),
+    );
+}

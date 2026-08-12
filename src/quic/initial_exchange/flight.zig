@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const quic = @import("../mod.zig");
+const wire = @import("../../internal/wire.zig");
 
 const net = std.Io.net;
 
@@ -390,6 +391,14 @@ pub fn insertCryptoPayload(
     payload: []const u8,
     packet_type: quic.FramePacketType,
 ) Error!void {
+    switch (packet_type) {
+        .initial, .handshake => return insertInitialHandshakeCryptoPayload(
+            reassembler,
+            payload,
+        ),
+        else => {},
+    }
+
     var pos: usize = 0;
     var saw_crypto = false;
     while (pos < payload.len) {
@@ -406,6 +415,123 @@ pub fn insertCryptoPayload(
         pos += parsed.consumed;
     }
     if (!saw_crypto) return error.MissingCryptoFrame;
+}
+
+fn insertInitialHandshakeCryptoPayload(
+    reassembler: *quic.crypto_stream.Reassembler,
+    payload: []const u8,
+) Error!void {
+    var cursor = wire.Cursor.init(payload);
+    var saw_crypto = false;
+    while (!cursor.eof()) {
+        const frame_type_len = quic.varint.encodedLen(try cursor.peekByte());
+        const frame_type = try quic.varint.decode(&cursor);
+        try validateFrameTypeEncoding(frame_type, frame_type_len);
+
+        if (frame_type == @intFromEnum(quic.FrameType.padding)) {
+            // Long runs of Initial datagram padding are common.  Skip the
+            // entire run with one library scan instead of looping byte-wise.
+            cursor.pos = std.mem.indexOfNonePos(
+                u8,
+                cursor.buf,
+                cursor.pos,
+                &.{@intFromEnum(quic.FrameType.padding)},
+            ) orelse cursor.buf.len;
+            continue;
+        }
+        if (frame_type == @intFromEnum(quic.FrameType.ping)) continue;
+        if (frame_type == @intFromEnum(quic.FrameType.ack) or
+            frame_type == @intFromEnum(quic.FrameType.ack_ecn))
+        {
+            try skipAckFrame(
+                &cursor,
+                frame_type == @intFromEnum(quic.FrameType.ack_ecn),
+            );
+            continue;
+        }
+        if (frame_type == @intFromEnum(quic.FrameType.crypto)) {
+            const offset = try quic.varint.decode(&cursor);
+            const len = try usizeFromVarint(try quic.varint.decode(&cursor));
+            try validateEndOffset(offset, len);
+            const data = try cursor.readSlice(len);
+            saw_crypto = true;
+            try reassembler.insert(.{ .offset = offset, .data = data });
+            continue;
+        }
+        if (frame_type == @intFromEnum(quic.FrameType.connection_close)) {
+            _ = try quic.varint.decode(&cursor);
+            _ = try quic.varint.decode(&cursor);
+            const reason_len = try usizeFromVarint(try quic.varint.decode(&cursor));
+            try cursor.skip(reason_len);
+            continue;
+        }
+        if (!quic.FrameType.known(frame_type)) return error.UnsupportedFrameType;
+        return error.InvalidFrame;
+    }
+    if (!saw_crypto) return error.MissingCryptoFrame;
+}
+
+fn skipAckFrame(cursor: *wire.Cursor, has_ecn: bool) Error!void {
+    const largest_acknowledged = try quic.varint.decode(cursor);
+    _ = try quic.varint.decode(cursor); // ack_delay
+    const range_count = try usizeFromVarint(try quic.varint.decode(cursor));
+    const first_ack_range = try quic.varint.decode(cursor);
+    try validateAckRangePayloadFits(cursor.remaining(), range_count, has_ecn);
+    if (first_ack_range > largest_acknowledged) return error.InvalidAckRange;
+
+    // Validate range arithmetic while skipping it.  This mirrors the general
+    // ACK parser without allocating the `AckRange` slice that handshake CRYPTO
+    // extraction never reads.
+    var smallest = largest_acknowledged - first_ack_range;
+    var index: usize = 0;
+    while (index < range_count) : (index += 1) {
+        const gap = try quic.varint.decode(cursor);
+        const ack_range_length = try quic.varint.decode(cursor);
+        const skipped = std.math.add(u64, gap, 2) catch
+            return error.InvalidAckRange;
+        if (smallest < skipped) return error.InvalidAckRange;
+
+        const range_largest = smallest - skipped;
+        if (ack_range_length > range_largest) return error.InvalidAckRange;
+        smallest = range_largest - ack_range_length;
+    }
+
+    if (has_ecn) {
+        _ = try quic.varint.decode(cursor);
+        _ = try quic.varint.decode(cursor);
+        _ = try quic.varint.decode(cursor);
+    }
+}
+
+fn validateFrameTypeEncoding(frame_type: u64, encoded_len: u8) Error!void {
+    const shortest = quic.varint.length(frame_type) catch
+        return error.UnsupportedFrameType;
+    if (encoded_len != shortest) return error.InvalidFrame;
+}
+
+fn usizeFromVarint(value: u64) Error!usize {
+    return std.math.cast(usize, value) orelse error.IntegerOverflow;
+}
+
+fn validateEndOffset(offset: u64, data_len: usize) Error!void {
+    const data_len_u64 = std.math.cast(u64, data_len) orelse
+        return error.InvalidFrameLength;
+    const end = std.math.add(u64, offset, data_len_u64) catch
+        return error.InvalidFrameLength;
+    if (end > quic.varint.max_value) return error.InvalidFrameLength;
+}
+
+fn validateAckRangePayloadFits(
+    remaining: usize,
+    range_count: usize,
+    has_ecn: bool,
+) Error!void {
+    const min_range_bytes = std.math.mul(usize, range_count, 2) catch
+        return error.InvalidFrameLength;
+    const min_ecn_bytes: usize = if (has_ecn) 3 else 0;
+    const min_bytes = std.math.add(usize, min_range_bytes, min_ecn_bytes) catch
+        return error.InvalidFrameLength;
+    if (remaining < min_bytes) return error.InvalidFrameLength;
 }
 
 test {
