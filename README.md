@@ -444,7 +444,8 @@ address, which makes CDN-backed origins more robust when one anycast edge is
 temporarily dropping UDP/443.
 
 Native microbenchmarks are also wired into the build.  Prefer `ReleaseFast`
-when collecting performance evidence:
+when collecting performance evidence.  The current local baseline and
+comparison gaps are recorded in `docs/benchmark-baseline.md`:
 
 ```sh
 zig build bench -Doptimize=ReleaseFast
