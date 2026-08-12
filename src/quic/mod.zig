@@ -242,13 +242,20 @@ pub fn writeVersionNegotiationPacket(
     for (options.versions) |version| {
         if (version == Version.negotiation.wireValue()) return error.InvalidVersionNegotiation;
     }
-    try list.append(allocator, options.first_byte);
-    try wire.appendInt(list, allocator, u32, Version.negotiation.wireValue(), .big);
-    try list.append(allocator, @intCast(options.destination_connection_id.len));
-    try list.appendSlice(allocator, options.destination_connection_id);
-    try list.append(allocator, @intCast(options.source_connection_id.len));
-    try list.appendSlice(allocator, options.source_connection_id);
-    for (options.versions) |version| try wire.appendInt(list, allocator, u32, version, .big);
+    const versions_len = std.math.mul(usize, options.versions.len, 4) catch
+        return error.InvalidVersionNegotiation;
+    var total_len: usize = 1 + 4 + 1 + 1;
+    total_len = try addWireLen(total_len, options.destination_connection_id.len);
+    total_len = try addWireLen(total_len, options.source_connection_id.len);
+    total_len = try addWireLen(total_len, versions_len);
+    try list.ensureUnusedCapacity(allocator, total_len);
+    list.appendAssumeCapacity(options.first_byte);
+    appendU32AssumeCapacity(list, Version.negotiation.wireValue());
+    list.appendAssumeCapacity(@intCast(options.destination_connection_id.len));
+    list.appendSliceAssumeCapacity(options.destination_connection_id);
+    list.appendAssumeCapacity(@intCast(options.source_connection_id.len));
+    list.appendSliceAssumeCapacity(options.source_connection_id);
+    for (options.versions) |version| appendU32AssumeCapacity(list, version);
 }
 
 pub fn parseRetryPacket(bytes: []const u8) Error!RetryPacket {
