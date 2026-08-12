@@ -52,6 +52,12 @@ pub fn main(init: std.process.Init) !void {
         );
         const iteration_elapsed = nowNs(io) -| iteration_started;
         throughput_samples[iteration] = mibPerSecond(config.body_bytes, iteration_elapsed);
+        if (config.verbose) {
+            std.debug.print(
+                "  [iter {d}] {d:.2} MiB/s\n",
+                .{ iteration, throughput_samples[iteration] },
+            );
+        }
         status_total += result.status_total;
         bytes_total += result.bytes_total;
     }
@@ -729,6 +735,7 @@ const Config = struct {
     paced_body_chunk_bytes: ?usize = null,
     mode: Mode = .upload,
     stats: bool = false,
+    verbose: bool = false,
 };
 
 fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
@@ -755,6 +762,8 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.mode = try parseMode(arg["--mode=".len..]);
         } else if (std.mem.eql(u8, arg, "--stats")) {
             config.stats = true;
+        } else if (std.mem.eql(u8, arg, "--verbose")) {
+            config.verbose = true;
         } else {
             return error.InvalidArgument;
         }

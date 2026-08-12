@@ -104,6 +104,8 @@ default single-stream/multi-stream transfer sizing knobs, making it possible to
 search stable packet-size-aware configurations without source edits. The
 benchmark now creates a fresh loopback server/client pair per iteration and
 reports mean/stddev MiB/s, matching quicz's multi-iteration benchmark shape.
+`--verbose` prints per-iteration throughput lines (`[iter N]`) for diagnosing
+long or stuck multi-iteration runs.
 
 ```sh
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
