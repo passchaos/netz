@@ -4,18 +4,30 @@ const std = @import("std");
 const wire = @import("../../internal/wire.zig");
 
 pub fn encode(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime prefix_bits: u4, first_prefix: u8, value: u64) !void {
+    try list.ensureUnusedCapacity(allocator, encodedLen(prefix_bits, value));
     const max_prefix: u8 = @intCast((@as(u16, 1) << prefix_bits) - 1);
     if (value < max_prefix) {
-        try list.append(allocator, first_prefix | @as(u8, @intCast(value)));
+        list.appendAssumeCapacity(first_prefix | @as(u8, @intCast(value)));
         return;
     }
-    try list.append(allocator, first_prefix | max_prefix);
+    list.appendAssumeCapacity(first_prefix | max_prefix);
     var remaining = value - max_prefix;
     while (remaining >= 128) {
-        try list.append(allocator, @as(u8, @intCast(remaining & 0x7f)) | 0x80);
+        list.appendAssumeCapacity(@as(u8, @intCast(remaining & 0x7f)) | 0x80);
         remaining >>= 7;
     }
-    try list.append(allocator, @intCast(remaining));
+    list.appendAssumeCapacity(@intCast(remaining));
+}
+
+pub fn encodedLen(comptime prefix_bits: u4, value: u64) usize {
+    const max_prefix: u8 = @intCast((@as(u16, 1) << prefix_bits) - 1);
+    if (value < max_prefix) return 1;
+    var len: usize = 2;
+    var remaining = value - max_prefix;
+    while (remaining >= 128) : (remaining >>= 7) {
+        len += 1;
+    }
+    return len;
 }
 
 pub fn decode(cursor: *wire.Cursor, comptime prefix_bits: u4, first: u8) !usize {
