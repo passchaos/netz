@@ -1815,8 +1815,10 @@ fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
 
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
     std.debug.assert(frame_type <= 63);
-    try list.append(allocator, @intCast(frame_type));
-    try varint.encode(list, allocator, value);
+    const frame_len = try singleVarintFrameWireLen(frame_type, value);
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    list.appendAssumeCapacity(@intCast(frame_type));
+    try appendVarintAssumeCapacity(list, value);
 }
 
 fn usizeFromVarint(value: u64) Error!usize {
