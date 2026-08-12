@@ -2092,6 +2092,11 @@ pub const HandshakeSessionOptions = struct {
     /// `max_stream_frame_data`, `max_frames_per_packet`, and the handshake
     /// one_rtt max datagram size to reduce ACK/flow-control pump iterations.
     paced_body_chunk_bytes: usize = 1024,
+    /// Experimental DATA-frame send path that avoids copying most body bytes
+    /// into a temporary HTTP/3 DATA payload. It is opt-in because shared
+    /// payload lifetime is subtle for multi-stream batching; benchmark enables
+    /// it only for single-stream transfer.
+    enable_data_prefix_fast_path: bool = false,
 };
 
 pub const HandshakeServerOptions = struct {
@@ -8284,10 +8289,31 @@ fn sendConnectionBodyChunk(
     const previous = entry.*;
     errdefer entry.* = previous;
     try bodies.prepareChunkForEntry(entry, data.len, fin);
+    bodies.frame_scratch.clearRetainingCapacity();
+    var prefix: [data_frame_prefix_capacity]u8 = undefined;
+    if (options.enable_data_prefix_fast_path and
+        try appendDataFrameStreamFramesFast(
+            &entry.send,
+            &bodies.frame_scratch,
+            connection.endpoint.allocator,
+            &prefix,
+            data,
+            fin,
+            options.max_stream_frame_data,
+        ))
+    {
+        try sendConnectionFrames(
+            connection,
+            bodies.frame_scratch.items,
+            options.max_frames_per_packet,
+        );
+        if (fin) _ = bodies.finish(stream_id);
+        return;
+    }
+
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(connection.endpoint.allocator);
     try writeDataFrame(&payload, connection.endpoint.allocator, data);
-    bodies.frame_scratch.clearRetainingCapacity();
     try entry.send.appendFrames(
         &bodies.frame_scratch,
         connection.endpoint.allocator,
@@ -8301,6 +8327,71 @@ fn sendConnectionBodyChunk(
         options.max_frames_per_packet,
     );
     if (fin) _ = bodies.finish(stream_id);
+}
+
+const data_frame_prefix_capacity: usize = 4096;
+
+fn appendDataFrameStreamFramesFast(
+    send: *quic.stream_state.SendState,
+    frames: *std.ArrayList(quic.Frame),
+    allocator: std.mem.Allocator,
+    prefix: *[data_frame_prefix_capacity]u8,
+    data: []const u8,
+    fin: bool,
+    max_stream_frame_data: usize,
+) Error!bool {
+    if (data.len == 0 or max_stream_frame_data == 0) return false;
+    if (send.fin_sent) return error.FinalSizeMismatch;
+    const payload_len_u64 = std.math.cast(u64, data.len) orelse
+        return error.IntegerOverflow;
+    var prefix_len: usize = 0;
+    const type_bytes = try quic.varint.encodeInto(
+        prefix[prefix_len..],
+        http3.FrameType.data,
+    );
+    prefix_len += type_bytes.len;
+    const len_bytes = try quic.varint.encodeInto(
+        prefix[prefix_len..],
+        payload_len_u64,
+    );
+    prefix_len += len_bytes.len;
+    if (prefix_len >= max_stream_frame_data) return false;
+    const first_body_len = @min(
+        data.len,
+        @min(max_stream_frame_data - prefix_len, prefix.len - prefix_len),
+    );
+    if (first_body_len == 0) return false;
+    @memcpy(prefix[prefix_len..][0..first_body_len], data[0..first_body_len]);
+    const first_len = prefix_len + first_body_len;
+    const remaining = data[first_body_len..];
+    const additional = if (remaining.len == 0)
+        @as(usize, 0)
+    else
+        std.math.divCeil(usize, remaining.len, max_stream_frame_data) catch
+            return error.InvalidFrameLength;
+    try frames.ensureUnusedCapacity(allocator, 1 + additional);
+    frames.appendAssumeCapacity(.{ .stream = .{
+        .stream_id = send.stream_id,
+        .offset = send.next_offset,
+        .data = prefix[0..first_len],
+        .fin = fin and remaining.len == 0,
+    } });
+    send.next_offset += first_len;
+    var written: usize = 0;
+    while (written < remaining.len) {
+        const chunk_len = @min(max_stream_frame_data, remaining.len - written);
+        const is_last = written + chunk_len == remaining.len;
+        frames.appendAssumeCapacity(.{ .stream = .{
+            .stream_id = send.stream_id,
+            .offset = send.next_offset,
+            .data = remaining[written .. written + chunk_len],
+            .fin = fin and is_last,
+        } });
+        send.next_offset += chunk_len;
+        written += chunk_len;
+    }
+    if (fin) send.fin_sent = true;
+    return true;
 }
 
 fn sendProtectedBodyChunk(

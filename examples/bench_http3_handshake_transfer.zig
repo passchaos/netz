@@ -39,6 +39,7 @@ pub fn main(init: std.process.Init) !void {
     const endpoint_datagram_size = transferEndpointDatagramSize(config.streams);
     const one_rtt_datagram_size = transferOneRttDatagramSize(config.streams);
     const paced_body_chunk_bytes = transferPacedBodyChunkBytes(config.streams);
+    const enable_data_prefix_fast_path = config.streams == 1;
 
     const server_cid = [_]u8{ 0x44, 0x45, 0x46, 0x47 };
     var server = try netz.http3.runtime.HandshakeServer.bind(
@@ -58,6 +59,7 @@ pub fn main(init: std.process.Init) !void {
                 .max_stream_buffer = default_max_stream_buffer,
                 .max_stream_frame_data = config.max_stream_frame_data,
                 .paced_body_chunk_bytes = paced_body_chunk_bytes,
+                .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
                 .max_concurrent_request_streams = max_streams,
             },
         },
@@ -142,6 +144,7 @@ pub fn main(init: std.process.Init) !void {
                     .max_stream_buffer = default_max_stream_buffer,
                     .max_stream_frame_data = config.max_stream_frame_data,
                     .paced_body_chunk_bytes = paced_body_chunk_bytes,
+                    .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
                     .max_concurrent_request_streams = max_streams,
                 },
             },

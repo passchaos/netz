@@ -246,48 +246,47 @@ Current stats samples:
 
 ```text
 16 MiB upload streams=1:
-  alloc count: 96228
+  alloc count: 89254
   remap count: 4697
-  total allocated bytes: 320049951
-  peak live bytes: 17993479
+  total allocated bytes: 248079087
+  peak live bytes: 18022064
   allocation buckets:
-    <=64: count=28828, bytes=485991
-    <=256: count=17746, bytes=2287651
+    <=64: count=28812, bytes=486182
+    <=256: count=17747, bytes=2288067
     <=1K: count=8280, bytes=4490099
-    <=4K: count=10167, bytes=23662704
-    <=16K: count=31370, bytes=272239869
+    <=4K: count=9889, bytes=23322296
+    <=16K: count=24798, bytes=200343435
     <=64K: count=8, bytes=217296
     >64K: count=3, bytes=16916528
 
 64 MiB upload streams=1:
-  alloc count: 386997
+  alloc count: 359369
   remap count: 18527
-  total allocated bytes: 1285842382
-  peak live bytes: 69018739
+  total allocated bytes: 994566095
+  peak live bytes: 69991771
   allocation buckets:
-    <=64: count=116962, bytes=1987670
-    <=256: count=71352, bytes=9180563
+    <=64: count=116957, bytes=1987374
+    <=256: count=71353, bytes=9181107
     <=1K: count=32856, bytes=17816435
-    <=4K: count=40118, bytes=93751920
-    <=16K: count=126199, bytes=1095719483
+    <=4K: count=39073, bytes=92460728
+    <=16K: count=99583, bytes=804544983
     <=64K: count=8, bytes=217296
     >64K: count=7, bytes=68083856
 ```
 
-Reusing the outbound body QUIC-frame scratch reduces allocation counts, but the
-64 MiB single-stream upload still allocates about 1.29 GiB cumulatively. The
-`<=16K` bucket continues to dominate with about 126k allocations and 1.09 GiB of
-traffic, matching the per-DATA-frame temporary payload construction path. This
-confirms that the next throughput work should eliminate or pool DATA payload
-buffers rather than only tuning QUIC windows.
+The single-stream DATA prefix fast path is enabled only for `streams=1`, where
+its payload lifetime is simple. Together with outbound body frame-scratch reuse,
+it reduces the 64 MiB single-stream upload cumulative allocation from about
+1.29 GiB to about 995 MiB. The `<=16K` bucket still dominates with about 99k
+allocations and 805 MiB of traffic, so future multi-stream payload-buffer work
+still needs explicit per-send or per-stream lifetime isolation.
 
-Several lower-level allocation experiments were rejected after validation:
-reusing a single DATA payload scratch buffer, pre-sizing each temporary DATA
-payload, and a stack DATA-prefix fast path all reduced single-stream allocation
-counts, but each caused 64 MiB 4-stream validation timeouts. Future
-payload-buffer work needs per-send or per-stream lifetime isolation, not one
-shared mutable buffer or a change that increases the multi-stream send/receive
-critical section.
+Two lower-level allocation experiments were rejected after validation: reusing a
+single shared DATA payload scratch buffer and pre-sizing each temporary DATA
+payload both reduced single-stream allocation counts, but they caused 64 MiB
+4-stream validation timeouts. Future multi-stream payload-buffer work needs
+per-send or per-stream lifetime isolation, not one shared mutable buffer or a
+change that increases the multi-stream send/receive critical section.
 
 ## Reference context from `~/Work`
 
