@@ -1183,12 +1183,7 @@ pub const Frame = union(enum) {
                 break :blk try datagramFrameWireLen(datagram);
             },
             .ack_frequency => |frame| blk: {
-                try validateAckFrequencyFrame(frame);
-                var len: usize = 2;
-                len = try addWireLen(len, try varint.length(frame.sequence_number));
-                len = try addWireLen(len, try varint.length(frame.ack_eliciting_threshold));
-                len = try addWireLen(len, try varint.length(frame.request_max_ack_delay));
-                break :blk try addWireLen(len, try varint.length(frame.reordering_threshold));
+                break :blk try ackFrequencyFrameWireLen(frame);
             },
         };
     }
@@ -1294,12 +1289,7 @@ pub const Frame = union(enum) {
                 try writeDatagramFrame(list, allocator, datagram);
             },
             .ack_frequency => |ack_frequency| {
-                try validateAckFrequencyFrame(ack_frequency);
-                try list.appendSlice(allocator, &[_]u8{ 0x40, @intCast(@intFromEnum(FrameType.ack_frequency)) });
-                try varint.encode(list, allocator, ack_frequency.sequence_number);
-                try varint.encode(list, allocator, ack_frequency.ack_eliciting_threshold);
-                try varint.encode(list, allocator, ack_frequency.request_max_ack_delay);
-                try varint.encode(list, allocator, ack_frequency.reordering_threshold);
+                try writeAckFrequencyFrame(list, allocator, ack_frequency);
             },
         }
     }
@@ -1382,6 +1372,15 @@ fn newConnectionIdFrameWireLen(frame: NewConnectionIdFrame) Error!usize {
     len = try addWireLen(len, 1);
     len = try addWireLen(len, frame.connection_id.len);
     return addWireLen(len, frame.stateless_reset_token.len);
+}
+
+fn ackFrequencyFrameWireLen(frame: AckFrequencyFrame) Error!usize {
+    try validateAckFrequencyFrame(frame);
+    var len: usize = 2; // ACK_FREQUENCY uses a two-byte varint frame type.
+    len = try addWireLen(len, try varint.length(frame.sequence_number));
+    len = try addWireLen(len, try varint.length(frame.ack_eliciting_threshold));
+    len = try addWireLen(len, try varint.length(frame.request_max_ack_delay));
+    return addWireLen(len, try varint.length(frame.reordering_threshold));
 }
 
 pub const FramePacketType = enum {
@@ -1974,6 +1973,19 @@ fn writeFixedPathFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, f
     try list.ensureUnusedCapacity(allocator, 9);
     list.appendAssumeCapacity(@intCast(frame_type));
     list.appendSliceAssumeCapacity(&frame.data);
+}
+
+fn writeAckFrequencyFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame: AckFrequencyFrame) Error!void {
+    const frame_len = try ackFrequencyFrameWireLen(frame);
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    list.appendSliceAssumeCapacity(&[_]u8{
+        0x40,
+        @intCast(@intFromEnum(FrameType.ack_frequency)),
+    });
+    try appendVarintAssumeCapacity(list, frame.sequence_number);
+    try appendVarintAssumeCapacity(list, frame.ack_eliciting_threshold);
+    try appendVarintAssumeCapacity(list, frame.request_max_ack_delay);
+    try appendVarintAssumeCapacity(list, frame.reordering_threshold);
 }
 
 fn writeStreamFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream: StreamFrame) Error!void {
