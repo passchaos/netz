@@ -621,13 +621,17 @@ pub const Settings = struct {
     }
 
     pub fn writePayload(self: Settings, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
-        try self.validateLocal();
-        try list.ensureUnusedCapacity(allocator, try self.payloadLen());
-        if (self.qpack_max_table_capacity != 0) try writeSetting(list, allocator, .qpack_max_table_capacity, self.qpack_max_table_capacity);
-        if (self.max_field_section_size != std.math.maxInt(u64)) try writeSetting(list, allocator, .max_field_section_size, self.max_field_section_size);
-        if (self.qpack_blocked_streams != 0) try writeSetting(list, allocator, .qpack_blocked_streams, self.qpack_blocked_streams);
-        if (self.enable_connect_protocol) try writeSetting(list, allocator, .enable_connect_protocol, 1);
-        if (self.h3_datagram) try writeSetting(list, allocator, .h3_datagram, 1);
+        const len = try self.payloadLen();
+        try list.ensureUnusedCapacity(allocator, len);
+        try self.writePayloadAssumeCapacity(list);
+    }
+
+    fn writePayloadAssumeCapacity(self: Settings, list: *std.ArrayList(u8)) Error!void {
+        if (self.qpack_max_table_capacity != 0) try writeSetting(list, .qpack_max_table_capacity, self.qpack_max_table_capacity);
+        if (self.max_field_section_size != std.math.maxInt(u64)) try writeSetting(list, .max_field_section_size, self.max_field_section_size);
+        if (self.qpack_blocked_streams != 0) try writeSetting(list, .qpack_blocked_streams, self.qpack_blocked_streams);
+        if (self.enable_connect_protocol) try writeSetting(list, .enable_connect_protocol, 1);
+        if (self.h3_datagram) try writeSetting(list, .h3_datagram, 1);
         const webtransport_enabled = self.enable_webtransport or self.webtransport_max_sessions != 0;
         if (webtransport_enabled) {
             // Emit both legacy enable identifiers.  The historical netz name
@@ -635,16 +639,16 @@ pub const Settings = struct {
             // boolean value here avoids peers that validate it as an enable bit
             // rejecting counts greater than one.  The concrete max-session
             // count is emitted below under the newer identifiers.
-            try writeSetting(list, allocator, .webtransport_max_sessions, 1);
-            try writeSetting(list, allocator, .enable_webtransport, 1);
+            try writeSetting(list, .webtransport_max_sessions, 1);
+            try writeSetting(list, .enable_webtransport, 1);
         }
         if (self.webtransport_max_sessions != 0) {
-            try writeSetting(list, allocator, .webtransport_max_sessions_draft, self.webtransport_max_sessions);
-            try writeSetting(list, allocator, .webtransport_max_sessions_v13, self.webtransport_max_sessions);
+            try writeSetting(list, .webtransport_max_sessions_draft, self.webtransport_max_sessions);
+            try writeSetting(list, .webtransport_max_sessions_v13, self.webtransport_max_sessions);
         }
-        if (self.webtransport_initial_max_data != 0) try writeSetting(list, allocator, .webtransport_initial_max_data, self.webtransport_initial_max_data);
-        if (self.webtransport_initial_max_streams_uni != 0) try writeSetting(list, allocator, .webtransport_initial_max_streams_uni, self.webtransport_initial_max_streams_uni);
-        if (self.webtransport_initial_max_streams_bidi != 0) try writeSetting(list, allocator, .webtransport_initial_max_streams_bidi, self.webtransport_initial_max_streams_bidi);
+        if (self.webtransport_initial_max_data != 0) try writeSetting(list, .webtransport_initial_max_data, self.webtransport_initial_max_data);
+        if (self.webtransport_initial_max_streams_uni != 0) try writeSetting(list, .webtransport_initial_max_streams_uni, self.webtransport_initial_max_streams_uni);
+        if (self.webtransport_initial_max_streams_bidi != 0) try writeSetting(list, .webtransport_initial_max_streams_bidi, self.webtransport_initial_max_streams_bidi);
     }
 
     pub fn payloadLen(self: Settings) Error!usize {
@@ -693,8 +697,7 @@ fn addSettingLen(current: usize, id: SettingId, value: u64) Error!usize {
     return addFrameLen(current, try settingLen(id, value));
 }
 
-fn writeSetting(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: SettingId, value: u64) Error!void {
-    _ = allocator;
+fn writeSetting(list: *std.ArrayList(u8), id: SettingId, value: u64) Error!void {
     try appendVarintAssumeCapacity(list, @intFromEnum(id));
     try appendVarintAssumeCapacity(list, value);
 }
@@ -1145,7 +1148,8 @@ fn writeStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator, str
 pub fn writeSettingsFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
     const payload_len = try settings.payloadLen();
     try writeFrameHeader(list, allocator, FrameType.settings, payload_len);
-    try settings.writePayload(list, allocator);
+    try list.ensureUnusedCapacity(allocator, payload_len);
+    try settings.writePayloadAssumeCapacity(list);
 }
 
 pub fn parseGoAwayPayload(payload: []const u8) Error!u64 {
