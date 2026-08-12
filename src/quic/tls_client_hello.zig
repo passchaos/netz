@@ -380,18 +380,16 @@ pub fn writeEncryptedExtensionsWithEarlyData(
         );
     }
 
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(allocator);
-    try appendU16Len(&body, allocator, extensions.items.len, error.InvalidEncryptedExtensions);
-    try body.appendSlice(allocator, extensions.items);
-
-    try writeHandshakeMessage(
-        list,
-        allocator,
-        handshake_type_encrypted_extensions,
-        body.items,
-        error.InvalidEncryptedExtensions,
-    );
+    const body_len = std.math.add(usize, 2, extensions.items.len) catch
+        return error.InvalidEncryptedExtensions;
+    if (body_len > std.math.maxInt(u24)) return error.InvalidEncryptedExtensions;
+    try list.ensureUnusedCapacity(allocator, 4 + body_len);
+    list.appendAssumeCapacity(handshake_type_encrypted_extensions);
+    list.appendAssumeCapacity(@truncate(body_len >> 16));
+    list.appendAssumeCapacity(@truncate(body_len >> 8));
+    list.appendAssumeCapacity(@truncate(body_len));
+    appendU16AssumeCapacity(list, @intCast(extensions.items.len));
+    list.appendSliceAssumeCapacity(extensions.items);
 }
 
 pub fn writeFinished(list: *std.ArrayList(u8), allocator: std.mem.Allocator, verify_data: [32]u8) Error!void {
