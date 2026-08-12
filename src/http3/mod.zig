@@ -492,7 +492,9 @@ fn writeFrameHeader(
     payload_len: usize,
 ) Error!void {
     if (frame_type <= 63 and payload_len <= 63) {
-        try list.appendSlice(allocator, &.{ @intCast(frame_type), @intCast(payload_len) });
+        try list.ensureUnusedCapacity(allocator, 2);
+        list.appendAssumeCapacity(@intCast(frame_type));
+        list.appendAssumeCapacity(@intCast(payload_len));
         return;
     }
     try quic.varint.encode(list, allocator, frame_type);
