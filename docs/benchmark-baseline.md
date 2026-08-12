@@ -283,9 +283,10 @@ still needs explicit per-send or per-stream lifetime isolation.
 
 Rejected experiments after validation:
 
-- Reusing a single shared DATA payload scratch buffer and pre-sizing each
-  temporary DATA payload both reduced single-stream allocation counts, but they
-  caused 64 MiB 4-stream validation timeouts.
+- Reusing a single shared DATA payload scratch buffer, per-stream payload
+  scratch, and pre-sizing each temporary DATA payload all reduced single-stream
+  allocation counts, but they caused 64 MiB 4-stream validation timeouts or
+  `StreamBufferTooLarge` failures.
 - Enabling the DATA prefix fast path for multi-stream upload regressed 64 MiB
   4-stream throughput, so it remains single-stream-only.
 - Replacing paced multi-stream upload with a naive event-loop style
