@@ -9053,13 +9053,17 @@ fn sendConnectionQpackEncoderInstructions(
     errdefer send_state.* = previous_send;
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(connection.endpoint.allocator);
+    try payload.ensureTotalCapacity(
+        connection.endpoint.allocator,
+        @intFromBool(!prefix_sent.*) + pending.len,
+    );
     if (!prefix_sent.*) {
         try http3.writeQpackEncoderStreamPrefix(
             &payload,
             connection.endpoint.allocator,
         );
     }
-    try payload.appendSlice(connection.endpoint.allocator, pending);
+    payload.appendSliceAssumeCapacity(pending);
 
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(connection.endpoint.allocator);
@@ -9095,11 +9099,15 @@ fn sendConnectionQpackFeedback(
     errdefer send_state.* = previous_send;
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(connection.endpoint.allocator);
+    try payload.ensureTotalCapacity(
+        connection.endpoint.allocator,
+        @intFromBool(!prefix_sent.*) + pending.len,
+    );
     if (!prefix_sent.*) try http3.writeQpackDecoderStreamPrefix(
         &payload,
         connection.endpoint.allocator,
     );
-    try payload.appendSlice(connection.endpoint.allocator, pending);
+    payload.appendSliceAssumeCapacity(pending);
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(connection.endpoint.allocator);
     try send_state.appendFrames(
@@ -9248,10 +9256,14 @@ fn sendProtectedQpackEncoderInstructions(
     errdefer send_state.* = previous_send;
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(endpoint.allocator);
+    try payload.ensureTotalCapacity(
+        endpoint.allocator,
+        @intFromBool(!prefix_sent.*) + pending.len,
+    );
     if (!prefix_sent.*) {
         try http3.writeQpackEncoderStreamPrefix(&payload, endpoint.allocator);
     }
-    try payload.appendSlice(endpoint.allocator, pending);
+    payload.appendSliceAssumeCapacity(pending);
 
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(endpoint.allocator);
@@ -9296,12 +9308,16 @@ fn sendProtectedQpackFeedback(
     errdefer send_state.* = previous_send;
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(endpoint.allocator);
+    try payload.ensureTotalCapacity(
+        endpoint.allocator,
+        @intFromBool(!prefix_sent.*) + pending.len,
+    );
     if (!prefix_sent.*) try http3.writeQpackDecoderStreamPrefix(
         &payload,
         endpoint.allocator,
     );
     const instruction_offset = payload.items.len;
-    try payload.appendSlice(endpoint.allocator, pending);
+    payload.appendSliceAssumeCapacity(pending);
 
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(endpoint.allocator);
