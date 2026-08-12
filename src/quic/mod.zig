@@ -749,16 +749,19 @@ fn encodePreferredAddressTransportParameter(
 ) Error!void {
     try validatePreferredAddress(preferred);
 
-    var value: std.ArrayList(u8) = .empty;
-    defer value.deinit(allocator);
-    try value.appendSlice(allocator, &preferred.ipv4_address);
-    try wire.appendInt(&value, allocator, u16, preferred.ipv4_port, .big);
-    try value.appendSlice(allocator, &preferred.ipv6_address);
-    try wire.appendInt(&value, allocator, u16, preferred.ipv6_port, .big);
-    try value.append(allocator, @intCast(preferred.connection_id.len));
-    try value.appendSlice(allocator, preferred.connection_id);
-    try value.appendSlice(allocator, &preferred.stateless_reset_token);
-    try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.preferred_address), value.items);
+    const value_len = try addWireLen(41, preferred.connection_id.len);
+    const id = @intFromEnum(TransportParameterId.preferred_address);
+    const total_len = try addWireLen(try addWireLen(try varint.length(id), try varint.length(value_len)), value_len);
+    try list.ensureUnusedCapacity(allocator, total_len);
+    try appendVarintAssumeCapacity(list, id);
+    try appendVarintAssumeCapacity(list, value_len);
+    list.appendSliceAssumeCapacity(&preferred.ipv4_address);
+    appendU16AssumeCapacity(list, preferred.ipv4_port);
+    list.appendSliceAssumeCapacity(&preferred.ipv6_address);
+    appendU16AssumeCapacity(list, preferred.ipv6_port);
+    list.appendAssumeCapacity(@intCast(preferred.connection_id.len));
+    list.appendSliceAssumeCapacity(preferred.connection_id);
+    list.appendSliceAssumeCapacity(&preferred.stateless_reset_token);
 }
 
 fn encodeVersionInformationTransportParameter(
@@ -1859,6 +1862,12 @@ fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
     var buffer: [8]u8 = undefined;
     const encoded = try varint.encodeInto(&buffer, value);
     list.appendSliceAssumeCapacity(encoded);
+}
+
+fn appendU16AssumeCapacity(list: *std.ArrayList(u8), value: u16) void {
+    const start = list.items.len;
+    list.items.len = start + 2;
+    std.mem.writeInt(u16, list.items[start..][0..2], value, .big);
 }
 
 fn appendU32AssumeCapacity(list: *std.ArrayList(u8), value: u32) void {
