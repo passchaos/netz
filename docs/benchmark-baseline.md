@@ -293,6 +293,9 @@ Rejected experiments after validation:
 - Replacing paced multi-stream upload with a naive event-loop style
   `sendRequestBody` loop triggered `DatagramTooLarge`; multi-stream batching
   needs packet-size-aware grouping rather than bypassing the paced chunker.
+- A first batch-body API grouped chunks by STREAM-frame count, but still hit
+  `DatagramTooLarge`; correct batching must group by actual QUIC frame wire
+  length / short-packet length and respect `currentSendDatagramSize()`.
 
 Future multi-stream payload-buffer work needs per-send or per-stream lifetime
 isolation, not one shared mutable buffer or a change that increases the
