@@ -299,8 +299,17 @@ pub const Endpoint = struct {
     }
 
     pub fn sendFrames(self: *Endpoint, to: net.IpAddress, frames: []const quic.Frame) Error!void {
+        var payload_len: usize = 0;
+        for (frames) |frame| {
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                try frame.wireLen(),
+            ) catch return error.InvalidFrameLength;
+        }
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(self.allocator);
+        try payload.ensureTotalCapacity(self.allocator, payload_len);
         for (frames) |frame| try frame.write(&payload, self.allocator);
         try self.sendBytes(to, payload.items);
     }
