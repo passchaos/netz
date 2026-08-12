@@ -1114,8 +1114,11 @@ pub const Frame = union(enum) {
             .stop_sending => |stop| try doubleVarintFrameWireLen(@intFromEnum(FrameType.stop_sending), stop.stream_id, stop.application_error_code),
             .new_token => |new_token| blk: {
                 if (new_token.token.len == 0) return error.InvalidFrame;
-                const prefix = try addWireLen(1, try varint.length(new_token.token.len));
-                break :blk try addWireLen(prefix, new_token.token.len);
+                break :blk try singleVarintPayloadFrameWireLen(
+                    @intFromEnum(FrameType.new_token),
+                    new_token.token.len,
+                    new_token.token.len,
+                );
             },
             .crypto => |crypto| blk: {
                 try validateEndOffset(crypto.offset, crypto.data.len);
@@ -1175,9 +1178,7 @@ pub const Frame = union(enum) {
             .handshake_done => 1,
             .immediate_ack => 1,
             .datagram => |datagram| blk: {
-                var len: usize = 1;
-                if (datagram.length_present) len = try addWireLen(len, try varint.length(datagram.data.len));
-                break :blk try addWireLen(len, datagram.data.len);
+                break :blk try datagramFrameWireLen(datagram);
             },
             .ack_frequency => |frame| blk: {
                 try validateAckFrequencyFrame(frame);
@@ -1203,9 +1204,13 @@ pub const Frame = union(enum) {
             },
             .new_token => |new_token| {
                 if (new_token.token.len == 0) return error.InvalidFrame;
-                try list.append(allocator, @intFromEnum(FrameType.new_token));
-                try varint.encode(list, allocator, new_token.token.len);
-                try list.appendSlice(allocator, new_token.token);
+                try writeSingleVarintPayloadFrame(
+                    list,
+                    allocator,
+                    @intFromEnum(FrameType.new_token),
+                    new_token.token.len,
+                    new_token.token,
+                );
             },
             .crypto => |crypto| {
                 try validateEndOffset(crypto.offset, crypto.data.len);
@@ -1283,9 +1288,7 @@ pub const Frame = union(enum) {
             .handshake_done => try list.append(allocator, @intFromEnum(FrameType.handshake_done)),
             .immediate_ack => try list.append(allocator, @intFromEnum(FrameType.immediate_ack)),
             .datagram => |datagram| {
-                try list.append(allocator, if (datagram.length_present) @intFromEnum(FrameType.datagram_len) else @intFromEnum(FrameType.datagram));
-                if (datagram.length_present) try varint.encode(list, allocator, datagram.data.len);
-                try list.appendSlice(allocator, datagram.data);
+                try writeDatagramFrame(list, allocator, datagram);
             },
             .ack_frequency => |ack_frequency| {
                 try validateAckFrequencyFrame(ack_frequency);
@@ -1342,6 +1345,11 @@ fn tripleVarintFrameWireLen(frame_type: u64, first: u64, second: u64, third: u64
     return addWireLen(len, try varint.length(third));
 }
 
+fn singleVarintPayloadFrameWireLen(frame_type: u64, value: u64, payload_len: usize) Error!usize {
+    const len = try singleVarintFrameWireLen(frame_type, value);
+    return addWireLen(len, payload_len);
+}
+
 fn doubleVarintPayloadFrameWireLen(frame_type: u64, first: u64, second: u64, payload_len: usize) Error!usize {
     const len = try doubleVarintFrameWireLen(frame_type, first, second);
     return addWireLen(len, payload_len);
@@ -1352,6 +1360,12 @@ fn streamFrameWireLen(stream: StreamFrame) Error!usize {
     if (stream.offset != 0) len = try addWireLen(len, try varint.length(stream.offset));
     len = try addWireLen(len, try varint.length(stream.data.len));
     return addWireLen(len, stream.data.len);
+}
+
+fn datagramFrameWireLen(datagram: DatagramFrame) Error!usize {
+    var len: usize = 1;
+    if (datagram.length_present) len = try addWireLen(len, try varint.length(datagram.data.len));
+    return addWireLen(len, datagram.data.len);
 }
 
 pub const FramePacketType = enum {
@@ -1852,6 +1866,24 @@ fn writeTripleVarintFrame(
     try appendVarintAssumeCapacity(list, third);
 }
 
+fn writeSingleVarintPayloadFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    frame_type: u64,
+    value: u64,
+    payload: []const u8,
+) Error!void {
+    const frame_len = try singleVarintPayloadFrameWireLen(
+        frame_type,
+        value,
+        payload.len,
+    );
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    list.appendAssumeCapacity(@intCast(frame_type));
+    try appendVarintAssumeCapacity(list, value);
+    list.appendSliceAssumeCapacity(payload);
+}
+
 fn writeDoubleVarintPayloadFrame(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -1871,6 +1903,18 @@ fn writeDoubleVarintPayloadFrame(
     try appendVarintAssumeCapacity(list, first);
     try appendVarintAssumeCapacity(list, second);
     list.appendSliceAssumeCapacity(payload);
+}
+
+fn writeDatagramFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, datagram: DatagramFrame) Error!void {
+    const frame_len = try datagramFrameWireLen(datagram);
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    if (datagram.length_present) {
+        list.appendAssumeCapacity(@intFromEnum(FrameType.datagram_len));
+        try appendVarintAssumeCapacity(list, datagram.data.len);
+    } else {
+        list.appendAssumeCapacity(@intFromEnum(FrameType.datagram));
+    }
+    list.appendSliceAssumeCapacity(datagram.data);
 }
 
 fn writeStreamFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream: StreamFrame) Error!void {
