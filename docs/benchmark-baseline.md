@@ -206,8 +206,8 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 ```
 
 ```text
-netz upload streams=1:   118 MiB/s, 123,836,123 bytes/s, ns/iter 541,916,703
-netz download streams=1: 120 MiB/s, 126,242,863 bytes/s, ns/iter 531,585,407
+netz upload streams=1:   125 MiB/s, 131,859,638 bytes/s, ns/iter 508,941,664
+netz download streams=1: 123 MiB/s, 129,894,689 bytes/s, ns/iter 516,640,553
 netz upload streams=4:   34 MiB/s, 36,504,241 bytes/s, ns/iter 1,838,385,370
 netz download streams=4: 32 MiB/s, 34,579,902 bytes/s, ns/iter 1,940,689,776
 ```
@@ -221,8 +221,9 @@ Same-host throughput ratio against the quicz real-handshake upload baselines:
 
 This same-host comparison shows netz is **improved but not yet
 performance-competitive** on large real-handshake transfers. Raising the
-single-stream 1-RTT datagram budget to 8192 bytes and the paced DATA chunk to
-7200 bytes closes much of the previous 3 MiB/s cliff, but quicz still leads on
+single-stream 1-RTT datagram budget to 8192 bytes, disabling HyStart for the
+low-RTT single-stream benchmark, and using a 7200-byte paced DATA chunk closes
+much of the previous 3 MiB/s cliff, but quicz still leads on
 64 MiB 4-stream aggregate throughput. Releasing all active streaming response
 reader capacity before each multi-response packet receive stabilizes the 64 MiB
 four-stream download case, but quicz still leads substantially. The next

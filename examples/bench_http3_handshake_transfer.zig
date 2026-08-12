@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
-                .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size },
+                .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size, .enable_hystart = config.streams != 1 },
                 .random = [_]u8{0x31} ** 32,
                 .x25519_secret_key = [_]u8{0x32} ** 32,
                 .max_crypto_buffer = 64 * 1024,
@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
                     .original_destination_connection_id = &original_dcid,
                     .local_connection_id = &local_cid,
                     .server_name = "localhost",
-                    .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size },
+                    .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size, .enable_hystart = config.streams != 1 },
                     .max_crypto_buffer = 64 * 1024,
                     .handshake_recovery = .{ .initial_pto_ms = 250, .max_pto_ms = 2000, .max_retries = 4, .max_duration_ms = 10_000 },
                 },
