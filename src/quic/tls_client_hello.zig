@@ -1156,33 +1156,20 @@ fn writeSupportedGroupsExtension(
     {
         return error.InvalidClientHello;
     }
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try appendInt(
-        &payload,
-        allocator,
-        u16,
-        @intCast(key_shares.len * 2),
-    );
+    const groups_len = key_shares.len * 2;
+    const payload_len = 2 + groups_len;
+    try list.ensureUnusedCapacity(allocator, 4 + payload_len);
+    appendU16AssumeCapacity(list, ext_supported_groups);
+    appendU16AssumeCapacity(list, @intCast(payload_len));
+    appendU16AssumeCapacity(list, @intCast(groups_len));
     for (key_shares, 0..) |share, index| {
         for (key_shares[0..index]) |previous| {
             if (share.group() == previous.group()) {
                 return error.InvalidClientHello;
             }
         }
-        try appendInt(
-            &payload,
-            allocator,
-            u16,
-            @intFromEnum(share.group()),
-        );
+        appendU16AssumeCapacity(list, @intFromEnum(share.group()));
     }
-    try writeExtension(
-        list,
-        allocator,
-        ext_supported_groups,
-        payload.items,
-    );
 }
 
 fn writeSignatureAlgorithmsExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
