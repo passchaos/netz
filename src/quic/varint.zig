@@ -37,9 +37,9 @@ pub fn encodeAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
 }
 
 pub fn encodeWithLenAssumeCapacity(list: *std.ArrayList(u8), value: u64, len: u8) void {
-    var tmp: [8]u8 = undefined;
-    encodeIntoWithLen(&tmp, value, len);
-    list.appendSliceAssumeCapacity(tmp[0..len]);
+    const start = list.items.len;
+    list.items.len = start + len;
+    encodeIntoWithLen(list.items[start..], value, len);
 }
 
 pub fn encodeInto(out: []u8, value: u64) Error![]u8 {
