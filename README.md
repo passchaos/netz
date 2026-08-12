@@ -155,7 +155,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   injection, suppresses 0-RTT replay, plus an integrated server Retry policy
   with secure nonce generation, queued pre-Retry 0-RTT discard, and retried
   Initial token/DCID/transport-parameter validation, minimal TLS
-  ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
+  ClientHello/ServerHello/EncryptedExtensions/Finished encoding with preallocated handshake messages and parsing,
   protected Initial ClientHello ↔ ServerHello exchange with client-side non-target
   datagram filtering, protected Handshake packet server/client Finished flights, and handshake/application secret
   derivation for QUIC, an integrated minimal client/server handshake for QUIC v1/v2 that emits

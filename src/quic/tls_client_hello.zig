@@ -289,9 +289,13 @@ pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try appendU16Len(&body, allocator, extensions.items.len, error.InvalidClientHello);
     try body.appendSlice(allocator, extensions.items);
 
-    try list.append(allocator, handshake_type_client_hello);
-    try appendU24Len(list, allocator, body.items.len, error.InvalidClientHello);
-    try list.appendSlice(allocator, body.items);
+    try writeHandshakeMessage(
+        list,
+        allocator,
+        handshake_type_client_hello,
+        body.items,
+        error.InvalidClientHello,
+    );
 }
 
 pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: ServerHelloOptions) Error!void {
@@ -332,9 +336,13 @@ pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try appendU16Len(&body, allocator, extensions.items.len, error.InvalidServerHello);
     try body.appendSlice(allocator, extensions.items);
 
-    try list.append(allocator, handshake_type_server_hello);
-    try appendU24Len(list, allocator, body.items.len, error.InvalidServerHello);
-    try list.appendSlice(allocator, body.items);
+    try writeHandshakeMessage(
+        list,
+        allocator,
+        handshake_type_server_hello,
+        body.items,
+        error.InvalidServerHello,
+    );
 }
 
 pub fn writeEncryptedExtensions(
@@ -377,15 +385,23 @@ pub fn writeEncryptedExtensionsWithEarlyData(
     try appendU16Len(&body, allocator, extensions.items.len, error.InvalidEncryptedExtensions);
     try body.appendSlice(allocator, extensions.items);
 
-    try list.append(allocator, handshake_type_encrypted_extensions);
-    try appendU24Len(list, allocator, body.items.len, error.InvalidEncryptedExtensions);
-    try list.appendSlice(allocator, body.items);
+    try writeHandshakeMessage(
+        list,
+        allocator,
+        handshake_type_encrypted_extensions,
+        body.items,
+        error.InvalidEncryptedExtensions,
+    );
 }
 
 pub fn writeFinished(list: *std.ArrayList(u8), allocator: std.mem.Allocator, verify_data: [32]u8) Error!void {
-    try list.append(allocator, handshake_type_finished);
-    try appendU24(list, allocator, verify_data.len);
-    try list.appendSlice(allocator, &verify_data);
+    try writeHandshakeMessage(
+        list,
+        allocator,
+        handshake_type_finished,
+        &verify_data,
+        error.InvalidFinished,
+    );
 }
 
 pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!ParsedClientHello {
@@ -1547,6 +1563,22 @@ fn appendU24(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u24)
     try list.append(allocator, @truncate(value >> 16));
     try list.append(allocator, @truncate(value >> 8));
     try list.append(allocator, @truncate(value));
+}
+
+fn writeHandshakeMessage(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    handshake_type: u8,
+    body: []const u8,
+    err: Error,
+) Error!void {
+    if (body.len > std.math.maxInt(u24)) return err;
+    try list.ensureUnusedCapacity(allocator, 4 + body.len);
+    list.appendAssumeCapacity(handshake_type);
+    list.appendAssumeCapacity(@truncate(body.len >> 16));
+    list.appendAssumeCapacity(@truncate(body.len >> 8));
+    list.appendAssumeCapacity(@truncate(body.len));
+    list.appendSliceAssumeCapacity(body);
 }
 
 fn appendU16Len(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len: usize, err: Error) Error!void {
