@@ -1156,11 +1156,7 @@ pub const Frame = union(enum) {
             .new_connection_id => |frame| blk: {
                 try validateConnectionIdLen(frame.connection_id.len);
                 if (frame.retire_prior_to > frame.sequence_number) return error.InvalidFrame;
-                var len = try addWireLen(1, try varint.length(frame.sequence_number));
-                len = try addWireLen(len, try varint.length(frame.retire_prior_to));
-                len = try addWireLen(len, 1);
-                len = try addWireLen(len, frame.connection_id.len);
-                break :blk try addWireLen(len, frame.stateless_reset_token.len);
+                break :blk try newConnectionIdFrameWireLen(frame);
             },
             .retire_connection_id => |frame| try singleVarintFrameWireLen(@intFromEnum(FrameType.retire_connection_id), frame.sequence_number),
             .path_challenge, .path_response => 9,
@@ -1262,12 +1258,7 @@ pub const Frame = union(enum) {
             .new_connection_id => |new_connection_id| {
                 try validateConnectionIdLen(new_connection_id.connection_id.len);
                 if (new_connection_id.retire_prior_to > new_connection_id.sequence_number) return error.InvalidFrame;
-                try list.append(allocator, @intFromEnum(FrameType.new_connection_id));
-                try varint.encode(list, allocator, new_connection_id.sequence_number);
-                try varint.encode(list, allocator, new_connection_id.retire_prior_to);
-                try list.append(allocator, @intCast(new_connection_id.connection_id.len));
-                try list.appendSlice(allocator, new_connection_id.connection_id);
-                try list.appendSlice(allocator, &new_connection_id.stateless_reset_token);
+                try writeNewConnectionIdFrame(list, allocator, new_connection_id);
             },
             .retire_connection_id => |retire| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.retire_connection_id), retire.sequence_number),
             .path_challenge => |path| {
@@ -1385,6 +1376,14 @@ fn datagramFrameWireLen(datagram: DatagramFrame) Error!usize {
     var len: usize = 1;
     if (datagram.length_present) len = try addWireLen(len, try varint.length(datagram.data.len));
     return addWireLen(len, datagram.data.len);
+}
+
+fn newConnectionIdFrameWireLen(frame: NewConnectionIdFrame) Error!usize {
+    var len = try addWireLen(1, try varint.length(frame.sequence_number));
+    len = try addWireLen(len, try varint.length(frame.retire_prior_to));
+    len = try addWireLen(len, 1);
+    len = try addWireLen(len, frame.connection_id.len);
+    return addWireLen(len, frame.stateless_reset_token.len);
 }
 
 pub const FramePacketType = enum {
@@ -1958,6 +1957,17 @@ fn writeDatagramFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, da
         list.appendAssumeCapacity(@intFromEnum(FrameType.datagram));
     }
     list.appendSliceAssumeCapacity(datagram.data);
+}
+
+fn writeNewConnectionIdFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame: NewConnectionIdFrame) Error!void {
+    const frame_len = try newConnectionIdFrameWireLen(frame);
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    list.appendAssumeCapacity(@intFromEnum(FrameType.new_connection_id));
+    try appendVarintAssumeCapacity(list, frame.sequence_number);
+    try appendVarintAssumeCapacity(list, frame.retire_prior_to);
+    list.appendAssumeCapacity(@intCast(frame.connection_id.len));
+    list.appendSliceAssumeCapacity(frame.connection_id);
+    list.appendSliceAssumeCapacity(&frame.stateless_reset_token);
 }
 
 fn writeStreamFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream: StreamFrame) Error!void {
