@@ -9,9 +9,9 @@ pub fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
 }
 
 pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, encoded_len: usize) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.ensureTotalCapacity(allocator, encoded_len);
+    const out = try allocator.alloc(u8, encoded_len);
+    errdefer allocator.free(out);
+    var out_index: usize = 0;
 
     var bits: u64 = 0;
     var bits_left: u6 = 40;
@@ -21,7 +21,9 @@ pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, enc
         bits_left -= entry.bits;
 
         while (bits_left <= 32) {
-            out.appendAssumeCapacity(@truncate(bits >> 32));
+            std.debug.assert(out_index < out.len);
+            out[out_index] = @truncate(bits >> 32);
+            out_index += 1;
             bits <<= 8;
             bits_left += 8;
         }
@@ -31,10 +33,12 @@ pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, enc
         // QPACK reuses HPACK's canonical Huffman code (RFC 9204 §4.1.2),
         // including EOS-prefix padding of the final octet.
         bits |= (@as(u64, 1) << bits_left) - 1;
-        out.appendAssumeCapacity(@truncate(bits >> 32));
+        std.debug.assert(out_index < out.len);
+        out[out_index] = @truncate(bits >> 32);
+        out_index += 1;
     }
-    std.debug.assert(out.items.len == encoded_len);
-    return out.toOwnedSlice(allocator);
+    std.debug.assert(out_index == encoded_len);
+    return out;
 }
 
 pub fn encodedLen(value: []const u8) !usize {
