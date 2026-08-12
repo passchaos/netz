@@ -2038,11 +2038,24 @@ fn writeDatagramFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, da
 }
 
 fn writeNewConnectionIdFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame: NewConnectionIdFrame) Error!void {
-    const frame_len = try newConnectionIdFrameWireLen(frame);
-    try list.ensureUnusedCapacity(allocator, frame_len);
+    const sequence_len = try varint.length(frame.sequence_number);
+    const retire_len = try varint.length(frame.retire_prior_to);
+    try list.ensureUnusedCapacity(
+        allocator,
+        2 + @as(usize, sequence_len) + retire_len +
+            frame.connection_id.len + frame.stateless_reset_token.len,
+    );
     list.appendAssumeCapacity(@intFromEnum(FrameType.new_connection_id));
-    try appendVarintAssumeCapacity(list, frame.sequence_number);
-    try appendVarintAssumeCapacity(list, frame.retire_prior_to);
+    varint.encodeWithLenAssumeCapacity(
+        list,
+        frame.sequence_number,
+        sequence_len,
+    );
+    varint.encodeWithLenAssumeCapacity(
+        list,
+        frame.retire_prior_to,
+        retire_len,
+    );
     list.appendAssumeCapacity(@intCast(frame.connection_id.len));
     list.appendSliceAssumeCapacity(frame.connection_id);
     list.appendSliceAssumeCapacity(&frame.stateless_reset_token);
