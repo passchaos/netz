@@ -1659,19 +1659,31 @@ pub const Hpack = struct {
         high_bits: u8,
         value: u64,
     ) !void {
+        try list.ensureUnusedCapacity(allocator, integerEncodedLen(prefix_bits, value));
         const prefix_max = (@as(u16, 1) << prefix_bits) - 1;
         if (value < prefix_max) {
-            try list.append(allocator, high_bits | @as(u8, @intCast(value)));
+            list.appendAssumeCapacity(high_bits | @as(u8, @intCast(value)));
             return;
         }
 
-        try list.append(allocator, high_bits | @as(u8, @intCast(prefix_max)));
+        list.appendAssumeCapacity(high_bits | @as(u8, @intCast(prefix_max)));
         var remaining = value - prefix_max;
         while (remaining >= 128) {
-            try list.append(allocator, @as(u8, @intCast(remaining & 0x7f)) | 0x80);
+            list.appendAssumeCapacity(@as(u8, @intCast(remaining & 0x7f)) | 0x80);
             remaining >>= 7;
         }
-        try list.append(allocator, @intCast(remaining));
+        list.appendAssumeCapacity(@intCast(remaining));
+    }
+
+    fn integerEncodedLen(comptime prefix_bits: u4, value: u64) usize {
+        const prefix_max = (@as(u16, 1) << prefix_bits) - 1;
+        if (value < prefix_max) return 1;
+        var len: usize = 2;
+        var remaining = value - prefix_max;
+        while (remaining >= 128) : (remaining >>= 7) {
+            len += 1;
+        }
+        return len;
     }
 
     fn decodeInteger(first: u8, cursor: *wire.Cursor, comptime prefix_bits: u4) Error!u64 {

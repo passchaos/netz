@@ -19,7 +19,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   with host verification plus OS/custom CA bundles, and a `std.Io.async`
   concurrent server helper
 - HTTP/2 frame headers with direct parse/preallocated writes and full-frame direct writes, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing, RFC 8336 single-probe exact-indexed ORIGIN origin-set state with exact-allocation/empty-payload parse fast paths, allocation-free/preallocated writes, empty-index membership and duplicate-entry skips, RFC 7838 single-probe exact-indexed ALTSVC connection/stream advertisements with allocation-free/preallocated writes, identical replacement skips and per-target replacement, and active-stream reset propagation, a bootstrap
-  HPACK static/literal encoder-decoder with RFC 7541 Huffman strings, exact encode/decode output preallocation, and empty/short/raw-preferred string write fast paths,
+  HPACK static/literal encoder-decoder with RFC 7541 Huffman strings, preallocated prefix-integer writes, exact encode/decode output preallocation, and empty/short/raw-preferred string write fast paths,
   pseudo-header and common-header static fast paths, internal empty-dynamic-table lookup skips, single-lookup
   dynamic insert indexing, O(1)
   FIFO dynamic-index eviction, and single-pass request/response pseudo-header
