@@ -2328,7 +2328,12 @@ pub const HandshakeServerSession = struct {
             &self.established.connection,
             &entry.reader,
         );
-        return entry.reader.readData(out);
+        const read = try entry.reader.readData(out);
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
+        return read;
     }
 
     pub fn skipRequestData(
@@ -2341,7 +2346,12 @@ pub const HandshakeServerSession = struct {
             &self.established.connection,
             &entry.reader,
         );
-        return entry.reader.skipData();
+        const skipped = try entry.reader.skipData();
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
+        return skipped;
     }
 
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
@@ -3447,7 +3457,12 @@ pub const HandshakeClient = struct {
             &self.established.connection,
             &entry.reader,
         );
-        return entry.reader.readData(out);
+        const read = try entry.reader.readData(out);
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
+        return read;
     }
 
     pub fn skipResponseData(
@@ -3460,7 +3475,12 @@ pub const HandshakeClient = struct {
             &self.established.connection,
             &entry.reader,
         );
-        return entry.reader.skipData();
+        const skipped = try entry.reader.skipData();
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
+        return skipped;
     }
 
     fn releaseStreamingResponseCapacity(self: *HandshakeClient) Error!void {
