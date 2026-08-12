@@ -208,8 +208,8 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 ```text
 netz upload streams=1:   118 MiB/s, 123,836,123 bytes/s, ns/iter 541,916,703
 netz download streams=1: 120 MiB/s, 126,242,863 bytes/s, ns/iter 531,585,407
-netz upload streams=4:   34 MiB/s, 36,160,595 bytes/s, ns/iter 1,855,856,161
-netz download streams=4: 33 MiB/s, 35,205,406 bytes/s, ns/iter 1,906,209,052
+netz upload streams=4:   34 MiB/s, 36,504,241 bytes/s, ns/iter 1,838,385,370
+netz download streams=4: 32 MiB/s, 34,579,902 bytes/s, ns/iter 1,940,689,776
 ```
 
 This same-host comparison shows netz is **improved but not yet
@@ -239,39 +239,40 @@ Current stats samples:
 
 ```text
 16 MiB upload streams=1:
-  alloc count: 103143
+  alloc count: 96228
   remap count: 4697
-  total allocated bytes: 326090881
-  peak live bytes: 17958617
+  total allocated bytes: 320049951
+  peak live bytes: 17993479
   allocation buckets:
-    <=64: count=28833, bytes=486158
-    <=256: count=18030, bytes=2332323
-    <=1K: count=8279, bytes=4489747
-    <=4K: count=16773, bytes=30527132
-    <=16K: count=31374, bytes=272091041
+    <=64: count=28828, bytes=485991
+    <=256: count=17746, bytes=2287651
+    <=1K: count=8280, bytes=4490099
+    <=4K: count=10167, bytes=23662704
+    <=16K: count=31370, bytes=272239869
     <=64K: count=8, bytes=217296
     >64K: count=3, bytes=16916528
 
 64 MiB upload streams=1:
-  alloc count: 414660
+  alloc count: 386997
   remap count: 18527
-  total allocated bytes: 1313437973
-  peak live bytes: 70091876
+  total allocated bytes: 1285842382
+  peak live bytes: 69018739
   allocation buckets:
-    <=64: count=116964, bytes=1987762
-    <=256: count=72392, bytes=9347075
+    <=64: count=116962, bytes=1987670
+    <=256: count=71352, bytes=9180563
     <=1K: count=32856, bytes=17816435
-    <=4K: count=66842, bytes=121537984
-    <=16K: count=126189, bytes=1095644877
+    <=4K: count=40118, bytes=93751920
+    <=16K: count=126199, bytes=1095719483
     <=64K: count=8, bytes=217296
     >64K: count=7, bytes=68083856
 ```
 
-The 64 MiB single-stream upload still allocates about 1.3 GiB cumulatively.
-The `<=16K` bucket dominates with about 126k allocations and 1.09 GiB of
+Reusing the outbound body QUIC-frame scratch reduces allocation counts, but the
+64 MiB single-stream upload still allocates about 1.29 GiB cumulatively. The
+`<=16K` bucket continues to dominate with about 126k allocations and 1.09 GiB of
 traffic, matching the per-DATA-frame temporary payload construction path. This
 confirms that the next throughput work should eliminate or pool DATA payload
-buffers/frame slices rather than only tuning QUIC windows.
+buffers rather than only tuning QUIC windows.
 
 ## Reference context from `~/Work`
 
