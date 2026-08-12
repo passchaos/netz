@@ -3268,12 +3268,10 @@ pub const Datagram = struct {
     }
 
     pub fn write(self: Datagram, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
-        if (self.quarter_stream_id <= 63) {
-            try list.append(allocator, @intCast(self.quarter_stream_id));
-        } else {
-            try quic.varint.encode(list, allocator, self.quarter_stream_id);
-        }
-        try list.appendSlice(allocator, self.payload);
+        const id_len = try quic.varint.length(self.quarter_stream_id);
+        try list.ensureUnusedCapacity(allocator, id_len + self.payload.len);
+        try appendVarintAssumeCapacity(list, self.quarter_stream_id);
+        list.appendSliceAssumeCapacity(self.payload);
     }
 };
 
