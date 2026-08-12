@@ -86,7 +86,7 @@ pub fn writeEncoderInstruction(
                 prefixed_integer.encodedLen(5, literal.name.len) +
                     literal.name.len,
             );
-            try encodePrefixedInteger(list, allocator, 5, 0x40, literal.name.len);
+            encodePrefixedIntegerAssumeCapacity(list, 5, 0x40, literal.name.len);
             list.appendSliceAssumeCapacity(literal.name);
             try encodeString(list, allocator, literal.value);
         },
@@ -513,9 +513,8 @@ fn encodeDynamicBlockWithReferenceLimit(
             allocator,
             prefixed_integer.encodedLen(3, field.name.len) + field.name.len,
         );
-        try encodePrefixedInteger(
+        encodePrefixedIntegerAssumeCapacity(
             list,
-            allocator,
             3,
             0x20 | if (field.never_indexed) @as(u8, 0x10) else 0,
             field.name.len,
@@ -710,7 +709,7 @@ pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator
                 allocator,
                 prefixed_integer.encodedLen(3, name.len) + name.len,
             );
-            try encodePrefixedInteger(list, allocator, 3, 0x20, name.len);
+            encodePrefixedIntegerAssumeCapacity(list, 3, 0x20, name.len);
             list.appendSliceAssumeCapacity(name);
             try encodeString(list, allocator, field.value);
         }
