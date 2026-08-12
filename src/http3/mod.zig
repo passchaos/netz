@@ -482,9 +482,7 @@ fn frameHeaderWireLen(frame_type: u64, payload_len: usize) Error!usize {
 }
 
 fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
-    var buffer: [8]u8 = undefined;
-    const encoded = try quic.varint.encodeInto(&buffer, value);
-    list.appendSliceAssumeCapacity(encoded);
+    try quic.varint.encodeAssumeCapacity(list, value);
 }
 
 fn writeFrameHeader(
@@ -1314,9 +1312,7 @@ fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator
     try list.ensureUnusedCapacity(allocator, header_len + payload_len);
     try appendVarintAssumeCapacity(list, frame_type);
     try appendVarintAssumeCapacity(list, payload_len);
-    var payload: [8]u8 = undefined;
-    const encoded = try quic.varint.encodeInto(&payload, value);
-    list.appendSliceAssumeCapacity(encoded);
+    try appendVarintAssumeCapacity(list, value);
 }
 
 fn writeVarintPayloadFrame(
