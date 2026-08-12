@@ -85,6 +85,10 @@ pub fn writeCryptoFrames(
 ) Error!void {
     if (bytes.len == 0) return;
     if (max_frame_data_len == 0) return error.InvalidCryptoRange;
+    try list.ensureUnusedCapacity(
+        allocator,
+        try cryptoFramesWireLen(offset, bytes.len, max_frame_data_len),
+    );
     var written: usize = 0;
     while (written < bytes.len) {
         const chunk_len = @min(max_frame_data_len, bytes.len - written);
@@ -94,6 +98,26 @@ pub fn writeCryptoFrames(
         } }).write(list, allocator);
         written += chunk_len;
     }
+}
+
+fn cryptoFramesWireLen(offset: u64, bytes_len: usize, max_frame_data_len: usize) Error!usize {
+    if (max_frame_data_len == 0) return error.InvalidCryptoRange;
+    var len: usize = 0;
+    var written: usize = 0;
+    while (written < bytes_len) {
+        const chunk_len = @min(max_frame_data_len, bytes_len - written);
+        const frame_offset = std.math.add(u64, offset, written) catch return error.InvalidCryptoRange;
+        const chunk_len_u64 = std.math.cast(u64, chunk_len) orelse return error.InvalidCryptoRange;
+        const frame_end = std.math.add(u64, frame_offset, chunk_len_u64) catch return error.InvalidCryptoRange;
+        if (frame_end > quic.varint.max_value) return error.InvalidCryptoRange;
+
+        len = std.math.add(usize, len, 1) catch return error.InvalidFrameLength;
+        len = std.math.add(usize, len, try quic.varint.length(frame_offset)) catch return error.InvalidFrameLength;
+        len = std.math.add(usize, len, try quic.varint.length(chunk_len)) catch return error.InvalidFrameLength;
+        len = std.math.add(usize, len, chunk_len) catch return error.InvalidFrameLength;
+        written += chunk_len;
+    }
+    return len;
 }
 
 test "QUIC CRYPTO stream frames split and reassemble out of order" {
