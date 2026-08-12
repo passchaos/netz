@@ -610,6 +610,7 @@ pub const Settings = struct {
 
     pub fn writePayload(self: Settings, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         try self.validateLocal();
+        try list.ensureUnusedCapacity(allocator, try self.payloadLen());
         if (self.qpack_max_table_capacity != 0) try writeSetting(list, allocator, .qpack_max_table_capacity, self.qpack_max_table_capacity);
         if (self.max_field_section_size != std.math.maxInt(u64)) try writeSetting(list, allocator, .max_field_section_size, self.max_field_section_size);
         if (self.qpack_blocked_streams != 0) try writeSetting(list, allocator, .qpack_blocked_streams, self.qpack_blocked_streams);
@@ -681,8 +682,9 @@ fn addSettingLen(current: usize, id: SettingId, value: u64) Error!usize {
 }
 
 fn writeSetting(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: SettingId, value: u64) Error!void {
-    try quic.varint.encode(list, allocator, @intFromEnum(id));
-    try quic.varint.encode(list, allocator, value);
+    _ = allocator;
+    try appendVarintAssumeCapacity(list, @intFromEnum(id));
+    try appendVarintAssumeCapacity(list, value);
 }
 
 pub const SettingsState = struct {
