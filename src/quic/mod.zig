@@ -1128,10 +1128,7 @@ pub const Frame = union(enum) {
             },
             .stream => |stream| blk: {
                 try validateEndOffset(stream.offset, stream.data.len);
-                var len = try addWireLen(1, try varint.length(stream.stream_id));
-                if (stream.offset != 0) len = try addWireLen(len, try varint.length(stream.offset));
-                len = try addWireLen(len, try varint.length(stream.data.len));
-                break :blk try addWireLen(len, stream.data.len);
+                break :blk try streamFrameWireLen(stream);
             },
             .max_data => |frame| try singleVarintFrameWireLen(@intFromEnum(FrameType.max_data), frame.maximum_data),
             .max_stream_data => |frame| try doubleVarintFrameWireLen(@intFromEnum(FrameType.max_stream_data), frame.stream_id, frame.maximum_stream_data),
@@ -1223,14 +1220,7 @@ pub const Frame = union(enum) {
             },
             .stream => |stream| {
                 try validateEndOffset(stream.offset, stream.data.len);
-                var frame_type: u8 = @intCast(@intFromEnum(FrameType.stream) | 0x02); // always include Length for unambiguous composition.
-                if (stream.offset != 0) frame_type |= 0x04;
-                if (stream.fin) frame_type |= 0x01;
-                try list.append(allocator, frame_type);
-                try varint.encode(list, allocator, stream.stream_id);
-                if (stream.offset != 0) try varint.encode(list, allocator, stream.offset);
-                try varint.encode(list, allocator, stream.data.len);
-                try list.appendSlice(allocator, stream.data);
+                try writeStreamFrame(list, allocator, stream);
             },
             .max_data => |max_data| {
                 try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.max_data), max_data.maximum_data);
@@ -1355,6 +1345,13 @@ fn tripleVarintFrameWireLen(frame_type: u64, first: u64, second: u64, third: u64
 fn doubleVarintPayloadFrameWireLen(frame_type: u64, first: u64, second: u64, payload_len: usize) Error!usize {
     const len = try doubleVarintFrameWireLen(frame_type, first, second);
     return addWireLen(len, payload_len);
+}
+
+fn streamFrameWireLen(stream: StreamFrame) Error!usize {
+    var len = try addWireLen(1, try varint.length(stream.stream_id));
+    if (stream.offset != 0) len = try addWireLen(len, try varint.length(stream.offset));
+    len = try addWireLen(len, try varint.length(stream.data.len));
+    return addWireLen(len, stream.data.len);
 }
 
 pub const FramePacketType = enum {
@@ -1874,6 +1871,20 @@ fn writeDoubleVarintPayloadFrame(
     try appendVarintAssumeCapacity(list, first);
     try appendVarintAssumeCapacity(list, second);
     list.appendSliceAssumeCapacity(payload);
+}
+
+fn writeStreamFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream: StreamFrame) Error!void {
+    const frame_len = try streamFrameWireLen(stream);
+    try list.ensureUnusedCapacity(allocator, frame_len);
+
+    var frame_type: u8 = @intCast(@intFromEnum(FrameType.stream) | 0x02); // always include Length for unambiguous composition.
+    if (stream.offset != 0) frame_type |= 0x04;
+    if (stream.fin) frame_type |= 0x01;
+    list.appendAssumeCapacity(frame_type);
+    try appendVarintAssumeCapacity(list, stream.stream_id);
+    if (stream.offset != 0) try appendVarintAssumeCapacity(list, stream.offset);
+    try appendVarintAssumeCapacity(list, stream.data.len);
+    list.appendSliceAssumeCapacity(stream.data);
 }
 
 fn usizeFromVarint(value: u64) Error!usize {
