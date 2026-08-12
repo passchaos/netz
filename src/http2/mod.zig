@@ -228,12 +228,18 @@ pub const PriorityPayload = struct {
         if (stream_dependency == stream_id) return error.InvalidStreamId;
         var dep = @as(u32, stream_dependency);
         if (exclusive) dep |= 0x8000_0000;
-        try wire.appendU24(list, allocator, 5);
-        try list.append(allocator, @intFromEnum(FrameType.priority));
-        try list.append(allocator, 0);
-        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
-        try wire.appendInt(list, allocator, u32, dep, .big);
-        try list.append(allocator, weight);
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, FrameHeader.encoded_len + 5);
+        list.items.len = start + FrameHeader.encoded_len + 5;
+        (FrameHeader{
+            .length = 5,
+            .frame_type = .priority,
+            .flags = 0,
+            .stream_id = stream_id,
+        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        const payload = list.items[start + FrameHeader.encoded_len ..][0..5];
+        std.mem.writeInt(u32, payload[0..4], dep, .big);
+        payload[4] = weight;
     }
 };
 
@@ -280,18 +286,20 @@ pub const PriorityUpdatePayload = struct {
             return error.InvalidFrameSize;
         };
         const payload_len = std.math.add(usize, 4, field_value.len) catch return error.InvalidFrameSize;
-        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
-        try list.append(allocator, @intFromEnum(FrameType.priority_update));
-        try list.append(allocator, 0);
-        try wire.appendInt(list, allocator, u32, 0, .big);
-        try wire.appendInt(
-            list,
-            allocator,
-            u32,
-            prioritized_stream_id,
-            .big,
-        );
-        try list.appendSlice(allocator, field_value);
+        const payload_len_u24 = std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize;
+        const total_len = FrameHeader.encoded_len + payload_len;
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, total_len);
+        list.items.len = start + total_len;
+        (FrameHeader{
+            .length = payload_len_u24,
+            .frame_type = .priority_update,
+            .flags = 0,
+            .stream_id = 0,
+        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        const payload = list.items[start + FrameHeader.encoded_len ..][0..payload_len];
+        std.mem.writeInt(u32, payload[0..4], prioritized_stream_id, .big);
+        @memcpy(payload[4..], field_value);
     }
 
     pub fn writePriority(
