@@ -263,9 +263,11 @@ HTTP/3 real-handshake transfer benchmark
   stddev percent: 10.40
 ```
 
-A matching `--iterations=5 --body-bytes=67108864 --mode=upload --streams=4`
-run did not finish within 900 seconds, so 4-stream optimization remains the
-primary open throughput gap.
+A matching `--iterations=3 --body-bytes=67108864 --mode=upload --streams=4 --verbose`
+completed iteration 0 at 33.92 MiB/s, then timed out before iteration 1 printed
+within 900 seconds. This narrows the multi-iteration gap to cleanup/reuse across
+fresh server/client pairs after a completed large 4-stream transfer, rather than
+the first transfer itself.
 
 This same-host comparison shows netz is **improved but not yet
 performance-competitive** on large real-handshake transfers. Raising the
