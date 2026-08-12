@@ -203,19 +203,21 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 ```
 
 ```text
-netz upload streams=1:   126 MiB/s, 132,534,851 bytes/s, ns/iter 506,348,808
-netz download streams=1: 118 MiB/s, 124,416,235 bytes/s, ns/iter 539,389,927
-netz upload streams=4:   34 MiB/s, 36,694,417 bytes/s, ns/iter 1,828,857,592
-netz download streams=4: 32 MiB/s, 34,337,775 bytes/s, ns/iter 1,954,374,257
+netz upload streams=1:   118 MiB/s, 123,836,123 bytes/s, ns/iter 541,916,703
+netz download streams=1: 120 MiB/s, 126,242,863 bytes/s, ns/iter 531,585,407
+netz upload streams=4:   34 MiB/s, 36,160,595 bytes/s, ns/iter 1,855,856,161
+netz download streams=4: 33 MiB/s, 35,205,406 bytes/s, ns/iter 1,906,209,052
 ```
 
 This same-host comparison shows netz is **improved but not yet
 performance-competitive** on large real-handshake transfers. Raising the
 single-stream 1-RTT datagram budget to 8192 bytes and the paced DATA chunk to
 7200 bytes closes much of the previous 3 MiB/s cliff, but quicz still leads on
-64 MiB 4-stream aggregate throughput. The next optimization target is the
-multi-stream paced body pump / receive-credit loop and packet batching across
-concurrent streams. A completion audit cannot pass
+64 MiB 4-stream aggregate throughput. Releasing all active streaming response
+reader capacity before each multi-response packet receive stabilizes the 64 MiB
+four-stream download case, but quicz still leads substantially. The next
+optimization target is packet batching across concurrent streams and reducing
+per-DATA-frame send overhead. A completion audit cannot pass
 until this gap is closed with measured same-host evidence.
 
 ## Reference context from `~/Work`

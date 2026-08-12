@@ -3458,6 +3458,15 @@ pub const HandshakeClient = struct {
         return entry.reader.skipData();
     }
 
+    fn releaseStreamingResponseCapacity(self: *HandshakeClient) Error!void {
+        for (self.streaming_responses.entries.items) |*entry| {
+            try releaseStreamingReaderCapacity(
+                &self.established.connection,
+                &entry.reader,
+            );
+        }
+    }
+
     /// Poll one promised response without aggregating its DATA payload.
     pub fn receivePushEvent(
         self: *HandshakeClient,
@@ -3644,12 +3653,7 @@ pub const HandshakeClient = struct {
             return error.UnexpectedStream;
         }
         while (true) {
-            for (self.streaming_responses.entries.items) |*entry| {
-                try releaseStreamingReaderCapacity(
-                    &self.established.connection,
-                    &entry.reader,
-                );
-            }
+            try self.releaseStreamingResponseCapacity();
             if (self.response_streams.firstReset()) |reset| {
                 if (!self.request_lifecycle.contains(reset.stream_id)) {
                     return error.UnexpectedStream;
@@ -3683,6 +3687,7 @@ pub const HandshakeClient = struct {
                     .value = owned_event,
                 } };
             }
+            try self.releaseStreamingResponseCapacity();
             try receiveConnectionResponsePacket(
                 &self.established.connection,
                 &self.receive_packets,
