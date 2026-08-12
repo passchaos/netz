@@ -16,6 +16,15 @@ pub const Config = struct {
     initial_pto_ms: u32 = 1000,
     max_pto_ms: u32 = 4000,
     max_retries: u8 = 3,
+    /// Optional wall-clock budget for one synchronous handshake transition.
+    ///
+    /// Event-loop QUIC stacks keep probing until a separate handshake-duration
+    /// or idle deadline fires.  When this adapter is configured with a non-zero
+    /// budget it mirrors that behavior by continuing capped PTO probes past
+    /// `max_retries` until the budget expires.  The default of zero preserves
+    /// the older strictly retry-count-bounded behavior for tests and embedded
+    /// callers that need deterministic fail-fast handshakes.
+    max_duration_ms: u32 = 0,
     /// Optional fault-injection callback. Production callers leave this null;
     /// tests can deterministically drop selected complete flights without
     /// teaching the transport about test-only counters.
@@ -39,6 +48,17 @@ pub const Config = struct {
         return durationFromMillis(self.timeoutMillis(retry_count));
     }
 
+    pub fn budgetMillis(self: Config) u64 {
+        if (self.max_duration_ms != 0) return self.max_duration_ms;
+
+        var total_ms: u64 = 0;
+        var retry_count: u16 = 0;
+        while (retry_count <= @as(u16, self.max_retries)) : (retry_count += 1) {
+            total_ms += self.timeoutMillis(@intCast(retry_count));
+        }
+        return total_ms;
+    }
+
     /// Timeout budget for passive waits after the peer has already proven
     /// liveness with part of a flight.  Waiting only the first PTO here makes a
     /// split Initial/Handshake response much more fragile than the active
@@ -46,22 +66,21 @@ pub const Config = struct {
     /// the blocking adapter aligned with mature QUIC stacks that separate PTO
     /// probing from the final handshake timeout.
     pub fn passiveTimeout(self: Config) std.Io.Timeout {
-        var total_ms: u64 = 0;
-        var retry_count: u16 = 0;
-        while (retry_count <= @as(u16, self.max_retries)) : (retry_count += 1) {
-            total_ms += self.timeoutMillis(@intCast(retry_count));
-        }
-        return durationFromMillis(total_ms);
+        return durationFromMillis(self.budgetMillis());
     }
 
     fn durationFromMillis(milliseconds: u64) std.Io.Timeout {
-        return .{ .duration = .{
+        return .{ .duration = clockDurationFromMillis(milliseconds) };
+    }
+
+    fn clockDurationFromMillis(milliseconds: u64) std.Io.Clock.Duration {
+        return .{
             .raw = .fromMilliseconds(@intCast(@min(
                 milliseconds,
                 @as(u64, @intCast(std.math.maxInt(i64))),
             ))),
             .clock = .awake,
-        } };
+        };
     }
 };
 
@@ -119,6 +138,7 @@ pub fn sendAndReceiveMatching(
     try config.validate();
     var retransmission: u8 = 0;
     var transmitted: u8 = 0;
+    const hard_deadline = activeDeadline(config, endpoint.io);
     while (true) {
         const drop = if (config.should_drop) |should_drop|
             should_drop(retransmission)
@@ -129,17 +149,25 @@ pub fn sendAndReceiveMatching(
                 return error.HandshakeSendFailed;
             transmitted +|= 1;
         }
-        const deadline = config.timeout(retransmission).toDeadline(
+        const deadline = attemptDeadline(
+            config,
             endpoint.io,
+            retransmission,
+            hard_deadline,
         );
         while (true) {
             var datagram = endpoint.receiveBytesTimeout(deadline) catch |err|
                 switch (err) {
                     error.Timeout => {
-                        if (retransmission == config.max_retries) {
+                        if (retryBudgetExhausted(
+                            config,
+                            endpoint.io,
+                            retransmission,
+                            hard_deadline,
+                        )) {
                             return error.HandshakeTimeout;
                         }
-                        retransmission += 1;
+                        retransmission +|= 1;
                         break;
                     },
                     error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
@@ -147,6 +175,9 @@ pub fn sendAndReceiveMatching(
                 };
             if (accept_fn(datagram.bytes)) return datagram;
             datagram.deinit(endpoint.allocator);
+            if (hardDeadlineExpired(endpoint.io, hard_deadline)) {
+                return error.HandshakeTimeout;
+            }
         }
     }
 }
@@ -169,6 +200,7 @@ pub fn sendAndReceiveMatchingContext(
     try config.validate();
     var retransmission: u8 = 0;
     var transmitted: u8 = 0;
+    const hard_deadline = activeDeadline(config, endpoint.io);
     while (true) {
         const drop = if (config.should_drop) |should_drop|
             should_drop(retransmission)
@@ -179,17 +211,25 @@ pub fn sendAndReceiveMatchingContext(
                 return error.HandshakeSendFailed;
             transmitted +|= 1;
         }
-        const deadline = config.timeout(retransmission).toDeadline(
+        const deadline = attemptDeadline(
+            config,
             endpoint.io,
+            retransmission,
+            hard_deadline,
         );
         while (true) {
             var datagram = endpoint.receiveBytesTimeout(deadline) catch |err|
                 switch (err) {
                     error.Timeout => {
-                        if (retransmission == config.max_retries) {
+                        if (retryBudgetExhausted(
+                            config,
+                            endpoint.io,
+                            retransmission,
+                            hard_deadline,
+                        )) {
                             return error.HandshakeTimeout;
                         }
-                        retransmission += 1;
+                        retransmission +|= 1;
                         break;
                     },
                     error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
@@ -197,6 +237,9 @@ pub fn sendAndReceiveMatchingContext(
                 };
             if (accept_fn(accept_context, datagram.bytes)) return datagram;
             datagram.deinit(endpoint.allocator);
+            if (hardDeadlineExpired(endpoint.io, hard_deadline)) {
+                return error.HandshakeTimeout;
+            }
         }
     }
 }
@@ -212,6 +255,59 @@ pub fn sendWithoutResponse(
 ) Error!void {
     try config.validate();
     send_fn(context, 0) catch return error.HandshakeSendFailed;
+}
+
+fn activeDeadline(config: Config, io: std.Io) ?std.Io.Clock.Timestamp {
+    if (config.max_duration_ms == 0) return null;
+    return std.Io.Clock.Timestamp.fromNow(
+        io,
+        Config.clockDurationFromMillis(config.max_duration_ms),
+    );
+}
+
+fn attemptDeadline(
+    config: Config,
+    io: std.Io,
+    retransmission: u8,
+    hard_deadline: ?std.Io.Clock.Timestamp,
+) std.Io.Timeout {
+    const pto_deadline = config.timeout(retransmission).toDeadline(io);
+    const hard = hard_deadline orelse return pto_deadline;
+    switch (pto_deadline) {
+        .deadline => |deadline| {
+            if (std.Io.Clock.Timestamp.compare(hard, .lt, deadline)) {
+                return .{ .deadline = hard };
+            }
+            return pto_deadline;
+        },
+        .none, .duration => unreachable,
+    }
+}
+
+fn retryBudgetExhausted(
+    config: Config,
+    io: std.Io,
+    retransmission: u8,
+    hard_deadline: ?std.Io.Clock.Timestamp,
+) bool {
+    // SendFn receives the retransmission number as u8 so flight helpers can
+    // derive fresh packet numbers without extra allocation.  Stop before that
+    // counter would saturate and risk reusing a QUIC AEAD nonce.
+    if (retransmission == std.math.maxInt(u8)) return true;
+    if (hard_deadline) |deadline| {
+        std.debug.assert(deadline.clock == .awake);
+        return std.Io.Clock.awake.now(io).nanoseconds >= deadline.raw.nanoseconds;
+    }
+    return retransmission == config.max_retries;
+}
+
+fn hardDeadlineExpired(
+    io: std.Io,
+    hard_deadline: ?std.Io.Clock.Timestamp,
+) bool {
+    const deadline = hard_deadline orelse return false;
+    std.debug.assert(deadline.clock == .awake);
+    return std.Io.Clock.awake.now(io).nanoseconds >= deadline.raw.nanoseconds;
 }
 
 pub const InitialFlight = struct {
