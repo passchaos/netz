@@ -13,6 +13,7 @@ const single_stream_one_rtt_datagram_size: usize = 8192;
 const single_stream_paced_body_chunk_bytes: usize = 7200;
 const multi_stream_one_rtt_datagram_size: usize = 4096;
 const multi_stream_paced_body_chunk_bytes: usize = 2800;
+const upload_trace_initial_window: usize = 256 * 1024;
 
 const Mode = enum {
     upload,
@@ -124,6 +125,24 @@ fn traceIteration(config: Config, iteration: usize, message: []const u8) void {
     }
 }
 
+fn shouldTraceUploadSendCall(
+    config: Config,
+    offset: usize,
+    end: usize,
+    stream_len: usize,
+    next_progress_trace: usize,
+) bool {
+    if (!config.trace_iteration) return false;
+
+    // Progress checkpoints print only after a send returns. Trace the early
+    // calls and every checkpoint boundary before entering the blocking paced
+    // send as well, so a timeout shows the exact stream/offset that stopped
+    // making forward progress without flooding long successful transfers.
+    return offset < upload_trace_initial_window or
+        end >= next_progress_trace or
+        end == stream_len;
+}
+
 fn runIteration(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -177,6 +196,9 @@ fn runIteration(
 
         fn run(shared: *@This()) void {
             runFallible(shared) catch |err| {
+                if (shared.trace) {
+                    std.debug.print("  [iter {d}] server error: {}\n", .{ shared.iteration, err });
+                }
                 shared.err = err;
             };
         }
@@ -459,7 +481,7 @@ fn runUploadClient(
         }, transferBytesForStream(body_bytes, streams, index));
     }
     traceIteration(config, iteration, "upload send bodies start");
-    try sendUploadBodies(client, stream_ids, body_bytes, streams, round_robin_chunk_bytes, body);
+    try sendUploadBodies(client, stream_ids, body_bytes, streams, round_robin_chunk_bytes, body, config, iteration);
     traceIteration(config, iteration, "upload send bodies done");
 
     var status_total: usize = 0;
@@ -490,11 +512,20 @@ fn sendUploadBodies(
     streams: usize,
     round_robin_chunk_bytes: usize,
     body: []const u8,
+    config: Config,
+    iteration: usize,
 ) !void {
     const allocator = client.allocator;
     const sent = try allocator.alloc(usize, streams);
     defer allocator.free(sent);
+    var next_trace: ?[]usize = null;
+    defer if (next_trace) |trace| allocator.free(trace);
     @memset(sent, 0);
+    const per_stream_trace_step = @max(@as(usize, 1), body_bytes / streams / 4);
+    if (config.trace_iteration) {
+        next_trace = try allocator.alloc(usize, streams);
+        @memset(next_trace.?, per_stream_trace_step);
+    }
     var finished_count: usize = 0;
     while (finished_count < streams) {
         for (stream_ids, 0..) |stream_id, index| {
@@ -502,12 +533,43 @@ fn sendUploadBodies(
             if (sent[index] == stream_len) continue;
             const count = @min(round_robin_chunk_bytes, stream_len - sent[index]);
             const end = sent[index] + count;
+            const trace_send_call = if (next_trace) |trace|
+                shouldTraceUploadSendCall(
+                    config,
+                    sent[index],
+                    end,
+                    stream_len,
+                    trace[index],
+                )
+            else
+                false;
+            if (trace_send_call) {
+                std.debug.print(
+                    "  [iter {d}] upload stream {d} send call {d}+{d}/{d} fin={}\n",
+                    .{ iteration, index, sent[index], count, stream_len, end == stream_len },
+                );
+            }
             try client.sendRequestBodyPaced(
                 stream_id,
                 body[0..count],
                 end == stream_len,
             );
+            if (trace_send_call) {
+                std.debug.print(
+                    "  [iter {d}] upload stream {d} send call done {d}/{d}\n",
+                    .{ iteration, index, end, stream_len },
+                );
+            }
             sent[index] = end;
+            if (next_trace) |trace| {
+                if (end >= trace[index] or end == stream_len) {
+                    std.debug.print(
+                        "  [iter {d}] upload stream {d} sent {d}/{d}\n",
+                        .{ iteration, index, end, stream_len },
+                    );
+                    while (trace[index] <= end) trace[index] += per_stream_trace_step;
+                }
+            }
             if (end == stream_len) finished_count += 1;
         }
     }
