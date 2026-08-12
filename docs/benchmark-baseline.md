@@ -265,9 +265,11 @@ HTTP/3 real-handshake transfer benchmark
 
 A matching `--iterations=3 --body-bytes=67108864 --mode=upload --streams=4 --verbose`
 completed iteration 0 at 33.92 MiB/s, then timed out before iteration 1 printed
-within 900 seconds. This narrows the multi-iteration gap to cleanup/reuse across
-fresh server/client pairs after a completed large 4-stream transfer, rather than
-the first transfer itself.
+within 900 seconds. A follow-up experiment that created a fresh
+`std.Io.Threaded` per iteration still timed out after iteration 0, so the stall
+is not only reuse of the top-level Io backend. This narrows the multi-iteration
+gap to cleanup/reuse across fresh server/client pairs after a completed large
+4-stream transfer, rather than the first transfer itself.
 
 This same-host comparison shows netz is **improved but not yet
 performance-competitive** on large real-handshake transfers. Raising the
