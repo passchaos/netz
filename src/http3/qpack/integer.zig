@@ -5,6 +5,10 @@ const wire = @import("../../internal/wire.zig");
 
 pub fn encode(list: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime prefix_bits: u4, first_prefix: u8, value: u64) !void {
     try list.ensureUnusedCapacity(allocator, encodedLen(prefix_bits, value));
+    encodeAssumeCapacity(list, prefix_bits, first_prefix, value);
+}
+
+pub fn encodeAssumeCapacity(list: *std.ArrayList(u8), comptime prefix_bits: u4, first_prefix: u8, value: u64) void {
     const max_prefix: u8 = @intCast((@as(u16, 1) << prefix_bits) - 1);
     if (value < max_prefix) {
         list.appendAssumeCapacity(first_prefix | @as(u8, @intCast(value)));

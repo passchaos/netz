@@ -8,6 +8,7 @@ const wire = @import("../../internal/wire.zig");
 const varint = @import("../../quic/varint.zig");
 const prefixed_integer = @import("integer.zig");
 const encodePrefixedInteger = prefixed_integer.encode;
+const encodePrefixedIntegerAssumeCapacity = prefixed_integer.encodeAssumeCapacity;
 const decodePrefixedInteger = prefixed_integer.decode;
 
 pub const Error = wire.Error || error{
@@ -802,12 +803,12 @@ fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: [
     const huffman_len = try huffmanEncodedLen(value);
     if (huffman_len >= value.len) {
         try list.ensureUnusedCapacity(allocator, prefixed_integer.encodedLen(7, value.len) + value.len);
-        try encodePrefixedInteger(list, allocator, 7, 0x00, value.len);
+        encodePrefixedIntegerAssumeCapacity(list, 7, 0x00, value.len);
         list.appendSliceAssumeCapacity(value);
         return;
     }
     try list.ensureUnusedCapacity(allocator, prefixed_integer.encodedLen(7, huffman_len) + huffman_len);
-    try encodePrefixedInteger(list, allocator, 7, 0x80, huffman_len);
+    encodePrefixedIntegerAssumeCapacity(list, 7, 0x80, huffman_len);
     appendHuffmanAssumeCapacity(list, value, huffman_len);
 }
 
