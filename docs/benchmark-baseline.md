@@ -299,6 +299,10 @@ Rejected experiments after validation:
 - A first batch-body API grouped chunks by STREAM-frame count, but still hit
   `DatagramTooLarge`; correct batching must group by actual QUIC frame wire
   length / short-packet length and respect `currentSendDatagramSize()`.
+- Replacing the generic `sendConnectionFrames` splitter with conservative
+  `wireLen()`-based grouping avoided `DatagramTooLarge` but caused 64 MiB
+  4-stream download timeouts; packet-size-aware batching needs to be scoped to
+  the new batch-body API rather than changing all HTTP/3 frame sends.
 - Multi-stream `--paced-body-chunk-bytes` scans after parameterization found no
   better stable default: 3000 bytes can reach ~40 MiB/s but had upload timeouts,
   3200 bytes improved download but upload timed out, and 2900 bytes regressed to
