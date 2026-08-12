@@ -1126,19 +1126,10 @@ fn writeCipherSuites(
             if (suite == previous) return error.InvalidCipherSuite;
         }
     }
-    try appendInt(
-        list,
-        allocator,
-        u16,
-        @intCast(suites.len * @sizeOf(u16)),
-    );
+    try list.ensureUnusedCapacity(allocator, 2 + suites.len * @sizeOf(u16));
+    appendU16AssumeCapacity(list, @intCast(suites.len * @sizeOf(u16)));
     for (suites) |suite| {
-        try appendInt(
-            list,
-            allocator,
-            u16,
-            suite.wireValue(),
-        );
+        appendU16AssumeCapacity(list, suite.wireValue());
     }
 }
 
