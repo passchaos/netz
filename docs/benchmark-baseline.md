@@ -23,8 +23,10 @@ Build mode: -Doptimize=ReleaseFast
 
 ```sh
 zig build bench-http3-qpack -Doptimize=ReleaseFast
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=4
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
@@ -92,44 +94,80 @@ selected direction, and reports aggregate bytes/s. Both upload and download
 modes use the handshake runtime's paced body sender: `CongestionLimited` and
 `FlowControlBlocked` drive peer packet processing so ACK/MAX_* frames can reopen
 send credit instead of turning large transfers into synchronous failures.
+`--streams` splits the requested byte count across concurrent client-initiated
+request streams, matching the shape of quicz's 4-stream aggregate benchmark.
 
 ```sh
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=4
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
 ```
 
-Current 16 MiB upload result:
+Current 16 MiB single-stream upload result:
 
 ```text
 HTTP/3 real-handshake transfer benchmark
   mode: upload
+  streams: 1
   iterations: 1
   body bytes/iteration: 16777216
   total body bytes: 16777216
   status total: 200
-  ns/iteration: 654903367
-  bytes/s: 25617849
+  ns/iteration: 633723309
+  bytes/s: 26474039
   MiB/s: 24
 ```
 
-Current 16 MiB download result:
+Current 16 MiB single-stream download result:
 
 ```text
 HTTP/3 real-handshake transfer benchmark
   mode: download
+  streams: 1
   iterations: 1
   body bytes/iteration: 16777216
   total body bytes: 16777216
   status total: 200
-  ns/iteration: 640421838
-  bytes/s: 26197132
+  ns/iteration: 630802886
+  bytes/s: 26596606
+  MiB/s: 25
+```
+
+Current 16 MiB / 4-stream upload result:
+
+```text
+HTTP/3 real-handshake transfer benchmark
+  mode: upload
+  streams: 4
+  iterations: 1
+  body bytes/iteration: 16777216
+  total body bytes: 16777216
+  status total: 800
+  ns/iteration: 632215439
+  bytes/s: 26537181
+  MiB/s: 25
+```
+
+Current 16 MiB / 4-stream download result:
+
+```text
+HTTP/3 real-handshake transfer benchmark
+  mode: download
+  streams: 4
+  iterations: 1
+  body bytes/iteration: 16777216
+  total body bytes: 16777216
+  status total: 800
+  ns/iteration: 662296871
+  bytes/s: 25331866
   MiB/s: 24
 ```
 
-This is now a real-handshake, paced single-stream upload/download result with
-the same 16 MiB transfer size as the quicz reference benchmark family. It is
-still not a completion claim: the next evidence step is to add multi-stream
-modes and compare against quicz on the same host/run shape.
+This is now a real-handshake, paced single-stream and 4-stream upload/download
+result with the same 16 MiB transfer size as the quicz reference benchmark
+family. It is still not a completion claim: the next evidence step is to run the
+same-host quicz reference and add memory/allocation evidence.
 
 ## Reference context from `~/Work`
 
@@ -148,16 +186,14 @@ different benchmark definitions, but they define the comparison target shape:
   dominate throughput comparisons and must be recorded separately.
 
 For netz, the current results above are microbenchmarks plus paced
-real-handshake 16 MiB upload/download benchmarks.  These now match the
-single-stream transfer size used by the quicz benchmark family, but they still
-lack the same-host reference run, multi-stream aggregate coverage, and
-memory/allocation evidence required before claiming performance parity or
-superiority.
+real-handshake 16 MiB upload/download benchmarks with single-stream and
+4-stream shapes.  These now match the transfer size and aggregate-stream shape
+used by the quicz benchmark family, but they still lack the same-host reference
+run and memory/allocation evidence required before claiming performance parity
+or superiority.
 
 ## Gaps before a completion audit can pass
 
-- Expand the current real-handshake paced transfer benchmark with
-  multi-stream transfer modes.
 - Run the same or equivalent scenario against at least one `~/Work` reference
   implementation on the same host.
 - Record allocation/peak-memory metrics for the benchmark processes.

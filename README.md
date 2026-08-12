@@ -452,8 +452,10 @@ zig build bench -Doptimize=ReleaseFast
 zig build bench-http1-parse -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
 zig build bench-http3-dev -Doptimize=ReleaseFast
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=4
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
 zig build bench-http3-capsule -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
@@ -473,7 +475,7 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/2 HPACK stateful dynamic-table encode/decode versus stateless helpers,
 - HTTP/3 cleartext development request/response round trips,
 - HTTP/3 real-handshake paced upload/download throughput with configurable
-  body size, mode, and iteration count,
+  body size, direction mode, stream count, and iteration count,
 - HTTP/3 Alt-Svc `h3` / `h3-29` endpoint discovery parsing and origin-relative connection target resolution for real-site upgrade hints,
 - HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
   CONNECT-stream extension payloads,
