@@ -308,6 +308,9 @@ Rejected experiments after validation:
   3200 bytes improved download but upload timed out, and 2900 bytes regressed to
   ~24 MiB/s with upload timeouts. The current 2800-byte default remains the
   stable baseline until packet-size-aware batching exists.
+- Multi-stream `--round-robin-chunk-bytes` scans did not find a better stable
+  default either: 16 KiB timed out on upload and hit `StreamBufferTooLarge` on
+  download; 32 KiB improved download to ~40 MiB/s but still timed out on upload.
 
 Future multi-stream payload-buffer work needs per-send or per-stream lifetime
 isolation, not one shared mutable buffer or a change that increases the
