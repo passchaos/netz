@@ -1893,9 +1893,7 @@ fn writeSingleByteFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
 }
 
 fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
-    var buffer: [8]u8 = undefined;
-    const encoded = try varint.encodeInto(&buffer, value);
-    list.appendSliceAssumeCapacity(encoded);
+    try varint.encodeAssumeCapacity(list, value);
 }
 
 fn appendU16AssumeCapacity(list: *std.ArrayList(u8), value: u16) void {
