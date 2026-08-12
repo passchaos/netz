@@ -274,6 +274,13 @@ traffic, matching the per-DATA-frame temporary payload construction path. This
 confirms that the next throughput work should eliminate or pool DATA payload
 buffers rather than only tuning QUIC windows.
 
+Two lower-level allocation experiments were rejected after validation: reusing a
+single DATA payload scratch buffer and pre-sizing each temporary DATA payload
+both reduced single-stream allocation counts, but they caused 64 MiB 4-stream
+validation timeouts. Future payload-buffer work needs per-send or per-stream
+lifetime isolation, not one shared mutable buffer or a change that increases the
+multi-stream send/receive critical section.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is
