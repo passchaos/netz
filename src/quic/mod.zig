@@ -1110,11 +1110,7 @@ pub const Frame = union(enum) {
             .padding => |padding| padding.len,
             .ping => 1,
             .ack => |ack| try ackFrameWireLen(ack),
-            .reset_stream => |reset| blk: {
-                var len = try addWireLen(1, try varint.length(reset.stream_id));
-                len = try addWireLen(len, try varint.length(reset.application_error_code));
-                break :blk try addWireLen(len, try varint.length(reset.final_size));
-            },
+            .reset_stream => |reset| try tripleVarintFrameWireLen(@intFromEnum(FrameType.reset_stream), reset.stream_id, reset.application_error_code, reset.final_size),
             .stop_sending => |stop| try doubleVarintFrameWireLen(@intFromEnum(FrameType.stop_sending), stop.stream_id, stop.application_error_code),
             .new_token => |new_token| blk: {
                 if (new_token.token.len == 0) return error.InvalidFrame;
@@ -1134,7 +1130,7 @@ pub const Frame = union(enum) {
                 len = try addWireLen(len, try varint.length(stream.data.len));
                 break :blk try addWireLen(len, stream.data.len);
             },
-            .max_data => |frame| try addWireLen(1, try varint.length(frame.maximum_data)),
+            .max_data => |frame| try singleVarintFrameWireLen(@intFromEnum(FrameType.max_data), frame.maximum_data),
             .max_stream_data => |frame| try doubleVarintFrameWireLen(@intFromEnum(FrameType.max_stream_data), frame.stream_id, frame.maximum_stream_data),
             .max_streams_bidi => |frame| blk: {
                 try validateStreamCount(frame.maximum_streams);
@@ -1200,10 +1196,7 @@ pub const Frame = union(enum) {
             .ping => try list.append(allocator, @intFromEnum(FrameType.ping)),
             .ack => |ack| try writeAckFrame(list, allocator, ack),
             .reset_stream => |reset| {
-                try list.append(allocator, @intFromEnum(FrameType.reset_stream));
-                try varint.encode(list, allocator, reset.stream_id);
-                try varint.encode(list, allocator, reset.application_error_code);
-                try varint.encode(list, allocator, reset.final_size);
+                try writeTripleVarintFrame(list, allocator, @intFromEnum(FrameType.reset_stream), reset.stream_id, reset.application_error_code, reset.final_size);
             },
             .stop_sending => |stop| {
                 try writeDoubleVarintFrame(list, allocator, @intFromEnum(FrameType.stop_sending), stop.stream_id, stop.application_error_code);
@@ -1233,8 +1226,7 @@ pub const Frame = union(enum) {
                 try list.appendSlice(allocator, stream.data);
             },
             .max_data => |max_data| {
-                try list.append(allocator, @intFromEnum(FrameType.max_data));
-                try varint.encode(list, allocator, max_data.maximum_data);
+                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.max_data), max_data.maximum_data);
             },
             .max_stream_data => |max_stream_data| {
                 try writeDoubleVarintFrame(list, allocator, @intFromEnum(FrameType.max_stream_data), max_stream_data.stream_id, max_stream_data.maximum_stream_data);
@@ -1344,6 +1336,13 @@ fn doubleVarintFrameWireLen(frame_type: u64, first: u64, second: u64) Error!usiz
     std.debug.assert(frame_type <= 63);
     const len = try addWireLen(1, try varint.length(first));
     return addWireLen(len, try varint.length(second));
+}
+
+fn tripleVarintFrameWireLen(frame_type: u64, first: u64, second: u64, third: u64) Error!usize {
+    std.debug.assert(frame_type <= 63);
+    var len = try addWireLen(1, try varint.length(first));
+    len = try addWireLen(len, try varint.length(second));
+    return addWireLen(len, try varint.length(third));
 }
 
 pub const FramePacketType = enum {
@@ -1825,6 +1824,23 @@ fn writeDoubleVarintFrame(
     list.appendAssumeCapacity(@intCast(frame_type));
     try appendVarintAssumeCapacity(list, first);
     try appendVarintAssumeCapacity(list, second);
+}
+
+fn writeTripleVarintFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    third: u64,
+) Error!void {
+    std.debug.assert(frame_type <= 63);
+    const frame_len = try tripleVarintFrameWireLen(frame_type, first, second, third);
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    list.appendAssumeCapacity(@intCast(frame_type));
+    try appendVarintAssumeCapacity(list, first);
+    try appendVarintAssumeCapacity(list, second);
+    try appendVarintAssumeCapacity(list, third);
 }
 
 fn usizeFromVarint(value: u64) Error!usize {
