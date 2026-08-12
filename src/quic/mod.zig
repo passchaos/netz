@@ -679,9 +679,13 @@ pub fn parseTransportParametersTyped(
 }
 
 pub fn encodeTransportParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: u64, value: []const u8) !void {
-    try varint.encode(list, allocator, id);
-    try varint.encode(list, allocator, value.len);
-    try list.appendSlice(allocator, value);
+    const id_len = try varint.length(id);
+    const value_len_len = try varint.length(value.len);
+    const total_len = try addWireLen(try addWireLen(id_len, value_len_len), value.len);
+    try list.ensureUnusedCapacity(allocator, total_len);
+    try appendVarintAssumeCapacity(list, id);
+    try appendVarintAssumeCapacity(list, value.len);
+    list.appendSliceAssumeCapacity(value);
 }
 
 pub fn encodeReservedTransportParameter(list: *std.ArrayList(u8), allocator: std.mem.Allocator, id: u64, value: []const u8) !void {
