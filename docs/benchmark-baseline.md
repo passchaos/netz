@@ -23,6 +23,7 @@ Build mode: -Doptimize=ReleaseFast
 
 ```sh
 zig build bench-http3-qpack -Doptimize=ReleaseFast
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=4096
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
@@ -82,6 +83,35 @@ QUIC UDP receive benchmark
   total datagrams/path: 270000
 ```
 
+### HTTP/3 real-handshake upload smoke
+
+`bench-http3-handshake-transfer` starts a loopback HTTP/3 server, creates a
+fresh QUIC/H3 client connection per iteration, streams a fixed-size request
+body, and reports aggregate bytes/s.  The current default is intentionally small
+because larger synchronous uploads can hit the current congestion-window send
+limit before a full transfer pump is added.
+
+```sh
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=4096
+```
+
+Current smoke result:
+
+```text
+HTTP/3 real-handshake upload benchmark
+  iterations: 1
+  body bytes/request: 4096
+  total request bytes: 4096
+  status total: 200
+  ns/iteration: 3879465
+  bytes/s: 1055815
+  MiB/s: 1
+```
+
+This is a reachability/measurement harness, not yet a quicz-style 16 MiB
+throughput result.  The next benchmark step is to add a paced transfer pump that
+can keep sending as ACKs reopen congestion credit.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is
@@ -98,15 +128,17 @@ different benchmark definitions, but they define the comparison target shape:
 - quicz documentation also highlights platform effects: Linux GSO/GRO can
   dominate throughput comparisons and must be recorded separately.
 
-For netz, the current results above are microbenchmarks, not real-handshake
-end-to-end transfer results.  The next evidence-building step is to add a
-netz real-handshake transfer benchmark comparable to quicz's `quic_bench_hs`
-methodology before claiming performance parity or superiority.
+For netz, the current results above are microbenchmarks plus a small
+real-handshake upload smoke benchmark, not a quicz-style end-to-end transfer
+throughput result.  The next evidence-building step is to expand the upload
+smoke into a paced real-handshake transfer benchmark comparable to quicz's
+`quic_bench_hs` methodology before claiming performance parity or superiority.
 
 ## Gaps before a completion audit can pass
 
-- Add a real-handshake transfer benchmark for netz with configurable payload
-  size, stream count, and iteration count.
+- Expand the current real-handshake upload smoke benchmark into a paced
+  transfer benchmark with configurable payload size, stream count, and
+  iteration count.
 - Run the same or equivalent scenario against at least one `~/Work` reference
   implementation on the same host.
 - Record allocation/peak-memory metrics for the benchmark processes.

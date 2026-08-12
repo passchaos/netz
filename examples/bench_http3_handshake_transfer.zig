@@ -1,0 +1,176 @@
+const std = @import("std");
+const netz = @import("netz");
+
+const default_iterations: usize = 1;
+const default_body_bytes: usize = 4096;
+const default_max_stream_frame_data: usize = 512;
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = std.heap.smp_allocator;
+    const config = try parseArgs(init, allocator);
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const request_body = try allocator.alloc(u8, config.body_bytes);
+    defer allocator.free(request_body);
+    @memset(request_body, 'x');
+
+    const server_cid = [_]u8{ 0x44, 0x45, 0x46, 0x47 };
+    var server = try netz.http3.runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 32 } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0x31} ** 32,
+                .x25519_secret_key = [_]u8{0x32} ** 32,
+                .max_crypto_buffer = 64 * 1024,
+            },
+            .session = .{
+                .max_stream_buffer = @max(64 * 1024, config.body_bytes + 4096),
+                .max_stream_frame_data = config.max_stream_frame_data,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *netz.http3.runtime.HandshakeServer,
+        iterations: usize,
+        body_bytes: usize,
+        err: ?anyerror = null,
+        handled: usize = 0,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            while (shared.handled < shared.iterations) : (shared.handled += 1) {
+                var session = try shared.server.accept();
+                defer session.deinit();
+                var request = try session.receiveRequest();
+                defer request.deinit(session.established.connection.endpoint.allocator);
+                if (request.request.body.len != shared.body_bytes) return error.InvalidFrame;
+                try session.sendResponse(request.stream_id, .{
+                    .status = 200,
+                    .headers = &.{.{ .name = "server", .value = "netz-transfer-bench" }},
+                    .body = "ok",
+                });
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server, .iterations = config.iterations, .body_bytes = config.body_bytes };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const started = nowNs(io);
+    var status_total: usize = 0;
+    var bytes_total: usize = 0;
+    for (0..config.iterations) |_| {
+        var original_dcid: [8]u8 = undefined;
+        var local_cid: [8]u8 = undefined;
+        try std.Io.randomSecure(io, &original_dcid);
+        try std.Io.randomSecure(io, &local_cid);
+
+        var client = try netz.http3.runtime.HandshakeClient.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            server.address(),
+            .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 32 } },
+            .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &local_cid,
+                    .server_name = "localhost",
+                    .max_crypto_buffer = 64 * 1024,
+                    .handshake_recovery = .{ .initial_pto_ms = 250, .max_pto_ms = 2000, .max_retries = 4, .max_duration_ms = 10_000 },
+                },
+                .session = .{
+                    .max_stream_buffer = @max(64 * 1024, config.body_bytes + 4096),
+                    .max_stream_frame_data = config.max_stream_frame_data,
+                },
+            },
+        );
+        defer client.deinit();
+
+        const stream_id = try client.startRequest(.{
+            .method = "POST",
+            .path = "/bench-transfer",
+            .scheme = "https",
+            .authority = "localhost",
+        }, config.body_bytes);
+        var sent: usize = 0;
+        while (sent < request_body.len) {
+            const chunk_len = @min(config.max_stream_frame_data, request_body.len - sent);
+            const end = sent + chunk_len;
+            try client.sendRequestBody(stream_id, request_body[sent..end], end == request_body.len);
+            sent = end;
+        }
+        var response = try client.receiveResponse(stream_id);
+        defer response.deinit(allocator);
+        if (response.response.status != 200) return error.InvalidFrame;
+        status_total += response.response.status;
+        bytes_total += request_body.len;
+    }
+    const elapsed = nowNs(io) -| started;
+    thread.join();
+    if (shared.err) |err| return err;
+
+    const bytes_per_second: u128 = if (elapsed == 0) 0 else (@as(u128, bytes_total) * std.time.ns_per_s) / elapsed;
+    std.debug.print(
+        \\HTTP/3 real-handshake upload benchmark
+        \\  iterations: {d}
+        \\  body bytes/request: {d}
+        \\  total request bytes: {d}
+        \\  status total: {d}
+        \\  ns/iteration: {d}
+        \\  bytes/s: {d}
+        \\  MiB/s: {d}
+        \\
+    , .{ config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+}
+
+const Config = struct {
+    iterations: usize = default_iterations,
+    body_bytes: usize = default_body_bytes,
+    max_stream_frame_data: usize = default_max_stream_frame_data,
+};
+
+fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args.deinit();
+    _ = args.next();
+    var config: Config = .{};
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            config.iterations = try parsePositiveUsize(arg["--iterations=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--body-bytes=")) {
+            config.body_bytes = try parsePositiveUsize(arg["--body-bytes=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--max-stream-frame-data=")) {
+            config.max_stream_frame_data = try parsePositiveUsize(arg["--max-stream-frame-data=".len..]);
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+    return config;
+}
+
+fn parsePositiveUsize(raw: []const u8) !usize {
+    const value = try std.fmt.parseInt(usize, raw, 10);
+    if (value == 0) return error.InvalidArgument;
+    return value;
+}
+
+fn nowNs(io: std.Io) u64 {
+    const timestamp = std.Io.Clock.awake.now(io).nanoseconds;
+    if (timestamp <= 0) return 0;
+    return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
+}
