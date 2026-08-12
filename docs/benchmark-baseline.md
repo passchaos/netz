@@ -96,6 +96,9 @@ modes use the handshake runtime's paced body sender: `CongestionLimited` and
 send credit instead of turning large transfers into synchronous failures.
 `--streams` splits the requested byte count across concurrent client-initiated
 request streams, matching the shape of quicz's 4-stream aggregate benchmark.
+`--round-robin-chunk-bytes` controls the per-stream scheduling quantum used by
+multi-stream upload/download helpers; the default is 64 KiB, while smaller
+values are useful for probing ACK/credit fairness without editing source.
 
 ```sh
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1

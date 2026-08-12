@@ -7,7 +7,7 @@ const default_max_stream_frame_data: usize = 1024;
 const default_max_stream_buffer: usize = 64 * 1024;
 const default_streams: usize = 1;
 const max_streams: usize = 128;
-const round_robin_chunk_bytes: usize = 64 * 1024;
+const default_round_robin_chunk_bytes: usize = 64 * 1024;
 const default_endpoint_datagram_size: usize = 4096;
 const single_stream_one_rtt_datagram_size: usize = 8192;
 const single_stream_paced_body_chunk_bytes: usize = 7200;
@@ -65,6 +65,7 @@ pub fn main(init: std.process.Init) !void {
         iterations: usize,
         body_bytes: usize,
         streams: usize,
+        round_robin_chunk_bytes: usize,
         mode: Mode,
         body: []const u8,
         err: ?anyerror = null,
@@ -90,6 +91,7 @@ pub fn main(init: std.process.Init) !void {
                         &session,
                         shared.body_bytes,
                         shared.streams,
+                        shared.round_robin_chunk_bytes,
                         shared.body,
                     ),
                 }
@@ -102,6 +104,7 @@ pub fn main(init: std.process.Init) !void {
         .iterations = config.iterations,
         .body_bytes = config.body_bytes,
         .streams = config.streams,
+        .round_robin_chunk_bytes = config.round_robin_chunk_bytes,
         .mode = config.mode,
         .body = transfer_body,
     };
@@ -148,6 +151,7 @@ pub fn main(init: std.process.Init) !void {
                     &client,
                     config.body_bytes,
                     config.streams,
+                    config.round_robin_chunk_bytes,
                     transfer_body,
                 );
                 bytes_total += config.body_bytes;
@@ -158,6 +162,7 @@ pub fn main(init: std.process.Init) !void {
                     &client,
                     config.body_bytes,
                     config.streams,
+                    config.round_robin_chunk_bytes,
                 );
                 status_total += result.status;
                 bytes_total += result.bytes;
@@ -281,6 +286,7 @@ fn serveDownload(
     session: *netz.http3.runtime.HandshakeServerSession,
     body_bytes: usize,
     streams: usize,
+    round_robin_chunk_bytes: usize,
     body: []const u8,
 ) !void {
     const allocator = session.established.connection.endpoint.allocator;
@@ -305,7 +311,7 @@ fn serveDownload(
             transferBytesForStream(body_bytes, streams, index),
         );
     }
-    try sendDownloadBodies(session, stream_ids, body_bytes, streams, body);
+    try sendDownloadBodies(session, stream_ids, body_bytes, streams, round_robin_chunk_bytes, body);
 }
 
 fn sendDownloadBodies(
@@ -313,6 +319,7 @@ fn sendDownloadBodies(
     stream_ids: []const u62,
     body_bytes: usize,
     streams: usize,
+    round_robin_chunk_bytes: usize,
     body: []const u8,
 ) !void {
     const allocator = session.established.connection.endpoint.allocator;
@@ -342,6 +349,7 @@ fn runUploadClient(
     client: *netz.http3.runtime.HandshakeClient,
     body_bytes: usize,
     streams: usize,
+    round_robin_chunk_bytes: usize,
     body: []const u8,
 ) !usize {
     const stream_ids = try allocator.alloc(u62, streams);
@@ -354,7 +362,7 @@ fn runUploadClient(
             .authority = "localhost",
         }, transferBytesForStream(body_bytes, streams, index));
     }
-    try sendUploadBodies(client, stream_ids, body_bytes, streams, body);
+    try sendUploadBodies(client, stream_ids, body_bytes, streams, round_robin_chunk_bytes, body);
 
     var status_total: usize = 0;
     var received: usize = 0;
@@ -380,6 +388,7 @@ fn sendUploadBodies(
     stream_ids: []const u62,
     body_bytes: usize,
     streams: usize,
+    round_robin_chunk_bytes: usize,
     body: []const u8,
 ) !void {
     const allocator = client.allocator;
@@ -414,7 +423,9 @@ fn runDownloadClient(
     client: *netz.http3.runtime.HandshakeClient,
     body_bytes: usize,
     streams: usize,
+    round_robin_chunk_bytes: usize,
 ) !DownloadResult {
+    _ = round_robin_chunk_bytes;
     const stream_ids = try allocator.alloc(u62, streams);
     defer allocator.free(stream_ids);
     for (stream_ids) |*stream_id| {
@@ -614,6 +625,7 @@ const Config = struct {
     body_bytes: usize = default_body_bytes,
     max_stream_frame_data: usize = default_max_stream_frame_data,
     streams: usize = default_streams,
+    round_robin_chunk_bytes: usize = default_round_robin_chunk_bytes,
     mode: Mode = .upload,
     stats: bool = false,
 };
@@ -630,6 +642,8 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.body_bytes = try parsePositiveUsize(arg["--body-bytes=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--max-stream-frame-data=")) {
             config.max_stream_frame_data = try parsePositiveUsize(arg["--max-stream-frame-data=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--round-robin-chunk-bytes=")) {
+            config.round_robin_chunk_bytes = try parsePositiveUsize(arg["--round-robin-chunk-bytes=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--streams=")) {
             config.streams = try parsePositiveUsize(arg["--streams=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--mode=")) {

@@ -475,7 +475,7 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/2 HPACK stateful dynamic-table encode/decode versus stateless helpers,
 - HTTP/3 cleartext development request/response round trips,
 - HTTP/3 real-handshake paced upload/download throughput with configurable
-  body size, direction mode, stream count, and iteration count,
+  body size, direction mode, stream count, round-robin scheduling quantum, and iteration count,
 - HTTP/3 Alt-Svc `h3` / `h3-29` endpoint discovery parsing and origin-relative connection target resolution for real-site upgrade hints,
 - HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
   CONNECT-stream extension payloads,
