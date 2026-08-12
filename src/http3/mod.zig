@@ -802,8 +802,11 @@ pub const ControlState = struct {
         copy.peer_cancelled_push_ids = .empty;
         copy.peer_cancelled_push_index = .empty;
         errdefer copy.deinit(allocator);
-        try copy.peer_cancelled_push_ids.appendSlice(
+        try copy.peer_cancelled_push_ids.ensureUnusedCapacity(
             allocator,
+            self.peer_cancelled_push_ids.items.len,
+        );
+        copy.peer_cancelled_push_ids.appendSliceAssumeCapacity(
             self.peer_cancelled_push_ids.items,
         );
         try copy.peer_cancelled_push_index.ensureUnusedCapacity(
