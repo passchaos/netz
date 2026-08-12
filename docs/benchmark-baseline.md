@@ -299,6 +299,11 @@ Rejected experiments after validation:
 - A first batch-body API grouped chunks by STREAM-frame count, but still hit
   `DatagramTooLarge`; correct batching must group by actual QUIC frame wire
   length / short-packet length and respect `currentSendDatagramSize()`.
+- Multi-stream `--paced-body-chunk-bytes` scans after parameterization found no
+  better stable default: 3000 bytes can reach ~40 MiB/s but had upload timeouts,
+  3200 bytes improved download but upload timed out, and 2900 bytes regressed to
+  ~24 MiB/s with upload timeouts. The current 2800-byte default remains the
+  stable baseline until packet-size-aware batching exists.
 
 Future multi-stream payload-buffer work needs per-send or per-stream lifetime
 isolation, not one shared mutable buffer or a change that increases the
