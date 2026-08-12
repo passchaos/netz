@@ -1304,10 +1304,13 @@ pub fn validateResponsePushPromises(control: ControlState, bytes: []const u8) Er
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
     try validateFrameType(frame_type);
     const payload_len = try quic.varint.length(value);
-    try writeFrameHeader(list, allocator, frame_type, payload_len);
+    const header_len = try frameHeaderWireLen(frame_type, payload_len);
+    try list.ensureUnusedCapacity(allocator, header_len + payload_len);
+    try appendVarintAssumeCapacity(list, frame_type);
+    try appendVarintAssumeCapacity(list, payload_len);
     var payload: [8]u8 = undefined;
     const encoded = try quic.varint.encodeInto(&payload, value);
-    try list.appendSlice(allocator, encoded);
+    list.appendSliceAssumeCapacity(encoded);
 }
 
 fn parseSingleVarintPayload(payload: []const u8) Error!u64 {
