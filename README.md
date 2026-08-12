@@ -160,7 +160,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   datagram filtering, protected Handshake packet server/client Finished flights, and handshake/application secret
   derivation for QUIC, an integrated minimal client/server handshake for QUIC v1/v2 that emits
   practical transport parameters and applies negotiated flow-control, stream,
-  and UDP-payload limits to established 1-RTT connection objects with static-key-derived stateless reset token and packet helpers,
+  and UDP-payload limits to established 1-RTT connection objects with static-key-derived stateless reset token and preallocated packet helpers,
   packet-number space ACK tracking with cached retained-packet counts, allocation-free single-range ACK ownership, first/newest/oldest-range fast paths, tail
   ACK-range append/removal fast paths, and bounded duplicate/old packet suppression,
   ACK range semantic validation plus zero-range decode skips and preallocated

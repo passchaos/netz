@@ -64,8 +64,9 @@ pub fn validPrefix(prefix: []const u8) bool {
 pub fn encode(list: *std.ArrayList(u8), allocator: std.mem.Allocator, unpredictable_prefix: []const u8, token: [token_len]u8) Error!void {
     if (unpredictable_prefix.len < min_datagram_len - token_len) return error.InvalidLength;
     if (!validPrefix(unpredictable_prefix)) return error.InvalidHeaderForm;
-    try list.appendSlice(allocator, unpredictable_prefix);
-    try list.appendSlice(allocator, &token);
+    try list.ensureUnusedCapacity(allocator, unpredictable_prefix.len + token_len);
+    list.appendSliceAssumeCapacity(unpredictable_prefix);
+    list.appendSliceAssumeCapacity(&token);
 }
 
 pub fn encodeForConnectionId(
