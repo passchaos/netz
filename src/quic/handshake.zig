@@ -412,6 +412,95 @@ fn receiveNextServerDatagramWithTimeout(
     };
 }
 
+fn replaceServerDatagram(
+    endpoint: *quic.runtime.Endpoint,
+    recovery: retransmit.Config,
+    datagram: *quic.runtime.OwnedBytes,
+) Error!void {
+    const next_datagram = try receiveNextServerDatagramWithTimeout(
+        endpoint,
+        recovery,
+    );
+    datagram.deinit(endpoint.allocator);
+    datagram.* = next_datagram;
+}
+
+fn peekExpectedServerInitial(
+    bytes: []const u8,
+    version: quic.Version,
+    expected_destination_connection_id: []const u8,
+    allow_zero_fixed_bit: bool,
+) Error!?quic.protection.ProtectedLongPacketInfo {
+    const info = try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
+        bytes,
+        allow_zero_fixed_bit,
+    );
+    if (info.version != version.wireValue() or
+        info.packet_type != .initial or
+        !std.mem.eql(
+            u8,
+            info.destination_connection_id,
+            expected_destination_connection_id,
+        ))
+    {
+        return null;
+    }
+    return info;
+}
+
+test "QUIC client filters non-target datagrams while waiting for server Initial" {
+    const allocator = std.testing.allocator;
+    const dcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
+    const scid = [_]u8{ 0xa4, 0xa5, 0xa6, 0xa7 };
+    const keys = quic.protection.deriveInitialSecrets(&dcid).server;
+    const initial = try quic.protection.sealInitialPacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 0,
+            .payload = &.{@intFromEnum(quic.FrameType.ping)},
+        },
+    );
+    defer allocator.free(initial);
+    const handshake = try quic.protection.sealHandshakePacket(
+        allocator,
+        quic.protection.deriveAes128Keys(
+            [_]u8{0x61} ** quic.protection.secret_len,
+        ),
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 0,
+            .payload = &.{@intFromEnum(quic.FrameType.ping)},
+        },
+    );
+    defer allocator.free(handshake);
+
+    try std.testing.expect(try peekExpectedServerInitial(
+        handshake,
+        .version_1,
+        &dcid,
+        false,
+    ) == null);
+    try std.testing.expect(try peekExpectedServerInitial(
+        initial,
+        .version_1,
+        "other",
+        false,
+    ) == null);
+
+    const info = (try peekExpectedServerInitial(
+        initial,
+        .version_1,
+        &dcid,
+        false,
+    )) orelse return error.InvalidHandshakeFlight;
+    try std.testing.expectEqual(quic.protection.ProtectedLongPacketType.initial, info.packet_type);
+    try std.testing.expectEqualSlices(u8, &dcid, info.destination_connection_id);
+}
+
 fn isHandshakeDatagram(bytes: []const u8) bool {
     const info =
         quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
@@ -787,12 +876,34 @@ fn connectAttempt(
     var server_initial_flight = while (true) {
         if (server_initial_attempts >= 8) return error.MissingCryptoFrame;
         server_initial_attempts += 1;
-        server_initial_info =
-            try quic.protection.peekProtectedLongPacketInfoWithFixedBitPolicy(
-                server_datagram.bytes,
-                options.local_transport_parameters.grease_quic_bit,
+        server_initial_info = peekExpectedServerInitial(
+            server_datagram.bytes,
+            options.version,
+            options.local_connection_id,
+            options.local_transport_parameters.grease_quic_bit,
+        ) catch |err| switch (err) {
+            error.InvalidInitialPacket,
+            error.InvalidPayloadLength,
+            error.InvalidHeaderProtectionSample,
+            error.BufferTooShort,
+            error.UnsupportedVersion,
+            => {
+                try replaceServerDatagram(
+                    endpoint,
+                    options.handshake_recovery,
+                    &server_datagram,
+                );
+                continue;
+            },
+            else => |other| return other,
+        } orelse {
+            try replaceServerDatagram(
+                endpoint,
+                options.handshake_recovery,
+                &server_datagram,
             );
-        if (server_initial_info.packet_type != .initial) return error.InvalidHandshakeFlight;
+            continue;
+        };
 
         break quic.initial_exchange.openInitialCryptoFlight(
             endpoint,
@@ -805,13 +916,18 @@ fn connectAttempt(
                 .allow_zero_fixed_bit = local_transport_parameters.grease_quic_bit,
             },
         ) catch |err| switch (err) {
-            error.MissingCryptoFrame => {
-                const next_datagram = try receiveNextServerDatagramWithTimeout(
+            error.MissingCryptoFrame,
+            error.InvalidInitialPacket,
+            error.InvalidPayloadLength,
+            error.InvalidHeaderProtectionSample,
+            error.BufferTooShort,
+            error.AuthenticationFailed,
+            => {
+                try replaceServerDatagram(
                     endpoint,
                     options.handshake_recovery,
+                    &server_datagram,
                 );
-                server_datagram.deinit(endpoint.allocator);
-                server_datagram = next_datagram;
                 continue;
             },
             else => |other| return other,

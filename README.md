@@ -156,8 +156,8 @@ starts with deterministic parsers, serializers, and state helpers for:
   with secure nonce generation, queued pre-Retry 0-RTT discard, and retried
   Initial token/DCID/transport-parameter validation, minimal TLS
   ClientHello/ServerHello/EncryptedExtensions/Finished encoding and parsing,
-  protected Initial ClientHello ↔ ServerHello exchange, protected Handshake
-  packet server/client Finished flights, and handshake/application secret
+  protected Initial ClientHello ↔ ServerHello exchange with client-side non-target
+  datagram filtering, protected Handshake packet server/client Finished flights, and handshake/application secret
   derivation for QUIC, an integrated minimal client/server handshake for QUIC v1/v2 that emits
   practical transport parameters and applies negotiated flow-control, stream,
   and UDP-payload limits to established 1-RTT connection objects with static-key-derived stateless reset token and packet helpers,
