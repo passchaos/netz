@@ -2085,6 +2085,13 @@ pub const HandshakeSessionOptions = struct {
     max_stream_buffer: usize = 64 * 1024,
     max_concurrent_request_streams: usize = 128,
     max_stream_frame_data: usize = 1200,
+    /// Maximum HTTP/3 DATA bytes one paced helper attempt may hand to QUIC.
+    ///
+    /// The default remains conservative for callers using the standard 1200B
+    /// path MTU. Loopback/high-throughput callers can raise this together with
+    /// `max_stream_frame_data`, `max_frames_per_packet`, and the handshake
+    /// one_rtt max datagram size to reduce ACK/flow-control pump iterations.
+    paced_body_chunk_bytes: usize = 1024,
 };
 
 pub const HandshakeServerOptions = struct {
@@ -2480,9 +2487,7 @@ pub const HandshakeServerSession = struct {
             try self.sendResponseBodyPacedChunk(stream_id, data, fin);
             return;
         }
-        const chunk_limit = pacedBodyChunkLimit(
-            self.options.max_stream_frame_data,
-        );
+        const chunk_limit = pacedBodyChunkLimit(self.options);
         var offset: usize = 0;
         while (offset < data.len) {
             const end = @min(data.len, offset + chunk_limit);
@@ -3178,9 +3183,7 @@ pub const HandshakeClient = struct {
             try self.sendRequestBodyPacedChunk(stream_id, data, fin);
             return;
         }
-        const chunk_limit = pacedBodyChunkLimit(
-            self.options.max_stream_frame_data,
-        );
+        const chunk_limit = pacedBodyChunkLimit(self.options);
         var offset: usize = 0;
         while (offset < data.len) {
             const end = @min(data.len, offset + chunk_limit);
@@ -8239,20 +8242,27 @@ fn writeDataFrame(
     }).write(list, allocator);
 }
 
-const paced_body_chunk_ceiling: usize = 1024;
-const paced_body_frame_overhead_margin: usize = 8;
+const paced_body_frame_overhead_margin: usize = 64;
 
-fn pacedBodyChunkLimit(max_stream_frame_data: usize) usize {
-    // The paced helpers are usually used with the default 1200-byte QUIC path
-    // MTU. Keep each retry unit comfortably below one datagram after HTTP/3
-    // DATA framing, QUIC STREAM framing, packet-number, and AEAD overhead. The
-    // caller's configured HTTP/3 stream-frame cap is still honored for tests
-    // that intentionally exercise tiny fragmentation.
-    const frame_data_limit = if (max_stream_frame_data > paced_body_frame_overhead_margin)
-        max_stream_frame_data - paced_body_frame_overhead_margin
+fn pacedBodyChunkLimit(options: HandshakeSessionOptions) usize {
+    // A paced retry unit may be split into several QUIC STREAM frames, but
+    // `sendConnectionFrames` packs only `max_frames_per_packet` of them into
+    // one QUIC packet. Keep the DATA chunk within that per-packet frame budget
+    // and leave a conservative allowance for HTTP/3 DATA framing, STREAM frame
+    // prefixes, packet number, and AEAD overhead. The option defaults to 1 KiB
+    // for compatibility with the standard 1200B path-MTU configuration, while
+    // benchmarks can raise it once their handshake 1-RTT datagram size is also
+    // raised.
+    const frame_budget = options.max_stream_frame_data *|
+        @max(@as(usize, 1), options.max_frames_per_packet);
+    const data_budget = if (frame_budget > paced_body_frame_overhead_margin)
+        frame_budget - paced_body_frame_overhead_margin
     else
         1;
-    return @max(@as(usize, 1), @min(frame_data_limit, paced_body_chunk_ceiling));
+    return @max(
+        @as(usize, 1),
+        @min(options.paced_body_chunk_bytes, data_budget),
+    );
 }
 
 fn sendConnectionBodyChunk(

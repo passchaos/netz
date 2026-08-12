@@ -8,6 +8,9 @@ const default_max_stream_buffer: usize = 64 * 1024;
 const default_streams: usize = 1;
 const max_streams: usize = 128;
 const round_robin_chunk_bytes: usize = 64 * 1024;
+const default_endpoint_datagram_size: usize = 4096;
+const single_stream_one_rtt_datagram_size: usize = 8192;
+const single_stream_paced_body_chunk_bytes: usize = 7200;
 
 const Mode = enum {
     upload,
@@ -26,15 +29,20 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(transfer_body);
     @memset(transfer_body, 'x');
 
+    const endpoint_datagram_size = transferEndpointDatagramSize(config.streams);
+    const one_rtt_datagram_size = transferOneRttDatagramSize(config.streams);
+    const paced_body_chunk_bytes = transferPacedBodyChunkBytes(config.streams);
+
     const server_cid = [_]u8{ 0x44, 0x45, 0x46, 0x47 };
     var server = try netz.http3.runtime.HandshakeServer.bind(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 32 } },
+        .{ .quic = .{ .max_datagram_size = endpoint_datagram_size, .max_frames_per_datagram = 32 } },
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
+                .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size },
                 .random = [_]u8{0x31} ** 32,
                 .x25519_secret_key = [_]u8{0x32} ** 32,
                 .max_crypto_buffer = 64 * 1024,
@@ -42,6 +50,7 @@ pub fn main(init: std.process.Init) !void {
             .session = .{
                 .max_stream_buffer = default_max_stream_buffer,
                 .max_stream_frame_data = config.max_stream_frame_data,
+                .paced_body_chunk_bytes = paced_body_chunk_bytes,
                 .max_concurrent_request_streams = max_streams,
             },
         },
@@ -109,18 +118,20 @@ pub fn main(init: std.process.Init) !void {
             io,
             .{ .ip4 = .loopback(0) },
             server.address(),
-            .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 32 } },
+            .{ .quic = .{ .max_datagram_size = endpoint_datagram_size, .max_frames_per_datagram = 32 } },
             .{
                 .handshake = .{
                     .original_destination_connection_id = &original_dcid,
                     .local_connection_id = &local_cid,
                     .server_name = "localhost",
+                    .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size },
                     .max_crypto_buffer = 64 * 1024,
                     .handshake_recovery = .{ .initial_pto_ms = 250, .max_pto_ms = 2000, .max_retries = 4, .max_duration_ms = 10_000 },
                 },
                 .session = .{
                     .max_stream_buffer = default_max_stream_buffer,
                     .max_stream_frame_data = config.max_stream_frame_data,
+                    .paced_body_chunk_bytes = paced_body_chunk_bytes,
                     .max_concurrent_request_streams = max_streams,
                 },
             },
@@ -491,6 +502,18 @@ fn findStreamIndex(stream_ids: []const u62, stream_id: u62) ?usize {
         if (candidate == stream_id) return index;
     }
     return null;
+}
+
+fn transferEndpointDatagramSize(streams: usize) usize {
+    return if (streams == 1) single_stream_one_rtt_datagram_size else default_endpoint_datagram_size;
+}
+
+fn transferOneRttDatagramSize(streams: usize) usize {
+    return if (streams == 1) single_stream_one_rtt_datagram_size else netz.quic.congestion.default_max_datagram_size;
+}
+
+fn transferPacedBodyChunkBytes(streams: usize) usize {
+    return if (streams == 1) single_stream_paced_body_chunk_bytes else 1024;
 }
 
 const Config = struct {
