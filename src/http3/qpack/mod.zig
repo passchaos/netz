@@ -684,8 +684,18 @@ pub fn encodePrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator, requ
         try list.appendSlice(allocator, &.{ 0, 0 });
         return;
     }
-    try varint.encode(list, allocator, required_insert_count);
-    try varint.encode(list, allocator, base);
+    const required_len = try varint.length(required_insert_count);
+    const base_len = try varint.length(base);
+    try list.ensureUnusedCapacity(
+        allocator,
+        @as(usize, required_len) + base_len,
+    );
+    varint.encodeWithLenAssumeCapacity(
+        list,
+        required_insert_count,
+        required_len,
+    );
+    varint.encodeWithLenAssumeCapacity(list, base, base_len);
 }
 
 /// Stateless QPACK encoder for deterministic clients. It uses the static

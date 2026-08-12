@@ -28,9 +28,17 @@ pub fn encodedLen(first: u8) u8 {
 
 pub fn encode(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64) !void {
     const len = try length(value);
+    try list.ensureUnusedCapacity(allocator, len);
+    encodeWithLenAssumeCapacity(list, value, len);
+}
+
+pub fn encodeAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
+    encodeWithLenAssumeCapacity(list, value, try length(value));
+}
+
+pub fn encodeWithLenAssumeCapacity(list: *std.ArrayList(u8), value: u64, len: u8) void {
     var tmp: [8]u8 = undefined;
     encodeIntoWithLen(&tmp, value, len);
-    try list.ensureUnusedCapacity(allocator, len);
     list.appendSliceAssumeCapacity(tmp[0..len]);
 }
 
