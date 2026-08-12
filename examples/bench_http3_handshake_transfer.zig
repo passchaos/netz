@@ -21,8 +21,12 @@ const Mode = enum {
 
 pub fn main(init: std.process.Init) !void {
     var stats_allocator = CountingAllocator.init(std.heap.smp_allocator);
-    const allocator = stats_allocator.allocator();
-    const config = try parseArgs(init, allocator);
+    const args_allocator = std.heap.smp_allocator;
+    const config = try parseArgs(init, args_allocator);
+    const allocator = if (config.stats)
+        stats_allocator.allocator()
+    else
+        std.heap.smp_allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
