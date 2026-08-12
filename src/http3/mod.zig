@@ -1342,11 +1342,19 @@ fn writeVarintPayloadFrame(
     tail: []const u8,
 ) Error!void {
     try validateFrameType(frame_type);
-    const header_len = try frameHeaderWireLen(frame_type, payload_len);
-    try list.ensureUnusedCapacity(allocator, header_len + payload_len);
-    try appendVarintAssumeCapacity(list, frame_type);
-    try appendVarintAssumeCapacity(list, payload_len);
-    try appendVarintAssumeCapacity(list, value);
+    const payload_len_u64 = std.math.cast(u64, payload_len) orelse
+        return error.IntegerOverflow;
+    const frame_type_len = try quic.varint.length(frame_type);
+    const payload_len_len = try quic.varint.length(payload_len_u64);
+    const value_len = try quic.varint.length(value);
+    std.debug.assert(@as(usize, value_len) + tail.len == payload_len);
+    try list.ensureUnusedCapacity(
+        allocator,
+        @as(usize, frame_type_len) + payload_len_len + payload_len,
+    );
+    quic.varint.encodeWithLenAssumeCapacity(list, frame_type, frame_type_len);
+    quic.varint.encodeWithLenAssumeCapacity(list, payload_len_u64, payload_len_len);
+    quic.varint.encodeWithLenAssumeCapacity(list, value, value_len);
     list.appendSliceAssumeCapacity(tail);
 }
 
