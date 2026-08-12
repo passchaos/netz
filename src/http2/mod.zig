@@ -437,13 +437,23 @@ pub const OriginPayload = struct {
             payload_len = std.math.add(usize, payload_len, origin.len) catch return error.InvalidFrameSize;
         }
 
-        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
-        try list.append(allocator, @intFromEnum(FrameType.origin));
-        try list.append(allocator, 0);
-        try wire.appendInt(list, allocator, u32, 0, .big);
+        const payload_len_u24 = std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize;
+        const total_len = FrameHeader.encoded_len + payload_len;
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, total_len);
+        list.items.len = start + total_len;
+        (FrameHeader{
+            .length = payload_len_u24,
+            .frame_type = .origin,
+            .flags = 0,
+            .stream_id = 0,
+        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        var payload_pos = start + FrameHeader.encoded_len;
         for (origins) |origin| {
-            try wire.appendInt(list, allocator, u16, @intCast(origin.len), .big);
-            try list.appendSlice(allocator, origin);
+            std.mem.writeInt(u16, list.items[payload_pos..][0..2], @intCast(origin.len), .big);
+            payload_pos += 2;
+            @memcpy(list.items[payload_pos..][0..origin.len], origin);
+            payload_pos += origin.len;
         }
     }
 };
