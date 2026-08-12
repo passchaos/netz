@@ -240,8 +240,30 @@ Same-host throughput ratio against the quicz real-handshake upload baselines:
 
 | Scenario | quicz | netz | netz/quicz |
 |---|---:|---:|---:|
-| 64 MiB single-stream upload | 228.77 MB/s | 118 MiB/s | ~0.52x |
-| 64 MiB 4-stream aggregate upload | 244.85 MB/s | 34 MiB/s | ~0.14x |
+| 64 MiB single-stream upload | 228.77 MB/s | 117.76 MiB/s mean (5 iters) | ~0.51x |
+| 64 MiB 4-stream aggregate upload | 244.85 MB/s | 34 MiB/s (single iter; 5 iters timed out) | ~0.14x |
+
+Fresh 5-iteration netz single-stream sample:
+
+```text
+HTTP/3 real-handshake transfer benchmark
+  mode: upload
+  streams: 1
+  iterations: 5
+  body bytes/iteration: 67108864
+  total body bytes: 335544320
+  status total: 1000
+  ns/iteration: 550419981
+  bytes/s: 121923015
+  MiB/s: 116
+  mean MiB/s: 117.76
+  stddev MiB/s: 12.25
+  stddev percent: 10.40
+```
+
+A matching `--iterations=5 --body-bytes=67108864 --mode=upload --streams=4`
+run did not finish within 900 seconds, so 4-stream optimization remains the
+primary open throughput gap.
 
 This same-host comparison shows netz is **improved but not yet
 performance-competitive** on large real-handshake transfers. Raising the
