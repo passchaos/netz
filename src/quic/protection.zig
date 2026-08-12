@@ -816,6 +816,34 @@ pub fn minimumPacketNumberLenForHeaderProtection(payload_len: usize) u8 {
     return @intCast(4 - payload_len);
 }
 
+fn protectedLongPacketCapacity(
+    destination_connection_id_len: usize,
+    source_connection_id_len: usize,
+    token_len: usize,
+    has_token_length_field: bool,
+    packet_number_len: usize,
+    payload_len: usize,
+) Error!usize {
+    var len: usize = 1 + 4 + 1 + 1;
+    len = std.math.add(usize, len, destination_connection_id_len) catch
+        return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, source_connection_id_len) catch
+        return error.InvalidPayloadLength;
+    if (has_token_length_field) {
+        len = std.math.add(usize, len, try varint.length(token_len)) catch
+            return error.InvalidPayloadLength;
+        len = std.math.add(usize, len, token_len) catch
+            return error.InvalidPayloadLength;
+    }
+    len = std.math.add(usize, len, 8) catch return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, packet_number_len) catch
+        return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, payload_len) catch
+        return error.InvalidPayloadLength;
+    return std.math.add(usize, len, aead_tag_len) catch
+        return error.InvalidPayloadLength;
+}
+
 pub fn sealInitialPacket(
     allocator: std.mem.Allocator,
     keys: PacketProtectionKeys,
@@ -834,6 +862,17 @@ pub fn sealInitialPacket(
     errdefer out.deinit(allocator);
 
     const pn_len = @as(usize, options.packet_number_len);
+    try out.ensureUnusedCapacity(
+        allocator,
+        try protectedLongPacketCapacity(
+            options.destination_connection_id.len,
+            options.source_connection_id.len,
+            options.token.len,
+            true,
+            pn_len,
+            options.payload.len,
+        ),
+    );
     const first_byte: u8 = longHeaderFirstByte(
         options.version,
         .initial,
@@ -967,6 +1006,17 @@ pub fn sealHandshakePacket(
     errdefer out.deinit(allocator);
 
     const pn_len = @as(usize, options.packet_number_len);
+    try out.ensureUnusedCapacity(
+        allocator,
+        try protectedLongPacketCapacity(
+            options.destination_connection_id.len,
+            options.source_connection_id.len,
+            0,
+            false,
+            pn_len,
+            options.payload.len,
+        ),
+    );
     const first_byte: u8 = longHeaderFirstByte(
         options.version,
         .handshake,
@@ -1090,6 +1140,17 @@ pub fn sealZeroRttPacket(
     errdefer out.deinit(allocator);
 
     const pn_len = @as(usize, options.packet_number_len);
+    try out.ensureUnusedCapacity(
+        allocator,
+        try protectedLongPacketCapacity(
+            options.destination_connection_id.len,
+            options.source_connection_id.len,
+            0,
+            false,
+            pn_len,
+            options.payload.len,
+        ),
+    );
     const first_byte: u8 = longHeaderFirstByte(
         options.version,
         .zero_rtt,
