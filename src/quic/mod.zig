@@ -1115,10 +1115,7 @@ pub const Frame = union(enum) {
                 len = try addWireLen(len, try varint.length(reset.application_error_code));
                 break :blk try addWireLen(len, try varint.length(reset.final_size));
             },
-            .stop_sending => |stop| blk: {
-                const len = try addWireLen(1, try varint.length(stop.stream_id));
-                break :blk try addWireLen(len, try varint.length(stop.application_error_code));
-            },
+            .stop_sending => |stop| try doubleVarintFrameWireLen(@intFromEnum(FrameType.stop_sending), stop.stream_id, stop.application_error_code),
             .new_token => |new_token| blk: {
                 if (new_token.token.len == 0) return error.InvalidFrame;
                 const prefix = try addWireLen(1, try varint.length(new_token.token.len));
@@ -1138,10 +1135,7 @@ pub const Frame = union(enum) {
                 break :blk try addWireLen(len, stream.data.len);
             },
             .max_data => |frame| try addWireLen(1, try varint.length(frame.maximum_data)),
-            .max_stream_data => |frame| blk: {
-                const len = try addWireLen(1, try varint.length(frame.stream_id));
-                break :blk try addWireLen(len, try varint.length(frame.maximum_stream_data));
-            },
+            .max_stream_data => |frame| try doubleVarintFrameWireLen(@intFromEnum(FrameType.max_stream_data), frame.stream_id, frame.maximum_stream_data),
             .max_streams_bidi => |frame| blk: {
                 try validateStreamCount(frame.maximum_streams);
                 break :blk try singleVarintFrameWireLen(@intFromEnum(FrameType.max_streams_bidi), frame.maximum_streams);
@@ -1151,10 +1145,7 @@ pub const Frame = union(enum) {
                 break :blk try singleVarintFrameWireLen(@intFromEnum(FrameType.max_streams_uni), frame.maximum_streams);
             },
             .data_blocked => |frame| try singleVarintFrameWireLen(@intFromEnum(FrameType.data_blocked), frame.maximum_data),
-            .stream_data_blocked => |frame| blk: {
-                const len = try addWireLen(1, try varint.length(frame.stream_id));
-                break :blk try addWireLen(len, try varint.length(frame.maximum_stream_data));
-            },
+            .stream_data_blocked => |frame| try doubleVarintFrameWireLen(@intFromEnum(FrameType.stream_data_blocked), frame.stream_id, frame.maximum_stream_data),
             .streams_blocked_bidi => |frame| blk: {
                 try validateStreamCount(frame.maximum_streams);
                 break :blk try singleVarintFrameWireLen(@intFromEnum(FrameType.streams_blocked_bidi), frame.maximum_streams);
@@ -1215,9 +1206,7 @@ pub const Frame = union(enum) {
                 try varint.encode(list, allocator, reset.final_size);
             },
             .stop_sending => |stop| {
-                try list.append(allocator, @intFromEnum(FrameType.stop_sending));
-                try varint.encode(list, allocator, stop.stream_id);
-                try varint.encode(list, allocator, stop.application_error_code);
+                try writeDoubleVarintFrame(list, allocator, @intFromEnum(FrameType.stop_sending), stop.stream_id, stop.application_error_code);
             },
             .new_token => |new_token| {
                 if (new_token.token.len == 0) return error.InvalidFrame;
@@ -1248,9 +1237,7 @@ pub const Frame = union(enum) {
                 try varint.encode(list, allocator, max_data.maximum_data);
             },
             .max_stream_data => |max_stream_data| {
-                try list.append(allocator, @intFromEnum(FrameType.max_stream_data));
-                try varint.encode(list, allocator, max_stream_data.stream_id);
-                try varint.encode(list, allocator, max_stream_data.maximum_stream_data);
+                try writeDoubleVarintFrame(list, allocator, @intFromEnum(FrameType.max_stream_data), max_stream_data.stream_id, max_stream_data.maximum_stream_data);
             },
             .max_streams_bidi => |max_streams| {
                 try validateStreamCount(max_streams.maximum_streams);
@@ -1262,9 +1249,7 @@ pub const Frame = union(enum) {
             },
             .data_blocked => |blocked| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.data_blocked), blocked.maximum_data),
             .stream_data_blocked => |blocked| {
-                try list.append(allocator, @intFromEnum(FrameType.stream_data_blocked));
-                try varint.encode(list, allocator, blocked.stream_id);
-                try varint.encode(list, allocator, blocked.maximum_stream_data);
+                try writeDoubleVarintFrame(list, allocator, @intFromEnum(FrameType.stream_data_blocked), blocked.stream_id, blocked.maximum_stream_data);
             },
             .streams_blocked_bidi => |blocked| {
                 try validateStreamCount(blocked.maximum_streams);
@@ -1353,6 +1338,12 @@ fn varintWireLen(values: []const u64) Error!usize {
 fn singleVarintFrameWireLen(frame_type: u64, value: u64) Error!usize {
     std.debug.assert(frame_type <= 63);
     return addWireLen(1, try varint.length(value));
+}
+
+fn doubleVarintFrameWireLen(frame_type: u64, first: u64, second: u64) Error!usize {
+    std.debug.assert(frame_type <= 63);
+    const len = try addWireLen(1, try varint.length(first));
+    return addWireLen(len, try varint.length(second));
 }
 
 pub const FramePacketType = enum {
@@ -1819,6 +1810,21 @@ fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator
     try list.ensureUnusedCapacity(allocator, frame_len);
     list.appendAssumeCapacity(@intCast(frame_type));
     try appendVarintAssumeCapacity(list, value);
+}
+
+fn writeDoubleVarintFrame(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    frame_type: u64,
+    first: u64,
+    second: u64,
+) Error!void {
+    std.debug.assert(frame_type <= 63);
+    const frame_len = try doubleVarintFrameWireLen(frame_type, first, second);
+    try list.ensureUnusedCapacity(allocator, frame_len);
+    list.appendAssumeCapacity(@intCast(frame_type));
+    try appendVarintAssumeCapacity(list, first);
+    try appendVarintAssumeCapacity(list, second);
 }
 
 fn usizeFromVarint(value: u64) Error!usize {
