@@ -731,15 +731,24 @@ pub fn encodeVersionInformationFromVersions(
 
 pub fn parseTransportParameters(allocator: std.mem.Allocator, bytes: []const u8) ![]TransportParameter {
     var cursor = wire.Cursor.init(bytes);
-    var params: std.ArrayList(TransportParameter) = .empty;
-    errdefer params.deinit(allocator);
+    var count: usize = 0;
     while (!cursor.eof()) {
+        _ = try varint.decode(&cursor);
+        const len = try varint.decode(&cursor);
+        try cursor.skip(std.math.cast(usize, len) orelse return error.IntegerOverflow);
+        count += 1;
+    }
+
+    const params = try allocator.alloc(TransportParameter, count);
+    errdefer allocator.free(params);
+    cursor = wire.Cursor.init(bytes);
+    for (params) |*param| {
         const id = try varint.decode(&cursor);
         const len = try varint.decode(&cursor);
         const value = try cursor.readSlice(std.math.cast(usize, len) orelse return error.IntegerOverflow);
-        try params.append(allocator, .{ .id = id, .value = value });
+        param.* = .{ .id = id, .value = value };
     }
-    return params.toOwnedSlice(allocator);
+    return params;
 }
 
 fn encodeIntegerTransportParameter(
