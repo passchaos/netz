@@ -1394,10 +1394,33 @@ fn validateSetting(id: u64, value: u64, seen: []const Setting) Error!void {
 }
 
 pub fn writeSettings(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: []const Setting) Error!void {
+    var payload_len: usize = 0;
     for (settings, 0..) |setting, index| {
         try validateSetting(setting.id, setting.value, settings[0..index]);
-        try quic.varint.encode(list, allocator, setting.id);
-        try quic.varint.encode(list, allocator, setting.value);
+        payload_len = std.math.add(
+            usize,
+            payload_len,
+            try quic.varint.length(setting.id),
+        ) catch return error.IntegerOverflow;
+        payload_len = std.math.add(
+            usize,
+            payload_len,
+            try quic.varint.length(setting.value),
+        ) catch return error.IntegerOverflow;
+    }
+
+    try list.ensureUnusedCapacity(allocator, payload_len);
+    for (settings) |setting| {
+        quic.varint.encodeWithLenAssumeCapacity(
+            list,
+            setting.id,
+            try quic.varint.length(setting.id),
+        );
+        quic.varint.encodeWithLenAssumeCapacity(
+            list,
+            setting.value,
+            try quic.varint.length(setting.value),
+        );
     }
 }
 
