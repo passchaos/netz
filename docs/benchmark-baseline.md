@@ -239,34 +239,39 @@ Current stats samples:
 
 ```text
 16 MiB upload streams=1:
-  alloc count: 102636
+  alloc count: 103143
   remap count: 4697
-  total allocated bytes: 326402938
-  peak live bytes: 17064487
+  total allocated bytes: 326090881
+  peak live bytes: 17958617
+  allocation buckets:
+    <=64: count=28833, bytes=486158
+    <=256: count=18030, bytes=2332323
+    <=1K: count=8279, bytes=4489747
+    <=4K: count=16773, bytes=30527132
+    <=16K: count=31374, bytes=272091041
+    <=64K: count=8, bytes=217296
+    >64K: count=3, bytes=16916528
 
 64 MiB upload streams=1:
-  alloc count: 414772
+  alloc count: 414660
   remap count: 18527
-  total allocated bytes: 1316295798
-  peak live bytes: 69767885
-
-64 MiB upload streams=4:
-  alloc count: 720561
-  remap count: 24909
-  total allocated bytes: 1067832078
-  peak live bytes: 71601427
-
-64 MiB download streams=4:
-  alloc count: 720557
-  remap count: 24909
-  total allocated bytes: 1068043443
-  peak live bytes: 73104644
+  total allocated bytes: 1313437973
+  peak live bytes: 70091876
+  allocation buckets:
+    <=64: count=116964, bytes=1987762
+    <=256: count=72392, bytes=9347075
+    <=1K: count=32856, bytes=17816435
+    <=4K: count=66842, bytes=121537984
+    <=16K: count=126189, bytes=1095644877
+    <=64K: count=8, bytes=217296
+    >64K: count=7, bytes=68083856
 ```
 
-The 64 MiB transfer path still allocates around 1.0-1.3 GiB cumulatively, and
-4-stream transfer performs about 720k allocations per iteration. This confirms
-that the next throughput work should reduce per-DATA-frame temporary allocation,
-frame-slice construction, and remap churn rather than only tuning QUIC windows.
+The 64 MiB single-stream upload still allocates about 1.3 GiB cumulatively.
+The `<=16K` bucket dominates with about 126k allocations and 1.09 GiB of
+traffic, matching the per-DATA-frame temporary payload construction path. This
+confirms that the next throughput work should eliminate or pool DATA payload
+buffers/frame slices rather than only tuning QUIC windows.
 
 ## Reference context from `~/Work`
 

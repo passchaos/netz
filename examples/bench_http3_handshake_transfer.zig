@@ -545,6 +545,11 @@ const CountingAllocator = struct {
     free_count: usize = 0,
     resize_count: usize = 0,
     remap_count: usize = 0,
+    alloc_buckets: [bucket_count]usize = .{0} ** bucket_count,
+    alloc_bucket_bytes: [bucket_count]usize = .{0} ** bucket_count,
+
+    const bucket_count = 7;
+    const bucket_labels = [_][]const u8{ "<=64", "<=256", "<=1K", "<=4K", "<=16K", "<=64K", ">64K" };
 
     const vtable: std.mem.Allocator.VTable = .{
         .alloc = alloc,
@@ -565,6 +570,7 @@ const CountingAllocator = struct {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const ptr = self.backing.rawAlloc(len, alignment, ret_addr) orelse return null;
         self.alloc_count += 1;
+        self.recordAllocBucket(len);
         self.total_allocated += len;
         self.current_bytes += len;
         self.peak_bytes = @max(self.peak_bytes, self.current_bytes);
@@ -595,6 +601,22 @@ const CountingAllocator = struct {
         self.backing.rawFree(memory, alignment, ret_addr);
     }
 
+    fn recordAllocBucket(self: *CountingAllocator, len: usize) void {
+        const index = bucketIndex(len);
+        self.alloc_buckets[index] += 1;
+        self.alloc_bucket_bytes[index] += len;
+    }
+
+    fn bucketIndex(len: usize) usize {
+        if (len <= 64) return 0;
+        if (len <= 256) return 1;
+        if (len <= 1024) return 2;
+        if (len <= 4096) return 3;
+        if (len <= 16 * 1024) return 4;
+        if (len <= 64 * 1024) return 5;
+        return 6;
+    }
+
     fn recordResize(self: *CountingAllocator, old_len: usize, new_len: usize) void {
         if (new_len > old_len) {
             const delta = new_len - old_len;
@@ -621,6 +643,13 @@ const CountingAllocator = struct {
                 "  peak live bytes: {d}\n",
             .{ self.alloc_count, self.free_count, self.resize_count, self.remap_count, self.total_allocated, self.total_freed, self.current_bytes, self.peak_bytes },
         );
+        std.debug.print("  allocation buckets:\n", .{});
+        for (bucket_labels, 0..) |label, index| {
+            std.debug.print(
+                "    {s}: count={d}, bytes={d}\n",
+                .{ label, self.alloc_buckets[index], self.alloc_bucket_bytes[index] },
+            );
+        }
     }
 };
 
