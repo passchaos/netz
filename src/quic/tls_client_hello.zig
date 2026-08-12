@@ -299,20 +299,6 @@ pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
 }
 
 pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: ServerHelloOptions) Error!void {
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(allocator);
-
-    try appendInt(&body, allocator, u16, tls_1_2);
-    try body.appendSlice(allocator, &options.random);
-    try body.append(allocator, 0); // legacy_session_id_echo
-    try appendInt(
-        &body,
-        allocator,
-        u16,
-        options.cipher_suite.wireValue(),
-    );
-    try body.append(allocator, 0); // legacy_compression_method
-
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
     const supported_versions = [_]u8{ 0x03, 0x04 };
@@ -333,16 +319,22 @@ pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
         );
     }
 
-    try appendU16Len(&body, allocator, extensions.items.len, error.InvalidServerHello);
-    try body.appendSlice(allocator, extensions.items);
-
-    try writeHandshakeMessage(
-        list,
-        allocator,
-        handshake_type_server_hello,
-        body.items,
-        error.InvalidServerHello,
-    );
+    if (extensions.items.len > std.math.maxInt(u16)) return error.InvalidServerHello;
+    const body_len = std.math.add(usize, 40, extensions.items.len) catch
+        return error.InvalidServerHello;
+    if (body_len > std.math.maxInt(u24)) return error.InvalidServerHello;
+    try list.ensureUnusedCapacity(allocator, 4 + body_len);
+    list.appendAssumeCapacity(handshake_type_server_hello);
+    list.appendAssumeCapacity(@truncate(body_len >> 16));
+    list.appendAssumeCapacity(@truncate(body_len >> 8));
+    list.appendAssumeCapacity(@truncate(body_len));
+    appendU16AssumeCapacity(list, tls_1_2);
+    list.appendSliceAssumeCapacity(&options.random);
+    list.appendAssumeCapacity(0); // legacy_session_id_echo
+    appendU16AssumeCapacity(list, options.cipher_suite.wireValue());
+    list.appendAssumeCapacity(0); // legacy_compression_method
+    appendU16AssumeCapacity(list, @intCast(extensions.items.len));
+    list.appendSliceAssumeCapacity(extensions.items);
 }
 
 pub fn writeEncryptedExtensions(
