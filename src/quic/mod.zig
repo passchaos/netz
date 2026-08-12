@@ -700,14 +700,21 @@ pub fn encodeVersionInformationFromVersions(
     available_versions: []const Version,
 ) Error!void {
     try validateChosenVersion(chosen_version);
-    var value: std.ArrayList(u8) = .empty;
-    defer value.deinit(allocator);
-    try wire.appendInt(&value, allocator, u32, chosen_version.wireValue(), .big);
+    const value_len = std.math.add(
+        usize,
+        4,
+        std.math.mul(usize, available_versions.len, 4) catch return error.InvalidTransportParameterLength,
+    ) catch return error.InvalidTransportParameterLength;
+    const id = @intFromEnum(TransportParameterId.version_information);
+    const total_len = try addWireLen(try addWireLen(try varint.length(id), try varint.length(value_len)), value_len);
+    try list.ensureUnusedCapacity(allocator, total_len);
+    try appendVarintAssumeCapacity(list, id);
+    try appendVarintAssumeCapacity(list, value_len);
+    appendU32AssumeCapacity(list, chosen_version.wireValue());
     for (available_versions) |available| {
         try validateAvailableVersion(available);
-        try wire.appendInt(&value, allocator, u32, available.wireValue(), .big);
+        appendU32AssumeCapacity(list, available.wireValue());
     }
-    try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.version_information), value.items);
 }
 
 pub fn parseTransportParameters(allocator: std.mem.Allocator, bytes: []const u8) ![]TransportParameter {
@@ -760,11 +767,15 @@ fn encodeVersionInformationTransportParameter(
     version_information: VersionInformation,
 ) Error!void {
     try validateVersionInformation(version_information);
-    var value: std.ArrayList(u8) = .empty;
-    defer value.deinit(allocator);
-    try wire.appendInt(&value, allocator, u32, version_information.chosen_version.wireValue(), .big);
-    try value.appendSlice(allocator, version_information.available_versions_wire);
-    try encodeTransportParameter(list, allocator, @intFromEnum(TransportParameterId.version_information), value.items);
+    const value_len = std.math.add(usize, 4, version_information.available_versions_wire.len) catch
+        return error.InvalidTransportParameterLength;
+    const id = @intFromEnum(TransportParameterId.version_information);
+    const total_len = try addWireLen(try addWireLen(try varint.length(id), try varint.length(value_len)), value_len);
+    try list.ensureUnusedCapacity(allocator, total_len);
+    try appendVarintAssumeCapacity(list, id);
+    try appendVarintAssumeCapacity(list, value_len);
+    appendU32AssumeCapacity(list, version_information.chosen_version.wireValue());
+    list.appendSliceAssumeCapacity(version_information.available_versions_wire);
 }
 
 fn parseVersionInformation(value: []const u8) Error!VersionInformation {
@@ -1848,6 +1859,12 @@ fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
     var buffer: [8]u8 = undefined;
     const encoded = try varint.encodeInto(&buffer, value);
     list.appendSliceAssumeCapacity(encoded);
+}
+
+fn appendU32AssumeCapacity(list: *std.ArrayList(u8), value: u32) void {
+    const start = list.items.len;
+    list.items.len = start + 4;
+    std.mem.writeInt(u32, list.items[start..][0..4], value, .big);
 }
 
 fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, value: u64) Error!void {
