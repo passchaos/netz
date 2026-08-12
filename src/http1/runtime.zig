@@ -1699,12 +1699,20 @@ fn appendDecimalForRuntime(list: *std.ArrayList(u8), allocator: std.mem.Allocato
 }
 
 fn writeHeaderLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const http1.Header) Error!void {
+    var rendered_len: usize = 0;
     for (headers) |header| {
         try http1.validateHeader(header);
-        try list.appendSlice(allocator, header.name);
-        try list.appendSlice(allocator, ": ");
-        try list.appendSlice(allocator, header.value);
-        try list.appendSlice(allocator, "\r\n");
+        rendered_len = std.math.add(usize, rendered_len, header.name.len) catch return error.InvalidResponse;
+        rendered_len = std.math.add(usize, rendered_len, 2) catch return error.InvalidResponse;
+        rendered_len = std.math.add(usize, rendered_len, header.value.len) catch return error.InvalidResponse;
+        rendered_len = std.math.add(usize, rendered_len, 2) catch return error.InvalidResponse;
+    }
+    try list.ensureUnusedCapacity(allocator, rendered_len);
+    for (headers) |header| {
+        list.appendSliceAssumeCapacity(header.name);
+        list.appendSliceAssumeCapacity(": ");
+        list.appendSliceAssumeCapacity(header.value);
+        list.appendSliceAssumeCapacity("\r\n");
     }
 }
 
