@@ -384,13 +384,7 @@ pub fn writeEncryptedExtensionsWithEarlyData(
 }
 
 pub fn writeFinished(list: *std.ArrayList(u8), allocator: std.mem.Allocator, verify_data: [32]u8) Error!void {
-    try writeHandshakeMessage(
-        list,
-        allocator,
-        handshake_type_finished,
-        &verify_data,
-        error.InvalidFinished,
-    );
+    try writeFinishedBytes(list, allocator, &verify_data);
 }
 
 pub fn parseClientHello(allocator: std.mem.Allocator, bytes: []const u8) Error!ParsedClientHello {
@@ -744,14 +738,7 @@ pub fn writeFinishedForHash(
     allocator: std.mem.Allocator,
     verify_data: quic.tls.secret.Secret,
 ) Error!void {
-    try list.append(allocator, handshake_type_finished);
-    try appendU24Len(
-        list,
-        allocator,
-        verify_data.bytes().len,
-        error.InvalidFinished,
-    );
-    try list.appendSlice(allocator, verify_data.bytes());
+    try writeFinishedBytes(list, allocator, verify_data.bytes());
 }
 
 pub fn parseFinishedForHash(
@@ -1543,6 +1530,20 @@ fn writeHandshakeMessage(
     list.appendAssumeCapacity(@truncate(body.len >> 8));
     list.appendAssumeCapacity(@truncate(body.len));
     list.appendSliceAssumeCapacity(body);
+}
+
+fn writeFinishedBytes(
+    list: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    verify_data: []const u8,
+) Error!void {
+    if (verify_data.len > std.math.maxInt(u24)) return error.InvalidFinished;
+    try list.ensureUnusedCapacity(allocator, 4 + verify_data.len);
+    list.appendAssumeCapacity(handshake_type_finished);
+    list.appendAssumeCapacity(@truncate(verify_data.len >> 16));
+    list.appendAssumeCapacity(@truncate(verify_data.len >> 8));
+    list.appendAssumeCapacity(@truncate(verify_data.len));
+    list.appendSliceAssumeCapacity(verify_data);
 }
 
 fn appendU16Len(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len: usize, err: Error) Error!void {
