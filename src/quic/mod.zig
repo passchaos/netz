@@ -2018,12 +2018,20 @@ fn writeTripleVarintPayloadFrame(
 }
 
 fn writeDatagramFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, datagram: DatagramFrame) Error!void {
-    const frame_len = try datagramFrameWireLen(datagram);
-    try list.ensureUnusedCapacity(allocator, frame_len);
     if (datagram.length_present) {
+        const data_len_len = try varint.length(datagram.data.len);
+        try list.ensureUnusedCapacity(
+            allocator,
+            1 + @as(usize, data_len_len) + datagram.data.len,
+        );
         list.appendAssumeCapacity(@intFromEnum(FrameType.datagram_len));
-        try appendVarintAssumeCapacity(list, datagram.data.len);
+        varint.encodeWithLenAssumeCapacity(
+            list,
+            datagram.data.len,
+            data_len_len,
+        );
     } else {
+        try list.ensureUnusedCapacity(allocator, 1 + datagram.data.len);
         list.appendAssumeCapacity(@intFromEnum(FrameType.datagram));
     }
     list.appendSliceAssumeCapacity(datagram.data);
