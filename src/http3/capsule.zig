@@ -105,13 +105,16 @@ pub fn write(
     value: []const u8,
 ) Error!void {
     const value_len = std.math.cast(u64, value.len) orelse return error.IntegerOverflow;
-    if (capsule_type <= 63 and value_len <= 63) {
-        try list.appendSlice(allocator, &.{ @intCast(capsule_type), @intCast(value_len) });
-    } else {
-        try quic.varint.encode(list, allocator, capsule_type);
-        try quic.varint.encode(list, allocator, value_len);
-    }
-    try list.appendSlice(allocator, value);
+    try list.ensureUnusedCapacity(allocator, try encodedLen(capsule_type, value.len));
+    try appendVarintAssumeCapacity(list, capsule_type);
+    try appendVarintAssumeCapacity(list, value_len);
+    list.appendSliceAssumeCapacity(value);
+}
+
+fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
+    var buffer: [8]u8 = undefined;
+    const encoded = try quic.varint.encodeInto(&buffer, value);
+    list.appendSliceAssumeCapacity(encoded);
 }
 
 /// Encode into caller-provided storage, avoiding the allocation required by the
