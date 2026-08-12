@@ -1136,13 +1136,14 @@ fn writeCipherSuites(
 fn writeServerNameExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) Error!void {
     const server_name_len = std.math.add(usize, 1 + 2, name.len) catch return error.InvalidClientHello;
     if (name.len > std.math.maxInt(u16) or server_name_len > std.math.maxInt(u16)) return error.InvalidClientHello;
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try appendInt(&payload, allocator, u16, @intCast(server_name_len));
-    try payload.append(allocator, 0);
-    try appendInt(&payload, allocator, u16, @intCast(name.len));
-    try payload.appendSlice(allocator, name);
-    try writeExtension(list, allocator, ext_server_name, payload.items);
+    const payload_len = 2 + server_name_len;
+    try list.ensureUnusedCapacity(allocator, 4 + payload_len);
+    appendU16AssumeCapacity(list, ext_server_name);
+    appendU16AssumeCapacity(list, @intCast(payload_len));
+    appendU16AssumeCapacity(list, @intCast(server_name_len));
+    list.appendAssumeCapacity(0);
+    appendU16AssumeCapacity(list, @intCast(name.len));
+    list.appendSliceAssumeCapacity(name);
 }
 
 fn writeSupportedGroupsExtension(
