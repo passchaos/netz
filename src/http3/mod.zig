@@ -467,10 +467,24 @@ pub const Frame = struct {
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
         try validateFrameType(self.frame_type);
         try validateFramePayloadShape(self.frame_type, self.payload);
-        const header_len = try frameHeaderWireLen(self.frame_type, self.payload.len);
-        try list.ensureUnusedCapacity(allocator, header_len + self.payload.len);
-        try appendVarintAssumeCapacity(list, self.frame_type);
-        try appendVarintAssumeCapacity(list, self.payload.len);
+        const payload_len_u64 = std.math.cast(u64, self.payload.len) orelse
+            return error.IntegerOverflow;
+        const frame_type_len = try quic.varint.length(self.frame_type);
+        const payload_len_len = try quic.varint.length(payload_len_u64);
+        try list.ensureUnusedCapacity(
+            allocator,
+            @as(usize, frame_type_len) + payload_len_len + self.payload.len,
+        );
+        quic.varint.encodeWithLenAssumeCapacity(
+            list,
+            self.frame_type,
+            frame_type_len,
+        );
+        quic.varint.encodeWithLenAssumeCapacity(
+            list,
+            payload_len_u64,
+            payload_len_len,
+        );
         list.appendSliceAssumeCapacity(self.payload);
     }
 };
