@@ -53,6 +53,10 @@ fn Fifo(comptime T: type) type {
             self.items.appendAssumeCapacity(value);
         }
 
+        fn appendSliceAssumeCapacity(self: *Self, values: []const T) void {
+            self.items.appendSliceAssumeCapacity(values);
+        }
+
         fn popFront(self: *Self) ?T {
             if (self.len() == 0) return null;
             const value = self.items.items[self.head];
@@ -112,8 +116,12 @@ pub const State = struct {
     pub fn clone(self: *const State, allocator: std.mem.Allocator) Error!State {
         var out = State.init(allocator);
         errdefer out.deinit();
-        try out.pending_responses.appendSlice(allocator, self.pending_responses.activeConst());
-        try out.pending_challenges.appendSlice(allocator, self.pending_challenges.activeConst());
+        const pending_responses = self.pending_responses.activeConst();
+        try out.pending_responses.ensureUnusedCapacity(allocator, pending_responses.len);
+        out.pending_responses.appendSliceAssumeCapacity(pending_responses);
+        const pending_challenges = self.pending_challenges.activeConst();
+        try out.pending_challenges.ensureUnusedCapacity(allocator, pending_challenges.len);
+        out.pending_challenges.appendSliceAssumeCapacity(pending_challenges);
         try out.outstanding_challenges.ensureUnusedCapacity(allocator, self.outstanding_challenges.items.len);
         out.outstanding_challenges.appendSliceAssumeCapacity(self.outstanding_challenges.items);
         try out.failed_challenges.ensureUnusedCapacity(allocator, self.failed_challenges.items.len);
