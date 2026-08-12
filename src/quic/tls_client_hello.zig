@@ -1319,9 +1319,16 @@ fn writeServerKeyShareExtension(
 
 fn writeExtension(list: *std.ArrayList(u8), allocator: std.mem.Allocator, typ: u16, payload: []const u8) Error!void {
     if (payload.len > std.math.maxInt(u16)) return error.InvalidClientHello;
-    try appendInt(list, allocator, u16, typ);
-    try appendInt(list, allocator, u16, @intCast(payload.len));
-    try list.appendSlice(allocator, payload);
+    try list.ensureUnusedCapacity(allocator, 4 + payload.len);
+    appendU16AssumeCapacity(list, typ);
+    appendU16AssumeCapacity(list, @intCast(payload.len));
+    list.appendSliceAssumeCapacity(payload);
+}
+
+fn appendU16AssumeCapacity(list: *std.ArrayList(u8), value: u16) void {
+    const start = list.items.len;
+    list.items.len = start + 2;
+    std.mem.writeInt(u16, list.items[start..][0..2], value, .big);
 }
 
 fn parseServerName(payload: []const u8) Error![]const u8 {
