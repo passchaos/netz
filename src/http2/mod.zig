@@ -371,14 +371,28 @@ pub const PushPromisePayload = struct {
         payload_len = std.math.add(usize, payload_len, options.padding_len) catch return error.InvalidFrameSize;
         if (options.padding_len != 0) payload_len = std.math.add(usize, payload_len, 1) catch return error.InvalidFrameSize;
 
-        try wire.appendU24(list, allocator, std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize);
-        try list.append(allocator, @intFromEnum(FrameType.push_promise));
-        try list.append(allocator, (if (options.end_headers) @as(u8, 0x4) else 0) | if (options.padding_len != 0) @as(u8, 0x8) else 0);
-        try wire.appendInt(list, allocator, u32, @as(u32, stream_id), .big);
-        if (options.padding_len != 0) try list.append(allocator, options.padding_len);
-        try wire.appendInt(list, allocator, u32, @as(u32, promised_stream_id), .big);
-        try list.appendSlice(allocator, header_block);
-        try list.appendNTimes(allocator, 0, options.padding_len);
+        const payload_len_u24 = std.math.cast(u24, payload_len) orelse return error.InvalidFrameSize;
+        const total_len = FrameHeader.encoded_len + payload_len;
+        const start = list.items.len;
+        try list.ensureUnusedCapacity(allocator, total_len);
+        list.items.len = start + total_len;
+        (FrameHeader{
+            .length = payload_len_u24,
+            .frame_type = .push_promise,
+            .flags = (if (options.end_headers) @as(u8, 0x4) else 0) |
+                if (options.padding_len != 0) @as(u8, 0x8) else 0,
+            .stream_id = stream_id,
+        }).writeInto(list.items[start..][0..FrameHeader.encoded_len]);
+        var payload_pos = start + FrameHeader.encoded_len;
+        if (options.padding_len != 0) {
+            list.items[payload_pos] = options.padding_len;
+            payload_pos += 1;
+        }
+        std.mem.writeInt(u32, list.items[payload_pos..][0..4], @as(u32, promised_stream_id), .big);
+        payload_pos += 4;
+        @memcpy(list.items[payload_pos..][0..header_block.len], header_block);
+        payload_pos += header_block.len;
+        @memset(list.items[payload_pos..][0..options.padding_len], 0);
     }
 };
 
