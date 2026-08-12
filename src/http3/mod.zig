@@ -497,8 +497,20 @@ fn writeFrameHeader(
         list.appendAssumeCapacity(@intCast(payload_len));
         return;
     }
-    try quic.varint.encode(list, allocator, frame_type);
-    try quic.varint.encode(list, allocator, payload_len);
+    const payload_len_u64 = std.math.cast(u64, payload_len) orelse
+        return error.IntegerOverflow;
+    const type_len = try quic.varint.length(frame_type);
+    const payload_varint_len = try quic.varint.length(payload_len_u64);
+    try list.ensureUnusedCapacity(
+        allocator,
+        @as(usize, type_len) + payload_varint_len,
+    );
+    quic.varint.encodeWithLenAssumeCapacity(list, frame_type, type_len);
+    quic.varint.encodeWithLenAssumeCapacity(
+        list,
+        payload_len_u64,
+        payload_varint_len,
+    );
 }
 
 fn validateFrameType(frame_type: u64) Error!void {
