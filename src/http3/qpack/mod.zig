@@ -681,7 +681,9 @@ pub const findStaticName = static_table_module.findName;
 
 pub fn encodePrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator, required_insert_count: u64, base: u64) !void {
     if (required_insert_count == 0 and base == 0) {
-        try list.appendSlice(allocator, &.{ 0, 0 });
+        try list.ensureUnusedCapacity(allocator, 2);
+        list.appendAssumeCapacity(0);
+        list.appendAssumeCapacity(0);
         return;
     }
     const required_len = try varint.length(required_insert_count);
