@@ -36,6 +36,7 @@ pub const SendState = struct {
             return;
         }
 
+        try list.ensureUnusedCapacity(allocator, try self.encodedFramesWireLen(data, max_frame_data_len, fin));
         var written: usize = 0;
         while (written < data.len) {
             const chunk_len = @min(max_frame_data_len, data.len - written);
@@ -69,6 +70,7 @@ pub const SendState = struct {
             return;
         }
 
+        try list.ensureUnusedCapacity(allocator, frameCount(data.len, max_frame_data_len));
         var written: usize = 0;
         while (written < data.len) {
             const chunk_len = @min(max_frame_data_len, data.len - written);
@@ -83,6 +85,30 @@ pub const SendState = struct {
             written += chunk_len;
         }
         if (fin) self.fin_sent = true;
+    }
+
+    fn encodedFramesWireLen(self: SendState, data: []const u8, max_frame_data_len: usize, fin: bool) Error!usize {
+        var len: usize = 0;
+        var offset = self.next_offset;
+        var written: usize = 0;
+        while (written < data.len) {
+            const chunk_len = @min(max_frame_data_len, data.len - written);
+            const is_last = written + chunk_len == data.len;
+            const frame_len = try (quic.Frame{ .stream = .{
+                .stream_id = self.stream_id,
+                .offset = offset,
+                .data = data[written .. written + chunk_len],
+                .fin = fin and is_last,
+            } }).wireLen();
+            len = std.math.add(usize, len, frame_len) catch return error.InvalidFrameLength;
+            offset += chunk_len;
+            written += chunk_len;
+        }
+        return len;
+    }
+
+    fn frameCount(data_len: usize, max_frame_data_len: usize) usize {
+        return std.math.divCeil(usize, data_len, max_frame_data_len) catch unreachable;
     }
 };
 

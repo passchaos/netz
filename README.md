@@ -169,7 +169,7 @@ starts with deterministic parsers, serializers, and state helpers for:
   no-new-ACK short-circuiting with sorted-range scan breaks and lower-bound ACK probes, lookup-free tail-forget fast paths, cached sortedness for
   ACK/loss scans, and single-pass ACK marking,
   receive-frame semantic preflight before multi-frame side effects, preallocated single-byte, single-, double-, triple-varint, fixed PATH, ACK_FREQUENCY, variable-payload, CRYPTO, STREAM, DATAGRAM, NEW_CONNECTION_ID, and close frame writes, and direct adaptive truncated packet-number
-  encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with empty non-FIN send no-ops, single-lookup flow creation and empty-index lookup skips,
+  encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with pre-reserved STREAM frame batches and empty non-FIN send no-ops, single-lookup flow creation and empty-index lookup skips,
   zero-consume skips, contiguous duplicate-overlap fast paths, conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,
   RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,
