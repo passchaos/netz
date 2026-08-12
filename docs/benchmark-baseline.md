@@ -166,8 +166,56 @@ HTTP/3 real-handshake transfer benchmark
 
 This is now a real-handshake, paced single-stream and 4-stream upload/download
 result with the same 16 MiB transfer size as the quicz reference benchmark
-family. It is still not a completion claim: the next evidence step is to run the
-same-host quicz reference and add memory/allocation evidence.
+family. It is still not a completion claim: the next evidence step is to close
+the same-host quicz gap below and add memory/allocation evidence.
+
+### Same-host reference comparison against `~/Work/quicz`
+
+Captured on the same host with `/tmp/quicz-bench-hs` compiled from
+`~/Work/quicz/examples/quic_bench_hs.zig` using:
+
+```sh
+zig build-exe -OReleaseFast --dep quicz \
+  -Mroot=/home/passchaos/Work/quicz/examples/quic_bench_hs.zig \
+  -Mquicz=/home/passchaos/Work/quicz/src/lib.zig -lc \
+  -femit-bin=/tmp/quicz-bench-hs
+timeout 600s /tmp/quicz-bench-hs
+```
+
+Relevant quicz output:
+
+```text
+Stream Upload 228.77 MB/s  (stddev 3.3%, 5 iters x 64 MB)
+Multi-Stream (4x) 244.85 MB/s  (stddev 2.8%, 5 iters x 64 MB, 4 streams)
+Echo Latency P50=10.5us  P99=14.3us  P99.9=377.8us  (5000 iters)
+Handshake Rate 1154.7 conn/s  (100 handshakes in 0.087 s)
+Aggregate (4 conns) 512.50 MB/s  (4 concurrent conns x 64 MB in 0.500 s)
+```
+
+To align transfer size with quicz's real-handshake throughput run, netz was
+also measured with `--body-bytes=67108864`:
+
+```sh
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=upload --streams=1
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=download --streams=1
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=upload --streams=4
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=download --streams=4
+```
+
+```text
+netz upload streams=1:   3 MiB/s,  3,280,568 bytes/s, ns/iter 20,456,476,909
+netz download streams=1: 3 MiB/s,  3,155,234 bytes/s, ns/iter 21,269,055,566
+netz upload streams=4:   3 MiB/s,  3,295,552 bytes/s, ns/iter 20,363,465,593
+netz download streams=4: 3 MiB/s,  3,450,680 bytes/s, ns/iter 19,448,009,875
+```
+
+This same-host comparison shows netz is **not yet performance-competitive** on
+large real-handshake transfers. The next optimization target is the paced body
+pump / receive-credit loop: the current helper makes progress and validates
+correctness, but the 64 MiB run suggests it serializes too much work around
+small DATA chunks, ACK/MAX_* processing, or receive-window credit updates. A
+completion audit cannot pass until this gap is closed with measured same-host
+evidence.
 
 ## Reference context from `~/Work`
 
@@ -194,8 +242,7 @@ or superiority.
 
 ## Gaps before a completion audit can pass
 
-- Run the same or equivalent scenario against at least one `~/Work` reference
-  implementation on the same host.
+- Close the same-host large-transfer throughput gap against `~/Work/quicz`.
 - Record allocation/peak-memory metrics for the benchmark processes.
 - Add loss/reordering benchmark cases or interop-runner style scenarios for
   handshake loss, transfer loss, and corruption.
