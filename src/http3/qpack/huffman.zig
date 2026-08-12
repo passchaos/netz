@@ -11,6 +11,21 @@ pub fn encodeHuffman(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
 pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, encoded_len: usize) ![]u8 {
     const out = try allocator.alloc(u8, encoded_len);
     errdefer allocator.free(out);
+    encodeHuffmanInto(out, value);
+    return out;
+}
+
+pub fn appendHuffmanAssumeCapacity(
+    list: *std.ArrayList(u8),
+    value: []const u8,
+    encoded_len: usize,
+) void {
+    const start_len = list.items.len;
+    list.items.len = start_len + encoded_len;
+    encodeHuffmanInto(list.items[start_len..], value);
+}
+
+fn encodeHuffmanInto(out: []u8, value: []const u8) void {
     var out_index: usize = 0;
 
     var bits: u64 = 0;
@@ -37,8 +52,7 @@ pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, enc
         out[out_index] = @truncate(bits >> 32);
         out_index += 1;
     }
-    std.debug.assert(out_index == encoded_len);
-    return out;
+    std.debug.assert(out_index == out.len);
 }
 
 pub fn encodedLen(value: []const u8) !usize {

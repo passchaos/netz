@@ -806,12 +806,9 @@ fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: [
         list.appendSliceAssumeCapacity(value);
         return;
     }
-    const huffman = try huffmanEncodeWithLen(allocator, value, huffman_len);
-    defer allocator.free(huffman);
-    std.debug.assert(huffman.len == huffman_len);
-    try list.ensureUnusedCapacity(allocator, prefixed_integer.encodedLen(7, huffman.len) + huffman.len);
-    try encodePrefixedInteger(list, allocator, 7, 0x80, huffman.len);
-    list.appendSliceAssumeCapacity(huffman);
+    try list.ensureUnusedCapacity(allocator, prefixed_integer.encodedLen(7, huffman_len) + huffman_len);
+    try encodePrefixedInteger(list, allocator, 7, 0x80, huffman_len);
+    appendHuffmanAssumeCapacity(list, value, huffman_len);
 }
 
 const DecodedString = struct {
@@ -837,4 +834,4 @@ pub const encodeHuffman = huffman_codec.encodeHuffman;
 pub const decodeHuffman = huffman_codec.decodeHuffman;
 pub const huffmanEncodedLen = huffman_codec.encodedLen;
 pub const huffmanDecodedLen = huffman_codec.decodedLen;
-const huffmanEncodeWithLen = huffman_codec.encodeHuffmanWithLen;
+const appendHuffmanAssumeCapacity = huffman_codec.appendHuffmanAssumeCapacity;
