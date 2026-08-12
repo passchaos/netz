@@ -1262,12 +1262,10 @@ pub const Frame = union(enum) {
             },
             .retire_connection_id => |retire| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.retire_connection_id), retire.sequence_number),
             .path_challenge => |path| {
-                try list.append(allocator, @intFromEnum(FrameType.path_challenge));
-                try list.appendSlice(allocator, &path.data);
+                try writeFixedPathFrame(list, allocator, @intFromEnum(FrameType.path_challenge), path);
             },
             .path_response => |path| {
-                try list.append(allocator, @intFromEnum(FrameType.path_response));
-                try list.appendSlice(allocator, &path.data);
+                try writeFixedPathFrame(list, allocator, @intFromEnum(FrameType.path_response), path);
             },
             .connection_close => |close| {
                 try writeTripleVarintPayloadFrame(
@@ -1968,6 +1966,14 @@ fn writeNewConnectionIdFrame(list: *std.ArrayList(u8), allocator: std.mem.Alloca
     list.appendAssumeCapacity(@intCast(frame.connection_id.len));
     list.appendSliceAssumeCapacity(frame.connection_id);
     list.appendSliceAssumeCapacity(&frame.stateless_reset_token);
+}
+
+fn writeFixedPathFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64, frame: PathFrame) Error!void {
+    std.debug.assert(frame_type == @intFromEnum(FrameType.path_challenge) or
+        frame_type == @intFromEnum(FrameType.path_response));
+    try list.ensureUnusedCapacity(allocator, 9);
+    list.appendAssumeCapacity(@intCast(frame_type));
+    list.appendSliceAssumeCapacity(&frame.data);
 }
 
 fn writeStreamFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream: StreamFrame) Error!void {
