@@ -21,7 +21,7 @@ pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, enc
         bits_left -= entry.bits;
 
         while (bits_left <= 32) {
-            try out.append(allocator, @truncate(bits >> 32));
+            out.appendAssumeCapacity(@truncate(bits >> 32));
             bits <<= 8;
             bits_left += 8;
         }
@@ -31,7 +31,7 @@ pub fn encodeHuffmanWithLen(allocator: std.mem.Allocator, value: []const u8, enc
         // QPACK reuses HPACK's canonical Huffman code (RFC 9204 §4.1.2),
         // including EOS-prefix padding of the final octet.
         bits |= (@as(u64, 1) << bits_left) - 1;
-        try out.append(allocator, @truncate(bits >> 32));
+        out.appendAssumeCapacity(@truncate(bits >> 32));
     }
     std.debug.assert(out.items.len == encoded_len);
     return out.toOwnedSlice(allocator);
