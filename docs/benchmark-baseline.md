@@ -249,9 +249,22 @@ Current stats samples:
   remap count: 18527
   total allocated bytes: 1316295798
   peak live bytes: 69767885
+
+64 MiB upload streams=4:
+  alloc count: 720561
+  remap count: 24909
+  total allocated bytes: 1067832078
+  peak live bytes: 71601427
+
+64 MiB download streams=4:
+  alloc count: 720557
+  remap count: 24909
+  total allocated bytes: 1068043443
+  peak live bytes: 73104644
 ```
 
-The 64 MiB upload currently allocates about 1.3 GiB cumulatively, which confirms
+The 64 MiB transfer path still allocates around 1.0-1.3 GiB cumulatively, and
+4-stream transfer performs about 720k allocations per iteration. This confirms
 that the next throughput work should reduce per-DATA-frame temporary allocation,
 frame-slice construction, and remap churn rather than only tuning QUIC windows.
 
