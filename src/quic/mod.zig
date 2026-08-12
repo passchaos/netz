@@ -2057,16 +2057,38 @@ fn writeFixedPathFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, f
 }
 
 fn writeAckFrequencyFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame: AckFrequencyFrame) Error!void {
-    const frame_len = try ackFrequencyFrameWireLen(frame);
-    try list.ensureUnusedCapacity(allocator, frame_len);
-    list.appendSliceAssumeCapacity(&[_]u8{
-        0x40,
-        @intCast(@intFromEnum(FrameType.ack_frequency)),
-    });
-    try appendVarintAssumeCapacity(list, frame.sequence_number);
-    try appendVarintAssumeCapacity(list, frame.ack_eliciting_threshold);
-    try appendVarintAssumeCapacity(list, frame.request_max_ack_delay);
-    try appendVarintAssumeCapacity(list, frame.reordering_threshold);
+    try validateAckFrequencyFrame(frame);
+    const sequence_len = try varint.length(frame.sequence_number);
+    const threshold_len = try varint.length(frame.ack_eliciting_threshold);
+    const max_ack_delay_len = try varint.length(frame.request_max_ack_delay);
+    const reordering_len = try varint.length(frame.reordering_threshold);
+    try list.ensureUnusedCapacity(
+        allocator,
+        2 + @as(usize, sequence_len) + threshold_len +
+            max_ack_delay_len + reordering_len,
+    );
+    list.appendAssumeCapacity(0x40);
+    list.appendAssumeCapacity(@intCast(@intFromEnum(FrameType.ack_frequency)));
+    varint.encodeWithLenAssumeCapacity(
+        list,
+        frame.sequence_number,
+        sequence_len,
+    );
+    varint.encodeWithLenAssumeCapacity(
+        list,
+        frame.ack_eliciting_threshold,
+        threshold_len,
+    );
+    varint.encodeWithLenAssumeCapacity(
+        list,
+        frame.request_max_ack_delay,
+        max_ack_delay_len,
+    );
+    varint.encodeWithLenAssumeCapacity(
+        list,
+        frame.reordering_threshold,
+        reordering_len,
+    );
 }
 
 fn writeStreamFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stream: StreamFrame) Error!void {
