@@ -253,20 +253,6 @@ pub const ParsedEncryptedExtensions = struct {
 };
 
 pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: ClientHelloOptions) Error!void {
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(allocator);
-
-    try appendInt(&body, allocator, u16, tls_1_2);
-    try body.appendSlice(allocator, &options.random);
-    try body.append(allocator, 0); // legacy_session_id
-    try writeCipherSuites(
-        &body,
-        allocator,
-        options.cipher_suites,
-    );
-    try body.append(allocator, 1);
-    try body.append(allocator, 0); // null compression
-
     var extensions: std.ArrayList(u8) = .empty;
     defer extensions.deinit(allocator);
     const legacy_share = KeyShare{
@@ -286,16 +272,29 @@ pub fn writeClientHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     try writeKeyShareExtension(&extensions, allocator, key_shares);
     try writeExtension(&extensions, allocator, ext_quic_transport_parameters, options.transport_parameters);
 
-    try appendU16Len(&body, allocator, extensions.items.len, error.InvalidClientHello);
-    try body.appendSlice(allocator, extensions.items);
-
-    try writeHandshakeMessage(
-        list,
-        allocator,
-        handshake_type_client_hello,
-        body.items,
-        error.InvalidClientHello,
-    );
+    const cipher_suites_len = try cipherSuitesWireLen(options.cipher_suites);
+    if (extensions.items.len > std.math.maxInt(u16)) return error.InvalidClientHello;
+    const variable_len = std.math.add(
+        usize,
+        cipher_suites_len,
+        extensions.items.len,
+    ) catch return error.InvalidClientHello;
+    const body_len = std.math.add(usize, 41, variable_len) catch
+        return error.InvalidClientHello;
+    if (body_len > std.math.maxInt(u24)) return error.InvalidClientHello;
+    try list.ensureUnusedCapacity(allocator, 4 + body_len);
+    list.appendAssumeCapacity(handshake_type_client_hello);
+    list.appendAssumeCapacity(@truncate(body_len >> 16));
+    list.appendAssumeCapacity(@truncate(body_len >> 8));
+    list.appendAssumeCapacity(@truncate(body_len));
+    appendU16AssumeCapacity(list, tls_1_2);
+    list.appendSliceAssumeCapacity(&options.random);
+    list.appendAssumeCapacity(0); // legacy_session_id
+    appendCipherSuitesAssumeCapacity(list, options.cipher_suites);
+    list.appendAssumeCapacity(1);
+    list.appendAssumeCapacity(0); // null compression
+    appendU16AssumeCapacity(list, @intCast(extensions.items.len));
+    list.appendSliceAssumeCapacity(extensions.items);
 }
 
 pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, options: ServerHelloOptions) Error!void {
@@ -1101,11 +1100,7 @@ const SeenExtensions = struct {
     }
 };
 
-fn writeCipherSuites(
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    suites: []const CipherSuite,
-) Error!void {
+fn cipherSuitesWireLen(suites: []const CipherSuite) Error!usize {
     if (suites.len == 0 or
         suites.len > std.math.maxInt(u16) / @sizeOf(u16))
     {
@@ -1116,7 +1111,13 @@ fn writeCipherSuites(
             if (suite == previous) return error.InvalidCipherSuite;
         }
     }
-    try list.ensureUnusedCapacity(allocator, 2 + suites.len * @sizeOf(u16));
+    return suites.len * @sizeOf(u16);
+}
+
+fn appendCipherSuitesAssumeCapacity(
+    list: *std.ArrayList(u8),
+    suites: []const CipherSuite,
+) void {
     appendU16AssumeCapacity(list, @intCast(suites.len * @sizeOf(u16)));
     for (suites) |suite| {
         appendU16AssumeCapacity(list, suite.wireValue());
