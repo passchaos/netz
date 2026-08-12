@@ -1191,7 +1191,7 @@ pub const Frame = union(enum) {
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
         switch (self) {
             .padding => |padding| try appendPadding(list, allocator, padding.len),
-            .ping => try list.append(allocator, @intFromEnum(FrameType.ping)),
+            .ping => try writeSingleByteFrame(list, allocator, @intFromEnum(FrameType.ping)),
             .ack => |ack| try writeAckFrame(list, allocator, ack),
             .reset_stream => |reset| {
                 try writeTripleVarintFrame(list, allocator, @intFromEnum(FrameType.reset_stream), reset.stream_id, reset.application_error_code, reset.final_size);
@@ -1283,8 +1283,8 @@ pub const Frame = union(enum) {
                     close.reason_phrase,
                 );
             },
-            .handshake_done => try list.append(allocator, @intFromEnum(FrameType.handshake_done)),
-            .immediate_ack => try list.append(allocator, @intFromEnum(FrameType.immediate_ack)),
+            .handshake_done => try writeSingleByteFrame(list, allocator, @intFromEnum(FrameType.handshake_done)),
+            .immediate_ack => try writeSingleByteFrame(list, allocator, @intFromEnum(FrameType.immediate_ack)),
             .datagram => |datagram| {
                 try writeDatagramFrame(list, allocator, datagram);
             },
@@ -1833,6 +1833,12 @@ fn writeAckFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: Ac
     else
         @intFromEnum(FrameType.ack_ecn));
     try writeAckFieldsAssumeCapacity(list, ack);
+}
+
+fn writeSingleByteFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64) Error!void {
+    std.debug.assert(frame_type <= 63);
+    try list.ensureUnusedCapacity(allocator, 1);
+    list.appendAssumeCapacity(@intCast(frame_type));
 }
 
 fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
