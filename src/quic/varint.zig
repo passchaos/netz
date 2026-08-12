@@ -30,7 +30,8 @@ pub fn encode(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64
     const len = try length(value);
     var tmp: [8]u8 = undefined;
     encodeIntoWithLen(&tmp, value, len);
-    try list.appendSlice(allocator, tmp[0..len]);
+    try list.ensureUnusedCapacity(allocator, len);
+    list.appendSliceAssumeCapacity(tmp[0..len]);
 }
 
 pub fn encodeInto(out: []u8, value: u64) Error![]u8 {
