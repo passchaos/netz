@@ -281,12 +281,20 @@ it reduces the 64 MiB single-stream upload cumulative allocation from about
 allocations and 805 MiB of traffic, so future multi-stream payload-buffer work
 still needs explicit per-send or per-stream lifetime isolation.
 
-Two lower-level allocation experiments were rejected after validation: reusing a
-single shared DATA payload scratch buffer and pre-sizing each temporary DATA
-payload both reduced single-stream allocation counts, but they caused 64 MiB
-4-stream validation timeouts. Future multi-stream payload-buffer work needs
-per-send or per-stream lifetime isolation, not one shared mutable buffer or a
-change that increases the multi-stream send/receive critical section.
+Rejected experiments after validation:
+
+- Reusing a single shared DATA payload scratch buffer and pre-sizing each
+  temporary DATA payload both reduced single-stream allocation counts, but they
+  caused 64 MiB 4-stream validation timeouts.
+- Enabling the DATA prefix fast path for multi-stream upload regressed 64 MiB
+  4-stream throughput, so it remains single-stream-only.
+- Replacing paced multi-stream upload with a naive event-loop style
+  `sendRequestBody` loop triggered `DatagramTooLarge`; multi-stream batching
+  needs packet-size-aware grouping rather than bypassing the paced chunker.
+
+Future multi-stream payload-buffer work needs per-send or per-stream lifetime
+isolation, not one shared mutable buffer or a change that increases the
+multi-stream send/receive critical section.
 
 ## Reference context from `~/Work`
 
