@@ -1703,25 +1703,29 @@ pub const Hpack = struct {
 
     fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
         if (value.len == 0) {
-            try list.append(allocator, 0);
+            try list.ensureUnusedCapacity(allocator, 1);
+            list.appendAssumeCapacity(0);
             return;
         }
         if (value.len <= 2) {
-            try list.append(allocator, @intCast(value.len));
-            try list.appendSlice(allocator, value);
+            try list.ensureUnusedCapacity(allocator, 1 + value.len);
+            list.appendAssumeCapacity(@intCast(value.len));
+            list.appendSliceAssumeCapacity(value);
             return;
         }
         const huffman_len = try huffmanEncodedLen(value);
         if (huffman_len >= value.len) {
+            try list.ensureUnusedCapacity(allocator, integerEncodedLen(7, value.len) + value.len);
             try encodeInteger(list, allocator, 7, 0x00, value.len);
-            try list.appendSlice(allocator, value);
+            list.appendSliceAssumeCapacity(value);
             return;
         }
         const huffman = try encodeHuffmanWithLen(allocator, value, huffman_len);
         defer allocator.free(huffman);
         std.debug.assert(huffman.len == huffman_len);
+        try list.ensureUnusedCapacity(allocator, integerEncodedLen(7, huffman.len) + huffman.len);
         try encodeInteger(list, allocator, 7, 0x80, huffman.len);
-        try list.appendSlice(allocator, huffman);
+        list.appendSliceAssumeCapacity(huffman);
     }
 
     const DecodedString = struct {
