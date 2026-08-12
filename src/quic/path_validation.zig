@@ -40,7 +40,8 @@ fn Fifo(comptime T: type) type {
 
         fn appendSlice(self: *Self, allocator: std.mem.Allocator, values: []const T) std.mem.Allocator.Error!void {
             self.compactIfEmpty();
-            try self.items.appendSlice(allocator, values);
+            try self.items.ensureUnusedCapacity(allocator, values.len);
+            self.items.appendSliceAssumeCapacity(values);
         }
 
         fn ensureUnusedCapacity(self: *Self, allocator: std.mem.Allocator, additional_count: usize) std.mem.Allocator.Error!void {
@@ -113,8 +114,10 @@ pub const State = struct {
         errdefer out.deinit();
         try out.pending_responses.appendSlice(allocator, self.pending_responses.activeConst());
         try out.pending_challenges.appendSlice(allocator, self.pending_challenges.activeConst());
-        try out.outstanding_challenges.appendSlice(allocator, self.outstanding_challenges.items);
-        try out.failed_challenges.appendSlice(allocator, self.failed_challenges.items);
+        try out.outstanding_challenges.ensureUnusedCapacity(allocator, self.outstanding_challenges.items.len);
+        out.outstanding_challenges.appendSliceAssumeCapacity(self.outstanding_challenges.items);
+        try out.failed_challenges.ensureUnusedCapacity(allocator, self.failed_challenges.items.len);
+        out.failed_challenges.appendSliceAssumeCapacity(self.failed_challenges.items);
         try out.rebuildIndexes();
         out.max_challenge_transmissions = self.max_challenge_transmissions;
         return out;
