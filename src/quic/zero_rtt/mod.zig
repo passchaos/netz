@@ -188,8 +188,17 @@ pub fn encodeFrames(
     allocator: std.mem.Allocator,
     frames: []const quic.Frame,
 ) Error![]u8 {
+    var payload_len: usize = 0;
+    for (frames) |frame| {
+        payload_len = std.math.add(
+            usize,
+            payload_len,
+            try frame.wireLen(),
+        ) catch return error.InvalidFrameLength;
+    }
     var payload: std.ArrayList(u8) = .empty;
     errdefer payload.deinit(allocator);
+    try payload.ensureTotalCapacity(allocator, payload_len);
     for (frames) |frame| try frame.write(&payload, allocator);
     return payload.toOwnedSlice(allocator);
 }

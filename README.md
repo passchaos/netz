@@ -190,7 +190,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   packet storms and opt-in adaptive receive-window growth,
   stream-count flow control with MAX_STREAMS and STREAMS_BLOCKED handling plus
   the same per-limit duplicate suppression for stream-count exhaustion,
-  protected 0-RTT long-header packet seal/open and frame datagram helpers with
+  protected 0-RTT long-header packet seal/open and preallocated frame datagram helpers with
   0-RTT packet-type restrictions, an indexed owning origin+ALPN session cache with
   cached transactional LRU eviction and stats, expired-hit eviction, independent TLS session copies, stable
   cache/lease/early-data stats, exclusive single-use early-data leases with
