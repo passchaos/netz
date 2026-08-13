@@ -14834,7 +14834,7 @@ test "HTTP/3 protected server reports streamed request reset with stream id" {
 
 test "HTTP/3 protected client streams large response through small window" {
     const allocator = std.testing.allocator;
-    const body_len: usize = 256 * 1024;
+    const body_len: usize = 512 * 1024;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -14919,14 +14919,14 @@ test "HTTP/3 protected client streams large response through small window" {
                 .max_datagram_size = 4096,
                 .max_frames_per_datagram = 8,
             },
-            .max_stream_buffer = 512,
+            .max_stream_buffer = 1024,
         },
         .{
             .receive_keys = server_keys,
             .send_keys = client_keys,
             .local_connection_id = &client_cid,
             .peer_connection_id = &server_cid,
-            .max_stream_buffer = 512,
+            .max_stream_buffer = 1024,
             .max_stream_frame_data = 480,
         },
     );
@@ -14971,7 +14971,7 @@ test "HTTP/3 protected client streams large response through small window" {
                 }
                 const active = client.streaming_responses.find(stream_id).?;
                 try std.testing.expect(
-                    active.reader.receive.buffer.items.len <= 512,
+                    active.reader.receive.buffer.items.len <= 1024,
                 );
             },
             .trailers => |trailers| {
