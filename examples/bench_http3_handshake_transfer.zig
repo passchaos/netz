@@ -9,13 +9,15 @@ const default_streams: usize = 1;
 const max_streams: usize = 128;
 const default_round_robin_chunk_bytes: usize = 64 * 1024;
 const single_stream_round_robin_chunk_bytes: usize = 8 * 1024;
-const default_endpoint_datagram_size: usize = 4096;
 const benchmark_min_flow_control_bytes: u64 = 256 * 1024 * 1024;
 const benchmark_ack_eliciting_threshold: u64 = 16;
 const benchmark_max_ack_delay_us: u64 = 25_000;
 const single_stream_one_rtt_datagram_size: usize = 8192;
 const single_stream_paced_body_chunk_bytes: usize = 7200;
-const multi_stream_one_rtt_datagram_size: usize = 4096;
+// Keep multi-stream packetization conservative: 8192 improves the 4-stream
+// upload benchmark over 4096 on loopback while avoiding the instability seen
+// with larger 12000-byte datagrams.
+const multi_stream_one_rtt_datagram_size: usize = 8192;
 const multi_stream_paced_body_chunk_bytes: usize = 2800;
 const upload_trace_initial_window: usize = 256 * 1024;
 
@@ -728,12 +730,12 @@ fn findStreamIndex(stream_ids: []const u62, stream_id: u62) ?usize {
 
 fn transferEndpointDatagramSize(config: Config) usize {
     return config.one_rtt_datagram_size orelse
-        if (config.streams == 1) single_stream_one_rtt_datagram_size else default_endpoint_datagram_size;
+        if (config.streams == 1) single_stream_one_rtt_datagram_size else multi_stream_one_rtt_datagram_size;
 }
 
 fn transferOneRttDatagramSize(config: Config) usize {
     return config.one_rtt_datagram_size orelse
-        if (config.streams == 1) single_stream_one_rtt_datagram_size else default_endpoint_datagram_size;
+        if (config.streams == 1) single_stream_one_rtt_datagram_size else multi_stream_one_rtt_datagram_size;
 }
 
 fn transferPacedBodyChunkBytes(config: Config) usize {
