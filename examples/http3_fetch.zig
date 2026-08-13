@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     var method: []const u8 = "GET";
     var verify_server = false;
     var discover = false;
+    var manual_alt_svc: ?[]const u8 = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--verify")) {
             verify_server = true;
@@ -40,6 +41,8 @@ pub fn main(init: std.process.Init) !void {
             method = "HEAD";
         } else if (std.mem.startsWith(u8, arg, "--method=")) {
             method = arg["--method=".len..];
+        } else if (std.mem.startsWith(u8, arg, "--alt-svc=")) {
+            manual_alt_svc = arg["--alt-svc=".len..];
         } else {
             uri_text = arg;
         }
@@ -48,7 +51,9 @@ pub fn main(init: std.process.Init) !void {
 
     var discovered: ?DiscoveredTarget = null;
     defer if (discovered) |*target| target.deinit();
-    if (discover) {
+    if (manual_alt_svc) |field_value| {
+        discovered = try manualAltSvcTarget(allocator, uri, field_value);
+    } else if (discover) {
         discovered = discoverAltSvc(allocator, io, uri_text, uri) catch |err| skipped: {
             std.debug.print("Alt-Svc discovery skipped: {s}\n", .{@errorName(err)});
             break :skipped null;
@@ -72,6 +77,47 @@ pub fn main(init: std.process.Init) !void {
     if (preview_len != 0) {
         std.debug.print("body-preview:\n{s}\n", .{body[0..preview_len]});
     }
+}
+
+fn manualAltSvcTarget(
+    allocator: std.mem.Allocator,
+    uri: std.Uri,
+    field_value: []const u8,
+) !DiscoveredTarget {
+    var endpoint = try netz.http3.runtime.uriEndpoint(allocator, uri);
+    defer endpoint.deinit();
+    const alt = (try netz.http3.firstHttp3AltSvc(field_value)) orelse
+        return error.InvalidHeader;
+    const target = try netz.http3.altSvcTarget(
+        endpoint.tls_host,
+        alt,
+        endpoint.port,
+    );
+    std.debug.print(
+        "Alt-Svc override: {s} authority={s} -> {s}:{d} ma={?d}\n",
+        .{ target.alpn, alt.authority, target.connect_host, target.port, target.max_age },
+    );
+    return try ownedTargetFromAltSvc(allocator, target);
+}
+
+fn ownedTargetFromAltSvc(
+    allocator: std.mem.Allocator,
+    target: netz.http3.AltSvcTarget,
+) !DiscoveredTarget {
+    const alpn = try allocator.dupe(u8, target.alpn);
+    errdefer allocator.free(alpn);
+    const connect_host = try allocator.dupe(u8, target.connect_host);
+    errdefer allocator.free(connect_host);
+    const origin_host = try allocator.dupe(u8, target.origin_host);
+    errdefer allocator.free(origin_host);
+    return .{
+        .allocator = allocator,
+        .alpn = alpn,
+        .connect_host = connect_host,
+        .origin_host = origin_host,
+        .port = target.port,
+        .max_age = target.max_age,
+    };
 }
 
 fn fetchWithRetries(
@@ -205,18 +251,5 @@ fn discoverAltSvc(
         "Alt-Svc: {s} authority={s} -> {s}:{d} ma={?d}\n",
         .{ target.alpn, alt.authority, target.connect_host, target.port, target.max_age },
     );
-    const alpn = try allocator.dupe(u8, target.alpn);
-    errdefer allocator.free(alpn);
-    const connect_host = try allocator.dupe(u8, target.connect_host);
-    errdefer allocator.free(connect_host);
-    const origin_host = try allocator.dupe(u8, target.origin_host);
-    errdefer allocator.free(origin_host);
-    return .{
-        .allocator = allocator,
-        .alpn = alpn,
-        .connect_host = connect_host,
-        .origin_host = origin_host,
-        .port = target.port,
-        .max_age = target.max_age,
-    };
+    return try ownedTargetFromAltSvc(allocator, target);
 }

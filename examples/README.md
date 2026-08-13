@@ -51,8 +51,10 @@ so individual 1-RTT features are easy to inspect:
 
 `run-http3-fetch` is the public-network example. By default it fetches
 `https://robotics.bytedance.com/`; `--verify` enables system trust-store
-certificate validation, and `--discover` performs best-effort Alt-Svc discovery
-using an HTTP/3 HEAD probe before issuing the final request.
+certificate validation, `--discover` performs best-effort Alt-Svc discovery
+using an HTTP/3 HEAD probe before issuing the final request, and
+`--alt-svc='h3=":443"; ma=2592000'` lets interop tests provide a known
+HTTP/3 alternative service explicitly.
 
 ## I/O backend note
 

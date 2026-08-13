@@ -18,6 +18,7 @@ zig build run-quic-handshake-echo -Doptimize=ReleaseFast
 zig build run-quic-datagram-echo -Doptimize=ReleaseFast
 zig build run-quic-close -Doptimize=ReleaseFast
 zig build run-http3-fetch -Doptimize=ReleaseFast -- --discover --verify --head https://robotics.bytedance.com/
+zig build run-http3-fetch -Doptimize=ReleaseFast -- --alt-svc='h3=":443"; ma=2592000' --verify --head https://robotics.bytedance.com/
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=upload --streams=2 --verbose
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=download --streams=1 --verbose
 ```
@@ -69,7 +70,7 @@ QUIC throughput.
 | Retry/token/address validation | Covered at library level | `src/quic/retry_flow.zig`, `src/quic/address_validation_token.zig`, handshake/retry tests | Add public example after external interop is audited. |
 | Congestion control (NewReno/CUBIC/HyStart++) | Covered and defaulted to CUBIC for 1-RTT | `src/quic/congestion.zig`, `src/quic/hystart.zig`, congestion tests | Evaluate quicz-style app-limited CUBIC behavior before changing production congestion math. |
 | UDP batching / GSO / GRO | Covered at QUIC runtime level | `src/quic/runtime.zig`, `bench-quic-udp-batch`, `bench-quic-one-rtt-send`, `bench-quic-one-rtt-receive` | HTTP/3 direct GRO receive remains unsafe as a default; do not enable without fixing long-run stability. |
-| HTTP/3 public fetch and Alt-Svc | Covered for robotics.bytedance.com | `examples/http3_fetch.zig`, `run-http3-fetch --discover --verify --head` | Broaden public interop matrix beyond one site. |
+| HTTP/3 public fetch and Alt-Svc | Covered for robotics.bytedance.com with discovery and manual Alt-Svc override | `examples/http3_fetch.zig`, `run-http3-fetch --discover --verify --head`, `run-http3-fetch --alt-svc='h3=":443"; ma=2592000' --verify --head` | Broaden public interop matrix beyond one site; recent Cloudflare/Google/Facebook probes did not add passing coverage. |
 | HTTP/3 real-handshake upload benchmark | Covered and improved | `examples/bench_http3_handshake_transfer.zig`; 4-stream 64MiB default has reached ~150+ MiB/s in validation | Continue comparing against `~/Work/quicz` throughput and stabilize aggressive chunk/datagram settings. |
 | HTTP/3 real-handshake download benchmark | Covered for current benchmark scale | 64KiB/1MiB smoke pass; 4MiB, 16MiB, and 64MiB single-/4-stream download validations pass | Continue long-run stability and apples-to-apples quicz throughput comparisons before declaring performance superiority. |
 | QPACK / Capsule / WebTransport | Covered by modules and benchmarks | `bench-http3-qpack`, `bench-http3-capsule`, `bench-webtransport-datagram` | Expand interop examples only after core H3 transfer gaps are closed. |
@@ -89,8 +90,10 @@ QUIC throughput.
    settings produce 100% CPU loops.  Until those are isolated, keep defaults
    conservative.
 4. **Complete external interop matrix**: public H3 fetch is proven against
-   `robotics.bytedance.com`, including `--discover` and `--verify`, but broader
-   server/client interop is not yet audited.
+   `robotics.bytedance.com`, including `--discover`, manual `--alt-svc`, and
+   `--verify`, but broader server/client interop is not yet audited. Recent
+   Cloudflare/Google/Facebook probes failed or timed out and are intentionally
+   not counted as coverage.
 5. **Performance comparison against `~/Work/quicz`**: an initial direct quicz
    run is now recorded, but netz still lacks a true raw QUIC real-handshake
    apples-to-apples benchmark and the validated HTTP/3 4-stream upload result
