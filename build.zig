@@ -120,6 +120,12 @@ pub fn build(b: *std.Build) void {
             .description = "Fetch the default public endpoint over HTTP/3",
         },
         .{
+            .exe_name = "netz-quic-echo",
+            .path = "examples/quic_echo.zig",
+            .run_step = "run-quic-echo",
+            .description = "Run a local preconfigured-key QUIC echo smoke test",
+        },
+        .{
             .exe_name = "netz-bench-http3-capsule",
             .path = "examples/bench_http3_capsule.zig",
             .run_step = "bench-http3-capsule",
