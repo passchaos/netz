@@ -14,6 +14,7 @@ parity:
 ```sh
 zig build test
 zig build run-quic-echo -Doptimize=ReleaseFast
+zig build run-quic-handshake-echo -Doptimize=ReleaseFast
 zig build run-quic-datagram-echo -Doptimize=ReleaseFast
 zig build run-quic-close -Doptimize=ReleaseFast
 zig build run-http3-fetch -Doptimize=ReleaseFast -- --discover --verify --head https://robotics.bytedance.com/
@@ -58,7 +59,7 @@ QUIC throughput.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
-| QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered for local preconfigured 1-RTT smoke | `examples/quic_echo.zig`, `zig build run-quic-echo` | Add a TLS-handshake echo variant if needed for user-facing demos. |
+| QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered for preconfigured and real-handshake local smokes | `examples/quic_echo.zig`, `examples/quic_handshake_echo.zig`, `zig build run-quic-echo`, `zig build run-quic-handshake-echo` | Extend into a raw QUIC throughput benchmark for apples-to-apples stream performance comparison. |
 | QUIC DATAGRAM (`datagram_echo`, `quic_bench_datagram`) | Covered and faster than current quicz DATAGRAM sample | `examples/quic_datagram_echo.zig`, `examples/bench_quic_datagram.zig`, `examples/bench_webtransport_datagram.zig`, `zig build run-quic-datagram-echo`, `zig build bench-quic-datagram -Doptimize=ReleaseFast` | Keep raw and WebTransport DATAGRAM benchmarks in the comparison matrix. |
 | Graceful/application close (`graceful_close`, close lifecycle) | Covered for local preconfigured 1-RTT smoke and tests | `examples/quic_close.zig`, one_rtt lifecycle tests, `zig build run-quic-close` | Add a full client/server CLI-style close demo only if external manual interop requires it. |
 | Packet protection / initial keys / key update | Covered by modules and tests | `src/quic/protection.zig`, `src/quic/zero_rtt`, `src/quic/one_rtt/tests/crypto_path.zig`, `zig build test` | Keep vector coverage current as TLS suites evolve. |
@@ -72,7 +73,7 @@ QUIC throughput.
 | HTTP/3 real-handshake upload benchmark | Covered and improved | `examples/bench_http3_handshake_transfer.zig`; 4-stream 64MiB default has reached ~150+ MiB/s in validation | Continue comparing against `~/Work/quicz` throughput and stabilize aggressive chunk/datagram settings. |
 | HTTP/3 real-handshake download benchmark | Covered for current benchmark scale | 64KiB/1MiB smoke pass; 4MiB, 16MiB, and 64MiB single-/4-stream download validations pass | Continue long-run stability and apples-to-apples quicz throughput comparisons before declaring performance superiority. |
 | QPACK / Capsule / WebTransport | Covered by modules and benchmarks | `bench-http3-qpack`, `bench-http3-capsule`, `bench-webtransport-datagram` | Expand interop examples only after core H3 transfer gaps are closed. |
-| TLS backend/process interop examples | Partially covered through netz/vail integration | QUIC handshake tests, HTTP/3 public fetch with `--verify` | netz lacks quicz-style standalone TLS process echo demos; add only if this is a required deliverable. |
+| TLS backend/process interop examples | Partially covered through netz/vail integration | QUIC handshake tests, `examples/quic_handshake_echo.zig`, HTTP/3 public fetch with `--verify` | netz still lacks quicz-style standalone TLS process echo demos; add only if this becomes a required deliverable. |
 
 ## Known blockers before declaring the goal complete
 

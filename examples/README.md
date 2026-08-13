@@ -19,6 +19,7 @@ zig build run-http2-h2c
 zig build run-http3-handshake
 zig build run-http3-fetch
 zig build run-quic-echo
+zig build run-quic-handshake-echo
 zig build run-quic-datagram-echo
 zig build run-quic-close
 zig build run-websocket-echo
@@ -40,6 +41,9 @@ so individual 1-RTT features are easy to inspect:
 
 - `run-quic-echo` sends STREAM data from a local client to server and echoes it
   back on the same bidirectional stream.
+- `run-quic-handshake-echo` performs the same STREAM exchange after a real
+  local QUIC/TLS handshake, covering raw handshake-backed transport without
+  HTTP/3 framing.
 - `run-quic-datagram-echo` exercises RFC 9221 DATAGRAM send, receive queueing,
   and echo.
 - `run-quic-close` sends an application close frame and verifies that the peer

@@ -126,6 +126,12 @@ pub fn build(b: *std.Build) void {
             .description = "Run a local preconfigured-key QUIC echo smoke test",
         },
         .{
+            .exe_name = "netz-quic-handshake-echo",
+            .path = "examples/quic_handshake_echo.zig",
+            .run_step = "run-quic-handshake-echo",
+            .description = "Run a local real-handshake QUIC STREAM echo smoke test",
+        },
+        .{
             .exe_name = "netz-quic-datagram-echo",
             .path = "examples/quic_datagram_echo.zig",
             .run_step = "run-quic-datagram-echo",
