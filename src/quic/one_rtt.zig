@@ -275,6 +275,11 @@ const ReservedStreamCredit = struct {
     bytes: u64,
 };
 
+const OutboundFrameTraits = struct {
+    ack_eliciting: bool = false,
+    in_flight: bool = false,
+};
+
 pub const CloseInfo = struct {
     application: bool = false,
     error_code: u64,
@@ -843,14 +848,39 @@ pub const Connection = struct {
             return error.InvalidPacketNumber;
         }
 
+        const PacketPreflight = struct {
+            payload_len: usize,
+            ack_eliciting: bool,
+            in_flight: bool,
+        };
+        var preflight: [max_batch_packets]PacketPreflight = undefined;
         // Stream-limit checks can emit STREAMS_BLOCKED through the ordinary
         // one-packet path, so perform all of them while batch scratch is empty.
-        for (packets[0..encryptable]) |frames| {
-            try self.validateOutboundFrames(frames);
+        // While walking those frames, cache the packet traits and payload size
+        // needed later by pacing, recovery, and packet-number sizing. Stateful
+        // batch sends are dominated by many small STREAM packets, so avoiding
+        // separate ack-eliciting/in-flight/wire-length passes saves CPU without
+        // changing any transport decisions.
+        for (packets[0..encryptable], 0..) |frames, i| {
+            if (frames.len == 0) return error.MissingFrame;
+            var traits: OutboundFrameTraits = .{};
+            var payload_len: usize = 0;
             for (frames) |frame| {
-                if (frame != .stream) continue;
-                try self.validateStreamFrameForSend(frame.stream);
+                try self.validateOutboundFrameAndTraits(frame, &traits);
+                if (frame == .stream) {
+                    try self.validateStreamFrameForSend(frame.stream);
+                }
+                payload_len = std.math.add(
+                    usize,
+                    payload_len,
+                    try frame.wireLen(),
+                ) catch return error.InvalidFrameLength;
             }
+            preflight[i] = .{
+                .payload_len = payload_len,
+                .ack_eliciting = traits.ack_eliciting,
+                .in_flight = traits.in_flight,
+            };
         }
 
         const PreparedPacket = struct {
@@ -882,24 +912,22 @@ pub const Connection = struct {
         var total_in_flight: usize = 0;
         var total_payload_len: usize = 0;
         var total_packet_len: usize = 0;
+        const largest_acknowledged = self.sent.largestAcknowledged();
+        const send_datagram_size = self.currentSendDatagramSize();
+        const congestion_available = self.congestion.available();
+        const send_flow_available = self.send_flow.available();
         std.debug.assert(self.send_frame_buffer.items.len == 0);
         defer self.send_frame_buffer.items.len = 0;
 
         while (count < encryptable) {
             const frames = packets[count];
-            var payload_len: usize = 0;
-            for (frames) |frame| {
-                payload_len = std.math.add(
-                    usize,
-                    payload_len,
-                    try frame.wireLen(),
-                ) catch return error.InvalidFrameLength;
-            }
+            const packet_preflight = preflight[count];
+            const payload_len = packet_preflight.payload_len;
             const packet_number = self.next_packet_number + count;
             const packet_number_len =
                 quic.protection.packetNumberLenForPayload(
                     packet_number,
-                    self.sent.largestAcknowledged(),
+                    largest_acknowledged,
                     payload_len,
                 );
             const overhead = try quic.protection.shortPacketLen(.{
@@ -913,13 +941,13 @@ pub const Connection = struct {
                 overhead,
                 payload_len,
             ) catch return error.InvalidPayloadLength;
-            if (packet_len > self.currentSendDatagramSize() or
+            if (packet_len > send_datagram_size or
                 packet_len > self.endpoint.limits.max_datagram_size)
             {
                 return error.DatagramTooLarge;
             }
 
-            const in_flight = packetInFlight(frames);
+            const in_flight = packet_preflight.in_flight;
             if (in_flight) {
                 if (simulated_pacer.deadlineAt(
                     now_ns,
@@ -932,8 +960,8 @@ pub const Connection = struct {
                     next_pacing_deadline = deadline;
                     break;
                 }
-                if (payload_len > self.congestion.available() -
-                    @min(self.congestion.available(), total_in_flight))
+                if (payload_len > congestion_available -
+                    @min(congestion_available, total_in_flight))
                 {
                     if (count == 0) return error.CongestionLimited;
                     break;
@@ -960,8 +988,8 @@ pub const Connection = struct {
                     bytes,
                 );
             }
-            if (packet_stream_bytes > self.send_flow.available() -
-                @min(self.send_flow.available(), total_stream_bytes))
+            if (packet_stream_bytes > send_flow_available -
+                @min(send_flow_available, total_stream_bytes))
             {
                 if (count == 0) {
                     try self.sendDataBlocked();
@@ -1020,7 +1048,7 @@ pub const Connection = struct {
                 .payload_offset = payload_offset,
                 .payload_len = payload_len,
                 .packet_len = packet_len,
-                .ack_eliciting = ackEliciting(frames),
+                .ack_eliciting = packet_preflight.ack_eliciting,
                 .in_flight = in_flight,
                 .stream_bytes = packet_stream_bytes,
             };
@@ -1980,27 +2008,48 @@ pub const Connection = struct {
     fn validateOutboundFrames(self: Connection, frames: []const quic.Frame) Error!void {
         if (frames.len == 0) return error.MissingFrame;
         for (frames) |frame| {
-            try quic.validateFrameForPacketType(frame, .one_rtt);
-            switch (frame) {
-                .new_token => |new_token| {
-                    // RFC 9000 server-only frames should be blocked before the
-                    // packet is encoded.  s2n-quic/tquic gate HANDSHAKE_DONE
-                    // and NEW_TOKEN at transmission time; doing so here keeps
-                    // generic send() from bypassing the dedicated helpers.
-                    if (self.config.local_endpoint != .server) return error.InvalidFrame;
-                    if (new_token.token.len == 0) return error.InvalidFrame;
-                },
-                .handshake_done => {
-                    if (self.config.local_endpoint != .server) return error.InvalidFrame;
-                },
-                .datagram => |datagram| {
-                    const frame_limit = self.config.peer_max_datagram_frame_size orelse return error.DatagramsNotEnabled;
-                    const frame_size = datagramFrameWireSize(datagram) orelse return error.InvalidFrameLength;
-                    if (frame_size > frame_limit) return error.DatagramTooLarge;
-                },
-                .ack_frequency, .immediate_ack => if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled,
-                else => {},
-            }
+            var traits: OutboundFrameTraits = .{};
+            try self.validateOutboundFrameAndTraits(frame, &traits);
+        }
+    }
+
+    fn validateOutboundFrameAndTraits(self: Connection, frame: quic.Frame, traits: *OutboundFrameTraits) Error!void {
+        try quic.validateFrameForPacketType(frame, .one_rtt);
+        switch (frame) {
+            .padding => traits.in_flight = true,
+            .ack => {},
+            .connection_close, .application_close => {},
+            .new_token => |new_token| {
+                // RFC 9000 server-only frames should be blocked before the
+                // packet is encoded.  s2n-quic/tquic gate HANDSHAKE_DONE and
+                // NEW_TOKEN at transmission time; doing so here keeps generic
+                // send() from bypassing the dedicated helpers.
+                if (self.config.local_endpoint != .server) return error.InvalidFrame;
+                if (new_token.token.len == 0) return error.InvalidFrame;
+                traits.ack_eliciting = true;
+                traits.in_flight = true;
+            },
+            .handshake_done => {
+                if (self.config.local_endpoint != .server) return error.InvalidFrame;
+                traits.ack_eliciting = true;
+                traits.in_flight = true;
+            },
+            .datagram => |datagram| {
+                const frame_limit = self.config.peer_max_datagram_frame_size orelse return error.DatagramsNotEnabled;
+                const frame_size = datagramFrameWireSize(datagram) orelse return error.InvalidFrameLength;
+                if (frame_size > frame_limit) return error.DatagramTooLarge;
+                traits.ack_eliciting = true;
+                traits.in_flight = true;
+            },
+            .ack_frequency, .immediate_ack => {
+                if (!self.config.enable_ack_frequency) return error.AckFrequencyDisabled;
+                traits.ack_eliciting = true;
+                traits.in_flight = true;
+            },
+            else => {
+                traits.ack_eliciting = true;
+                traits.in_flight = true;
+            },
         }
     }
 
