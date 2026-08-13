@@ -132,6 +132,12 @@ pub fn build(b: *std.Build) void {
             .description = "Run a local QUIC DATAGRAM echo smoke test",
         },
         .{
+            .exe_name = "netz-quic-close",
+            .path = "examples/quic_close.zig",
+            .run_step = "run-quic-close",
+            .description = "Run a local QUIC application-close smoke test",
+        },
+        .{
             .exe_name = "netz-bench-http3-capsule",
             .path = "examples/bench_http3_capsule.zig",
             .run_step = "bench-http3-capsule",
