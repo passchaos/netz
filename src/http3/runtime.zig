@@ -17529,7 +17529,7 @@ test "HTTP/3 handshake server streams large request through small window" {
 
 test "HTTP/3 handshake client streams dynamic response through small window" {
     const allocator = std.testing.allocator;
-    const body_len: usize = 64 * 1024;
+    const body_len: usize = 256 * 1024;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
