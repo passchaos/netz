@@ -43,6 +43,14 @@ fn appendTruncatedPacketNumberForTest(
     try list.appendSlice(allocator, full[8 - packet_number_len ..]);
 }
 
+fn trafficSecretForSuiteForTest(suite: protection.CipherSuite) vail.tls.secret.Secret {
+    return switch (suite.hash()) {
+        .sha256 => .fromSha256([_]u8{0x51} ** 32),
+        .sha384 => .fromSha384([_]u8{0x52} ** 48),
+        .sm3 => .fromSm3([_]u8{0x53} ** 32),
+    };
+}
+
 fn expectHex(expected_hex: []const u8, actual: []const u8) !void {
     var expected_buf: [128]u8 = undefined;
     const expected = try std.fmt.hexToBytes(&expected_buf, expected_hex);
@@ -525,6 +533,80 @@ test "QUIC short packet in-place sealing matches allocating wrapper" {
     try std.testing.expectEqual(try protection.shortPacketLen(options), in_place.len);
     try std.testing.expectEqualSlices(u8, allocated, in_place);
     try std.testing.expectError(error.BufferTooShort, protection.sealShortPacketInto(storage[0 .. in_place.len - 1], keys, options));
+}
+
+test "QUIC short packet payload can be sealed in final storage" {
+    const allocator = std.testing.allocator;
+    const keys = protection.deriveAes128Keys([_]u8{0x9f} ** protection.secret_len);
+    const options: protection.ShortPacketOptions = .{
+        .destination_connection_id = "final-dcid",
+        .packet_number = 0x56_789a,
+        .packet_number_len = 3,
+        .spin_bit = true,
+        .key_phase = true,
+        .payload = "payload already encoded in final packet storage",
+    };
+    var expected_storage: [160]u8 = undefined;
+    const expected = try protection.sealShortPacketInto(&expected_storage, keys, options);
+
+    var storage: [160]u8 = undefined;
+    const payload_offset = 1 + options.destination_connection_id.len + options.packet_number_len;
+    @memcpy(storage[payload_offset..][0..options.payload.len], options.payload);
+    const sealed = try protection.sealShortPacketInPlace(&storage, keys, options);
+
+    try std.testing.expectEqualSlices(u8, expected, sealed);
+    try std.testing.expectError(error.BufferTooShort, protection.sealShortPacketInPlace(storage[0 .. sealed.len - 1], keys, options));
+
+    var opened = try protection.openShortPacket(
+        allocator,
+        keys,
+        sealed,
+        options.destination_connection_id.len,
+        options.packet_number,
+    );
+    defer opened.deinit(allocator);
+    try std.testing.expectEqualStrings(options.payload, opened.payload);
+}
+
+test "QUIC short packet final-storage sealing supports every traffic suite" {
+    const allocator = std.testing.allocator;
+    const suites = [_]protection.CipherSuite{
+        .aes_128_gcm_sha256,
+        .aes_256_gcm_sha384,
+        .chacha20_poly1305_sha256,
+        .sm4_gcm_sm3,
+    };
+    const options: protection.ShortPacketOptions = .{
+        .destination_connection_id = "suite-dcid",
+        .packet_number = 0x22_3344,
+        .packet_number_len = 3,
+        .payload = "suite-generic in-place short packet seal",
+    };
+    inline for (suites) |suite| {
+        const keys = try protection.deriveKeysForSecretForVersion(
+            version_1_wire_for_test,
+            suite,
+            trafficSecretForSuiteForTest(suite),
+        );
+        var expected_storage: [160]u8 = undefined;
+        const expected = try protection.sealShortPacketInto(&expected_storage, keys, options);
+
+        var storage: [160]u8 = undefined;
+        const payload_offset = 1 + options.destination_connection_id.len + options.packet_number_len;
+        @memcpy(storage[payload_offset..][0..options.payload.len], options.payload);
+        const sealed = try protection.sealShortPacketInPlace(&storage, keys, options);
+        try std.testing.expectEqualSlices(u8, expected, sealed);
+
+        var opened = try protection.openShortPacket(
+            allocator,
+            keys,
+            sealed,
+            options.destination_connection_id.len,
+            options.packet_number,
+        );
+        defer opened.deinit(allocator);
+        try std.testing.expectEqualStrings(options.payload, opened.payload);
+    }
 }
 
 test "QUIC short packet in-place open matches owning open" {

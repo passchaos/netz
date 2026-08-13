@@ -887,7 +887,6 @@ pub const Connection = struct {
             frames: []const quic.Frame,
             packet_number: u64,
             packet_number_len: u8,
-            payload_offset: usize,
             payload_len: usize,
             packet_len: usize,
             ack_eliciting: bool,
@@ -916,8 +915,6 @@ pub const Connection = struct {
         const send_datagram_size = self.currentSendDatagramSize();
         const congestion_available = self.congestion.available();
         const send_flow_available = self.send_flow.available();
-        std.debug.assert(self.send_frame_buffer.items.len == 0);
-        defer self.send_frame_buffer.items.len = 0;
 
         while (count < encryptable) {
             const frames = packets[count];
@@ -1030,22 +1027,10 @@ pub const Connection = struct {
                     credit.bytes,
                 );
             }
-            const payload_offset = self.send_frame_buffer.items.len;
-            for (frames) |frame| {
-                try frame.write(
-                    &self.send_frame_buffer,
-                    self.endpoint.allocator,
-                );
-            }
-            std.debug.assert(
-                self.send_frame_buffer.items.len - payload_offset ==
-                    payload_len,
-            );
             prepared[count] = .{
                 .frames = frames,
                 .packet_number = packet_number,
                 .packet_number_len = packet_number_len,
-                .payload_offset = payload_offset,
                 .payload_len = payload_len,
                 .packet_len = packet_len,
                 .ack_eliciting = packet_preflight.ack_eliciting,
@@ -1115,22 +1100,6 @@ pub const Connection = struct {
         errdefer for (prepared[0..tracked_sent_count]) |packet| {
             _ = self.sent.forget(packet.packet_number);
         };
-        for (prepared[0..count]) |packet| {
-            const payload = self.send_frame_buffer.items[packet.payload_offset..][0..packet.payload_len];
-            if (packet.ack_eliciting) {
-                _ = try self.recovery.trackSent(packet.packet_number, payload);
-            }
-            tracked_recovery_count += 1;
-            try self.sent.sentInFlightAt(
-                packet.packet_number,
-                packet.ack_eliciting,
-                packet.in_flight,
-                packet.payload_len,
-                .not_ect,
-                sent_time_ns,
-            );
-            tracked_sent_count += 1;
-        }
 
         try self.reserveAntiAmplification(total_payload_len);
         var anti_amplification_reserved = true;
@@ -1158,9 +1127,35 @@ pub const Connection = struct {
             }
         };
         for (prepared[0..count], 0..) |packet, i| {
-            const payload = self.send_frame_buffer.items[packet.payload_offset..][0..packet.payload_len];
-            const sealed = try quic.protection.sealShortPacketInto(
-                self.send_packet_buffer.items[packet_offset..][0..packet.packet_len],
+            const packet_storage = self.send_packet_buffer.items[packet_offset..][0..packet.packet_len];
+            const payload_offset = 1 + self.config.peer_connection_id.len + @as(usize, packet.packet_number_len);
+            const payload = packet_storage[payload_offset..][0..packet.payload_len];
+            var fixed_payload = std.heap.FixedBufferAllocator.init(payload);
+            var payload_list = try std.ArrayList(u8).initCapacity(
+                fixed_payload.allocator(),
+                packet.payload_len,
+            );
+            for (packet.frames) |frame| {
+                try frame.write(&payload_list, fixed_payload.allocator());
+            }
+            std.debug.assert(payload_list.items.len == packet.payload_len);
+
+            if (packet.ack_eliciting) {
+                _ = try self.recovery.trackSent(packet.packet_number, payload);
+            }
+            tracked_recovery_count += 1;
+            try self.sent.sentInFlightAt(
+                packet.packet_number,
+                packet.ack_eliciting,
+                packet.in_flight,
+                packet.payload_len,
+                .not_ect,
+                sent_time_ns,
+            );
+            tracked_sent_count += 1;
+
+            const sealed = try quic.protection.sealShortPacketInPlace(
+                packet_storage,
                 self.send_key_phase.currentKeys(),
                 .{
                     .destination_connection_id = self.config.peer_connection_id,

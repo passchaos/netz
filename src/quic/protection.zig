@@ -1351,6 +1351,42 @@ pub fn sealShortPacketInto(
     return packet;
 }
 
+/// Seal a short-header packet whose plaintext payload already resides in the
+/// caller-provided packet buffer.
+///
+/// `packet` must contain `shortPacketLen(options)` bytes of storage. The
+/// plaintext payload is expected at the normal short-header payload offset
+/// (`1 + dcid.len + packet_number_len`) and is encrypted in place. This lets
+/// hot send paths encode frames directly into their final datagram storage
+/// instead of first building a separate payload buffer and then copying it into
+/// the protected packet.
+pub fn sealShortPacketInPlace(
+    packet: []u8,
+    keys: PacketProtectionKeys,
+    options: ShortPacketOptions,
+) Error![]u8 {
+    const packet_len = try shortPacketLen(options);
+    if (packet.len < packet_len) return error.BufferTooShort;
+
+    const out = packet[0..packet_len];
+    const pn_len = @as(usize, options.packet_number_len);
+    const pn_offset = 1 + options.destination_connection_id.len;
+    const payload_offset = pn_offset + pn_len;
+    out[0] = shortHeaderFirstByte(options, pn_len);
+    @memcpy(out[1..pn_offset], options.destination_connection_id);
+    try writeTruncatedPacketNumber(out[pn_offset..payload_offset], options.packet_number);
+
+    const payload = out[payload_offset .. payload_offset + options.payload.len];
+    const tag = out[payload_offset + options.payload.len ..][0..aead_tag_len];
+    // Vail's linked AWS-LC backend explicitly allows `in == out`, and the
+    // pure-Zig AEAD implementations encrypt via stream XOR before MACing the
+    // resulting ciphertext. Keep this helper restricted to exact in-place
+    // sealing rather than permitting partially-overlapping aliases.
+    try protectPayload(keys, options.packet_number, out[0..payload_offset], payload, payload, tag);
+    try applyHeaderProtectionForKeys(keys, .short, out, pn_offset);
+    return out;
+}
+
 pub fn shortPacketLen(options: ShortPacketOptions) Error!usize {
     try validatePacketNumberLen(options.packet_number_len);
     try validatePacketNumber(options.packet_number);
