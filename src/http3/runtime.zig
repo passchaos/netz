@@ -4321,6 +4321,51 @@ pub const ProtectedServer = struct {
         if (fin) self.request_lifecycle.markFinished(stream_id);
     }
 
+    pub fn sendResponseBodyPaced(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        if (data.len == 0) {
+            try self.sendResponseBodyPacedChunk(to, stream_id, data, fin);
+            return;
+        }
+        const chunk_limit = pacedProtectedBodyChunkLimit(self.config);
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const end = @min(data.len, offset + chunk_limit);
+            try self.sendResponseBodyPacedChunk(
+                to,
+                stream_id,
+                data[offset..end],
+                fin and end == data.len,
+            );
+            offset = end;
+        }
+    }
+
+    fn sendResponseBodyPacedChunk(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        while (true) {
+            self.sendResponseBody(to, stream_id, data, fin) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    _ = try self.receiveRequestPacketTimeout(100_000);
+                    continue;
+                },
+                else => return err,
+            };
+            _ = try self.receiveRequestPacketTimeout(100_000);
+            return;
+        }
+    }
+
     pub fn finishResponseTrailers(
         self: *ProtectedServer,
         to: net.IpAddress,
@@ -4575,6 +4620,48 @@ pub const ProtectedServer = struct {
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback(packet.from);
         }
+    }
+
+    fn receiveRequestPacketTimeout(
+        self: *ProtectedServer,
+        timeout_ns: i64,
+    ) Error!bool {
+        var datagram = self.quic_server.endpoint.receiveBytesTimeout(.{
+            .duration = .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(timeout_ns),
+            },
+        }) catch |err| switch (err) {
+            error.Timeout => return false,
+            else => |other| return @errorCast(other),
+        };
+        defer datagram.deinit(self.quic_server.endpoint.allocator);
+        var packet = try quic.one_rtt.openReceivedBytes(
+            &self.quic_server.endpoint,
+            datagram.from,
+            datagram.bytes,
+            self.config.receive_keys,
+            self.config.local_connection_id.len,
+            self.expected_packet_number,
+            self.config.max_frames_per_packet,
+        );
+        defer packet.deinit(self.quic_server.endpoint.allocator);
+        self.expected_packet_number = packet.packet.packet_number + 1;
+        _ = try applyServerRequestPacketFrames(
+            packet.from,
+            packet.frames,
+            self.quic_server.endpoint.allocator,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.request_streams,
+            &self.streaming_requests,
+            self.peer_promised_push_ids.items,
+        );
+        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
+            try self.sendQpackFeedback(packet.from);
+        }
+        return true;
     }
 
     fn applyStreamingRequestEvent(
@@ -8305,6 +8392,16 @@ fn pacedBodyChunkLimit(options: HandshakeSessionOptions) usize {
         @as(usize, 1),
         @min(options.paced_body_chunk_bytes, data_budget),
     );
+}
+
+fn pacedProtectedBodyChunkLimit(config: ProtectedConfig) usize {
+    const frame_budget = config.max_stream_frame_data *|
+        @max(@as(usize, 1), config.max_frames_per_packet);
+    const data_budget = if (frame_budget > paced_body_frame_overhead_margin)
+        frame_budget - paced_body_frame_overhead_margin
+    else
+        1;
+    return @max(@as(usize, 1), data_budget);
 }
 
 fn sendConnectionBodyChunk(
@@ -14737,7 +14834,7 @@ test "HTTP/3 protected server reports streamed request reset with stream id" {
 
 test "HTTP/3 protected client streams large response through small window" {
     const allocator = std.testing.allocator;
-    const body_len: usize = 128 * 1024;
+    const body_len: usize = 256 * 1024;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -14794,7 +14891,7 @@ test "HTTP/3 protected client streams large response through small window" {
             var remaining = body_len;
             while (remaining != 0) {
                 const count = @min(chunk.len, remaining);
-                try server_ptr.sendResponseBody(
+                try server_ptr.sendResponseBodyPaced(
                     request.from,
                     request.stream_id,
                     chunk[0..count],
