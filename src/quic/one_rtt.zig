@@ -1880,7 +1880,22 @@ pub const Connection = struct {
     fn prepareFramesForSend(self: *Connection, frames: []const quic.Frame, sent_time_ns: ?u64) Error!PreparedFrames {
         std.debug.assert(self.send_frame_buffer.items.len == 0);
         errdefer self.send_frame_buffer.items.len = 0;
-        for (frames) |frame| try frame.write(&self.send_frame_buffer, self.endpoint.allocator);
+        var payload_len: usize = 0;
+        for (frames) |frame| {
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                try frame.wireLen(),
+            ) catch return error.InvalidFrameLength;
+        }
+        try self.send_frame_buffer.ensureUnusedCapacity(
+            self.endpoint.allocator,
+            payload_len,
+        );
+        for (frames) |frame| {
+            try frame.writeAssumeCapacity(&self.send_frame_buffer);
+        }
+        std.debug.assert(self.send_frame_buffer.items.len == payload_len);
         const payload = self.send_frame_buffer.items;
         const is_ack_eliciting = ackEliciting(frames);
         const is_in_flight = packetInFlight(frames);
