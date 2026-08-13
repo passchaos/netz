@@ -8,6 +8,7 @@ const min_stream_buffer: usize = 2 * 1024 * 1024;
 const default_streams: usize = 1;
 const max_streams: usize = 128;
 const default_round_robin_chunk_bytes: usize = 64 * 1024;
+const single_stream_round_robin_chunk_bytes: usize = 8 * 1024;
 const default_endpoint_datagram_size: usize = 4096;
 const benchmark_min_flow_control_bytes: u64 = 256 * 1024 * 1024;
 const benchmark_ack_eliciting_threshold: u64 = 16;
@@ -741,7 +742,8 @@ fn transferPacedBodyChunkBytes(config: Config) usize {
 }
 
 fn transferRoundRobinChunkBytes(config: Config) usize {
-    return config.round_robin_chunk_bytes orelse default_round_robin_chunk_bytes;
+    return config.round_robin_chunk_bytes orelse
+        if (config.streams == 1) single_stream_round_robin_chunk_bytes else default_round_robin_chunk_bytes;
 }
 
 fn transferStreamBufferBytes(config: Config) usize {
