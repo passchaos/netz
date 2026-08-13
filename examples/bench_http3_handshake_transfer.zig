@@ -18,7 +18,9 @@ const single_stream_paced_body_chunk_bytes: usize = 7200;
 // upload benchmark over 4096 on loopback while avoiding the instability seen
 // with larger 12000-byte datagrams.
 const multi_stream_one_rtt_datagram_size: usize = 8192;
-const multi_stream_paced_body_chunk_bytes: usize = 2800;
+// Keep multi-stream body pacing below the unstable 3200+ range observed on
+// long 64MiB uploads while still reducing per-body send overhead over 2800.
+const multi_stream_paced_body_chunk_bytes: usize = 3000;
 const upload_trace_initial_window: usize = 256 * 1024;
 
 const Mode = enum {
