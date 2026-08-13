@@ -2068,6 +2068,13 @@ pub const OwnedResponse = struct {
     }
 };
 
+/// Options for the preconfigured-key protected HTTP/3 runtime.
+///
+/// This runtime intentionally bypasses the integrated QUIC handshake and does
+/// not own a full `one_rtt.Connection`; it is best suited for deterministic
+/// packet-protection, QPACK, and HTTP/3 stream-state tests.  Use the
+/// handshake-backed runtime for production-like large transfers that require
+/// complete QUIC recovery, pacing, and flow-control feedback loops.
 pub const ProtectedConfig = struct {
     receive_keys: quic.protection.PacketProtectionKeys,
     send_keys: quic.protection.PacketProtectionKeys,
@@ -2075,7 +2082,17 @@ pub const ProtectedConfig = struct {
     peer_connection_id: []const u8,
     local_settings: http3.Settings = .{},
     max_frames_per_packet: usize = 8,
+    /// Maximum retained bytes for one protected HTTP/3 streaming reader. This
+    /// is a local memory bound for the lightweight runtime, not a replacement
+    /// for full QUIC receive-window negotiation.
     max_stream_buffer: usize = 64 * 1024,
+    /// Optional peer receive window for protected streaming body senders.
+    ///
+    /// A real QUIC handshake exchanges transport parameters and `MAX_STREAM_DATA`
+    /// frames through `one_rtt.Connection`.  The preconfigured-key runtime has
+    /// no transport-parameter handshake, so callers that want deterministic
+    /// small-window streaming can seed the peer window explicitly here.
+    peer_stream_flow_window: ?usize = null,
     max_stream_frame_data: usize = 1200,
 };
 
@@ -4174,7 +4191,24 @@ pub const ProtectedServer = struct {
     ) Error!usize {
         const entry = self.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
-        return entry.reader.readData(out);
+        try sendProtectedReaderCapacity(
+            &self.quic_server.endpoint,
+            entry.from orelse return error.UnexpectedStream,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &entry.reader,
+        );
+        const read = try entry.reader.readData(out);
+        try sendProtectedReaderCapacity(
+            &self.quic_server.endpoint,
+            entry.from orelse return error.UnexpectedStream,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &entry.reader,
+        );
+        return read;
     }
 
     pub fn sendResponse(self: *ProtectedServer, to: net.IpAddress, stream_id: u62, response: http3.Response) Error!void {
@@ -4307,6 +4341,9 @@ pub const ProtectedServer = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        if (self.config.peer_stream_flow_window) |window| {
+            try self.outbound_bodies.enableFlowLimit(stream_id, window);
+        }
         try sendProtectedBodyChunk(
             &self.quic_server.endpoint,
             to,
@@ -4387,6 +4424,24 @@ pub const ProtectedServer = struct {
             &self.qpack_encoder_prefix_sent,
         );
         self.request_lifecycle.markFinished(stream_id);
+    }
+
+    pub fn finishResponseTrailersPaced(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        while (true) {
+            self.finishResponseTrailers(to, stream_id, trailers) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    _ = try self.receiveRequestPacketTimeout(100_000);
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
     }
 
     pub fn sendResponseWithInformational(
@@ -4573,6 +4628,10 @@ pub const ProtectedServer = struct {
                 self.config.max_frames_per_packet,
             );
             defer packet.deinit(self.quic_server.endpoint.allocator);
+            updateOutboundBodyFlowLimitsFromFrames(
+                &self.outbound_bodies,
+                packet.frames,
+            );
             if (try applyServerRequestPacketFrames(
                 packet.from,
                 packet.frames,
@@ -4606,6 +4665,10 @@ pub const ProtectedServer = struct {
         );
         defer packet.deinit(self.quic_server.endpoint.allocator);
 
+        updateOutboundBodyFlowLimitsFromFrames(
+            &self.outbound_bodies,
+            packet.frames,
+        );
         _ = try applyServerRequestPacketFrames(
             packet.from,
             packet.frames,
@@ -4647,6 +4710,10 @@ pub const ProtectedServer = struct {
         );
         defer packet.deinit(self.quic_server.endpoint.allocator);
         self.expected_packet_number = packet.packet.packet_number + 1;
+        updateOutboundBodyFlowLimitsFromFrames(
+            &self.outbound_bodies,
+            packet.frames,
+        );
         _ = try applyServerRequestPacketFrames(
             packet.from,
             packet.frames,
@@ -4917,6 +4984,9 @@ pub const ProtectedClient = struct {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
+        if (self.config.peer_stream_flow_window) |window| {
+            try self.outbound_bodies.enableFlowLimit(stream_id, window);
+        }
         try sendProtectedBodyChunk(
             &self.quic_client.endpoint,
             self.quic_client.peer,
@@ -4928,6 +4998,47 @@ pub const ProtectedClient = struct {
             data,
             fin,
         );
+    }
+
+    pub fn sendRequestBodyPaced(
+        self: *ProtectedClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        if (data.len == 0) {
+            try self.sendRequestBodyPacedChunk(stream_id, data, fin);
+            return;
+        }
+        const chunk_limit = pacedProtectedBodyChunkLimit(self.config);
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const end = @min(data.len, offset + chunk_limit);
+            try self.sendRequestBodyPacedChunk(
+                stream_id,
+                data[offset..end],
+                fin and end == data.len,
+            );
+            offset = end;
+        }
+    }
+
+    fn sendRequestBodyPacedChunk(
+        self: *ProtectedClient,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        while (true) {
+            self.sendRequestBody(stream_id, data, fin) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveResponsePacket();
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
     }
 
     pub fn finishRequestTrailers(
@@ -4952,6 +5063,23 @@ pub const ProtectedClient = struct {
             &self.qpack_encoder_send,
             &self.qpack_encoder_prefix_sent,
         );
+    }
+
+    pub fn finishRequestTrailersPaced(
+        self: *ProtectedClient,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        while (true) {
+            self.finishRequestTrailers(stream_id, trailers) catch |err| switch (err) {
+                error.FlowControlBlocked, error.CongestionLimited => {
+                    try self.receiveResponsePacket();
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
     }
 
     pub fn receiveResponse(
@@ -5135,7 +5263,24 @@ pub const ProtectedClient = struct {
     ) Error!usize {
         const entry = self.streaming_responses.find(stream_id) orelse
             return error.UnexpectedStream;
-        return entry.reader.readData(out);
+        try sendProtectedReaderCapacity(
+            &self.quic_client.endpoint,
+            entry.from orelse self.quic_client.peer,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &entry.reader,
+        );
+        const read = try entry.reader.readData(out);
+        try sendProtectedReaderCapacity(
+            &self.quic_client.endpoint,
+            entry.from orelse self.quic_client.peer,
+            self.config,
+            &self.next_packet_number,
+            &self.protected_send,
+            &entry.reader,
+        );
+        return read;
     }
 
     pub fn receivePushEvent(
@@ -5444,6 +5589,10 @@ pub const ProtectedClient = struct {
             self.config.max_frames_per_packet,
         );
         defer packet.deinit(self.quic_client.endpoint.allocator);
+        updateOutboundBodyFlowLimitsFromFrames(
+            &self.outbound_bodies,
+            packet.frames,
+        );
         var flush_qpack_feedback = false;
         for (packet.frames) |frame| {
             try rejectCriticalStreamClosureFrame(self.control, frame, .client);
@@ -5757,6 +5906,62 @@ fn releaseStreamingReaderCapacity(
         amount,
     );
     reader.markCredited(amount);
+}
+
+fn sendProtectedReaderCapacity(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    config: ProtectedConfig,
+    next_packet_number: *u64,
+    protected_send: *ProtectedSendState,
+    reader: *StreamingMessageReader,
+) Error!void {
+    const amount = reader.uncreditedConsumed();
+    if (amount == 0) return;
+    const credited = std.math.add(
+        u64,
+        reader.credited_offset,
+        amount,
+    ) catch return error.InvalidFrameLength;
+    const window = std.math.cast(u64, reader.receive.max_buffered) orelse
+        return error.InvalidFrameLength;
+    const maximum_stream_data = std.math.add(
+        u64,
+        credited,
+        window,
+    ) catch quic.varint.max_value;
+    const frames = [_]quic.Frame{.{ .max_stream_data = .{
+        .stream_id = reader.receive.stream_id,
+        .maximum_stream_data = @min(maximum_stream_data, quic.varint.max_value),
+    } }};
+    try sendProtectedFrames(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        &frames,
+        config.max_frames_per_packet,
+        protected_send,
+    );
+    reader.markCredited(amount);
+}
+
+fn updateOutboundBodyFlowLimitsFromFrames(
+    bodies: *OutboundBodySet,
+    frames: []const quic.Frame,
+) void {
+    for (frames) |frame| {
+        if (frame != .max_stream_data) continue;
+        const stream_id = std.math.cast(
+            u62,
+            frame.max_stream_data.stream_id,
+        ) orelse continue;
+        bodies.updateFlowLimit(
+            stream_id,
+            frame.max_stream_data.maximum_stream_data,
+        );
+    }
 }
 
 pub const OwnedProtectedRequest = struct {
@@ -7563,6 +7768,11 @@ const OutboundBodySet = struct {
         send: quic.stream_state.SendState,
         expected_length: ?usize,
         written: usize = 0,
+        /// Optional peer-advertised stream offset for lightweight protected
+        /// runtimes. The handshake runtime keeps this state in
+        /// `one_rtt.Connection`; preconfigured-key paths use it only for
+        /// blocking helpers that need deterministic small receive windows.
+        flow_limit: ?u64 = null,
     };
 
     allocator: std.mem.Allocator,
@@ -7679,6 +7889,33 @@ const OutboundBodySet = struct {
         }
         self.last_entry_index = null;
         return true;
+    }
+
+    fn enableFlowLimit(
+        self: *OutboundBodySet,
+        stream_id: u62,
+        additional_window: usize,
+    ) Error!void {
+        const entry = self.find(stream_id) orelse return error.UnexpectedStream;
+        if (entry.flow_limit != null) return;
+        const window = std.math.cast(u64, additional_window) orelse
+            return error.InvalidWindow;
+        entry.flow_limit = std.math.add(
+            u64,
+            entry.send.next_offset,
+            window,
+        ) catch return error.InvalidWindow;
+    }
+
+    fn updateFlowLimit(
+        self: *OutboundBodySet,
+        stream_id: u62,
+        maximum_stream_data: u64,
+    ) void {
+        const entry = self.find(stream_id) orelse return;
+        const current = entry.flow_limit orelse return;
+        if (maximum_stream_data <= current) return;
+        entry.flow_limit = maximum_stream_data;
     }
 
     fn find(self: *OutboundBodySet, stream_id: u62) ?*Entry {
@@ -8538,10 +8775,18 @@ fn sendProtectedBodyChunk(
     const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
     const previous = entry.*;
     errdefer entry.* = previous;
-    try bodies.prepareChunkForEntry(entry, data.len, fin);
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(endpoint.allocator);
     try writeDataFrame(&payload, endpoint.allocator, data);
+    if (entry.flow_limit) |limit| {
+        const next_offset = std.math.add(
+            u64,
+            entry.send.next_offset,
+            payload.items.len,
+        ) catch return error.InvalidFrameLength;
+        if (next_offset > limit) return error.FlowControlBlocked;
+    }
+    try bodies.prepareChunkForEntry(entry, data.len, fin);
     var frames: std.ArrayList(quic.Frame) = .empty;
     defer frames.deinit(endpoint.allocator);
     try entry.send.appendFrames(
@@ -8643,6 +8888,14 @@ fn sendProtectedTrailers(
         stream_id,
         qpack,
     );
+    if (entry.flow_limit) |limit| {
+        const next_offset = std.math.add(
+            u64,
+            entry.send.next_offset,
+            encoded.items.len,
+        ) catch return error.InvalidFrameLength;
+        if (next_offset > limit) return error.FlowControlBlocked;
+    }
     try sendProtectedQpackEncoderInstructions(
         endpoint,
         to,
@@ -14834,7 +15087,7 @@ test "HTTP/3 protected server reports streamed request reset with stream id" {
 
 test "HTTP/3 protected client streams large response through small window" {
     const allocator = std.testing.allocator;
-    const body_len: usize = 512 * 1024;
+    const body_len: usize = 1024 * 1024;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -14860,6 +15113,7 @@ test "HTTP/3 protected client streams large response through small window" {
             .send_keys = server_keys,
             .local_connection_id = &server_cid,
             .peer_connection_id = &client_cid,
+            .peer_stream_flow_window = 1024,
             .max_stream_frame_data = 480,
         },
     );
@@ -14899,7 +15153,7 @@ test "HTTP/3 protected client streams large response through small window" {
                 );
                 remaining -= count;
             }
-            try server_ptr.finishResponseTrailers(
+            try server_ptr.finishResponseTrailersPaced(
                 request.from,
                 request.stream_id,
                 &.{.{ .name = "x-stream-finished", .value = "yes" }},

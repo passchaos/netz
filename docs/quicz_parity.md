@@ -52,11 +52,11 @@ zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 ## Known blockers before declaring the goal complete
 
 1. **Large HTTP/3 download reliability**: local real-handshake download works for
-   small and 1MiB smoke tests, and the deterministic handshake streaming
-   response test now covers 1MiB. The preconfigured protected runtime now
-   covers 512KiB small-window responses, but 1MiB still fails with
-   StreamBufferTooLarge, and benchmark-scale responses still show
-   queue/recovery sensitivity.  This is the top functionality gap.
+   small and 1MiB smoke tests, the deterministic handshake streaming response
+   test covers 1MiB, and the preconfigured protected runtime now covers 1MiB
+   small-window responses with explicit protected-runtime stream-credit
+   feedback. Benchmark-scale responses still show queue/recovery sensitivity,
+   which is now the top functionality gap.
 2. **Aggressive receive batching**: enabling HTTP/3 GRO receive directly has
    caused long stalls.  The lower-level QUIC GRO benchmark works, but the H3
    runtime path needs more work before it can be defaulted.
@@ -72,9 +72,10 @@ zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 
 ## Next recommended work
 
-1. Fix the protected runtime response path so its deterministic small-window
-   streaming test can grow beyond the current stable 512KiB coverage to 1MiB.
-2. Use those tests to fix response-side flow-control/recovery/lifecycle
-   handling without benchmark-layer scheduling hacks.
+1. Use the protected 1MiB small-window coverage to keep tightening
+   response-side flow-control/recovery/lifecycle handling without
+   benchmark-layer scheduling hacks.
+2. Extend real-handshake download reliability beyond the current 1MiB smoke
+   level toward 4MiB/16MiB+ benchmark-scale responses.
 3. Once download is reliable, rerun the 64MiB upload/download benchmark matrix.
 4. Only then revisit GRO and larger packet/body chunk defaults.
