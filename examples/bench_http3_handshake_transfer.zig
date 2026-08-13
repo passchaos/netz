@@ -10,6 +10,8 @@ const max_streams: usize = 128;
 const default_round_robin_chunk_bytes: usize = 64 * 1024;
 const default_endpoint_datagram_size: usize = 4096;
 const benchmark_min_flow_control_bytes: u64 = 256 * 1024 * 1024;
+const benchmark_ack_eliciting_threshold: u64 = 16;
+const benchmark_max_ack_delay_us: u64 = 25_000;
 const single_stream_one_rtt_datagram_size: usize = 8192;
 const single_stream_paced_body_chunk_bytes: usize = 7200;
 const multi_stream_one_rtt_datagram_size: usize = 4096;
@@ -213,6 +215,11 @@ fn runIteration(
         fn runFallible(shared: *@This()) !void {
             var session = try shared.server.accept();
             defer session.deinit();
+            session.established.connection.configureAckPolicy(
+                benchmark_ack_eliciting_threshold,
+                benchmark_max_ack_delay_us,
+                netz.quic.packet_space.default_packet_threshold,
+            );
             switch (shared.mode) {
                 .upload => {
                     if (shared.trace) std.debug.print("  [iter {d}] server upload start\n", .{shared.iteration});

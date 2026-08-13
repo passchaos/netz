@@ -1750,6 +1750,23 @@ pub const Connection = struct {
         return self.ack_reordering_threshold;
     }
 
+    /// Configure this endpoint's local ACK cadence.
+    ///
+    /// This is the local counterpart to receiving an ACK_FREQUENCY frame. It is
+    /// useful for embedded runtimes and benchmarks that know their event-loop
+    /// batching policy without negotiating the extension first. `max_ack_delay`
+    /// is expressed in microseconds, matching ACK_FREQUENCY.
+    pub fn configureAckPolicy(
+        self: *Connection,
+        ack_eliciting_threshold: u64,
+        max_ack_delay: u64,
+        reordering_threshold: u64,
+    ) void {
+        self.ack_eliciting_threshold = @max(@as(u64, 1), ack_eliciting_threshold);
+        self.requested_max_ack_delay = max_ack_delay;
+        self.ack_reordering_threshold = @max(@as(u64, 1), reordering_threshold);
+    }
+
     pub fn immediateAckRequested(self: Connection) bool {
         return self.immediate_ack_requested;
     }
