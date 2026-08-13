@@ -184,15 +184,16 @@ fn discoverAltSvc(
     uri_text: []const u8,
     uri: std.Uri,
 ) !?DiscoveredTarget {
+    _ = uri_text;
     var endpoint = try netz.http3.runtime.uriEndpoint(allocator, uri);
     defer endpoint.deinit();
 
-    var response = try netz.http1.runtime.Client.requestUri(allocator, io, uri_text, .{
-        .method = .HEAD,
-    }, .{
-        .max_head_bytes = 64 * 1024,
-        .max_body_bytes = 0,
-    });
+    // Prefer an HTTP/3 HEAD probe for the example's discovery mode. The direct
+    // H3 path already has bounded handshake recovery, while the simple HTTP/1
+    // runtime exposes raw blocking TCP/TLS operations and can hang when one
+    // resolved address blackholes. If this probe fails, main treats discovery
+    // as best-effort and falls back to the normal request path.
+    var response = try fetchWithRetries(allocator, io, uri, "HEAD", false, null);
     defer response.deinit(allocator);
 
     const alt = (try netz.http3.firstHttp3AltSvcHeader(response.response.headers)) orelse {
