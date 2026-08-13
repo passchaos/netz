@@ -31,6 +31,27 @@ zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 ```
 
+## Current direct `~/Work/quicz` comparison
+
+A direct run of `~/Work/quicz/examples/quic_bench_hs.zig` with Zig 0.16 and
+`-OReleaseFast -lc` produced these loopback real-handshake reference numbers:
+
+```text
+quicz Stream Upload:       217.22 MB/s mean, 4.7% stddev, 5 x 64 MiB
+quicz Multi-Stream (4x):   244.57 MB/s mean, 3.0% stddev, 5 x 64 MiB
+quicz Echo Latency:        P50 10.7us, P99 23.7us, P99.9 283.6us
+quicz DATAGRAM:            228.01 MB/s, 1200B payload
+```
+
+The closest currently validated netz run is HTTP/3-over-QUIC rather than raw
+QUIC STREAM, so it includes HTTP/3 framing/QPACK/session overhead. Its 4-stream
+64MiB upload gate currently reaches about `155.04 MiB/s` mean over 5 iterations
+with `0.82%` stddev. This proves the transfer is functional and stable, but it
+does **not** yet prove performance superiority over quicz. A true apples-to-
+apples raw QUIC real-handshake transfer benchmark for netz remains needed, and
+HTTP/3 upload still needs optimization if it is expected to exceed quicz's raw
+QUIC throughput.
+
 ## Feature parity table
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
@@ -67,9 +88,10 @@ zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 4. **Complete external interop matrix**: public H3 fetch is proven against
    `robotics.bytedance.com`, including `--discover` and `--verify`, but broader
    server/client interop is not yet audited.
-5. **Performance comparison against `~/Work/quicz`**: netz has improved, but no
-   final apples-to-apples benchmark report proves it exceeds quicz across
-   stream, datagram, handshake, upload, and download scenarios.
+5. **Performance comparison against `~/Work/quicz`**: an initial direct quicz
+   run is now recorded, but netz still lacks a true raw QUIC real-handshake
+   apples-to-apples benchmark and the validated HTTP/3 4-stream upload result
+   remains below quicz's raw QUIC reference throughput.
 
 ## Next recommended work
 
