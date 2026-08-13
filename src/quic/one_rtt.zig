@@ -2316,7 +2316,15 @@ pub const Connection = struct {
 
     pub fn ptoDeadline(self: Connection) ?u64 {
         if (self.close_info != null or self.idle_timed_out or self.recovery.pendingCount() == 0) return null;
-        const sent_time = self.sent.latestAckElicitingInFlightSentTime() orelse return null;
+        const sent_time = self.sent.latestAckElicitingInFlightSentTime() orelse {
+            // Recovery owns stable payload groups until any copy is ACKed. A
+            // packet can be declared lost, removing it from the in-flight PTO
+            // base, while its recovery group still needs retransmission. Do not
+            // leave such orphaned groups timerless; arm an immediate PTO so the
+            // blocking/runtime pump can emit a fresh probe and re-establish a
+            // normal in-flight deadline.
+            return self.monotonicNowNs();
+        };
         return std.math.add(u64, sent_time, self.ptoPeriod()) catch std.math.maxInt(u64);
     }
 
