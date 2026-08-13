@@ -197,6 +197,100 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
     try std.testing.expectEqual(@as(u64, 2), probe0.packet.packet_number);
 }
 
+test "QUIC 1-RTT PTO retransmits unacked response stream packets after partial ACK" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_cid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
+    const keys = quic.protection.deriveAes128Keys([_]u8{0xa9} ** quic.protection.secret_len);
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const request0 = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .offset = 0, .data = "q0", .fin = true } }};
+    const request1 = [_]quic.Frame{.{ .stream = .{ .stream_id = 4, .offset = 0, .data = "q1", .fin = true } }};
+    const request2 = [_]quic.Frame{.{ .stream = .{ .stream_id = 8, .offset = 0, .data = "q2", .fin = true } }};
+    const request3 = [_]quic.Frame{.{ .stream = .{ .stream_id = 12, .offset = 0, .data = "q3", .fin = true } }};
+    try client.sendAt(&request0, 1_000_000);
+    try client.sendAt(&request1, 1_000_000);
+    try client.sendAt(&request2, 1_000_000);
+    try client.sendAt(&request3, 1_000_000);
+    var received_request0 = try server.receivePacketAt(2_000_000);
+    received_request0.deinit(allocator);
+    var received_request1 = try server.receivePacketAt(2_000_000);
+    received_request1.deinit(allocator);
+    var received_request2 = try server.receivePacketAt(2_000_000);
+    received_request2.deinit(allocator);
+    var received_request3 = try server.receivePacketAt(2_000_000);
+    received_request3.deinit(allocator);
+
+    const response0 = [_]quic.Frame{.{ .stream = .{ .stream_id = 0, .offset = 0, .data = "r0", .fin = true } }};
+    const response1 = [_]quic.Frame{.{ .stream = .{ .stream_id = 4, .offset = 0, .data = "r1", .fin = true } }};
+    const response2 = [_]quic.Frame{.{ .stream = .{ .stream_id = 8, .offset = 0, .data = "r2", .fin = true } }};
+    const response3 = [_]quic.Frame{.{ .stream = .{ .stream_id = 12, .offset = 0, .data = "r3", .fin = true } }};
+
+    try server.sendAt(&response0, 10_000_000);
+    try server.sendAt(&response1, 10_000_000);
+    try server.sendAt(&response2, 10_000_000);
+    try server.sendAt(&response3, 10_000_000);
+    try std.testing.expectEqual(@as(usize, 4), server.pendingRecoveryCount());
+
+    var first = try client.receivePacketAt(20_000_000);
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), first.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 0), first.frames[0].stream.stream_id);
+
+    // Simulate local UDP loss for the remaining response packets: remove them
+    // from the client socket without processing them, then ACK only packet 0.
+    var dropped1 = try client.endpoint.receiveBytes();
+    dropped1.deinit(allocator);
+    var dropped2 = try client.endpoint.receiveBytes();
+    dropped2.deinit(allocator);
+    var dropped3 = try client.endpoint.receiveBytes();
+    dropped3.deinit(allocator);
+
+    try client.sendAck(0);
+    var ack = try server.receivePacketAt(30_000_000);
+    defer ack.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), server.pendingRecoveryCount());
+
+    const deadline = server.lossDetectionTimerDeadline() orelse return error.TestUnexpectedResult;
+    _ = try server.serviceLossDetectionTimer(deadline.deadline_ns);
+
+    var retransmitted = try client.receivePacketAt(deadline.deadline_ns + 1);
+    defer retransmitted.deinit(allocator);
+    try std.testing.expect(retransmitted.frames[0] == .stream);
+    try std.testing.expect(retransmitted.frames[0].stream.stream_id == 4 or
+        retransmitted.frames[0].stream.stream_id == 8 or
+        retransmitted.frames[0].stream.stream_id == 12);
+}
+
 test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
     const allocator = std.testing.allocator;
 
