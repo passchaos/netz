@@ -1130,13 +1130,9 @@ pub const Connection = struct {
             const packet_storage = self.send_packet_buffer.items[packet_offset..][0..packet.packet_len];
             const payload_offset = 1 + self.config.peer_connection_id.len + @as(usize, packet.packet_number_len);
             const payload = packet_storage[payload_offset..][0..packet.payload_len];
-            var fixed_payload = std.heap.FixedBufferAllocator.init(payload);
-            var payload_list = try std.ArrayList(u8).initCapacity(
-                fixed_payload.allocator(),
-                packet.payload_len,
-            );
+            var payload_list = std.ArrayList(u8).initBuffer(payload);
             for (packet.frames) |frame| {
-                try frame.write(&payload_list, fixed_payload.allocator());
+                try frame.writeAssumeCapacity(&payload_list);
             }
             std.debug.assert(payload_list.items.len == packet.payload_len);
 

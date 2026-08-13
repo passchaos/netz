@@ -1273,21 +1273,32 @@ pub const Frame = union(enum) {
     }
 
     pub fn write(self: Frame, list: *std.ArrayList(u8), allocator: std.mem.Allocator) Error!void {
+        const frame_len = try self.wireLen();
+        try list.ensureUnusedCapacity(allocator, frame_len);
+        try self.writeAssumeCapacity(list);
+    }
+
+    /// Encode this frame into a list that already has enough spare capacity.
+    ///
+    /// Callers on hot packet-construction paths often compute the exact QUIC
+    /// payload length up front.  This helper preserves the same frame
+    /// validation as `write` but avoids a second capacity check and allocator
+    /// dispatch for every individual frame.
+    pub fn writeAssumeCapacity(self: Frame, list: *std.ArrayList(u8)) Error!void {
         switch (self) {
-            .padding => |padding| try appendPadding(list, allocator, padding.len),
-            .ping => try writeSingleByteFrame(list, allocator, @intFromEnum(FrameType.ping)),
-            .ack => |ack| try writeAckFrame(list, allocator, ack),
+            .padding => |padding| appendPaddingAssumeCapacity(list, padding.len),
+            .ping => writeSingleByteFrameAssumeCapacity(list, @intFromEnum(FrameType.ping)),
+            .ack => |ack| try writeAckFrameAssumeCapacity(list, ack),
             .reset_stream => |reset| {
-                try writeTripleVarintFrame(list, allocator, @intFromEnum(FrameType.reset_stream), reset.stream_id, reset.application_error_code, reset.final_size);
+                try writeTripleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.reset_stream), reset.stream_id, reset.application_error_code, reset.final_size);
             },
             .stop_sending => |stop| {
-                try writeDoubleVarintFrame(list, allocator, @intFromEnum(FrameType.stop_sending), stop.stream_id, stop.application_error_code);
+                try writeDoubleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.stop_sending), stop.stream_id, stop.application_error_code);
             },
             .new_token => |new_token| {
                 if (new_token.token.len == 0) return error.InvalidFrame;
-                try writeSingleVarintPayloadFrame(
+                try writeSingleVarintPayloadFrameAssumeCapacity(
                     list,
-                    allocator,
                     @intFromEnum(FrameType.new_token),
                     new_token.token.len,
                     new_token.token,
@@ -1295,9 +1306,8 @@ pub const Frame = union(enum) {
             },
             .crypto => |crypto| {
                 try validateEndOffset(crypto.offset, crypto.data.len);
-                try writeDoubleVarintPayloadFrame(
+                try writeDoubleVarintPayloadFrameAssumeCapacity(
                     list,
-                    allocator,
                     @intFromEnum(FrameType.crypto),
                     crypto.offset,
                     crypto.data.len,
@@ -1306,50 +1316,49 @@ pub const Frame = union(enum) {
             },
             .stream => |stream| {
                 try validateEndOffset(stream.offset, stream.data.len);
-                try writeStreamFrame(list, allocator, stream);
+                try writeStreamFrameAssumeCapacity(list, stream);
             },
             .max_data => |max_data| {
-                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.max_data), max_data.maximum_data);
+                try writeSingleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.max_data), max_data.maximum_data);
             },
             .max_stream_data => |max_stream_data| {
-                try writeDoubleVarintFrame(list, allocator, @intFromEnum(FrameType.max_stream_data), max_stream_data.stream_id, max_stream_data.maximum_stream_data);
+                try writeDoubleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.max_stream_data), max_stream_data.stream_id, max_stream_data.maximum_stream_data);
             },
             .max_streams_bidi => |max_streams| {
                 try validateStreamCount(max_streams.maximum_streams);
-                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.max_streams_bidi), max_streams.maximum_streams);
+                try writeSingleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.max_streams_bidi), max_streams.maximum_streams);
             },
             .max_streams_uni => |max_streams| {
                 try validateStreamCount(max_streams.maximum_streams);
-                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.max_streams_uni), max_streams.maximum_streams);
+                try writeSingleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.max_streams_uni), max_streams.maximum_streams);
             },
-            .data_blocked => |blocked| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.data_blocked), blocked.maximum_data),
+            .data_blocked => |blocked| try writeSingleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.data_blocked), blocked.maximum_data),
             .stream_data_blocked => |blocked| {
-                try writeDoubleVarintFrame(list, allocator, @intFromEnum(FrameType.stream_data_blocked), blocked.stream_id, blocked.maximum_stream_data);
+                try writeDoubleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.stream_data_blocked), blocked.stream_id, blocked.maximum_stream_data);
             },
             .streams_blocked_bidi => |blocked| {
                 try validateStreamCount(blocked.maximum_streams);
-                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.streams_blocked_bidi), blocked.maximum_streams);
+                try writeSingleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.streams_blocked_bidi), blocked.maximum_streams);
             },
             .streams_blocked_uni => |blocked| {
                 try validateStreamCount(blocked.maximum_streams);
-                try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.streams_blocked_uni), blocked.maximum_streams);
+                try writeSingleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.streams_blocked_uni), blocked.maximum_streams);
             },
             .new_connection_id => |new_connection_id| {
                 try validateConnectionIdLen(new_connection_id.connection_id.len);
                 if (new_connection_id.retire_prior_to > new_connection_id.sequence_number) return error.InvalidFrame;
-                try writeNewConnectionIdFrame(list, allocator, new_connection_id);
+                try writeNewConnectionIdFrameAssumeCapacity(list, new_connection_id);
             },
-            .retire_connection_id => |retire| try writeSingleVarintFrame(list, allocator, @intFromEnum(FrameType.retire_connection_id), retire.sequence_number),
+            .retire_connection_id => |retire| try writeSingleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.retire_connection_id), retire.sequence_number),
             .path_challenge => |path| {
-                try writeFixedPathFrame(list, allocator, @intFromEnum(FrameType.path_challenge), path);
+                writeFixedPathFrameAssumeCapacity(list, @intFromEnum(FrameType.path_challenge), path);
             },
             .path_response => |path| {
-                try writeFixedPathFrame(list, allocator, @intFromEnum(FrameType.path_response), path);
+                writeFixedPathFrameAssumeCapacity(list, @intFromEnum(FrameType.path_response), path);
             },
             .connection_close => |close| {
-                try writeTripleVarintPayloadFrame(
+                try writeTripleVarintPayloadFrameAssumeCapacity(
                     list,
-                    allocator,
                     @intFromEnum(FrameType.connection_close),
                     close.error_code,
                     close.frame_type,
@@ -1358,22 +1367,21 @@ pub const Frame = union(enum) {
                 );
             },
             .application_close => |close| {
-                try writeDoubleVarintPayloadFrame(
+                try writeDoubleVarintPayloadFrameAssumeCapacity(
                     list,
-                    allocator,
                     @intFromEnum(FrameType.connection_close_app),
                     close.error_code,
                     close.reason_phrase.len,
                     close.reason_phrase,
                 );
             },
-            .handshake_done => try writeSingleByteFrame(list, allocator, @intFromEnum(FrameType.handshake_done)),
-            .immediate_ack => try writeSingleByteFrame(list, allocator, @intFromEnum(FrameType.immediate_ack)),
+            .handshake_done => writeSingleByteFrameAssumeCapacity(list, @intFromEnum(FrameType.handshake_done)),
+            .immediate_ack => writeSingleByteFrameAssumeCapacity(list, @intFromEnum(FrameType.immediate_ack)),
             .datagram => |datagram| {
-                try writeDatagramFrame(list, allocator, datagram);
+                try writeDatagramFrameAssumeCapacity(list, datagram);
             },
             .ack_frequency => |ack_frequency| {
-                try writeAckFrequencyFrame(list, allocator, ack_frequency);
+                try writeAckFrequencyFrameAssumeCapacity(list, ack_frequency);
             },
         }
     }
@@ -1874,6 +1882,13 @@ pub fn appendPadding(list: *std.ArrayList(u8), allocator: std.mem.Allocator, len
     @memset(list.items[start..], @intFromEnum(FrameType.padding));
 }
 
+fn appendPaddingAssumeCapacity(list: *std.ArrayList(u8), len: usize) void {
+    if (len == 0) return;
+    const start = list.items.len;
+    list.items.len = start + len;
+    @memset(list.items[start..], @intFromEnum(FrameType.padding));
+}
+
 fn writeAckFieldsAssumeCapacity(list: *std.ArrayList(u8), ack: AckFrame) Error!void {
     try appendVarintAssumeCapacity(list, ack.largest_acknowledged);
     try appendVarintAssumeCapacity(list, ack.ack_delay);
@@ -1912,6 +1927,11 @@ fn ackFrameWireLen(ack: AckFrame) Error!usize {
 fn writeAckFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: AckFrame) Error!void {
     const frame_len = try ackFrameWireLen(ack);
     try list.ensureUnusedCapacity(allocator, frame_len);
+    try writeAckFrameAssumeCapacity(list, ack);
+}
+
+fn writeAckFrameAssumeCapacity(list: *std.ArrayList(u8), ack: AckFrame) Error!void {
+    _ = try ackFrameWireLen(ack);
     list.appendAssumeCapacity(if (ack.ecn_counts == null)
         @intFromEnum(FrameType.ack)
     else
@@ -1922,6 +1942,11 @@ fn writeAckFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, ack: Ac
 fn writeSingleByteFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, frame_type: u64) Error!void {
     std.debug.assert(frame_type <= 63);
     try list.ensureUnusedCapacity(allocator, 1);
+    writeSingleByteFrameAssumeCapacity(list, frame_type);
+}
+
+fn writeSingleByteFrameAssumeCapacity(list: *std.ArrayList(u8), frame_type: u64) void {
+    std.debug.assert(frame_type <= 63);
     list.appendAssumeCapacity(@intCast(frame_type));
 }
 
@@ -1945,6 +1970,16 @@ fn writeSingleVarintFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator
     std.debug.assert(frame_type <= 63);
     const value_len = try varint.length(value);
     try list.ensureUnusedCapacity(allocator, 1 + value_len);
+    writeSingleVarintFrameAssumeCapacityWithLen(list, frame_type, value, value_len);
+}
+
+fn writeSingleVarintFrameAssumeCapacity(list: *std.ArrayList(u8), frame_type: u64, value: u64) Error!void {
+    const value_len = try varint.length(value);
+    writeSingleVarintFrameAssumeCapacityWithLen(list, frame_type, value, value_len);
+}
+
+fn writeSingleVarintFrameAssumeCapacityWithLen(list: *std.ArrayList(u8), frame_type: u64, value: u64, value_len: u8) void {
+    std.debug.assert(frame_type <= 63);
     list.appendAssumeCapacity(@intCast(frame_type));
     varint.encodeWithLenAssumeCapacity(list, value, value_len);
 }
@@ -1963,6 +1998,24 @@ fn writeDoubleVarintFrame(
         allocator,
         1 + @as(usize, first_len) + second_len,
     );
+    writeDoubleVarintFrameAssumeCapacityWithLens(list, frame_type, first, second, first_len, second_len);
+}
+
+fn writeDoubleVarintFrameAssumeCapacity(list: *std.ArrayList(u8), frame_type: u64, first: u64, second: u64) Error!void {
+    const first_len = try varint.length(first);
+    const second_len = try varint.length(second);
+    writeDoubleVarintFrameAssumeCapacityWithLens(list, frame_type, first, second, first_len, second_len);
+}
+
+fn writeDoubleVarintFrameAssumeCapacityWithLens(
+    list: *std.ArrayList(u8),
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    first_len: u8,
+    second_len: u8,
+) void {
+    std.debug.assert(frame_type <= 63);
     list.appendAssumeCapacity(@intCast(frame_type));
     varint.encodeWithLenAssumeCapacity(list, first, first_len);
     varint.encodeWithLenAssumeCapacity(list, second, second_len);
@@ -1984,6 +2037,27 @@ fn writeTripleVarintFrame(
         allocator,
         1 + @as(usize, first_len) + second_len + third_len,
     );
+    writeTripleVarintFrameAssumeCapacityWithLens(list, frame_type, first, second, third, first_len, second_len, third_len);
+}
+
+fn writeTripleVarintFrameAssumeCapacity(list: *std.ArrayList(u8), frame_type: u64, first: u64, second: u64, third: u64) Error!void {
+    const first_len = try varint.length(first);
+    const second_len = try varint.length(second);
+    const third_len = try varint.length(third);
+    writeTripleVarintFrameAssumeCapacityWithLens(list, frame_type, first, second, third, first_len, second_len, third_len);
+}
+
+fn writeTripleVarintFrameAssumeCapacityWithLens(
+    list: *std.ArrayList(u8),
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    third: u64,
+    first_len: u8,
+    second_len: u8,
+    third_len: u8,
+) void {
+    std.debug.assert(frame_type <= 63);
     list.appendAssumeCapacity(@intCast(frame_type));
     varint.encodeWithLenAssumeCapacity(list, first, first_len);
     varint.encodeWithLenAssumeCapacity(list, second, second_len);
@@ -2002,6 +2076,26 @@ fn writeSingleVarintPayloadFrame(
         allocator,
         1 + @as(usize, value_len) + payload.len,
     );
+    writeSingleVarintPayloadFrameAssumeCapacityWithLen(list, frame_type, value, payload, value_len);
+}
+
+fn writeSingleVarintPayloadFrameAssumeCapacity(
+    list: *std.ArrayList(u8),
+    frame_type: u64,
+    value: u64,
+    payload: []const u8,
+) Error!void {
+    const value_len = try varint.length(value);
+    writeSingleVarintPayloadFrameAssumeCapacityWithLen(list, frame_type, value, payload, value_len);
+}
+
+fn writeSingleVarintPayloadFrameAssumeCapacityWithLen(
+    list: *std.ArrayList(u8),
+    frame_type: u64,
+    value: u64,
+    payload: []const u8,
+    value_len: u8,
+) void {
     list.appendAssumeCapacity(@intCast(frame_type));
     varint.encodeWithLenAssumeCapacity(list, value, value_len);
     list.appendSliceAssumeCapacity(payload);
@@ -2021,6 +2115,30 @@ fn writeDoubleVarintPayloadFrame(
         allocator,
         1 + @as(usize, first_len) + second_len + payload.len,
     );
+    writeDoubleVarintPayloadFrameAssumeCapacityWithLens(list, frame_type, first, second, payload, first_len, second_len);
+}
+
+fn writeDoubleVarintPayloadFrameAssumeCapacity(
+    list: *std.ArrayList(u8),
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    payload: []const u8,
+) Error!void {
+    const first_len = try varint.length(first);
+    const second_len = try varint.length(second);
+    writeDoubleVarintPayloadFrameAssumeCapacityWithLens(list, frame_type, first, second, payload, first_len, second_len);
+}
+
+fn writeDoubleVarintPayloadFrameAssumeCapacityWithLens(
+    list: *std.ArrayList(u8),
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    payload: []const u8,
+    first_len: u8,
+    second_len: u8,
+) void {
     list.appendAssumeCapacity(@intCast(frame_type));
     varint.encodeWithLenAssumeCapacity(list, first, first_len);
     varint.encodeWithLenAssumeCapacity(list, second, second_len);
@@ -2043,6 +2161,34 @@ fn writeTripleVarintPayloadFrame(
         allocator,
         1 + @as(usize, first_len) + second_len + third_len + payload.len,
     );
+    writeTripleVarintPayloadFrameAssumeCapacityWithLens(list, frame_type, first, second, third, payload, first_len, second_len, third_len);
+}
+
+fn writeTripleVarintPayloadFrameAssumeCapacity(
+    list: *std.ArrayList(u8),
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    third: u64,
+    payload: []const u8,
+) Error!void {
+    const first_len = try varint.length(first);
+    const second_len = try varint.length(second);
+    const third_len = try varint.length(third);
+    writeTripleVarintPayloadFrameAssumeCapacityWithLens(list, frame_type, first, second, third, payload, first_len, second_len, third_len);
+}
+
+fn writeTripleVarintPayloadFrameAssumeCapacityWithLens(
+    list: *std.ArrayList(u8),
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    third: u64,
+    payload: []const u8,
+    first_len: u8,
+    second_len: u8,
+    third_len: u8,
+) void {
     list.appendAssumeCapacity(@intCast(frame_type));
     varint.encodeWithLenAssumeCapacity(list, first, first_len);
     varint.encodeWithLenAssumeCapacity(list, second, second_len);
@@ -2057,14 +2203,26 @@ fn writeDatagramFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, da
             allocator,
             1 + @as(usize, data_len_len) + datagram.data.len,
         );
-        list.appendAssumeCapacity(@intFromEnum(FrameType.datagram_len));
-        varint.encodeWithLenAssumeCapacity(
-            list,
-            datagram.data.len,
-            data_len_len,
-        );
+        writeDatagramFrameAssumeCapacityWithLen(list, datagram, data_len_len);
     } else {
         try list.ensureUnusedCapacity(allocator, 1 + datagram.data.len);
+        writeDatagramFrameAssumeCapacityWithLen(list, datagram, 0);
+    }
+}
+
+fn writeDatagramFrameAssumeCapacity(list: *std.ArrayList(u8), datagram: DatagramFrame) Error!void {
+    const data_len_len = if (datagram.length_present)
+        try varint.length(datagram.data.len)
+    else
+        0;
+    writeDatagramFrameAssumeCapacityWithLen(list, datagram, data_len_len);
+}
+
+fn writeDatagramFrameAssumeCapacityWithLen(list: *std.ArrayList(u8), datagram: DatagramFrame, data_len_len: u8) void {
+    if (datagram.length_present) {
+        list.appendAssumeCapacity(@intFromEnum(FrameType.datagram_len));
+        varint.encodeWithLenAssumeCapacity(list, datagram.data.len, data_len_len);
+    } else {
         list.appendAssumeCapacity(@intFromEnum(FrameType.datagram));
     }
     list.appendSliceAssumeCapacity(datagram.data);
@@ -2078,6 +2236,16 @@ fn writeNewConnectionIdFrame(list: *std.ArrayList(u8), allocator: std.mem.Alloca
         2 + @as(usize, sequence_len) + retire_len +
             frame.connection_id.len + frame.stateless_reset_token.len,
     );
+    writeNewConnectionIdFrameAssumeCapacityWithLens(list, frame, sequence_len, retire_len);
+}
+
+fn writeNewConnectionIdFrameAssumeCapacity(list: *std.ArrayList(u8), frame: NewConnectionIdFrame) Error!void {
+    const sequence_len = try varint.length(frame.sequence_number);
+    const retire_len = try varint.length(frame.retire_prior_to);
+    writeNewConnectionIdFrameAssumeCapacityWithLens(list, frame, sequence_len, retire_len);
+}
+
+fn writeNewConnectionIdFrameAssumeCapacityWithLens(list: *std.ArrayList(u8), frame: NewConnectionIdFrame, sequence_len: u8, retire_len: u8) void {
     list.appendAssumeCapacity(@intFromEnum(FrameType.new_connection_id));
     varint.encodeWithLenAssumeCapacity(
         list,
@@ -2098,6 +2266,12 @@ fn writeFixedPathFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, f
     std.debug.assert(frame_type == @intFromEnum(FrameType.path_challenge) or
         frame_type == @intFromEnum(FrameType.path_response));
     try list.ensureUnusedCapacity(allocator, 9);
+    writeFixedPathFrameAssumeCapacity(list, frame_type, frame);
+}
+
+fn writeFixedPathFrameAssumeCapacity(list: *std.ArrayList(u8), frame_type: u64, frame: PathFrame) void {
+    std.debug.assert(frame_type == @intFromEnum(FrameType.path_challenge) or
+        frame_type == @intFromEnum(FrameType.path_response));
     list.appendAssumeCapacity(@intCast(frame_type));
     list.appendSliceAssumeCapacity(&frame.data);
 }
@@ -2113,6 +2287,26 @@ fn writeAckFrequencyFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator
         2 + @as(usize, sequence_len) + threshold_len +
             max_ack_delay_len + reordering_len,
     );
+    writeAckFrequencyFrameAssumeCapacityWithLens(list, frame, sequence_len, threshold_len, max_ack_delay_len, reordering_len);
+}
+
+fn writeAckFrequencyFrameAssumeCapacity(list: *std.ArrayList(u8), frame: AckFrequencyFrame) Error!void {
+    try validateAckFrequencyFrame(frame);
+    const sequence_len = try varint.length(frame.sequence_number);
+    const threshold_len = try varint.length(frame.ack_eliciting_threshold);
+    const max_ack_delay_len = try varint.length(frame.request_max_ack_delay);
+    const reordering_len = try varint.length(frame.reordering_threshold);
+    writeAckFrequencyFrameAssumeCapacityWithLens(list, frame, sequence_len, threshold_len, max_ack_delay_len, reordering_len);
+}
+
+fn writeAckFrequencyFrameAssumeCapacityWithLens(
+    list: *std.ArrayList(u8),
+    frame: AckFrequencyFrame,
+    sequence_len: u8,
+    threshold_len: u8,
+    max_ack_delay_len: u8,
+    reordering_len: u8,
+) void {
     list.appendAssumeCapacity(0x40);
     list.appendAssumeCapacity(@intCast(@intFromEnum(FrameType.ack_frequency)));
     varint.encodeWithLenAssumeCapacity(
@@ -2148,7 +2342,20 @@ fn writeStreamFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, stre
         allocator,
         1 + @as(usize, stream_id_len) + offset_len + data_len_len + stream.data.len,
     );
+    writeStreamFrameAssumeCapacityWithLens(list, stream, stream_id_len, @intCast(offset_len), data_len_len);
+}
 
+fn writeStreamFrameAssumeCapacity(list: *std.ArrayList(u8), stream: StreamFrame) Error!void {
+    const stream_id_len = try varint.length(stream.stream_id);
+    const offset_len = if (stream.offset == 0)
+        0
+    else
+        try varint.length(stream.offset);
+    const data_len_len = try varint.length(stream.data.len);
+    writeStreamFrameAssumeCapacityWithLens(list, stream, stream_id_len, @intCast(offset_len), data_len_len);
+}
+
+fn writeStreamFrameAssumeCapacityWithLens(list: *std.ArrayList(u8), stream: StreamFrame, stream_id_len: u8, offset_len: u8, data_len_len: u8) void {
     var frame_type: u8 = @intCast(@intFromEnum(FrameType.stream) | 0x02); // always include Length for unambiguous composition.
     if (stream.offset != 0) frame_type |= 0x04;
     if (stream.fin) frame_type |= 0x01;
@@ -3248,6 +3455,13 @@ test "QUIC frame wire lengths match encoders for every variant" {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(allocator);
         try frame.write(&encoded, allocator);
-        try std.testing.expectEqual(encoded.items.len, try frame.wireLen());
+        const frame_len = try frame.wireLen();
+        try std.testing.expectEqual(encoded.items.len, frame_len);
+
+        const assume_storage = try allocator.alloc(u8, frame_len);
+        defer allocator.free(assume_storage);
+        var assume_encoded = std.ArrayList(u8).initBuffer(assume_storage);
+        try frame.writeAssumeCapacity(&assume_encoded);
+        try std.testing.expectEqualSlices(u8, encoded.items, assume_encoded.items);
     }
 }
