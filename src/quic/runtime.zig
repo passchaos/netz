@@ -19,6 +19,15 @@ pub const ReceiveTimeoutError = Error ||
 pub const Limits = struct {
     max_datagram_size: usize = 65_535,
     max_frames_per_datagram: usize = 256,
+    /// Best-effort SO_RCVBUF target for UDP sockets.
+    ///
+    /// High-throughput QUIC workloads can burst many datagrams before the peer
+    /// gets scheduled to drain its socket. A larger kernel receive queue avoids
+    /// local benchmark drops that would otherwise force PTO recovery or leave
+    /// simple blocking examples waiting for a response the kernel discarded.
+    /// The kernel may clamp or double this value; unsupported platforms ignore
+    /// it.
+    socket_receive_buffer_bytes: usize = 4 * 1024 * 1024,
     /// Use Linux UDP_SEGMENT when a batch is already laid out as compatible
     /// contiguous segments. Unsupported kernels still fall back automatically.
     enable_gso_send: bool = true,
@@ -127,6 +136,7 @@ pub const Endpoint = struct {
             .gso_send_enabled = limits.enable_gso_send and udpGsoSupported(),
         };
         errdefer endpoint.deinit();
+        endpoint.configureSocketReceiveBuffer();
         endpoint.enableEcnReceive();
         endpoint.enableGroReceive();
         return endpoint;
@@ -701,6 +711,20 @@ pub const Endpoint = struct {
             .ip4 => rawSetSockOpt(self.socket.handle, ipproto_ip, ip_recvtos, enabled_bytes),
             .ip6 => rawSetSockOpt(self.socket.handle, ipproto_ipv6, ipv6_recvtclass, enabled_bytes),
         };
+    }
+
+    fn configureSocketReceiveBuffer(self: *Endpoint) void {
+        if (self.limits.socket_receive_buffer_bytes == 0) return;
+        const size: u32 = std.math.cast(
+            u32,
+            self.limits.socket_receive_buffer_bytes,
+        ) orelse std.math.maxInt(u32);
+        _ = rawSetSockOpt(
+            self.socket.handle,
+            std.posix.SOL.SOCKET,
+            std.posix.SO.RCVBUF,
+            std.mem.asBytes(&size),
+        );
     }
 
     fn enableGroReceive(self: *Endpoint) void {

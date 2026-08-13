@@ -385,7 +385,7 @@ const ConnectionPacketCursor = struct {
             self.batch = null;
         }
         if (!connection.endpoint.groReceiveEnabled()) {
-            var packet = try connection.receivePacket();
+            var packet = try connection.receivePacketServicingTimers();
             errdefer packet.deinit(connection.endpoint.allocator);
             _ = connection.sendAckForPacketsIfNeeded(
                 @as(*const [1]quic.one_rtt.ReceivedPacket, &packet),
@@ -10008,14 +10008,35 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
     // zero carries the stream type varint; subsequent frames on an already
     // registered critical stream contain only that stream's payload.
     if ((stream.stream_id & 0x02) == 0) return false;
+    const stream_offset = std.math.cast(usize, stream.offset) orelse
+        return error.InvalidStreamRange;
+    const stream_end = std.math.add(
+        usize,
+        stream_offset,
+        stream.data.len,
+    ) catch return error.InvalidStreamRange;
     if (isRegisteredCriticalStream(control.*, stream.stream_id)) {
         try rejectClosedCriticalStream(stream);
     }
-    if (stream.offset != 0) {
-        if (control.peer_control_stream_id != null and control.peer_control_stream_id.? == stream.stream_id) {
-            try control.applyControlPayload(allocator, stream.data);
+    if (control.peer_control_stream_id != null and
+        control.peer_control_stream_id.? == stream.stream_id)
+    {
+        if (stream_end <= control.peer_control_stream_consumed_offset) {
             return true;
         }
+        if (stream_offset > control.peer_control_stream_consumed_offset) {
+            return error.BufferTooShort;
+        }
+        const payload_start =
+            control.peer_control_stream_consumed_offset - stream_offset;
+        try control.applyControlPayload(
+            allocator,
+            stream.data[payload_start..],
+        );
+        control.peer_control_stream_consumed_offset = stream_end;
+        return true;
+    }
+    if (stream.offset != 0) {
         if ((control.peer_qpack_encoder_stream_id != null and control.peer_qpack_encoder_stream_id.? == stream.stream_id) or
             (control.peer_qpack_decoder_stream_id != null and control.peer_qpack_decoder_stream_id.? == stream.stream_id))
         {
@@ -10032,7 +10053,17 @@ fn applyControlStreamFrame(control: *http3.ControlState, allocator: std.mem.Allo
         .control => {
             try rejectClosedCriticalStream(stream);
             try control.registerControlStream(stream.stream_id);
-            try control.applyControlPayload(allocator, stream.data[prefix_cursor.pos..]);
+            const apply_start = @max(
+                prefix_cursor.pos,
+                control.peer_control_stream_consumed_offset,
+            );
+            if (apply_start < stream.data.len) {
+                try control.applyControlPayload(
+                    allocator,
+                    stream.data[apply_start..],
+                );
+            }
+            control.peer_control_stream_consumed_offset = stream_end;
         },
         .qpack_encoder, .qpack_decoder => {
             try rejectClosedCriticalStream(stream);
@@ -10321,13 +10352,14 @@ test "HTTP/3 client rejects server-only control frames" {
     }, .server));
     try std.testing.expectEqual(@as(?u64, 1), server_control.peer_goaway_id);
 
+    const next_control_offset = stream_bytes.items.len;
     stream_bytes.clearRetainingCapacity();
     goaway_payload.clearRetainingCapacity();
     try quic.varint.encode(&goaway_payload, allocator, 0);
     try (http3.Frame{ .frame_type = http3.FrameType.goaway, .payload = goaway_payload.items, .consumed = 0 }).write(&stream_bytes, allocator);
     try std.testing.expect(try applyControlStreamFrameForRole(&server_control, allocator, .{
         .stream_id = 2,
-        .offset = 1,
+        .offset = next_control_offset,
         .fin = false,
         .data = stream_bytes.items,
     }, .server));

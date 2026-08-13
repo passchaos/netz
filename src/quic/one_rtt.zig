@@ -500,6 +500,7 @@ pub const TimerDeadline = struct {
 
 pub const anti_amplification_multiplier: usize = 3;
 const max_short_packet_overhead: usize = 1 + 20 + 4 + quic.protection.aead_tag_len;
+const timer_blocked_receive_backoff_ns: u64 = std.time.ns_per_ms;
 
 pub const Connection = struct {
     endpoint: *quic.runtime.Endpoint,
@@ -2283,14 +2284,15 @@ pub const Connection = struct {
             }
             _ = self.applyPersistentCongestionIfDetected();
         }
+        var retransmitted = false;
         for (self.sent.packets.items) |packet| {
             if (!packet.lost) continue;
             const candidate = self.recovery.packetNumberCandidate(packet.packet_number) orelse continue;
             if (candidate.packet_number != packet.packet_number) continue;
             try self.retransmitCandidate(candidate, .congestion_controlled);
-            return true;
+            retransmitted = true;
         }
-        return false;
+        return retransmitted;
     }
 
     pub fn timeThresholdLossDeadline(self: Connection, loss_delay_ns: u64) ?u64 {
@@ -3430,6 +3432,111 @@ pub const Connection = struct {
 
     pub fn receivePacket(self: *Connection) Error!ReceivedPacket {
         return self.receivePacketAt(self.monotonicNowNs());
+    }
+
+    /// Receive one packet while continuing to service QUIC timers.
+    ///
+    /// Blocking HTTP/3 helpers use this when they are waiting for ACK,
+    /// MAX_STREAM_DATA, or response progress.  A plain blocking socket read can
+    /// deadlock if the next action is local timer work (ACK-delay expiry, PTO
+    /// retransmission, loss detection, keep-alive, or idle timeout) rather than
+    /// an already queued datagram.  This helper arms the socket receive with
+    /// the next transport deadline, services the timer on timeout, and then
+    /// resumes waiting.
+    pub fn receivePacketServicingTimers(self: *Connection) Error!ReceivedPacket {
+        while (true) {
+            const timer = self.nextTimerDeadline() orelse
+                return self.receivePacket();
+            const now_ns = self.monotonicNowNs();
+            if (now_ns >= timer.deadline_ns) {
+                if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
+                    continue;
+                }
+                if (try self.receivePacketAfterBlockedTimer(now_ns)) |packet| {
+                    return packet;
+                }
+                continue;
+            }
+            const deadline_ns_i96 = std.math.cast(
+                i96,
+                timer.deadline_ns,
+            ) orelse std.math.maxInt(i96);
+            var datagram = self.endpoint.receiveBytesTimeout(.{ .deadline = .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(deadline_ns_i96),
+            } }) catch |err| switch (err) {
+                error.Timeout => {
+                    const timeout_ns = self.monotonicNowNs();
+                    if (!try self.serviceNextTimerForBlockingReceive(
+                        timeout_ns,
+                    )) {
+                        if (try self.receivePacketAfterBlockedTimer(
+                            timeout_ns,
+                        )) |packet| {
+                            return packet;
+                        }
+                    }
+                    continue;
+                },
+                // Some std.Io backends cannot provide a timed network wait.
+                // Preserve correctness by falling back to the existing
+                // blocking receive path on those platforms.
+                error.ConcurrencyUnavailable => return self.receivePacket(),
+                else => |other| return @errorCast(other),
+            };
+            defer datagram.deinit(self.endpoint.allocator);
+            return try self.processReceivedBytesAt(
+                datagram.from,
+                datagram.bytes,
+                datagram.ecn,
+                self.monotonicNowNs(),
+            );
+        }
+    }
+
+    fn serviceNextTimerForBlockingReceive(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!bool {
+        _ = self.serviceNextTimerAt(now_ns) catch |err| switch (err) {
+            error.CongestionLimited => return false,
+            error.PacingLimited => {
+                try self.waitForPacing(now_ns);
+                return true;
+            },
+            else => |other| return other,
+        };
+        return true;
+    }
+
+    fn receivePacketAfterBlockedTimer(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!?ReceivedPacket {
+        const deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            timer_blocked_receive_backoff_ns,
+        ) catch std.math.maxInt(u64);
+        const deadline_ns_i96 = std.math.cast(
+            i96,
+            deadline_ns,
+        ) orelse std.math.maxInt(i96);
+        var datagram = self.endpoint.receiveBytesTimeout(.{ .deadline = .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(deadline_ns_i96),
+        } }) catch |err| switch (err) {
+            error.Timeout => return null,
+            error.ConcurrencyUnavailable => return try self.receivePacket(),
+            else => |other| return @errorCast(other),
+        };
+        defer datagram.deinit(self.endpoint.allocator);
+        return try self.processReceivedBytesAt(
+            datagram.from,
+            datagram.bytes,
+            datagram.ecn,
+            self.monotonicNowNs(),
+        );
     }
 
     pub fn receivePacketOrDropAfterClose(self: *Connection) Error!?ReceivedPacket {

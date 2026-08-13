@@ -771,6 +771,12 @@ pub const ControlState = struct {
     peer_cancelled_push_ids: std.ArrayList(u64) = .empty,
     push_cancellation_generation: u64 = 0,
     peer_control_stream_id: ?u64 = null,
+    /// Absolute QUIC stream offset through which peer control bytes have been
+    /// applied to this HTTP/3 control state. QUIC may retransmit STREAM ranges
+    /// under new packet numbers; without this cursor, a duplicate offset-zero
+    /// control frame would re-apply SETTINGS and incorrectly surface as
+    /// H3_SETTINGS_ERROR.
+    peer_control_stream_consumed_offset: usize = 0,
     latest_priority_update: ?PriorityUpdatePayload = null,
     latest_priority_update_type: ?u64 = null,
     priority_updates: std.ArrayList(StoredPriorityUpdate) = .empty,
@@ -778,6 +784,8 @@ pub const ControlState = struct {
     priority_update_generation: u64 = 0,
     peer_qpack_encoder_stream_id: ?u64 = null,
     peer_qpack_decoder_stream_id: ?u64 = null,
+    peer_qpack_encoder_stream_consumed_offset: usize = 0,
+    peer_qpack_decoder_stream_consumed_offset: usize = 0,
     peer_cancelled_push_index: std.AutoHashMapUnmanaged(u64, void) = .empty,
 
     pub fn deinit(self: *ControlState, allocator: std.mem.Allocator) void {

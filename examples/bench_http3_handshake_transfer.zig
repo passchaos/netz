@@ -4,11 +4,12 @@ const netz = @import("netz");
 const default_iterations: usize = 1;
 const default_body_bytes: usize = 64 * 1024;
 const default_max_stream_frame_data: usize = 1024;
-const default_max_stream_buffer: usize = 64 * 1024;
+const min_stream_buffer: usize = 2 * 1024 * 1024;
 const default_streams: usize = 1;
 const max_streams: usize = 128;
 const default_round_robin_chunk_bytes: usize = 64 * 1024;
 const default_endpoint_datagram_size: usize = 4096;
+const benchmark_min_flow_control_bytes: u64 = 256 * 1024 * 1024;
 const single_stream_one_rtt_datagram_size: usize = 8192;
 const single_stream_paced_body_chunk_bytes: usize = 7200;
 const multi_stream_one_rtt_datagram_size: usize = 4096;
@@ -153,7 +154,12 @@ fn runIteration(
     const endpoint_datagram_size = transferEndpointDatagramSize(config);
     const one_rtt_datagram_size = transferOneRttDatagramSize(config);
     const paced_body_chunk_bytes = transferPacedBodyChunkBytes(config);
+    const round_robin_chunk_bytes = transferRoundRobinChunkBytes(config);
+    const stream_buffer = transferStreamBufferBytes(config);
+    const transport_parameters = transferTransportParameters(config);
     const enable_data_prefix_fast_path = config.streams == 1;
+    const enable_hystart = config.enable_hystart orelse (config.streams != 1);
+    const enable_pacing = config.enable_pacing;
 
     traceIteration(config, iteration, "bind server");
     var server_cid = [_]u8{ 0x44, 0x45, 0x46, 0x47 };
@@ -166,13 +172,14 @@ fn runIteration(
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
-                .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size, .enable_hystart = config.streams != 1 },
+                .local_transport_parameters = transport_parameters,
+                .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size, .enable_hystart = enable_hystart, .enable_pacing = enable_pacing },
                 .random = [_]u8{0x31} ** 32,
                 .x25519_secret_key = [_]u8{0x32} ** 32,
                 .max_crypto_buffer = 64 * 1024,
             },
             .session = .{
-                .max_stream_buffer = default_max_stream_buffer,
+                .max_stream_buffer = stream_buffer,
                 .max_stream_frame_data = config.max_stream_frame_data,
                 .paced_body_chunk_bytes = paced_body_chunk_bytes,
                 .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
@@ -213,6 +220,8 @@ fn runIteration(
                         &session,
                         shared.body_bytes,
                         shared.streams,
+                        shared.trace,
+                        shared.iteration,
                     );
                     if (shared.trace) std.debug.print("  [iter {d}] server upload done\n", .{shared.iteration});
                 },
@@ -231,7 +240,7 @@ fn runIteration(
         .server = &server,
         .body_bytes = config.body_bytes,
         .streams = config.streams,
-        .round_robin_chunk_bytes = config.round_robin_chunk_bytes,
+        .round_robin_chunk_bytes = round_robin_chunk_bytes,
         .mode = config.mode,
         .body = transfer_body,
         .trace = config.trace_iteration,
@@ -257,12 +266,13 @@ fn runIteration(
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &local_cid,
                 .server_name = "localhost",
-                .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size, .enable_hystart = config.streams != 1 },
+                .local_transport_parameters = transport_parameters,
+                .initial_one_rtt_config = .{ .max_datagram_size = one_rtt_datagram_size, .enable_hystart = enable_hystart, .enable_pacing = enable_pacing },
                 .max_crypto_buffer = 64 * 1024,
                 .handshake_recovery = .{ .initial_pto_ms = 250, .max_pto_ms = 2000, .max_retries = 4, .max_duration_ms = 10_000 },
             },
             .session = .{
-                .max_stream_buffer = default_max_stream_buffer,
+                .max_stream_buffer = stream_buffer,
                 .max_stream_frame_data = config.max_stream_frame_data,
                 .paced_body_chunk_bytes = paced_body_chunk_bytes,
                 .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
@@ -291,7 +301,7 @@ fn runIteration(
                 &client,
                 config.body_bytes,
                 config.streams,
-                config.round_robin_chunk_bytes,
+                round_robin_chunk_bytes,
             );
             result.status_total += download.status;
             result.bytes_total += download.bytes;
@@ -309,6 +319,8 @@ fn serveUpload(
     session: *netz.http3.runtime.HandshakeServerSession,
     body_bytes: usize,
     streams: usize,
+    trace: bool,
+    iteration: usize,
 ) !void {
     const allocator = session.established.connection.endpoint.allocator;
     const stream_ids = try receiveUploadBodies(
@@ -316,6 +328,8 @@ fn serveUpload(
         session,
         body_bytes,
         streams,
+        trace,
+        iteration,
     );
     defer allocator.free(stream_ids);
     for (stream_ids) |stream_id| {
@@ -332,6 +346,8 @@ fn receiveUploadBodies(
     session: *netz.http3.runtime.HandshakeServerSession,
     body_bytes: usize,
     streams: usize,
+    trace: bool,
+    iteration: usize,
 ) ![]u62 {
     const stream_ids = try allocator.alloc(u62, streams);
     errdefer allocator.free(stream_ids);
@@ -367,6 +383,12 @@ fn receiveUploadBodies(
                 expected[seen_count] = content_length;
                 total_expected += content_length;
                 if (total_expected > body_bytes) return error.InvalidFrame;
+                if (trace) {
+                    std.debug.print(
+                        "  [iter {d}] server upload head stream_id={d} index={d} length={d}\n",
+                        .{ iteration, message.stream_id, seen_count, content_length },
+                    );
+                }
                 seen_count += 1;
             },
             .data_available => {
@@ -378,6 +400,15 @@ fn receiveUploadBodies(
                 if (read[index] > expected[index] or total_read > body_bytes) {
                     return error.InvalidFrame;
                 }
+                if (trace and
+                    (read[index] == expected[index] or
+                        read[index] % (256 * 1024) == 0))
+                {
+                    std.debug.print(
+                        "  [iter {d}] server upload data stream={d} read={d}/{d} total={d}/{d}\n",
+                        .{ iteration, index, read[index], expected[index], total_read, body_bytes },
+                    );
+                }
             },
             .finished => {
                 const index = findStreamIndex(stream_ids[0..seen_count], message.stream_id) orelse
@@ -387,6 +418,12 @@ fn receiveUploadBodies(
                 }
                 finished[index] = true;
                 finished_count += 1;
+                if (trace) {
+                    std.debug.print(
+                        "  [iter {d}] server upload finished stream={d} count={d}/{d}\n",
+                        .{ iteration, index, finished_count, streams },
+                    );
+                }
             },
             .push_promise, .trailers => return error.InvalidFrame,
         }
@@ -468,7 +505,7 @@ fn runUploadClient(
 ) !usize {
     const body_bytes = config.body_bytes;
     const streams = config.streams;
-    const round_robin_chunk_bytes = config.round_robin_chunk_bytes;
+    const round_robin_chunk_bytes = transferRoundRobinChunkBytes(config);
     traceIteration(config, iteration, "upload open streams");
     const stream_ids = try allocator.alloc(u62, streams);
     defer allocator.free(stream_ids);
@@ -696,6 +733,44 @@ fn transferPacedBodyChunkBytes(config: Config) usize {
         if (config.streams == 1) single_stream_paced_body_chunk_bytes else multi_stream_paced_body_chunk_bytes;
 }
 
+fn transferRoundRobinChunkBytes(config: Config) usize {
+    return config.round_robin_chunk_bytes orelse default_round_robin_chunk_bytes;
+}
+
+fn transferStreamBufferBytes(config: Config) usize {
+    const max_per_stream = transferBytesForStream(config.body_bytes, config.streams, 0);
+    const frame_slack = @max(config.max_stream_frame_data, 64 * 1024);
+    const desired = max_per_stream +| frame_slack;
+    return @max(min_stream_buffer, desired);
+}
+
+fn transferTransportParameters(config: Config) netz.quic.TransportParameters {
+    var params = netz.quic.practical_transport_parameters;
+    const flow_control_bytes = transferFlowControlBytes(config);
+    // The throughput benchmark should measure packetization, congestion, and
+    // HTTP/3 body movement, not repeated small-window MAX_DATA turnarounds.
+    // quicz's comparable benchmarks advertise 256MiB receive windows; keep the
+    // same floor here while scaling above it for larger local experiments.
+    params.initial_max_data = flow_control_bytes;
+    params.initial_max_stream_data_bidi_local = flow_control_bytes;
+    params.initial_max_stream_data_bidi_remote = flow_control_bytes;
+    params.initial_max_stream_data_uni = flow_control_bytes;
+    params.initial_max_streams_bidi = max_streams;
+    params.initial_max_streams_uni = max_streams;
+    return params;
+}
+
+fn transferFlowControlBytes(config: Config) u64 {
+    const body_bytes = std.math.cast(u64, config.body_bytes) orelse
+        netz.quic.varint.max_value;
+    const slack = @max(@as(u64, 1024 * 1024), body_bytes / 8);
+    const desired = body_bytes +| slack;
+    return @min(
+        @max(benchmark_min_flow_control_bytes, desired),
+        netz.quic.varint.max_value,
+    );
+}
+
 const CountingAllocator = struct {
     backing: std.mem.Allocator,
     current_bytes: usize = 0,
@@ -819,13 +894,15 @@ const Config = struct {
     body_bytes: usize = default_body_bytes,
     max_stream_frame_data: usize = default_max_stream_frame_data,
     streams: usize = default_streams,
-    round_robin_chunk_bytes: usize = default_round_robin_chunk_bytes,
+    round_robin_chunk_bytes: ?usize = null,
     one_rtt_datagram_size: ?usize = null,
     paced_body_chunk_bytes: ?usize = null,
     mode: Mode = .upload,
     stats: bool = false,
     verbose: bool = false,
     trace_iteration: bool = false,
+    enable_hystart: ?bool = null,
+    enable_pacing: bool = true,
 };
 
 fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
@@ -856,6 +933,12 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--trace-iteration")) {
             config.trace_iteration = true;
+        } else if (std.mem.eql(u8, arg, "--disable-hystart")) {
+            config.enable_hystart = false;
+        } else if (std.mem.eql(u8, arg, "--enable-hystart")) {
+            config.enable_hystart = true;
+        } else if (std.mem.eql(u8, arg, "--disable-pacing")) {
+            config.enable_pacing = false;
         } else {
             return error.InvalidArgument;
         }
