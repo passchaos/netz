@@ -7483,6 +7483,7 @@ const OutboundBodySet = struct {
     last_entry_index: ?usize = null,
     entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     frame_scratch: std.ArrayList(quic.Frame) = .empty,
+    payload_scratch: std.ArrayList(u8) = .empty,
     max_streams: usize,
 
     fn init(
@@ -7493,6 +7494,7 @@ const OutboundBodySet = struct {
     }
 
     fn deinit(self: *OutboundBodySet) void {
+        self.payload_scratch.deinit(self.allocator);
         self.frame_scratch.deinit(self.allocator);
         self.entries.deinit(self.allocator);
         self.entry_index.deinit(self.allocator);
@@ -8339,13 +8341,16 @@ fn sendConnectionBodyChunk(
         return;
     }
 
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(connection.endpoint.allocator);
-    try writeDataFrame(&payload, connection.endpoint.allocator, data);
+    bodies.payload_scratch.clearRetainingCapacity();
+    try writeDataFrame(
+        &bodies.payload_scratch,
+        connection.endpoint.allocator,
+        data,
+    );
     try entry.send.appendFrames(
         &bodies.frame_scratch,
         connection.endpoint.allocator,
-        payload.items,
+        bodies.payload_scratch.items,
         options.max_stream_frame_data,
         fin,
     );
