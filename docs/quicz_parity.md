@@ -29,6 +29,7 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=download --streams=4 --verbose
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
+zig build bench-quic-datagram -Doptimize=ReleaseFast
 ```
 
 ## Current direct `~/Work/quicz` comparison
@@ -41,6 +42,7 @@ quicz Stream Upload:       217.22 MB/s mean, 4.7% stddev, 5 x 64 MiB
 quicz Multi-Stream (4x):   244.57 MB/s mean, 3.0% stddev, 5 x 64 MiB
 quicz Echo Latency:        P50 10.7us, P99 23.7us, P99.9 283.6us
 quicz DATAGRAM:            228.01 MB/s, 1200B payload
+netz QUIC DATAGRAM:        297.06 MiB/s, 1200B payload, 16 MiB transfer
 ```
 
 The closest currently validated netz run is HTTP/3-over-QUIC rather than raw
@@ -57,7 +59,7 @@ QUIC throughput.
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
 | QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered for local preconfigured 1-RTT smoke | `examples/quic_echo.zig`, `zig build run-quic-echo` | Add a TLS-handshake echo variant if needed for user-facing demos. |
-| QUIC DATAGRAM (`datagram_echo`, `quic_bench_datagram`) | Covered for local preconfigured 1-RTT smoke and WebTransport benchmark | `examples/quic_datagram_echo.zig`, `examples/bench_webtransport_datagram.zig`, `zig build run-quic-datagram-echo` | Add raw QUIC DATAGRAM throughput benchmark if performance parity with `quic_bench_datagram` becomes a target. |
+| QUIC DATAGRAM (`datagram_echo`, `quic_bench_datagram`) | Covered and faster than current quicz DATAGRAM sample | `examples/quic_datagram_echo.zig`, `examples/bench_quic_datagram.zig`, `examples/bench_webtransport_datagram.zig`, `zig build run-quic-datagram-echo`, `zig build bench-quic-datagram -Doptimize=ReleaseFast` | Keep raw and WebTransport DATAGRAM benchmarks in the comparison matrix. |
 | Graceful/application close (`graceful_close`, close lifecycle) | Covered for local preconfigured 1-RTT smoke and tests | `examples/quic_close.zig`, one_rtt lifecycle tests, `zig build run-quic-close` | Add a full client/server CLI-style close demo only if external manual interop requires it. |
 | Packet protection / initial keys / key update | Covered by modules and tests | `src/quic/protection.zig`, `src/quic/zero_rtt`, `src/quic/one_rtt/tests/crypto_path.zig`, `zig build test` | Keep vector coverage current as TLS suites evolve. |
 | Loss recovery / PTO / retransmission | Partially covered and improved | `src/quic/recovery.zig`, `src/quic/one_rtt/tests/recovery_flow.zig`, commits covering orphan PTO and response retransmit | Continue investigating long-run 100% CPU busy loops seen in aggressive HTTP/3 transfer settings. |
@@ -96,7 +98,8 @@ QUIC throughput.
 ## Next recommended work
 
 1. Run longer repeated 64MiB download/upload matrices and compare the numbers
-   directly with the relevant `~/Work/quicz` benchmarks.
+   directly with the relevant `~/Work/quicz` benchmarks; DATAGRAM now has a
+   raw benchmark where netz exceeds the captured quicz sample.
 2. Investigate the aggressive receive batching path so HTTP/3 can safely use
    GRO without stalls.
 3. Isolate the remaining long-run busy-loop cases seen with larger packet/body

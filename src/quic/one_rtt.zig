@@ -3635,6 +3635,31 @@ pub const Connection = struct {
         return try self.processReceivedBytesAt(datagram.from, datagram.bytes, datagram.ecn, now_ns);
     }
 
+    /// Receive one 1-RTT packet with a caller-supplied socket timeout.
+    ///
+    /// This is the non-blocking/event-loop counterpart to `receivePacket`.
+    /// Callers that drive their own scheduling can poll for ACKs or peer
+    /// DATAGRAM/STREAM progress without relying on the timer-servicing
+    /// blocking helper. The timeout covers only the UDP receive; authenticated
+    /// packets still pass through the normal path validation, packet-number,
+    /// recovery, flow-control, and frame-routing pipeline.
+    pub fn receivePacketTimeout(
+        self: *Connection,
+        timeout: std.Io.Timeout,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!ReceivedPacket {
+        if (self.close_info != null or self.idle_timed_out) {
+            return error.ConnectionClosed;
+        }
+        var datagram = try self.endpoint.receiveBytesTimeout(timeout);
+        defer datagram.deinit(self.endpoint.allocator);
+        return try self.processReceivedBytesAt(
+            datagram.from,
+            datagram.bytes,
+            datagram.ecn,
+            self.monotonicNowNs(),
+        );
+    }
+
     /// Import authenticated 0-RTT frames into the shared application-data
     /// packet-number space after the TLS handshake commits early-data
     /// acceptance. The caller retains ownership of frame payloads.
