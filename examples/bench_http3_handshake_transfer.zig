@@ -502,6 +502,15 @@ fn sendDownloadBodies(
                 body[0..count],
                 end == stream_len,
             );
+            // The benchmark runs both endpoints in one process. A tiny sleep
+            // between response chunks gives the client thread time to drain
+            // loopback UDP, avoiding artificial drops that do not represent an
+            // event-loop driven server.
+            try std.Io.sleep(
+                session.established.connection.endpoint.io,
+                .fromNanoseconds(50_000),
+                .awake,
+            );
             sent[index] = end;
             if (end == stream_len) finished_count += 1;
         }
