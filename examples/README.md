@@ -17,6 +17,10 @@ Run individual examples:
 zig build run-http1-hello
 zig build run-http2-h2c
 zig build run-http3-handshake
+zig build run-http3-fetch
+zig build run-quic-echo
+zig build run-quic-datagram-echo
+zig build run-quic-close
 zig build run-websocket-echo
 # Linux only: raw std.os.linux.IoUring connect/send/recv around HTTP/1 bytes
 zig build run-linux-io-uring-http1
@@ -30,6 +34,21 @@ supported by the HTTP/1, HTTP/2 h2c, and WebSocket client examples.
 HTTP/3 fetcher: it starts a local QUIC/H3 server, performs a full client
 handshake, exchanges one POST/200 response, and exits without relying on
 external network access.
+
+The QUIC examples are preconfigured-key transport smoke tests that bypass TLS
+so individual 1-RTT features are easy to inspect:
+
+- `run-quic-echo` sends STREAM data from a local client to server and echoes it
+  back on the same bidirectional stream.
+- `run-quic-datagram-echo` exercises RFC 9221 DATAGRAM send, receive queueing,
+  and echo.
+- `run-quic-close` sends an application close frame and verifies that the peer
+  enters draining with the expected error code and reason phrase.
+
+`run-http3-fetch` is the public-network example. By default it fetches
+`https://robotics.bytedance.com/`; `--verify` enables system trust-store
+certificate validation, and `--discover` performs best-effort Alt-Svc discovery
+using an HTTP/3 HEAD probe before issuing the final request.
 
 ## I/O backend note
 
