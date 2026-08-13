@@ -25,6 +25,8 @@ Longer performance gates that have been used successfully include:
 
 ```sh
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=5 --body-bytes=67108864 --mode=upload --streams=4 --verbose
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=download --streams=1 --verbose
+zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=download --streams=4 --verbose
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 ```
@@ -45,18 +47,17 @@ zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 | UDP batching / GSO / GRO | Covered at QUIC runtime level | `src/quic/runtime.zig`, `bench-quic-udp-batch`, `bench-quic-one-rtt-send`, `bench-quic-one-rtt-receive` | HTTP/3 direct GRO receive remains unsafe as a default; do not enable without fixing long-run stability. |
 | HTTP/3 public fetch and Alt-Svc | Covered for robotics.bytedance.com | `examples/http3_fetch.zig`, `run-http3-fetch --discover --verify --head` | Broaden public interop matrix beyond one site. |
 | HTTP/3 real-handshake upload benchmark | Covered and improved | `examples/bench_http3_handshake_transfer.zig`; 4-stream 64MiB default has reached ~150+ MiB/s in validation | Continue comparing against `~/Work/quicz` throughput and stabilize aggressive chunk/datagram settings. |
-| HTTP/3 real-handshake download benchmark | Partially covered | 64KiB and 1MiB smoke pass after benchmark receiver scheduling fix | Large responses (4MiB/16MiB+) still need core runtime/lifecycle investigation before claiming complete download support. |
+| HTTP/3 real-handshake download benchmark | Covered for current benchmark scale | 64KiB/1MiB smoke pass; 4MiB, 16MiB, and 64MiB single-/4-stream download validations pass | Continue long-run stability and apples-to-apples quicz throughput comparisons before declaring performance superiority. |
 | QPACK / Capsule / WebTransport | Covered by modules and benchmarks | `bench-http3-qpack`, `bench-http3-capsule`, `bench-webtransport-datagram` | Expand interop examples only after core H3 transfer gaps are closed. |
 | TLS backend/process interop examples | Partially covered through netz/vail integration | QUIC handshake tests, HTTP/3 public fetch with `--verify` | netz lacks quicz-style standalone TLS process echo demos; add only if this is a required deliverable. |
 
 ## Known blockers before declaring the goal complete
 
-1. **Large HTTP/3 download reliability**: local real-handshake download works for
-   small and 1MiB smoke tests, the deterministic handshake streaming response
-   test covers 1MiB, and the preconfigured protected runtime now covers 1MiB
-   small-window responses with explicit protected-runtime stream-credit
-   feedback. Benchmark-scale responses still show queue/recovery sensitivity,
-   which is now the top functionality gap.
+1. **Large HTTP/3 download reliability**: local real-handshake download now
+   covers 4MiB/16MiB/64MiB benchmark-scale responses in both single-stream and
+   four-stream runs, in addition to the 1MiB smoke tests and protected
+   small-window coverage. The remaining work is long-run repeatability rather
+   than a basic benchmark-scale functional gap.
 2. **Aggressive receive batching**: enabling HTTP/3 GRO receive directly has
    caused long stalls.  The lower-level QUIC GRO benchmark works, but the H3
    runtime path needs more work before it can be defaulted.
@@ -72,10 +73,10 @@ zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 
 ## Next recommended work
 
-1. Use the protected 1MiB small-window coverage to keep tightening
-   response-side flow-control/recovery/lifecycle handling without
-   benchmark-layer scheduling hacks.
-2. Extend real-handshake download reliability beyond the current 1MiB smoke
-   level toward 4MiB/16MiB+ benchmark-scale responses.
-3. Once download is reliable, rerun the 64MiB upload/download benchmark matrix.
-4. Only then revisit GRO and larger packet/body chunk defaults.
+1. Run longer repeated 64MiB download/upload matrices and compare the numbers
+   directly with the relevant `~/Work/quicz` benchmarks.
+2. Investigate the aggressive receive batching path so HTTP/3 can safely use
+   GRO without stalls.
+3. Isolate the remaining long-run busy-loop cases seen with larger packet/body
+   chunk settings before raising defaults.
+4. Broaden public HTTP/3 interop beyond `robotics.bytedance.com`.
