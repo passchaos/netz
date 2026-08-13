@@ -14737,7 +14737,7 @@ test "HTTP/3 protected server reports streamed request reset with stream id" {
 
 test "HTTP/3 protected client streams large response through small window" {
     const allocator = std.testing.allocator;
-    const body_len: usize = 64 * 1024;
+    const body_len: usize = 128 * 1024;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
