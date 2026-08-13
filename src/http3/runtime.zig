@@ -3084,7 +3084,7 @@ pub const HandshakeClient = struct {
         const stream_id = self.next_stream_id;
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         try self.request_lifecycle.open(stream_id);
-        errdefer _ = self.request_lifecycle.finish(stream_id);
+        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
         self.next_stream_id += 4;
 
         try sendConnectionSettings(
@@ -3121,7 +3121,7 @@ pub const HandshakeClient = struct {
             return error.GoAwayReceived;
         }
         try self.request_lifecycle.open(stream_id);
-        errdefer _ = self.request_lifecycle.finish(stream_id);
+        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
         self.next_stream_id += 4;
         try sendConnectionSettings(
             &self.established.connection,
@@ -3294,7 +3294,7 @@ pub const HandshakeClient = struct {
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
                 try self.sendQpackFeedback();
-                _ = self.request_lifecycle.finish(stream_id);
+                _ = try self.request_lifecycle.finish(stream_id);
                 _ = self.outbound_bodies.finish(stream_id);
                 self.qpack_encode.abandonStream(stream_id);
                 return err;
@@ -3320,7 +3320,7 @@ pub const HandshakeClient = struct {
             response.qpack_section_acknowledgments,
         );
         try self.sendQpackFeedback();
-        _ = self.request_lifecycle.finish(stream_id);
+        _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         return .{ .stream_bytes = assembled.bytes, .response = response };
     }
@@ -3336,7 +3336,7 @@ pub const HandshakeClient = struct {
                 if (self.request_lifecycle.contains(reset.stream_id)) {
                     _ = self.response_streams.takeReset(reset.stream_id);
                     try self.sendQpackFeedback();
-                    _ = self.request_lifecycle.finish(reset.stream_id);
+                    _ = try self.request_lifecycle.finish(reset.stream_id);
                     _ = self.outbound_bodies.finish(reset.stream_id);
                     self.qpack_encode.abandonStream(reset.stream_id);
                     return .{ .reset = .{
@@ -3392,7 +3392,7 @@ pub const HandshakeClient = struct {
         }
         if (self.response_streams.takeReset(stream_id)) |code| {
             try self.sendQpackFeedback();
-            self.finishStreamingResponse(stream_id);
+            try self.finishStreamingResponse(stream_id);
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
             else
@@ -3423,7 +3423,7 @@ pub const HandshakeClient = struct {
         );
         if (self.response_streams.takeReset(stream_id)) |code| {
             try self.sendQpackFeedback();
-            self.finishStreamingResponse(stream_id);
+            try self.finishStreamingResponse(stream_id);
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
             else
@@ -3685,7 +3685,7 @@ pub const HandshakeClient = struct {
                 }
                 _ = self.response_streams.takeReset(reset.stream_id);
                 try self.sendQpackFeedback();
-                self.finishStreamingResponse(reset.stream_id);
+                try self.finishStreamingResponse(reset.stream_id);
                 return .{ .reset = .{
                     .stream_id = reset.stream_id,
                     .application_error_code = reset.application_error_code,
@@ -3829,7 +3829,7 @@ pub const HandshakeClient = struct {
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
         self.streaming_responses.remove(stream_id);
-        _ = self.request_lifecycle.finish(stream_id);
+        _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
     }
 
@@ -3926,7 +3926,7 @@ pub const HandshakeClient = struct {
     ) Error!void {
         const code = self.response_streams.takeReset(stream_id) orelse return;
         try self.sendQpackFeedback();
-        _ = self.request_lifecycle.finish(stream_id);
+        _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         self.qpack_encode.abandonStream(stream_id);
         return responseResetError(code);
@@ -3959,15 +3959,15 @@ pub const HandshakeClient = struct {
             try self.sendQpackFeedback();
         }
         if (event == .finished) {
-            self.finishStreamingResponse(stream_id);
+            try self.finishStreamingResponse(stream_id);
         }
     }
 
     fn finishStreamingResponse(
         self: *HandshakeClient,
         stream_id: u62,
-    ) void {
-        _ = self.request_lifecycle.finish(stream_id);
+    ) Error!void {
+        _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         self.qpack_encode.abandonStream(stream_id);
         self.streaming_responses.remove(stream_id);
@@ -4710,7 +4710,7 @@ pub const ProtectedClient = struct {
         const stream_id = self.next_stream_id;
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         try self.request_lifecycle.open(stream_id);
-        errdefer _ = self.request_lifecycle.finish(stream_id);
+        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
         self.next_stream_id += 4;
 
         try sendProtectedSettings(
@@ -4776,7 +4776,7 @@ pub const ProtectedClient = struct {
             return error.GoAwayReceived;
         }
         try self.request_lifecycle.open(stream_id);
-        errdefer _ = self.request_lifecycle.finish(stream_id);
+        errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
         self.next_stream_id += 4;
         try sendProtectedSettings(
             &self.quic_client.endpoint,
@@ -4880,7 +4880,7 @@ pub const ProtectedClient = struct {
         const assembled = self.receiveStreamBytes(stream_id) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
                 try self.sendQpackFeedback();
-                _ = self.request_lifecycle.finish(stream_id);
+                _ = try self.request_lifecycle.finish(stream_id);
                 _ = self.outbound_bodies.finish(stream_id);
                 self.qpack_encode.abandonStream(stream_id);
                 return err;
@@ -4906,7 +4906,7 @@ pub const ProtectedClient = struct {
             response.qpack_section_acknowledgments,
         );
         try self.sendQpackFeedback();
-        _ = self.request_lifecycle.finish(stream_id);
+        _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         return .{ .stream_bytes = assembled.bytes, .response = response };
     }
@@ -4921,7 +4921,7 @@ pub const ProtectedClient = struct {
             if (self.response_streams.firstReset()) |reset| {
                 if (self.request_lifecycle.contains(reset.stream_id)) {
                     _ = self.response_streams.takeReset(reset.stream_id);
-                    _ = self.request_lifecycle.finish(reset.stream_id);
+                    _ = try self.request_lifecycle.finish(reset.stream_id);
                     _ = self.outbound_bodies.finish(reset.stream_id);
                     self.qpack_encode.abandonStream(reset.stream_id);
                     return .{ .reset = .{
@@ -4954,7 +4954,7 @@ pub const ProtectedClient = struct {
             return error.UnexpectedStream;
         }
         if (self.response_streams.takeReset(stream_id)) |code| {
-            self.finishStreamingResponse(stream_id);
+            try self.finishStreamingResponse(stream_id);
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
             else
@@ -4974,7 +4974,7 @@ pub const ProtectedClient = struct {
         }
         try self.receiveResponsePacket();
         if (self.response_streams.takeReset(stream_id)) |code| {
-            self.finishStreamingResponse(stream_id);
+            try self.finishStreamingResponse(stream_id);
             return if (code == http3.ApplicationErrorCode.request_rejected)
                 error.RequestRejected
             else
@@ -5010,7 +5010,7 @@ pub const ProtectedClient = struct {
                     return error.UnexpectedStream;
                 }
                 _ = self.response_streams.takeReset(reset.stream_id);
-                self.finishStreamingResponse(reset.stream_id);
+                try self.finishStreamingResponse(reset.stream_id);
                 return .{ .reset = .{
                     .stream_id = reset.stream_id,
                     .application_error_code = reset.application_error_code,
@@ -5247,7 +5247,7 @@ pub const ProtectedClient = struct {
         self.qpack_encode.abandonStream(stream_id);
         self.response_streams.remove(stream_id);
         self.streaming_responses.remove(stream_id);
-        _ = self.request_lifecycle.finish(stream_id);
+        _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
     }
 
@@ -5497,15 +5497,15 @@ pub const ProtectedClient = struct {
             try self.sendQpackFeedback();
         }
         if (event == .finished) {
-            self.finishStreamingResponse(stream_id);
+            try self.finishStreamingResponse(stream_id);
         }
     }
 
     fn finishStreamingResponse(
         self: *ProtectedClient,
         stream_id: u62,
-    ) void {
-        _ = self.request_lifecycle.finish(stream_id);
+    ) Error!void {
+        _ = try self.request_lifecycle.finish(stream_id);
         _ = self.outbound_bodies.finish(stream_id);
         self.qpack_encode.abandonStream(stream_id);
         self.streaming_responses.remove(stream_id);
@@ -7384,6 +7384,7 @@ const ClientRequestLifecycle = struct {
     allocator: std.mem.Allocator,
     outstanding: std.ArrayList(u62) = .empty,
     outstanding_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
+    finished: std.AutoHashMapUnmanaged(u62, void) = .empty,
     max_streams: usize,
 
     fn init(
@@ -7396,6 +7397,7 @@ const ClientRequestLifecycle = struct {
     fn deinit(self: *ClientRequestLifecycle) void {
         self.outstanding.deinit(self.allocator);
         self.outstanding_index.deinit(self.allocator);
+        self.finished.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -7419,9 +7421,15 @@ const ClientRequestLifecycle = struct {
             self.outstanding_index.contains(stream_id);
     }
 
-    fn finish(self: *ClientRequestLifecycle, stream_id: u62) bool {
+    fn isFinished(self: ClientRequestLifecycle, stream_id: u62) bool {
+        return self.finished.count() != 0 and self.finished.contains(stream_id);
+    }
+
+    fn finish(self: *ClientRequestLifecycle, stream_id: u62) Error!bool {
         if (self.outstanding_index.count() == 0) return false;
         const index = self.outstanding_index.get(stream_id) orelse return false;
+        try self.finished.put(self.allocator, stream_id, {});
+        errdefer _ = self.finished.remove(stream_id);
         const last_index = self.outstanding.items.len - 1;
         const removed = self.outstanding.swapRemove(index);
         _ = self.outstanding_index.remove(removed);
@@ -7448,17 +7456,17 @@ test "HTTP/3 client request lifecycle indexes outstanding streams" {
 
     // Removing from the middle uses swapRemove; the moved stream must keep a
     // valid index because send/receive body paths call contains() frequently.
-    try std.testing.expect(lifecycle.finish(4));
+    try std.testing.expect(try lifecycle.finish(4));
     try std.testing.expect(!lifecycle.contains(4));
     try std.testing.expect(lifecycle.contains(8));
-    try std.testing.expect(lifecycle.finish(8));
+    try std.testing.expect(try lifecycle.finish(8));
     try std.testing.expect(!lifecycle.contains(8));
 
     try lifecycle.open(12);
     try std.testing.expect(lifecycle.contains(12));
-    try std.testing.expect(!lifecycle.finish(4));
-    try std.testing.expect(lifecycle.finish(0));
-    try std.testing.expect(lifecycle.finish(12));
+    try std.testing.expect(!try lifecycle.finish(4));
+    try std.testing.expect(try lifecycle.finish(0));
+    try std.testing.expect(try lifecycle.finish(12));
     try std.testing.expectEqual(@as(usize, 0), lifecycle.outstanding.items.len);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.outstanding_index.count());
 }
@@ -8868,6 +8876,7 @@ fn receiveConnectionResponsePacket(
         {
             const stream_id: u62 = @intCast(frame.reset_stream.stream_id);
             if (request_lifecycle) |lifecycle| {
+                if (lifecycle.isFinished(stream_id)) continue;
                 if (!lifecycle.contains(stream_id)) {
                     return error.UnexpectedStream;
                 }
@@ -8934,6 +8943,7 @@ fn receiveConnectionResponsePacket(
         if ((try messageStreamDisposition(frame.stream.stream_id)) == .ignore) continue;
         const stream_id: u62 = @intCast(frame.stream.stream_id);
         if (request_lifecycle) |lifecycle| {
+            if (lifecycle.isFinished(stream_id)) continue;
             if (!lifecycle.contains(stream_id)) return error.UnexpectedStream;
         }
         if (streaming_responses) |streaming| {
