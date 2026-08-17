@@ -1,12 +1,28 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const http2 = @import("mod.zig");
 const http1 = @import("../http1/mod.zig");
 const http1_runtime = http1.runtime;
+const frame_io = @import("runtime/frame_io.zig");
 const push = @import("runtime/push.zig");
 const priority_runtime = @import("runtime/priority.zig");
 const stream_io = @import("../internal/stream_io.zig");
 
 const net = std.Io.net;
+
+fn setTcpNoDelay(stream: net.Stream) std.posix.SetSockOptError!void {
+    if (comptime builtin.os.tag == .windows) {
+        // std.Io 0.16 exposes no portable socket-option operation yet.
+        return;
+    }
+    const enabled: c_int = 1;
+    try std.posix.setsockopt(
+        stream.socket.handle,
+        std.posix.IPPROTO.TCP,
+        std.posix.TCP.NODELAY,
+        std.mem.asBytes(&enabled),
+    );
+}
 
 pub const Error = http2.Error || http1_runtime.Error || error{
     ConnectionClosed,
@@ -25,7 +41,7 @@ pub const Error = http2.Error || http1_runtime.Error || error{
     ConnectionGoAway,
     UnsupportedScheme,
     PriorityCapacityExceeded,
-} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
+} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.HostName.ValidateError || net.HostName.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError || std.Thread.SpawnError;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
 
@@ -37,6 +53,11 @@ const max_flow_window: i64 = std.math.maxInt(i31);
 const default_max_frame_size: usize = 16 * 1024;
 const max_max_frame_size: usize = 16_777_215;
 const default_max_header_list_size: usize = 16 * 1024;
+// Zig 0.16 Threaded networking submits at most eight iovecs. DATA consumes a
+// header/payload pair, so four frames make one actual syscall burst. HEADERS
+// occupies the first pair and leaves room for three DATA frames.
+const max_data_frames_per_write: usize = 4;
+const max_data_frames_with_headers: usize = 3;
 
 pub const Limits = struct {
     /// Local allocation/test ceiling for any inbound or outbound frame payload.
@@ -52,6 +73,12 @@ pub const Limits = struct {
     max_continuation_frames: ?usize = null,
     header_table_size: usize = http2.Hpack.default_dynamic_table_size,
     initial_window_size: u32 = @intCast(default_flow_window),
+    /// Desired receive-side connection window. HTTP/2 starts every connection
+    /// at 65,535 bytes, so values above that are established with an initial
+    /// connection WINDOW_UPDATE after SETTINGS. This is distinct from
+    /// SETTINGS_INITIAL_WINDOW_SIZE, which applies per stream.
+    initial_connection_window_size: u32 =
+        @intCast(default_flow_window),
     max_concurrent_streams: ?u32 = null,
     max_frame_size: usize = default_max_frame_size,
     max_header_list_size: usize = default_max_header_list_size,
@@ -70,6 +97,10 @@ pub const Limits = struct {
     /// client to use PRIORITY_UPDATE and tells the peer that legacy dependency
     /// signals are intentionally ignored.
     no_rfc7540_priorities: bool = false,
+    /// Disable Nagle on HTTP/2 TCP connections. HTTP/2 already provides its
+    /// own frame and stream aggregation; retaining Nagle can stall a complete
+    /// flow-control burst behind Linux's delayed ACK timer.
+    tcp_nodelay: bool = true,
 };
 
 pub const Server = struct {
@@ -100,6 +131,7 @@ pub const Server = struct {
     pub fn accept(self: *Server) Error!Connection {
         const stream = try self.listener.accept(self.io);
         errdefer stream.close(self.io);
+        if (self.limits.tcp_nodelay) try setTcpNoDelay(stream);
 
         var preface_buf: [http2.connection_preface.len]u8 = undefined;
         try readExact(self.io, stream, &preface_buf);
@@ -114,6 +146,12 @@ pub const Server = struct {
         defer self.allocator.free(peer_settings);
 
         try writeInitialSettings(self.allocator, self.io, stream, self.limits, .server);
+        try writeInitialConnectionWindow(
+            self.allocator,
+            self.io,
+            stream,
+            self.limits,
+        );
         try writeFrame(self.allocator, self.io, stream, .settings, flag_ack, 0, &.{});
 
         var connection = Connection{
@@ -133,6 +171,7 @@ pub const Server = struct {
         const stream = try self.listener.accept(self.io);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
+        if (self.limits.tcp_nodelay) try setTcpNoDelay(stream);
 
         var request = try http1_runtime.readRequestFromStream(self.allocator, self.io, stream, limitsToHttp1(self.limits), .{});
         errdefer request.deinit(self.allocator);
@@ -166,6 +205,12 @@ pub const Server = struct {
         defer self.allocator.free(peer_settings);
 
         try writeInitialSettings(self.allocator, self.io, stream, self.limits, .server);
+        try writeInitialConnectionWindow(
+            self.allocator,
+            self.io,
+            stream,
+            self.limits,
+        );
         try writeFrame(self.allocator, self.io, stream, .settings, flag_ack, 0, &.{});
 
         // The HTTP/1 Upgrade request already occupies stream 1, so the next
@@ -389,6 +434,7 @@ pub const Client = struct {
         request_options: RequestOptions,
     ) Error!H2cUpgradeResult {
         try validateLocalLimits(limits);
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         var connection = Connection{
             .io = io,
             .allocator = allocator,
@@ -451,12 +497,19 @@ pub const Client = struct {
         defer allocator.free(settings);
         try connection.applySettings(settings);
         try writeFrame(allocator, io, stream, .settings, flag_ack, 0, &.{});
+        // The Upgrade server waits specifically for this SETTINGS ACK before
+        // returning the connection to the application. Send the optional
+        // connection WINDOW_UPDATE afterward so it remains the next ordinary
+        // control frame consumed by the established runtime.
+        try writeInitialConnectionWindow(allocator, io, stream, limits);
         return .{ .connection = connection, .upgrade_response = upgrade };
     }
 
     fn connectStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!Connection {
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         try writeAll(io, stream, http2.connection_preface);
         try writeInitialSettings(allocator, io, stream, limits, .client);
+        try writeInitialConnectionWindow(allocator, io, stream, limits);
 
         var saw_server_settings = false;
         var saw_settings_ack = false;
@@ -633,6 +686,7 @@ pub const Connection = struct {
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
     write_batch: std.ArrayList(u8) = .empty,
+    frame_reader: frame_io.Reader = .{},
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
@@ -687,6 +741,7 @@ pub const Connection = struct {
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.write_batch.deinit(self.allocator);
+        self.frame_reader.deinit(self.allocator);
         self.stream.close(self.io);
         self.* = undefined;
     }
@@ -1061,12 +1116,7 @@ pub const Connection = struct {
     ) Error!void {
         var remaining = states.len;
         while (remaining != 0) {
-            var frame = try readFrame(
-                self.allocator,
-                self.io,
-                self.stream,
-                self.limits,
-            );
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.frame_type == .goaway) {
@@ -1387,12 +1437,7 @@ pub const Connection = struct {
         self: *Connection,
     ) Error!http2.PriorityUpdatePayload {
         while (true) {
-            var frame = try readFrame(
-                self.allocator,
-                self.io,
-                self.stream,
-                self.limits,
-            );
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type == .priority_update) {
                 const update =
@@ -1490,7 +1535,7 @@ pub const Connection = struct {
         if (self.role != .server) return error.UnexpectedFrame;
         if (!self.limits.enable_connect_protocol) return error.ExtendedConnectDisabled;
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             switch (frame.frame.header.frame_type) {
@@ -1572,7 +1617,7 @@ pub const Connection = struct {
         if (self.role != .server) return error.UnexpectedFrame;
         if (self.popPendingRequest()) |pending| return pending;
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             switch (frame.frame.header.frame_type) {
@@ -1601,33 +1646,95 @@ pub const Connection = struct {
                     const is_connect = methodIsConnect(method);
                     const is_extended_connect = is_connect and protocol != null;
                     if (is_connect and !is_extended_connect and (expected_request_len orelse 0) != 0) return error.InvalidContentLength;
+                    if (expected_request_len) |body_len| {
+                        if (body_len > self.limits.max_body_bytes) {
+                            return error.MessageTooLarge;
+                        }
+                        // The Content-Length has already passed strict header
+                        // validation. Reserve the final aggregate once rather
+                        // than repeatedly growing while DATA frames arrive.
+                        try body.ensureTotalCapacity(
+                            self.allocator,
+                            body_len,
+                        );
+                    }
 
                     if ((!is_connect or is_extended_connect) and (frame.frame.header.flags & flag_end_stream) == 0) {
                         while (true) {
-                            var data_frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
-                            defer data_frame.deinit(self.allocator);
-                            if (try self.handleConnectionFrame(data_frame.frame)) continue;
-                            if (data_frame.frame.header.stream_id != stream_id) {
-                                if (try self.queueCompletePeerRequestFrame(data_frame.frame)) continue;
-                                return error.UnexpectedFrame;
-                            }
-                            switch (data_frame.frame.header.frame_type) {
-                                .data => {
-                                    const data = try self.receiveDataPayload(stream_id, data_frame.frame);
-                                    if (body.items.len + data.data.len > self.limits.max_body_bytes) return error.MessageTooLarge;
-                                    try body.appendSlice(self.allocator, data.data);
-                                    try self.maybeReleaseReceivedCapacity(stream_id);
-                                    if ((data_frame.frame.header.flags & flag_end_stream) != 0) break;
+                            var incoming = try self.readRequestBodyFrame(
+                                stream_id,
+                                &body,
+                            );
+                            switch (incoming) {
+                                .direct_data => |end_stream| {
+                                    if (end_stream) break;
+                                    continue;
                                 },
-                                .headers => {
-                                    if ((data_frame.frame.header.flags & flag_end_stream) == 0) return error.UnexpectedFrame;
-                                    trailers = try self.readHeaderBlock(data_frame.frame);
-                                    try validateHeaderBlock(trailers, .request_trailers);
-                                    try validateExpectedContentLength(lookup.content_length, body.items.len);
-                                    break;
+                                .owned_frame => |*owned| {
+                                    defer owned.deinit(self.allocator);
+                                    if (try self.handleConnectionFrame(
+                                        owned.frame,
+                                    )) continue;
+                                    if (owned.frame.header.stream_id !=
+                                        stream_id)
+                                    {
+                                        if (try self.queueCompletePeerRequestFrame(
+                                            owned.frame,
+                                        )) continue;
+                                        return error.UnexpectedFrame;
+                                    }
+                                    switch (owned.frame.header.frame_type) {
+                                        .data => {
+                                            const data =
+                                                try self.receiveDataPayload(
+                                                    stream_id,
+                                                    owned.frame,
+                                                );
+                                            const body_len = std.math.add(
+                                                usize,
+                                                body.items.len,
+                                                data.data.len,
+                                            ) catch
+                                                return error.MessageTooLarge;
+                                            if (body_len >
+                                                self.limits.max_body_bytes)
+                                            {
+                                                return error.MessageTooLarge;
+                                            }
+                                            try body.appendSlice(
+                                                self.allocator,
+                                                data.data,
+                                            );
+                                            try self.maybeReleaseReceivedCapacity(
+                                                stream_id,
+                                            );
+                                            if ((owned.frame.header.flags &
+                                                flag_end_stream) != 0) break;
+                                        },
+                                        .headers => {
+                                            if ((owned.frame.header.flags &
+                                                flag_end_stream) == 0)
+                                            {
+                                                return error.UnexpectedFrame;
+                                            }
+                                            trailers =
+                                                try self.readHeaderBlock(
+                                                    owned.frame,
+                                                );
+                                            try validateHeaderBlock(
+                                                trailers,
+                                                .request_trailers,
+                                            );
+                                            try validateExpectedContentLength(
+                                                lookup.content_length,
+                                                body.items.len,
+                                            );
+                                            break;
+                                        },
+                                        .rst_stream => return error.StreamReset,
+                                        else => return error.UnexpectedFrame,
+                                    }
                                 },
-                                .rst_stream => return error.StreamReset,
-                                else => return error.UnexpectedFrame,
                             }
                         }
                     }
@@ -1658,12 +1765,249 @@ pub const Connection = struct {
         }
     }
 
+    /// Read a complete request while delivering DATA without aggregation.
+    ///
+    /// Header and trailer fields in the returned value are owned and remain
+    /// valid until `StreamingRequest.deinit`. Each DATA slice is borrowed from
+    /// connection scratch and is valid only for the duration of `consume`.
+    /// This lets handlers hash, parse, forward, or discard large bodies without
+    /// a body-sized allocation. The callback must consume the slice before
+    /// returning and must not retain it.
+    pub fn readRequestStreaming(
+        self: *Connection,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (self.popPendingRequest()) |pending_value| {
+            var pending = pending_value;
+            var pending_owned = true;
+            errdefer if (pending_owned) pending.deinit(self.allocator);
+            if (pending.body.len != 0) {
+                try consume(context, pending.body);
+            }
+            const result = streamingRequestFromOwned(pending);
+            self.allocator.free(pending.body);
+            pending_owned = false;
+            return result;
+        }
+
+        while (true) {
+            var first = try self.readOwnedFrame();
+            defer first.deinit(self.allocator);
+            if (try self.handleConnectionFrame(first.frame)) continue;
+            if (first.frame.header.frame_type == .goaway) continue;
+            if (first.frame.header.frame_type != .headers) {
+                return error.UnexpectedFrame;
+            }
+
+            const stream_id = first.frame.header.stream_id;
+            if (!clientInitiatedStreamId(stream_id) or
+                stream_id <= self.last_peer_client_stream_id)
+            {
+                return error.InvalidFrame;
+            }
+            try self.reservePeerStream(stream_id);
+            errdefer self.releasePeerStream(stream_id);
+            self.last_peer_client_stream_id = stream_id;
+
+            const headers = try self.readHeaderBlock(first.frame);
+            var headers_owned = true;
+            errdefer if (headers_owned) freeHeaders(self.allocator, headers);
+            try validateHeaderBlock(headers, .request);
+            const lookup = try requestHeaderLookup(headers);
+            const method = lookup.method orelse
+                return error.MissingPseudoHeader;
+            const protocol = lookup.protocol;
+            if (protocol != null and !self.limits.enable_connect_protocol) {
+                return error.ExtendedConnectDisabled;
+            }
+            const is_connect = methodIsConnect(method);
+            const is_extended_connect = is_connect and protocol != null;
+            if (is_connect and !is_extended_connect and
+                (lookup.content_length orelse 0) != 0)
+            {
+                return error.InvalidContentLength;
+            }
+            if (lookup.content_length) |body_len| {
+                if (body_len > self.limits.max_body_bytes) {
+                    return error.MessageTooLarge;
+                }
+            }
+
+            var trailers: []http2.Hpack.HeaderField = &.{};
+            var trailers_owned = false;
+            errdefer if (trailers_owned) {
+                freeHeaders(self.allocator, trailers);
+            };
+            var body_bytes: usize = 0;
+            if ((!is_connect or is_extended_connect) and
+                (first.frame.header.flags & flag_end_stream) == 0)
+            {
+                while (true) {
+                    const frame = try self.readFrameScratch();
+                    if (try self.handleConnectionFrame(frame)) continue;
+                    if (frame.header.stream_id != stream_id) {
+                        if (try self.queueCompletePeerRequestFrame(frame)) {
+                            continue;
+                        }
+                        return error.UnexpectedFrame;
+                    }
+                    switch (frame.header.frame_type) {
+                        .data => {
+                            const data =
+                                try self.receiveDataPayload(stream_id, frame);
+                            body_bytes = std.math.add(
+                                usize,
+                                body_bytes,
+                                data.data.len,
+                            ) catch return error.MessageTooLarge;
+                            if (body_bytes > self.limits.max_body_bytes) {
+                                return error.MessageTooLarge;
+                            }
+                            if (data.data.len != 0) {
+                                try consume(context, data.data);
+                            }
+                            try self.maybeReleaseReceivedCapacity(stream_id);
+                            if ((frame.header.flags & flag_end_stream) != 0) {
+                                break;
+                            }
+                        },
+                        .headers => {
+                            if ((frame.header.flags & flag_end_stream) == 0) {
+                                return error.UnexpectedFrame;
+                            }
+                            trailers = try self.readHeaderBlock(frame);
+                            trailers_owned = true;
+                            try validateHeaderBlock(
+                                trailers,
+                                .request_trailers,
+                            );
+                            break;
+                        },
+                        .rst_stream => return error.StreamReset,
+                        else => return error.UnexpectedFrame,
+                    }
+                }
+            }
+
+            try validateExpectedContentLength(
+                lookup.content_length,
+                body_bytes,
+            );
+            try self.rememberResponseSemantics(
+                stream_id,
+                method,
+                protocol,
+            );
+            headers_owned = false;
+            trailers_owned = false;
+            return .{
+                .stream_id = stream_id,
+                .headers = headers,
+                .method = method,
+                .path = lookup.path orelse "",
+                .scheme = lookup.scheme orelse "",
+                .authority = lookup.requestAuthority(),
+                .protocol = protocol,
+                .body_bytes = body_bytes,
+                .trailers = trailers,
+                .priority = if (self.peerPriority(stream_id)) |value|
+                    value
+                else
+                    http2.ExtensiblePriority.parse(
+                        lookup.priority orelse "",
+                    ),
+            };
+        }
+    }
+
+    fn readFrameScratch(self: *Connection) Error!http2.Frame {
+        return (try self.readBufferedFrame()).frame;
+    }
+
+    fn readBufferedFrame(self: *Connection) Error!frame_io.BorrowedFrame {
+        const borrowed = try self.frame_reader.read(
+            self.allocator,
+            self.io,
+            self.stream,
+            @min(
+                self.limits.max_frame_payload,
+                self.limits.max_frame_size,
+            ),
+        );
+        try validateFrameEnvelope(borrowed.frame);
+        return borrowed;
+    }
+
+    fn readOwnedFrame(self: *Connection) Error!OwnedFrame {
+        const borrowed = try self.readBufferedFrame();
+        const bytes = try self.allocator.dupe(u8, borrowed.bytes);
+        errdefer self.allocator.free(bytes);
+        return .{
+            .bytes = bytes,
+            .frame = try http2.Frame.parse(bytes),
+        };
+    }
+
     fn popPendingRequest(self: *Connection) ?OwnedRequest {
         if (self.pending_request_head >= self.pending_requests.items.len) return null;
         const pending = self.pending_requests.items[self.pending_request_head];
         self.pending_request_head += 1;
         self.compactPendingRequestsIfSparse();
         return pending;
+    }
+
+    const RequestBodyFrame = union(enum) {
+        direct_data: bool,
+        owned_frame: OwnedFrame,
+    };
+
+    /// Read ordinary, unpadded DATA directly into the aggregate request body.
+    ///
+    /// The general frame reader must allocate an owning frame because callers
+    /// may retain its payload. Request aggregation immediately copies DATA into
+    /// the final body, so reading there directly avoids one allocation and one
+    /// payload copy per frame. Padded DATA and all control/header frames retain
+    /// the fully validated owning fallback.
+    fn readRequestBodyFrame(
+        self: *Connection,
+        stream_id: u31,
+        body: *std.ArrayList(u8),
+    ) Error!RequestBodyFrame {
+        const borrowed = try self.readBufferedFrame();
+        const header = borrowed.frame.header;
+        const is_direct_data = header.frame_type == .data and
+            header.stream_id == stream_id and (header.flags & 0x8) == 0;
+        if (!is_direct_data) {
+            const bytes = try self.allocator.dupe(u8, borrowed.bytes);
+            errdefer self.allocator.free(bytes);
+            const frame = try http2.Frame.parse(bytes);
+            return .{ .owned_frame = .{
+                .bytes = bytes,
+                .frame = frame,
+            } };
+        }
+
+        const old_len = body.items.len;
+        const new_len = std.math.add(
+            usize,
+            old_len,
+            borrowed.frame.payload.len,
+        ) catch return error.MessageTooLarge;
+        if (new_len > self.limits.max_body_bytes) {
+            return error.MessageTooLarge;
+        }
+        try body.appendSlice(self.allocator, borrowed.frame.payload);
+        const frame = http2.Frame{
+            .header = header,
+            .payload = body.items[old_len..new_len],
+        };
+        _ = try self.receiveDataPayload(stream_id, frame);
+        try self.maybeReleaseReceivedCapacity(stream_id);
+        return .{
+            .direct_data = (header.flags & flag_end_stream) != 0,
+        };
     }
 
     fn queueCompletePeerRequestFrame(self: *Connection, frame: http2.Frame) Error!bool {
@@ -2110,7 +2454,7 @@ pub const Connection = struct {
     pub fn ping(self: *Connection, data: [8]u8) Error![8]u8 {
         try writeFrame(self.allocator, self.io, self.stream, .ping, 0, 0, &data);
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .ping) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) continue;
@@ -2133,7 +2477,7 @@ pub const Connection = struct {
 
     pub fn readPing(self: *Connection) Error![8]u8 {
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .ping) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) continue;
@@ -2197,7 +2541,7 @@ pub const Connection = struct {
 
     pub fn readGoAway(self: *Connection) Error!OwnedGoAway {
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .goaway) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
@@ -2222,7 +2566,7 @@ pub const Connection = struct {
 
     pub fn readResetStream(self: *Connection) Error!OwnedResetStream {
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .rst_stream) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
@@ -2293,15 +2637,10 @@ pub const Connection = struct {
 
     pub fn sendWindowUpdate(self: *Connection, stream_id: u31, increment: u31) Error!void {
         if (stream_id == 0) {
-            try self.recv_connection_window.update(increment);
+            try self.sendWindowUpdates(null, increment, null);
         } else {
-            if (!self.outboundStreamIsActive(stream_id) and !self.hasRecvStreamWindow(stream_id)) return error.InvalidStreamId;
-            try (try self.recvStreamWindow(stream_id)).update(increment);
+            try self.sendWindowUpdates(stream_id, null, increment);
         }
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
-        try http2.WindowUpdatePayload.write(&encoded, self.allocator, stream_id, increment);
-        try writeAll(self.io, self.stream, encoded.items);
     }
 
     pub fn releaseReceivedCapacity(self: *Connection, stream_id: u31, amount: usize) Error!void {
@@ -2309,10 +2648,58 @@ pub const Connection = struct {
         var remaining = amount;
         while (remaining != 0) {
             const increment: u31 = @intCast(@min(remaining, std.math.maxInt(u31)));
-            try self.sendWindowUpdate(0, increment);
-            try self.sendWindowUpdate(stream_id, increment);
+            try self.sendWindowUpdates(
+                stream_id,
+                increment,
+                increment,
+            );
             remaining -= increment;
         }
+    }
+
+    fn sendWindowUpdates(
+        self: *Connection,
+        stream_id: ?u31,
+        connection_increment: ?u31,
+        stream_increment: ?u31,
+    ) Error!void {
+        if (connection_increment == null and stream_increment == null) return;
+        if (stream_increment != null) {
+            const id = stream_id orelse return error.InvalidStreamId;
+            if (!self.outboundStreamIsActive(id) and
+                !self.hasRecvStreamWindow(id))
+            {
+                return error.InvalidStreamId;
+            }
+        }
+
+        var encoded: [2 * (http2.FrameHeader.encoded_len + 4)]u8 =
+            undefined;
+        var encoded_len: usize = 0;
+        if (connection_increment) |increment| {
+            try self.recv_connection_window.update(increment);
+            errdefer self.recv_connection_window.adjust(
+                -@as(i64, increment),
+            ) catch unreachable;
+            try encodeWindowUpdateFrame(
+                encoded[encoded_len..][0 .. http2.FrameHeader.encoded_len + 4],
+                0,
+                increment,
+            );
+            encoded_len += http2.FrameHeader.encoded_len + 4;
+        }
+        if (stream_increment) |increment| {
+            const window = try self.recvStreamWindow(stream_id.?);
+            try window.update(increment);
+            errdefer window.adjust(-@as(i64, increment)) catch unreachable;
+            try encodeWindowUpdateFrame(
+                encoded[encoded_len..][0 .. http2.FrameHeader.encoded_len + 4],
+                stream_id.?,
+                increment,
+            );
+            encoded_len += http2.FrameHeader.encoded_len + 4;
+        }
+        try writeAll(self.io, self.stream, encoded[0..encoded_len]);
     }
 
     fn addActiveLocalStream(self: *Connection, stream_id: u31) Error!void {
@@ -2495,22 +2882,36 @@ pub const Connection = struct {
     }
 
     fn maybeReleaseReceivedCapacity(self: *Connection, stream_id: u31) Error!void {
-        const low_watermark = @as(usize, @intCast(default_flow_window / 2));
-        const target = @as(usize, @intCast(default_flow_window));
+        const connection_target: usize =
+            self.limits.initial_connection_window_size;
+        const connection_low_watermark = connection_target / 2;
         const conn_available = self.recv_connection_window.available();
-        if (conn_available <= low_watermark) {
-            try self.sendWindowUpdate(0, @intCast(target - conn_available));
-        }
         const stream_window = try self.recvStreamWindow(stream_id);
+        const stream_target: usize = self.limits.initial_window_size;
+        const stream_low_watermark = stream_target / 2;
         const stream_available = stream_window.available();
-        if (stream_available <= low_watermark) {
-            try self.sendWindowUpdate(stream_id, @intCast(target - stream_available));
-        }
+        const connection_increment: ?u31 =
+            if (conn_available <= connection_low_watermark and
+            conn_available < connection_target)
+                @intCast(connection_target - conn_available)
+            else
+                null;
+        const stream_increment: ?u31 =
+            if (stream_available <= stream_low_watermark and
+            stream_available < stream_target)
+                @intCast(stream_target - stream_available)
+            else
+                null;
+        try self.sendWindowUpdates(
+            stream_id,
+            connection_increment,
+            stream_increment,
+        );
     }
 
     pub fn readWindowUpdate(self: *Connection) Error!OwnedWindowUpdate {
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             errdefer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .window_update) {
                 if (try self.handleConnectionOrGoAwayFrame(frame.frame)) {
@@ -2542,7 +2943,7 @@ pub const Connection = struct {
         var response_content_length: ?usize = null;
 
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.frame_type == .goaway) {
@@ -2644,12 +3045,7 @@ pub const Connection = struct {
         var response_status: ?u16 = null;
         var response_content_length: ?usize = null;
         while (true) {
-            var frame = try readFrame(
-                self.allocator,
-                self.io,
-                self.stream,
-                self.limits,
-            );
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.stream_id != stream_id) {
@@ -2719,7 +3115,7 @@ pub const Connection = struct {
 
     fn readExtendedConnectResponse(self: *Connection, stream_id: u31) Error!ExtendedConnectResponse {
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.frame_type == .goaway) {
@@ -2792,12 +3188,7 @@ pub const Connection = struct {
         var continuation_count: usize = 0;
         const max_continuations = self.maxContinuationFrames();
         while ((flags & flag_end_headers) == 0) {
-            var continuation = try readFrame(
-                self.allocator,
-                self.io,
-                self.stream,
-                self.limits,
-            );
+            var continuation = try self.readOwnedFrame();
             defer continuation.deinit(self.allocator);
             if (continuation.frame.header.frame_type != .continuation or
                 continuation.frame.header.stream_id != promise.stream_id)
@@ -2831,7 +3222,7 @@ pub const Connection = struct {
 
     fn consumeForbiddenResponseBody(self: *Connection, stream_id: u31) Error!void {
         while (true) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) continue;
             if (frame.frame.header.frame_type == .goaway) {
@@ -2865,8 +3256,8 @@ pub const Connection = struct {
         try self.writeHeaderBlock(stream_id, block, end_stream);
     }
 
-    /// Emit a HEADERS frame and a single DATA frame in one stream write when
-    /// the body fits both the peer frame size and current flow-control credit.
+    /// Emit HEADERS and the first DATA burst in one stream write when the
+    /// header block and current flow-control credit permit it.
     ///
     /// Small request/response bodies are common and two tiny TCP submissions
     /// can trigger Linux's Nagle/delayed-ACK interaction. Larger or blocked
@@ -2892,22 +3283,27 @@ pub const Connection = struct {
         );
         const frame_limit = self.outboundFramePayloadLimit();
         const stream_window = try self.sendStreamWindow(stream_id);
-        const can_coalesce = block.len <= frame_limit and
-            data.len <= frame_limit and
-            data.len <= self.send_connection_window.available() and
-            data.len <= stream_window.available();
-        if (!can_coalesce) {
+        const burst_limit = frame_limit *| max_data_frames_with_headers;
+        const first_data_len = @min(
+            data.len,
+            burst_limit,
+            self.send_connection_window.available(),
+            stream_window.available(),
+        );
+        if (block.len > frame_limit or first_data_len == 0) {
             try self.writeHeaderBlock(stream_id, block, false);
             try self.writeData(stream_id, data, end_stream);
             return;
         }
 
-        try self.send_connection_window.reserve(data.len);
+        try self.send_connection_window.reserve(first_data_len);
         errdefer self.send_connection_window.update(
-            @intCast(data.len),
+            @intCast(first_data_len),
         ) catch unreachable;
-        try stream_window.reserve(data.len);
-        errdefer stream_window.update(@intCast(data.len)) catch unreachable;
+        try stream_window.reserve(first_data_len);
+        errdefer stream_window.update(
+            @intCast(first_data_len),
+        ) catch unreachable;
 
         var headers_frame: [http2.FrameHeader.encoded_len]u8 = undefined;
         try encodeFrameHeader(
@@ -2917,19 +3313,45 @@ pub const Connection = struct {
             stream_id,
             block.len,
         );
-        var data_frame: [http2.FrameHeader.encoded_len]u8 = undefined;
-        try encodeFrameHeader(
-            &data_frame,
-            .data,
-            if (end_stream) flag_end_stream else 0,
-            stream_id,
-            data.len,
-        );
+        var data_frames: [max_data_frames_per_write][
+            http2.FrameHeader.encoded_len
+        ]u8 = undefined;
+        var parts: [2 + 2 * max_data_frames_per_write][]const u8 =
+            undefined;
+        parts[0] = &headers_frame;
+        parts[1] = block;
+        var part_count: usize = 2;
+        var offset: usize = 0;
+        while (offset < first_data_len) {
+            const end = @min(first_data_len, offset + frame_limit);
+            const frame_index = (part_count - 2) / 2;
+            try encodeFrameHeader(
+                &data_frames[frame_index],
+                .data,
+                if (end_stream and end == data.len)
+                    flag_end_stream
+                else
+                    0,
+                stream_id,
+                end - offset,
+            );
+            parts[part_count] = &data_frames[frame_index];
+            parts[part_count + 1] = data[offset..end];
+            part_count += 2;
+            offset = end;
+        }
         try stream_io.writeAllSlices(
             self.io,
             self.stream,
-            &.{ &headers_frame, block, &data_frame, data },
+            parts[0..part_count],
         );
+        if (first_data_len < data.len) {
+            try self.writeData(
+                stream_id,
+                data[first_data_len..],
+                end_stream,
+            );
+        }
     }
 
     const StreamActivation = enum { none, local, peer };
@@ -3168,7 +3590,7 @@ pub const Connection = struct {
         var continuation_count: usize = 0;
         const max_continuations = self.maxContinuationFrames();
         while ((flags & flag_end_headers) == 0) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (frame.frame.header.frame_type != .continuation or frame.frame.header.stream_id != first.header.stream_id) {
                 return error.UnexpectedFrame;
@@ -3247,43 +3669,88 @@ pub const Connection = struct {
         var offset: usize = 0;
         while (offset < data.len) {
             const stream_window = try self.sendStreamWindow(stream_id);
-            const available = @min(
+            const available_credit = @min(
                 data.len - offset,
-                chunk_size,
                 self.send_connection_window.available(),
                 stream_window.available(),
             );
-            if (available == 0) {
+            if (available_credit == 0) {
                 try self.waitForSendCapacity(stream_id);
                 continue;
             }
-            const end = offset + available;
-            try self.writeDataChunk(stream_id, data[offset..end], end_stream and end == data.len);
-            offset = end;
+
+            const burst_limit = std.math.mul(
+                usize,
+                chunk_size,
+                max_data_frames_per_write,
+            ) catch std.math.maxInt(usize);
+            const burst_len = @min(available_credit, burst_limit);
+            try self.writeDataBurst(
+                stream_id,
+                data[offset..][0..burst_len],
+                end_stream and offset + burst_len == data.len,
+                chunk_size,
+                stream_window,
+            );
+            offset += burst_len;
         }
     }
 
-    fn writeDataChunk(self: *Connection, stream_id: u31, payload: []const u8, end_stream: bool) Error!void {
-        try self.send_connection_window.reserve(payload.len);
-        errdefer self.send_connection_window.update(@intCast(payload.len)) catch unreachable;
-        const stream_window = try self.sendStreamWindow(stream_id);
-        try stream_window.reserve(payload.len);
-        errdefer stream_window.update(@intCast(payload.len)) catch unreachable;
+    fn writeDataBurst(
+        self: *Connection,
+        stream_id: u31,
+        payload: []const u8,
+        end_stream: bool,
+        chunk_size: usize,
+        stream_window: *FlowWindow,
+    ) Error!void {
+        std.debug.assert(payload.len != 0);
+        std.debug.assert(payload.len <=
+            chunk_size *| max_data_frames_per_write);
 
-        try writeFrame(
-            self.allocator,
+        try self.send_connection_window.reserve(payload.len);
+        errdefer self.send_connection_window.update(
+            @intCast(payload.len),
+        ) catch unreachable;
+        try stream_window.reserve(payload.len);
+        errdefer stream_window.update(
+            @intCast(payload.len),
+        ) catch unreachable;
+
+        var headers: [max_data_frames_per_write][
+            http2.FrameHeader.encoded_len
+        ]u8 = undefined;
+        var parts: [2 * max_data_frames_per_write][]const u8 = undefined;
+        var part_count: usize = 0;
+        var offset: usize = 0;
+        while (offset < payload.len) {
+            const end = @min(payload.len, offset + chunk_size);
+            const frame_index = part_count / 2;
+            try encodeFrameHeader(
+                &headers[frame_index],
+                .data,
+                if (end_stream and end == payload.len)
+                    flag_end_stream
+                else
+                    0,
+                stream_id,
+                end - offset,
+            );
+            parts[part_count] = &headers[frame_index];
+            parts[part_count + 1] = payload[offset..end];
+            part_count += 2;
+            offset = end;
+        }
+        try stream_io.writeAllSlices(
             self.io,
             self.stream,
-            .data,
-            if (end_stream) flag_end_stream else 0,
-            stream_id,
-            payload,
+            parts[0..part_count],
         );
     }
 
     fn waitForSendCapacity(self: *Connection, stream_id: u31) Error!void {
         while (self.send_connection_window.available() == 0 or (try self.sendStreamWindow(stream_id)).available() == 0) {
-            var frame = try readFrame(self.allocator, self.io, self.stream, self.limits);
+            var frame = try self.readOwnedFrame();
             defer frame.deinit(self.allocator);
             if (try self.handleConnectionFrame(frame.frame)) {
                 if (self.push_state.localStatus(stream_id) ==
@@ -3462,6 +3929,8 @@ pub const Connection = struct {
 
     fn applyLocalLimits(self: *Connection) void {
         self.hpack_decoder.setMaxDynamicTableSize(self.allocator, self.limits.header_table_size);
+        self.recv_connection_window.value =
+            self.limits.initial_connection_window_size;
     }
 
     fn outboundFramePayloadLimit(self: Connection) usize {
@@ -3599,6 +4068,43 @@ pub const OwnedRequest = struct {
     }
 };
 
+pub const StreamingRequest = struct {
+    stream_id: u31,
+    headers: []http2.Hpack.HeaderField,
+    method: []const u8,
+    path: []const u8,
+    scheme: []const u8,
+    authority: ?[]const u8,
+    protocol: ?[]const u8 = null,
+    body_bytes: usize,
+    trailers: []http2.Hpack.HeaderField = &.{},
+    priority: http2.ExtensiblePriority = .{},
+
+    pub fn deinit(
+        self: *StreamingRequest,
+        allocator: std.mem.Allocator,
+    ) void {
+        freeHeaders(allocator, self.headers);
+        freeHeaders(allocator, self.trailers);
+        self.* = undefined;
+    }
+};
+
+fn streamingRequestFromOwned(request: OwnedRequest) StreamingRequest {
+    return .{
+        .stream_id = request.stream_id,
+        .headers = request.headers,
+        .method = request.method,
+        .path = request.path,
+        .scheme = request.scheme,
+        .authority = request.authority,
+        .protocol = request.protocol,
+        .body_bytes = request.body.len,
+        .trailers = request.trailers,
+        .priority = request.priority,
+    };
+}
+
 pub const OwnedResponse = struct {
     headers: []http2.Hpack.HeaderField,
     status: u16,
@@ -3696,7 +4202,7 @@ pub const Tunnel = struct {
 
     pub fn read(self: *Tunnel) Error!OwnedTunnelData {
         while (true) {
-            var frame = try readFrame(self.connection.allocator, self.connection.io, self.connection.stream, self.connection.limits);
+            var frame = try self.connection.readOwnedFrame();
             errdefer frame.deinit(self.connection.allocator);
             if (try self.connection.handleConnectionFrame(frame.frame)) {
                 frame.deinit(self.connection.allocator);
@@ -3886,6 +4392,29 @@ fn encodeFrameHeader(
     std.mem.writeInt(u32, header[5..9], @as(u32, stream_id), .big);
 }
 
+fn encodeWindowUpdateFrame(
+    output: []u8,
+    stream_id: u31,
+    increment: u31,
+) Error!void {
+    std.debug.assert(output.len == http2.FrameHeader.encoded_len + 4);
+    const header: *[http2.FrameHeader.encoded_len]u8 =
+        @ptrCast(output.ptr);
+    try encodeFrameHeader(
+        header,
+        .window_update,
+        0,
+        stream_id,
+        4,
+    );
+    std.mem.writeInt(
+        u32,
+        output[http2.FrameHeader.encoded_len..][0..4],
+        increment,
+        .big,
+    );
+}
+
 fn appendFrameBytes(
     batch: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -3954,6 +4483,11 @@ fn appendHeaderBlockBytes(
 
 fn validateLocalLimits(limits: Limits) Error!void {
     if (limits.initial_window_size > std.math.maxInt(i31)) return error.InvalidSetting;
+    if (limits.initial_connection_window_size < default_flow_window or
+        limits.initial_connection_window_size > std.math.maxInt(i31))
+    {
+        return error.InvalidSetting;
+    }
     if (limits.max_frame_size < default_max_frame_size or limits.max_frame_size > max_max_frame_size) return error.InvalidSetting;
     if (limits.max_continuation_frames) |limit| if (limit == 0) return error.InvalidSetting;
     if (limits.max_idle_priority_updates == 0) return error.InvalidSetting;
@@ -3970,6 +4504,29 @@ fn writeInitialSettings(allocator: std.mem.Allocator, io: std.Io, stream: net.St
     var payload_buf: [max_settings_payload_len]u8 = undefined;
     const payload = try encodeSettingsPayloadInto(&payload_buf, settings.buf[0..settings.count]);
     try writeFrame(allocator, io, stream, .settings, 0, 0, payload);
+}
+
+fn writeInitialConnectionWindow(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+) Error!void {
+    if (limits.initial_connection_window_size == default_flow_window) return;
+    const increment: u31 = @intCast(
+        limits.initial_connection_window_size - default_flow_window,
+    );
+    var payload: [4]u8 = undefined;
+    std.mem.writeInt(u32, &payload, increment, .big);
+    try writeFrame(
+        allocator,
+        io,
+        stream,
+        .window_update,
+        0,
+        0,
+        &payload,
+    );
 }
 
 fn cloneDecodedHeaders(
@@ -9854,6 +10411,178 @@ test "HTTP/2 request batch reorders out-of-order responses" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 streaming request consumes body without aggregation" {
+    const allocator = std.testing.allocator;
+    const body = "streaming-data-" ** 8192;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const limits: Limits = .{
+        .max_body_bytes = body.len,
+        .initial_window_size = 1024 * 1024,
+        .initial_connection_window_size = 1024 * 1024,
+    };
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+        bytes: usize = 0,
+        checksum: u64 = 0,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn consume(shared: *@This(), data: []const u8) !void {
+            shared.bytes += data.len;
+            for (data) |byte| shared.checksum +%= byte;
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var request = try connection.readRequestStreaming(
+                shared,
+                consume,
+            );
+            defer request.deinit(shared.server.allocator);
+            try std.testing.expectEqual(body.len, request.body_bytes);
+            try connection.writeResponse(request.stream_id, .{});
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    var response = try client.request(.{
+        .method = "POST",
+        .path = "/stream",
+        .authority = "localhost",
+        .body = body,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    var expected_checksum: u64 = 0;
+    for (body) |byte| expected_checksum +%= byte;
+    try std.testing.expectEqual(body.len, shared.bytes);
+    try std.testing.expectEqual(expected_checksum, shared.checksum);
+}
+
+test "HTTP/2 buffered frame reader preserves coalesced suffix" {
+    const allocator = std.testing.allocator;
+    var raw: std.ArrayList(u8) = .empty;
+    try (http2.Frame{
+        .header = .{
+            .length = 0,
+            .frame_type = .ping,
+            .flags = flag_ack,
+            .stream_id = 0,
+        },
+        .payload = "12345678",
+    }).write(&raw, allocator);
+    try (http2.Frame{
+        .header = .{
+            .length = 0,
+            .frame_type = .headers,
+            .flags = flag_end_headers | flag_end_stream,
+            .stream_id = 1,
+        },
+        .payload = &.{0x82},
+    }).write(&raw, allocator);
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .frame_reader = .{ .buffer = raw },
+    };
+    defer connection.frame_reader.deinit(allocator);
+
+    const first = try connection.readBufferedFrame();
+    try std.testing.expectEqual(http2.FrameType.ping, first.frame.header.frame_type);
+    try std.testing.expectEqualStrings("12345678", first.frame.payload);
+    const second = try connection.readBufferedFrame();
+    try std.testing.expectEqual(http2.FrameType.headers, second.frame.header.frame_type);
+    try std.testing.expectEqual(@as(u31, 1), second.frame.header.stream_id);
+    try std.testing.expectEqualSlices(u8, &.{0x82}, second.frame.payload);
+    try std.testing.expectEqual(
+        connection.frame_reader.buffer.items.len,
+        connection.frame_reader.start,
+    );
+}
+
+test "HTTP/2 streaming pending request cleans up callback failure" {
+    const allocator = std.testing.allocator;
+    const headers = try allocator.alloc(http2.Hpack.HeaderField, 3);
+    headers[0] = .{
+        .name = try allocator.dupe(u8, ":method"),
+        .value = try allocator.dupe(u8, "POST"),
+    };
+    headers[1] = .{
+        .name = try allocator.dupe(u8, ":path"),
+        .value = try allocator.dupe(u8, "/fail"),
+    };
+    headers[2] = .{
+        .name = try allocator.dupe(u8, ":scheme"),
+        .value = try allocator.dupe(u8, "http"),
+    };
+    const body = try allocator.dupe(u8, "callback body");
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer connection.pending_requests.deinit(allocator);
+    try connection.pending_requests.append(allocator, .{
+        .stream_id = 1,
+        .headers = headers,
+        .method = headers[0].value,
+        .path = headers[1].value,
+        .scheme = headers[2].value,
+        .authority = null,
+        .body = body,
+    });
+
+    try std.testing.expectError(
+        error.InvalidResponse,
+        connection.readRequestStreaming(
+            {},
+            struct {
+                fn consume(_: void, _: []const u8) Error!void {
+                    return error.InvalidResponse;
+                }
+            }.consume,
+        ),
+    );
+    try std.testing.expectEqual(
+        connection.pending_requests.items.len,
+        connection.pending_request_head,
+    );
+}
+
 test "HTTP/2 request batch rolls back staged HPACK state" {
     const allocator = std.testing.allocator;
     var connection = Connection{
@@ -10757,6 +11486,12 @@ test "HTTP/2 runtime rejects invalid local SETTINGS limits" {
         .initial_window_size = @as(u32, std.math.maxInt(i31)) + 1,
     }));
     try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .initial_connection_window_size = @as(u32, @intCast(default_flow_window)) - 1,
+    }));
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
+        .initial_connection_window_size = @as(u32, std.math.maxInt(i31)) + 1,
+    }));
+    try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
         .max_frame_size = default_max_frame_size - 1,
     }));
     try std.testing.expectError(error.InvalidSetting, validateLocalLimits(.{
@@ -10767,6 +11502,7 @@ test "HTTP/2 runtime rejects invalid local SETTINGS limits" {
     }));
     try validateLocalLimits(.{
         .initial_window_size = std.math.maxInt(i31),
+        .initial_connection_window_size = std.math.maxInt(i31),
         .max_frame_size = max_max_frame_size,
     });
 }

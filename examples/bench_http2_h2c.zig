@@ -11,11 +11,19 @@ const response_headers = [_]netz.http2.Hpack.HeaderField{.{
     .value = "Mon, 17 Aug 2026 00:00:00 GMT",
 }};
 const request_body = "ssssssssss";
+const request_body_100kb = "x" ** (100 * 1024);
+const h2_window: u32 = 1024 * 1024;
+const limits: netz.http2.runtime.Limits = .{
+    .max_body_bytes = 128 * 1024,
+    .initial_window_size = h2_window,
+    .initial_connection_window_size = h2_window,
+};
 
 const Scenario = struct {
     name: []const u8,
     request: netz.http2.runtime.RequestOptions,
     parallel: usize = 1,
+    warmups: usize = warmup_iterations,
 };
 
 pub fn main() !void {
@@ -29,7 +37,7 @@ pub fn main() !void {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        limits,
     );
     defer server.deinit();
 
@@ -44,27 +52,62 @@ pub fn main() !void {
         }
 
         fn runFallible(shared: *@This()) !void {
-            const scenario_iterations = warmup_iterations + iterations;
             const ScenarioServer = struct {
                 body: []const u8,
                 parallel: usize,
+                warmups: usize = warmup_iterations,
+                streaming: bool = false,
             };
             const scenarios = [_]ScenarioServer{
                 .{ .body = "", .parallel = 1 },
                 .{ .body = request_body, .parallel = 1 },
+                .{
+                    .body = request_body_100kb,
+                    .parallel = 1,
+                    .warmups = 100,
+                    .streaming = true,
+                },
                 .{ .body = "", .parallel = 10 },
             };
             for (scenarios) |scenario| {
                 var connection = try shared.server.accept();
                 defer connection.close();
+                const scenario_iterations = scenario.warmups + iterations;
                 if (scenario.parallel == 1) {
                     for (0..scenario_iterations) |_| {
-                        var request = try connection.readRequest();
-                        defer request.deinit(shared.server.allocator);
-                        if (!std.mem.eql(u8, request.body, scenario.body)) {
-                            return error.UnexpectedRequestBody;
-                        }
-                        try connection.writeResponse(request.stream_id, .{
+                        const stream_id = if (scenario.streaming) stream: {
+                            var body_bytes: usize = 0;
+                            var request = try connection.readRequestStreaming(
+                                &body_bytes,
+                                struct {
+                                    fn consume(
+                                        count: *usize,
+                                        data: []const u8,
+                                    ) !void {
+                                        count.* += data.len;
+                                    }
+                                }.consume,
+                            );
+                            defer request.deinit(shared.server.allocator);
+                            if (body_bytes != scenario.body.len or
+                                request.body_bytes != scenario.body.len)
+                            {
+                                return error.UnexpectedRequestBody;
+                            }
+                            break :stream request.stream_id;
+                        } else stream: {
+                            var request = try connection.readRequest();
+                            defer request.deinit(shared.server.allocator);
+                            if (!std.mem.eql(
+                                u8,
+                                request.body,
+                                scenario.body,
+                            )) {
+                                return error.UnexpectedRequestBody;
+                            }
+                            break :stream request.stream_id;
+                        };
+                        try connection.writeResponse(stream_id, .{
                             .headers = &response_headers,
                         });
                     }
@@ -131,6 +174,17 @@ pub fn main() !void {
             },
         },
         .{
+            .name = "http2_consecutive_x1_req_100kb",
+            .request = .{
+                .method = "POST",
+                .path = "/hello",
+                .scheme = "http",
+                .authority = authority,
+                .body = request_body_100kb,
+            },
+            .warmups = 100,
+        },
+        .{
             .name = "http2_parallel_x10_empty",
             .request = .{
                 .path = "/hello",
@@ -145,14 +199,14 @@ pub fn main() !void {
             allocator,
             io,
             server.address(),
-            .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+            limits,
         );
         defer client.close();
 
         var requests: [10]netz.http2.runtime.RequestOptions = undefined;
         @memset(requests[0..scenario.parallel], scenario.request);
         var responses: [10]netz.http2.runtime.OwnedResponse = undefined;
-        for (0..warmup_iterations) |_| {
+        for (0..scenario.warmups) |_| {
             try exchangeScenario(
                 &client,
                 requests[0..scenario.parallel],
@@ -192,7 +246,7 @@ pub fn main() !void {
         , .{
             scenario.name,
             scenario.parallel,
-            warmup_iterations,
+            scenario.warmups,
             iterations,
             status_total,
             elapsed / iterations,

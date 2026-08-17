@@ -34,6 +34,14 @@ test "public modules are reachable" {
         netz.http2.runtime.Connection,
         "writeResponseBatch",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readRequestStreaming",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "StreamingRequest",
+    ));
     try std.testing.expect(@hasField(netz.http1.runtime.RequestOptions, "trailers"));
     try std.testing.expect(@hasField(netz.http1.runtime.ResponseOptions, "trailers"));
     try std.testing.expect(@hasField(netz.http1.ParseOptions, "allow_obs_fold"));

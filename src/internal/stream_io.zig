@@ -20,9 +20,10 @@ pub fn writeAllParts(
 
 /// Write borrowed slices in order without first concatenating them.
 ///
-/// Up to fifteen remaining slices are submitted per syscall; larger vectors
-/// continue in a subsequent call. Empty slices are skipped, and short writes
-/// advance across slice boundaries without replaying already-written bytes.
+/// Up to fifteen remaining slices are offered per call; a backend may consume
+/// fewer (Zig 0.16 Threaded uses eight iovecs), in which case this helper
+/// resumes at the exact slice boundary. Empty slices are skipped and short
+/// writes never replay bytes.
 pub fn writeAllSlices(
     io: std.Io,
     stream: net.Stream,
