@@ -10,7 +10,11 @@ const max_streams: usize = 128;
 const default_round_robin_chunk_bytes: usize = 64 * 1024;
 const single_stream_round_robin_chunk_bytes: usize = 8 * 1024;
 const benchmark_min_flow_control_bytes: u64 = 256 * 1024 * 1024;
-const benchmark_ack_eliciting_threshold: u64 = 16;
+// ACK every four ack-eliciting packets. The previous threshold of 16 allowed
+// loopback's small receive queue to accumulate enough outstanding packets that
+// one drop caused a larger recovery burst; four is the best stable point in
+// the 2/4/8/16/32 same-host scan.
+const benchmark_ack_eliciting_threshold: u64 = 4;
 const benchmark_max_ack_delay_us: u64 = 25_000;
 const single_stream_one_rtt_datagram_size: usize = 8192;
 const single_stream_paced_body_chunk_bytes: usize = 7200;
@@ -18,9 +22,13 @@ const single_stream_paced_body_chunk_bytes: usize = 7200;
 // upload benchmark over 4096 on loopback while avoiding the instability seen
 // with larger 12000-byte datagrams.
 const multi_stream_one_rtt_datagram_size: usize = 8192;
-// Keep multi-stream body pacing below the unstable 3200+ range observed on
-// long 64MiB uploads while still reducing per-body send overhead over 2800.
 const multi_stream_paced_body_chunk_bytes: usize = 3000;
+// ACK-driven loss repair removed the old false 3200-byte stability ceiling.
+// The larger packet wins on quicz-shaped 64 MiB runs, while 3000 bytes remains
+// more stable for shorter transfers. Keep the benchmark default adaptive
+// rather than regressing one shape to optimize another.
+const large_multi_stream_body_bytes: usize = 64 * 1024 * 1024;
+const large_multi_stream_paced_body_chunk_bytes: usize = 6000;
 const upload_trace_initial_window: usize = 256 * 1024;
 
 const Mode = enum {
@@ -77,6 +85,10 @@ pub fn main(init: std.process.Init) !void {
         \\HTTP/3 real-handshake transfer benchmark
         \\  mode: {s}
         \\  streams: {d}
+        \\  body batch: {}
+        \\  1-RTT datagram bytes: {d}
+        \\  paced body chunk bytes: {d}
+        \\  server ACK-eliciting threshold: {d}
         \\  iterations: {d}
         \\  body bytes/iteration: {d}
         \\  total body bytes: {d}
@@ -85,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
         \\  bytes/s: {d}
         \\  MiB/s: {d}
         \\
-    , .{ @tagName(config.mode), config.streams, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    , .{ @tagName(config.mode), config.streams, config.enable_body_batch, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
     const summary = summarizeThroughput(throughput_samples);
     std.debug.print(
         "  mean MiB/s: {d:.2}\n" ++
@@ -206,6 +218,7 @@ fn runIteration(
         body: []const u8,
         trace: bool,
         iteration: usize,
+        ack_eliciting_threshold: u64,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -221,7 +234,7 @@ fn runIteration(
             var session = try shared.server.accept();
             defer session.deinit();
             session.established.connection.configureAckPolicy(
-                benchmark_ack_eliciting_threshold,
+                shared.ack_eliciting_threshold,
                 benchmark_max_ack_delay_us,
                 netz.quic.packet_space.default_packet_threshold,
             );
@@ -257,6 +270,7 @@ fn runIteration(
         .body = transfer_body,
         .trace = config.trace_iteration,
         .iteration = iteration,
+        .ack_eliciting_threshold = config.ack_eliciting_threshold,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     traceIteration(config, iteration, "server thread spawned");
@@ -576,59 +590,138 @@ fn sendUploadBodies(
     const allocator = client.allocator;
     const sent = try allocator.alloc(usize, streams);
     defer allocator.free(sent);
+    const round_targets = try allocator.alloc(usize, streams);
+    defer allocator.free(round_targets);
+    const trace_round = try allocator.alloc(bool, streams);
+    defer allocator.free(trace_round);
+    const completed = try allocator.alloc(bool, streams);
+    defer allocator.free(completed);
+    const chunks = try allocator.alloc(
+        netz.http3.runtime.BodyChunk,
+        streams,
+    );
+    defer allocator.free(chunks);
     var next_trace: ?[]usize = null;
     defer if (next_trace) |trace| allocator.free(trace);
     @memset(sent, 0);
+    @memset(completed, false);
     const per_stream_trace_step = @max(@as(usize, 1), body_bytes / streams / 4);
     if (config.trace_iteration) {
         next_trace = try allocator.alloc(usize, streams);
         @memset(next_trace.?, per_stream_trace_step);
     }
     var finished_count: usize = 0;
+    const paced_chunk_bytes = transferPacedBodyChunkBytes(config);
     while (finished_count < streams) {
+        var round_pending = false;
         for (stream_ids, 0..) |stream_id, index| {
+            _ = stream_id;
+            if (completed[index]) continue;
             const stream_len = transferBytesForStream(body_bytes, streams, index);
-            if (sent[index] == stream_len) continue;
-            const count = @min(round_robin_chunk_bytes, stream_len - sent[index]);
-            const end = sent[index] + count;
-            const trace_send_call = if (next_trace) |trace|
+            if (sent[index] == stream_len) {
+                round_targets[index] = stream_len;
+                trace_round[index] = false;
+                continue;
+            }
+            round_targets[index] = @min(
+                stream_len,
+                sent[index] + round_robin_chunk_bytes,
+            );
+            trace_round[index] = if (next_trace) |trace|
                 shouldTraceUploadSendCall(
                     config,
                     sent[index],
-                    end,
+                    round_targets[index],
                     stream_len,
                     trace[index],
                 )
             else
                 false;
-            if (trace_send_call) {
+            if (trace_round[index]) {
                 std.debug.print(
                     "  [iter {d}] upload stream {d} send call {d}+{d}/{d} fin={}\n",
-                    .{ iteration, index, sent[index], count, stream_len, end == stream_len },
+                    .{
+                        iteration,
+                        index,
+                        sent[index],
+                        round_targets[index] - sent[index],
+                        stream_len,
+                        round_targets[index] == stream_len,
+                    },
                 );
             }
-            try client.sendRequestBodyPaced(
-                stream_id,
-                body[0..count],
-                end == stream_len,
-            );
-            if (trace_send_call) {
-                std.debug.print(
-                    "  [iter {d}] upload stream {d} send call done {d}/{d}\n",
-                    .{ iteration, index, end, stream_len },
+            round_pending = true;
+        }
+
+        while (round_pending) {
+            var chunk_count: usize = 0;
+            round_pending = false;
+            for (stream_ids, 0..) |stream_id, index| {
+                if (sent[index] == round_targets[index]) continue;
+                const count = @min(
+                    paced_chunk_bytes,
+                    round_targets[index] - sent[index],
                 );
+                const end = sent[index] + count;
+                chunks[chunk_count] = .{
+                    .stream_id = stream_id,
+                    .data = body[0..count],
+                    .fin = end ==
+                        transferBytesForStream(body_bytes, streams, index),
+                };
+                chunk_count += 1;
+                round_pending = true;
             }
-            sent[index] = end;
-            if (next_trace) |trace| {
-                if (end >= trace[index] or end == stream_len) {
-                    std.debug.print(
-                        "  [iter {d}] upload stream {d} sent {d}/{d}\n",
-                        .{ iteration, index, end, stream_len },
+            if (chunk_count == 0) break;
+            if (config.enable_body_batch) {
+                try client.sendRequestBodyBatchPaced(chunks[0..chunk_count]);
+            } else {
+                for (chunks[0..chunk_count]) |chunk| {
+                    try client.sendRequestBodyPaced(
+                        chunk.stream_id,
+                        chunk.data,
+                        chunk.fin,
                     );
-                    while (trace[index] <= end) trace[index] += per_stream_trace_step;
                 }
             }
-            if (end == stream_len) finished_count += 1;
+            for (chunks[0..chunk_count]) |chunk| {
+                const index = findStreamIndex(
+                    stream_ids,
+                    chunk.stream_id,
+                ) orelse return error.InvalidFrame;
+                sent[index] += chunk.data.len;
+            }
+        }
+
+        for (stream_ids, 0..) |_, index| {
+            const stream_len = transferBytesForStream(
+                body_bytes,
+                streams,
+                index,
+            );
+            if (trace_round[index]) {
+                std.debug.print(
+                    "  [iter {d}] upload stream {d} send call done {d}/{d}\n",
+                    .{ iteration, index, sent[index], stream_len },
+                );
+            }
+            if (next_trace) |trace| {
+                if (sent[index] >= trace[index] or
+                    sent[index] == stream_len)
+                {
+                    std.debug.print(
+                        "  [iter {d}] upload stream {d} sent {d}/{d}\n",
+                        .{ iteration, index, sent[index], stream_len },
+                    );
+                    while (trace[index] <= sent[index]) {
+                        trace[index] += per_stream_trace_step;
+                    }
+                }
+            }
+            if (!completed[index] and sent[index] == stream_len) {
+                completed[index] = true;
+                finished_count += 1;
+            }
         }
     }
 }
@@ -751,7 +844,12 @@ fn transferOneRttDatagramSize(config: Config) usize {
 
 fn transferPacedBodyChunkBytes(config: Config) usize {
     return config.paced_body_chunk_bytes orelse
-        if (config.streams == 1) single_stream_paced_body_chunk_bytes else multi_stream_paced_body_chunk_bytes;
+        if (config.streams == 1)
+            single_stream_paced_body_chunk_bytes
+        else if (config.body_bytes >= large_multi_stream_body_bytes)
+            large_multi_stream_paced_body_chunk_bytes
+        else
+            multi_stream_paced_body_chunk_bytes;
 }
 
 fn transferRoundRobinChunkBytes(config: Config) usize {
@@ -925,6 +1023,11 @@ const Config = struct {
     trace_iteration: bool = false,
     enable_hystart: ?bool = null,
     enable_pacing: bool = true,
+    // This host's small sysctl-capped UDP receive queue makes four-packet GSO
+    // bursts slower than sequential submissions. Keep the batch mode opt-in so
+    // capable hosts can measure it without regressing the portable baseline.
+    enable_body_batch: bool = false,
+    ack_eliciting_threshold: u64 = benchmark_ack_eliciting_threshold,
 };
 
 fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
@@ -945,6 +1048,15 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.one_rtt_datagram_size = try parsePositiveUsize(arg["--one-rtt-datagram-size=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--paced-body-chunk-bytes=")) {
             config.paced_body_chunk_bytes = try parsePositiveUsize(arg["--paced-body-chunk-bytes=".len..]);
+        } else if (std.mem.startsWith(u8, arg, "--ack-eliciting-threshold=")) {
+            config.ack_eliciting_threshold = try std.fmt.parseInt(
+                u64,
+                arg["--ack-eliciting-threshold=".len..],
+                10,
+            );
+            if (config.ack_eliciting_threshold == 0) {
+                return error.InvalidArgument;
+            }
         } else if (std.mem.startsWith(u8, arg, "--streams=")) {
             config.streams = try parsePositiveUsize(arg["--streams=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--mode=")) {
@@ -961,6 +1073,8 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.enable_hystart = true;
         } else if (std.mem.eql(u8, arg, "--disable-pacing")) {
             config.enable_pacing = false;
+        } else if (std.mem.eql(u8, arg, "--enable-body-batch")) {
+            config.enable_body_batch = true;
         } else {
             return error.InvalidArgument;
         }

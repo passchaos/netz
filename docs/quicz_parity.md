@@ -36,7 +36,7 @@ zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 -
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 --transfer-bytes=67108864 --streams=4 --verbose
 ```
 
-## Current direct `~/Work/quicz` comparison
+## Current `~/Work/quicz` comparison context
 
 A direct run of `~/Work/quicz/examples/quic_bench_hs.zig` with Zig 0.16 and
 `-OReleaseFast -lc` produced these loopback real-handshake reference numbers:
@@ -51,12 +51,17 @@ netz Stream Upload:        311.69 MiB/s mean, 3.1% stddev, 3 x 64 MiB
 netz Multi-Stream (4x):    314.68 MiB/s mean, 0.6% stddev, 3 x 64 MiB
 ```
 
-`bench-quic-handshake-stream` now provides the previously missing direct
-comparison. It performs a fresh TLS 1.3/QUIC handshake per iteration, uses the
-same 64 MiB aggregate upload and one-/four-stream shapes, drives CUBIC recovery,
-and consumes STREAM data through the allocation-free borrowed receive API.
-The captured netz means are about 1.36x and 1.29x the latest same-host quicz
-228.77/244.85 MB/s samples recorded in `docs/benchmark-baseline.md`.
+The old values share a host and aggregate transfer shape but not a controlled
+CPU layout. A fresh CPU-0-pinned quicz run produced 15.97/16.12 MB/s because
+both same-process endpoints contend for one CPU; a matching netz raw probe was
+also scheduling-bound. The previous 1.36x/1.29x raw STREAM ratios are withdrawn
+until both stacks use an equivalent endpoint CPU layout.
+
+HTTP/3 is a separate evidence gap: quicz's benchmark calls raw
+`sendOnStream`, while `bench-http3-handshake-transfer` includes DATA framing,
+request/response/QPACK work, and response completion. No equal-wire quicz H3
+benchmark currently exists, so the netz H3 numbers are reported as internal
+progress rather than a direct superiority claim.
 
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992
@@ -70,7 +75,7 @@ benchmarks.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
-| QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered and faster in the current direct real-handshake throughput comparison | `examples/quic_echo.zig`, `examples/quic_handshake_echo.zig`, `examples/bench_quic_handshake_stream.zig`; 64 MiB means 311.69 MiB/s single-stream and 314.68 MiB/s four-stream | Keep the same-host matrix current and add latency/handshake-rate comparisons separately. |
+| QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered; direct performance verdict pending controlled CPU layout | `examples/quic_echo.zig`, `examples/quic_handshake_echo.zig`, `examples/bench_quic_handshake_stream.zig`; historical unpinned 64 MiB netz means were 311.69 MiB/s single-stream and 314.68 MiB/s four-stream | Re-run both stacks with equivalent endpoint CPU placement; same-process single-CPU pinning is scheduling-bound and invalidates the old ratio. |
 | QUIC DATAGRAM (`datagram_echo`, `quic_bench_datagram`) | Covered and faster than current quicz DATAGRAM sample | `examples/quic_datagram_echo.zig`, `examples/bench_quic_datagram.zig`, `examples/bench_webtransport_datagram.zig`, `zig build run-quic-datagram-echo`, `zig build bench-quic-datagram -Doptimize=ReleaseFast` | Keep raw and WebTransport DATAGRAM benchmarks in the comparison matrix. |
 | Graceful/application close (`graceful_close`, close lifecycle) | Covered for local preconfigured 1-RTT smoke and tests | `examples/quic_close.zig`, one_rtt lifecycle tests, `zig build run-quic-close` | Add a full client/server CLI-style close demo only if external manual interop requires it. |
 | Packet protection / initial keys / key update | Covered by modules and tests | `src/quic/protection.zig`, `src/quic/zero_rtt`, `src/quic/one_rtt/tests/crypto_path.zig`, `zig build test` | Keep vector coverage current as TLS suites evolve. |
@@ -81,7 +86,7 @@ benchmarks.
 | Congestion control (NewReno/CUBIC/HyStart++) | Covered and defaulted to CUBIC for 1-RTT | `src/quic/congestion.zig`, `src/quic/hystart.zig`, congestion tests | Evaluate quicz-style app-limited CUBIC behavior before changing production congestion math. |
 | UDP batching / GSO / GRO | Covered at QUIC runtime level | `src/quic/runtime.zig`, `bench-quic-udp-batch`, `bench-quic-one-rtt-send`, `bench-quic-one-rtt-receive` | HTTP/3 direct GRO receive remains unsafe as a default; do not enable without fixing long-run stability. |
 | HTTP/3 public fetch and Alt-Svc | Covered for robotics.bytedance.com with discovery and manual Alt-Svc override | `examples/http3_fetch.zig`, `run-http3-fetch --discover --verify --head`, `run-http3-fetch --alt-svc='h3=":443"; ma=2592000' --verify --head` | Broaden public interop matrix beyond one site; recent Cloudflare/Google/Facebook probes did not add passing coverage. |
-| HTTP/3 real-handshake upload benchmark | Covered and reliable at the tested default | `examples/bench_http3_handshake_transfer.zig`; CPU-0-pinned 4-stream 64 MiB upload completed 5/5 iterations at 103.68 MiB/s mean and 2.58% stddev after ACK-driven recovery was moved into the QUIC receive pump | Close the remaining ~0.44x throughput gap against the recorded quicz 244.85 MB/s mean with equal-CPU reruns and H3-specific packet batching. |
+| HTTP/3 real-handshake upload benchmark | Covered and reliable at the tested default | `examples/bench_http3_handshake_transfer.zig`; CPU-0-pinned 4-stream 64 MiB upload completed 5/5 iterations at 141.78 MiB/s mean and 2.76% stddev with ACK threshold 4 and adaptive DATA sizing; exact-size cross-stream body batching is also available but opt-in on this small-rmem host | Build an equal-wire quicz H3 reference before making a cross-stack ratio; then reduce netz per-packet recovery/framing cost. |
 | HTTP/3 real-handshake download benchmark | Covered for current benchmark scale | 64KiB/1MiB smoke pass; 4MiB, 16MiB, and 64MiB single-/4-stream download validations pass | Continue long-run stability and apples-to-apples quicz throughput comparisons before declaring performance superiority. |
 | QPACK / Capsule / WebTransport | Covered by modules, datagram benchmark, and real-handshake bidi/uni stream example | `bench-http3-qpack`, `bench-http3-capsule`, `bench-webtransport-datagram`, `run-webtransport-handshake-stream`; modern 0x41 bidi prefix follows wtransport rather than quicz's legacy Session-ID-only codec | Add external wtransport/browser interop and incremental/reset stream APIs. |
 | TLS backend/process interop examples | Partially covered through netz/vail integration | QUIC handshake tests, `examples/quic_handshake_echo.zig`, HTTP/3 public fetch with `--verify` | netz still lacks quicz-style standalone TLS process echo demos; add only if this becomes a required deliverable. |
@@ -96,29 +101,32 @@ benchmarks.
 2. **Aggressive receive batching**: enabling HTTP/3 GRO receive directly has
    caused long stalls.  The lower-level QUIC GRO benchmark works, but the H3
    runtime path needs more work before it can be defaulted.
-3. **Aggressive transfer settings**: the default 3000-byte paced body chunks
-   now complete five CPU-pinned 64 MiB/four-stream uploads. Larger historical
-   body chunk/datagram combinations that produced busy loops still need fresh
-   post-recovery validation before defaults can be raised.
+3. **Aggressive transfer settings**: the benchmark uses 3000-byte multi-stream
+   chunks below 64 MiB and 6000 bytes for quicz-shaped 64 MiB runs. Larger
+   12/14/16 KiB datagrams were slower or noisier, while cross-stream GSO
+   batching remains opt-in because this host's small receive queue favors
+   sequential packet submission.
 4. **Complete external interop matrix**: public H3 fetch is proven against
    `robotics.bytedance.com`, including `--discover`, manual `--alt-svc`, and
    `--verify`, but broader server/client interop is not yet audited. Recent
    Cloudflare/Google/Facebook probes failed or timed out and are intentionally
    not counted as coverage.
 5. **Broader performance comparison against `~/Work/quicz`**: raw QUIC
-   real-handshake STREAM and DATAGRAM throughput now have direct passing
-   comparisons where the current netz samples are faster. Echo latency,
-   handshake rate, loss simulation, stream churn, and multi-connection
-   aggregate throughput still need equivalent netz artifacts before the whole
-   quicz benchmark surface can be considered surpassed.
+   STREAM comparisons need equivalent endpoint CPU placement, and HTTP/3 still
+   lacks an equal-wire quicz reference. DATAGRAM has a direct passing sample,
+   while echo latency, handshake rate, loss simulation, stream churn, and
+   multi-connection aggregate throughput still need controlled equivalent
+   artifacts before the whole quicz benchmark surface can be considered
+   surpassed.
 
 ## Next recommended work
 
-1. Extend the direct QUIC comparison with echo latency and handshake-rate
-   modes, then loss/churn/multi-connection cases; raw STREAM and DATAGRAM
-   throughput now exceed the captured quicz samples.
+1. Rebuild the raw QUIC comparison with equivalent endpoint CPU placement,
+   then add echo latency, handshake-rate, loss/churn, and multi-connection
+   cases. The old unpinned ratio is no longer accepted as proof.
 2. Investigate the aggressive receive batching path so HTTP/3 can safely use
    GRO without stalls.
-3. Add H3-specific packet-size-aware multi-stream body batching, then rerun the
-   larger packet/body chunk matrix before raising defaults.
+3. Reduce HTTP/3 per-packet recovery ownership and STREAM/DATA framing cost;
+   exact-size multi-stream batching now exists but needs a larger-rmem host to
+   show a throughput benefit.
 4. Broaden public HTTP/3 interop beyond `robotics.bytedance.com`.

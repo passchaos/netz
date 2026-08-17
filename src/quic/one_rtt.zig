@@ -782,6 +782,19 @@ pub const Connection = struct {
         }
     }
 
+    /// Submit one stateful batch using the connection's monotonic clock.
+    ///
+    /// Blocking protocol adapters need explicit prefix progress but should not
+    /// pass a null send timestamp: recovery would then have no PTO time base
+    /// for the newly sent packets. Deterministic tests can keep using the
+    /// timestamped `sendManyProgressAt` variant.
+    pub fn sendManyProgress(
+        self: *Connection,
+        packets: []const []const quic.Frame,
+    ) Error!ConnectionBatchSendResult {
+        return self.sendManyProgressAt(packets, self.monotonicNowNs());
+    }
+
     /// Protect and submit one stateful packet batch with explicit progress.
     ///
     /// All fallible transport bookkeeping is completed before the socket call.
@@ -1730,6 +1743,65 @@ pub const Connection = struct {
         });
         const full_packet_len = std.math.add(usize, packet_len, payload_len) catch return error.InvalidPayloadLength;
         return self.pacingDeadlineAt(now_ns, full_packet_len);
+    }
+
+    /// Exact protected size for a future packet containing `frames`.
+    ///
+    /// HTTP/3 batch planners use this read-only query before handing borrowed
+    /// frame slices to `sendManyProgressAt`. Accounting for the packet-number
+    /// offset avoids a fixed-overhead guess when a batch crosses a truncated
+    /// packet-number length boundary.
+    pub fn packetLenForFramesAtOffset(
+        self: Connection,
+        packet_offset: usize,
+        frames: []const quic.Frame,
+    ) Error!usize {
+        if (frames.len == 0) return error.MissingFrame;
+        const packet_number = std.math.add(
+            u64,
+            self.next_packet_number,
+            packet_offset,
+        ) catch return error.InvalidPacketNumber;
+        if (packet_number > quic.protection.max_packet_number) {
+            return error.InvalidPacketNumber;
+        }
+        var payload_len: usize = 0;
+        for (frames) |frame| {
+            payload_len = std.math.add(
+                usize,
+                payload_len,
+                try frame.wireLen(),
+            ) catch return error.InvalidFrameLength;
+        }
+        if (packet_offset == 0 and
+            self.handshake_status.needsHandshakeDone())
+        {
+            payload_len = std.math.add(usize, payload_len, 1) catch
+                return error.InvalidFrameLength;
+        }
+        const packet_number_len =
+            quic.protection.packetNumberLenForPayload(
+                packet_number,
+                self.sent.largestAcknowledged(),
+                payload_len,
+            );
+        const overhead = try quic.protection.shortPacketLen(.{
+            .destination_connection_id = self.config.peer_connection_id,
+            .packet_number = packet_number,
+            .packet_number_len = packet_number_len,
+            .payload = &.{},
+        });
+        return std.math.add(usize, overhead, payload_len) catch
+            return error.InvalidPayloadLength;
+    }
+
+    /// Wait until a previously reported pacing deadline becomes writable.
+    ///
+    /// Blocking protocol adapters call this only after
+    /// `sendManyProgressAt` returns `PacingLimited`; event-loop users can keep
+    /// integrating `pacingDeadlineAt` into their own scheduler.
+    pub fn waitForPacingAvailability(self: *Connection) Error!void {
+        try self.waitForPacing(self.monotonicNowNs());
     }
 
     pub fn sendAckFrequency(self: *Connection, ack_eliciting_threshold: u64, request_max_ack_delay: u64, reordering_threshold: u64) Error!u64 {

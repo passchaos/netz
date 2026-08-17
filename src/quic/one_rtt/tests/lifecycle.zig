@@ -988,6 +988,53 @@ test "QUIC 1-RTT stateful batch commits stream flow and recovery" {
     try std.testing.expect(received1.frames[0].stream.fin);
 }
 
+test "QUIC 1-RTT future packet length includes pending handshake done" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xba} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "client",
+        .peer_connection_id = "server",
+        .local_endpoint = .server,
+    });
+    defer client.deinit();
+
+    client.handshake_status = .{ .server_pending = null };
+    // Keep the base payload at three bytes so header-protection minimum packet
+    // number sizing does not mask the extra HANDSHAKE_DONE byte.
+    const frames = [_]quic.Frame{.{ .padding = .{ .len = 3 } }};
+    const with_handshake_done = try client.packetLenForFramesAtOffset(
+        0,
+        &frames,
+    );
+    client.handshake_status = .confirmed;
+    const without_handshake_done = try client.packetLenForFramesAtOffset(
+        0,
+        &frames,
+    );
+    try std.testing.expectEqual(
+        without_handshake_done + 1,
+        with_handshake_done,
+    );
+}
+
 test "QUIC 1-RTT stateful batch splits at AEAD key generation boundary" {
     const allocator = std.testing.allocator;
 

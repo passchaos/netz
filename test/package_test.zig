@@ -222,6 +222,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "startRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBody"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBodyPaced"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime, "BodyChunk"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendRequestBodyBatchPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "finishRequestTrailers"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "finishRequestTrailersPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "OwnedHandshakeResponseEvent"));
@@ -236,6 +238,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "startResponse"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseBody"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseBodyPaced"));
+    try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "sendResponseBodyBatchPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "finishResponseTrailers"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeServerSession, "finishResponseTrailersPaced"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "ShutdownState"));
@@ -536,7 +539,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receiveRoutedDatagramWithEcnAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closeTransport"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendMany"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendManyProgress"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendManyProgressAt"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "packetLenForFramesAtOffset"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendWithEcn"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "releaseReceivedCapacity"));

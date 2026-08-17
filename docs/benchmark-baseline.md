@@ -212,6 +212,13 @@ default single-stream/multi-stream transfer sizing knobs, making it possible to
 search stable packet-size-aware configurations without source edits. The
 benchmark now creates a fresh loopback server/client pair per iteration and
 reports mean/stddev MiB/s, matching quicz's multi-iteration benchmark shape.
+`--ack-eliciting-threshold` controls the server ACK policy; the default of four
+is the stable winner from the same-host 2/4/8/16/32 scan. Packet-size-aware
+cross-stream body batches are available through
+`sendRequestBodyBatchPaced`/`sendResponseBodyBatchPaced`, and
+`--enable-body-batch` measures that path. It remains opt-in because this host's
+sysctl-capped 212,992-byte UDP receive queue makes four-packet GSO bursts
+slightly slower than sequential submissions.
 `--verbose` prints per-iteration throughput lines (`[iter N]`) for diagnosing
 long or stuck multi-iteration runs. `--trace-iteration` additionally prints
 coarse lifecycle stages (bind, connect, transfer, join) for each iteration.
@@ -278,16 +285,20 @@ Current 16 MiB / 4-stream upload result:
 HTTP/3 real-handshake transfer benchmark
   mode: upload
   streams: 4
+  body batch: false
+  1-RTT datagram bytes: 8192
+  paced body chunk bytes: 3000
+  server ACK-eliciting threshold: 4
   iterations: 5
   body bytes/iteration: 16777216
   total body bytes: 83886080
   status total: 4000
-  ns/iteration: 230481831
-  bytes/s: 72791924
-  MiB/s: 69
-  mean MiB/s: 69.43
-  stddev MiB/s: 0.80
-  stddev percent: 1.15
+  ns/iteration: 123919485
+  bytes/s: 135388038
+  MiB/s: 129
+  mean MiB/s: 129.36
+  stddev MiB/s: 5.50
+  stddev percent: 4.25
 ```
 
 This CPU-0-pinned sample was captured on 2026-08-17 after moving
@@ -354,20 +365,27 @@ taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- 
 ```text
 netz upload streams=1:   117.76 MiB/s mean, 5 iterations
 netz download streams=1: 123 MiB/s, 129,894,689 bytes/s, one iteration
-netz upload streams=4:   103.68 MiB/s mean, 2.58% stddev, 5 iterations
+netz upload streams=4:   141.78 MiB/s mean, 2.76% stddev, 5 iterations
 netz download streams=4: 32 MiB/s, 34,579,902 bytes/s, one iteration
 ```
 
-Same-host throughput ratio against the quicz real-handshake upload baselines:
+Transport-only context against the quicz real-handshake STREAM baselines:
 
-| Scenario | quicz | netz | netz/quicz |
-|---|---:|---:|---:|
-| 64 MiB single-stream upload | 228.77 MB/s (218.17 MiB/s) | 117.76 MiB/s mean (5 iters) | ~0.54x |
-| 64 MiB 4-stream aggregate upload | 244.85 MB/s (233.51 MiB/s) | 103.68 MiB/s mean (5 iters) | ~0.44x |
+| Scenario | historical quicz raw QUIC STREAM | netz HTTP/3 DATA |
+|---|---:|---:|
+| 64 MiB single-stream upload | 228.77 MB/s | 117.76 MiB/s mean (5 iters) |
+| 64 MiB 4-stream aggregate upload | 244.85 MB/s | 141.78 MiB/s mean (5 iters) |
 
-The ratio normalizes decimal MB/s to binary MiB/s. The new netz samples are
-CPU-0 pinned; the historical quicz command above was same-host but not pinned,
-so this remains a directional baseline rather than final equal-CPU evidence.
+These are deliberately **not** presented as a throughput ratio:
+`quic_bench_hs.zig` calls raw `sendOnStream`, while netz also performs HTTP/3
+DATA framing, request/response processing, and QPACK/session work. The netz
+samples are CPU-0 pinned; the historical quicz values were not. A fresh
+CPU-0-pinned quicz run produced 15.97 MB/s single-stream and 16.12 MB/s
+four-stream because pinning both same-process endpoints to one CPU changes the
+scheduling shape dramatically. Netz's raw benchmark showed the same scheduling
+sensitivity. No equal-wire, equal-CPU quicz HTTP/3 benchmark is currently
+available, so neither raw transport result is accepted as an H3 superiority
+claim.
 
 Fresh 5-iteration netz single-stream sample:
 
@@ -387,14 +405,26 @@ HTTP/3 real-handshake transfer benchmark
   stddev percent: 10.40
 ```
 
-A matching five-iteration 64 MiB / four-stream run now completes:
+A matching CPU-0-pinned five-iteration 64 MiB / four-stream run now completes:
 
 ```text
-per-iteration MiB/s: 107.53, 105.73, 100.18, 103.38, 101.60
-mean MiB/s: 103.68
-stddev MiB/s: 2.67
-stddev percent: 2.58
+per-iteration MiB/s: 143.53, 140.85, 146.05, 134.70, 143.78
+mean MiB/s: 141.78
+stddev MiB/s: 3.91
+stddev percent: 2.76
 ```
+
+This result combines a 6000-byte adaptive DATA chunk for 64 MiB multi-stream
+runs with an ACK-eliciting threshold of four. Thresholds 2, 4, 8, 16, and 32
+produced 129.07, 137.06, 112.87, 110.17, and 85.87 MiB/s means respectively.
+The shorter 16 MiB/four-stream shape retains 3000-byte packets and improved
+from the previous 69.43 MiB/s sample to 129.36 MiB/s with threshold four.
+
+The optional cross-stream body batch completed five 64 MiB iterations at
+134.89 MiB/s mean and 2.38% stddev. It is not the default on this host because
+the sequential path is slightly faster with the small kernel receive queue.
+The API still provides exact protected-packet sizing, per-DATA prefix ownership,
+and socket-visible-prefix commit semantics for hosts that can absorb bursts.
 
 The earlier run completed iteration 0 at 33.92 MiB/s and then timed out. A
 single traced 16 MiB run showed all four client send loops complete while the
@@ -405,16 +435,18 @@ blocking QUIC pump immediately retransmits a bounded set after each received
 ACK, stopping transactionally at congestion or pacing limits. PTO remains the
 fallback rather than the primary repair mechanism.
 
-This same-host comparison shows netz is **reliable at the tested default but
-not yet performance-competitive** on large real-handshake transfers. Raising the
+The current evidence shows netz is **reliable and substantially faster than its
+previous H3 baseline**, but does not establish superiority over quicz HTTP/3
+because an equal-wire reference is missing. Raising the
 single-stream 1-RTT datagram budget to 8192 bytes, disabling HyStart for the
 low-RTT single-stream benchmark, and using a 7200-byte paced DATA chunk closes
 much of the previous 3 MiB/s cliff, but quicz still leads on
 64 MiB four-stream aggregate throughput. Releasing all active streaming response
 reader capacity before each multi-response packet receive stabilizes the 64 MiB
 four-stream download case, but quicz still leads substantially. The next
-optimization target is packet batching across concurrent streams and reducing
-per-DATA-frame send overhead. A completion audit cannot pass
+optimization target is reducing per-packet recovery ownership and STREAM/DATA
+framing overhead, then retesting batching on a host with a larger UDP receive
+queue. A completion audit cannot pass
 until this gap is closed with measured same-host evidence.
 
 ### Allocation / peak-live evidence
@@ -479,18 +511,18 @@ Rejected experiments after validation:
 - Replacing paced multi-stream upload with a naive event-loop style
   `sendRequestBody` loop triggered `DatagramTooLarge`; multi-stream batching
   needs packet-size-aware grouping rather than bypassing the paced chunker.
-- A first batch-body API grouped chunks by STREAM-frame count, but still hit
-  `DatagramTooLarge`; correct batching must group by actual QUIC frame wire
-  length / short-packet length and respect `currentSendDatagramSize()`.
+- A first batch-body prototype grouped chunks by STREAM-frame count and hit
+  `DatagramTooLarge`. The current API instead queries exact protected packet
+  length at each packet-number offset, isolates DATA-prefix storage, and
+  commits only the socket-visible QUIC batch prefix.
 - Replacing the generic `sendConnectionFrames` splitter with conservative
   `wireLen()`-based grouping avoided `DatagramTooLarge` but caused 64 MiB
   4-stream download timeouts; packet-size-aware batching needs to be scoped to
   the new batch-body API rather than changing all HTTP/3 frame sends.
 - Multi-stream `--paced-body-chunk-bytes` scans before the ACK-driven recovery
-  fix incorrectly made 3000-byte chunks look unstable. With recovery fixed,
-  3000 bytes is the current default and completed the five 64 MiB/four-stream
-  samples above. Larger packet-size-aware batches still need fresh validation
-  rather than relying on those pre-fix timeout results.
+  fix incorrectly made larger chunks look unstable. The benchmark now retains
+  3000 bytes below 64 MiB and uses 6000 bytes for the quicz-shaped 64 MiB
+  aggregate; 12/14/16 KiB datagram experiments were slower or much noisier.
 - Multi-stream `--round-robin-chunk-bytes` scans did not find a better stable
   default either: 16 KiB timed out on upload and hit `StreamBufferTooLarge` on
   download; 32 KiB improved download to ~40 MiB/s but still timed out on upload.
@@ -522,9 +554,13 @@ netz four streams:
   payload bytes received: 201326592
 ```
 
-The latest same-host quicz run recorded above produced 228.77 MB/s
-single-stream and 244.85 MB/s four-stream means. The current netz samples are
-therefore about 1.36x and 1.29x those references, respectively.
+The historical same-host quicz run recorded above produced 228.77 MB/s
+single-stream and 244.85 MB/s four-stream means. Those values were not
+CPU-pinned. A new `taskset -c 0 /tmp/quicz-bench-hs` run produced 15.97 MB/s
+and 16.12 MB/s because both same-process endpoints contend for one CPU; a
+matching pinned netz probe was similarly scheduling-bound. The prior 1.36x and
+1.29x ratios are therefore withdrawn. Future raw QUIC claims require an
+equivalent endpoint CPU layout, not merely a shared host and transfer size.
 
 This comparison intentionally disables GSO/GRO. The host clamps
 `net.core.rmem_max` to 212,992 bytes, so a same-process multi-packet burst can
@@ -663,10 +699,11 @@ different benchmark definitions, but they define the comparison target shape:
 - quicz documentation also highlights platform effects: Linux GSO/GRO can
   dominate throughput comparisons and must be recorded separately.
 
-For netz, raw QUIC STREAM and DATAGRAM throughput now have same-host reference
-runs where the captured samples exceed quicz. HTTP/3 transfer results remain a
-separate comparison because they include H3 framing, QPACK, and session
-bookkeeping.
+For netz, raw QUIC STREAM and DATAGRAM throughput have same-host reference
+runs, but only DATAGRAM currently retains a direct performance verdict. STREAM
+needs equivalent endpoint CPU placement after the single-CPU scheduling audit.
+HTTP/3 remains separate because it includes H3 framing, QPACK, and session
+bookkeeping and has no equal-wire quicz reference.
 
 ## Gaps before a completion audit can pass
 

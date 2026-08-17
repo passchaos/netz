@@ -1,6 +1,7 @@
 const std = @import("std");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
+const body_batch = @import("runtime/body_batch.zig");
 
 const net = std.Io.net;
 
@@ -2116,6 +2117,8 @@ pub const HandshakeSessionOptions = struct {
     enable_data_prefix_fast_path: bool = false,
 };
 
+pub const BodyChunk = body_batch.Chunk;
+
 pub const HandshakeServerOptions = struct {
     handshake: quic.handshake.ServerOptions,
     session: HandshakeSessionOptions = .{},
@@ -2547,6 +2550,37 @@ pub const HandshakeServerSession = struct {
             );
             offset = end;
         }
+    }
+
+    /// Batched counterpart to `sendResponseBodyPaced` for concurrent response
+    /// streams. Each contribution becomes one QUIC packet and the socket-visible
+    /// prefix commits atomically into the corresponding body stream states.
+    pub fn sendResponseBodyBatchPaced(
+        self: *HandshakeServerSession,
+        chunks: []const BodyChunk,
+    ) Error!void {
+        try sendConnectionBodyBatchPaced(
+            &self.established.connection,
+            &self.outbound_bodies,
+            chunks,
+            self.options,
+            self,
+            HandshakeServerSession.receiveBatchProgressForSend,
+            HandshakeServerSession.finishBatchResponseStream,
+        );
+    }
+
+    fn receiveBatchProgressForSend(
+        self: *HandshakeServerSession,
+    ) Error!void {
+        try self.receiveRequestPacket();
+    }
+
+    fn finishBatchResponseStream(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) void {
+        self.request_lifecycle.markFinished(stream_id);
     }
 
     fn sendResponseBodyPacedChunk(
@@ -3262,6 +3296,70 @@ pub const HandshakeClient = struct {
             );
             offset = end;
         }
+    }
+
+    /// Send one DATA contribution per active request stream as a stateful QUIC
+    /// packet batch.
+    ///
+    /// The input order determines packet order and each stream may appear at
+    /// most once. Congestion, flow control, and pacing are handled like
+    /// `sendRequestBodyPaced`, but socket-visible packet prefixes are committed
+    /// together so multi-stream schedulers can amortize protection and
+    /// sendmmsg/GSO overhead without sharing mutable DATA payload storage.
+    pub fn sendRequestBodyBatchPaced(
+        self: *HandshakeClient,
+        chunks: []const BodyChunk,
+    ) Error!void {
+        for (chunks) |chunk| {
+            if (!self.request_lifecycle.contains(chunk.stream_id)) {
+                return error.UnexpectedStream;
+            }
+        }
+        try sendConnectionBodyBatchPaced(
+            &self.established.connection,
+            &self.outbound_bodies,
+            chunks,
+            self.options,
+            self,
+            HandshakeClient.receiveBatchProgressForSend,
+            HandshakeClient.finishBatchRequestStream,
+        );
+    }
+
+    fn receiveBatchProgressForSend(self: *HandshakeClient) Error!void {
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
+        try receiveConnectionResponsePacket(
+            &self.established.connection,
+            &self.receive_packets,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.response_streams,
+            &self.streaming_responses,
+            &self.push_streams,
+            &self.request_lifecycle,
+        );
+        if (self.response_streams.firstReset()) |reset| {
+            if (!self.request_lifecycle.contains(reset.stream_id)) return;
+            _ = self.response_streams.takeReset(reset.stream_id);
+            try self.sendQpackFeedback();
+            _ = try self.request_lifecycle.finish(reset.stream_id);
+            _ = self.outbound_bodies.finish(reset.stream_id);
+            self.qpack_encode.abandonStream(reset.stream_id);
+            return responseResetError(reset.application_error_code);
+        }
+    }
+
+    fn finishBatchRequestStream(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) void {
+        _ = self;
+        _ = stream_id;
+        // A request remains outstanding until its response is consumed. The
+        // shared batch helper already retires only the outbound body state.
     }
 
     fn sendRequestBodyPacedChunk(
@@ -7817,6 +7915,7 @@ const OutboundBodySet = struct {
     entry_index: std.AutoHashMapUnmanaged(u62, usize) = .empty,
     frame_scratch: std.ArrayList(quic.Frame) = .empty,
     payload_scratch: std.ArrayList(u8) = .empty,
+    batch_scratch: body_batch.Scratch = .{},
     max_streams: usize,
 
     fn init(
@@ -7827,6 +7926,7 @@ const OutboundBodySet = struct {
     }
 
     fn deinit(self: *OutboundBodySet) void {
+        self.batch_scratch.deinit(self.allocator);
         self.payload_scratch.deinit(self.allocator);
         self.frame_scratch.deinit(self.allocator);
         self.entries.deinit(self.allocator);
@@ -8690,9 +8790,9 @@ fn sendConnectionBodyChunk(
     errdefer entry.* = previous;
     try bodies.prepareChunkForEntry(entry, data.len, fin);
     bodies.frame_scratch.clearRetainingCapacity();
-    var prefix: [data_frame_prefix_capacity]u8 = undefined;
+    var prefix: body_batch.Prefix = undefined;
     if (options.enable_data_prefix_fast_path and
-        try appendDataFrameStreamFramesFast(
+        try body_batch.appendDataStreamFrames(
             &entry.send,
             &bodies.frame_scratch,
             connection.endpoint.allocator,
@@ -8732,69 +8832,141 @@ fn sendConnectionBodyChunk(
     if (fin) _ = bodies.finish(stream_id);
 }
 
-const data_frame_prefix_capacity: usize = 4096;
-
-fn appendDataFrameStreamFramesFast(
-    send: *quic.stream_state.SendState,
-    frames: *std.ArrayList(quic.Frame),
-    allocator: std.mem.Allocator,
-    prefix: *[data_frame_prefix_capacity]u8,
-    data: []const u8,
-    fin: bool,
-    max_stream_frame_data: usize,
-) Error!bool {
-    if (data.len == 0 or max_stream_frame_data == 0) return false;
-    if (send.fin_sent) return error.FinalSizeMismatch;
-    const payload_len_u64 = std.math.cast(u64, data.len) orelse
-        return error.IntegerOverflow;
-    var prefix_len: usize = 0;
-    const type_bytes = try quic.varint.encodeInto(
-        prefix[prefix_len..],
-        http3.FrameType.data,
-    );
-    prefix_len += type_bytes.len;
-    const len_bytes = try quic.varint.encodeInto(
-        prefix[prefix_len..],
-        payload_len_u64,
-    );
-    prefix_len += len_bytes.len;
-    if (prefix_len >= max_stream_frame_data) return false;
-    const first_body_len = @min(
-        data.len,
-        @min(max_stream_frame_data - prefix_len, prefix.len - prefix_len),
-    );
-    if (first_body_len == 0) return false;
-    @memcpy(prefix[prefix_len..][0..first_body_len], data[0..first_body_len]);
-    const first_len = prefix_len + first_body_len;
-    const remaining = data[first_body_len..];
-    const additional = if (remaining.len == 0)
-        @as(usize, 0)
-    else
-        std.math.divCeil(usize, remaining.len, max_stream_frame_data) catch
-            return error.InvalidFrameLength;
-    try frames.ensureUnusedCapacity(allocator, 1 + additional);
-    frames.appendAssumeCapacity(.{ .stream = .{
-        .stream_id = send.stream_id,
-        .offset = send.next_offset,
-        .data = prefix[0..first_len],
-        .fin = fin and remaining.len == 0,
-    } });
-    send.next_offset += first_len;
-    var written: usize = 0;
-    while (written < remaining.len) {
-        const chunk_len = @min(max_stream_frame_data, remaining.len - written);
-        const is_last = written + chunk_len == remaining.len;
-        frames.appendAssumeCapacity(.{ .stream = .{
-            .stream_id = send.stream_id,
-            .offset = send.next_offset,
-            .data = remaining[written .. written + chunk_len],
-            .fin = fin and is_last,
-        } });
-        send.next_offset += chunk_len;
-        written += chunk_len;
+fn sendConnectionBodyBatchPaced(
+    connection: *quic.one_rtt.Connection,
+    bodies: *OutboundBodySet,
+    chunks: []const BodyChunk,
+    options: HandshakeSessionOptions,
+    context: anytype,
+    comptime receive_progress: anytype,
+    comptime finish_stream: anytype,
+) Error!void {
+    if (chunks.len == 0) return;
+    for (chunks, 0..) |chunk, i| {
+        if (chunk.data.len > pacedBodyChunkLimit(options)) {
+            return error.DatagramTooLarge;
+        }
+        var j: usize = 0;
+        while (j < i) : (j += 1) {
+            if (chunks[j].stream_id == chunk.stream_id) {
+                return error.UnexpectedStream;
+            }
+        }
     }
-    if (fin) send.fin_sent = true;
-    return true;
+
+    const Staged = struct {
+        stream_id: u62,
+        entry: OutboundBodySet.Entry,
+        fin: bool,
+    };
+    var staged: [quic.one_rtt.max_batch_packets]Staged = undefined;
+    var packets: [quic.one_rtt.max_batch_packets][]const quic.Frame =
+        undefined;
+    var offset: usize = 0;
+    while (offset < chunks.len) {
+        const count = @min(
+            quic.one_rtt.max_batch_packets,
+            chunks.len - offset,
+        );
+        const window = chunks[offset..][0..count];
+        try bodies.batch_scratch.begin(bodies.allocator, count);
+
+        for (window, 0..) |chunk, i| {
+            const current = bodies.find(chunk.stream_id) orelse
+                return error.UnexpectedStream;
+            staged[i] = .{
+                .stream_id = chunk.stream_id,
+                .entry = current.*,
+                .fin = chunk.fin,
+            };
+            try bodies.prepareChunkForEntry(
+                &staged[i].entry,
+                chunk.data.len,
+                chunk.fin,
+            );
+            const frame_start = bodies.batch_scratch.frames.items.len;
+            if (chunk.data.len == 0) {
+                try staged[i].entry.send.appendFrames(
+                    &bodies.batch_scratch.frames,
+                    bodies.allocator,
+                    &.{},
+                    options.max_stream_frame_data,
+                    chunk.fin,
+                );
+            } else if (!try body_batch.appendDataStreamFrames(
+                &staged[i].entry.send,
+                &bodies.batch_scratch.frames,
+                bodies.allocator,
+                &bodies.batch_scratch.prefixes.items[i],
+                chunk.data,
+                chunk.fin,
+                options.max_stream_frame_data,
+            )) {
+                return error.DatagramTooLarge;
+            }
+            const frame_len =
+                bodies.batch_scratch.frames.items.len - frame_start;
+            if (frame_len == 0 or
+                frame_len > @max(@as(usize, 1), options.max_frames_per_packet))
+            {
+                return error.DatagramTooLarge;
+            }
+            bodies.batch_scratch.frame_ranges.items[i] = .{
+                .start = frame_start,
+                .len = frame_len,
+            };
+        }
+
+        for (bodies.batch_scratch.frame_ranges.items[0..count], 0..) |range, i| {
+            packets[i] = bodies.batch_scratch.frames.items[range.start .. range.start + range.len];
+            if (try connection.packetLenForFramesAtOffset(
+                i,
+                packets[i],
+            ) > connection.currentSendDatagramSize()) {
+                return error.DatagramTooLarge;
+            }
+        }
+
+        const result = connection.sendManyProgress(
+            packets[0..count],
+        ) catch |err| switch (err) {
+            error.FlowControlBlocked, error.CongestionLimited => {
+                try receive_progress(context);
+                continue;
+            },
+            error.PacingLimited => {
+                try connection.waitForPacingAvailability();
+                continue;
+            },
+            else => return err,
+        };
+        if (result.sent_count > count or
+            result.protected_count > count or
+            result.sent_count > result.protected_count)
+        {
+            return error.Unexpected;
+        }
+
+        // QUIC commits only the socket-visible prefix. Mirror that exact
+        // prefix into HTTP/3 body offsets and FIN state; protected-but-unsent
+        // suffix packets consumed nonces but had their transport flow state
+        // rolled back and remain safe to retry under fresh packet numbers.
+        for (staged[0..result.sent_count]) |committed| {
+            const entry = bodies.find(committed.stream_id) orelse
+                return error.UnexpectedStream;
+            entry.* = committed.entry;
+            if (committed.fin) {
+                _ = bodies.finish(committed.stream_id);
+                finish_stream(context, committed.stream_id);
+            }
+        }
+        offset += result.sent_count;
+        if (result.send_error) |err| return err;
+        if (result.sent_count != result.protected_count) {
+            return error.Unexpected;
+        }
+        if (result.sent_count == 0) return error.Unexpected;
+    }
 }
 
 fn sendProtectedBodyChunk(
@@ -17580,6 +17752,185 @@ test "HTTP/3 handshake client drains GRO response batch one packet at a time" {
         "response-one",
         first_event.response.value.response.body,
     );
+}
+
+test "HTTP/3 handshake client batches request DATA across streams" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{
+        0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8,
+    };
+    const client_cid = [_]u8{ 0xd9, 0xda, 0xdb, 0xdc };
+    const server_cid = [_]u8{ 0xdd, 0xde, 0xdf, 0xe0 };
+    var server = try HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 1400,
+                    .enable_pacing = false,
+                },
+                .random = [_]u8{0xe1} ** 32,
+                .x25519_secret_key = [_]u8{0xe2} ** 32,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *HandshakeServer) !void {
+            var session = try server_ptr.accept();
+            defer session.deinit();
+            var saw_first = false;
+            var saw_second = false;
+            var first_stream_id: ?u62 = null;
+            var second_stream_id: ?u62 = null;
+            for (0..2) |_| {
+                var request = try session.receiveRequest();
+                defer request.deinit(
+                    session.established.connection.endpoint.allocator,
+                );
+                if (std.mem.eql(
+                    u8,
+                    request.request.path,
+                    "/batch-first",
+                )) {
+                    try std.testing.expectEqualStrings(
+                        "first-body",
+                        request.request.body,
+                    );
+                    saw_first = true;
+                    first_stream_id = request.stream_id;
+                } else if (std.mem.eql(
+                    u8,
+                    request.request.path,
+                    "/batch-second",
+                )) {
+                    try std.testing.expectEqualStrings(
+                        "second-body",
+                        request.request.body,
+                    );
+                    saw_second = true;
+                    second_stream_id = request.stream_id;
+                } else {
+                    return error.TestUnexpectedResult;
+                }
+            }
+            try std.testing.expect(saw_first);
+            try std.testing.expect(saw_second);
+            try session.startResponse(
+                first_stream_id.?,
+                .{ .status = 200 },
+                "first-response".len,
+            );
+            try session.startResponse(
+                second_stream_id.?,
+                .{ .status = 200 },
+                "second-response".len,
+            );
+            try session.sendResponseBodyBatchPaced(&.{
+                .{
+                    .stream_id = first_stream_id.?,
+                    .data = "first-response",
+                    .fin = true,
+                },
+                .{
+                    .stream_id = second_stream_id.?,
+                    .data = "second-response",
+                    .fin = true,
+                },
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 1400,
+                    .enable_pacing = false,
+                },
+                .random = [_]u8{0xe3} ** 32,
+                .x25519_secret_key = [_]u8{0xe4} ** 32,
+            },
+        },
+    );
+    defer client.deinit();
+
+    const first = try client.startRequest(.{
+        .method = "POST",
+        .path = "/batch-first",
+        .authority = "localhost",
+    }, "first-body".len);
+    const second = try client.startRequest(.{
+        .method = "POST",
+        .path = "/batch-second",
+        .authority = "localhost",
+    }, "second-body".len);
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        client.sendRequestBodyBatchPaced(&.{
+            .{ .stream_id = first, .data = "first-body", .fin = true },
+            .{ .stream_id = first, .data = "first-body", .fin = true },
+        }),
+    );
+    try client.sendRequestBodyBatchPaced(&.{
+        .{ .stream_id = first, .data = "first-body", .fin = true },
+        .{ .stream_id = second, .data = "second-body", .fin = true },
+    });
+    for (0..2) |_| {
+        var event = try client.receiveNextResponse();
+        defer event.deinit(allocator);
+        try std.testing.expect(event == .response);
+        try std.testing.expectEqual(@as(u16, 200), event.response.value.response.status);
+        if (event.response.stream_id == first) {
+            try std.testing.expectEqualStrings(
+                "first-response",
+                event.response.value.response.body,
+            );
+        } else if (event.response.stream_id == second) {
+            try std.testing.expectEqualStrings(
+                "second-response",
+                event.response.value.response.body,
+            );
+        } else {
+            return error.TestUnexpectedResult;
+        }
+    }
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/3 handshake runtime streams request and response DATA chunks" {

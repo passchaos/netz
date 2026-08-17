@@ -93,7 +93,13 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   enforces the configured concurrency bound. Protected clients and servers also
   expose `startRequest`/`sendRequestBody` and
   `startResponse`/`sendResponseBody`, preserving per-stream QUIC offsets across
-  multiple DATA chunks with empty-open/finish lookup skips, single-lookup chunk accounting plus cached FIN cleanup and enforcing declared Content-Length at FIN. Streaming
+  multiple DATA chunks with empty-open/finish lookup skips, single-lookup chunk accounting plus cached FIN cleanup and enforcing declared Content-Length at FIN.
+  Handshake-backed clients and server sessions additionally expose
+  `sendRequestBodyBatchPaced`/`sendResponseBodyBatchPaced`: one DATA
+  contribution per stream is packet-size checked, protected through the
+  stateful QUIC batch path, and committed only for the socket-visible prefix,
+  with isolated DATA-prefix storage for recovery-safe borrowed payloads.
+  Streaming
   messages can instead finish with dynamic QPACK trailer HEADERS through
   indexed streaming body state for
   `finishRequestTrailers`/`finishResponseTrailers`. Preconfigured-protection
@@ -491,7 +497,9 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   shapes,
 - HTTP/3 cleartext development request/response round trips,
 - HTTP/3 real-handshake paced upload/download throughput with configurable
-  body size, direction mode, stream count, round-robin scheduling quantum, 1-RTT datagram size, paced body chunk size, and iteration count,
+  body size, direction mode, stream count, round-robin scheduling quantum,
+  1-RTT datagram size, paced body chunk size, optional cross-stream body packet
+  batching, and iteration count,
 - HTTP/3 Alt-Svc `h3` / `h3-29` endpoint discovery parsing and origin-relative connection target resolution for real-site upgrade hints,
 - HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
   CONNECT-stream extension payloads,
