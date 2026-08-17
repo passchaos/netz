@@ -4,6 +4,7 @@ const http1 = @import("../http1/mod.zig");
 const http1_runtime = http1.runtime;
 const push = @import("runtime/push.zig");
 const priority_runtime = @import("runtime/priority.zig");
+const stream_io = @import("../internal/stream_io.zig");
 
 const net = std.Io.net;
 
@@ -694,36 +695,72 @@ pub const Connection = struct {
         if (request_options.authority == null) request_options.authority = self.default_authority;
         const scheme = request_options.scheme orelse self.default_scheme orelse "https";
 
-        var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
-        defer fields.deinit(self.allocator);
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            request_options.headers.len,
+            7,
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = if (fields_capacity <= fields_stack.len)
+            fields_stack[0..fields_capacity]
+        else
+            try self.allocator.alloc(
+                http2.Hpack.HeaderField,
+                fields_capacity,
+            );
+        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
+            self.allocator.free(fields_buffer);
+        };
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
         const method_is_connect = methodIsConnect(request_options.method);
         const extended_connect = request_options.protocol != null;
         if (method_is_connect and !extended_connect and (request_options.body.len != 0 or request_options.trailers.len != 0)) {
             return error.InvalidContentLength;
         }
-        try fields.append(self.allocator, .{ .name = ":method", .value = request_options.method });
+        fields.appendAssumeCapacity(.{
+            .name = ":method",
+            .value = request_options.method,
+        });
         if (!method_is_connect or extended_connect) {
-            try fields.append(self.allocator, .{ .name = ":path", .value = request_options.path });
-            try fields.append(self.allocator, .{ .name = ":scheme", .value = scheme });
+            fields.appendAssumeCapacity(.{
+                .name = ":path",
+                .value = request_options.path,
+            });
+            fields.appendAssumeCapacity(.{
+                .name = ":scheme",
+                .value = scheme,
+            });
         }
         if (request_options.protocol) |protocol| {
             if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
-            try fields.append(self.allocator, .{ .name = ":protocol", .value = protocol });
+            fields.appendAssumeCapacity(.{
+                .name = ":protocol",
+                .value = protocol,
+            });
         }
-        if (request_options.authority) |authority| try fields.append(self.allocator, .{ .name = ":authority", .value = authority });
+        if (request_options.authority) |authority| {
+            fields.appendAssumeCapacity(.{
+                .name = ":authority",
+                .value = authority,
+            });
+        }
         var priority_buf: [16]u8 = undefined;
         if (request_options.priority) |value| {
-            try fields.append(self.allocator, .{
+            fields.appendAssumeCapacity(.{
                 .name = "priority",
                 .value = value.serialize(&priority_buf),
             });
         }
-        for (request_options.headers) |header| try fields.append(self.allocator, header);
+        fields.appendSliceAssumeCapacity(request_options.headers);
         stripConnectionHeaders(&fields, .request);
         var content_length_buf: [32]u8 = undefined;
         if (requestShouldDefaultContentLength(request_options.method, fields.items, request_options.body.len)) {
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{request_options.body.len}) catch unreachable;
-            try fields.append(self.allocator, .{ .name = "content-length", .value = content_length });
+            fields.appendAssumeCapacity(.{
+                .name = "content-length",
+                .value = content_length,
+            });
         }
         try validateHeaderBlock(fields.items, .request);
         try validateHeaderBlock(request_options.trailers, .request_trailers);
@@ -731,8 +768,30 @@ pub const Connection = struct {
 
         const stream_id = try self.reserveNextClientStreamId();
         errdefer self.releaseLocalStream(stream_id);
-        try self.writeHeaders(stream_id, fields.items, request_options.body.len == 0 and request_options.trailers.len == 0);
-        if (request_options.body.len != 0) try self.writeData(stream_id, request_options.body, request_options.trailers.len == 0);
+        if (request_options.body.len != 0 and
+            request_options.trailers.len == 0)
+        {
+            try self.writeHeadersThenData(
+                stream_id,
+                fields.items,
+                request_options.body,
+                true,
+            );
+        } else {
+            try self.writeHeaders(
+                stream_id,
+                fields.items,
+                request_options.body.len == 0 and
+                    request_options.trailers.len == 0,
+            );
+            if (request_options.body.len != 0) {
+                try self.writeData(
+                    stream_id,
+                    request_options.body,
+                    false,
+                );
+            }
+        }
         if (request_options.trailers.len != 0) try self.writeHeaders(stream_id, request_options.trailers, true);
         return self.readResponse(stream_id, request_options.method, extended_connect);
     }
@@ -1277,11 +1336,30 @@ pub const Connection = struct {
         const suppress_body = responseWriteSuppressesBodySemantics(options.status, semantics);
         const status = std.fmt.bufPrint(&status_buf, "{}", .{options.status}) catch return error.InvalidStatus;
 
-        var fields: std.ArrayList(http2.Hpack.HeaderField) = .empty;
-        defer fields.deinit(self.allocator);
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            options.headers.len,
+            2,
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = if (fields_capacity <= fields_stack.len)
+            fields_stack[0..fields_capacity]
+        else
+            try self.allocator.alloc(
+                http2.Hpack.HeaderField,
+                fields_capacity,
+            );
+        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
+            self.allocator.free(fields_buffer);
+        };
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
         var content_length_buf: [32]u8 = undefined;
-        try fields.append(self.allocator, .{ .name = ":status", .value = status });
-        for (options.headers) |header| try fields.append(self.allocator, header);
+        fields.appendAssumeCapacity(.{
+            .name = ":status",
+            .value = status,
+        });
+        fields.appendSliceAssumeCapacity(options.headers);
         stripConnectionHeaders(&fields, .response);
         if (semantics.traditional_connect and options.status >= 200 and options.status < 300) {
             try stripSuccessfulConnectContentLength(&fields);
@@ -1292,13 +1370,35 @@ pub const Connection = struct {
         try validateDeclaredResponseLengthValue(options.status, semantics, declared_response_length, options.body.len);
         if (responseShouldDefaultContentLengthValue(options.status, semantics, declared_response_length, options.body.len)) {
             const content_length = std.fmt.bufPrint(&content_length_buf, "{}", .{options.body.len}) catch unreachable;
-            try fields.append(self.allocator, .{ .name = "content-length", .value = content_length });
+            fields.appendAssumeCapacity(.{
+                .name = "content-length",
+                .value = content_length,
+            });
         }
         try validateHeaderBlock(fields.items, .response);
         try validateHeaderBlock(options.trailers, .response_trailers);
-        try self.writeHeaders(stream_id, fields.items, suppress_body or (options.body.len == 0 and options.trailers.len == 0));
+        if (!suppress_body and
+            options.body.len != 0 and
+            options.trailers.len == 0)
+        {
+            try self.writeHeadersThenData(
+                stream_id,
+                fields.items,
+                options.body,
+                true,
+            );
+        } else {
+            try self.writeHeaders(
+                stream_id,
+                fields.items,
+                suppress_body or
+                    (options.body.len == 0 and options.trailers.len == 0),
+            );
+        }
         if (!suppress_body) {
-            if (options.body.len != 0) try self.writeData(stream_id, options.body, options.trailers.len == 0);
+            if (options.body.len != 0 and options.trailers.len != 0) {
+                try self.writeData(stream_id, options.body, false);
+            }
             if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
         }
         self.releasePeerStream(stream_id);
@@ -2201,10 +2301,78 @@ pub const Connection = struct {
         try validateHeaderListSize(headers, self.peer_max_header_list_size);
         const activation = try self.ensureStreamTrackedForOutboundHeaders(stream_id);
         errdefer self.undoStreamActivation(activation, stream_id);
-        var block: std.ArrayList(u8) = .empty;
-        defer block.deinit(self.allocator);
-        try self.hpack_encoder.encodeBlock(&block, self.allocator, headers);
-        try self.writeHeaderBlock(stream_id, block.items, end_stream);
+        const block = try self.hpack_encoder.encodeBlockRetained(
+            self.allocator,
+            headers,
+        );
+        try self.writeHeaderBlock(stream_id, block, end_stream);
+    }
+
+    /// Emit a HEADERS frame and a single DATA frame in one stream write when
+    /// the body fits both the peer frame size and current flow-control credit.
+    ///
+    /// Small request/response bodies are common and two tiny TCP submissions
+    /// can trigger Linux's Nagle/delayed-ACK interaction. Larger or blocked
+    /// bodies retain the normal framing and WINDOW_UPDATE-driven fallback.
+    fn writeHeadersThenData(
+        self: *Connection,
+        stream_id: u31,
+        headers: []const http2.Hpack.HeaderField,
+        data: []const u8,
+        end_stream: bool,
+    ) Error!void {
+        std.debug.assert(data.len != 0);
+        try validateHeaderListSize(
+            headers,
+            self.peer_max_header_list_size,
+        );
+        const activation =
+            try self.ensureStreamTrackedForOutboundHeaders(stream_id);
+        errdefer self.undoStreamActivation(activation, stream_id);
+        const block = try self.hpack_encoder.encodeBlockRetained(
+            self.allocator,
+            headers,
+        );
+        const frame_limit = self.outboundFramePayloadLimit();
+        const stream_window = try self.sendStreamWindow(stream_id);
+        const can_coalesce = block.len <= frame_limit and
+            data.len <= frame_limit and
+            data.len <= self.send_connection_window.available() and
+            data.len <= stream_window.available();
+        if (!can_coalesce) {
+            try self.writeHeaderBlock(stream_id, block, false);
+            try self.writeData(stream_id, data, end_stream);
+            return;
+        }
+
+        try self.send_connection_window.reserve(data.len);
+        errdefer self.send_connection_window.update(
+            @intCast(data.len),
+        ) catch unreachable;
+        try stream_window.reserve(data.len);
+        errdefer stream_window.update(@intCast(data.len)) catch unreachable;
+
+        var headers_frame: [http2.FrameHeader.encoded_len]u8 = undefined;
+        try encodeFrameHeader(
+            &headers_frame,
+            .headers,
+            flag_end_headers,
+            stream_id,
+            block.len,
+        );
+        var data_frame: [http2.FrameHeader.encoded_len]u8 = undefined;
+        try encodeFrameHeader(
+            &data_frame,
+            .data,
+            if (end_stream) flag_end_stream else 0,
+            stream_id,
+            data.len,
+        );
+        try stream_io.writeAllSlices(
+            self.io,
+            self.stream,
+            &.{ &headers_frame, block, &data_frame, data },
+        );
     }
 
     const StreamActivation = enum { none, local, peer };
@@ -3133,15 +3301,32 @@ fn writeFrame(
     payload: []const u8,
 ) Error!void {
     _ = allocator;
-    const payload_len = std.math.cast(u24, payload.len) orelse return error.InvalidFrameSize;
     var header: [http2.FrameHeader.encoded_len]u8 = undefined;
+    try encodeFrameHeader(
+        &header,
+        frame_type,
+        flags,
+        stream_id,
+        payload.len,
+    );
+    try stream_io.writeAllParts(io, stream, &header, payload);
+}
+
+fn encodeFrameHeader(
+    header: *[http2.FrameHeader.encoded_len]u8,
+    frame_type: http2.FrameType,
+    flags: u8,
+    stream_id: u31,
+    payload_length: usize,
+) Error!void {
+    const payload_len = std.math.cast(u24, payload_length) orelse
+        return error.InvalidFrameSize;
     header[0] = @truncate(payload_len >> 16);
     header[1] = @truncate(payload_len >> 8);
     header[2] = @truncate(payload_len);
     header[3] = @intFromEnum(frame_type);
     header[4] = flags;
     std.mem.writeInt(u32, header[5..9], @as(u32, stream_id), .big);
-    try writeAllHeaderPayload(io, stream, &header, payload);
 }
 
 fn validateLocalLimits(limits: Limits) Error!void {
@@ -4064,31 +4249,6 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
         const n = try io.vtable.netWrite(io.userdata, stream.socket.handle, bytes[written..], &.{""}, 0);
         if (n == 0) return error.SocketUnconnected;
         written += n;
-    }
-}
-
-fn writeAllHeaderPayload(io: std.Io, stream: net.Stream, header: []const u8, payload: []const u8) net.Stream.Writer.Error!void {
-    if (payload.len == 0) {
-        try writeAll(io, stream, header);
-        return;
-    }
-    var header_written: usize = 0;
-    var payload_written: usize = 0;
-    while (header_written < header.len or payload_written < payload.len) {
-        const data = if (payload_written < payload.len)
-            &[_][]const u8{payload[payload_written..]}
-        else
-            &[_][]const u8{};
-        const n = if (header_written < header.len)
-            try io.vtable.netWrite(io.userdata, stream.socket.handle, header[header_written..], data, 0)
-        else
-            try io.vtable.netWrite(io.userdata, stream.socket.handle, payload[payload_written..], &.{""}, 0);
-        if (n == 0) return error.SocketUnconnected;
-
-        const header_remaining = header.len - header_written;
-        const header_advance = @min(n, header_remaining);
-        header_written += header_advance;
-        payload_written += n - header_advance;
     }
 }
 

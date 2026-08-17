@@ -1148,9 +1148,11 @@ pub const Hpack = struct {
         dynamic_table: DynamicTable = .{},
         pending_size_update: ?SizeUpdate = null,
         last_emitted_dynamic_table_size: usize = default_dynamic_table_size,
+        encoded_scratch: std.ArrayList(u8) = .empty,
 
         pub fn deinit(self: *Encoder, allocator: std.mem.Allocator) void {
             self.dynamic_table.deinit(allocator);
+            self.encoded_scratch.deinit(allocator);
             self.* = undefined;
         }
 
@@ -1223,6 +1225,25 @@ pub const Hpack = struct {
                 try encodeString(list, allocator, field.value);
                 if (can_incrementally_index) try self.dynamic_table.add(allocator, field.name, field.value);
             }
+        }
+
+        /// Encode into connection-owned scratch retained by this encoder.
+        ///
+        /// The returned bytes are valid until the next retained encode or
+        /// `deinit`. Runtime connections use this path so a small HEADERS frame
+        /// does not allocate and free an ArrayList on every request/response.
+        pub fn encodeBlockRetained(
+            self: *Encoder,
+            allocator: std.mem.Allocator,
+            fields: []const HeaderField,
+        ) ![]const u8 {
+            self.encoded_scratch.clearRetainingCapacity();
+            try self.encodeBlock(
+                &self.encoded_scratch,
+                allocator,
+                fields,
+            );
+            return self.encoded_scratch.items;
         }
 
         fn queueSizeUpdate(self: *Encoder, max_size: usize) void {
@@ -2568,6 +2589,31 @@ test "HTTP/2 HPACK Huffman and dynamic table state" {
     defer Hpack.freeDecodedFields(allocator, second_fields);
     try std.testing.expectEqualStrings("x-dynamic", second_fields[0].name);
     try std.testing.expectEqualStrings("one", second_fields[0].value);
+}
+
+test "HTTP/2 HPACK retained encoder scratch reuses capacity" {
+    const allocator = std.testing.allocator;
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+
+    const first = try encoder.encodeBlockRetained(
+        allocator,
+        &.{.{ .name = ":status", .value = "200" }},
+    );
+    try std.testing.expectEqualSlices(u8, &.{0x88}, first);
+    const first_ptr = first.ptr;
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const second = try encoder.encodeBlockRetained(
+        failing.allocator(),
+        &.{.{ .name = ":status", .value = "204" }},
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(first_ptr, second.ptr);
+    try std.testing.expectEqualSlices(u8, &.{0x89}, second);
 }
 
 test "HTTP/2 HPACK decoder writes into caller storage" {

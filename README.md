@@ -19,7 +19,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   with host verification plus OS/custom CA bundles, and a `std.Io.async`
   concurrent server helper
 - HTTP/2 frame headers with direct parse/preallocated writes and full-frame direct writes, RFC-bounded SETTINGS validation, DATA/HEADERS (including PADDED/PRIORITY self-dependency checks)/PRIORITY/PUSH_PROMISE/CONTINUATION/RST_STREAM payload parsing, RFC 8336 single-probe exact-indexed ORIGIN origin-set state with exact-allocation/empty-payload parse fast paths, allocation-free/preallocated writes, empty-index membership and duplicate-entry skips, RFC 7838 single-probe exact-indexed ALTSVC connection/stream advertisements with allocation-free/preallocated writes, identical replacement skips and per-target replacement, and active-stream reset propagation, a bootstrap
-  HPACK static/literal encoder-decoder with RFC 7541 Huffman strings, preallocated prefix-integer writes, exact encode/decode output preallocation, and preallocated empty/short/raw-preferred string write fast paths,
+  HPACK static/literal encoder-decoder with RFC 7541 Huffman strings, preallocated prefix-integer writes, exact encode/decode output preallocation, retained runtime encode scratch, and preallocated empty/short/raw-preferred string write fast paths,
   pseudo-header and common-header static fast paths, internal empty-dynamic-table lookup skips, single-lookup
   dynamic insert indexing, O(1)
   FIFO dynamic-index eviction, and single-pass request/response pseudo-header
@@ -29,7 +29,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   never-index encoding for sensitive fields, fixed-control-frame and preallocated control-frame write fast paths, PING with opaque ACK matching, GOAWAY/WINDOW_UPDATE connection
   management including interleaved SETTINGS/PING/WINDOW_UPDATE/PRIORITY handling and compacting interleaved request FIFO reuse, RFC 9218 SETTINGS_NO_RFC7540_PRIORITIES negotiation and client-only PRIORITY_UPDATE signaling with preallocated frame payload writes, indexed bounded pre-request buffering, allocation-free full-capacity rejection, identical-update skips, single-probe reservation/replacement, cached idle-request pruning/activation with empty-index checks, empty-update lookups/removals, and promised-push validation, active-stream RST_STREAM guarding, explicit opt-in PUSH_PROMISE promised-request/pushed-response lifecycle with preallocated PUSH_PROMISE frame writes, parent/promised-stream validation, single-lookup local push reservations with empty-index local lookup skips and promised-push queue indexing, indexed reserved/pending push lookups and releases with empty-index skips, O(1) cursor FIFO promised-request notification delivery, head/tail-cancel fast paths with empty-pending skips and targeted pending-index repair, and client RST_STREAM(CANCEL) refusal of reserved pushes, GOAWAY propagation and allocation-free GOAWAY emission during stream reads and post-GOAWAY request suppression/rejection, cached multi-set drain-floor checks, and same-control-stream GOAWAY emission with persistent control-stream offsets, default client server-push opt-out, connection- and stream-level flow-control enforcement including
   transactional single-pass SETTINGS_INITIAL_WINDOW_SIZE updates, exact-allocation/empty SETTINGS parse fast paths, and allocation-conscious configurable advertisement, configurable SETTINGS_HEADER_TABLE_SIZE/SETTINGS_MAX_CONCURRENT_STREAMS/SETTINGS_MAX_FRAME_SIZE advertisement, bidirectional SETTINGS_MAX_CONCURRENT_STREAMS enforcement, SETTINGS_MAX_FRAME_SIZE and SETTINGS_MAX_HEADER_LIST_SIZE validation with inbound advertised-frame-size enforcement,
-  outbound frame splitting plus h2-style CONTINUATION chain flood, stream-id overflow, indexed active-stream tracking with single-probe activation, duplicate reserve skips, empty-index active checks, and empty-index release skips, wrong-direction HEADERS, and idle-stream DATA/WINDOW_UPDATE send limits, with DATA sends that wait for WINDOW_UPDATE capacity
+  outbound frame splitting plus h2-style CONTINUATION chain flood, stream-id overflow, indexed active-stream tracking with single-probe activation, duplicate reserve skips, empty-index active checks, and empty-index release skips, wrong-direction HEADERS, and idle-stream DATA/WINDOW_UPDATE send limits, with stack-first request/response header descriptors, one-syscall HEADERS+single-DATA submission when current frame/flow limits permit, and DATA sends that wait for WINDOW_UPDATE capacity
   and inbound DATA consumers that account for full padded frame payloads with single-probe indexed stream-window state, empty-index membership skips, and restore connection/stream receive capacity,
   frame-envelope validation including fixed-size RST_STREAM and SETTINGS payload-multiple checks, stream-id direction/monotonicity validation, request/response trailers with forbidden-field rejection, pre-HEADERS frame ordering checks, interim 1xx response skipping and explicit server-side informational response sending, content-length
   validation with pure-digit Content-Length enforcement, indexed response-body semantics retention with single-probe updates, duplicate reserve skips, and empty-index lookup skips, HTTP/2 pseudo-header/lowercase field-name/value and control-character validation, `:method` token validation with case-sensitive HEAD/CONNECT/OPTIONS semantics and `:protocol` token validation,
@@ -457,6 +457,7 @@ zig build bench -Doptimize=ReleaseFast
 zig build bench-http1-parse -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
 zig build bench-http3-dev -Doptimize=ReleaseFast
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
@@ -485,6 +486,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   parsing and one-flush response batches, matching Hyper's `hello_world_16`
   benchmark shape,
 - HTTP/2 HPACK stateful dynamic-table encode/decode versus stateless helpers,
+- HTTP/2 persistent h2c round trips matching Hyper's consecutive empty and
+  10-byte-request end-to-end benchmark shapes,
 - HTTP/3 cleartext development request/response round trips,
 - HTTP/3 real-handshake paced upload/download throughput with configurable
   body size, direction mode, stream count, round-robin scheduling quantum, 1-RTT datagram size, paced body chunk size, and iteration count,

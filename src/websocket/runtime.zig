@@ -4,6 +4,7 @@ const http1 = @import("../http1/mod.zig");
 const http2 = @import("../http2/mod.zig");
 const http1_runtime = http1.runtime;
 const http2_runtime = http2.runtime;
+const stream_io = @import("../internal/stream_io.zig");
 const wire = @import("../internal/wire.zig");
 
 const net = std.Io.net;
@@ -57,7 +58,7 @@ const RuntimeTransport = union(enum) {
         payload: []const u8,
     ) Error!void {
         return switch (self) {
-            .tcp => |tcp| writeAllHeaderPayload(
+            .tcp => |tcp| stream_io.writeAllParts(
                 tcp.io,
                 tcp.stream,
                 header,
@@ -1523,44 +1524,6 @@ fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Strea
         const n = try io.vtable.netWrite(io.userdata, stream.socket.handle, bytes[written..], &.{""}, 0);
         if (n == 0) return error.SocketUnconnected;
         written += n;
-    }
-}
-
-fn writeAllHeaderPayload(
-    io: std.Io,
-    stream: net.Stream,
-    header: []const u8,
-    payload: []const u8,
-) net.Stream.Writer.Error!void {
-    var header_written: usize = 0;
-    var payload_written: usize = 0;
-    while (header_written < header.len or payload_written < payload.len) {
-        const data = if (payload_written < payload.len)
-            &[_][]const u8{payload[payload_written..]}
-        else
-            &[_][]const u8{};
-        const n = if (header_written < header.len)
-            try io.vtable.netWrite(
-                io.userdata,
-                stream.socket.handle,
-                header[header_written..],
-                data,
-                0,
-            )
-        else
-            try io.vtable.netWrite(
-                io.userdata,
-                stream.socket.handle,
-                payload[payload_written..],
-                &.{""},
-                0,
-            );
-        if (n == 0) return error.SocketUnconnected;
-
-        const header_remaining = header.len - header_written;
-        const header_advance = @min(n, header_remaining);
-        header_written += header_advance;
-        payload_written += n - header_advance;
     }
 }
 

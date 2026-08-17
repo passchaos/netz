@@ -42,12 +42,12 @@ hyper hello_world_16:
   0.836-0.866 us/request
 
 netz bench-http1-pipeline:
-  11.56-11.76 us / 16-request batch
-  0.723-0.735 us/request
-  1.361-1.384 million requests/s
+  11.38-12.03 us / 16-request batch
+  0.711-0.752 us/request
+  1.330-1.406 million requests/s
 ```
 
-Netz is about 1.14-1.20x faster in this captured workload.
+Netz is about 1.11-1.22x faster in this captured workload.
 
 ## Implementation evidence
 
@@ -69,6 +69,66 @@ The batch read path intentionally rejects chunked bodies because their complete
 wire boundary requires body parsing; existing owned request APIs remain the
 general path.
 
+## HTTP/2 consecutive round trips
+
+Hyper's `benches/end_to_end.rs` defines consecutive empty GET and 10-byte POST
+scenarios on one persistent HTTP/2 connection. The netz h2c benchmark mirrors
+both with 200 untimed warmup iterations and 2,000 measured iterations:
+
+```sh
+taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
+
+cd ~/Work/hyper
+cargo bench --bench end_to_end http2_consecutive_x1_empty \
+  --features full --no-run
+HYPER_H2_BENCH=$(
+  find target/release/deps -maxdepth 1 -type f \
+    -name 'end_to_end-*' -executable -print -quit
+)
+taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_empty
+taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_req_10b
+```
+
+The reference revision/toolchain are the same as the HTTP/1 comparison above.
+Syscall traces verified equal steady-state wire shapes:
+
+- empty: 19-byte request and 11-byte response for each implementation;
+- 10-byte POST: 43 request bytes (24-byte HEADERS + 19-byte DATA) and an
+  11-byte response for each implementation.
+
+2026-08-17 ranges, each from five CPU-0-pinned process runs:
+
+```text
+http2_consecutive_x1_empty:
+  netz:  10.35-11.28 us/op
+  hyper: 12.51-12.54 us/op
+  netz is about 1.11-1.21x faster
+
+http2_consecutive_x1_req_10b:
+  netz:  11.60-12.08 us/op
+  hyper: 41.15-41.37 ms/op
+```
+
+The 10-byte result is a specific Linux TCP scheduling cliff, not a general
+3,500x whole-stack claim. In the audited Hyper run, HEADERS and DATA are two
+small `writev` calls and the response follows about 41 ms later. Netz preserves
+the same two HTTP/2 frames and 43 wire bytes but submits their four borrowed
+slices in one `sendmsg`, avoiding Nagle/delayed-ACK interaction. Larger bodies,
+trailers, fragmented header blocks and flow-control-blocked streams use the
+normal multi-write fallback.
+
+Reusable implementation changes behind both H2 results:
+
+- a shared Zig 0.16 stream-vector helper correctly reserves `netWrite`'s final
+  data element as its splat pattern and handles partial writes;
+- HTTP/1, HTTP/2 and WebSocket now use that single reviewed helper instead of
+  three subtly incorrect copies;
+- HPACK encoders retain their block scratch between HEADERS writes;
+- common request/response descriptor lists use stack storage, with exact
+  allocation fallback for larger caller header sets;
+- a one-frame body with available flow credit is submitted together with its
+  HEADERS frame without concatenating or copying application bytes.
+
 ## Current feature comparison
 
 | Area | netz | hyper |
@@ -76,12 +136,14 @@ general path.
 | HTTP/1 client/server | Blocking std.Io, TLS client, io_uring experiments, persistent/pipelined serving | Async runtime integration, mature ecosystem |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue | Mature RFC behavior and broad production use |
 | HTTP/2 | h2c client/server, Upgrade, HPACK, push, priorities, flow control, tunnels/RFC 8441 | Tokio h2 integration and production client/server |
-| Direct pipeline sample | 0.723-0.735 us/request pinned | 0.836-0.866 us/request pinned |
+| HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
+| HTTP/2 consecutive empty | 10.35-11.28 us/op pinned | 12.51-12.54 us/op pinned |
+| HTTP/2 consecutive 10-byte POST | 11.60-12.08 us/op pinned, coalesced frame submission | 41.15-41.37 ms/op pinned, delayed-ACK cliff on this host |
 
 ## Remaining evidence
 
 1. Add same-shape Hyper comparisons for fixed 1 MB bodies, chunked bodies and
-   HTTP/2 consecutive/parallel workloads.
+   HTTP/2 parallel workloads.
 2. Measure allocation count and peak memory, not only elapsed time.
 3. Add external h2spec and broad HTTP conformance/interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;

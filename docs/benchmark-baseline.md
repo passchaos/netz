@@ -23,6 +23,7 @@ Build mode: -Doptimize=ReleaseFast
 
 ```sh
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
@@ -60,9 +61,9 @@ taskset -c 0 "$HYPER_BENCH" --bench hello_world_16
 
 ```text
 netz (five samples):
-  0.723-0.735 us/request
-  11.56-11.76 us/16-request batch
-  1.361-1.384 million requests/s
+  0.711-0.752 us/request
+  11.38-12.03 us/16-request batch
+  1.330-1.406 million requests/s
 
 hyper (five samples):
   0.836-0.866 us/request
@@ -73,13 +74,55 @@ Both ranges contain five CPU-0-pinned samples. The Hyper binary was built from
 revision `084473f728f9d07b3be5845475aa2f62ed9ff579` with
 `rustc 1.98.0-nightly (e7815e522 2026-06-04)`.
 
-Netz is about **1.14-1.20x faster** for this same-host, same-shape sample. The
+Netz is about **1.11-1.22x faster** for this same-host, same-shape sample. The
 runtime path uses caller-owned head/header/body output arrays, borrowed receive
 storage, one prefix compaction per pipeline, persistent write scratch,
 header/body vectored writes and one transactional response-batch flush. This is
 a focused HTTP/1 pipeline result, not a whole-library superiority claim. The
 implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 `docs/hyper_parity.md`.
+
+### HTTP/2 persistent consecutive round trips
+
+Captured on 2026-08-17 against Hyper's
+`http2_consecutive_x1_empty` and `http2_consecutive_x1_req_10b` benchmarks.
+Both sides use one persistent prior-knowledge connection and were pinned to CPU
+0. Netz supplies Hyper's same-length Date value and uses untimed warmup so
+steady-state wire sizes and calibration intent match.
+
+```sh
+taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
+
+cd /home/passchaos/Work/hyper
+cargo bench --bench end_to_end http2_consecutive_x1_empty \
+  --features full --no-run
+HYPER_H2_BENCH=$(
+  find target/release/deps -maxdepth 1 -type f \
+    -name 'end_to_end-*' -executable -print -quit
+)
+taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_empty
+taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_req_10b
+```
+
+```text
+empty GET (five samples):
+  netz:  10.35-11.28 us/op
+  hyper: 12.51-12.54 us/op
+  netz latency advantage: 1.11-1.21x
+
+10-byte POST (five samples):
+  netz:  11.60-12.08 us/op
+  hyper: 41.15-41.37 ms/op
+```
+
+`strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
+requests and 11-byte responses; POST exchanges use 43-byte requests and
+11-byte responses. The large POST gap is specifically Hyper's two-write
+HEADERS/DATA path hitting Linux's Nagle/delayed-ACK interaction on this host,
+not a general whole-library ratio. Netz preserves both HTTP/2 frames but submits
+their four slices in one `sendmsg`; larger, fragmented or flow-blocked messages
+fall back to ordinary frame writes. See `docs/hyper_parity.md` for the
+implementation audit and remaining H2 comparison work.
 
 ### HTTP/3 QPACK dynamic encode
 
