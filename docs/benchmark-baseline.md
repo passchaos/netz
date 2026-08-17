@@ -217,11 +217,11 @@ long or stuck multi-iteration runs. `--trace-iteration` additionally prints
 coarse lifecycle stages (bind, connect, transfer, join) for each iteration.
 
 ```sh
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=4
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=5 --body-bytes=1048576 --mode=upload --streams=1
+taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
+taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
+taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=5 --body-bytes=16777216 --mode=upload --streams=4 --verbose
+taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
+taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=5 --body-bytes=1048576 --mode=upload --streams=1
 ```
 
 Current 5-iteration 1 MiB upload smoke sample:
@@ -278,14 +278,25 @@ Current 16 MiB / 4-stream upload result:
 HTTP/3 real-handshake transfer benchmark
   mode: upload
   streams: 4
-  iterations: 1
+  iterations: 5
   body bytes/iteration: 16777216
-  total body bytes: 16777216
-  status total: 800
-  ns/iteration: 136766171
-  bytes/s: 122670802
-  MiB/s: 116
+  total body bytes: 83886080
+  status total: 4000
+  ns/iteration: 230481831
+  bytes/s: 72791924
+  MiB/s: 69
+  mean MiB/s: 69.43
+  stddev MiB/s: 0.80
+  stddev percent: 1.15
 ```
+
+This CPU-0-pinned sample was captured on 2026-08-17 after moving
+ACK-driven packet-threshold recovery into QUIC's timer-servicing blocking
+receive path. Before that fix, all client body-send calls could return while
+dropped STREAM ranges remained pending; the client then waited for responses
+and recovered only through exponentially backed-off PTO probes. The same
+16 MiB / four-stream trace previously stalled after the server consumed about
+9.4 MiB. All five iterations above delivered every stream through FIN.
 
 Current 16 MiB / 4-stream download result:
 
@@ -334,25 +345,29 @@ To align transfer size with quicz's real-handshake throughput run, netz was
 also measured with `--body-bytes=67108864`:
 
 ```sh
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=upload --streams=1
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=download --streams=1
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=upload --streams=4
-zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=download --streams=4
+taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=upload --streams=1
+taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=download --streams=1
+taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=5 --body-bytes=67108864 --mode=upload --streams=4 --verbose
+taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=67108864 --mode=download --streams=4
 ```
 
 ```text
-netz upload streams=1:   125 MiB/s, 131,859,638 bytes/s, ns/iter 508,941,664
-netz download streams=1: 123 MiB/s, 129,894,689 bytes/s, ns/iter 516,640,553
-netz upload streams=4:   34 MiB/s, 36,504,241 bytes/s, ns/iter 1,838,385,370
-netz download streams=4: 32 MiB/s, 34,579,902 bytes/s, ns/iter 1,940,689,776
+netz upload streams=1:   117.76 MiB/s mean, 5 iterations
+netz download streams=1: 123 MiB/s, 129,894,689 bytes/s, one iteration
+netz upload streams=4:   103.68 MiB/s mean, 2.58% stddev, 5 iterations
+netz download streams=4: 32 MiB/s, 34,579,902 bytes/s, one iteration
 ```
 
 Same-host throughput ratio against the quicz real-handshake upload baselines:
 
 | Scenario | quicz | netz | netz/quicz |
 |---|---:|---:|---:|
-| 64 MiB single-stream upload | 228.77 MB/s | 117.76 MiB/s mean (5 iters) | ~0.51x |
-| 64 MiB 4-stream aggregate upload | 244.85 MB/s | 34 MiB/s (single iter; 5 iters timed out) | ~0.14x |
+| 64 MiB single-stream upload | 228.77 MB/s (218.17 MiB/s) | 117.76 MiB/s mean (5 iters) | ~0.54x |
+| 64 MiB 4-stream aggregate upload | 244.85 MB/s (233.51 MiB/s) | 103.68 MiB/s mean (5 iters) | ~0.44x |
+
+The ratio normalizes decimal MB/s to binary MiB/s. The new netz samples are
+CPU-0 pinned; the historical quicz command above was same-host but not pinned,
+so this remains a directional baseline rather than final equal-CPU evidence.
 
 Fresh 5-iteration netz single-stream sample:
 
@@ -372,24 +387,30 @@ HTTP/3 real-handshake transfer benchmark
   stddev percent: 10.40
 ```
 
-A matching `--iterations=3 --body-bytes=67108864 --mode=upload --streams=4 --verbose`
-completed iteration 0 at 33.92 MiB/s, then timed out before iteration 1 printed
-within 900 seconds. Follow-up experiments that created a fresh
-`std.Io.Threaded` per iteration, sent a client-side QUIC application close at
-iteration end, or drained readable datagrams from old client/server UDP sockets
-still timed out after iteration 0. Additional `--trace-iteration` instrumentation
-shows iteration 1 reaches `connect done`, `upload open streams`, server-side
-`upload start`, and then stalls inside client-side `upload send bodies start`.
-The stall is therefore not only reuse of the top-level Io backend, lack of a
-local close frame, queued datagrams on the old sockets, bind, handshake, or
-stream opening; it occurs while sending the second large 4-stream request body.
+A matching five-iteration 64 MiB / four-stream run now completes:
 
-This same-host comparison shows netz is **improved but not yet
-performance-competitive** on large real-handshake transfers. Raising the
+```text
+per-iteration MiB/s: 107.53, 105.73, 100.18, 103.38, 101.60
+mean MiB/s: 103.68
+stddev MiB/s: 2.67
+stddev percent: 2.58
+```
+
+The earlier run completed iteration 0 at 33.92 MiB/s and then timed out. A
+single traced 16 MiB run showed all four client send loops complete while the
+server stopped at roughly 9.4 MiB. ACK processing had already classified old
+packets as packet-threshold losses and removed their congestion accounting, but
+the HTTP/3 receive pump did not drain those recovery candidates. The corrected
+blocking QUIC pump immediately retransmits a bounded set after each received
+ACK, stopping transactionally at congestion or pacing limits. PTO remains the
+fallback rather than the primary repair mechanism.
+
+This same-host comparison shows netz is **reliable at the tested default but
+not yet performance-competitive** on large real-handshake transfers. Raising the
 single-stream 1-RTT datagram budget to 8192 bytes, disabling HyStart for the
 low-RTT single-stream benchmark, and using a 7200-byte paced DATA chunk closes
 much of the previous 3 MiB/s cliff, but quicz still leads on
-64 MiB 4-stream aggregate throughput. Releasing all active streaming response
+64 MiB four-stream aggregate throughput. Releasing all active streaming response
 reader capacity before each multi-response packet receive stabilizes the 64 MiB
 four-stream download case, but quicz still leads substantially. The next
 optimization target is packet batching across concurrent streams and reducing
@@ -465,11 +486,11 @@ Rejected experiments after validation:
   `wireLen()`-based grouping avoided `DatagramTooLarge` but caused 64 MiB
   4-stream download timeouts; packet-size-aware batching needs to be scoped to
   the new batch-body API rather than changing all HTTP/3 frame sends.
-- Multi-stream `--paced-body-chunk-bytes` scans after parameterization found no
-  better stable default: 3000 bytes can reach ~40 MiB/s but had upload timeouts,
-  3200 bytes improved download but upload timed out, and 2900 bytes regressed to
-  ~24 MiB/s with upload timeouts. The current 2800-byte default remains the
-  stable baseline until packet-size-aware batching exists.
+- Multi-stream `--paced-body-chunk-bytes` scans before the ACK-driven recovery
+  fix incorrectly made 3000-byte chunks look unstable. With recovery fixed,
+  3000 bytes is the current default and completed the five 64 MiB/four-stream
+  samples above. Larger packet-size-aware batches still need fresh validation
+  rather than relying on those pre-fix timeout results.
 - Multi-stream `--round-robin-chunk-bytes` scans did not find a better stable
   default either: 16 KiB timed out on upload and hit `StreamBufferTooLarge` on
   download; 32 KiB improved download to ~40 MiB/s but still timed out on upload.

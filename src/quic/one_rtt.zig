@@ -2176,6 +2176,36 @@ pub const Connection = struct {
         ack_eliciting: bool,
         pace_packet: bool,
     ) Error!void {
+        const sizing_options: quic.protection.ShortPacketOptions = .{
+            .destination_connection_id = self.config.peer_connection_id,
+            .packet_number = packet_number,
+            .packet_number_len = packet_number_len,
+            // Header-bit values do not affect packet length. Keep sizing
+            // mutation-free; the fixed-bit generator advances only when the
+            // packet has passed pacing preflight and will actually be sealed.
+            .fixed_bit = true,
+            .spin_bit = false,
+            .key_phase = self.send_key_phase.currentKeyPhase(),
+            .payload = payload,
+        };
+        const packet_len = try quic.protection.shortPacketLen(sizing_options);
+        const now_ns = sent_time_ns orelse self.monotonicNowNs();
+        if (pace_packet) {
+            if (self.pacer.deadlineAt(
+                now_ns,
+                packet_len,
+                self.congestion.congestion_window,
+                self.rtt_stats.smoothedOrInitial(),
+            )) |deadline| {
+                self.pacing_blocked_until_ns = deadline;
+                return error.PacingLimited;
+            }
+        }
+
+        // Pacing is a retryable preflight result. Check it before key updates
+        // or AEAD sealing so a deferred retransmission cannot consume a nonce
+        // and then retry the same packet number. Recovery/congestion callers
+        // can safely roll back their metadata without hidden crypto state.
         try self.prepareAeadForEncryption(packet_number, sent_time_ns);
         try self.reserveAntiAmplification(payload.len);
         errdefer self.releaseAntiAmplification(payload.len);
@@ -2188,7 +2218,6 @@ pub const Connection = struct {
             .key_phase = self.send_key_phase.currentKeyPhase(),
             .payload = payload,
         };
-        const packet_len = try quic.protection.shortPacketLen(packet_options);
         try self.send_packet_buffer.ensureTotalCapacity(self.endpoint.allocator, packet_len);
         self.send_packet_buffer.items.len = self.send_packet_buffer.capacity;
         defer self.send_packet_buffer.items.len = 0;
@@ -2198,18 +2227,6 @@ pub const Connection = struct {
             packet_options,
         );
         self.recordPacketEncrypted();
-        const now_ns = sent_time_ns orelse self.monotonicNowNs();
-        if (pace_packet) {
-            if (self.pacer.deadlineAt(
-                now_ns,
-                packet.len,
-                self.congestion.congestion_window,
-                self.rtt_stats.smoothedOrInitial(),
-            )) |deadline| {
-                self.pacing_blocked_until_ns = deadline;
-                return error.PacingLimited;
-            }
-        }
         try self.endpoint.sendBytesWithEcn(self.config.peer, packet, ecn);
         self.noteOneRttPacketSent(packet_number, packet.len, now_ns, ack_eliciting);
         if (pace_packet) {
@@ -2347,8 +2364,9 @@ pub const Connection = struct {
     /// `applyReceivedFrames` marks all eligible sent packets lost in one pass,
     /// so event loops should drain more than one recovery candidate before
     /// waiting for PTO. Stopping cleanly when the reduced congestion window is
-    /// full lets the next ACK resume the same queue without turning ordinary
-    /// loss recovery into an application-visible send failure.
+    /// full or pacing defers the next packet lets a later ACK/timer resume the
+    /// same queue without turning ordinary loss recovery into an
+    /// application-visible send failure.
     pub fn retransmitPacketThresholdLosses(
         self: *Connection,
         max_retransmissions: usize,
@@ -2364,7 +2382,7 @@ pub const Connection = struct {
                 candidate,
                 .congestion_controlled,
             ) catch |err| switch (err) {
-                error.CongestionLimited => break,
+                error.CongestionLimited, error.PacingLimited => break,
                 else => return err,
             };
             retransmitted += 1;
@@ -3625,7 +3643,7 @@ pub const Connection = struct {
     pub fn receivePacketServicingTimers(self: *Connection) Error!ReceivedPacket {
         while (true) {
             const timer = self.nextTimerDeadline() orelse
-                return self.receivePacket();
+                return self.receivePacketServicingAckDrivenRecovery();
             const now_ns = self.monotonicNowNs();
             if (now_ns >= timer.deadline_ns) {
                 if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
@@ -3660,17 +3678,53 @@ pub const Connection = struct {
                 // Some std.Io backends cannot provide a timed network wait.
                 // Preserve correctness by falling back to the existing
                 // blocking receive path on those platforms.
-                error.ConcurrencyUnavailable => return self.receivePacket(),
+                error.ConcurrencyUnavailable => {
+                    return self.receivePacketServicingAckDrivenRecovery();
+                },
                 else => |other| return @errorCast(other),
             };
             defer datagram.deinit(self.endpoint.allocator);
-            return try self.processReceivedBytesAt(
+            return try self.processReceivedBytesServicingAckDrivenRecovery(
                 datagram.from,
                 datagram.bytes,
                 datagram.ecn,
-                self.monotonicNowNs(),
             );
         }
+    }
+
+    /// Finish one blocking receive by immediately repairing losses proved by
+    /// the packet's ACK ranges.
+    ///
+    /// Packet-threshold loss is ACK-driven, not timer-driven. Leaving these
+    /// retransmissions to application protocols makes a blocking caller wait
+    /// for exponentially backed-off PTO probes even though the peer already
+    /// identified the missing packets. Keep this behavior in the transport
+    /// pump so HTTP/3, WebTransport, and future blocking adapters cannot omit
+    /// a required recovery step.
+    fn receivePacketServicingAckDrivenRecovery(
+        self: *Connection,
+    ) Error!ReceivedPacket {
+        var packet = try self.receivePacket();
+        errdefer packet.deinit(self.endpoint.allocator);
+        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+        return packet;
+    }
+
+    fn processReceivedBytesServicingAckDrivenRecovery(
+        self: *Connection,
+        from: net.IpAddress,
+        bytes: []const u8,
+        ecn: quic.packet_space.EcnCodepoint,
+    ) Error!ReceivedPacket {
+        var packet = try self.processReceivedBytesAt(
+            from,
+            bytes,
+            ecn,
+            self.monotonicNowNs(),
+        );
+        errdefer packet.deinit(self.endpoint.allocator);
+        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+        return packet;
     }
 
     fn serviceNextTimerForBlockingReceive(
@@ -3706,15 +3760,16 @@ pub const Connection = struct {
             .raw = .fromNanoseconds(deadline_ns_i96),
         } }) catch |err| switch (err) {
             error.Timeout => return null,
-            error.ConcurrencyUnavailable => return try self.receivePacket(),
+            error.ConcurrencyUnavailable => {
+                return try self.receivePacketServicingAckDrivenRecovery();
+            },
             else => |other| return @errorCast(other),
         };
         defer datagram.deinit(self.endpoint.allocator);
-        return try self.processReceivedBytesAt(
+        return try self.processReceivedBytesServicingAckDrivenRecovery(
             datagram.from,
             datagram.bytes,
             datagram.ecn,
-            self.monotonicNowNs(),
         );
     }
 

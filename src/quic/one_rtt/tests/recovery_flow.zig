@@ -597,7 +597,7 @@ test "QUIC 1-RTT connection retransmits packet-threshold losses" {
     try std.testing.expectEqual(@as(u64, 2), client.recovery.pending.items[0].packetNumberAt(0).?);
 }
 
-test "QUIC 1-RTT connection drains packet-threshold retransmissions" {
+test "QUIC 1-RTT timer-servicing receive drains packet-threshold retransmissions" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -655,11 +655,14 @@ test "QUIC 1-RTT connection drains packet-threshold retransmissions" {
     var fifth = try server.receivePacket();
     defer fifth.deinit(allocator);
     try server.sendAck(0);
-    var ack_packet = try client.receivePacket();
+    // The blocking transport pump owns ACK-driven recovery. Callers should
+    // receive the ACK and repaired payload as one transport-level progress
+    // step instead of remembering a second protocol-specific recovery call.
+    var ack_packet = try client.receivePacketServicingTimers();
     defer ack_packet.deinit(allocator);
 
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 0),
         try client.retransmitPacketThresholdLosses(8),
     );
     var first = try server.receivePacket();
@@ -672,6 +675,88 @@ test "QUIC 1-RTT connection drains packet-threshold retransmissions" {
         @as(usize, 0),
         try client.retransmitPacketThresholdLosses(8),
     );
+}
+
+test "QUIC 1-RTT ACK-driven recovery defers transactionally when paced" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x4a, 0x4b, 0x4c, 0x4d };
+    const server_cid = [_]u8{ 0x4e, 0x4f, 0x50, 0x51 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xaf} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    for (0..5) |_| try client.send(&ping);
+    for (0..4) |_| {
+        var dropped = try server_endpoint.receiveBytes();
+        dropped.deinit(allocator);
+    }
+    var fifth = try server.receivePacket();
+    defer fifth.deinit(allocator);
+    try server.sendAck(0);
+
+    // Pin the pacer's last-send timestamp in the future so processing the ACK
+    // can identify loss but cannot immediately send a repair. A retryable
+    // pacing result must not consume packet number 5 or an AEAD nonce.
+    client.pacer.budget = 0;
+    client.pacer.last_sent_time_ns = std.math.maxInt(u64);
+    const next_packet_number = client.next_packet_number;
+    const encrypted_packets = client.encryptedPacketsWithCurrentKeys();
+    var ack = try client.receivePacketServicingTimers();
+    defer ack.deinit(allocator);
+    try std.testing.expectEqual(next_packet_number, client.next_packet_number);
+    try std.testing.expectEqual(
+        encrypted_packets,
+        client.encryptedPacketsWithCurrentKeys(),
+    );
+    try std.testing.expectEqual(@as(usize, 4), client.pendingRecoveryCount());
+    for (client.recovery.pending.items) |pending| {
+        try std.testing.expectEqual(@as(usize, 1), pending.packetCount());
+    }
+
+    client.pacer.enabled = false;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try client.retransmitPacketThresholdLosses(8),
+    );
+    try std.testing.expectEqual(next_packet_number + 2, client.next_packet_number);
 }
 
 test "QUIC 1-RTT connection applies persistent congestion response" {

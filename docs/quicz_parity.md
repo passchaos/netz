@@ -74,14 +74,14 @@ benchmarks.
 | QUIC DATAGRAM (`datagram_echo`, `quic_bench_datagram`) | Covered and faster than current quicz DATAGRAM sample | `examples/quic_datagram_echo.zig`, `examples/bench_quic_datagram.zig`, `examples/bench_webtransport_datagram.zig`, `zig build run-quic-datagram-echo`, `zig build bench-quic-datagram -Doptimize=ReleaseFast` | Keep raw and WebTransport DATAGRAM benchmarks in the comparison matrix. |
 | Graceful/application close (`graceful_close`, close lifecycle) | Covered for local preconfigured 1-RTT smoke and tests | `examples/quic_close.zig`, one_rtt lifecycle tests, `zig build run-quic-close` | Add a full client/server CLI-style close demo only if external manual interop requires it. |
 | Packet protection / initial keys / key update | Covered by modules and tests | `src/quic/protection.zig`, `src/quic/zero_rtt`, `src/quic/one_rtt/tests/crypto_path.zig`, `zig build test` | Keep vector coverage current as TLS suites evolve. |
-| Loss recovery / PTO / retransmission | Partially covered and improved | `src/quic/recovery.zig`, `src/quic/one_rtt/tests/recovery_flow.zig`, bounded multi-candidate packet-threshold retransmission, commits covering orphan PTO and response retransmit | Continue investigating long-run 100% CPU busy loops seen in aggressive HTTP/3 transfer settings. |
+| Loss recovery / PTO / retransmission | Partially covered and improved | `src/quic/recovery.zig`, `src/quic/one_rtt/tests/recovery_flow.zig`; the timer-servicing blocking receive now drains bounded ACK-driven packet-threshold retransmissions transactionally before relying on PTO | Add loss-rate simulation and long-run recovery benchmarks; aggressive non-default packet/body sizing still needs separate busy-loop coverage. |
 | Flow control / stream reset / STOP_SENDING | Covered by implementation and tests | `src/quic/flow_control.zig`, `src/quic/stream.zig`, one_rtt tests | Add higher-level examples if user-facing docs need them. |
 | Connection IDs / stateless reset / path validation / migration | Mostly covered in modules/tests | `src/quic/connection_id.zig`, `src/quic/stateless_reset.zig`, `src/quic/path_validation.zig`, lifecycle tests | Add runnable examples matching quicz's many UDP loopback demos if feature demos are required. |
 | Retry/token/address validation | Covered at library level | `src/quic/retry_flow.zig`, `src/quic/address_validation_token.zig`, handshake/retry tests | Add public example after external interop is audited. |
 | Congestion control (NewReno/CUBIC/HyStart++) | Covered and defaulted to CUBIC for 1-RTT | `src/quic/congestion.zig`, `src/quic/hystart.zig`, congestion tests | Evaluate quicz-style app-limited CUBIC behavior before changing production congestion math. |
 | UDP batching / GSO / GRO | Covered at QUIC runtime level | `src/quic/runtime.zig`, `bench-quic-udp-batch`, `bench-quic-one-rtt-send`, `bench-quic-one-rtt-receive` | HTTP/3 direct GRO receive remains unsafe as a default; do not enable without fixing long-run stability. |
 | HTTP/3 public fetch and Alt-Svc | Covered for robotics.bytedance.com with discovery and manual Alt-Svc override | `examples/http3_fetch.zig`, `run-http3-fetch --discover --verify --head`, `run-http3-fetch --alt-svc='h3=":443"; ma=2592000' --verify --head` | Broaden public interop matrix beyond one site; recent Cloudflare/Google/Facebook probes did not add passing coverage. |
-| HTTP/3 real-handshake upload benchmark | Covered and improved | `examples/bench_http3_handshake_transfer.zig`; 4-stream 64MiB default has reached ~150+ MiB/s in validation | Continue comparing against `~/Work/quicz` throughput and stabilize aggressive chunk/datagram settings. |
+| HTTP/3 real-handshake upload benchmark | Covered and reliable at the tested default | `examples/bench_http3_handshake_transfer.zig`; CPU-0-pinned 4-stream 64 MiB upload completed 5/5 iterations at 103.68 MiB/s mean and 2.58% stddev after ACK-driven recovery was moved into the QUIC receive pump | Close the remaining ~0.44x throughput gap against the recorded quicz 244.85 MB/s mean with equal-CPU reruns and H3-specific packet batching. |
 | HTTP/3 real-handshake download benchmark | Covered for current benchmark scale | 64KiB/1MiB smoke pass; 4MiB, 16MiB, and 64MiB single-/4-stream download validations pass | Continue long-run stability and apples-to-apples quicz throughput comparisons before declaring performance superiority. |
 | QPACK / Capsule / WebTransport | Covered by modules, datagram benchmark, and real-handshake bidi/uni stream example | `bench-http3-qpack`, `bench-http3-capsule`, `bench-webtransport-datagram`, `run-webtransport-handshake-stream`; modern 0x41 bidi prefix follows wtransport rather than quicz's legacy Session-ID-only codec | Add external wtransport/browser interop and incremental/reset stream APIs. |
 | TLS backend/process interop examples | Partially covered through netz/vail integration | QUIC handshake tests, `examples/quic_handshake_echo.zig`, HTTP/3 public fetch with `--verify` | netz still lacks quicz-style standalone TLS process echo demos; add only if this becomes a required deliverable. |
@@ -96,9 +96,10 @@ benchmarks.
 2. **Aggressive receive batching**: enabling HTTP/3 GRO receive directly has
    caused long stalls.  The lower-level QUIC GRO benchmark works, but the H3
    runtime path needs more work before it can be defaulted.
-3. **Long-run transfer busy loops**: some aggressive body chunk/datagram
-   settings produce 100% CPU loops.  Until those are isolated, keep defaults
-   conservative.
+3. **Aggressive transfer settings**: the default 3000-byte paced body chunks
+   now complete five CPU-pinned 64 MiB/four-stream uploads. Larger historical
+   body chunk/datagram combinations that produced busy loops still need fresh
+   post-recovery validation before defaults can be raised.
 4. **Complete external interop matrix**: public H3 fetch is proven against
    `robotics.bytedance.com`, including `--discover`, manual `--alt-svc`, and
    `--verify`, but broader server/client interop is not yet audited. Recent
@@ -118,6 +119,6 @@ benchmarks.
    throughput now exceed the captured quicz samples.
 2. Investigate the aggressive receive batching path so HTTP/3 can safely use
    GRO without stalls.
-3. Isolate the remaining long-run busy-loop cases seen with larger packet/body
-   chunk settings before raising defaults.
+3. Add H3-specific packet-size-aware multi-stream body batching, then rerun the
+   larger packet/body chunk matrix before raising defaults.
 4. Broaden public HTTP/3 interop beyond `robotics.bytedance.com`.
