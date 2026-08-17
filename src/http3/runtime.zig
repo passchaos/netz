@@ -398,7 +398,7 @@ const ConnectionPacketCursor = struct {
             };
             return packet;
         }
-        var batch = try connection.receivePacketBatch();
+        var batch = try connection.receivePacketBatchServicingTimers();
         errdefer batch.deinit();
         _ = connection.sendAckForPacketsIfNeeded(
             batch.packets[batch.next_index..],
@@ -17721,6 +17721,13 @@ test "HTTP/3 handshake client drains GRO response batch one packet at a time" {
         .path = "/gro-two",
         .authority = "localhost",
     });
+    // Force the cursor through the timer-aware GRO branch rather than the
+    // no-deadline shortcut. The server's two response packets should still be
+    // retained as one owning batch behind the first application event.
+    const now = std.Io.Clock.awake.now(io).nanoseconds;
+    client.established.connection.ack_delay_start_ns = @intCast(now);
+    client.established.connection.ack_delay_deadline_ns =
+        @intCast(now + std.time.ns_per_s);
     var second_event = try client.receiveNextResponse();
     defer second_event.deinit(allocator);
     try std.testing.expect(second_event == .response);

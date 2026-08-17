@@ -84,7 +84,7 @@ benchmarks.
 | Connection IDs / stateless reset / path validation / migration | Mostly covered in modules/tests | `src/quic/connection_id.zig`, `src/quic/stateless_reset.zig`, `src/quic/path_validation.zig`, lifecycle tests | Add runnable examples matching quicz's many UDP loopback demos if feature demos are required. |
 | Retry/token/address validation | Covered at library level | `src/quic/retry_flow.zig`, `src/quic/address_validation_token.zig`, handshake/retry tests | Add public example after external interop is audited. |
 | Congestion control (NewReno/CUBIC/HyStart++) | Covered and defaulted to CUBIC for 1-RTT | `src/quic/congestion.zig`, `src/quic/hystart.zig`, congestion tests | Evaluate quicz-style app-limited CUBIC behavior before changing production congestion math. |
-| UDP batching / GSO / GRO | Covered at QUIC runtime level | `src/quic/runtime.zig`, `bench-quic-udp-batch`, `bench-quic-one-rtt-send`, `bench-quic-one-rtt-receive` | HTTP/3 direct GRO receive remains unsafe as a default; do not enable without fixing long-run stability. |
+| UDP batching / GSO / GRO | Covered through QUIC and HTTP/3 timer-aware paths | `src/quic/runtime.zig`, `receiveBytesBatchTimeout`, `receivePacketBatchServicingTimers`, dedicated batch benchmarks, and 64 MiB H3 upload/download completion | Keep H3 GRO opt-in on this 212,992-byte-rmem host because it is slower/noisier; benchmark again on a tuned host before defaulting it. |
 | HTTP/3 public fetch and Alt-Svc | Covered for robotics.bytedance.com with discovery and manual Alt-Svc override | `examples/http3_fetch.zig`, `run-http3-fetch --discover --verify --head`, `run-http3-fetch --alt-svc='h3=":443"; ma=2592000' --verify --head` | Broaden public interop matrix beyond one site; recent Cloudflare/Google/Facebook probes did not add passing coverage. |
 | HTTP/3 real-handshake upload benchmark | Covered and reliable at the tested default | `examples/bench_http3_handshake_transfer.zig`; CPU-0-pinned 4-stream 64 MiB upload completed 5/5 iterations at 141.78 MiB/s mean and 2.76% stddev with ACK threshold 4 and adaptive DATA sizing; exact-size cross-stream body batching is also available but opt-in on this small-rmem host | Build an equal-wire quicz H3 reference before making a cross-stack ratio; then reduce netz per-packet recovery/framing cost. |
 | HTTP/3 real-handshake download benchmark | Covered for current benchmark scale | 64KiB/1MiB smoke pass; 4MiB, 16MiB, and 64MiB single-/4-stream download validations pass | Continue long-run stability and apples-to-apples quicz throughput comparisons before declaring performance superiority. |
@@ -98,9 +98,11 @@ benchmarks.
    four-stream runs, in addition to the 1MiB smoke tests and protected
    small-window coverage. The remaining work is long-run repeatability rather
    than a basic benchmark-scale functional gap.
-2. **Aggressive receive batching**: enabling HTTP/3 GRO receive directly has
-   caused long stalls.  The lower-level QUIC GRO benchmark works, but the H3
-   runtime path needs more work before it can be defaulted.
+2. **Aggressive receive batching**: the prior timer starvation is fixed.
+   Timer-aware GRO completed five 64 MiB/four-stream uploads and three
+   downloads, including a transport test where PTO fires after a deliberately
+   dropped packet. It remains opt-in because throughput is worse on this host,
+   not because of a known reliability stall.
 3. **Aggressive transfer settings**: the benchmark uses 3000-byte multi-stream
    chunks below 64 MiB and 6000 bytes for quicz-shaped 64 MiB runs. Larger
    12/14/16 KiB datagrams were slower or noisier, while cross-stream GSO
@@ -124,8 +126,8 @@ benchmarks.
 1. Rebuild the raw QUIC comparison with equivalent endpoint CPU placement,
    then add echo latency, handshake-rate, loss/churn, and multi-connection
    cases. The old unpinned ratio is no longer accepted as proof.
-2. Investigate the aggressive receive batching path so HTTP/3 can safely use
-   GRO without stalls.
+2. Re-run HTTP/3 GRO on a host with larger kernel UDP receive buffers; the
+   timer/recovery path is now safe, but this host's throughput regresses.
 3. Reduce HTTP/3 per-packet recovery ownership and STREAM/DATA framing cost;
    exact-size multi-stream batching now exists but needs a larger-rmem host to
    show a throughput benefit.

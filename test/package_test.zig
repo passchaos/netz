@@ -159,6 +159,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.capsule, "protocolEnabled"));
     try std.testing.expect(@hasDecl(netz.http3.Frame, "parseHeader"));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.http3.runtime.Limits{}).quic.max_datagram_size);
+    try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveBytesBatchTimeout"));
     try std.testing.expectEqual(
         @as(usize, 128),
         (netz.http3.runtime.Limits{}).max_concurrent_request_streams,
@@ -535,6 +536,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "openReceivedBytesWithKeyUpdate"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "Connection"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receivePacketAt"));
+    try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receivePacketBatchServicingTimers"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receiveRoutedDatagramAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "receiveRoutedDatagramWithEcnAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "closeTransport"));

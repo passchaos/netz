@@ -356,6 +356,111 @@ test "QUIC 1-RTT connection exposes PTO backoff deadlines and services timer" {
     try std.testing.expectEqual(@as(?one_rtt.LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadline());
 }
 
+test "QUIC 1-RTT timer-aware GRO receive fires PTO before peer response" {
+    if (!quic.runtime.udpGroSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 4096,
+            .enable_gro_receive = true,
+        },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 4096,
+            .enable_gro_receive = true,
+        },
+    );
+    defer client_endpoint.deinit();
+    if (!client_endpoint.groReceiveEnabled()) return error.SkipZigTest;
+
+    const client_cid = [_]u8{ 0x93, 0x94, 0x95, 0x96 };
+    const server_cid = [_]u8{ 0x97, 0x98, 0x99, 0x9a };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x9b} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    const request = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "request",
+        .fin = true,
+    } }};
+    try client.send(&request);
+    var dropped = try server_endpoint.receiveBytes();
+    dropped.deinit(allocator);
+
+    const Shared = struct {
+        server: *one_rtt.Connection,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *one_rtt.Connection) !void {
+            var probe = try server_ptr.receivePacket();
+            defer probe.deinit(server_ptr.endpoint.allocator);
+            try std.testing.expectEqual(@as(u64, 1), probe.packet.packet_number);
+            try std.testing.expectEqualStrings(
+                "request",
+                probe.frames[0].stream.data,
+            );
+            const response = [_]quic.Frame{.{ .stream = .{
+                .stream_id = 0,
+                .data = "response",
+                .fin = true,
+            } }};
+            try server_ptr.send(&response);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var response = try client.receivePacketBatchServicingTimers();
+    defer response.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
+    try std.testing.expectEqual(@as(usize, 1), response.packets.len);
+    try std.testing.expectEqualStrings(
+        "response",
+        response.packets[0].frames[0].stream.data,
+    );
+}
+
 test "QUIC 1-RTT loss detection timer reports earliest loss or PTO deadline" {
     const allocator = std.testing.allocator;
 

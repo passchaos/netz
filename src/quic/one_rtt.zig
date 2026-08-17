@@ -4004,7 +4004,14 @@ pub const Connection = struct {
         if (self.close_info != null or self.idle_timed_out) return error.ConnectionClosed;
         var datagrams = try self.endpoint.receiveBytesBatch();
         defer datagrams.deinit(self.endpoint.allocator);
+        return try self.processReceivedDatagramBatchAt(&datagrams, now_ns);
+    }
 
+    fn processReceivedDatagramBatchAt(
+        self: *Connection,
+        datagrams: *quic.runtime.OwnedBytesBatch,
+        now_ns: ?u64,
+    ) Error!ReceivedPacketBatch {
         const packets = try self.endpoint.allocator.alloc(ReceivedPacket, datagrams.segment_count);
         var completed: usize = 0;
         errdefer {
@@ -4021,6 +4028,113 @@ pub const Connection = struct {
             completed += 1;
         }
         return .{ .allocator = self.endpoint.allocator, .packets = packets };
+    }
+
+    /// Receive one owning GRO batch while continuing to service QUIC timers.
+    ///
+    /// This is the batch counterpart to `receivePacketServicingTimers`. The
+    /// timed socket operation preserves one coalesced kernel datagram instead
+    /// of splitting its suffix into the single-packet FIFO, so HTTP/3 can keep
+    /// GRO amortization without allowing a blocking read to suppress PTO,
+    /// delayed ACK, flow-control, or idle-timeout work.
+    pub fn receivePacketBatchServicingTimers(
+        self: *Connection,
+    ) Error!ReceivedPacketBatch {
+        while (true) {
+            const timer = self.nextTimerDeadline() orelse {
+                return self.receivePacketBatchServicingAckDrivenRecovery();
+            };
+            const now_ns = self.monotonicNowNs();
+            if (now_ns >= timer.deadline_ns) {
+                if (try self.serviceNextTimerForBlockingReceive(now_ns)) {
+                    continue;
+                }
+                if (try self.receivePacketBatchAfterBlockedTimer(now_ns)) |batch| {
+                    return batch;
+                }
+                continue;
+            }
+            const deadline_ns_i96 = std.math.cast(
+                i96,
+                timer.deadline_ns,
+            ) orelse std.math.maxInt(i96);
+            var datagrams = self.endpoint.receiveBytesBatchTimeout(
+                .{ .deadline = .{
+                    .clock = .awake,
+                    .raw = .fromNanoseconds(deadline_ns_i96),
+                } },
+            ) catch |err| switch (err) {
+                error.Timeout => {
+                    const timeout_ns = self.monotonicNowNs();
+                    if (!try self.serviceNextTimerForBlockingReceive(
+                        timeout_ns,
+                    )) {
+                        if (try self.receivePacketBatchAfterBlockedTimer(
+                            timeout_ns,
+                        )) |batch| {
+                            return batch;
+                        }
+                    }
+                    continue;
+                },
+                error.ConcurrencyUnavailable => {
+                    return self.receivePacketBatchServicingAckDrivenRecovery();
+                },
+                else => |other| return @errorCast(other),
+            };
+            defer datagrams.deinit(self.endpoint.allocator);
+            var batch = try self.processReceivedDatagramBatchAt(
+                &datagrams,
+                self.monotonicNowNs(),
+            );
+            errdefer batch.deinit();
+            _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+            return batch;
+        }
+    }
+
+    fn receivePacketBatchServicingAckDrivenRecovery(
+        self: *Connection,
+    ) Error!ReceivedPacketBatch {
+        var batch = try self.receivePacketBatch();
+        errdefer batch.deinit();
+        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+        return batch;
+    }
+
+    fn receivePacketBatchAfterBlockedTimer(
+        self: *Connection,
+        now_ns: u64,
+    ) Error!?ReceivedPacketBatch {
+        const deadline_ns = std.math.add(
+            u64,
+            now_ns,
+            timer_blocked_receive_backoff_ns,
+        ) catch std.math.maxInt(u64);
+        const deadline_ns_i96 = std.math.cast(
+            i96,
+            deadline_ns,
+        ) orelse std.math.maxInt(i96);
+        var datagrams = self.endpoint.receiveBytesBatchTimeout(
+            .{ .deadline = .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(deadline_ns_i96),
+            } },
+        ) catch |err| switch (err) {
+            error.Timeout => return null,
+            error.ConcurrencyUnavailable => {
+                return try self.receivePacketBatchServicingAckDrivenRecovery();
+            },
+            else => |other| return @errorCast(other),
+        };
+        defer datagrams.deinit(self.endpoint.allocator);
+        var batch = try self.processReceivedDatagramBatchAt(
+            &datagrams,
+            self.monotonicNowNs(),
+        );
+        errdefer batch.deinit();
+        _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+        return batch;
     }
 
     /// Process a kernel/GRO batch and release each decoded packet immediately.

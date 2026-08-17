@@ -219,6 +219,10 @@ cross-stream body batches are available through
 `--enable-body-batch` measures that path. It remains opt-in because this host's
 sysctl-capped 212,992-byte UDP receive queue makes four-packet GSO bursts
 slightly slower than sequential submissions.
+`--enable-gro-receive` enables the timer-aware owning-batch receive path. It is
+also opt-in on this host: the path now completes long uploads/downloads without
+stalling, but its burst shape is slower and noisier under the same small receive
+queue.
 `--verbose` prints per-iteration throughput lines (`[iter N]`) for diagnosing
 long or stuck multi-iteration runs. `--trace-iteration` additionally prints
 coarse lifecycle stages (bind, connect, transfer, join) for each iteration.
@@ -425,6 +429,24 @@ The optional cross-stream body batch completed five 64 MiB iterations at
 the sequential path is slightly faster with the small kernel receive queue.
 The API still provides exact protected-packet sizing, per-DATA prefix ownership,
 and socket-visible-prefix commit semantics for hosts that can absorb bursts.
+
+Timer-aware HTTP/3 GRO validation used the same 64 MiB/four-stream shape:
+
+```text
+upload, five iterations:
+  samples: 117.83, 122.24, 103.24, 123.80, 121.55 MiB/s
+  mean: 117.73 MiB/s, stddev: 6.38%
+
+download, three iterations:
+  samples: 87.01, 84.43, 106.60 MiB/s
+  mean: 92.68 MiB/s, stddev: 10.68%
+```
+
+Both directions completed every iteration. The transport test additionally
+drops the original STREAM packet and proves that a GRO batch receive fires PTO,
+sends packet-number 1 as a recovery probe, and returns the response afterward.
+GRO therefore no longer suppresses recovery timers; it remains disabled by
+default solely because it is slower on this host.
 
 The earlier run completed iteration 0 at 33.92 MiB/s and then timed out. A
 single traced 16 MiB run showed all four client send loops complete while the

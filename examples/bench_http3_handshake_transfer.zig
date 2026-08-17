@@ -86,6 +86,7 @@ pub fn main(init: std.process.Init) !void {
         \\  mode: {s}
         \\  streams: {d}
         \\  body batch: {}
+        \\  GRO receive: {}
         \\  1-RTT datagram bytes: {d}
         \\  paced body chunk bytes: {d}
         \\  server ACK-eliciting threshold: {d}
@@ -97,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
         \\  bytes/s: {d}
         \\  MiB/s: {d}
         \\
-    , .{ @tagName(config.mode), config.streams, config.enable_body_batch, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    , .{ @tagName(config.mode), config.streams, config.enable_body_batch, config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
     const summary = summarizeThroughput(throughput_samples);
     std.debug.print(
         "  mean MiB/s: {d:.2}\n" ++
@@ -187,7 +188,11 @@ fn runIteration(
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .quic = .{ .max_datagram_size = endpoint_datagram_size, .max_frames_per_datagram = 32 } },
+        .{ .quic = .{
+            .max_datagram_size = endpoint_datagram_size,
+            .max_frames_per_datagram = 32,
+            .enable_gro_receive = config.enable_gro_receive,
+        } },
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
@@ -286,7 +291,11 @@ fn runIteration(
         io,
         .{ .ip4 = .loopback(0) },
         server.address(),
-        .{ .quic = .{ .max_datagram_size = endpoint_datagram_size, .max_frames_per_datagram = 32 } },
+        .{ .quic = .{
+            .max_datagram_size = endpoint_datagram_size,
+            .max_frames_per_datagram = 32,
+            .enable_gro_receive = config.enable_gro_receive,
+        } },
         .{
             .handshake = .{
                 .original_destination_connection_id = &original_dcid,
@@ -1027,6 +1036,7 @@ const Config = struct {
     // bursts slower than sequential submissions. Keep the batch mode opt-in so
     // capable hosts can measure it without regressing the portable baseline.
     enable_body_batch: bool = false,
+    enable_gro_receive: bool = false,
     ack_eliciting_threshold: u64 = benchmark_ack_eliciting_threshold,
 };
 
@@ -1075,6 +1085,8 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             config.enable_pacing = false;
         } else if (std.mem.eql(u8, arg, "--enable-body-batch")) {
             config.enable_body_batch = true;
+        } else if (std.mem.eql(u8, arg, "--enable-gro-receive")) {
+            config.enable_gro_receive = true;
         } else {
             return error.InvalidArgument;
         }

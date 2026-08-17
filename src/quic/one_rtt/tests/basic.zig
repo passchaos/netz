@@ -569,6 +569,84 @@ test "QUIC 1-RTT connection receives a UDP GRO packet batch" {
     try std.testing.expectEqual(@as(u64, 3), second_ack.first_ack_range);
 }
 
+test "QUIC 1-RTT timer-aware receive preserves UDP GRO batch" {
+    if (!quic.runtime.udpGroSupported()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 4096,
+            .enable_gro_receive = true,
+        },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+    if (!server_endpoint.groReceiveEnabled() or
+        !client_endpoint.gsoSendEnabled())
+    {
+        return error.SkipZigTest;
+    }
+
+    const client_cid = [_]u8{ 0x8a, 0x8b, 0x8c, 0x8d };
+    const server_cid = [_]u8{ 0x8e, 0x8f, 0x90, 0x91 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x92} ** quic.protection.secret_len,
+    );
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    // Seed a future ACK-delay timer. The batch receive must arm a timed socket
+    // operation while still returning both GRO segments in one owning batch.
+    const now = std.Io.Clock.awake.now(io).nanoseconds;
+    server.ack_delay_start_ns = @intCast(now);
+    server.ack_delay_deadline_ns = @intCast(now + std.time.ns_per_s);
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    const packet_frames = [_][]const quic.Frame{ &ping, &ping };
+    try one_rtt.sendFramesBatch(
+        &client_endpoint,
+        server_endpoint.address(),
+        keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .first_packet_number = 0,
+            .packet_number_len = 4,
+            .packets = &packet_frames,
+        },
+    );
+
+    var received = try server.receivePacketBatchServicingTimers();
+    defer received.deinit();
+    try std.testing.expectEqual(@as(usize, 2), received.packets.len);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        received.packets[0].packet.packet_number,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        received.packets[1].packet.packet_number,
+    );
+}
+
 test "QUIC 1-RTT connection sends ACK and marks sent packet acknowledged" {
     const allocator = std.testing.allocator;
 
