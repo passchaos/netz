@@ -8,7 +8,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   unfolding, exact-allocation/empty-header owned-parse fast paths, strict allocation-free borrowed request/response head parsing into
   caller header storage with exact Content-Length pipeline offsets and
   method/status-aware response boundaries, request-target/status/reason-phrase start-line validation with method-specific asterisk/authority-form and no-fragment rules, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
-  byte buffering with exact-message ownership transfer, preallocated runtime header-line and trailer assembly for persistent connections, method-aware response body
+  byte buffering with exact-message ownership transfer, allocation-free caller-storage request-pipeline batch parsing and one-prefix consumption, reusable runtime header/trailer/encoding scratch for persistent connections, non-chunked header/body vectored writes, transactional batched response validation and one-flush pipeline writes, method-aware response body
   handling for HEAD and successful CONNECT, Host/authority delimiter validation, strict authority-form CONNECT target delimiter/userinfo rejection, malformed absolute-form authority validation including bracketed IPv6, and CONNECT tunnel helpers, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling even when body bytes are pre-read with invalid-head suppression, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping, ambiguous body-length rejection
@@ -455,6 +455,7 @@ comparison gaps are recorded in `docs/benchmark-baseline.md`:
 ```sh
 zig build bench -Doptimize=ReleaseFast
 zig build bench-http1-parse -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
 zig build bench-http3-dev -Doptimize=ReleaseFast
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
@@ -480,6 +481,9 @@ zig build bench-quic-stream-window -Doptimize=ReleaseFast
 The aggregate `bench` step runs the current protocol microbenchmarks:
 
 - HTTP/1 borrowed request-head parsing versus owned full request parsing,
+- HTTP/1 persistent 16-request pipeline round trips with caller-storage batch
+  parsing and one-flush response batches, matching Hyper's `hello_world_16`
+  benchmark shape,
 - HTTP/2 HPACK stateful dynamic-table encode/decode versus stateless helpers,
 - HTTP/3 cleartext development request/response round trips,
 - HTTP/3 real-handshake paced upload/download throughput with configurable

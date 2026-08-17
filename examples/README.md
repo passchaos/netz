@@ -23,6 +23,7 @@ zig build run-quic-handshake-echo
 zig build run-quic-datagram-echo
 zig build run-quic-close
 zig build run-websocket-echo
+taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 # Linux only: raw std.os.linux.IoUring connect/send/recv around HTTP/1 bytes
@@ -32,6 +33,14 @@ zig build run-linux-io-uring-http1
 The URI helpers derive Host / `:authority` / `:scheme` from the URI. Host names,
 IPv4 literals, and bracketed IPv6 literals such as `http://[::1]:8080/` are
 supported by the HTTP/1, HTTP/2 h2c, and WebSocket client examples.
+
+`bench-http1-pipeline` mirrors Hyper's `hello_world_16`: one persistent
+loopback TCP connection carries batches of sixteen bodyless requests and
+thirteen-byte bodies. It includes Hyper's same-length Date field so each
+response is 89 wire bytes, and performs untimed warmup batches before
+measurement. Pin both reference executables to the same CPU when collecting
+comparison evidence; see `docs/hyper_parity.md` for exact commands and captured
+same-host results.
 
 `run-http3-handshake` is the protected-loopback counterpart to the public
 HTTP/3 fetcher: it starts a local QUIC/H3 server, performs a full client

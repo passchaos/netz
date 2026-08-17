@@ -18,6 +18,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http1.runtime, "Tunnel"));
     try std.testing.expect(@hasDecl(netz.http1.runtime.Client, "openConnectTunnel"));
     try std.testing.expect(@hasDecl(netz.http1.runtime.Connection, "acceptConnectTunnel"));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
+        "readRequestBatchInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Connection,
+        "writeResponses",
+    ));
     try std.testing.expect(@hasField(netz.http1.runtime.RequestOptions, "trailers"));
     try std.testing.expect(@hasField(netz.http1.runtime.ResponseOptions, "trailers"));
     try std.testing.expect(@hasField(netz.http1.ParseOptions, "allow_obs_fold"));

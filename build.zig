@@ -96,6 +96,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark HTTP/1 borrowed head parsing against owned parsing",
         },
         .{
+            .exe_name = "netz-bench-http1-pipeline",
+            .path = "examples/bench_http1_pipeline.zig",
+            .run_step = "bench-http1-pipeline",
+            .description = "Benchmark HTTP/1 persistent 16-request pipelines",
+        },
+        .{
             .exe_name = "netz-bench-http2-hpack",
             .path = "examples/bench_http2_hpack.zig",
             .run_step = "bench-http2-hpack",

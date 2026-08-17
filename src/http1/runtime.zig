@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const http1 = @import("mod.zig");
+const runtime_write = @import("runtime/write.zig");
 const wire = @import("../internal/wire.zig");
 
 const net = std.Io.net;
@@ -293,7 +294,33 @@ const RuntimeTransport = union(enum) {
             .linux_io_uring => |transport| transport.writeAll(bytes),
         };
     }
+
+    fn writeAllParts(
+        self: RuntimeTransport,
+        header: []const u8,
+        body: []const u8,
+    ) Error!void {
+        if (body.len == 0) return self.writeAll(header);
+        if (header.len == 0) return self.writeAll(body);
+        return switch (self) {
+            .tcp => |tcp| writeAllHeaderPayload(
+                tcp.io,
+                tcp.stream,
+                header,
+                body,
+            ),
+            .tls => |conn| conn.writeAllParts(header, body),
+            // The raw io_uring adapter currently accepts one slice per SQE.
+            // Two sends still avoid a body-sized temporary allocation.
+            .linux_io_uring => |transport| {
+                try transport.writeAll(header);
+                try transport.writeAll(body);
+            },
+        };
+    }
 };
+
+const WriteScratch = runtime_write.Scratch;
 
 pub const LinuxIoUringStream = if (builtin.os.tag == .linux) struct {
     ring: *linux.IoUring,
@@ -558,9 +585,11 @@ pub const LinuxIoUringConnection = if (builtin.os.tag == .linux) struct {
     stream: LinuxIoUringStream,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
+    write_scratch: WriteScratch = .{},
 
     pub fn close(self: *LinuxIoUringConnection) void {
         self.inbuf.deinit(self.allocator);
+        self.write_scratch.deinit(self.allocator);
         self.stream.close();
         self.* = undefined;
     }
@@ -570,7 +599,12 @@ pub const LinuxIoUringConnection = if (builtin.os.tag == .linux) struct {
     }
 
     pub fn writeResponse(self: *LinuxIoUringConnection, response: ResponseOptions) Error!void {
-        try writeResponseToTransport(self.allocator, .{ .linux_io_uring = self.stream }, response);
+        try writeResponseToTransportScratch(
+            self.allocator,
+            .{ .linux_io_uring = self.stream },
+            response,
+            &self.write_scratch,
+        );
     }
 };
 
@@ -717,6 +751,7 @@ pub const Client = struct {
     stream: net.Stream,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
+    write_scratch: WriteScratch = .{},
     default_host: ?[]u8 = null,
     tls_conn: ?*TlsClientConnection = null,
 
@@ -783,6 +818,7 @@ pub const Client = struct {
     pub fn close(self: *Client) void {
         if (self.default_host) |host| self.allocator.free(host);
         self.inbuf.deinit(self.allocator);
+        self.write_scratch.deinit(self.allocator);
         if (self.tls_conn) |conn| {
             conn.deinit();
         } else {
@@ -794,7 +830,12 @@ pub const Client = struct {
     pub fn request(self: *Client, request_options: RequestOptions) Error!OwnedResponse {
         var options = request_options;
         if (options.host == null) options.host = self.default_host;
-        try writeRequestToTransport(self.allocator, self.transport(), options);
+        try writeRequestToTransportScratch(
+            self.allocator,
+            self.transport(),
+            options,
+            &self.write_scratch,
+        );
         return readResponseFromTransportBufferedForRequest(self.allocator, self.transport(), self.limits, .{}, &self.inbuf, request_options.method);
     }
 
@@ -940,9 +981,11 @@ pub const Connection = struct {
     stream: net.Stream,
     limits: Limits = .{},
     inbuf: std.ArrayList(u8) = .empty,
+    write_scratch: WriteScratch = .{},
 
     pub fn close(self: *Connection) void {
         self.inbuf.deinit(self.allocator);
+        self.write_scratch.deinit(self.allocator);
         self.stream.close(self.io);
         self.* = undefined;
     }
@@ -951,8 +994,155 @@ pub const Connection = struct {
         return readRequestFromStreamBuffered(self.allocator, self.io, self.stream, self.limits, options, &self.inbuf);
     }
 
+    /// Read and parse an exact batch of pipelined request heads without
+    /// per-request allocation.
+    ///
+    /// `heads`, every head's header slice, and `bodies` borrow `self.inbuf`.
+    /// They remain valid only until the next read or `consumeRequestBatch`.
+    /// Chunked requests have no statically known message boundary and return
+    /// `InvalidResponse`; callers can use `readRequest` for those.
+    pub fn readRequestBatchInto(
+        self: *Connection,
+        heads: []http1.RequestHead,
+        header_storage: []http1.Header,
+        bodies: [][]const u8,
+        options: http1.ParseOptions,
+    ) Error!usize {
+        if (heads.len == 0 or heads.len != bodies.len) {
+            return error.InvalidResponse;
+        }
+        const required_header_slots = std.math.mul(
+            usize,
+            heads.len,
+            options.max_headers,
+        ) catch return error.TooManyHeaders;
+        if (options.max_headers == 0 or
+            header_storage.len < required_header_slots)
+        {
+            return error.TooManyHeaders;
+        }
+        const max_batch_head_bytes = std.math.mul(
+            usize,
+            heads.len,
+            self.limits.max_head_bytes,
+        ) catch return error.BodyTooLarge;
+        const max_batch_body_bytes = std.math.mul(
+            usize,
+            heads.len,
+            self.limits.max_body_bytes,
+        ) catch return error.BodyTooLarge;
+        const max_batch_bytes = std.math.add(
+            usize,
+            max_batch_head_bytes,
+            max_batch_body_bytes,
+        ) catch return error.BodyTooLarge;
+
+        while (true) {
+            var offset: usize = 0;
+            var complete = true;
+            for (heads, bodies, 0..) |*head, *body, index| {
+                const headers = header_storage[index * options.max_headers ..][0..options.max_headers];
+                head.* = http1.parseRequestHead(
+                    self.inbuf.items[offset..],
+                    headers,
+                    options,
+                ) catch |err| switch (err) {
+                    error.BufferTooShort => {
+                        // A missing terminator must still respect the limit of
+                        // this request head, rather than consuming the aggregate
+                        // allowance of all later pipeline entries.
+                        _ = try findHttpHeadEndWithinLimit(
+                            self.inbuf.items[offset..],
+                            self.limits.max_head_bytes,
+                        );
+                        complete = false;
+                        break;
+                    },
+                    else => return err,
+                };
+                if (head.head_len > self.limits.max_head_bytes) {
+                    return error.HeadersTooLarge;
+                }
+                const message_len = (try head.messageLength()) orelse
+                    return error.InvalidResponse;
+                if (message_len < head.head_len) {
+                    return error.InvalidResponse;
+                }
+                if (message_len - head.head_len >
+                    self.limits.max_body_bytes)
+                {
+                    return error.BodyTooLarge;
+                }
+                const next_offset = std.math.add(
+                    usize,
+                    offset,
+                    message_len,
+                ) catch return error.BodyTooLarge;
+                if (next_offset > self.inbuf.items.len) {
+                    complete = false;
+                    break;
+                }
+                body.* = self.inbuf.items[offset + head.head_len .. next_offset];
+                offset = next_offset;
+            }
+            if (complete) return offset;
+
+            // Do not over-read merely to discover that the batch cannot fit.
+            // A complete batch may coexist with a larger already-buffered
+            // suffix, but an incomplete final request has no later message
+            // boundary yet, so all current bytes belong to this batch.
+            if (self.inbuf.items.len >= max_batch_bytes) {
+                return error.BodyTooLarge;
+            }
+            var read_buffer: [16 * 1024]u8 = undefined;
+            const remaining = max_batch_bytes - self.inbuf.items.len;
+            const count = try readSome(
+                self.io,
+                self.stream,
+                read_buffer[0..@min(remaining, read_buffer.len)],
+            );
+            if (count == 0) return error.ConnectionClosed;
+            try self.inbuf.appendSlice(
+                self.allocator,
+                read_buffer[0..count],
+            );
+        }
+    }
+
+    pub fn consumeRequestBatch(
+        self: *Connection,
+        consumed: usize,
+    ) Error!void {
+        if (consumed > self.inbuf.items.len) return error.InvalidResponse;
+        discardPrefix(&self.inbuf, consumed);
+    }
+
     pub fn writeResponse(self: *Connection, response: ResponseOptions) Error!void {
-        try writeResponseToStream(self.allocator, self.io, self.stream, response);
+        try writeResponseToTransportScratch(
+            self.allocator,
+            .{ .tcp = .{ .io = self.io, .stream = self.stream } },
+            response,
+            &self.write_scratch,
+        );
+    }
+
+    /// Validate and flush several pipelined responses as one transport write.
+    ///
+    /// Like Hyper's `pipeline_flush`, this avoids delayed-ACK/Nagle stalls
+    /// caused by one tiny write per response. The whole batch is encoded before
+    /// the socket call, so a later invalid response cannot leave an already
+    /// visible prefix. Storage is retained on the connection for steady-state
+    /// allocation-free reuse.
+    pub fn writeResponses(
+        self: *Connection,
+        responses: []const ResponseOptions,
+    ) Error!void {
+        try writeResponsesToTransportScratch(
+            self.allocator,
+            .{ .tcp = .{ .io = self.io, .stream = self.stream } },
+            responses,
+            &self.write_scratch,
+        );
     }
 
     pub fn serveOne(self: *Connection, context: anytype, comptime handler: anytype) Error!bool {
@@ -1045,32 +1235,8 @@ pub const OwnedResponse = struct {
     }
 };
 
-pub const RequestOptions = struct {
-    method: http1.Method = .GET,
-    target: []const u8 = "/",
-    version: http1.Version = .http_1_1,
-    /// Optional authority used to synthesize Host when the caller did not
-    /// provide one explicitly.  HTTP/1.1 requires Host on origin-form requests;
-    /// keeping it in RequestOptions lets the client runtime behave like mature
-    /// stacks without forcing every call site to hand-build a header field.
-    host: ?[]const u8 = null,
-    headers: []const http1.Header = &.{},
-    body: []const u8 = &.{},
-    trailers: []const http1.Header = &.{},
-};
-
-pub const ResponseOptions = struct {
-    version: http1.Version = .http_1_1,
-    status: u16 = 200,
-    reason: []const u8 = "OK",
-    headers: []const http1.Header = &.{},
-    body: []const u8 = &.{},
-    trailers: []const http1.Header = &.{},
-    /// Optional method of the request this response answers.  HEAD and
-    /// successful CONNECT have method-specific body framing rules that cannot
-    /// be inferred from status/headers alone.
-    request_method: ?http1.Method = null,
-};
+pub const RequestOptions = runtime_write.RequestOptions;
+pub const ResponseOptions = runtime_write.ResponseOptions;
 
 fn uriTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
     const path_value = uriComponentBytes(uri.path);
@@ -1357,71 +1523,28 @@ pub fn writeRequestToStream(allocator: std.mem.Allocator, io: std.Io, stream: ne
 }
 
 fn writeRequestToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: RequestOptions) Error!void {
-    try http1.validateRequestTargetForMethod(options.method, options.target);
-    const target_authority = if (options.method == .CONNECT) options.target else http1.absoluteFormAuthority(options.target);
-    const synthesized_host = options.host orelse target_authority;
-    var request_headers: std.ArrayList(http1.Header) = .empty;
-    defer request_headers.deinit(allocator);
-    try appendRequestHeadersWithHost(&request_headers, allocator, options.headers, synthesized_host);
-    try http1.validateHostHeaderBlock(options.version, request_headers.items);
-    if (target_authority) |authority| {
-        const host = wire.findHeader(request_headers.items, "host") orelse return error.InvalidHost;
-        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, host, " \t"), authority)) return error.InvalidHost;
-    }
-    if (options.method == .CONNECT and (options.body.len != 0 or options.trailers.len != 0)) return error.InvalidContentLength;
-    const use_chunked = try chunkedWriteFraming(options.version, request_headers.items, options.trailers);
-    try validateDeclaredRequestBodyLength(request_headers.items, options.body.len, use_chunked);
-    var headers: std.ArrayList(http1.Header) = .empty;
-    defer headers.deinit(allocator);
-    var len_buf: [32]u8 = undefined;
-    var trailer_value: std.ArrayList(u8) = .empty;
-    defer trailer_value.deinit(allocator);
-    try appendDefaultedHeaders(
-        &headers,
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+    try writeRequestToTransportScratch(
         allocator,
-        request_headers.items,
-        options.body.len,
-        options.trailers,
-        use_chunked,
-        shouldDefaultRequestContentLength(options.method, options.body.len, options.trailers),
-        &len_buf,
-        &trailer_value,
+        transport,
+        options,
+        &scratch,
     );
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try encoded.appendSlice(allocator, options.method.string());
-    try encoded.append(allocator, ' ');
-    try encoded.appendSlice(allocator, options.target);
-    try encoded.append(allocator, ' ');
-    try encoded.appendSlice(allocator, options.version.string());
-    try encoded.appendSlice(allocator, "\r\n");
-    try writeHeaderLines(&encoded, allocator, headers.items);
-    try encoded.appendSlice(allocator, "\r\n");
-    if (use_chunked) {
-        const chunks = [_][]const u8{options.body};
-        try encodeChunkedForRuntime(&encoded, allocator, &chunks, options.trailers);
-    } else {
-        try encoded.appendSlice(allocator, options.body);
-    }
-    try transport.writeAll(encoded.items);
 }
 
-fn appendRequestHeadersWithHost(
-    list: *std.ArrayList(http1.Header),
+fn writeRequestToTransportScratch(
     allocator: std.mem.Allocator,
-    headers: []const http1.Header,
-    host: ?[]const u8,
+    transport: RuntimeTransport,
+    options: RequestOptions,
+    scratch: *WriteScratch,
 ) Error!void {
-    var has_host = false;
-    try list.ensureUnusedCapacity(allocator, headers.len + 1);
-    for (headers) |header| {
-        if (header.eqlName("host")) has_host = true;
-        list.appendAssumeCapacity(header);
-    }
-    if (!has_host) {
-        if (host) |value| list.appendAssumeCapacity(.{ .name = "Host", .value = value });
-    }
+    const parts = try runtime_write.prepareRequest(
+        allocator,
+        options,
+        scratch,
+    );
+    try transport.writeAllParts(parts.header, parts.body);
 }
 
 pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, options: ResponseOptions) Error!void {
@@ -1429,146 +1552,42 @@ pub fn writeResponseToStream(allocator: std.mem.Allocator, io: std.Io, stream: n
 }
 
 fn writeResponseToTransport(allocator: std.mem.Allocator, transport: RuntimeTransport, options: ResponseOptions) Error!void {
-    try http1.validateStatusCode(options.status);
-    try http1.validateReasonPhrase(options.reason);
-    try http1.validateResponseBodyForStatus(options.status, options.headers, options.body, options.trailers);
-    const use_chunked = try chunkedWriteFraming(options.version, options.headers, options.trailers);
-    try validateDeclaredResponseBodyLength(
-        options.status,
-        options.request_method,
-        options.headers,
-        options.body.len,
-        options.trailers.len,
-        use_chunked,
-    );
-    const suppress_body = responseWriteSuppressesBody(options.status, options.request_method);
-    var headers: std.ArrayList(http1.Header) = .empty;
-    defer headers.deinit(allocator);
-    var len_buf: [32]u8 = undefined;
-    var trailer_value: std.ArrayList(u8) = .empty;
-    defer trailer_value.deinit(allocator);
-    try appendDefaultedHeaders(
-        &headers,
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+    try writeResponseToTransportScratch(
         allocator,
-        options.headers,
-        options.body.len,
-        options.trailers,
-        use_chunked,
-        responseShouldDefaultContentLength(options.status, options.request_method),
-        &len_buf,
-        &trailer_value,
+        transport,
+        options,
+        &scratch,
     );
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try encoded.appendSlice(allocator, options.version.string());
-    try encoded.append(allocator, ' ');
-    try appendDecimalForRuntime(&encoded, allocator, options.status);
-    if (options.reason.len != 0) {
-        try encoded.append(allocator, ' ');
-        try encoded.appendSlice(allocator, options.reason);
-    }
-    try encoded.appendSlice(allocator, "\r\n");
-    try writeHeaderLines(&encoded, allocator, headers.items);
-    try encoded.appendSlice(allocator, "\r\n");
-    if (suppress_body) {
-        // HEAD/304/CONNECT response bodies are interpreted out-of-band by HTTP
-        // semantics.  Preserve descriptive headers, but do not put even a
-        // zero-size chunk on the wire.
-    } else if (use_chunked) {
-        const chunks = [_][]const u8{options.body};
-        try encodeChunkedForRuntime(&encoded, allocator, &chunks, options.trailers);
-    } else {
-        try encoded.appendSlice(allocator, options.body);
-    }
-    try transport.writeAll(encoded.items);
 }
 
-fn appendDefaultedHeaders(
-    list: *std.ArrayList(http1.Header),
+fn writeResponseToTransportScratch(
     allocator: std.mem.Allocator,
-    headers: []const http1.Header,
-    body_len: usize,
-    trailers: []const http1.Header,
-    use_chunked: bool,
-    add_default_content_length: bool,
-    len_buf: *[32]u8,
-    trailer_value: *std.ArrayList(u8),
+    transport: RuntimeTransport,
+    options: ResponseOptions,
+    scratch: *WriteScratch,
 ) Error!void {
-    var has_content_length = false;
-    var has_transfer_encoding = false;
-    var has_trailer = false;
-    try list.ensureUnusedCapacity(allocator, headers.len + 2);
-    for (headers) |header| {
-        if (header.eqlName("content-length")) has_content_length = true;
-        if (header.eqlName("transfer-encoding")) has_transfer_encoding = true;
-        if (header.eqlName("trailer")) has_trailer = true;
-        if (use_chunked and header.eqlName("content-length")) continue;
-        list.appendAssumeCapacity(header);
-    }
-    if (use_chunked) {
-        if (!has_transfer_encoding) list.appendAssumeCapacity(.{ .name = "Transfer-Encoding", .value = "chunked" });
-        if (trailers.len != 0 and !has_trailer) {
-            try renderTrailerHeaderValue(trailer_value, allocator, trailers);
-            list.appendAssumeCapacity(.{ .name = "Trailer", .value = trailer_value.items });
-        }
-    } else if (add_default_content_length and !has_content_length) {
-        const rendered = std.fmt.bufPrint(len_buf, "{}", .{body_len}) catch unreachable;
-        list.appendAssumeCapacity(.{ .name = "Content-Length", .value = rendered });
-    }
+    const parts = try runtime_write.prepareResponse(
+        allocator,
+        options,
+        scratch,
+    );
+    try transport.writeAllParts(parts.header, parts.body);
 }
 
-fn shouldDefaultRequestContentLength(method: http1.Method, body_len: usize, trailers: []const http1.Header) bool {
-    if (body_len != 0 or trailers.len != 0) return true;
-    return switch (method) {
-        .GET, .HEAD, .CONNECT => false,
-        else => true,
-    };
-}
-
-fn validateDeclaredRequestBodyLength(headers: []const http1.Header, body_len: usize, use_chunked: bool) Error!void {
-    if (use_chunked) return;
-    const declared = try http1.contentLength(headers);
-    if (declared) |len| {
-        // Once a caller supplies Content-Length the runtime encoder must ensure
-        // the wire body matches it exactly.  Sending a shorter/longer body leaves
-        // the peer desynchronized and can corrupt the next pipelined message.
-        if (len != body_len) return error.InvalidContentLength;
-    }
-}
-
-fn validateDeclaredResponseBodyLength(
-    status: u16,
-    request_method: ?http1.Method,
-    headers: []const http1.Header,
-    body_len: usize,
-    trailers_len: usize,
-    use_chunked: bool,
+fn writeResponsesToTransportScratch(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    responses: []const ResponseOptions,
+    scratch: *WriteScratch,
 ) Error!void {
-    if (request_method) |method| {
-        if (method == .CONNECT and status >= 200 and status < 300) {
-            if (use_chunked) return error.InvalidTransferEncoding;
-            // RFC 9110/9112: a 2xx CONNECT response switches to tunnel mode
-            // immediately after the header section.  Content-Length/TE would be
-            // interpreted differently by different intermediaries, so forbid it
-            // even when the declared length is zero.
-            if (body_len != 0 or (try http1.contentLength(headers)) != null) return error.InvalidContentLength;
-            return;
-        }
-        if (method == .HEAD) {
-            if (trailers_len != 0) return error.InvalidTrailer;
-            if (try http1.contentLength(headers)) |len| {
-                if (body_len != 0 and len != body_len) return error.InvalidContentLength;
-            }
-            return;
-        }
-    }
-    if (use_chunked) return;
-    if (status == 304) return;
-    const declared = try http1.contentLength(headers);
-    if (declared) |len| {
-        if (len != body_len) return error.InvalidContentLength;
-    }
+    const batch = try runtime_write.prepareResponses(
+        allocator,
+        responses,
+        scratch,
+    );
+    try transport.writeAll(batch);
 }
 
 const ServeLoopResponse = struct {
@@ -1630,162 +1649,6 @@ fn responseOptionsKeepAlive(response: ResponseOptions) bool {
         if (wire.containsToken(header.value, "keep-alive")) return true;
     }
     return response.version == .http_1_1;
-}
-
-fn responseWriteSuppressesBody(status: u16, request_method: ?http1.Method) bool {
-    if (http1.statusCodeForbidsBody(status)) return true;
-    if (request_method) |method| {
-        if (method == .HEAD) return true;
-        if (method == .CONNECT and status >= 200 and status < 300) return true;
-    }
-    return false;
-}
-
-fn responseShouldDefaultContentLength(status: u16, request_method: ?http1.Method) bool {
-    if (http1.statusCodeForbidsBody(status)) return false;
-    if (request_method) |method| {
-        // Hyper/h1 never emits Content-Length or Transfer-Encoding on a
-        // successful CONNECT response: the byte stream after CRLFCRLF is the
-        // tunnel, not an HTTP response body.  Do not synthesize CL: 0 here,
-        // because some intermediaries treat it as conflicting framing.
-        if (method == .CONNECT and status >= 200 and status < 300) return false;
-    }
-    return true;
-}
-
-fn chunkedWriteFraming(version: http1.Version, headers: []const http1.Header, trailers: []const http1.Header) Error!bool {
-    var has_transfer_encoding = false;
-    for (headers) |header| {
-        if (header.eqlName("transfer-encoding")) {
-            has_transfer_encoding = true;
-            break;
-        }
-    }
-
-    if (has_transfer_encoding) {
-        // Once callers opt into transfer coding, the runtime must emit bytes
-        // that match the declared framing.  This HTTP/1 layer only knows how to
-        // encode chunked bodies, so reject unsupported stacked codings instead
-        // of silently sending a raw body under misleading headers.
-        if ((try http1.bodyFraming(headers)) != .chunked) return error.InvalidTransferEncoding;
-        if (version == .http_1_0) return error.InvalidVersion;
-        return true;
-    }
-
-    if (trailers.len == 0) return false;
-    if (version == .http_1_0) return error.InvalidVersion;
-    return true;
-}
-
-fn renderTrailerHeaderValue(value: *std.ArrayList(u8), allocator: std.mem.Allocator, trailers: []const http1.Header) Error!void {
-    value.clearRetainingCapacity();
-    var rendered_len: usize = 0;
-    var unique_count: usize = 0;
-    for (trailers, 0..) |trailer, index| {
-        var duplicate = false;
-        for (trailers[0..index]) |prior| {
-            if (trailer.eqlName(prior.name)) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
-        if (unique_count != 0) rendered_len = std.math.add(usize, rendered_len, 2) catch return error.InvalidTrailer;
-        rendered_len = std.math.add(usize, rendered_len, trailer.name.len) catch return error.InvalidTrailer;
-        unique_count += 1;
-    }
-    try value.ensureUnusedCapacity(allocator, rendered_len);
-
-    for (trailers, 0..) |trailer, index| {
-        var duplicate = false;
-        for (trailers[0..index]) |prior| {
-            if (trailer.eqlName(prior.name)) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
-        if (value.items.len != 0) value.appendSliceAssumeCapacity(", ");
-        value.appendSliceAssumeCapacity(trailer.name);
-    }
-}
-
-fn appendDecimalForRuntime(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: anytype) Error!void {
-    var tmp: [32]u8 = undefined;
-    const rendered = std.fmt.bufPrint(&tmp, "{}", .{value}) catch return error.InvalidResponse;
-    try list.appendSlice(allocator, rendered);
-}
-
-fn writeHeaderLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const http1.Header) Error!void {
-    var rendered_len: usize = 0;
-    for (headers) |header| {
-        try http1.validateHeader(header);
-        rendered_len = std.math.add(usize, rendered_len, header.name.len) catch return error.InvalidResponse;
-        rendered_len = std.math.add(usize, rendered_len, 2) catch return error.InvalidResponse;
-        rendered_len = std.math.add(usize, rendered_len, header.value.len) catch return error.InvalidResponse;
-        rendered_len = std.math.add(usize, rendered_len, 2) catch return error.InvalidResponse;
-    }
-    try list.ensureUnusedCapacity(allocator, rendered_len);
-    for (headers) |header| {
-        list.appendSliceAssumeCapacity(header.name);
-        list.appendSliceAssumeCapacity(": ");
-        list.appendSliceAssumeCapacity(header.value);
-        list.appendSliceAssumeCapacity("\r\n");
-    }
-}
-
-fn writeMergedHeaderLines(list: *std.ArrayList(u8), allocator: std.mem.Allocator, headers: []const http1.Header) Error!void {
-    var written = try std.ArrayList(bool).initCapacity(allocator, headers.len);
-    defer written.deinit(allocator);
-    try written.appendNTimes(allocator, false, headers.len);
-
-    for (headers, 0..) |header, index| {
-        if (written.items[index]) continue;
-        try http1.validateHeader(header);
-        try list.appendSlice(allocator, header.name);
-        try list.appendSlice(allocator, ": ");
-        try list.appendSlice(allocator, header.value);
-        written.items[index] = true;
-
-        var next = index + 1;
-        while (next < headers.len) : (next += 1) {
-            if (written.items[next]) continue;
-            const duplicate = headers[next];
-            if (!header.eqlName(duplicate.name)) continue;
-            try http1.validateHeader(duplicate);
-            // Match Hyper's repeated-trailer behavior: preserve the first field
-            // name casing and append repeated values into the same field line so
-            // recipients see one logical trailer field.
-            try list.appendSlice(allocator, ", ");
-            try list.appendSlice(allocator, duplicate.value);
-            written.items[next] = true;
-        }
-        try list.appendSlice(allocator, "\r\n");
-    }
-}
-
-fn encodeChunkedForRuntime(
-    list: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    chunks: []const []const u8,
-    trailers: []const http1.Header,
-) Error!void {
-    try http1.validateTrailers(trailers);
-    for (chunks) |chunk| {
-        // A zero-length chunk is the chunked terminator on the wire.  Treat
-        // empty payload slices as "no DATA" and emit exactly one terminating
-        // chunk after all non-empty payload slices so empty bodies can still
-        // carry trailers.
-        if (chunk.len == 0) continue;
-        var tmp: [32]u8 = undefined;
-        const rendered = std.fmt.bufPrint(&tmp, "{x}\r\n", .{chunk.len}) catch return error.InvalidResponse;
-        try list.appendSlice(allocator, rendered);
-        try list.appendSlice(allocator, chunk);
-        try list.appendSlice(allocator, "\r\n");
-    }
-    try list.appendSlice(allocator, "0\r\n");
-    try writeMergedHeaderLines(list, allocator, trailers);
-    try list.appendSlice(allocator, "\r\n");
 }
 
 fn readMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
@@ -2041,6 +1904,150 @@ test "HTTP/1 buffered reader transfers exact message buffer ownership" {
     try std.testing.expectEqualStrings(raw, bytes);
 }
 
+test "HTTP/1 borrowed pipeline batch preserves bodies until consume" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .limits = .{ .max_head_bytes = 1024, .max_body_bytes = 16 },
+    };
+    defer {
+        connection.inbuf.deinit(allocator);
+        connection.write_scratch.deinit(allocator);
+    }
+    const pipeline =
+        "GET /one HTTP/1.1\r\nHost: example\r\n\r\n" ++
+        "POST /two HTTP/1.1\r\nHost: example\r\n" ++
+        "Content-Length: 3\r\n\r\nabc" ++
+        "GET /next HTTP/1.1\r\nHost: example\r\n\r\n";
+    try connection.inbuf.appendSlice(allocator, pipeline);
+
+    var heads: [2]http1.RequestHead = undefined;
+    var headers: [8]http1.Header = undefined;
+    var bodies: [2][]const u8 = undefined;
+    const consumed = try connection.readRequestBatchInto(
+        &heads,
+        &headers,
+        &bodies,
+        .{ .max_headers = 4 },
+    );
+    try std.testing.expectEqual(http1.Method.GET, heads[0].method);
+    try std.testing.expectEqualStrings("/one", heads[0].target);
+    try std.testing.expectEqual(http1.Method.POST, heads[1].method);
+    try std.testing.expectEqualStrings("abc", bodies[1]);
+    try std.testing.expectEqualStrings(
+        pipeline[0..consumed],
+        connection.inbuf.items[0..consumed],
+    );
+
+    try connection.consumeRequestBatch(consumed);
+    try std.testing.expectEqualStrings(
+        "GET /next HTTP/1.1\r\nHost: example\r\n\r\n",
+        connection.inbuf.items,
+    );
+    try std.testing.expectError(
+        error.InvalidResponse,
+        connection.consumeRequestBatch(
+            connection.inbuf.items.len + 1,
+        ),
+    );
+}
+
+test "HTTP/1 borrowed pipeline batch enforces limits before I/O" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .limits = .{ .max_head_bytes = 24, .max_body_bytes = 2 },
+    };
+    defer {
+        connection.inbuf.deinit(allocator);
+        connection.write_scratch.deinit(allocator);
+    }
+
+    var heads: [2]http1.RequestHead = undefined;
+    var headers: [8]http1.Header = undefined;
+    var bodies: [2][]const u8 = undefined;
+    try connection.inbuf.appendSlice(
+        allocator,
+        "GET /long HTTP/1.1\r\nHost: example\r\n\r\n",
+    );
+    try std.testing.expectError(
+        error.HeadersTooLarge,
+        connection.readRequestBatchInto(
+            heads[0..1],
+            headers[0..4],
+            bodies[0..1],
+            .{ .max_headers = 4 },
+        ),
+    );
+
+    connection.inbuf.clearRetainingCapacity();
+    connection.limits.max_head_bytes = 1024;
+    try connection.inbuf.appendSlice(
+        allocator,
+        "POST / HTTP/1.1\r\nHost: example\r\n" ++
+            "Content-Length: 3\r\n\r\nabc",
+    );
+    try std.testing.expectError(
+        error.BodyTooLarge,
+        connection.readRequestBatchInto(
+            heads[0..1],
+            headers[0..4],
+            bodies[0..1],
+            .{ .max_headers = 4 },
+        ),
+    );
+
+    connection.inbuf.clearRetainingCapacity();
+    connection.limits = .{
+        .max_head_bytes = std.math.maxInt(usize),
+        .max_body_bytes = 0,
+    };
+    try std.testing.expectError(
+        error.BodyTooLarge,
+        connection.readRequestBatchInto(
+            &heads,
+            &headers,
+            &bodies,
+            .{ .max_headers = 4 },
+        ),
+    );
+    try std.testing.expectError(
+        error.TooManyHeaders,
+        connection.readRequestBatchInto(
+            &heads,
+            &headers,
+            &bodies,
+            .{ .max_headers = std.math.maxInt(usize) },
+        ),
+    );
+}
+
+test "HTTP/1 response batch validation is transactional" {
+    const allocator = std.testing.allocator;
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+
+    const responses = [_]ResponseOptions{
+        .{ .body = "ok" },
+        .{ .status = 204, .body = "forbidden" },
+    };
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        writeResponsesToTransportScratch(
+            allocator,
+            .{ .tcp = .{ .io = undefined, .stream = undefined } },
+            &responses,
+            &scratch,
+        ),
+    );
+    // The invalid batch never reaches the transport. Scratch content itself is
+    // internal and may be reused/partially encoded for the next attempt.
+}
+
 fn maybeWriteContinue(transport: RuntimeTransport, head: []const u8, already_buffered_body_bytes: usize, auto_continue: bool) Error!void {
     _ = already_buffered_body_bytes;
     if (!auto_continue) return;
@@ -2289,6 +2296,46 @@ fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Strea
         const n = try io.vtable.netWrite(io.userdata, stream.socket.handle, bytes[written..], &.{""}, 0);
         if (n == 0) return error.SocketUnconnected;
         written += n;
+    }
+}
+
+fn writeAllHeaderPayload(
+    io: std.Io,
+    stream: net.Stream,
+    header: []const u8,
+    payload: []const u8,
+) net.Stream.Writer.Error!void {
+    if (payload.len == 0) return writeAllToStream(io, stream, header);
+    if (header.len == 0) return writeAllToStream(io, stream, payload);
+    var header_written: usize = 0;
+    var payload_written: usize = 0;
+    while (header_written < header.len or payload_written < payload.len) {
+        const data = if (payload_written < payload.len)
+            &[_][]const u8{payload[payload_written..]}
+        else
+            &[_][]const u8{};
+        const n = if (header_written < header.len)
+            try io.vtable.netWrite(
+                io.userdata,
+                stream.socket.handle,
+                header[header_written..],
+                data,
+                0,
+            )
+        else
+            try io.vtable.netWrite(
+                io.userdata,
+                stream.socket.handle,
+                payload[payload_written..],
+                &.{""},
+                0,
+            );
+        if (n == 0) return error.SocketUnconnected;
+
+        const header_remaining = header.len - header_written;
+        const header_advance = @min(n, header_remaining);
+        header_written += header_advance;
+        payload_written += n - header_advance;
     }
 }
 
@@ -3952,39 +3999,93 @@ test "HTTP/1 runtime does not default Content-Length for status-forbidden respon
 
 test "HTTP/1 runtime does not default Connection close on writes" {
     const allocator = std.testing.allocator;
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
 
-    var len_buf: [32]u8 = undefined;
-    var trailer_value: std.ArrayList(u8) = .empty;
-    defer trailer_value.deinit(allocator);
-    var headers: std.ArrayList(http1.Header) = .empty;
-    defer headers.deinit(allocator);
-
-    try appendDefaultedHeaders(&headers, allocator, &.{}, 0, &.{}, false, true, &len_buf, &trailer_value);
-    try std.testing.expect(wire.findHeader(headers.items, "connection") == null);
-    try std.testing.expectEqualStrings("0", wire.findHeader(headers.items, "content-length").?);
-
-    headers.clearRetainingCapacity();
-    try appendDefaultedHeaders(
-        &headers,
+    const defaulted = try runtime_write.prepareResponse(
         allocator,
-        &.{.{ .name = "Connection", .value = "close" }},
-        0,
-        &.{},
-        false,
-        true,
-        &len_buf,
-        &trailer_value,
+        .{},
+        &scratch,
     );
-    try std.testing.expectEqualStrings("close", wire.findHeader(headers.items, "connection").?);
+    try std.testing.expect(
+        std.mem.indexOf(u8, defaulted.header, "Connection:") == null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            defaulted.header,
+            "Content-Length: 0\r\n",
+        ) != null,
+    );
+
+    const explicit_close = try runtime_write.prepareResponse(
+        allocator,
+        .{ .headers = &.{.{
+            .name = "Connection",
+            .value = "close",
+        }} },
+        &scratch,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            explicit_close.header,
+            "Connection: close\r\n",
+        ) != null,
+    );
 }
 
 test "HTTP/1 request writers default Content-Length by method" {
-    try std.testing.expect(!shouldDefaultRequestContentLength(.GET, 0, &.{}));
-    try std.testing.expect(!shouldDefaultRequestContentLength(.HEAD, 0, &.{}));
-    try std.testing.expect(!shouldDefaultRequestContentLength(.CONNECT, 0, &.{}));
-    try std.testing.expect(shouldDefaultRequestContentLength(.POST, 0, &.{}));
-    try std.testing.expect(shouldDefaultRequestContentLength(.GET, 1, &.{}));
-    try std.testing.expect(shouldDefaultRequestContentLength(.GET, 0, &.{.{ .name = "x-trailer", .value = "ok" }}));
+    const allocator = std.testing.allocator;
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+
+    inline for (.{ http1.Method.GET, .HEAD, .CONNECT }) |method| {
+        const safe = try runtime_write.prepareRequest(
+            allocator,
+            .{
+                .method = method,
+                .target = if (method == .CONNECT)
+                    "example.com:443"
+                else
+                    "/",
+                .host = if (method == .CONNECT)
+                    "example.com:443"
+                else
+                    "example.com",
+            },
+            &scratch,
+        );
+        try std.testing.expect(
+            std.mem.indexOf(u8, safe.header, "Content-Length:") == null,
+        );
+    }
+
+    const post = try runtime_write.prepareRequest(
+        allocator,
+        .{ .method = .POST, .host = "example.com" },
+        &scratch,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            post.header,
+            "Content-Length: 0\r\n",
+        ) != null,
+    );
+
+    const get_body = try runtime_write.prepareRequest(
+        allocator,
+        .{ .host = "example.com", .body = "x" },
+        &scratch,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            get_body.header,
+            "Content-Length: 1\r\n",
+        ) != null,
+    );
 }
 
 test "HTTP/1 request writer omits zero Content-Length for bodyless safe methods" {
@@ -4123,42 +4224,38 @@ test "HTTP/1 runtime validates outbound request and response framing before writ
         .request_method = .CONNECT,
     }));
 
-    try std.testing.expect(!responseShouldDefaultContentLength(200, .CONNECT));
-    try std.testing.expect(responseShouldDefaultContentLength(400, .CONNECT));
-    try std.testing.expect(!responseShouldDefaultContentLength(204, null));
-
-    var connect_headers: std.ArrayList(http1.Header) = .empty;
-    defer connect_headers.deinit(allocator);
-    var len_buf: [32]u8 = undefined;
-    var trailer_value: std.ArrayList(u8) = .empty;
-    defer trailer_value.deinit(allocator);
-    try appendDefaultedHeaders(
-        &connect_headers,
+    var scratch: WriteScratch = .{};
+    defer scratch.deinit(allocator);
+    const connect = try runtime_write.prepareResponse(
         allocator,
-        &.{},
-        0,
-        &.{},
-        false,
-        responseShouldDefaultContentLength(200, .CONNECT),
-        &len_buf,
-        &trailer_value,
+        .{ .request_method = .CONNECT },
+        &scratch,
     );
-    try std.testing.expect(!hasHeader(connect_headers.items, "content-length"));
+    try std.testing.expect(
+        std.mem.indexOf(u8, connect.header, "Content-Length:") == null,
+    );
 
-    var ok_headers: std.ArrayList(http1.Header) = .empty;
-    defer ok_headers.deinit(allocator);
-    try appendDefaultedHeaders(
-        &ok_headers,
+    const connect_error = try runtime_write.prepareResponse(
         allocator,
-        &.{},
-        0,
-        &.{},
-        false,
-        responseShouldDefaultContentLength(200, .GET),
-        &len_buf,
-        &trailer_value,
+        .{ .status = 400, .request_method = .CONNECT },
+        &scratch,
     );
-    try std.testing.expectEqualStrings("0", wire.findHeader(ok_headers.items, "content-length").?);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            connect_error.header,
+            "Content-Length: 0\r\n",
+        ) != null,
+    );
+
+    const no_content = try runtime_write.prepareResponse(
+        allocator,
+        .{ .status = 204 },
+        &scratch,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, no_content.header, "Content-Length:") == null,
+    );
 }
 
 test "HTTP/1 runtime target length rejects ambiguous head framing" {

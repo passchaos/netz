@@ -22,6 +22,7 @@ Build mode: -Doptimize=ReleaseFast
 ## Commands
 
 ```sh
+taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
@@ -33,6 +34,52 @@ zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 ```
 
 ## Current netz results
+
+### HTTP/1 persistent 16-request pipeline
+
+Captured on 2026-08-17. This benchmark mirrors
+`~/Work/hyper/benches/pipeline.rs::hello_world_16`: each iteration sends
+sixteen bodyless GET requests on one persistent loopback TCP connection and
+receives sixteen `"Hello, World!"` responses. Hyper automatically adds a
+29-byte Date value; netz supplies a same-length Date field so both responses
+are 89 wire bytes. Netz runs 200 untimed warmup batches before 2,000 measured
+batches. CPU 0 pinning is required on this hybrid-core host; unpinned samples
+are not used for the comparison.
+
+```sh
+taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
+
+cd /home/passchaos/Work/hyper
+cargo bench --bench pipeline hello_world_16 --features full
+HYPER_BENCH=$(
+  find target/release/deps -maxdepth 1 -type f \
+    -name 'pipeline-*' -executable -print -quit
+)
+taskset -c 0 "$HYPER_BENCH" --bench hello_world_16
+```
+
+```text
+netz (five samples):
+  0.723-0.735 us/request
+  11.56-11.76 us/16-request batch
+  1.361-1.384 million requests/s
+
+hyper (five samples):
+  0.836-0.866 us/request
+  13.38-13.85 us/16-request batch
+```
+
+Both ranges contain five CPU-0-pinned samples. The Hyper binary was built from
+revision `084473f728f9d07b3be5845475aa2f62ed9ff579` with
+`rustc 1.98.0-nightly (e7815e522 2026-06-04)`.
+
+Netz is about **1.14-1.20x faster** for this same-host, same-shape sample. The
+runtime path uses caller-owned head/header/body output arrays, borrowed receive
+storage, one prefix compaction per pipeline, persistent write scratch,
+header/body vectored writes and one transactional response-batch flush. This is
+a focused HTTP/1 pipeline result, not a whole-library superiority claim. The
+implementation audit and remaining HTTP/1/HTTP/2 evidence are in
+`docs/hyper_parity.md`.
 
 ### HTTP/3 QPACK dynamic encode
 

@@ -318,20 +318,30 @@ const BorrowedHead = struct {
 };
 
 fn parseHeadLines(bytes: []const u8, header_storage: []Header, options: ParseOptions) Error!BorrowedHead {
-    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
-    const head = bytes[0..head_end];
-    // Headerless messages place the first CRLF at the beginning of the
-    // terminator, so it is excluded from `head` and the start line spans all
-    // remaining bytes.
-    const first_line_end = std.mem.indexOf(u8, head, "\r\n") orelse head.len;
-    const start_line = head[0..first_line_end];
+    // Walk CRLF-delimited lines once and stop at the empty line. The previous
+    // implementation first scanned the complete head for CRLFCRLF and then
+    // rescanned every line; pipelined runtimes already provide a complete
+    // buffer, so the double pass was pure overhead in the parse hot path.
+    const first_line_end = std.mem.indexOf(u8, bytes, "\r\n") orelse
+        return error.BufferTooShort;
+    const start_line = bytes[0..first_line_end];
 
     var count: usize = 0;
-    var pos = if (first_line_end == head.len) head.len else first_line_end + 2;
-    while (pos < head.len) {
-        const line_end_rel = std.mem.indexOf(u8, head[pos..], "\r\n") orelse head.len - pos;
-        const line = head[pos .. pos + line_end_rel];
-        if (line.len == 0) return error.MalformedHeader;
+    var pos = first_line_end + 2;
+    while (true) {
+        const line_end_rel = std.mem.indexOf(
+            u8,
+            bytes[pos..],
+            "\r\n",
+        ) orelse return error.BufferTooShort;
+        if (line_end_rel == 0) {
+            return .{
+                .start_line = start_line,
+                .headers = header_storage[0..count],
+                .head_len = pos + 2,
+            };
+        }
+        const line = bytes[pos .. pos + line_end_rel];
         if (line[0] == ' ' or line[0] == '\t') {
             // Even when allocating parse allows obs-fold, this borrowed API
             // cannot expose a contiguous unfolded value without copying.
@@ -347,14 +357,9 @@ fn parseHeadLines(bytes: []const u8, header_storage: []Header, options: ParseOpt
         try validateHeaderValue(value);
         header_storage[count] = .{ .name = name, .value = value };
         count += 1;
-        pos += line_end_rel;
-        if (pos < head.len) pos += 2;
+        pos += line_end_rel + 2;
+        if (pos > bytes.len) return error.BufferTooShort;
     }
-    return .{
-        .start_line = start_line,
-        .headers = header_storage[0..count],
-        .head_len = head_end + 4,
-    };
 }
 
 pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!Request {
