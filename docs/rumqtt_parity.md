@@ -16,7 +16,8 @@ whole-broker throughput claims.
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local and shared groups | Hash maps, logs and broker scheduler |
 | Retained messages | Bounded owned store, O(1) exact lookup, wildcard delivery, MQTT 5 expiry countdown and full subscription-time rules | HashMap store with expiry; audited routing has Retain Forward Rules/re-subscribe TODOs |
 | Runtime transports | Blocking TCP client/server plus `std.Io.async` concurrent server helper; verified native TLS client; MQTT 3.1.1/5 WebSocket client/server over WS and client-side WSS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
-| Broker persistence | Not yet a full broker session/log store | Datalog, retained messages, graveyard/persistent sessions and reconnect state |
+| Broker sessions | Bounded Session Store with Session Expiry, full subscription options/identifiers, offline QoS 1/2 queue, incoming/outgoing QoS 2 and reconnect retransmission | Graveyard restores filter names, tracker cursors and PUBREL IDs; no Session Expiry cleanup |
+| Broker log persistence | In-memory retained/session stores; no disk commitlog yet | Datalog, segments and graveyard state |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
@@ -179,10 +180,56 @@ caller-owned buffers without allocation. The wildcard scan deliberately
 returns every entry, so this is an internal scaling baseline rather than a
 whole-broker comparison.
 
+## Persistent Session Store
+
+`mqtt.session.Store` uses generation-checked handles so a duplicate ClientID
+takeover immediately invalidates the previous connection. It implements MQTT
+3.1.1 CleanSession and MQTT 5 Clean Start/Session Expiry semantics, including
+Session Present, expiry overrides on DISCONNECT, explicit discard, and
+monotonic expiry pruning.
+
+Server Session State contains:
+
+- complete Subscription options and Subscription Identifiers,
+- bounded offline QoS 1/2 PUBLISH queues with owned MQTT 5 properties,
+- sent but unacknowledged QoS 1/2 PUBLISH packets,
+- PUBREL state awaiting PUBCOMP,
+- received QoS 2 Packet Identifiers awaiting completion,
+- Message Expiry countdown and connection-scoped Topic Alias rejection.
+
+On resumed Sessions, PUBLISH packets retain their original Packet Identifier
+and are retransmitted with DUP=1, while PUBREL packets are resumed with the
+original identifier. Negative PUBREC terminates the QoS 2 flow. ACK lookup is
+O(1) by Packet Identifier and supports valid out-of-order PUBACK/PUBREC/PUBCOMP
+completion.
+
+This exceeds two audited rumqttd graveyard limitations: it has no Session
+Expiry cleanup, and `Outgoing::register_ack`/`register_pubcomp` explicitly
+reject out-of-order acknowledgements. Rumqttd still has a broader disk-backed
+commitlog and production scheduler, so this is not yet whole-broker
+superiority.
+
+Run:
+
+```sh
+zig build bench-mqtt-session -Doptimize=ReleaseFast
+```
+
+2026-08-18 same-host `ReleaseFast` result with 4,096 Sessions:
+
+```text
+resume:                    44 ns/op
+offline queue:            169 ns/message
+reconnect drain (4 msgs): 494 ns/session
+```
+
+The benchmark measures in-memory state operations and does not include socket
+or disk I/O.
+
 ## Remaining work before broad superiority
 
-1. Add persistent broker sessions, offline queues, Will Delay processing and
-   reconnect retransmission equivalent to rumqttd's graveyard/log machinery.
+1. Add Will Delay scheduling and a durable disk/replicated commitlog for
+   retained/session/offline state.
 2. Add native MQTT TLS server and server-side WSS termination, plus client
    certificate/mTLS support; verified native TLS and WSS clients are available.
 3. Build one identical multi-client publish/subscribe load driver for both

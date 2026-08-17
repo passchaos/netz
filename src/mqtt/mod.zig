@@ -6,6 +6,7 @@ pub const websocket_runtime = @import("websocket_runtime.zig");
 pub const tls_runtime = @import("tls_runtime.zig");
 pub const router = @import("router.zig");
 pub const retained = @import("retained/mod.zig");
+pub const session = @import("session/mod.zig");
 pub const testing = @import("testing/mod.zig");
 
 pub const Error = wire.Error || error{
@@ -426,6 +427,17 @@ pub fn messageExpiryInterval(properties: []const Property) ?u32 {
     for (properties) |property| {
         if (property == .four_byte and
             property.four_byte.id == .message_expiry_interval)
+        {
+            return property.four_byte.value;
+        }
+    }
+    return null;
+}
+
+pub fn sessionExpiryInterval(properties: []const Property) ?u32 {
+    for (properties) |property| {
+        if (property == .four_byte and
+            property.four_byte.id == .session_expiry_interval)
         {
             return property.four_byte.value;
         }
@@ -2591,6 +2603,7 @@ test {
     _ = tls_runtime;
     _ = router;
     _ = retained;
+    _ = session;
     _ = @import("runtime/packet_transport.zig");
     _ = @import("tls_runtime_tests.zig");
     _ = @import("websocket_runtime_tests.zig");

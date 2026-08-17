@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const mqtt = @import("../mod.zig");
+const owned_properties = @import("../owned_properties.zig");
 
 pub const Error = mqtt.Error || error{
     RetainedLimitExceeded,
@@ -121,7 +122,7 @@ const Entry = struct {
     allocation_bytes: usize,
 
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
-        freeProperties(allocator, self.properties);
+        owned_properties.deinit(allocator, self.properties);
         allocator.free(self.payload);
         allocator.free(self.topic);
         self.* = undefined;
@@ -515,21 +516,28 @@ fn cloneEntry(
     errdefer allocator.free(topic_owned);
     const payload_owned = try allocator.dupe(u8, payload);
     errdefer allocator.free(payload_owned);
-    const properties_owned, const property_bytes = try cloneProperties(
+    const property_result = owned_properties.clone(
         allocator,
         properties,
+        keepRetainedProperty,
+    ) catch |err| switch (err) {
+        error.OwnedPropertyLimitExceeded => return error.RetainedLimitExceeded,
+        else => return @errorCast(err),
+    };
+    errdefer owned_properties.deinit(
+        allocator,
+        property_result.properties,
     );
-    errdefer freeProperties(allocator, properties_owned);
     const allocation_bytes = std.math.add(
         usize,
         topic_owned.len + payload_owned.len,
-        property_bytes,
+        property_result.allocation_bytes,
     ) catch return error.RetainedLimitExceeded;
     return .{
         .topic = topic_owned,
         .payload = payload_owned,
         .qos = qos,
-        .properties = properties_owned,
+        .properties = property_result.properties,
         .publisher_id = publisher_id,
         .stored_at_ns = now_ns,
         .expiry_interval = mqtt.messageExpiryInterval(properties),
@@ -537,94 +545,11 @@ fn cloneEntry(
     };
 }
 
-fn cloneProperties(
-    allocator: std.mem.Allocator,
-    properties: []const mqtt.Property,
-) Error!struct { []mqtt.Property, usize } {
-    var stored_count: usize = 0;
-    for (properties) |property| {
-        // Topic Alias is scoped to one Network Connection and must not survive
-        // in broker state or be replayed to another subscriber.
-        if (property == .two_byte and
-            property.two_byte.id == .topic_alias) continue;
-        stored_count += 1;
-    }
-    const owned = try allocator.alloc(mqtt.Property, stored_count);
-    errdefer allocator.free(owned);
-    var initialized: usize = 0;
-    var bytes: usize = std.math.mul(
-        usize,
-        stored_count,
-        @sizeOf(mqtt.Property),
-    ) catch return error.RetainedLimitExceeded;
-    errdefer freePropertyRange(allocator, owned[0..initialized]);
-    var output_index: usize = 0;
-    for (properties) |property| {
-        if (property == .two_byte and
-            property.two_byte.id == .topic_alias) continue;
-        owned[output_index] = switch (property) {
-            .byte, .two_byte, .four_byte, .varint => property,
-            .binary => |value| blk: {
-                const copied = try allocator.dupe(u8, value.value);
-                bytes = std.math.add(usize, bytes, copied.len) catch
-                    return error.RetainedLimitExceeded;
-                break :blk .{ .binary = .{
-                    .id = value.id,
-                    .value = copied,
-                } };
-            },
-            .utf8 => |value| blk: {
-                const copied = try allocator.dupe(u8, value.value);
-                bytes = std.math.add(usize, bytes, copied.len) catch
-                    return error.RetainedLimitExceeded;
-                break :blk .{ .utf8 = .{
-                    .id = value.id,
-                    .value = copied,
-                } };
-            },
-            .utf8_pair => |value| blk: {
-                const key = try allocator.dupe(u8, value.key);
-                errdefer allocator.free(key);
-                const val = try allocator.dupe(u8, value.value);
-                bytes = std.math.add(
-                    usize,
-                    bytes,
-                    key.len + val.len,
-                ) catch return error.RetainedLimitExceeded;
-                break :blk .{ .utf8_pair = .{
-                    .id = value.id,
-                    .key = key,
-                    .value = val,
-                } };
-            },
-        };
-        output_index += 1;
-        initialized = output_index;
-    }
-    return .{ owned, bytes };
-}
-
-fn freeProperties(
-    allocator: std.mem.Allocator,
-    properties: []mqtt.Property,
-) void {
-    freePropertyRange(allocator, properties);
-    allocator.free(properties);
-}
-
-fn freePropertyRange(
-    allocator: std.mem.Allocator,
-    properties: []mqtt.Property,
-) void {
-    for (properties) |property| switch (property) {
-        .binary => |value| allocator.free(value.value),
-        .utf8 => |value| allocator.free(value.value),
-        .utf8_pair => |value| {
-            allocator.free(value.key);
-            allocator.free(value.value);
-        },
-        else => {},
-    };
+fn keepRetainedProperty(property: mqtt.Property) bool {
+    // Topic Alias is scoped to one Network Connection and must not survive in
+    // broker state or be replayed to another subscriber.
+    return !(property == .two_byte and
+        property.two_byte.id == .topic_alias);
 }
 
 fn remainingExpiry(entry: Entry, now_ns: i96) ?u32 {

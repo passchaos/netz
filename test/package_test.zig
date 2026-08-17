@@ -347,6 +347,44 @@ test "public modules are reachable" {
         netz.mqtt.retained.Store,
         "deliveriesAlloc",
     ));
+    try std.testing.expect(@hasDecl(netz.mqtt, "session"));
+    try std.testing.expect(@hasDecl(netz.mqtt.session, "Store"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "openConnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "disconnectPacket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "enqueuePublish",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "drainInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "handleAck",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "recordIncomingQoS2",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "stats",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.session.Store,
+        "find",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt,
+        "sessionExpiryInterval",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt, "topicAlias"));
     try std.testing.expect(@hasDecl(netz.mqtt, "topicAliasMaximum"));
     try std.testing.expect(@hasDecl(netz.mqtt, "LastWill"));

@@ -383,7 +383,11 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   stable low-remapping Rendezvous hashing, plus a bounded retained-message
   store with exact O(1) lookup, wildcard matching, MQTT 5 expiry countdown,
   Retain Handling 0/1/2, shared-subscription suppression, QoS downgrade and
-  connection-scoped property stripping, plus a blocking TCP client/server runtime with a
+  connection-scoped property stripping, plus a bounded persistent Session
+  Store with full subscription restoration, Session Expiry, offline QoS 1/2
+  queues, Receive Maximum scheduling, DUP/PUBREL reconnect retransmission,
+  out-of-order ACKs and incoming QoS 2 deduplication, plus a blocking TCP
+  client/server runtime with a
   `std.Io.async` concurrent server helper, native MQTT-over-TLS clients with
   system or caller-provided CA roots and hostname verification, and
   MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with
