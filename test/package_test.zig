@@ -982,12 +982,40 @@ test "public modules are reachable" {
         "stopStream",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "drain",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "close",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "receiveSessionEvent",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,
         "readStream",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "drain",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "close",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "receiveSessionEvent",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,
         "StreamRead",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "SessionEvent",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport,

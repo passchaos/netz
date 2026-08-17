@@ -5,10 +5,12 @@ const quic = @import("../quic/mod.zig");
 
 const net = std.Io.net;
 const datagram_stack_capacity: usize = 4096;
+const session_control = @import("runtime/session_control.zig");
 
 pub const Error = webtransport.Error || http3.runtime.Error || error{
     InvalidConnect,
     MissingDatagram,
+    InvalidSessionState,
 };
 
 pub const Limits = struct {
@@ -145,13 +147,20 @@ pub const HandshakeServer = struct {
         var session = try self.h3.accept();
         errdefer session.deinit();
 
-        var request = try session.receiveRequest();
-        errdefer request.deinit(session.established.connection.endpoint.allocator);
-        try validateConnectRequest(request.request);
+        const request = try receiveHandshakeConnectRequest(&session);
+        var request_head = request.head;
+        errdefer request_head.deinit(
+            session.established.connection.endpoint.allocator,
+        );
         try webtransport.ensureDatagramsNegotiated(session.options.local_settings, session.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
-        try session.sendResponse(request.stream_id, connectResponse());
+        try session.startResponse(
+            request.stream_id,
+            connectResponse(),
+            null,
+        );
+        try session.detachRequestStream(request.stream_id);
         var streams = try initHandshakeStreamRegistry(
             session.established.connection.endpoint.allocator,
             session_id,
@@ -163,11 +172,16 @@ pub const HandshakeServer = struct {
             null,
         );
         errdefer streams.deinit();
+        const control = try session_control.Control.init(session_id);
         return .{
             .h3 = session,
-            .request = request,
+            .request = .{
+                .stream_id = request.stream_id,
+                .request = request_head,
+            },
             .session_id = session_id,
             .streams = streams,
+            .control = control,
         };
     }
 };
@@ -192,11 +206,25 @@ pub const AcceptedProtectedSession = struct {
     }
 };
 
+pub const OwnedHandshakeConnectRequest = struct {
+    stream_id: u62,
+    request: http3.DecodedRequestHead,
+
+    pub fn deinit(
+        self: *OwnedHandshakeConnectRequest,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.request.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const AcceptedHandshakeSession = struct {
     h3: http3.runtime.HandshakeServerSession,
-    request: http3.runtime.OwnedHandshakeRequest,
+    request: OwnedHandshakeConnectRequest,
     session_id: webtransport.SessionId,
     streams: webtransport.StreamRegistry,
+    control: session_control.Control,
 
     pub fn deinit(self: *AcceptedHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
@@ -217,6 +245,7 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn sendDatagram(self: *AcceptedHandshakeSession, payload: []const u8) Error!void {
+        try self.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         try sendHandshakeDatagramFromConnection(&self.h3.established.connection, self.session_id, payload);
     }
@@ -241,6 +270,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn openBidirectionalStream(
         self: *AcceptedHandshakeSession,
     ) Error!u62 {
+        try self.control.ensureOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -251,6 +281,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn openUnidirectionalStream(
         self: *AcceptedHandshakeSession,
     ) Error!u62 {
+        try self.control.ensureOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -273,6 +304,7 @@ pub const AcceptedHandshakeSession = struct {
         payload: []const u8,
         fin: bool,
     ) Error!void {
+        try self.control.ensureOpen();
         try sendHandshakeSessionStream(
             &self.h3.established.connection,
             &self.streams,
@@ -330,6 +362,85 @@ pub const AcceptedHandshakeSession = struct {
             &self.streams,
             stream_id,
             application_error_code,
+        );
+    }
+
+    pub fn drain(self: *AcceptedHandshakeSession) Error!void {
+        if (self.control.local_drain_sent) return;
+        var encoded: [16]u8 = undefined;
+        const capsule = try session_control.writeDrainInto(&encoded);
+        try self.h3.sendResponseBodyPaced(
+            self.session_id.value,
+            capsule,
+            false,
+        );
+        try self.control.recordLocalDrain();
+    }
+
+    pub fn close(
+        self: *AcceptedHandshakeSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.control.local_close_sent) return;
+        var encoded: [4 + session_control.max_close_reason + 16]u8 =
+            undefined;
+        const capsule = try session_control.writeCloseInto(
+            &encoded,
+            code,
+            reason,
+        );
+        try self.h3.sendResponseBodyPaced(
+            self.session_id.value,
+            capsule,
+            true,
+        );
+        try self.control.recordLocalClose(code);
+        try session_control.terminateStreams(
+            &self.h3.established.connection,
+            &self.streams,
+        );
+    }
+
+    pub fn receiveSessionEvent(
+        self: *AcceptedHandshakeSession,
+    ) Error!SessionEvent {
+        const event = self.control.receive(
+            &self.h3.established.connection,
+            self,
+            AcceptedHandshakeSession.receiveControlProgress,
+        ) catch |err| switch (err) {
+            error.InvalidCapsule => {
+                try self.h3.established.connection.resetStream(
+                    self.session_id.value,
+                    http3.ApplicationErrorCode.message_error,
+                );
+                return err;
+            },
+            else => return err,
+        };
+        if (event == .closed or event == .reset) {
+            if (event == .closed and !self.control.local_close_sent) {
+                try self.h3.sendResponseBodyPaced(
+                    self.session_id.value,
+                    &.{},
+                    true,
+                );
+                self.control.local_close_sent = true;
+            }
+            try session_control.terminateStreams(
+                &self.h3.established.connection,
+                &self.streams,
+            );
+        }
+        return event;
+    }
+
+    fn receiveControlProgress(
+        self: *AcceptedHandshakeSession,
+    ) Error!void {
+        try self.h3.receiveDetachedRequestProgress(
+            self.session_id.value,
         );
     }
 };
@@ -385,6 +496,7 @@ pub const HandshakeClientSession = struct {
     h3: http3.runtime.HandshakeClient,
     session_id: webtransport.SessionId,
     streams: webtransport.StreamRegistry,
+    control: session_control.Control,
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -397,20 +509,26 @@ pub const HandshakeClientSession = struct {
         errdefer h3_client.deinit();
         var header_buf: [3]http3.Qpack.HeaderField = undefined;
         const headers = connectRequestHeaders(options.origin, &header_buf);
-        var response = try h3_client.request(.{
+        const session_id = try h3_client.startRequest(.{
             .method = "CONNECT",
             .path = options.path,
             .scheme = "https",
             .authority = options.authority,
             .headers = headers,
-        });
-        defer response.deinit(allocator);
-        try validateConnectResponse(response.response);
+        }, null);
+        const response_head =
+            try receiveHandshakeConnectResponse(&h3_client, session_id);
+        defer {
+            var owned = response_head;
+            owned.deinit(allocator);
+        }
+        try h3_client.detachResponseStream(session_id);
         try webtransport.ensureDatagramsNegotiated(h3_client.options.local_settings, h3_client.control.settings.peer);
-        const session_id = webtransport.SessionId.init(0);
+        const webtransport_session_id =
+            webtransport.SessionId.init(session_id);
         var streams = try initHandshakeStreamRegistry(
             allocator,
-            session_id,
+            webtransport_session_id,
             .client,
             h3_client.options.local_settings,
             h3_client.control.settings.peer,
@@ -419,10 +537,14 @@ pub const HandshakeClientSession = struct {
             null,
         );
         errdefer streams.deinit();
+        const control = try session_control.Control.init(
+            webtransport_session_id,
+        );
         return .{
             .h3 = h3_client,
-            .session_id = session_id,
+            .session_id = webtransport_session_id,
             .streams = streams,
+            .control = control,
         };
     }
 
@@ -433,6 +555,7 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn sendDatagram(self: *HandshakeClientSession, payload: []const u8) Error!void {
+        try self.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         try sendHandshakeDatagramFromConnection(&self.h3.established.connection, self.session_id, payload);
     }
@@ -467,6 +590,7 @@ pub const HandshakeClientSession = struct {
     pub fn openBidirectionalStream(
         self: *HandshakeClientSession,
     ) Error!u62 {
+        try self.control.ensureOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -485,6 +609,7 @@ pub const HandshakeClientSession = struct {
     pub fn openUnidirectionalStream(
         self: *HandshakeClientSession,
     ) Error!u62 {
+        try self.control.ensureOpen();
         try webtransport.ensureNegotiated(
             self.h3.options.local_settings,
             self.h3.control.settings.peer,
@@ -498,6 +623,7 @@ pub const HandshakeClientSession = struct {
         payload: []const u8,
         fin: bool,
     ) Error!void {
+        try self.control.ensureOpen();
         try sendHandshakeSessionStream(
             &self.h3.established.connection,
             &self.streams,
@@ -555,6 +681,85 @@ pub const HandshakeClientSession = struct {
             &self.streams,
             stream_id,
             application_error_code,
+        );
+    }
+
+    pub fn drain(self: *HandshakeClientSession) Error!void {
+        if (self.control.local_drain_sent) return;
+        var encoded: [16]u8 = undefined;
+        const capsule = try session_control.writeDrainInto(&encoded);
+        try self.h3.sendRequestBodyPaced(
+            self.session_id.value,
+            capsule,
+            false,
+        );
+        try self.control.recordLocalDrain();
+    }
+
+    pub fn close(
+        self: *HandshakeClientSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.control.local_close_sent) return;
+        var encoded: [4 + session_control.max_close_reason + 16]u8 =
+            undefined;
+        const capsule = try session_control.writeCloseInto(
+            &encoded,
+            code,
+            reason,
+        );
+        try self.h3.sendRequestBodyPaced(
+            self.session_id.value,
+            capsule,
+            true,
+        );
+        try self.control.recordLocalClose(code);
+        try session_control.terminateStreams(
+            &self.h3.established.connection,
+            &self.streams,
+        );
+    }
+
+    pub fn receiveSessionEvent(
+        self: *HandshakeClientSession,
+    ) Error!SessionEvent {
+        const event = self.control.receive(
+            &self.h3.established.connection,
+            self,
+            HandshakeClientSession.receiveControlProgress,
+        ) catch |err| switch (err) {
+            error.InvalidCapsule => {
+                try self.h3.established.connection.resetStream(
+                    self.session_id.value,
+                    http3.ApplicationErrorCode.message_error,
+                );
+                return err;
+            },
+            else => return err,
+        };
+        if (event == .closed or event == .reset) {
+            if (event == .closed and !self.control.local_close_sent) {
+                try self.h3.sendRequestBodyPaced(
+                    self.session_id.value,
+                    &.{},
+                    true,
+                );
+                self.control.local_close_sent = true;
+            }
+            try session_control.terminateStreams(
+                &self.h3.established.connection,
+                &self.streams,
+            );
+        }
+        return event;
+    }
+
+    fn receiveControlProgress(
+        self: *HandshakeClientSession,
+    ) Error!void {
+        try self.h3.receiveDetachedResponseProgress(
+            self.session_id.value,
         );
     }
 };
@@ -663,6 +868,57 @@ fn webTransportHandshakeClientOptions(options: http3.runtime.HandshakeClientOpti
     return out;
 }
 
+fn receiveHandshakeConnectRequest(
+    session: *http3.runtime.HandshakeServerSession,
+) Error!struct {
+    stream_id: u62,
+    head: http3.DecodedRequestHead,
+} {
+    while (true) {
+        var event = try session.receiveRequestEvent();
+        defer event.deinit(
+            session.established.connection.endpoint.allocator,
+        );
+        switch (event) {
+            .reset => return error.InvalidConnect,
+            .message => |*message| switch (message.value) {
+                .head => |*head| {
+                    if (head.* != .request) return error.InvalidConnect;
+                    try validateConnectRequest(head.request);
+                    const owned = head.request;
+                    message.value = .finished;
+                    return .{
+                        .stream_id = message.stream_id,
+                        .head = owned,
+                    };
+                },
+                else => return error.InvalidConnect,
+            },
+        }
+    }
+}
+
+fn receiveHandshakeConnectResponse(
+    client: *http3.runtime.HandshakeClient,
+    stream_id: u62,
+) Error!http3.DecodedResponseHead {
+    while (true) {
+        var event = (try client.receiveResponseEvent(stream_id)) orelse
+            continue;
+        defer event.deinit(client.allocator);
+        switch (event) {
+            .head => |*head| {
+                if (head.* != .response) return error.InvalidConnect;
+                try validateConnectResponse(head.response);
+                const owned = head.response;
+                event = .finished;
+                return owned;
+            },
+            else => return error.InvalidConnect,
+        }
+    }
+}
+
 fn validateConnectRequest(request: anytype) Error!void {
     if (!std.mem.eql(u8, request.method, "CONNECT")) return error.InvalidConnect;
     if (!std.mem.eql(u8, findHeader(request.headers, ":protocol") orelse "", "webtransport")) {
@@ -764,6 +1020,7 @@ const handshake_stream = @import("runtime/stream.zig");
 const incremental_stream = @import("runtime/stream_incremental.zig");
 pub const OwnedHandshakeStream = handshake_stream.OwnedHandshakeStream;
 pub const StreamRead = incremental_stream.Read;
+pub const SessionEvent = session_control.Event;
 const initHandshakeStreamRegistry = handshake_stream.initRegistry;
 const sendHandshakeSessionStream = handshake_stream.send;
 const receiveHandshakeSessionStream = handshake_stream.receive;
@@ -1348,4 +1605,5 @@ test "WebTransport handshake session receives datagrams with std.Io async batch"
 
 test {
     _ = @import("runtime/stream_tests.zig");
+    _ = @import("runtime/session_control_tests.zig");
 }

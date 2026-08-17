@@ -448,7 +448,11 @@ receive calls if the peer did not negotiate the matching capabilities.
 Handshake-backed sessions additionally expose caller-buffer incremental stream
 reads before FIN, flow-credit return after every delivered prefix, mapped
 32-bit WebTransport RESET_STREAM/STOP_SENDING APIs, and typed data/reset/stopped
-events while retaining the whole-FIN receive helper for compatibility.
+events while retaining the whole-FIN receive helper for compatibility. Their
+Extended CONNECT streams remain open for bounded incremental Capsule Protocol
+control, including advisory drain, detailed/clean close, split DATA/capsule
+parsing, UTF-8 reason validation and WT_SESSION_GONE cleanup of associated
+streams.
 
 ## Build
 

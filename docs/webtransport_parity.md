@@ -23,6 +23,8 @@ HTTP/3 SETTINGS and extended CONNECT negotiation, then:
 - server-to-client unidirectional stream,
 - caller-buffer incremental reads before FIN with immediate flow-credit return,
 - mapped 32-bit RESET_STREAM and STOP_SENDING lifecycle events,
+- runtime WT_DRAIN_SESSION/WT_CLOSE_SESSION send and receive over the
+  long-lived Extended CONNECT stream,
 - session/transport stream limits and stream-ID direction validation,
 - shared HTTP/3 request/WebTransport bidi and push/WebTransport uni ID
   allocation, preventing sibling protocol stream collisions.
@@ -38,7 +40,7 @@ WebTransport DATAGRAM round trip and transport statistics.
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
 | Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop and lifecycle/limits | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop |
 | Unidirectional streams | Real-handshake both directions, incremental reads, reset/stop and lifecycle/limits | Session registry and header codec | Production async uni streams with read/reset/stop |
-| Close/drain capsule codec | Strict UTF-8 close and drain codecs/state | Close codec/state | Session lifecycle |
+| Close/drain capsule codec | Real-handshake runtime send/receive, split frame/capsule parsing, clean-FIN close, UTF-8/1024-byte validation and SESSION_GONE stream cleanup | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver handles close while drain support is absent |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
 ## Important interoperability correction
@@ -86,15 +88,36 @@ These are the median elapsed time and corresponding integer throughput from
 three consecutive 2026-08-18 same-host `ReleaseFast` runs. This is an internal
 streaming baseline; no equal-wire wtransport/quicz ratio is claimed.
 
+## Session drain and close lifecycle
+
+Handshake sessions now keep their Extended CONNECT request/response stream open
+after successful HEADERS instead of using the aggregate HTTP/3 helper that
+immediately sent FIN. `drain`, `close`, and `receiveSessionEvent` operate on
+that stream:
+
+- WT_DRAIN_SESSION remains advisory; streams and datagrams stay usable.
+- WT_CLOSE_SESSION carries a 32-bit code plus at most 1024 bytes of UTF-8,
+  sends CONNECT FIN immediately, and makes new stream/datagram operations fail.
+- a peer close or clean CONNECT FIN produces a typed terminal event; clean FIN
+  maps to code zero and an empty reason.
+- session termination sends RESET_STREAM/STOP_SENDING with WT_SESSION_GONE for
+  every non-terminal associated stream direction.
+- malformed close length/UTF-8 resets the CONNECT stream with H3_MESSAGE_ERROR.
+
+The CONNECT stream uses a fixed-size incremental state machine. HTTP/3 DATA
+frame headers and Capsule Protocol varints may split at any byte boundary;
+unknown capsule values are skipped without allocation or whole-value buffering.
+Focused tests sweep every split point around an unknown capsule followed by
+WT_DRAIN_SESSION, while real-handshake tests cover drain, post-drain stream
+traffic, detailed close, clean-FIN close and post-close rejection.
+
 ## Remaining gaps
 
 1. Expose equivalent stream APIs on preconfigured protected and development
    runtimes; the production-oriented real-handshake path is covered first.
 2. Add partial-write return semantics; current sends accept caller chunks and
    internally pump flow control until each chunk is submitted.
-3. Integrate CLOSE/DRAIN capsule transmission and reception into runtime
-   session shutdown.
-4. Add external `wtransport` client/server interoperability runs and browser
+3. Add external `wtransport` client/server interoperability runs and browser
    WebTransport evidence.
-5. Add concurrent stream, stream-churn and cancellation-under-loss benchmarks;
+4. Add concurrent stream, stream-churn and cancellation-under-loss benchmarks;
    sustained incremental stream throughput now has a real-handshake baseline.

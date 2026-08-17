@@ -43,9 +43,11 @@ pub const Error = wire.Error || error{
 pub const max_settings_payload_size: usize = 256;
 
 pub const ApplicationErrorCode = struct {
+    pub const no_error: u64 = 0x100;
     pub const request_rejected: u64 = 0x10b;
     pub const request_cancelled: u64 = 0x10c;
     pub const request_incomplete: u64 = 0x10d;
+    pub const message_error: u64 = 0x10e;
 };
 
 pub const AltSvcEndpoint = struct {

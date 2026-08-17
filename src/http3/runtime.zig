@@ -2391,6 +2391,66 @@ pub const HandshakeServerSession = struct {
         return skipped;
     }
 
+    /// Detach an established Extended CONNECT receive stream from HTTP/3
+    /// message parsing.
+    ///
+    /// Protocol adapters such as WebTransport parse their own long-lived DATA
+    /// payload after HTTP semantics establish the tunnel. The initial HEADERS
+    /// must already have been consumed with `receiveRequestEvent`; detaching
+    /// before that point would bypass QPACK acknowledgments and request
+    /// validation.
+    pub fn detachRequestStream(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!void {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        if (entry.reader.phase != .body or
+            entry.reader.current_frame != null)
+        {
+            return error.UnexpectedStream;
+        }
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
+        var removed = self.streaming_requests.takeEntry(stream_id) orelse
+            return error.UnexpectedStream;
+        removed.deinit();
+    }
+
+    /// Pump one packet after an Extended CONNECT stream has been detached.
+    ///
+    /// The QUIC connection still assembles all STREAM data. This adapter keeps
+    /// HTTP/3 control/QPACK and unrelated request streams progressing while
+    /// leaving the detached CONNECT stream's bytes for its protocol owner.
+    pub fn receiveDetachedRequestProgress(
+        self: *HandshakeServerSession,
+        detached_stream_id: u62,
+    ) Error!void {
+        var packet = try self.receive_packets.take(
+            &self.established.connection,
+        );
+        defer packet.deinit(
+            self.established.connection.endpoint.allocator,
+        );
+        _ = try applyServerRequestPacketFrames(
+            packet.from,
+            packet.frames,
+            self.established.connection.endpoint.allocator,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.request_streams,
+            &self.streaming_requests,
+            self.peer_promised_push_ids.items,
+            detached_stream_id,
+        );
+        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
+            try self.sendQpackFeedback();
+        }
+    }
+
     pub fn sendResponse(self: *HandshakeServerSession, stream_id: u62, response: http3.Response) Error!void {
         try self.sendResponseWithInformational(stream_id, &.{}, response);
     }
@@ -2768,6 +2828,7 @@ pub const HandshakeServerSession = struct {
             &self.request_streams,
             &self.streaming_requests,
             self.peer_promised_push_ids.items,
+            null,
         );
         // Encoder-stream inserts and reset cancellations both queue decoder
         // instructions. Flush them at the packet boundary so a peer does not
@@ -3340,6 +3401,7 @@ pub const HandshakeClient = struct {
             &self.streaming_responses,
             &self.push_streams,
             &self.request_lifecycle,
+            null,
         );
         if (self.response_streams.firstReset()) |reset| {
             if (!self.request_lifecycle.contains(reset.stream_id)) return;
@@ -3518,6 +3580,7 @@ pub const HandshakeClient = struct {
                 &self.streaming_responses,
                 &self.push_streams,
                 &self.request_lifecycle,
+                null,
             );
         }
     }
@@ -3571,6 +3634,7 @@ pub const HandshakeClient = struct {
             &self.streaming_responses,
             &self.push_streams,
             &self.request_lifecycle,
+            null,
         );
         if (self.response_streams.takeReset(stream_id)) |code| {
             try self.sendQpackFeedback();
@@ -3632,6 +3696,50 @@ pub const HandshakeClient = struct {
             &entry.reader,
         );
         return skipped;
+    }
+
+    /// Detach an established Extended CONNECT response stream from HTTP/3
+    /// message parsing after final response HEADERS have been consumed.
+    pub fn detachResponseStream(
+        self: *HandshakeClient,
+        stream_id: u62,
+    ) Error!void {
+        const entry = self.streaming_responses.find(stream_id) orelse
+            return error.UnexpectedStream;
+        if (entry.reader.phase != .body or
+            entry.reader.current_frame != null)
+        {
+            return error.UnexpectedStream;
+        }
+        try releaseStreamingReaderCapacity(
+            &self.established.connection,
+            &entry.reader,
+        );
+        var removed = self.streaming_responses.takeEntry(stream_id) orelse
+            return error.UnexpectedStream;
+        removed.deinit();
+    }
+
+    /// Client counterpart to `receiveDetachedRequestProgress`.
+    pub fn receiveDetachedResponseProgress(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+    ) Error!void {
+        if (self.request_lifecycle.outstanding.items.len == 0) {
+            return error.UnexpectedStream;
+        }
+        try receiveConnectionResponsePacket(
+            &self.established.connection,
+            &self.receive_packets,
+            &self.control,
+            &self.qpack_decode,
+            &self.qpack_encode,
+            &self.response_streams,
+            &self.streaming_responses,
+            &self.push_streams,
+            &self.request_lifecycle,
+            detached_stream_id,
+        );
     }
 
     fn releaseStreamingResponseCapacity(self: *HandshakeClient) Error!void {
@@ -3698,6 +3806,7 @@ pub const HandshakeClient = struct {
                 &self.streaming_responses,
                 &self.push_streams,
                 &self.request_lifecycle,
+                null,
             );
         }
     }
@@ -3874,6 +3983,7 @@ pub const HandshakeClient = struct {
                 &self.streaming_responses,
                 &self.push_streams,
                 &self.request_lifecycle,
+                null,
             );
         }
     }
@@ -4067,6 +4177,7 @@ pub const HandshakeClient = struct {
             &self.streaming_responses,
             &self.push_streams,
             &self.request_lifecycle,
+            null,
         );
         try self.failIfRequestResetForSend(stream_id);
     }
@@ -4776,6 +4887,7 @@ pub const ProtectedServer = struct {
                 &self.request_streams,
                 null,
                 self.peer_promised_push_ids.items,
+                null,
             )) |reset| {
                 try self.sendQpackFeedback(reset.from);
                 return requestResetError(reset.application_error_code);
@@ -4813,6 +4925,7 @@ pub const ProtectedServer = struct {
             &self.request_streams,
             &self.streaming_requests,
             self.peer_promised_push_ids.items,
+            null,
         );
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback(packet.from);
@@ -4858,6 +4971,7 @@ pub const ProtectedServer = struct {
             &self.request_streams,
             &self.streaming_requests,
             self.peer_promised_push_ids.items,
+            null,
         );
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback(packet.from);
@@ -9186,6 +9300,7 @@ fn receiveConnectionRequestStreamBytes(
             request_streams,
             null,
             peer_promised_push_ids,
+            null,
         )) |reset| {
             return requestResetError(reset.application_error_code);
         }
@@ -9236,6 +9351,7 @@ fn applyServerRequestPacketFrames(
     request_streams: *RequestStreamSet,
     streaming_requests: ?*StreamingRequestSet,
     peer_promised_push_ids: []const u64,
+    detached_stream_id: ?u62,
 ) Error!?RequestStreamReset {
     var first_reset: ?RequestStreamReset = null;
     for (frames) |frame| {
@@ -9298,6 +9414,13 @@ fn applyServerRequestPacketFrames(
             continue;
         }
         if (frame != .stream) continue;
+        if (detached_stream_id != null and
+            frame.stream.stream_id == detached_stream_id.?)
+        {
+            // QUIC has already assembled this frame in the connection receive
+            // state. Its protocol adapter consumes it directly.
+            continue;
+        }
         if (isPeerQpackStreamFrame(
             control.*,
             qpack_encode.decoder_stream,
@@ -9383,6 +9506,7 @@ fn receiveConnectionResponseStreamBytes(
             streaming_responses,
             push_streams,
             request_lifecycle,
+            null,
         );
         if (response_streams.takeReset(expected_stream_id)) |code| {
             return if (code == http3.ApplicationErrorCode.request_rejected)
@@ -9410,6 +9534,7 @@ fn receiveConnectionResponsePacket(
     streaming_responses: ?*StreamingResponseSet,
     push_streams: ?*PushStreamSet,
     request_lifecycle: ?*const ClientRequestLifecycle,
+    detached_stream_id: ?u62,
 ) Error!void {
     var packet = try receive_packets.take(connection);
     defer packet.deinit(connection.endpoint.allocator);
@@ -9454,6 +9579,11 @@ fn receiveConnectionResponsePacket(
             continue;
         }
         if (frame != .stream) continue;
+        if (detached_stream_id != null and
+            frame.stream.stream_id == detached_stream_id.?)
+        {
+            continue;
+        }
         if (isPeerQpackStreamFrame(
             control.*,
             qpack_encode.decoder_stream,
