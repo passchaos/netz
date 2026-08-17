@@ -1,5 +1,6 @@
 const std = @import("std");
 const quic = @import("mod.zig");
+const payload_cache = @import("recovery/payload_cache.zig");
 
 /// Minimal recovery state for a single QUIC packet number space.
 ///
@@ -31,6 +32,10 @@ pub const QueueStats = struct {
     packet_number_copies: usize,
     retransmission_copies: usize,
     payload_bytes: usize,
+    cached_payload_blocks: usize,
+    cached_payload_bytes: usize,
+    payload_cache_hits: u64,
+    payload_cache_misses: u64,
 };
 
 const PendingDatagram = struct {
@@ -41,29 +46,38 @@ const PendingDatagram = struct {
     original_packet_number: ?u64,
     retransmission_packet_numbers: std.ArrayList(u64) = .empty,
     newest_packet_number: u64,
-    payload: []u8,
+    /// Owning allocation may be a power-of-two cache bucket larger than the
+    /// encoded frame payload. Keep the logical length separate so candidates
+    /// never retransmit uninitialized bucket slack and allocator.free always
+    /// receives the original allocation size.
+    payload_storage: []u8,
+    payload_len: usize,
 
-    fn init(
-        allocator: std.mem.Allocator,
+    fn initOwned(
         group_id: u64,
         packet_number: u64,
-        payload: []const u8,
-    ) Error!PendingDatagram {
-        if (payload.len == 0) return error.EmptyPayload;
-
-        const payload_copy = try allocator.dupe(u8, payload);
+        payload_storage: []u8,
+        payload_len: usize,
+    ) PendingDatagram {
+        std.debug.assert(payload_len != 0);
+        std.debug.assert(payload_len <= payload_storage.len);
         return .{
             .group_id = group_id,
             .original_packet_number = packet_number,
             .newest_packet_number = packet_number,
-            .payload = payload_copy,
+            .payload_storage = payload_storage,
+            .payload_len = payload_len,
         };
     }
 
     fn deinit(self: *PendingDatagram, allocator: std.mem.Allocator) void {
         self.retransmission_packet_numbers.deinit(allocator);
-        allocator.free(self.payload);
+        allocator.free(self.payload_storage);
         self.* = undefined;
+    }
+
+    fn payload(self: PendingDatagram) []const u8 {
+        return self.payload_storage[0..self.payload_len];
     }
 
     fn newestPacketNumber(self: PendingDatagram) u64 {
@@ -128,13 +142,18 @@ pub const Queue = struct {
     retransmission_copies: usize = 0,
     payload_bytes: usize = 0,
     next_group_id: u64 = 0,
+    payload_cache: payload_cache.Cache,
 
     pub fn init(allocator: std.mem.Allocator) Queue {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .payload_cache = .init(allocator),
+        };
     }
 
     pub fn deinit(self: *Queue) void {
         for (self.pending.items) |*entry| entry.deinit(self.allocator);
+        self.payload_cache.deinit();
         self.pending.deinit(self.allocator);
         self.group_index.deinit(self.allocator);
         self.packet_index.deinit(self.allocator);
@@ -146,11 +165,16 @@ pub const Queue = struct {
     }
 
     pub fn stats(self: *const Queue) QueueStats {
+        const cache_stats = self.payload_cache.stats();
         return .{
             .pending_groups = self.pending.items.len,
             .packet_number_copies = self.packet_number_copies,
             .retransmission_copies = self.retransmission_copies,
             .payload_bytes = self.payload_bytes,
+            .cached_payload_blocks = cache_stats.blocks,
+            .cached_payload_bytes = cache_stats.bytes,
+            .payload_cache_hits = cache_stats.hits,
+            .payload_cache_misses = cache_stats.misses,
         };
     }
 
@@ -185,13 +209,17 @@ pub const Queue = struct {
         errdefer _ = self.group_index.remove(group_id);
 
         try self.pending.ensureUnusedCapacity(self.allocator, 1);
-        var entry = try PendingDatagram.init(
-            self.allocator,
+        const payload_storage = self.payload_cache.acquire(
+            payload.len,
+        ) catch return error.OutOfMemory;
+        errdefer self.payload_cache.release(payload_storage);
+        @memcpy(payload_storage[0..payload.len], payload);
+        const entry = PendingDatagram.initOwned(
             group_id,
             packet_number,
-            payload,
+            payload_storage,
+            payload.len,
         );
-        errdefer entry.deinit(self.allocator);
         self.appendGroupAssumeCapacity(
             entry,
             group_slot.value_ptr,
@@ -225,7 +253,7 @@ pub const Queue = struct {
         return .{
             .group_index = group_index,
             .packet_number = entry.newestPacketNumber(),
-            .payload = entry.payload,
+            .payload = entry.payload(),
             .retransmission_count = entry.retransmission_packet_numbers.items.len,
         };
     }
@@ -244,7 +272,7 @@ pub const Queue = struct {
             return .{
                 .group_index = group_index,
                 .packet_number = entry.newestPacketNumber(),
-                .payload = entry.payload,
+                .payload = entry.payload(),
                 .retransmission_count = entry.retransmission_packet_numbers.items.len,
             };
         }
@@ -258,7 +286,7 @@ pub const Queue = struct {
         return .{
             .group_index = group_index,
             .packet_number = entry.newestPacketNumber(),
-            .payload = entry.payload,
+            .payload = entry.payload(),
             .retransmission_count = entry.retransmission_packet_numbers.items.len,
         };
     }
@@ -284,7 +312,7 @@ pub const Queue = struct {
         if (self.packet_index.count() == 0) return false;
         const index = self.packet_index.get(packet_number) orelse return false;
         var removed = self.removeGroupOrdered(index);
-        removed.deinit(self.allocator);
+        self.recycleEntry(&removed);
         return true;
     }
 
@@ -293,7 +321,7 @@ pub const Queue = struct {
         const group_index = self.packet_index.get(packet_number) orelse return false;
         if (self.pending.items[group_index].packetCount() == 1) {
             var removed = self.removeGroupOrdered(group_index);
-            removed.deinit(self.allocator);
+            self.recycleEntry(&removed);
             return true;
         }
 
@@ -370,7 +398,7 @@ pub const Queue = struct {
             if (entryContainsAnyRange(entry, acked_ranges)) {
                 var removed_entry = entry;
                 self.removeEntryStats(removed_entry);
-                removed_entry.deinit(self.allocator);
+                self.recycleEntry(&removed_entry);
                 removed += 1;
                 continue;
             }
@@ -424,13 +452,19 @@ pub const Queue = struct {
     fn addEntryStats(self: *Queue, entry: PendingDatagram) void {
         self.packet_number_copies += entry.packetCount();
         self.retransmission_copies += entry.retransmission_packet_numbers.items.len;
-        self.payload_bytes += entry.payload.len;
+        self.payload_bytes += entry.payload_len;
     }
 
     fn removeEntryStats(self: *Queue, entry: PendingDatagram) void {
         self.packet_number_copies -|= entry.packetCount();
         self.retransmission_copies -|= entry.retransmission_packet_numbers.items.len;
-        self.payload_bytes -|= entry.payload.len;
+        self.payload_bytes -|= entry.payload_len;
+    }
+
+    fn recycleEntry(self: *Queue, entry: *PendingDatagram) void {
+        entry.retransmission_packet_numbers.deinit(self.allocator);
+        self.payload_cache.release(entry.payload_storage);
+        entry.* = undefined;
     }
 
     fn removeEntryIndexes(self: *Queue, entry: PendingDatagram) void {
@@ -549,6 +583,70 @@ test "QUIC recovery queue keeps initial packet number allocation-free" {
     try queue.recordRetransmission(0, 43);
     try std.testing.expectEqual(@as(usize, 2), queue.pending.items[0].packetCount());
     try std.testing.expect(queue.pending.items[0].retransmission_packet_numbers.capacity > 0);
+}
+
+test "QUIC recovery queue reuses payload buckets after ACK" {
+    var counting = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const allocator = counting.allocator();
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    try queue.pending.ensureTotalCapacity(allocator, 1);
+    try queue.group_index.ensureTotalCapacity(allocator, 1);
+    try queue.packet_index.ensureTotalCapacity(allocator, 1);
+    _ = try queue.trackSent(1, "eight!!!");
+    const allocations_after_first = counting.allocations;
+    try std.testing.expect(queue.acknowledgePacketNumber(1));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        queue.payload_cache.stats().blocks,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 8),
+        queue.payload_cache.stats().bytes,
+    );
+
+    // Seven bytes reuse the cached eight-byte bucket, but only the logical
+    // prefix may become a retransmission candidate.
+    _ = try queue.trackSent(2, "second!");
+    try std.testing.expectEqual(allocations_after_first, counting.allocations);
+    try std.testing.expectEqualStrings(
+        "second!",
+        queue.ptoCandidate().?.payload,
+    );
+    const stats = queue.stats();
+    try std.testing.expectEqual(@as(u64, 1), stats.payload_cache_hits);
+    try std.testing.expectEqual(@as(u64, 1), stats.payload_cache_misses);
+}
+
+test "QUIC recovery payload cache is depth and byte bounded" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    for (0..payload_cache.Cache.depth + 2) |packet_number| {
+        _ = try queue.trackSent(@intCast(packet_number), "payload");
+    }
+    for (0..payload_cache.Cache.depth + 2) |packet_number| {
+        try std.testing.expect(
+            queue.acknowledgePacketNumber(@intCast(packet_number)),
+        );
+    }
+    const stats = queue.stats();
+    try std.testing.expectEqual(
+        payload_cache.Cache.depth,
+        stats.cached_payload_blocks,
+    );
+    try std.testing.expectEqual(
+        payload_cache.Cache.depth * 8,
+        stats.cached_payload_bytes,
+    );
+    try std.testing.expect(
+        stats.cached_payload_bytes <= payload_cache.Cache.max_cached_bytes,
+    );
 }
 
 test "QUIC recovery queue keeps stable group identity across retransmissions" {
@@ -767,7 +865,10 @@ test "QUIC recovery queue schedules packet-threshold loss once per newest copy" 
 
     try queue.recordRetransmission(candidate.group_index, 7);
     try std.testing.expect(queue.packetThresholdCandidate(4, quic.packet_space.default_packet_threshold) == null);
-    try std.testing.expectEqualStrings("zero", queue.pending.items[0].payload);
+    try std.testing.expectEqualStrings(
+        "zero",
+        queue.pending.items[0].payload(),
+    );
 
     const ack = quic.AckFrame{
         .largest_acknowledged = 7,

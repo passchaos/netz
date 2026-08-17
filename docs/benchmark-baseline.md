@@ -430,6 +430,31 @@ the sequential path is slightly faster with the small kernel receive queue.
 The API still provides exact protected-packet sizing, per-DATA prefix ownership,
 and socket-visible-prefix commit semantics for hosts that can absorb bursts.
 
+QUIC recovery now retains a bounded four-block stack per power-of-two payload
+class, with a global 1 MiB idle-byte cap. ACK/forget paths recycle without
+allocating, and retransmission candidates expose only the logical encoded
+payload rather than bucket slack. A 10-pair alternating CPU-0 A/B against
+commit `28e8698` was throughput-neutral:
+
+```text
+recovery cache: 139.285 MiB/s mean, 4.890 MiB/s stddev
+baseline:       139.315 MiB/s mean, 3.194 MiB/s stddev
+delta:          -0.02%
+```
+
+One 64 MiB/four-stream `--stats` pair showed:
+
+```text
+                         recovery cache    baseline
+allocations:             168,178           183,819
+cumulative allocated:    385,898,699 B     464,527,093 B
+peak live:                83,950,631 B      94,586,109 B
+```
+
+That is 8.5% fewer allocation calls, 16.9% fewer cumulative allocated bytes,
+and 11.2% lower peak live memory in the captured pair, without measurable
+throughput loss.
+
 Timer-aware HTTP/3 GRO validation used the same 64 MiB/four-stream shape:
 
 ```text

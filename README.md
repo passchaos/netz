@@ -316,7 +316,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   contiguous equal-sized packet batches with one-shot capability fallback and
   opt-in Linux `UDP_GRO` receive coalescing with shared zero-copy segment
   ownership, preallocated 1-RTT frame payload encoding, in-place current-key 1-RTT decryption, reusable frame scratch,
-  and strict wire-order low-peak batch servicing,
+  strict wire-order low-peak batch servicing, and bounded power-of-two
+  recovery-payload reuse with allocation-free ACK-time recycling, per-class
+  depth limits, and a global idle-byte cap,
   endpoint-level connection-ID routing with single-probe registration and empty-length unregister skips,
   max-length-cached short-header dispatch with validated-key construction, empty-length long-header skips, unroutable zero-DCID long-header drops and static-key token derivation primitives for stable multi-connection
   demultiplexing wired into raw UDP receive routing and 1-RTT connection
