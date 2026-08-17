@@ -126,7 +126,16 @@ pub fn main(init: std.process.Init) !void {
     shared.started.waitUncancelable(io);
     const stream_id = try client.openBidirectionalStream();
     const started_ns = nowNs(io);
-    try client.sendStream(stream_id, payload, true);
+    var write_calls: usize = 0;
+    var written: usize = 0;
+    while (written < payload.len) {
+        written += try client.writeStream(
+            stream_id,
+            payload[written..],
+        );
+        write_calls += 1;
+    }
+    try client.finishStream(stream_id);
     shared.finished.waitUncancelable(io);
     const elapsed_ns = nowNs(io) -| started_ns;
     thread.join();
@@ -143,6 +152,7 @@ pub fn main(init: std.process.Init) !void {
         \\  transfer bytes: {d}
         \\  receive window: {d}
         \\  caller buffer: {d}
+        \\  partial writes: {d}
         \\  read events: {d}
         \\  checksum: {d}
         \\  elapsed ns: {d}
@@ -152,6 +162,7 @@ pub fn main(init: std.process.Init) !void {
         payload.len,
         stream_window,
         read_buffer_bytes,
+        write_calls,
         shared.events,
         shared.checksum,
         elapsed_ns,

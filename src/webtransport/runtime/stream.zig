@@ -68,6 +68,36 @@ pub fn send(
     payload: []const u8,
     fin: bool,
 ) Error!void {
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        offset += try write(
+            connection,
+            registry,
+            session_id,
+            stream_id,
+            payload[offset..],
+        );
+    }
+    if (fin) try finish(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+    );
+}
+
+/// Submit at most one packet-sized application prefix and return its length.
+///
+/// This call processes peer packets until at least one byte is writable, but
+/// returns after one STREAM submission so the caller can fairly schedule other
+/// streams. Empty input is a no-op; use `finish` for FIN.
+pub fn write(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    payload: []const u8,
+) Error!usize {
     const stream = registry.get(stream_id) orelse
         return error.UnknownStream;
     if (stream.direction == .unidirectional and
@@ -81,100 +111,158 @@ pub fn send(
     {
         return error.InvalidStreamState;
     }
+    if (payload.len == 0) return 0;
 
-    var fin_sent = false;
-    if (!stream.prefix_sent) {
-        var prefix_storage: [16]u8 = undefined;
-        const prefix = switch (stream.direction) {
-            .bidirectional => try webtransport
-                .BidirectionalStreamHeader.writeInto(
-                &prefix_storage,
-                session_id,
-            ),
-            .unidirectional => try writeUnidirectionalHeaderInto(
-                &prefix_storage,
-                session_id,
-            ),
+    while (true) {
+        try sendPrefixIfNeeded(
+            connection,
+            stream,
+            session_id,
+            stream_id,
+        );
+        const credit = connection.streamSendCredit(stream_id);
+        const max_frame_data = @max(
+            @as(usize, 1),
+            credit.max_datagram_size -| 128,
+        );
+        const count = @min(
+            payload.len,
+            @min(max_frame_data, credit.available()),
+        );
+        if (count == 0) {
+            try receiveSendProgress(connection);
+            continue;
+        }
+        const frames = [_]quic.Frame{.{ .stream = .{
+            .stream_id = stream_id,
+            .offset = stream.send_offset,
+            .data = payload[0..count],
+            .fin = false,
+        } }};
+        connection.send(&frames) catch |err| switch (err) {
+            error.FlowControlBlocked,
+            error.CongestionLimited,
+            error.PacingLimited,
+            => {
+                try receiveSendProgress(connection);
+                continue;
+            },
+            else => return err,
         };
-        const frames = [_]quic.Frame{.{ .stream = .{
-            .stream_id = stream_id,
-            .offset = stream.send_offset,
-            .data = prefix,
-            .fin = fin and payload.len == 0,
-        } }};
-        try sendHandshakeStreamFramesPaced(connection, &frames);
-        fin_sent = fin and payload.len == 0;
         stream.send_offset = std.math.add(
             u64,
             stream.send_offset,
-            prefix.len,
+            count,
         ) catch return error.IntegerOverflow;
-        stream.prefix_sent = true;
-        if (fin_sent) try registry.recordSent(stream_id, 0, true);
+        try registry.recordSent(stream_id, count, false);
+        return count;
     }
+}
 
-    const max_frame_data = @max(
-        @as(usize, 1),
-        connection.currentSendDatagramSize() -|
-            128,
-    );
-    var offset: usize = 0;
-    while (offset < payload.len) {
-        const end = @min(payload.len, offset + max_frame_data);
-        const is_final = fin and end == payload.len;
-        const frames = [_]quic.Frame{.{ .stream = .{
-            .stream_id = stream_id,
-            .offset = stream.send_offset,
-            .data = payload[offset..end],
-            .fin = is_final,
-        } }};
-        try sendHandshakeStreamFramesPaced(connection, &frames);
-        stream.send_offset = std.math.add(
-            u64,
-            stream.send_offset,
-            end - offset,
-        ) catch return error.IntegerOverflow;
-        // Commit application accounting per socket-visible chunk. If a later
-        // transport error aborts this call, already-sent progress remains
-        // observable instead of being reported as zero.
-        try registry.recordSent(stream_id, end - offset, is_final);
-        offset = end;
+pub fn finish(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+) Error!void {
+    const stream = registry.get(stream_id) orelse
+        return error.UnknownStream;
+    if (stream.direction == .unidirectional and
+        !stream.locally_initiated)
+    {
+        return error.InvalidStreamState;
     }
-    if (payload.len == 0 and fin and !fin_sent) {
+    if (stream.send_reset != null or
+        stream.stopped != null or
+        stream.local_fin)
+    {
+        return error.InvalidStreamState;
+    }
+    try sendPrefixIfNeeded(
+        connection,
+        stream,
+        session_id,
+        stream_id,
+    );
+    while (true) {
         const frames = [_]quic.Frame{.{ .stream = .{
             .stream_id = stream_id,
             .offset = stream.send_offset,
             .data = &.{},
             .fin = true,
         } }};
-        try sendHandshakeStreamFramesPaced(connection, &frames);
-        try registry.recordSent(stream_id, 0, true);
-    } else if (payload.len == 0 and !fin) {
-        try registry.recordSent(stream_id, 0, false);
-    }
-}
-
-fn sendHandshakeStreamFramesPaced(
-    connection: *quic.one_rtt.Connection,
-    frames: []const quic.Frame,
-) Error!void {
-    while (true) {
-        connection.send(frames) catch |err| switch (err) {
-            error.FlowControlBlocked, error.CongestionLimited => {
-                var packet = try connection.receivePacketServicingTimers();
-                defer packet.deinit(connection.endpoint.allocator);
-                _ = connection.sendAckForPacketsIfNeeded(
-                    @as(*const [1]quic.one_rtt.ReceivedPacket, &packet),
-                ) catch {};
-                _ = try connection.retransmitPacketThresholdLosses(
-                    quic.one_rtt.max_batch_packets,
-                );
+        connection.send(&frames) catch |err| switch (err) {
+            error.FlowControlBlocked,
+            error.CongestionLimited,
+            error.PacingLimited,
+            => {
+                try receiveSendProgress(connection);
                 continue;
             },
             else => return err,
         };
+        try registry.recordSent(stream_id, 0, true);
         return;
     }
+}
+
+fn sendPrefixIfNeeded(
+    connection: *quic.one_rtt.Connection,
+    stream: *webtransport.StreamState,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+) Error!void {
+    if (stream.prefix_sent) return;
+    var prefix_storage: [16]u8 = undefined;
+    const prefix = switch (stream.direction) {
+        .bidirectional => try webtransport
+            .BidirectionalStreamHeader.writeInto(
+            &prefix_storage,
+            session_id,
+        ),
+        .unidirectional => try writeUnidirectionalHeaderInto(
+            &prefix_storage,
+            session_id,
+        ),
+    };
+    while (true) {
+        const frames = [_]quic.Frame{.{ .stream = .{
+            .stream_id = stream_id,
+            .offset = stream.send_offset,
+            .data = prefix,
+            .fin = false,
+        } }};
+        connection.send(&frames) catch |err| switch (err) {
+            error.FlowControlBlocked,
+            error.CongestionLimited,
+            error.PacingLimited,
+            => {
+                try receiveSendProgress(connection);
+                continue;
+            },
+            else => return err,
+        };
+        stream.send_offset = std.math.add(
+            u64,
+            stream.send_offset,
+            prefix.len,
+        ) catch return error.IntegerOverflow;
+        stream.prefix_sent = true;
+        return;
+    }
+}
+
+fn receiveSendProgress(
+    connection: *quic.one_rtt.Connection,
+) Error!void {
+    var packet = try connection.receivePacketServicingTimers();
+    defer packet.deinit(connection.endpoint.allocator);
+    _ = connection.sendAckForPacketsIfNeeded(
+        @as(*const [1]quic.one_rtt.ReceivedPacket, &packet),
+    ) catch {};
+    _ = try connection.retransmitPacketThresholdLosses(
+        quic.one_rtt.max_batch_packets,
+    );
 }
 
 pub fn receive(

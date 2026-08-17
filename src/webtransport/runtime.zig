@@ -315,6 +315,36 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    pub fn writeStream(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        payload: []const u8,
+    ) Error!usize {
+        try self.control.ensureOpen();
+        return handshake_stream.write(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            payload,
+        );
+    }
+
+    pub fn finishStream(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+    ) Error!void {
+        // Completion means the FIN packet was accepted by the socket. QUIC
+        // recovery remains responsible for retransmission until peer ACK.
+        try self.control.ensureOpen();
+        return handshake_stream.finish(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+        );
+    }
+
     pub fn receiveStream(
         self: *AcceptedHandshakeSession,
     ) Error!OwnedHandshakeStream {
@@ -631,6 +661,35 @@ pub const HandshakeClientSession = struct {
             stream_id,
             payload,
             fin,
+        );
+    }
+
+    pub fn writeStream(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        payload: []const u8,
+    ) Error!usize {
+        try self.control.ensureOpen();
+        return handshake_stream.write(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            payload,
+        );
+    }
+
+    pub fn finishStream(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+    ) Error!void {
+        // Completion means the FIN packet was submitted, not yet acknowledged.
+        try self.control.ensureOpen();
+        return handshake_stream.finish(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
         );
     }
 

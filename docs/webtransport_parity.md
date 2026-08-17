@@ -63,9 +63,13 @@ Session-ID-only prefix with an ordinary HTTP/3 DATA/HEADERS frame.
 ## Incremental stream and cancellation evidence
 
 `HandshakeClientSession` and `AcceptedHandshakeSession` expose `readStream`,
-`resetStream`, and `stopStream`. `readStream` copies only the next contiguous
-prefix into caller storage, releases it to QUIC flow control immediately, and
-returns data/FIN, RESET_STREAM, or STOP_SENDING events. The runtime maps
+`writeStream`, `finishStream`, `resetStream`, and `stopStream`. `readStream`
+copies only the next contiguous prefix into caller storage, releases it to QUIC
+flow control immediately, and returns data/FIN, RESET_STREAM, or STOP_SENDING
+events. `writeStream` waits for positive transport credit but submits at most
+one packet-sized application prefix and returns its actual length, allowing
+callers to round-robin many active streams; `finishStream` submits FIN
+independently. The runtime maps
 WebTransport's 32-bit application error space into HTTP/3 codes while skipping
 reserved codepoints and exposes both mapped and raw values on receive.
 
@@ -75,18 +79,21 @@ progress, and then exchanges both reset and stop events. Thus a successful test
 cannot be explained by retaining a complete body behind the advertised window.
 
 The benchmark uses one 4 MiB real-handshake bidirectional transfer, a 64 KiB
-stream window and 16 KiB caller storage:
+stream window, 16 KiB caller storage, partial writes and independent FIN:
 
 ```text
-read events:       3913
+partial writes:    4036
+read events:       4037
 checksum:          534773760
-median elapsed:    59.68 ms
-median throughput: 67 MiB/s
+median elapsed:    96.43 ms
+median throughput: 41 MiB/s
 ```
 
 These are the median elapsed time and corresponding integer throughput from
-three consecutive 2026-08-18 same-host `ReleaseFast` runs. This is an internal
-streaming baseline; no equal-wire wtransport/quicz ratio is claimed.
+three consecutive 2026-08-18 same-host `ReleaseFast` runs after switching the
+benchmark to one-packet partial writes. This deliberately prioritizes
+caller-controlled fairness over the write-all helper's throughput; it is an
+internal baseline and no equal-wire wtransport/quicz ratio is claimed.
 
 ## Session drain and close lifecycle
 
@@ -115,9 +122,8 @@ traffic, detailed close, clean-FIN close and post-close rejection.
 
 1. Expose equivalent stream APIs on preconfigured protected and development
    runtimes; the production-oriented real-handshake path is covered first.
-2. Add partial-write return semantics; current sends accept caller chunks and
-   internally pump flow control until each chunk is submitted.
-3. Add external `wtransport` client/server interoperability runs and browser
+2. Add external `wtransport` client/server interoperability runs and browser
    WebTransport evidence.
-4. Add concurrent stream, stream-churn and cancellation-under-loss benchmarks;
+3. Add larger concurrent stream, stream-churn and cancellation-under-loss
+   benchmarks;
    sustained incremental stream throughput now has a real-handshake baseline.

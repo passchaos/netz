@@ -112,7 +112,13 @@ test "WebTransport handshake sessions exchange drain and close capsules" {
         "after drain",
         stream_buffer[0..stream.data.bytes],
     );
-    try std.testing.expect(stream.data.fin);
+    if (!stream.data.fin) {
+        const fin = try client.readStream(&stream_buffer);
+        try std.testing.expect(fin == .data);
+        try std.testing.expectEqual(stream.data.stream_id, fin.data.stream_id);
+        try std.testing.expectEqual(@as(usize, 0), fin.data.bytes);
+        try std.testing.expect(fin.data.fin);
+    }
 
     try client.close(77, "client done");
     try std.testing.expectError(

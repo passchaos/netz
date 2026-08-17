@@ -967,6 +967,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
+        "writeStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "finishStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
         "receiveStream",
     ));
     try std.testing.expect(@hasDecl(
@@ -999,6 +1007,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.AcceptedHandshakeSession,
+        "writeStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "finishStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
         "drain",
     ));
     try std.testing.expect(@hasDecl(
@@ -1024,6 +1040,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport,
         "http3ToApplicationErrorCode",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt,
+        "SendCredit",
     ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.AcceptedHandshakeSession, "getStats"));
     try std.testing.expectEqual(@as(u32, 0x2112A442), netz.webrtc.stun.magic_cookie);

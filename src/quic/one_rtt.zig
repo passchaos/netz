@@ -229,6 +229,7 @@ const StreamFlowEntry = struct {
     stream_id: u64,
     flow: quic.flow_control.SendFlow,
     highest_sent_end: u64 = 0,
+    final_size: ?u64 = null,
     stopped: ?StopSendingInfo = null,
     reset_sent: ?StreamResetInfo = null,
 };
@@ -346,6 +347,28 @@ pub const ConnectionStats = struct {
     }
 };
 
+pub const SendCredit = struct {
+    connection: u64,
+    stream: u64,
+    congestion: usize,
+    max_datagram_size: usize,
+
+    pub fn available(self: SendCredit) usize {
+        return @min(
+            self.max_datagram_size,
+            @min(
+                self.congestion,
+                @min(
+                    std.math.cast(usize, self.connection) orelse
+                        std.math.maxInt(usize),
+                    std.math.cast(usize, self.stream) orelse
+                        std.math.maxInt(usize),
+                ),
+            ),
+        );
+    }
+};
+
 pub const SendStreamStats = struct {
     bytes_sent: u64,
     highest_sent_offset: u64,
@@ -354,6 +377,7 @@ pub const SendStreamStats = struct {
     blocked: bool,
     stopped: ?StopSendingInfo,
     reset: ?StreamResetInfo,
+    final_size: ?u64,
 };
 
 pub const RecvStreamStats = struct {
@@ -377,6 +401,7 @@ fn sendStreamStatsFromEntry(entry: *const StreamFlowEntry) SendStreamStats {
         .blocked = entry.flow.available() == 0,
         .stopped = entry.stopped,
         .reset = entry.reset_sent,
+        .final_size = entry.final_size,
     };
 }
 
@@ -1520,6 +1545,33 @@ pub const Connection = struct {
 
     pub fn getSendStreamStats(self: Connection, stream_id: u64) ?SendStreamStats {
         return self.sendStreamStats(stream_id);
+    }
+
+    /// Snapshot the immediately usable application STREAM credit.
+    ///
+    /// This does not reserve bytes and can race a subsequent send in a
+    /// concurrent owner; connection adapters serialize mutation and use it as
+    /// a sizing hint before the transport performs authoritative preflight.
+    pub fn streamSendCredit(
+        self: Connection,
+        stream_id: u64,
+    ) SendCredit {
+        const stream_available = if (self.stream_send_index.count() == 0)
+            self.initialSendStreamDataLimit(stream_id)
+        else if (self.stream_send_index.get(stream_id)) |index|
+            if (index < self.stream_send_flows.items.len and
+                self.stream_send_flows.items[index].stream_id == stream_id)
+                self.stream_send_flows.items[index].flow.available()
+            else
+                self.initialSendStreamDataLimit(stream_id)
+        else
+            self.initialSendStreamDataLimit(stream_id);
+        return .{
+            .connection = self.send_flow.available(),
+            .stream = stream_available,
+            .congestion = self.congestion.available(),
+            .max_datagram_size = self.currentSendDatagramSize(),
+        };
     }
 
     pub fn recvStreamStats(self: Connection, stream_id: u64) ?RecvStreamStats {
@@ -5188,6 +5240,7 @@ pub const Connection = struct {
             const data_len = std.math.cast(u64, frame.stream.data.len) orelse continue;
             const stream_end = std.math.add(u64, frame.stream.offset, data_len) catch continue;
             entry.highest_sent_end = @max(entry.highest_sent_end, stream_end);
+            if (frame.stream.fin) entry.final_size = stream_end;
         }
     }
 
@@ -5539,6 +5592,25 @@ pub const Connection = struct {
     fn validateStreamFrameForSend(self: *Connection, stream: quic.StreamFrame) Error!void {
         if (self.findSendStreamEntry(stream.stream_id)) |entry| {
             if (entry.stopped != null or entry.reset_sent != null) return error.StreamStopped;
+            const data_len = std.math.cast(u64, stream.data.len) orelse
+                return error.InvalidFrameLength;
+            const end = std.math.add(
+                u64,
+                stream.offset,
+                data_len,
+            ) catch return error.InvalidFrameLength;
+            if (entry.final_size) |final_size| {
+                if (end > final_size or
+                    (stream.fin and end != final_size))
+                {
+                    return error.FinalSizeMismatch;
+                }
+                if (stream.data.len != 0 and
+                    end > entry.highest_sent_end)
+                {
+                    return error.FinalSizeMismatch;
+                }
+            }
             return;
         }
         if (!streamHasSendSide(self.config.local_endpoint, stream.stream_id)) return error.StreamStateError;

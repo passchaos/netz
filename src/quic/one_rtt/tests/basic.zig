@@ -747,6 +747,14 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expectEqual(@as(f64, 0.0), initial.lossRate());
     try std.testing.expect(client.getSendStreamStats(0) == null);
     try std.testing.expect(client.streamStopped(0) == null);
+    const initial_credit = client.streamSendCredit(0);
+    try std.testing.expect(initial_credit.connection >= 5);
+    try std.testing.expect(initial_credit.stream >= 5);
+    try std.testing.expect(initial_credit.congestion > 0);
+    try std.testing.expectEqual(
+        quic.congestion.default_max_datagram_size,
+        initial_credit.max_datagram_size,
+    );
     try std.testing.expect(server.getRecvStreamStats(0) == null);
     try std.testing.expect(server.availableReceivedStream(0) == null);
     try std.testing.expect(!server.receivedStreamComplete(0));
@@ -779,10 +787,23 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     const send_stream_stats = client.getSendStreamStats(0).?;
     try std.testing.expectEqual(@as(u64, 5), send_stream_stats.bytes_sent);
     try std.testing.expectEqual(@as(u64, 5), send_stream_stats.highest_sent_offset);
+    try std.testing.expectEqual(
+        @as(?u64, 5),
+        send_stream_stats.final_size,
+    );
     try std.testing.expect(send_stream_stats.send_limit > 5);
     try std.testing.expectEqual(
         send_stream_stats.send_limit - 5,
         send_stream_stats.send_available,
+    );
+    const remaining_credit = client.streamSendCredit(0);
+    try std.testing.expectEqual(
+        initial_credit.connection - 5,
+        remaining_credit.connection,
+    );
+    try std.testing.expectEqual(
+        initial_credit.stream - 5,
+        remaining_credit.stream,
     );
     try std.testing.expect(client.getSendStreamStats(4) == null);
     try std.testing.expect(client.streamStopped(0) == null);
@@ -855,6 +876,83 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expectEqual(@as(f64, 0.0), client_after_ack.lossRate());
     try std.testing.expectEqual(@as(?u64, 150_000_000), client_after_ack.latest_rtt_ns);
     try std.testing.expect(client_after_ack.smoothed_rtt_ns != null);
+}
+
+test "QUIC 1-RTT connection delivers FIN-only stream packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const server_cid = [_]u8{ 0x95, 0x96, 0x97, 0x98 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x93} ** quic.protection.secret_len,
+    );
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+        .enable_pacing = false,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer server.deinit();
+
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "payload",
+    } }});
+    try client.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .offset = "payload".len,
+        .data = &.{},
+        .fin = true,
+    } }});
+    var data = try server.receivePacket();
+    defer data.deinit(allocator);
+    var fin = try server.receivePacket();
+    defer fin.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "payload",
+        server.availableReceivedStream(0).?,
+    );
+    const stats = server.recvStreamStats(0).?;
+    try std.testing.expectEqual(@as(?u64, "payload".len), stats.final_size);
+    try std.testing.expectError(
+        error.FinalSizeMismatch,
+        client.send(&.{.{ .stream = .{
+            .stream_id = 0,
+            .offset = "payload".len,
+            .data = "late",
+        } }}),
+    );
 }
 
 test "QUIC 1-RTT stats include datagram queue drops" {

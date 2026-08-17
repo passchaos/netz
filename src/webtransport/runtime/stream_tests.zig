@@ -63,7 +63,6 @@ test "WebTransport handshake streams read incrementally and exchange cancellatio
         fn runFallible(shared: *@This()) !void {
             var session = try shared.server.accept();
             defer session.deinit();
-
             var read_buffer: [3072]u8 = undefined;
             var received: usize = 0;
             var data_events: usize = 0;
@@ -77,7 +76,7 @@ test "WebTransport handshake streams read incrementally and exchange cancellatio
                             data.direction,
                         );
                         try std.testing.expect(!data.locally_initiated);
-                        try std.testing.expect(data.bytes != 0);
+                        try std.testing.expect(data.bytes != 0 or data.fin);
                         try std.testing.expectEqualSlices(
                             u8,
                             shared.expected[received..][0..data.bytes],
@@ -163,7 +162,6 @@ test "WebTransport handshake streams read incrementally and exchange cancellatio
         },
     );
     defer client.deinit();
-
     const streamed = try client.openBidirectionalStream();
     try std.testing.expectEqual(@as(u62, 4), streamed);
     try client.sendStream(streamed, stream_payload, true);
@@ -292,6 +290,174 @@ test "WebTransport stream registry rolls back peer association" {
     try std.testing.expect(registry.get(4) == null);
     const replacement = try registry.registerPeer(8, .bidirectional);
     try std.testing.expectEqual(@as(u62, 8), replacement.stream_id);
+}
+
+test "WebTransport partial writes interleave streams and finish independently" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x50, 0x01, 0x57, 0x54, 0x50, 0x02 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x50, 0x03 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x50, 0x04 };
+    const first_payload = [_]u8{0xa5} ** (24 * 1024);
+    const second_payload = [_]u8{0x5a} ** (24 * 1024);
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .http3 = .{
+                .quic = .{
+                    .max_datagram_size = 4096,
+                    .max_frames_per_datagram = 8,
+                },
+            },
+        },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .local_transport_parameters = smallWindowTransportParameters(),
+                .initial_one_rtt_config = .{
+                    .stream_receive_window = stream_window,
+                },
+                .random = [_]u8{0xb3} ** 32,
+                .x25519_secret_key = [_]u8{0xb4} ** 32,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        first: []const u8,
+        second: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var session = try shared.server.accept();
+            defer session.deinit();
+            var buffer: [4096]u8 = undefined;
+            var first_received: usize = 0;
+            var second_received: usize = 0;
+            var first_fin = false;
+            var second_fin = false;
+            while (!first_fin or !second_fin) {
+                const event = try session.readStream(&buffer);
+                if (event != .data) return error.UnexpectedStreamEvent;
+                const data = event.data;
+                if (data.stream_id == 4) {
+                    try std.testing.expectEqualSlices(
+                        u8,
+                        shared.first[first_received..][0..data.bytes],
+                        buffer[0..data.bytes],
+                    );
+                    first_received += data.bytes;
+                    first_fin = data.fin;
+                } else if (data.stream_id == 8) {
+                    try std.testing.expectEqualSlices(
+                        u8,
+                        shared.second[second_received..][0..data.bytes],
+                        buffer[0..data.bytes],
+                    );
+                    second_received += data.bytes;
+                    second_fin = data.fin;
+                } else return error.UnexpectedStream;
+            }
+            try std.testing.expectEqual(shared.first.len, first_received);
+            try std.testing.expectEqual(shared.second.len, second_received);
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .first = &first_payload,
+        .second = &second_payload,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-partial",
+            .limits = .{
+                .http3 = .{
+                    .quic = .{
+                        .max_datagram_size = 4096,
+                        .max_frames_per_datagram = 8,
+                    },
+                },
+            },
+            .h3 = .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .local_transport_parameters = smallWindowTransportParameters(),
+                    .initial_one_rtt_config = .{
+                        .stream_receive_window = stream_window,
+                    },
+                    .server_name = "localhost",
+                    .random = [_]u8{0xb1} ** 32,
+                    .x25519_secret_key = [_]u8{0xb2} ** 32,
+                },
+            },
+        },
+    );
+    defer client.deinit();
+
+    const first = try client.openBidirectionalStream();
+    const second = try client.openBidirectionalStream();
+    try std.testing.expectEqual(@as(u62, 4), first);
+    try std.testing.expectEqual(@as(u62, 8), second);
+    var first_written: usize = 0;
+    var second_written: usize = 0;
+    var turns: usize = 0;
+    while (first_written < first_payload.len or
+        second_written < second_payload.len)
+    {
+        if (first_written < first_payload.len) {
+            const count = try client.writeStream(
+                first,
+                first_payload[first_written..],
+            );
+            try std.testing.expect(count > 0);
+            try std.testing.expect(count < first_payload.len);
+            first_written += count;
+        }
+        if (second_written < second_payload.len) {
+            const count = try client.writeStream(
+                second,
+                second_payload[second_written..],
+            );
+            try std.testing.expect(count > 0);
+            try std.testing.expect(count < second_payload.len);
+            second_written += count;
+        }
+        turns += 1;
+    }
+    try std.testing.expect(turns > 1);
+    try client.finishStream(second);
+    try client.finishStream(first);
+    try std.testing.expectError(
+        error.InvalidStreamState,
+        client.writeStream(first, "late"),
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 fn smallWindowTransportParameters() quic.TransportParameters {
