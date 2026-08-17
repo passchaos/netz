@@ -307,6 +307,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt, "router"));
     try std.testing.expect(@hasDecl(netz.mqtt.router, "Router"));
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "subscribe"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.router.Router,
+        "subscribeWithStatus",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "unsubscribe"));
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "matchInto"));
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "matchIntoForPublisher"));
@@ -321,6 +325,28 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt, "serverKeepAlive"));
     try std.testing.expect(@hasDecl(netz.mqtt, "receiveMaximum"));
     try std.testing.expect(@hasDecl(netz.mqtt, "maximumPacketSize"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt,
+        "messageExpiryInterval",
+    ));
+    try std.testing.expect(@hasDecl(netz.mqtt, "retained"));
+    try std.testing.expect(@hasDecl(netz.mqtt.retained, "Store"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.retained.Store,
+        "applyPublish",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.retained.Store,
+        "applyParsedPublish",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.retained.Store,
+        "deliveriesInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.retained.Store,
+        "deliveriesAlloc",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt, "topicAlias"));
     try std.testing.expect(@hasDecl(netz.mqtt, "topicAliasMaximum"));
     try std.testing.expect(@hasDecl(netz.mqtt, "LastWill"));

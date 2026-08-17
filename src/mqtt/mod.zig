@@ -5,6 +5,7 @@ pub const runtime = @import("runtime.zig");
 pub const websocket_runtime = @import("websocket_runtime.zig");
 pub const tls_runtime = @import("tls_runtime.zig");
 pub const router = @import("router.zig");
+pub const retained = @import("retained/mod.zig");
 pub const testing = @import("testing/mod.zig");
 
 pub const Error = wire.Error || error{
@@ -419,6 +420,23 @@ pub fn maximumPacketSize(properties: []const Property) ?u32 {
         if (property == .four_byte and property.four_byte.id == .maximum_packet_size) return property.four_byte.value;
     }
     return null;
+}
+
+pub fn messageExpiryInterval(properties: []const Property) ?u32 {
+    for (properties) |property| {
+        if (property == .four_byte and
+            property.four_byte.id == .message_expiry_interval)
+        {
+            return property.four_byte.value;
+        }
+    }
+    return null;
+}
+
+pub fn validatePublishProperties(
+    properties: []const Property,
+) Error!void {
+    return validatePropertiesFor(.publish, properties);
 }
 
 pub fn maximumQoS(properties: []const Property) ?QoS {
@@ -2572,6 +2590,7 @@ test {
     _ = websocket_runtime;
     _ = tls_runtime;
     _ = router;
+    _ = retained;
     _ = @import("runtime/packet_transport.zig");
     _ = @import("tls_runtime_tests.zig");
     _ = @import("websocket_runtime_tests.zig");

@@ -108,6 +108,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark MQTT-over-TLS QoS 1 publish/PUBACK round trips",
         },
         .{
+            .exe_name = "netz-bench-mqtt-retained",
+            .path = "examples/bench_mqtt_retained.zig",
+            .run_step = "bench-mqtt-retained",
+            .description = "Benchmark MQTT retained-message exact and wildcard lookup",
+        },
+        .{
             .exe_name = "netz-bench-http1-parse",
             .path = "examples/bench_http1_parse.zig",
             .run_step = "bench-http1-parse",

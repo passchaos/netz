@@ -14,6 +14,7 @@ whole-broker throughput claims.
 | MQTT 5 capabilities | Properties, topic aliases, maximum packet/QoS, retain/wildcard/shared/subscription-ID capability enforcement | Rich v5 client packet/state support |
 | Shared subscriptions | Trie-indexed `{group, filter}` routing with allocation-free match, RoundRobin/Random/Sticky and stable Rendezvous hashing | RoundRobin/Random/Sticky broker strategies |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local and shared groups | Hash maps, logs and broker scheduler |
+| Retained messages | Bounded owned store, O(1) exact lookup, wildcard delivery, MQTT 5 expiry countdown and full subscription-time rules | HashMap store with expiry; audited routing has Retain Forward Rules/re-subscribe TODOs |
 | Runtime transports | Blocking TCP client/server plus `std.Io.async` concurrent server helper; verified native TLS client; MQTT 3.1.1/5 WebSocket client/server over WS and client-side WSS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
 | Broker persistence | Not yet a full broker session/log store | Datalog, retained messages, graveyard/persistent sessions and reconnect state |
 
@@ -127,15 +128,64 @@ claim. Unlike rumqtt's feature-gated rustls/native-tls split, the netz API is
 available through one built-in Zig TLS transport; rumqtt still has broader
 client-certificate/mTLS configuration.
 
+## Retained-message store
+
+`mqtt.retained.Store` owns Topic Names, payloads, and variable-length MQTT 5
+properties under per-message, message-count, and aggregate-byte limits.
+Replacing a topic is transactional, and only an empty PUBLISH with RETAIN=1
+deletes retained state. The audited rumqttd path instead removes an entry for
+any empty payload before checking RETAIN.
+
+Subscription-time delivery implements the MQTT 5 rules directly:
+
+- Retain Handling 0 always sends matching retained messages.
+- Retain Handling 1 sends only for a new non-shared subscription; the router's
+  `subscribeWithStatus` reports replacement atomically.
+- Retain Handling 2 sends none.
+- Shared subscriptions receive no retained messages at subscribe time, as
+  required by MQTT 5 section 3.8.4.
+- Delivery QoS is `min(publish QoS, subscription QoS)` and the RETAIN flag is
+  always 1 for retained messages delivered because of SUBSCRIBE.
+- Message Expiry Interval is reduced by monotonic elapsed time, expired entries
+  are skipped/pruned, and the adjusted property is emitted by the delivery
+  encoder.
+- Publisher identity is retained for No Local filtering, and Subscription
+  Identifiers are injected from the matching subscription when encoding.
+- Topic Alias is removed from stored state, while a client-supplied
+  Subscription Identifier is rejected.
+
+Rumqttd explicitly contains `TODO: use retain forward rules` and another TODO
+for updating an existing DataRequest so retained messages can be forwarded on
+every re-subscribe. It also suppresses retained delivery for shared
+subscriptions, which agrees with the specification but was previously
+undocumented in netz.
+
+Run the internal lookup baseline with:
+
+```sh
+zig build bench-mqtt-retained -Doptimize=ReleaseFast
+```
+
+2026-08-18 same-host `ReleaseFast` smoke result with 4,096 retained entries:
+
+```text
+exact lookup:            138 ns/op
+wildcard full scan:  325,232 ns/op
+wildcard matches:       4,096/op
+```
+
+The exact path uses the topic hash index and both lookup paths write into
+caller-owned buffers without allocation. The wildcard scan deliberately
+returns every entry, so this is an internal scaling baseline rather than a
+whole-broker comparison.
+
 ## Remaining work before broad superiority
 
-1. Add retained-message storage and delivery rules, including retain-handling
-   behavior for new/replaced/shared subscriptions.
-2. Add persistent broker sessions, offline queues, Will Delay processing and
+1. Add persistent broker sessions, offline queues, Will Delay processing and
    reconnect retransmission equivalent to rumqttd's graveyard/log machinery.
-3. Add native MQTT TLS server and server-side WSS termination, plus client
+2. Add native MQTT TLS server and server-side WSS termination, plus client
    certificate/mTLS support; verified native TLS and WSS clients are available.
-4. Build one identical multi-client publish/subscribe load driver for both
+3. Build one identical multi-client publish/subscribe load driver for both
    brokers and capture throughput, tail latency, allocation and peak memory.
-5. Add MQTT protocol conformance/interoperability suites beyond in-repository
+4. Add MQTT protocol conformance/interoperability suites beyond in-repository
    codec and runtime tests.

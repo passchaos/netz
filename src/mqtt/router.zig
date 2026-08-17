@@ -133,6 +133,19 @@ pub const Router = struct {
     }
 
     pub fn subscribe(self: *Router, subscriber_id: SubscriberId, subscription: mqtt.Subscription) Error!void {
+        _ = try self.subscribeWithStatus(subscriber_id, subscription);
+    }
+
+    /// Add or replace a subscription and report whether it already existed.
+    ///
+    /// MQTT 5 Retain Handling=1 needs this exact status to distinguish a new
+    /// Subscription from a replacement. Returning it from the same mutation
+    /// avoids a racy lookup-then-subscribe sequence in broker integrations.
+    pub fn subscribeWithStatus(
+        self: *Router,
+        subscriber_id: SubscriberId,
+        subscription: mqtt.Subscription,
+    ) Error!bool {
         try mqtt.validateTopicFilter(subscription.topic_filter);
         const parsed_input = parseFilter(subscription.topic_filter) orelse return error.InvalidSubscription;
         if (parsed_input.group != null and subscription.no_local) return error.InvalidSubscription;
@@ -145,7 +158,7 @@ pub const Router = struct {
             entry.subscription.no_local = subscription.no_local;
             entry.subscription.retain_as_published = subscription.retain_as_published;
             entry.subscription.retain_handling = subscription.retain_handling;
-            return;
+            return true;
         }
 
         const filter_owned = try self.allocator.dupe(u8, subscription.topic_filter);
@@ -189,6 +202,7 @@ pub const Router = struct {
             try self.appendRouteEntry(node_index, multi_level, entry_index);
             errdefer self.removeRouteEntry(node_index, multi_level, entry_index);
         }
+        return false;
     }
 
     pub fn unsubscribe(self: *Router, subscriber_id: SubscriberId, topic_filter: []const u8) Error!void {
@@ -1116,6 +1130,23 @@ test "MQTT router replaces repeated subscription options" {
     try std.testing.expect(matches[0].subscription.no_local);
     try std.testing.expect(matches[0].subscription.retain_as_published);
     try std.testing.expectEqual(@as(u2, 2), matches[0].subscription.retain_handling);
+}
+
+test "MQTT router subscribeWithStatus reports replacement atomically" {
+    const allocator = std.testing.allocator;
+    var router = try Router.init(allocator);
+    defer router.deinit();
+
+    try std.testing.expect(!(try router.subscribeWithStatus(1, .{
+        .topic_filter = "state/+",
+        .retain_handling = 1,
+    })));
+    try std.testing.expect(try router.subscribeWithStatus(1, .{
+        .topic_filter = "state/+",
+        .qos = .at_least_once,
+        .retain_handling = 1,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), router.subscriptionCount());
 }
 
 test "MQTT router enforces no-local semantics" {
