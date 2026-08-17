@@ -1,0 +1,308 @@
+const std = @import("std");
+const webtransport = @import("../mod.zig");
+const runtime = @import("../runtime.zig");
+const quic = @import("../../quic/mod.zig");
+
+const stream_payload_len: usize = 96 * 1024;
+const stream_window: u64 = 8 * 1024;
+
+test "WebTransport handshake streams read incrementally and exchange cancellation" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x57, 0x54, 0x30, 0x01, 0x57, 0x54, 0x30, 0x02 };
+    const client_cid = [_]u8{ 0x57, 0x54, 0x30, 0x03 };
+    const server_cid = [_]u8{ 0x57, 0x54, 0x30, 0x04 };
+    const stream_payload = try allocator.alloc(u8, stream_payload_len);
+    defer allocator.free(stream_payload);
+    for (stream_payload, 0..) |*byte, index| {
+        byte.* = expectedByte(index);
+    }
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .http3 = .{
+                .quic = .{
+                    .max_datagram_size = 4096,
+                    .max_frames_per_datagram = 8,
+                },
+            },
+        },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .local_transport_parameters = smallWindowTransportParameters(),
+                .initial_one_rtt_config = .{
+                    .stream_receive_window = stream_window,
+                },
+                .random = [_]u8{0xa3} ** 32,
+                .x25519_secret_key = [_]u8{0xa4} ** 32,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        expected: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var session = try shared.server.accept();
+            defer session.deinit();
+
+            var read_buffer: [3072]u8 = undefined;
+            var received: usize = 0;
+            var data_events: usize = 0;
+            while (true) {
+                const event = try session.readStream(&read_buffer);
+                switch (event) {
+                    .data => |data| {
+                        try std.testing.expectEqual(@as(u62, 4), data.stream_id);
+                        try std.testing.expectEqual(
+                            webtransport.StreamDirection.bidirectional,
+                            data.direction,
+                        );
+                        try std.testing.expect(!data.locally_initiated);
+                        try std.testing.expect(data.bytes != 0);
+                        try std.testing.expectEqualSlices(
+                            u8,
+                            shared.expected[received..][0..data.bytes],
+                            read_buffer[0..data.bytes],
+                        );
+                        received += data.bytes;
+                        data_events += 1;
+                        if (data.fin) break;
+                    },
+                    else => return error.UnexpectedStreamEvent,
+                }
+            }
+            try std.testing.expectEqual(shared.expected.len, received);
+            try std.testing.expect(data_events > 1);
+            try std.testing.expect(shared.expected.len > stream_window);
+
+            const stop_stream = try session.openUnidirectionalStream();
+            try session.sendStream(stop_stream, "stop me", false);
+            while (true) {
+                const event = try session.readStream(&read_buffer);
+                switch (event) {
+                    .stopped => |stopped| {
+                        try std.testing.expectEqual(
+                            stop_stream,
+                            stopped.stream_id,
+                        );
+                        try std.testing.expectEqual(
+                            @as(?u32, 7),
+                            stopped.error_info.application_code,
+                        );
+                        break;
+                    },
+                    .data => {},
+                    else => return error.UnexpectedStreamEvent,
+                }
+            }
+            try std.testing.expectError(
+                error.InvalidStreamState,
+                session.sendStream(stop_stream, "late", false),
+            );
+
+            const reset_stream = try session.openBidirectionalStream();
+            try session.sendStream(reset_stream, "before reset", false);
+            try session.resetStream(reset_stream, 42);
+        }
+    };
+
+    var shared = Shared{
+        .server = &server,
+        .expected = stream_payload,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.HandshakeClientSession.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/wt-incremental",
+            .limits = .{
+                .http3 = .{
+                    .quic = .{
+                        .max_datagram_size = 4096,
+                        .max_frames_per_datagram = 8,
+                    },
+                },
+            },
+            .h3 = .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .local_transport_parameters = smallWindowTransportParameters(),
+                    .initial_one_rtt_config = .{
+                        .stream_receive_window = stream_window,
+                    },
+                    .server_name = "localhost",
+                    .random = [_]u8{0xa1} ** 32,
+                    .x25519_secret_key = [_]u8{0xa2} ** 32,
+                },
+            },
+        },
+    );
+    defer client.deinit();
+
+    const streamed = try client.openBidirectionalStream();
+    try std.testing.expectEqual(@as(u62, 4), streamed);
+    try client.sendStream(streamed, stream_payload, true);
+
+    var read_buffer: [2048]u8 = undefined;
+    var saw_stop_payload = false;
+    while (!saw_stop_payload) {
+        const event = try client.readStream(&read_buffer);
+        switch (event) {
+            .data => |data| {
+                if (data.direction == .unidirectional and
+                    !data.locally_initiated)
+                {
+                    try std.testing.expectEqualStrings(
+                        "stop me",
+                        read_buffer[0..data.bytes],
+                    );
+                    try std.testing.expect(!data.fin);
+                    saw_stop_payload = true;
+                    try client.stopStream(data.stream_id, 7);
+                }
+            },
+            else => return error.UnexpectedStreamEvent,
+        }
+    }
+
+    var reset_stream_id: ?u62 = null;
+    var saw_stop_reset = false;
+    while (true) {
+        const event = try client.readStream(&read_buffer);
+        switch (event) {
+            .data => |data| {
+                if (data.direction == .bidirectional and
+                    !data.locally_initiated)
+                {
+                    try std.testing.expectEqualStrings(
+                        "before reset",
+                        read_buffer[0..data.bytes],
+                    );
+                    try std.testing.expect(!data.fin);
+                    reset_stream_id = data.stream_id;
+                }
+            },
+            .reset => |reset| {
+                if (reset.error_info.application_code == 7) {
+                    try std.testing.expectEqual(
+                        webtransport.StreamDirection.unidirectional,
+                        reset.direction,
+                    );
+                    saw_stop_reset = true;
+                    continue;
+                }
+                if (reset_stream_id) |stream_id| {
+                    try std.testing.expectEqual(stream_id, reset.stream_id);
+                }
+                try std.testing.expectEqual(
+                    @as(?u32, 42),
+                    reset.error_info.application_code,
+                );
+                try std.testing.expectEqual(
+                    webtransport.applicationErrorCodeToHttp3(42),
+                    reset.error_info.http3_code,
+                );
+                break;
+            },
+            else => return error.UnexpectedStreamEvent,
+        }
+    }
+    try std.testing.expect(saw_stop_reset);
+    // RESET_STREAM can overtake its preceding STREAM packet. Both outcomes are
+    // valid: when data arrives first it is delivered before reset; otherwise
+    // the reset terminates the read direction without fabricating payload.
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebTransport stream direction guards reject invalid reset and stop" {
+    const allocator = std.testing.allocator;
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        .init(0),
+        .client,
+        .{},
+    );
+    defer registry.deinit();
+    const local_uni = try registry.openLocal(.unidirectional);
+    const peer_uni = try registry.registerPeer(3, .unidirectional);
+
+    // Direction checks happen before the QUIC operation, so these focused
+    // calls need no socket-backed connection.
+    var connection: quic.one_rtt.Connection = undefined;
+    try std.testing.expectError(
+        error.InvalidStreamState,
+        @import("stream_incremental.zig").stop(
+            &connection,
+            &registry,
+            local_uni.stream_id,
+            1,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidStreamState,
+        @import("stream_incremental.zig").reset(
+            &connection,
+            &registry,
+            peer_uni.stream_id,
+            1,
+        ),
+    );
+}
+
+test "WebTransport stream registry rolls back peer association" {
+    const allocator = std.testing.allocator;
+    var registry = try webtransport.StreamRegistry.init(
+        allocator,
+        .init(0),
+        .server,
+        .{ .max_peer_bidi = 1 },
+    );
+    defer registry.deinit();
+
+    const first = try registry.registerPeer(4, .bidirectional);
+    try std.testing.expectEqual(@as(u62, 4), first.stream_id);
+    registry.removeLastPeer(4);
+    try std.testing.expect(registry.get(4) == null);
+    const replacement = try registry.registerPeer(8, .bidirectional);
+    try std.testing.expectEqual(@as(u62, 8), replacement.stream_id);
+}
+
+fn smallWindowTransportParameters() quic.TransportParameters {
+    var parameters = quic.practical_transport_parameters;
+    parameters.initial_max_data = stream_window * 2;
+    parameters.initial_max_stream_data_bidi_local = stream_window;
+    parameters.initial_max_stream_data_bidi_remote = stream_window;
+    parameters.initial_max_stream_data_uni = stream_window;
+    return parameters;
+}
+
+fn expectedByte(index: usize) u8 {
+    return @truncate((index *% 131) ^ (index >> 3));
+}

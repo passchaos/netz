@@ -19,6 +19,7 @@ pub const OwnedHandshakeStream = struct {
     }
 };
 
+const association = @import("stream_association.zig");
 pub fn initRegistry(
     allocator: std.mem.Allocator,
     session_id: webtransport.SessionId,
@@ -74,7 +75,12 @@ pub fn send(
     {
         return error.InvalidStreamState;
     }
-    if (stream.reset or stream.local_fin) return error.InvalidStreamState;
+    if (stream.send_reset != null or
+        stream.stopped != null or
+        stream.local_fin)
+    {
+        return error.InvalidStreamState;
+    }
 
     var fin_sent = false;
     if (!stream.prefix_sent) {
@@ -220,59 +226,15 @@ fn takeHandshakeSessionStream(
 ) Error!?OwnedHandshakeStream {
     const available = connection.availableReceivedStream(stream_id) orelse
         return null;
-    const direction: webtransport.StreamDirection =
-        if (quic.StreamId.init(stream_id).direction() == .bidirectional)
-            .bidirectional
-        else
-            .unidirectional;
-
-    var stream = registry.get(stream_id);
-    if (stream == null) {
-        const prefix_len = switch (direction) {
-            .bidirectional => blk: {
-                const parsed =
-                    webtransport.BidirectionalStreamHeader.parse(available) catch |err|
-                        switch (err) {
-                            error.BufferTooShort => return null,
-                            error.InvalidStreamType => return null,
-                            else => return err,
-                        };
-                if (parsed.session_id.value != session_id.value) {
-                    return error.InvalidSessionId;
-                }
-                break :blk parsed.consumed;
-            },
-            .unidirectional => blk: {
-                const parsed =
-                    webtransport.UnidirectionalStreamHeader.parse(available) catch |err|
-                        switch (err) {
-                            error.BufferTooShort => return null,
-                            else => return err,
-                        };
-                if (parsed.stream_type != .webtransport_unidirectional) {
-                    return null;
-                }
-                if (parsed.session_id == null or
-                    parsed.session_id.?.value != session_id.value)
-                {
-                    return error.InvalidSessionId;
-                }
-                break :blk parsed.consumed;
-            },
-        };
-        stream = try registry.registerPeer(stream_id, direction);
-        stream.?.prefix_received = true;
-        stream.?.receive_prefix_len = prefix_len;
-    } else if (stream.?.locally_initiated and
-        stream.?.direction == .bidirectional and
-        stream.?.bytes_received == 0 and
-        !stream.?.prefix_received)
-    {
-        // A locally-opened bidi stream has no association prefix in the peer's
-        // reverse direction.
-        stream.?.prefix_received = true;
-    }
-    const prefix_len = stream.?.receive_prefix_len;
+    const stream = try association.identify(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        .whole,
+    ) orelse return null;
+    if (stream.receive_reset != null) return error.InvalidStreamState;
+    const prefix_len = stream.receive_prefix_len;
 
     const stats = connection.recvStreamStats(stream_id) orelse return null;
     const final_size = stats.final_size orelse return null;
@@ -281,7 +243,7 @@ fn takeHandshakeSessionStream(
     const payload_len = std.math.cast(usize, payload_len_u64) orelse
         return error.IntegerOverflow;
     if (payload_len > max_stream_bytes) return error.StreamLimitExceeded;
-    if (!stream.?.prefix_received or available.len < prefix_len + payload_len) {
+    if (!stream.prefix_received or available.len < prefix_len + payload_len) {
         return null;
     }
     const payload = try connection.endpoint.allocator.dupe(
@@ -297,8 +259,8 @@ fn takeHandshakeSessionStream(
     return .{
         .allocator = connection.endpoint.allocator,
         .stream_id = stream_id,
-        .direction = direction,
-        .locally_initiated = stream.?.locally_initiated,
+        .direction = stream.direction,
+        .locally_initiated = stream.locally_initiated,
         .payload = payload,
         .fin = true,
     };

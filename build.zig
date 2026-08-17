@@ -222,6 +222,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark WebTransport datagram round trips over HTTP/3",
         },
         .{
+            .exe_name = "netz-bench-webtransport-stream",
+            .path = "examples/bench_webtransport_stream.zig",
+            .run_step = "bench-webtransport-stream",
+            .description = "Benchmark incremental WebTransport stream transfer",
+        },
+        .{
             .exe_name = "netz-webtransport-handshake-stream",
             .path = "examples/webtransport_handshake_stream.zig",
             .run_step = "run-webtransport-handshake-stream",

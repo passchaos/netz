@@ -83,6 +83,12 @@ pub const StreamLifecycle = enum {
     reset,
 };
 
+pub const ReceiveMode = enum {
+    unset,
+    whole,
+    incremental,
+};
+
 pub const StreamState = struct {
     stream_id: u62,
     direction: StreamDirection,
@@ -92,15 +98,29 @@ pub const StreamState = struct {
     prefix_sent: bool = false,
     prefix_received: bool = false,
     receive_prefix_len: usize = 0,
+    /// Whole-FIN and incremental readers consume transport storage
+    /// differently and therefore must not be mixed on one receive direction.
+    receive_mode: ReceiveMode = .unset,
     /// Application bytes only; association prefixes are intentionally excluded.
     bytes_sent: u64 = 0,
     bytes_received: u64 = 0,
     local_fin: bool = false,
     peer_fin: bool = false,
-    reset: bool = false,
+    /// Error sent in RESET_STREAM for this stream's local send direction.
+    send_reset: ?webtransport.StreamError = null,
+    /// Error received in RESET_STREAM for this stream's peer send direction.
+    receive_reset: ?webtransport.StreamError = null,
+    /// Error sent in STOP_SENDING for this stream's peer send direction.
+    stop_sent: ?webtransport.StreamError = null,
+    /// Error received in STOP_SENDING for this stream's local send direction.
+    stopped: ?webtransport.StreamError = null,
+    reset_reported: bool = false,
+    stopped_reported: bool = false,
 
     pub fn lifecycle(self: StreamState) StreamLifecycle {
-        if (self.reset) return .reset;
+        if (self.send_reset != null or self.receive_reset != null) {
+            return .reset;
+        }
         if (self.local_fin and self.peer_fin) return .closed;
         if (self.local_fin) return .fin_sent;
         if (self.peer_fin) return .fin_received;
@@ -251,6 +271,31 @@ pub const StreamRegistry = struct {
         return &self.streams.items[position];
     }
 
+    /// Borrow all registered streams for allocation-free runtime polling.
+    ///
+    /// The slice is invalidated by the next operation that can register a
+    /// stream. Runtime adapters use it to observe STOP_SENDING on local
+    /// unidirectional streams, which never appear in the receive-stream table.
+    pub fn registered(self: *StreamRegistry) []StreamState {
+        return self.streams.items;
+    }
+
+    pub fn removeLastPeer(
+        self: *StreamRegistry,
+        stream_id: u62,
+    ) void {
+        const position = self.index.get(stream_id) orelse return;
+        std.debug.assert(position + 1 == self.streams.items.len);
+        const stream_state = self.streams.items[position];
+        std.debug.assert(!stream_state.locally_initiated);
+        _ = self.index.remove(stream_id);
+        _ = self.streams.pop();
+        switch (stream_state.direction) {
+            .bidirectional => self.opened_peer_bidi -= 1,
+            .unidirectional => self.opened_peer_uni -= 1,
+        }
+    }
+
     pub fn recordSent(
         self: *StreamRegistry,
         stream_id: u62,
@@ -264,7 +309,10 @@ pub const StreamRegistry = struct {
         {
             return error.InvalidStreamState;
         }
-        if (stream_state.reset or stream_state.local_fin) {
+        if (stream_state.send_reset != null or
+            stream_state.stopped != null or
+            stream_state.local_fin)
+        {
             return error.InvalidStreamState;
         }
         stream_state.bytes_sent = std.math.add(
@@ -288,7 +336,10 @@ pub const StreamRegistry = struct {
         {
             return error.InvalidStreamState;
         }
-        if (stream_state.reset or stream_state.peer_fin) {
+        if (stream_state.receive_reset != null or
+            stream_state.stop_sent != null or
+            stream_state.peer_fin)
+        {
             return error.InvalidStreamState;
         }
         stream_state.bytes_received = std.math.add(
@@ -302,10 +353,21 @@ pub const StreamRegistry = struct {
     pub fn markReset(
         self: *StreamRegistry,
         stream_id: u62,
+        http3_code: u64,
     ) webtransport.Error!void {
         const stream_state = self.get(stream_id) orelse
             return error.UnknownStream;
-        stream_state.reset = true;
+        stream_state.receive_reset = .fromHttp3(http3_code);
+    }
+
+    pub fn markStopped(
+        self: *StreamRegistry,
+        stream_id: u62,
+        http3_code: u64,
+    ) webtransport.Error!void {
+        const stream_state = self.get(stream_id) orelse
+            return error.UnknownStream;
+        stream_state.stopped = .fromHttp3(http3_code);
     }
 
     fn insert(

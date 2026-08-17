@@ -445,6 +445,10 @@ handshake-backed protected session API. The protected WebTransport runtimes
 enable CONNECT, H3 DATAGRAM, WebTransport max-sessions, and draft-13
 per-session stream/data credit SETTINGS by default, then reject DATAGRAM send or
 receive calls if the peer did not negotiate the matching capabilities.
+Handshake-backed sessions additionally expose caller-buffer incremental stream
+reads before FIN, flow-credit return after every delivered prefix, mapped
+32-bit WebTransport RESET_STREAM/STOP_SENDING APIs, and typed data/reset/stopped
+events while retaining the whole-FIN receive helper for compatibility.
 
 ## Build
 
@@ -460,6 +464,7 @@ zig build run-http1-hello
 zig build run-http2-h2c
 zig build run-http3-handshake
 zig build run-webtransport-handshake-stream
+zig build bench-webtransport-stream -Doptimize=ReleaseFast
 zig build run-websocket-echo
 zig build run-http3-fetch
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify

@@ -25,12 +25,61 @@ pub const CapsuleType = struct {
     pub const drain_webtransport_session: u64 = 0x78ae;
 };
 
+pub const ApplicationErrorCode = struct {
+    pub const session_gone: u64 = 0x170d7b68;
+    pub const buffered_stream_rejected: u64 = 0x3994bd84;
+    pub const mapped_base: u64 = 0x52e4a40fa8db;
+};
+
+/// WebTransport maps its 32-bit application stream errors into an HTTP/3
+/// varint range while skipping every reserved HTTP/3 error code of the form
+/// `0x1f * N + 0x21`.
+pub fn applicationErrorCodeToHttp3(application_code: u32) u64 {
+    const code: u64 = application_code;
+    return ApplicationErrorCode.mapped_base + code + code / 0x1e;
+}
+
+/// Recover a WebTransport application stream error from its HTTP/3 code.
+///
+/// Protocol-defined errors such as SESSION_GONE and arbitrary HTTP/3 errors
+/// intentionally return null; callers can still inspect `StreamError.http3_code`.
+pub fn http3ToApplicationErrorCode(http3_code: u64) ?u32 {
+    if (http3_code < ApplicationErrorCode.mapped_base) return null;
+    const difference = http3_code - ApplicationErrorCode.mapped_base;
+    const max_code: u64 = std.math.maxInt(u32);
+    const mapped_end = ApplicationErrorCode.mapped_base +
+        max_code + max_code / 0x1e;
+    if (http3_code > mapped_end) return null;
+    if ((http3_code - 0x21) % 0x1f == 0) return null;
+    const candidate = difference - difference / 0x1f;
+    const application_code = std.math.cast(u32, candidate) orelse return null;
+    if (applicationErrorCodeToHttp3(application_code) != http3_code) {
+        return null;
+    }
+    return application_code;
+}
+
+pub const StreamError = struct {
+    /// Raw HTTP/3 application error carried by RESET_STREAM/STOP_SENDING.
+    http3_code: u64,
+    /// Present only when `http3_code` belongs to WebTransport's mapped range.
+    application_code: ?u32,
+
+    pub fn fromHttp3(http3_code: u64) StreamError {
+        return .{
+            .http3_code = http3_code,
+            .application_code = http3ToApplicationErrorCode(http3_code),
+        };
+    }
+};
+
 pub const stream = @import("stream.zig");
 pub const FrameType = stream.FrameType;
 pub const BidirectionalStreamHeader = stream.BidirectionalStreamHeader;
 pub const EndpointRole = stream.EndpointRole;
 pub const StreamDirection = stream.StreamDirection;
 pub const StreamLifecycle = stream.StreamLifecycle;
+pub const ReceiveMode = stream.ReceiveMode;
 pub const StreamState = stream.StreamState;
 pub const StreamRegistry = stream.StreamRegistry;
 
@@ -397,14 +446,69 @@ test "WebTransport stream registry enforces IDs limits and lifecycle" {
         client.recordSent(4, 1, false),
     );
 
-    try client.markReset(8);
+    try client.markReset(8, applicationErrorCodeToHttp3(42));
     try std.testing.expectEqual(
         StreamLifecycle.reset,
         client.get(8).?.lifecycle(),
     );
+    try std.testing.expectEqual(
+        @as(?u32, 42),
+        client.get(8).?.receive_reset.?.application_code,
+    );
+    try client.markStopped(
+        4,
+        ApplicationErrorCode.buffered_stream_rejected,
+    );
+    try std.testing.expectEqual(
+        ApplicationErrorCode.buffered_stream_rejected,
+        client.get(4).?.stopped.?.http3_code,
+    );
+    try std.testing.expectEqual(
+        @as(?u32, null),
+        client.get(4).?.stopped.?.application_code,
+    );
     try std.testing.expectError(
         error.UnknownStream,
         client.recordReceived(100, 1, false),
+    );
+}
+
+test "WebTransport application error mapping skips reserved HTTP/3 codes" {
+    const values = [_]u32{
+        0,
+        1,
+        29,
+        30,
+        31,
+        42,
+        std.math.maxInt(u32),
+    };
+    for (values) |value| {
+        const mapped = applicationErrorCodeToHttp3(value);
+        try std.testing.expect(
+            (mapped - 0x21) % 0x1f != 0,
+        );
+        try std.testing.expectEqual(
+            @as(?u32, value),
+            http3ToApplicationErrorCode(mapped),
+        );
+    }
+    try std.testing.expectEqual(
+        @as(?u32, null),
+        http3ToApplicationErrorCode(
+            ApplicationErrorCode.buffered_stream_rejected,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, null),
+        http3ToApplicationErrorCode(
+            ApplicationErrorCode.mapped_base + 0x21 -
+                (ApplicationErrorCode.mapped_base % 0x1f),
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, null),
+        http3ToApplicationErrorCode(quic.varint.max_value),
     );
 }
 

@@ -293,6 +293,45 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.options.max_stream_buffer,
         );
     }
+
+    /// Read the next stream data/control event without waiting for FIN.
+    pub fn readStream(
+        self: *AcceptedHandshakeSession,
+        out: []u8,
+    ) Error!StreamRead {
+        return readHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            out,
+        );
+    }
+
+    pub fn resetStream(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        application_error_code: u32,
+    ) Error!void {
+        return resetHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+        );
+    }
+
+    pub fn stopStream(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        application_error_code: u32,
+    ) Error!void {
+        return stopHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+        );
+    }
 };
 
 pub const ClientSession = struct {
@@ -477,6 +516,45 @@ pub const HandshakeClientSession = struct {
             &self.streams,
             self.session_id,
             self.h3.options.max_stream_buffer,
+        );
+    }
+
+    /// Read the next stream data/control event without waiting for FIN.
+    pub fn readStream(
+        self: *HandshakeClientSession,
+        out: []u8,
+    ) Error!StreamRead {
+        return readHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            out,
+        );
+    }
+
+    pub fn resetStream(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+    ) Error!void {
+        return resetHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+        );
+    }
+
+    pub fn stopStream(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+    ) Error!void {
+        return stopHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
         );
     }
 };
@@ -683,10 +761,15 @@ pub const OwnedHandshakeDatagramBatch = struct {
 };
 
 const handshake_stream = @import("runtime/stream.zig");
+const incremental_stream = @import("runtime/stream_incremental.zig");
 pub const OwnedHandshakeStream = handshake_stream.OwnedHandshakeStream;
+pub const StreamRead = incremental_stream.Read;
 const initHandshakeStreamRegistry = handshake_stream.initRegistry;
 const sendHandshakeSessionStream = handshake_stream.send;
 const receiveHandshakeSessionStream = handshake_stream.receive;
+const readHandshakeSessionStream = incremental_stream.read;
+const resetHandshakeSessionStream = incremental_stream.reset;
+const stopHandshakeSessionStream = incremental_stream.stop;
 
 fn sendDatagramFromEndpoint(
     endpoint: *quic.runtime.Endpoint,
@@ -1261,4 +1344,8 @@ test "WebTransport handshake session receives datagrams with std.Io async batch"
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test {
+    _ = @import("runtime/stream_tests.zig");
 }
