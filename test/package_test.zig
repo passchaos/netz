@@ -352,6 +352,43 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt, "Auth"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writeAuth"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readAuth"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "initWebSocket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "establishClient",
+    ));
+    try std.testing.expect(@hasDecl(netz.mqtt, "websocket_runtime"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime,
+        "Server",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Server,
+        "listen",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Server,
+        "accept",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime,
+        "Client",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.Client,
+        "connectUri",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.websocket_runtime.ConnectOptions,
+        "tls",
+    ));
     try std.testing.expectEqual(@as(usize, 65_535), (netz.quic.runtime.Limits{}).max_datagram_size);
     try std.testing.expect(!(netz.quic.runtime.Limits{}).enable_gro_receive);
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "receiveBytesBatch"));

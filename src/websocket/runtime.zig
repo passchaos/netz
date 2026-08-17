@@ -128,6 +128,9 @@ pub const Server = struct {
         const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
         const selected_protocol = try selectHttp1Subprotocol(self.http.allocator, request.headers, options.protocols);
         errdefer if (selected_protocol) |protocol| self.http.allocator.free(protocol);
+        if (options.require_subprotocol and selected_protocol == null) {
+            return error.InvalidSubprotocol;
+        }
         const selected_extension = try websocket.ExtensionNegotiation.acceptClientHeaders(
             self.http.allocator,
             request.headers,
@@ -235,6 +238,13 @@ fn ServeTask(comptime HandlerContext: type) type {
 
 pub const AcceptOptions = struct {
     protocols: []const []const u8 = &.{},
+    /// Reject the HTTP upgrade unless one of `protocols` was selected.
+    ///
+    /// Generic WebSocket servers often allow clients to omit a subprotocol,
+    /// while protocol bindings such as MQTT require the opening handshake to
+    /// select their registered token. Keeping this opt-in avoids weakening the
+    /// generic behavior while allowing adapters to fail before sending 101.
+    require_subprotocol: bool = false,
     extra_headers: []const http1.Header = &.{},
     enable_permessage_deflate: bool = false,
 };

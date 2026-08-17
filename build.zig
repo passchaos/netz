@@ -96,6 +96,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark MQTT router trie matching against a linear scan",
         },
         .{
+            .exe_name = "netz-bench-mqtt-websocket",
+            .path = "examples/bench_mqtt_websocket.zig",
+            .run_step = "bench-mqtt-websocket",
+            .description = "Benchmark MQTT-over-WebSocket QoS 1 publish/PUBACK round trips",
+        },
+        .{
             .exe_name = "netz-bench-http1-parse",
             .path = "examples/bench_http1_parse.zig",
             .run_step = "bench-http1-parse",

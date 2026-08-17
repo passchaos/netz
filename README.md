@@ -381,7 +381,11 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   subscription-option replacement, publisher-aware No Local filtering, and
   per-group/filter shared-subscription RoundRobin/Random/Sticky selection plus
   stable low-remapping Rendezvous hashing, plus a blocking TCP client/server runtime with a
-  `std.Io.async` concurrent server helper, MQTT v5 Server Keep Alive, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
+  `std.Io.async` concurrent server helper and MQTT-over-WebSocket client/server
+  adapters for MQTT 3.1.1 and MQTT 5, with strict `mqtt` subprotocol
+  negotiation, `ws://` plus client-side `wss://`, MQTT byte-stream
+  reassembly across binary-message boundaries, and in-place client masking,
+  MQTT v5 Server Keep Alive, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation and `Capsule-Protocol` request/response advertisement, and
   datagram mapping, session lifecycle/counter state, plus a cleartext
@@ -412,9 +416,11 @@ blocking TCP runtime, and WebSocket clients also support WSS over the shared TLS
 client transport; QUIC has Initial
 protection primitives plus a blocking UDP endpoint runtime for datagram/frame
 transport with endpoint-level Version Negotiation responses for unsupported
-long-header versions; MQTT has a blocking TCP client/server runtime for
-CONNECT/SUBSCRIBE/PUBLISH/PING/DISCONNECT flows, including QoS 1 and QoS 2
-publish acknowledgements. TLS, event loops, congestion control,
+long-header versions; MQTT has blocking TCP and WebSocket client/server
+runtimes for CONNECT/SUBSCRIBE/PUBLISH/PING/DISCONNECT flows, including QoS 1
+and QoS 2 publish acknowledgements. The WebSocket client supports WSS through
+the shared TLS client transport. Server-side TLS termination, event loops,
+congestion control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on
 the same byte-level pieces.
 

@@ -1,10 +1,12 @@
 const std = @import("std");
 const mqtt = @import("mod.zig");
+const websocket = @import("../websocket/mod.zig");
+const websocket_runtime = websocket.runtime;
+const packet_transport = @import("runtime/packet_transport.zig");
 
 const net = std.Io.net;
 
-pub const Error = mqtt.Error || error{
-    ConnectionClosed,
+pub const Error = packet_transport.Error || error{
     PacketTooLarge,
     UnexpectedPacket,
     ConnectRefused,
@@ -13,7 +15,7 @@ pub const Error = mqtt.Error || error{
     OutgoingPacketTooLarge,
     PublishRefused,
     SubscriptionRefused,
-} || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
+} || websocket_runtime.Error || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
@@ -21,6 +23,8 @@ pub const Limits = struct {
 
 const packet_identifier_slots = @as(usize, std.math.maxInt(u16)) + 1;
 const topic_alias_slots: usize = 16;
+
+const PacketTransport = packet_transport.Transport;
 
 pub const Server = struct {
     io: std.Io,
@@ -51,37 +55,15 @@ pub const Server = struct {
         errdefer stream.close(self.io);
 
         var connection = Connection{
-            .io = self.io,
             .allocator = self.allocator,
-            .stream = stream,
+            .transport = .initTcp(self.io, stream),
             .protocol = options.protocol,
             .limits = self.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(options.topic_alias_maximum),
         };
         errdefer connection.close();
-
-        var connect = try connection.readConnect();
-        errdefer connect.deinit(self.allocator);
-        if (mqtt.receiveMaximum(connect.connect.properties)) |receive_maximum| {
-            connection.max_outgoing_inflight = negotiatedOutgoingInflightLimit(connection.max_outgoing_inflight, receive_maximum);
-        }
-        if (mqtt.maximumPacketSize(connect.connect.properties)) |maximum_packet_size| connection.peer_max_packet_size = maximum_packet_size;
-        if (mqtt.topicAliasMaximum(connect.connect.properties)) |topic_alias_maximum| connection.peer_topic_alias_maximum = topic_alias_maximum;
-        try connection.writeConnAck(.{
-            .session_present = options.session_present,
-            .reason_code = options.reason_code,
-            .max_outgoing_inflight = options.max_outgoing_inflight,
-            .topic_alias_maximum = options.topic_alias_maximum,
-            .server_keep_alive_seconds = options.server_keep_alive_seconds,
-            .maximum_qos = options.maximum_qos,
-            .retain_available = options.retain_available,
-            .wildcard_subscription_available = options.wildcard_subscription_available,
-            .subscription_identifier_available = options.subscription_identifier_available,
-            .shared_subscription_available = options.shared_subscription_available,
-        });
-
-        return .{ .connection = connection, .connect = connect };
+        return connection.accept(options);
     }
 
     pub fn serveConcurrent(
@@ -197,11 +179,7 @@ pub const Client = struct {
     pub fn connectWithConnAck(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!ConnectResult {
         var attempt = try connectAttempt(allocator, io, address, options);
         errdefer attempt.deinit(allocator);
-        const connection = attempt.connection orelse return error.ConnectRefused;
-        return .{
-            .connection = connection,
-            .connack = attempt.takeConnAck(),
-        };
+        return attempt.requireAccepted();
     }
 
     pub fn connectAttempt(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, options: ConnectOptions) Error!ConnectAttempt {
@@ -209,9 +187,8 @@ pub const Client = struct {
         errdefer stream.close(io);
 
         var connection = Connection{
-            .io = io,
             .allocator = allocator,
-            .stream = stream,
+            .transport = .initTcp(io, stream),
             .protocol = options.protocol,
             .limits = options.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
@@ -222,54 +199,7 @@ pub const Client = struct {
         };
         errdefer connection.close();
 
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(allocator);
-        var connect_properties: std.ArrayList(mqtt.Property) = .empty;
-        defer connect_properties.deinit(allocator);
-        try connect_properties.appendSlice(allocator, options.properties);
-        if (options.protocol == .v5 and mqtt.receiveMaximum(options.properties) == null) {
-            try connect_properties.append(allocator, .{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
-        }
-        if (options.protocol == .v5 and mqtt.maximumPacketSize(options.properties) == null and options.limits.max_packet_size <= std.math.maxInt(u32)) {
-            try connect_properties.append(allocator, .{ .four_byte = .{ .id = .maximum_packet_size, .value = @intCast(options.limits.max_packet_size) } });
-        }
-        if (options.protocol == .v5) {
-            try appendTopicAliasMaximumSetting(&connect_properties, allocator, options.properties, options.topic_alias_maximum);
-        }
-        if (options.protocol == .v5) {
-            connection.max_incoming_inflight = mqtt.receiveMaximum(connect_properties.items) orelse connection.max_incoming_inflight;
-            connection.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(connect_properties.items) orelse connection.incoming_topic_alias_maximum;
-        }
-        try mqtt.writeConnectPacket(&encoded, allocator, options.protocol, .{
-            .client_id = options.client_id,
-            .clean_start = options.clean_start,
-            .keep_alive_seconds = options.keep_alive_seconds,
-            .properties = connect_properties.items,
-            .will = options.will,
-            .username = options.username,
-            .password = options.password,
-        });
-        try writeAll(io, stream, encoded.items);
-
-        var connack = try connection.readConnAck();
-        errdefer connack.deinit(allocator);
-        if (connack.connack.reason_code != 0) {
-            connection.close();
-            return .{ .connection = null, .connack = connack };
-        }
-        if (mqtt.receiveMaximum(connack.connack.properties)) |receive_maximum| {
-            connection.max_outgoing_inflight = negotiatedOutgoingInflightLimit(connection.max_outgoing_inflight, receive_maximum);
-        }
-        if (mqtt.maximumPacketSize(connack.connack.properties)) |maximum_packet_size| connection.peer_max_packet_size = maximum_packet_size;
-        if (mqtt.topicAliasMaximum(connack.connack.properties)) |topic_alias_maximum| connection.peer_topic_alias_maximum = topic_alias_maximum;
-        if (mqtt.serverKeepAlive(connack.connack.properties)) |server_keep_alive| connection.keep_alive_seconds = server_keep_alive;
-        if (mqtt.maximumQoS(connack.connack.properties)) |maximum_qos| connection.peer_maximum_qos = maximum_qos;
-        if (mqtt.retainAvailable(connack.connack.properties)) |retain_available| connection.peer_retain_available = retain_available;
-        if (mqtt.wildcardSubscriptionAvailable(connack.connack.properties)) |available| connection.peer_wildcard_subscription_available = available;
-        if (mqtt.subscriptionIdentifierAvailable(connack.connack.properties)) |available| connection.peer_subscription_identifier_available = available;
-        if (mqtt.sharedSubscriptionAvailable(connack.connack.properties)) |available| connection.peer_shared_subscription_available = available;
-
-        return .{ .connection = connection, .connack = connack };
+        return connection.establishClient(options);
     }
 };
 
@@ -287,11 +217,12 @@ pub const ConnectAttempt = struct {
         self.* = undefined;
     }
 
-    fn takeConnAck(self: *ConnectAttempt) OwnedConnAck {
+    pub fn requireAccepted(self: *ConnectAttempt) Error!ConnectResult {
+        const connection = self.connection orelse return error.ConnectRefused;
         const connack = self.connack;
         self.connack = undefined;
         self.connection = null;
-        return connack;
+        return .{ .connection = connection, .connack = connack };
     }
 };
 
@@ -324,6 +255,42 @@ pub const ConnectOptions = struct {
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
 };
+
+fn applyConnAckNegotiation(
+    connection: *Connection,
+    connack: mqtt.ConnAck,
+) void {
+    if (mqtt.receiveMaximum(connack.properties)) |receive_maximum| {
+        connection.max_outgoing_inflight = negotiatedOutgoingInflightLimit(
+            connection.max_outgoing_inflight,
+            receive_maximum,
+        );
+    }
+    if (mqtt.maximumPacketSize(connack.properties)) |maximum_packet_size| {
+        connection.peer_max_packet_size = maximum_packet_size;
+    }
+    if (mqtt.topicAliasMaximum(connack.properties)) |topic_alias_maximum| {
+        connection.peer_topic_alias_maximum = topic_alias_maximum;
+    }
+    if (mqtt.serverKeepAlive(connack.properties)) |server_keep_alive| {
+        connection.keep_alive_seconds = server_keep_alive;
+    }
+    if (mqtt.maximumQoS(connack.properties)) |maximum_qos| {
+        connection.peer_maximum_qos = maximum_qos;
+    }
+    if (mqtt.retainAvailable(connack.properties)) |retain_available| {
+        connection.peer_retain_available = retain_available;
+    }
+    if (mqtt.wildcardSubscriptionAvailable(connack.properties)) |available| {
+        connection.peer_wildcard_subscription_available = available;
+    }
+    if (mqtt.subscriptionIdentifierAvailable(connack.properties)) |available| {
+        connection.peer_subscription_identifier_available = available;
+    }
+    if (mqtt.sharedSubscriptionAvailable(connack.properties)) |available| {
+        connection.peer_shared_subscription_available = available;
+    }
+}
 
 pub const ConnAckOptions = struct {
     session_present: bool = false,
@@ -375,9 +342,8 @@ fn appendTopicAliasMaximumSetting(
 }
 
 pub const Connection = struct {
-    io: std.Io,
     allocator: std.mem.Allocator,
-    stream: net.Stream,
+    transport: PacketTransport,
     protocol: mqtt.ProtocolVersion = .v5,
     limits: Limits = .{},
     next_packet_id: u16 = 1,
@@ -407,6 +373,29 @@ pub const Connection = struct {
     incoming_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
     outgoing_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
 
+    /// Wrap an already-negotiated WebSocket connection in the shared MQTT
+    /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
+    /// the caller owns the WebSocket opening handshake.
+    pub fn initWebSocket(
+        allocator: std.mem.Allocator,
+        ws: websocket_runtime.Connection,
+        protocol: mqtt.ProtocolVersion,
+        limits: Limits,
+        max_outgoing_inflight: u16,
+        topic_alias_maximum: u16,
+    ) Connection {
+        return .{
+            .allocator = allocator,
+            .transport = .initWebSocket(ws),
+            .protocol = protocol,
+            .limits = limits,
+            .max_outgoing_inflight = max_outgoing_inflight,
+            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(
+                topic_alias_maximum,
+            ),
+        };
+    }
+
     pub fn close(self: *Connection) void {
         for (self.incoming_topic_aliases) |maybe_topic| {
             if (maybe_topic) |topic| self.allocator.free(topic);
@@ -414,12 +403,138 @@ pub const Connection = struct {
         for (self.outgoing_topic_aliases) |maybe_topic| {
             if (maybe_topic) |topic| self.allocator.free(topic);
         }
-        self.stream.close(self.io);
+        self.transport.close(self.allocator);
         self.* = undefined;
     }
 
+    /// Complete the broker side of MQTT CONNECT on an already-open transport.
+    ///
+    /// Transport adapters call this after their own opening handshake, which
+    /// keeps all MQTT capability and inflight negotiation in one state machine.
+    pub fn accept(
+        self: *Connection,
+        options: AcceptOptions,
+    ) Error!AcceptedClient {
+        var connect = try self.readConnect();
+        errdefer connect.deinit(self.allocator);
+        if (mqtt.receiveMaximum(connect.connect.properties)) |receive_maximum| {
+            self.max_outgoing_inflight = negotiatedOutgoingInflightLimit(
+                self.max_outgoing_inflight,
+                receive_maximum,
+            );
+        }
+        if (mqtt.maximumPacketSize(connect.connect.properties)) |maximum_packet_size| {
+            self.peer_max_packet_size = maximum_packet_size;
+        }
+        if (mqtt.topicAliasMaximum(connect.connect.properties)) |topic_alias_maximum| {
+            self.peer_topic_alias_maximum = topic_alias_maximum;
+        }
+        try self.writeConnAck(.{
+            .session_present = options.session_present,
+            .reason_code = options.reason_code,
+            .max_outgoing_inflight = options.max_outgoing_inflight,
+            .topic_alias_maximum = options.topic_alias_maximum,
+            .server_keep_alive_seconds = options.server_keep_alive_seconds,
+            .maximum_qos = options.maximum_qos,
+            .retain_available = options.retain_available,
+            .wildcard_subscription_available = options.wildcard_subscription_available,
+            .subscription_identifier_available = options.subscription_identifier_available,
+            .shared_subscription_available = options.shared_subscription_available,
+        });
+
+        const owned_connection = self.*;
+        self.* = undefined;
+        return .{
+            .connection = owned_connection,
+            .connect = connect,
+        };
+    }
+
+    /// Send CONNECT and process CONNACK on an already-open transport.
+    pub fn establishClient(
+        self: *Connection,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
+        // This method transfers `self` into the returned attempt. Capture the
+        // allocator before that move so deferred temporary cleanup never reads
+        // the deliberately undefined moved-from connection.
+        const allocator = self.allocator;
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        var connect_properties: std.ArrayList(mqtt.Property) = .empty;
+        defer connect_properties.deinit(allocator);
+        try connect_properties.appendSlice(
+            allocator,
+            options.properties,
+        );
+        if (options.protocol == .v5 and
+            mqtt.receiveMaximum(options.properties) == null)
+        {
+            try connect_properties.append(
+                allocator,
+                .{ .two_byte = .{
+                    .id = .receive_maximum,
+                    .value = options.max_outgoing_inflight,
+                } },
+            );
+        }
+        if (options.protocol == .v5 and
+            mqtt.maximumPacketSize(options.properties) == null and
+            options.limits.max_packet_size <= std.math.maxInt(u32))
+        {
+            try connect_properties.append(
+                allocator,
+                .{ .four_byte = .{
+                    .id = .maximum_packet_size,
+                    .value = @intCast(options.limits.max_packet_size),
+                } },
+            );
+        }
+        if (options.protocol == .v5) {
+            try appendTopicAliasMaximumSetting(
+                &connect_properties,
+                allocator,
+                options.properties,
+                options.topic_alias_maximum,
+            );
+            self.max_incoming_inflight =
+                mqtt.receiveMaximum(connect_properties.items) orelse
+                self.max_incoming_inflight;
+            self.incoming_topic_alias_maximum =
+                mqtt.topicAliasMaximum(connect_properties.items) orelse
+                self.incoming_topic_alias_maximum;
+        }
+        try mqtt.writeConnectPacket(
+            &encoded,
+            allocator,
+            options.protocol,
+            .{
+                .client_id = options.client_id,
+                .clean_start = options.clean_start,
+                .keep_alive_seconds = options.keep_alive_seconds,
+                .properties = connect_properties.items,
+                .will = options.will,
+                .username = options.username,
+                .password = options.password,
+            },
+        );
+        try self.writePacket(encoded.items);
+
+        var connack = try self.readConnAck();
+        errdefer connack.deinit(allocator);
+        if (connack.connack.reason_code != 0) {
+            self.close();
+            return .{ .connection = null, .connack = connack };
+        }
+        applyConnAckNegotiation(self, connack.connack);
+
+        const owned_connection = self.*;
+        self.* = undefined;
+        return .{ .connection = owned_connection, .connack = connack };
+    }
+
     pub fn readConnect(self: *Connection) Error!OwnedConnect {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .connect) return error.UnexpectedPacket;
         var connect = try mqtt.Connect.parse(self.allocator, packet.bytes);
@@ -485,7 +600,7 @@ pub const Connection = struct {
     }
 
     pub fn readConnAck(self: *Connection) Error!OwnedConnAck {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .connack) return error.UnexpectedPacket;
         var connack = try mqtt.ConnAck.parse(self.allocator, self.protocol, packet.bytes);
@@ -569,7 +684,7 @@ pub const Connection = struct {
     }
 
     pub fn readPublish(self: *Connection) Error!OwnedPublish {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .publish) return error.UnexpectedPacket;
         var publish_packet = try mqtt.Publish.parse(self.allocator, self.protocol, packet.bytes);
@@ -661,7 +776,7 @@ pub const Connection = struct {
     }
 
     pub fn readSubscribe(self: *Connection) Error!OwnedSubscribe {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .subscribe) return error.UnexpectedPacket;
         var subscribe_packet = try mqtt.Subscribe.parse(self.allocator, self.protocol, packet.bytes);
@@ -678,7 +793,7 @@ pub const Connection = struct {
     }
 
     pub fn readSubAck(self: *Connection) Error!OwnedSubAck {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .suback) return error.UnexpectedPacket;
         var suback = try mqtt.SubAck.parse(self.allocator, self.protocol, packet.bytes);
@@ -700,7 +815,7 @@ pub const Connection = struct {
     }
 
     pub fn readUnsubscribe(self: *Connection) Error!OwnedUnsubscribe {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .unsubscribe) return error.UnexpectedPacket;
         var unsubscribe_packet = try mqtt.Unsubscribe.parse(self.allocator, self.protocol, packet.bytes);
@@ -716,7 +831,7 @@ pub const Connection = struct {
     }
 
     pub fn readUnsubAck(self: *Connection) Error!OwnedUnsubAck {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .unsuback) return error.UnexpectedPacket;
         var unsuback = try mqtt.UnsubAck.parse(self.allocator, self.protocol, packet.bytes);
@@ -729,14 +844,14 @@ pub const Connection = struct {
         defer encoded.deinit(self.allocator);
         try mqtt.writePing(&encoded, self.allocator, false);
         try self.writePacket(encoded.items);
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         defer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .pingresp) return error.UnexpectedPacket;
         try mqtt.validatePing(packet.bytes, true);
     }
 
     pub fn readPingReq(self: *Connection) Error!void {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         defer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .pingreq) return error.UnexpectedPacket;
         try mqtt.validatePing(packet.bytes, false);
@@ -757,7 +872,7 @@ pub const Connection = struct {
     }
 
     pub fn readDisconnect(self: *Connection) Error!OwnedDisconnect {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .disconnect) return error.UnexpectedPacket;
         var disconnect_packet = try mqtt.Disconnect.parse(self.allocator, self.protocol, packet.bytes);
@@ -773,7 +888,7 @@ pub const Connection = struct {
     }
 
     pub fn readAuth(self: *Connection) Error!OwnedAuth {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .auth) return error.UnexpectedPacket;
         var auth_packet = try mqtt.Auth.parse(self.allocator, self.protocol, packet.bytes);
@@ -904,13 +1019,24 @@ pub const Connection = struct {
         }
     }
 
-    fn writePacket(self: *Connection, bytes: []const u8) Error!void {
+    fn writePacket(self: *Connection, bytes: []u8) Error!void {
         if (bytes.len > self.peer_max_packet_size) return error.OutgoingPacketTooLarge;
-        try writeAll(self.io, self.stream, bytes);
+        try self.transport.writePacket(bytes);
+    }
+
+    fn readPacket(self: *Connection) Error!OwnedPacket {
+        const packet = try self.transport.readPacket(
+            self.allocator,
+            self.limits.max_packet_size,
+        );
+        return .{
+            .bytes = packet.bytes,
+            .fixed = packet.fixed,
+        };
     }
 
     fn readAck(self: *Connection, packet_type: mqtt.PacketType) Error!OwnedAck {
-        var packet = try readPacket(self.allocator, self.io, self.stream, self.limits);
+        var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != packet_type) return error.UnexpectedPacket;
         var ack = try mqtt.AckPacket.parse(self.allocator, self.protocol, packet.bytes);
@@ -1107,58 +1233,6 @@ pub const OwnedAuth = struct {
         self.* = undefined;
     }
 };
-
-fn readPacket(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!OwnedPacket {
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(allocator);
-
-    var first: [1]u8 = undefined;
-    try readExact(io, stream, &first);
-    try encoded.append(allocator, first[0]);
-
-    var remaining_bytes: [4]u8 = undefined;
-    var remaining_len_len: usize = 0;
-    while (remaining_len_len < remaining_bytes.len) : (remaining_len_len += 1) {
-        try readExact(io, stream, remaining_bytes[remaining_len_len .. remaining_len_len + 1]);
-        try encoded.append(allocator, remaining_bytes[remaining_len_len]);
-        if ((remaining_bytes[remaining_len_len] & 0x80) == 0) break;
-    } else {
-        return error.MalformedRemainingLength;
-    }
-
-    const decoded = try mqtt.decodeRemainingLength(remaining_bytes[0 .. remaining_len_len + 1]);
-    const payload_start = encoded.items.len;
-    const packet_len = std.math.add(usize, payload_start, decoded.value) catch return error.PacketTooLarge;
-    // MQTT 5 Maximum Packet Size is defined over the entire Control Packet,
-    // not just the Remaining Length payload.  Enforce the local limit before
-    // allocating the payload so a peer cannot make us buffer an oversize frame.
-    if (packet_len > limits.max_packet_size) return error.PacketTooLarge;
-    try encoded.resize(allocator, packet_len);
-    try readExact(io, stream, encoded.items[payload_start..]);
-
-    const bytes = try encoded.toOwnedSlice(allocator);
-    errdefer allocator.free(bytes);
-    return .{ .bytes = bytes, .fixed = try mqtt.FixedHeader.parse(bytes) };
-}
-
-fn readExact(io: std.Io, stream: net.Stream, buffer: []u8) Error!void {
-    var offset: usize = 0;
-    while (offset < buffer.len) {
-        var bufs = [_][]u8{buffer[offset..]};
-        const n = try io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
-        if (n == 0) return error.ConnectionClosed;
-        offset += n;
-    }
-}
-
-fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer.Error!void {
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const n = try io.vtable.netWrite(io.userdata, stream.socket.handle, bytes[written..], &.{""}, 0);
-        if (n == 0) return error.SocketUnconnected;
-        written += n;
-    }
-}
 
 test "MQTT runtime client and server exchange over TCP" {
     const allocator = std.testing.allocator;
@@ -1444,9 +1518,8 @@ test "MQTT client connectAttempt exposes refused CONNACK reason" {
 
 test "MQTT connection enforces outgoing inflight limit before writing" {
     var connection = Connection{
-        .io = undefined,
         .allocator = std.testing.allocator,
-        .stream = undefined,
+        .transport = undefined,
         .protocol = .v5,
         .outgoing_inflight = 1,
         .max_outgoing_inflight = 1,
@@ -1724,9 +1797,8 @@ test "MQTT v3 UNSUBACK validates packet id without per-filter reasons" {
 
 test "MQTT connection enforces negotiated maximum packet size" {
     var connection = Connection{
-        .io = undefined,
         .allocator = std.testing.allocator,
-        .stream = undefined,
+        .transport = undefined,
         .protocol = .v5,
         .peer_max_packet_size = 8,
     };
@@ -1748,23 +1820,27 @@ test "MQTT runtime enforces incoming maximum packet size on full frame" {
     const server_stream = try listener.accept(io);
     defer server_stream.close(io);
 
+    var sender = PacketTransport.initTcp(io, client_stream);
     var ping: std.ArrayList(u8) = .empty;
     defer ping.deinit(allocator);
     try mqtt.writePing(&ping, allocator, false);
-    try writeAll(io, client_stream, ping.items);
+    try sender.writePacket(ping.items);
+    var transport = PacketTransport.initTcp(io, server_stream);
 
     // A PINGREQ has Remaining Length 0 but a total Control Packet length of 2.
     // MQTT 5's Maximum Packet Size applies to that total length, matching
     // rumqtt's outbound size check and preventing tiny limits from being
     // bypassed by packets with empty variable headers/payloads.
-    try std.testing.expectError(error.PacketTooLarge, readPacket(allocator, io, server_stream, .{ .max_packet_size = 1 }));
+    try std.testing.expectError(
+        error.PacketTooLarge,
+        transport.readPacket(allocator, 1),
+    );
 }
 
 test "MQTT connection enforces incoming receive maximum" {
     var connection = Connection{
-        .io = undefined,
         .allocator = std.testing.allocator,
-        .stream = undefined,
+        .transport = undefined,
         .protocol = .v5,
         .max_incoming_inflight = 1,
     };
@@ -1809,9 +1885,8 @@ test "MQTT connection enforces incoming receive maximum" {
 
 test "MQTT connection keeps QoS2 receive slot until PUBCOMP" {
     var connection = Connection{
-        .io = undefined,
         .allocator = std.testing.allocator,
-        .stream = undefined,
+        .transport = undefined,
         .protocol = .v5,
         .max_incoming_inflight = 1,
     };
@@ -1875,9 +1950,8 @@ test "MQTT connection enforces negotiated subscribe capabilities" {
     const sub_id = [_]mqtt.Property{.{ .varint = .{ .id = .subscription_identifier, .value = 1 } }};
 
     var connection = Connection{
-        .io = undefined,
         .allocator = std.testing.allocator,
-        .stream = undefined,
+        .transport = undefined,
         .protocol = .v5,
         .peer_wildcard_subscription_available = false,
         .peer_subscription_identifier_available = false,
@@ -1900,9 +1974,8 @@ test "MQTT connection enforces negotiated subscribe capabilities" {
 
 test "MQTT connection rejects topic aliases beyond negotiated maximum" {
     var connection = Connection{
-        .io = undefined,
         .allocator = std.testing.allocator,
-        .stream = undefined,
+        .transport = undefined,
         .protocol = .v5,
         .peer_topic_alias_maximum = 1,
         .incoming_topic_alias_maximum = 1,
@@ -1960,9 +2033,8 @@ test "MQTT runtime caps advertised topic alias maximum to local storage" {
 
 test "MQTT connection enforces peer publish capabilities" {
     var connection = Connection{
-        .io = undefined,
         .allocator = std.testing.allocator,
-        .stream = undefined,
+        .transport = undefined,
         .protocol = .v5,
         .peer_maximum_qos = .at_most_once,
         .peer_retain_available = false,
