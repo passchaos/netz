@@ -13,6 +13,26 @@ pub const Match = struct {
     subscription: mqtt.Subscription,
 };
 
+/// Selection policy for one MQTT 5 shared-subscription group/filter.
+///
+/// The first three mirror rumqttd's broker configuration. Rendezvous hashing
+/// additionally gives a stable topic-to-member assignment: adding or removing
+/// a member remaps only the topics that choose that member instead of moving
+/// every group's cursor.
+pub const SharedSubscriptionStrategy = enum {
+    round_robin,
+    random,
+    sticky,
+    rendezvous_hash,
+};
+
+pub const Options = struct {
+    shared_subscription_strategy: SharedSubscriptionStrategy = .round_robin,
+    /// Deterministic seed for the `random` strategy. Brokers that require
+    /// process-unique sequences can supply secure random startup bytes.
+    random_seed: u64 = 0x6d71_7474_5f72_6f75,
+};
+
 const Entry = struct {
     subscriber_id: SubscriberId,
     subscription: mqtt.Subscription,
@@ -29,7 +49,10 @@ const Entry = struct {
 const SharedGroup = struct {
     name: []u8,
     effective_filter: []u8,
+    strategy: SharedSubscriptionStrategy,
     cursor: usize = 0,
+    selection_seed: u64,
+    random_state: u64,
     entry_indices: std.ArrayList(usize) = .empty,
 
     fn deinit(self: *SharedGroup, allocator: std.mem.Allocator) void {
@@ -56,14 +79,15 @@ const Node = struct {
     }
 };
 
-/// MQTT topic-filter trie with deterministic shared-subscription selection.
+/// MQTT topic-filter trie with configurable shared-subscription selection.
 ///
 /// Literal and `+` edges are traversed once per topic level; `#` subscriptions
 /// terminate at their prefix node. Shared subscriptions are grouped by
-/// `{ShareName, TopicFilter}` and emit exactly one member per publish in stable
-/// round-robin order, matching rumqttd's broker strategy.
+/// `{ShareName, TopicFilter}` and emit exactly one member per publish using the
+/// configured broker strategy.
 pub const Router = struct {
     allocator: std.mem.Allocator,
+    options: Options,
     nodes: std.ArrayList(Node) = .empty,
     entries: std.ArrayList(?Entry) = .empty,
     // Route representatives store `shared_group_index`, so group positions must
@@ -72,7 +96,17 @@ pub const Router = struct {
     shared_groups: std.ArrayList(?SharedGroup) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Error!Router {
-        var router = Router{ .allocator = allocator };
+        return initWithOptions(allocator, .{});
+    }
+
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        options: Options,
+    ) Error!Router {
+        var router = Router{
+            .allocator = allocator,
+            .options = options,
+        };
         errdefer router.deinit();
         try router.nodes.append(allocator, .{});
         return router;
@@ -201,7 +235,8 @@ pub const Router = struct {
         const normal_count = self.matchNormalTrie(topic, publisher_id, null) orelse
             self.matchNormalLinear(topic, publisher_id, null);
         const shared_count_from_trie = self.matchSharedTrie(topic, null);
-        const shared_group_count = shared_count_from_trie orelse self.matchSharedLinear(topic, null);
+        const shared_group_count = shared_count_from_trie orelse
+            self.matchSharedLinear(topic, null);
         const required = std.math.add(usize, normal_count, shared_group_count) catch return error.MatchBufferTooSmall;
         if (out.len < required) return error.MatchBufferTooSmall;
 
@@ -213,7 +248,10 @@ pub const Router = struct {
             // router snapshot.  A successful count pass therefore guarantees
             // the emitting pass will not need the linear fallback after it has
             // advanced shared-subscription cursors.
-            self.matchSharedTrie(topic, out[normal_written..required]) orelse unreachable
+            self.matchSharedTrie(
+                topic,
+                out[normal_written..required],
+            ) orelse unreachable
         else
             self.matchSharedLinear(topic, out[normal_written..required]);
         std.debug.assert(shared_written == shared_group_count);
@@ -343,7 +381,12 @@ pub const Router = struct {
             for (current[0..current_count]) |node_index| {
                 const node = &self.nodes.items[node_index];
                 if (!(depth == 0 and topic[0] == '$')) {
-                    written = self.emitSharedEntries(node.multi_wildcard_entries.items, out, written);
+                    written = self.emitSharedEntries(
+                        topic,
+                        node.multi_wildcard_entries.items,
+                        out,
+                        written,
+                    );
                 }
                 if (depth == 0 and std.mem.startsWith(u8, topic, "$")) {
                     if (findLiteralChild(node.*, level)) |child| {
@@ -365,8 +408,18 @@ pub const Router = struct {
         }
         for (current[0..current_count]) |node_index| {
             const node = &self.nodes.items[node_index];
-            written = self.emitSharedEntries(node.terminal_entries.items, out, written);
-            written = self.emitSharedEntries(node.multi_wildcard_entries.items, out, written);
+            written = self.emitSharedEntries(
+                topic,
+                node.terminal_entries.items,
+                out,
+                written,
+            );
+            written = self.emitSharedEntries(
+                topic,
+                node.multi_wildcard_entries.items,
+                out,
+                written,
+            );
         }
         return written;
     }
@@ -382,8 +435,10 @@ pub const Router = struct {
                 const representative = self.firstLiveGroupEntry(group.*) orelse continue;
                 if (!mqtt.topicMatchesFilter(topic, representative.effective_filter)) continue;
                 if (out) |storage| {
-                    group.cursor %= group.entry_indices.items.len;
-                    const entry = self.nextLiveGroupEntry(group) orelse continue;
+                    const entry = self.selectGroupEntry(
+                        group,
+                        topic,
+                    ) orelse continue;
                     storage[written] = entryMatch(entry);
                 }
                 written += 1;
@@ -394,6 +449,7 @@ pub const Router = struct {
 
     fn emitSharedEntries(
         self: *Router,
+        topic: []const u8,
         entry_indices: []const usize,
         out: ?[]Match,
         start: usize,
@@ -405,8 +461,10 @@ pub const Router = struct {
             if (group_index >= self.shared_groups.items.len) continue;
             if (self.shared_groups.items[group_index]) |*group| {
                 if (out) |storage| {
-                    group.cursor %= group.entry_indices.items.len;
-                    const entry = self.nextLiveGroupEntry(group) orelse continue;
+                    const entry = self.selectGroupEntry(
+                        group,
+                        topic,
+                    ) orelse continue;
                     storage[written] = entryMatch(entry);
                 }
                 written += 1;
@@ -422,7 +480,24 @@ pub const Router = struct {
         return null;
     }
 
-    fn nextLiveGroupEntry(self: Router, group: *SharedGroup) ?Entry {
+    fn selectGroupEntry(
+        self: *Router,
+        group: *SharedGroup,
+        topic: []const u8,
+    ) ?Entry {
+        if (group.entry_indices.items.len == 0) return null;
+        return switch (group.strategy) {
+            .round_robin => self.nextRoundRobinGroupEntry(group),
+            .random => self.randomGroupEntry(group),
+            .sticky => self.stickyGroupEntry(group),
+            .rendezvous_hash => self.rendezvousGroupEntry(group.*, topic),
+        };
+    }
+
+    fn nextRoundRobinGroupEntry(
+        self: Router,
+        group: *SharedGroup,
+    ) ?Entry {
         var checked: usize = 0;
         while (checked < group.entry_indices.items.len) : (checked += 1) {
             const index = group.cursor % group.entry_indices.items.len;
@@ -430,6 +505,57 @@ pub const Router = struct {
             if (self.entries.items[group.entry_indices.items[index]]) |entry| return entry;
         }
         return null;
+    }
+
+    fn stickyGroupEntry(self: Router, group: *SharedGroup) ?Entry {
+        var checked: usize = 0;
+        while (checked < group.entry_indices.items.len) : (checked += 1) {
+            const index =
+                (group.cursor + checked) % group.entry_indices.items.len;
+            if (self.entries.items[group.entry_indices.items[index]]) |entry| {
+                group.cursor = index;
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    fn randomGroupEntry(self: Router, group: *SharedGroup) ?Entry {
+        var checked: usize = 0;
+        const first = std.math.cast(
+            usize,
+            nextRandom(&group.random_state) %
+                @as(u64, @intCast(group.entry_indices.items.len)),
+        ) orelse 0;
+        while (checked < group.entry_indices.items.len) : (checked += 1) {
+            const index = (first + checked) % group.entry_indices.items.len;
+            if (self.entries.items[group.entry_indices.items[index]]) |entry| {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    fn rendezvousGroupEntry(
+        self: Router,
+        group: SharedGroup,
+        topic: []const u8,
+    ) ?Entry {
+        var selected: ?Entry = null;
+        var selected_score: u64 = 0;
+        for (group.entry_indices.items) |entry_index| {
+            const entry = self.entries.items[entry_index] orelse continue;
+            const score = rendezvousScore(group, topic, entry.subscriber_id);
+            if (selected == null or
+                score > selected_score or
+                (score == selected_score and
+                    entry.subscriber_id < selected.?.subscriber_id))
+            {
+                selected = entry;
+                selected_score = score;
+            }
+        }
+        return selected;
     }
 
     fn insertFilterPath(self: *Router, filter: []const u8) Error!struct { usize, bool } {
@@ -500,13 +626,35 @@ pub const Router = struct {
 
         for (self.shared_groups.items, 0..) |maybe_group, i| {
             if (maybe_group != null) continue;
-            self.shared_groups.items[i] = .{ .name = owned_name, .effective_filter = owned_filter };
+            const selection_seed = sharedGroupSeed(
+                self.options.random_seed,
+                name,
+                filter,
+            );
+            self.shared_groups.items[i] = .{
+                .name = owned_name,
+                .effective_filter = owned_filter,
+                .strategy = self.options.shared_subscription_strategy,
+                .selection_seed = selection_seed,
+                .random_state = selection_seed,
+            };
             owns_name = false;
             owns_filter = false;
             return .{ i, true };
         }
 
-        try self.shared_groups.append(self.allocator, .{ .name = owned_name, .effective_filter = owned_filter });
+        const selection_seed = sharedGroupSeed(
+            self.options.random_seed,
+            name,
+            filter,
+        );
+        try self.shared_groups.append(self.allocator, .{
+            .name = owned_name,
+            .effective_filter = owned_filter,
+            .strategy = self.options.shared_subscription_strategy,
+            .selection_seed = selection_seed,
+            .random_state = selection_seed,
+        });
         owns_name = false;
         owns_filter = false;
         return .{ self.shared_groups.items.len - 1, true };
@@ -633,6 +781,41 @@ fn entryMatch(entry: Entry) Match {
     return .{ .subscriber_id = entry.subscriber_id, .subscription = entry.subscription };
 }
 
+fn rendezvousScore(
+    group: SharedGroup,
+    topic: []const u8,
+    subscriber_id: SubscriberId,
+) u64 {
+    var hasher = std.hash.Wyhash.init(group.selection_seed);
+    hasher.update(topic);
+    var id_bytes: [@sizeOf(SubscriberId)]u8 = undefined;
+    std.mem.writeInt(SubscriberId, &id_bytes, subscriber_id, .little);
+    hasher.update(&id_bytes);
+    return hasher.final();
+}
+
+fn sharedGroupSeed(
+    random_seed: u64,
+    name: []const u8,
+    filter: []const u8,
+) u64 {
+    var hasher = std.hash.Wyhash.init(random_seed);
+    hasher.update(name);
+    hasher.update(&.{0});
+    hasher.update(filter);
+    return hasher.final();
+}
+
+fn nextRandom(state: *u64) u64 {
+    // SplitMix64 has a full-period state transition and good output diffusion
+    // without pulling an allocator or OS-random call into the publish hot path.
+    state.* +%= 0x9e37_79b9_7f4a_7c15;
+    var value = state.*;
+    value = (value ^ (value >> 30)) *% 0xbf58_476d_1ce4_e5b9;
+    value = (value ^ (value >> 27)) *% 0x94d0_49bb_1331_11eb;
+    return value ^ (value >> 31);
+}
+
 test "MQTT router matches literal and wildcard subscriptions" {
     const allocator = std.testing.allocator;
     var router = try Router.init(allocator);
@@ -685,6 +868,163 @@ test "MQTT router shared subscriptions round robin per filter" {
         try std.testing.expectEqual(subscriber, matches[0].subscriber_id);
         try std.testing.expectEqual(@as(SubscriberId, 20), matches[1].subscriber_id);
     }
+}
+
+test "MQTT router shared subscription strategies are configurable" {
+    const allocator = std.testing.allocator;
+
+    var sticky = try Router.initWithOptions(allocator, .{
+        .shared_subscription_strategy = .sticky,
+    });
+    defer sticky.deinit();
+    for (10..13) |subscriber_id| {
+        try sticky.subscribe(
+            subscriber_id,
+            .{ .topic_filter = "$share/workers/jobs/+" },
+        );
+    }
+    var storage: [1]Match = undefined;
+    for (0..8) |_| {
+        const matches = try sticky.matchInto("jobs/one", &storage);
+        try std.testing.expectEqual(
+            @as(SubscriberId, 10),
+            matches[0].subscriber_id,
+        );
+    }
+
+    var random_a = try Router.initWithOptions(allocator, .{
+        .shared_subscription_strategy = .random,
+        .random_seed = 0x1234_5678,
+    });
+    defer random_a.deinit();
+    var random_b = try Router.initWithOptions(allocator, .{
+        .shared_subscription_strategy = .random,
+        .random_seed = 0x1234_5678,
+    });
+    defer random_b.deinit();
+    for (10..13) |subscriber_id| {
+        try random_a.subscribe(
+            subscriber_id,
+            .{ .topic_filter = "$share/workers/jobs/+" },
+        );
+        try random_b.subscribe(
+            subscriber_id,
+            .{ .topic_filter = "$share/workers/jobs/+" },
+        );
+    }
+    var saw: [3]bool = .{ false, false, false };
+    for (0..32) |_| {
+        const first = try random_a.matchInto("jobs/random", &storage);
+        const first_id = first[0].subscriber_id;
+        var second_storage: [1]Match = undefined;
+        const second = try random_b.matchInto(
+            "jobs/random",
+            &second_storage,
+        );
+        try std.testing.expectEqual(
+            first_id,
+            second[0].subscriber_id,
+        );
+        saw[first_id - 10] = true;
+    }
+    try std.testing.expect(saw[0] and saw[1] and saw[2]);
+}
+
+test "MQTT router random capacity failure preserves scheduler state" {
+    const allocator = std.testing.allocator;
+    var reference = try Router.initWithOptions(allocator, .{
+        .shared_subscription_strategy = .random,
+        .random_seed = 42,
+    });
+    defer reference.deinit();
+    var probed = try Router.initWithOptions(allocator, .{
+        .shared_subscription_strategy = .random,
+        .random_seed = 42,
+    });
+    defer probed.deinit();
+    for (1..4) |subscriber_id| {
+        try reference.subscribe(
+            subscriber_id,
+            .{ .topic_filter = "$share/g/tasks/+" },
+        );
+        try probed.subscribe(
+            subscriber_id,
+            .{ .topic_filter = "$share/g/tasks/+" },
+        );
+    }
+    // Add one ordinary match so empty storage fails after both count passes.
+    try reference.subscribe(100, .{ .topic_filter = "tasks/#" });
+    try probed.subscribe(100, .{ .topic_filter = "tasks/#" });
+
+    try std.testing.expectError(
+        error.MatchBufferTooSmall,
+        probed.matchInto("tasks/a", &.{}),
+    );
+    var reference_storage: [2]Match = undefined;
+    var probed_storage: [2]Match = undefined;
+    const expected = try reference.matchInto("tasks/a", &reference_storage);
+    const actual = try probed.matchInto("tasks/a", &probed_storage);
+    try std.testing.expectEqual(
+        expected[1].subscriber_id,
+        actual[1].subscriber_id,
+    );
+}
+
+test "MQTT router rendezvous strategy is stable and low-remapping" {
+    const allocator = std.testing.allocator;
+    var router = try Router.initWithOptions(allocator, .{
+        .shared_subscription_strategy = .rendezvous_hash,
+    });
+    defer router.deinit();
+    for (1..4) |subscriber_id| {
+        try router.subscribe(
+            subscriber_id,
+            .{ .topic_filter = "$share/workers/jobs/+" },
+        );
+    }
+
+    var before: [256]SubscriberId = undefined;
+    var storage: [1]Match = undefined;
+    var topic_buffer: [32]u8 = undefined;
+    for (&before, 0..) |*selected, topic_index| {
+        const topic = try std.fmt.bufPrint(
+            &topic_buffer,
+            "jobs/{d}",
+            .{topic_index},
+        );
+        const first = try router.matchInto(topic, &storage);
+        const first_id = first[0].subscriber_id;
+        var second_storage: [1]Match = undefined;
+        const second = try router.matchInto(topic, &second_storage);
+        try std.testing.expectEqual(
+            first_id,
+            second[0].subscriber_id,
+        );
+        selected.* = first_id;
+    }
+
+    try router.subscribe(
+        4,
+        .{ .topic_filter = "$share/workers/jobs/+" },
+    );
+    var remapped: usize = 0;
+    for (before, 0..) |previous, topic_index| {
+        const topic = try std.fmt.bufPrint(
+            &topic_buffer,
+            "jobs/{d}",
+            .{topic_index},
+        );
+        const selected = (try router.matchInto(topic, &storage))[0]
+            .subscriber_id;
+        if (selected != previous) {
+            remapped += 1;
+            // Rendezvous hashing can only remap an existing key to the newly
+            // added member, unlike modulo hashing which reshuffles old peers.
+            try std.testing.expectEqual(@as(SubscriberId, 4), selected);
+        }
+    }
+    try std.testing.expect(remapped > 0);
+    try std.testing.expect(remapped < before.len / 2);
 }
 
 test "MQTT router indexes shared groups by trie representative" {

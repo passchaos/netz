@@ -276,6 +276,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "matchInto"));
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "matchIntoForPublisher"));
     try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "matchAlloc"));
+    try std.testing.expect(@hasDecl(netz.mqtt.router.Router, "initWithOptions"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.router,
+        "SharedSubscriptionStrategy",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt, "maximumQoS"));
     try std.testing.expect(@hasDecl(netz.mqtt, "retainAvailable"));
     try std.testing.expect(@hasDecl(netz.mqtt, "serverKeepAlive"));

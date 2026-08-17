@@ -3,6 +3,8 @@ const netz = @import("netz");
 
 const filter_count: usize = 4096;
 const iterations: usize = 20_000;
+const shared_member_count: usize = 64;
+const shared_iterations: usize = 100_000;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
@@ -62,6 +64,7 @@ pub fn main() !void {
         removed += 1;
     }
     const unsubscribe_ns = nowNs(io) -| unsubscribe_start;
+    const shared = try benchmarkSharedStrategies(allocator, io);
 
     std.debug.print(
         \\MQTT router benchmark
@@ -71,6 +74,12 @@ pub fn main() !void {
         \\  linear matches: {d}, ns/op: {d}
         \\  router speedup: {d}.{d:0>2}x
         \\  unsubscribed exact filters: {d}, ns/op: {d}
+        \\  shared members: {d}, shared iterations: {d}
+        \\  round-robin shared selection: {d} ns/op
+        \\  sticky shared selection: {d} ns/op
+        \\  random shared selection: {d} ns/op
+        \\  rendezvous shared selection: {d} ns/op
+        \\  shared checksum: {d}
         \\
     , .{
         filters.items.len,
@@ -83,7 +92,116 @@ pub fn main() !void {
         speedup_x100 % 100,
         removed,
         unsubscribe_ns / removed,
+        shared_member_count,
+        shared_iterations,
+        shared.round_robin_ns / shared_iterations,
+        shared.sticky_ns / shared_iterations,
+        shared.random_ns / shared_iterations,
+        shared.rendezvous_ns / shared_iterations,
+        shared.checksum,
     });
+}
+
+const SharedBenchmark = struct {
+    round_robin_ns: u64,
+    sticky_ns: u64,
+    random_ns: u64,
+    rendezvous_ns: u64,
+    checksum: u64,
+};
+
+fn benchmarkSharedStrategies(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) !SharedBenchmark {
+    var round_robin = try initSharedRouter(
+        allocator,
+        .round_robin,
+    );
+    defer round_robin.deinit();
+    var sticky = try initSharedRouter(allocator, .sticky);
+    defer sticky.deinit();
+    var random = try initSharedRouter(allocator, .random);
+    defer random.deinit();
+    var rendezvous = try initSharedRouter(
+        allocator,
+        .rendezvous_hash,
+    );
+    defer rendezvous.deinit();
+
+    const rr_ns, const rr_checksum = try measureShared(
+        &round_robin,
+        io,
+        false,
+    );
+    const sticky_ns, const sticky_checksum = try measureShared(
+        &sticky,
+        io,
+        false,
+    );
+    const random_ns, const random_checksum = try measureShared(
+        &random,
+        io,
+        false,
+    );
+    const rendezvous_ns, const rendezvous_checksum = try measureShared(
+        &rendezvous,
+        io,
+        true,
+    );
+    return .{
+        .round_robin_ns = rr_ns,
+        .sticky_ns = sticky_ns,
+        .random_ns = random_ns,
+        .rendezvous_ns = rendezvous_ns,
+        .checksum = rr_checksum +% sticky_checksum +%
+            random_checksum +% rendezvous_checksum,
+    };
+}
+
+fn initSharedRouter(
+    allocator: std.mem.Allocator,
+    strategy: netz.mqtt.router.SharedSubscriptionStrategy,
+) !netz.mqtt.router.Router {
+    var router = try netz.mqtt.router.Router.initWithOptions(
+        allocator,
+        .{
+            .shared_subscription_strategy = strategy,
+            .random_seed = 0x1234_5678,
+        },
+    );
+    errdefer router.deinit();
+    for (0..shared_member_count) |member| {
+        try router.subscribe(
+            @intCast(200_000 + member),
+            .{ .topic_filter = "$share/workers/devices/+/state" },
+        );
+    }
+    return router;
+}
+
+fn measureShared(
+    router: *netz.mqtt.router.Router,
+    io: std.Io,
+    vary_topic: bool,
+) !struct { u64, u64 } {
+    var storage: [1]netz.mqtt.router.Match = undefined;
+    var topic_buffer: [64]u8 = undefined;
+    var checksum: u64 = 0;
+    const started = nowNs(io);
+    for (0..shared_iterations) |iteration| {
+        const topic = if (vary_topic)
+            try std.fmt.bufPrint(
+                &topic_buffer,
+                "devices/{d}/state",
+                .{iteration & 1023},
+            )
+        else
+            "devices/2047/state";
+        const matches = try router.matchInto(topic, &storage);
+        checksum +%= matches[0].subscriber_id;
+    }
+    return .{ nowNs(io) -| started, checksum };
 }
 
 fn ratioTimes100(numerator: u64, denominator: u64) u64 {

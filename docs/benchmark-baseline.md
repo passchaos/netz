@@ -459,6 +459,37 @@ the normal unmasked server runtime avoids the payload copy entirely. This is a
 codec/send-hot-path comparison, not an end-to-end connection throughput claim;
 a full concurrent echo/load benchmark remains separate work.
 
+## MQTT shared-subscription router
+
+Captured on 2026-08-17 with:
+
+```sh
+zig build bench-mqtt-router -Doptimize=ReleaseFast
+```
+
+Three-run ranges:
+
+```text
+4098-filter trie match:            328-338 ns/op
+4098-filter linear scan:           109-111 us/op
+trie speedup:                      327-333x
+64-member shared RoundRobin:       267-271 ns/op
+64-member shared Sticky:           290-294 ns/op
+64-member shared Random:           282-286 ns/op
+64-member shared Rendezvous hash:  1.25-1.34 us/op
+```
+
+RoundRobin, Random and Sticky match rumqttd's configurable shared-subscription
+strategies. Netz additionally supports stable Rendezvous hashing for
+topic-affine assignment with low remapping when group membership changes.
+Strategy state is per `{ShareName, TopicFilter}` and only advances after output
+capacity preflight succeeds.
+
+`~/Work/rumqtt/benchmarks/router/routernxn.rs` is commented out in the audited
+checkout, so these numbers are recorded as a netz baseline rather than a direct
+whole-broker throughput ratio. See `docs/rumqtt_parity.md` for the feature and
+remaining-work audit.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is

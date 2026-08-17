@@ -365,7 +365,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   a broker-grade topic-level subscription trie with hashed literal edges,
   allocation-free caller-buffer matching, exact linear overflow fallback,
   subscription-option replacement, publisher-aware No Local filtering, and
-  per-group/filter shared-subscription round robin, plus a blocking TCP client/server runtime with a
+  per-group/filter shared-subscription RoundRobin/Random/Sticky selection plus
+  stable low-remapping Rendezvous hashing, plus a blocking TCP client/server runtime with a
   `std.Io.async` concurrent server helper, MQTT v5 Server Keep Alive, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation and `Capsule-Protocol` request/response advertisement, and
