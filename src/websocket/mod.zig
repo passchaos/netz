@@ -222,6 +222,8 @@ pub const Frame = struct {
     }
 };
 
+pub const max_frame_header_len: usize = 14;
+
 pub fn parseFrame(allocator: std.mem.Allocator, bytes: []const u8) Error!Frame {
     return parseFrameOptions(allocator, bytes, .{});
 }
@@ -347,34 +349,103 @@ pub fn writeFrameExtended(
     payload: []const u8,
     options: WriteFrameOptions,
 ) !void {
+    var header_storage: [max_frame_header_len]u8 = undefined;
+    const header = try writeFrameHeaderInto(
+        &header_storage,
+        opcode,
+        payload,
+        options,
+    );
+    const required = std.math.add(
+        usize,
+        header.len,
+        payload.len,
+    ) catch return error.PayloadTooLarge;
+    try list.ensureUnusedCapacity(allocator, required);
+    list.appendSliceAssumeCapacity(header);
+    const encoded_payload =
+        list.addManyAsSliceAssumeCapacity(payload.len);
+    if (options.mask_key) |mask| {
+        applyMaskCopyAssumeCapacity(encoded_payload, payload, mask, 0);
+    } else {
+        @memcpy(encoded_payload, payload);
+    }
+}
+
+/// Encode a complete frame into caller-owned storage without allocation.
+///
+/// This is useful for fixed buffers, benchmarks, and transports that already
+/// own reusable packet storage. Runtime stream writers can use
+/// `writeFrameHeaderInto` directly to avoid copying an unmasked payload.
+pub fn writeFrameInto(
+    storage: []u8,
+    opcode: Opcode,
+    payload: []const u8,
+    options: WriteFrameOptions,
+) Error![]u8 {
+    var header_storage: [max_frame_header_len]u8 = undefined;
+    const header = try writeFrameHeaderInto(
+        &header_storage,
+        opcode,
+        payload,
+        options,
+    );
+    const required = std.math.add(
+        usize,
+        header.len,
+        payload.len,
+    ) catch return error.PayloadTooLarge;
+    if (storage.len < required) return error.BufferTooShort;
+    @memcpy(storage[0..header.len], header);
+    const encoded_payload = storage[header.len..required];
+    if (options.mask_key) |mask| {
+        applyMaskCopyAssumeCapacity(encoded_payload, payload, mask, 0);
+    } else {
+        @memcpy(encoded_payload, payload);
+    }
+    return storage[0..required];
+}
+
+/// Write only the RFC 6455 frame header into the fixed 14-byte maximum.
+///
+/// The payload is accepted so all opcode, control-frame, RSV, UTF-8, and Close
+/// validation remains identical to `writeFrameExtended`; callers may safely
+/// stream the returned header and original payload as one logical frame.
+pub fn writeFrameHeaderInto(
+    storage: *[max_frame_header_len]u8,
+    opcode: Opcode,
+    payload: []const u8,
+    options: WriteFrameOptions,
+) Error![]const u8 {
     try validateOutgoingFrame(opcode, payload, options);
-    const b0: u8 = (if (options.fin) @as(u8, 0x80) else 0) |
+    storage[0] = (if (options.fin) @as(u8, 0x80) else 0) |
         (if (options.rsv1) @as(u8, 0x40) else 0) |
         (if (options.rsv2) @as(u8, 0x20) else 0) |
         (if (options.rsv3) @as(u8, 0x10) else 0) |
         @intFromEnum(opcode);
-    try list.append(allocator, b0);
     const masked_bit: u8 = if (options.mask_key != null) 0x80 else 0;
+    var pos: usize = 2;
     if (payload.len <= 125) {
-        try list.append(allocator, masked_bit | @as(u8, @intCast(payload.len)));
+        storage[1] = masked_bit | @as(u8, @intCast(payload.len));
     } else if (payload.len <= std.math.maxInt(u16)) {
-        try list.append(allocator, masked_bit | 126);
-        try wire.appendInt(list, allocator, u16, @intCast(payload.len), .big);
+        storage[1] = masked_bit | 126;
+        std.mem.writeInt(u16, storage[2..4], @intCast(payload.len), .big);
+        pos = 4;
     } else {
-        try list.append(allocator, masked_bit | 127);
-        try wire.appendInt(list, allocator, u64, @intCast(payload.len), .big);
+        const payload_len = std.math.cast(u64, payload.len) orelse
+            return error.PayloadTooLarge;
+        storage[1] = masked_bit | 127;
+        std.mem.writeInt(u64, storage[2..10], payload_len, .big);
+        pos = 10;
     }
     if (options.mask_key) |mask| {
-        try list.appendSlice(allocator, &mask);
-        const start = list.items.len;
-        try list.appendSlice(allocator, payload);
-        applyMask(list.items[start..], mask, 0);
-    } else {
-        try list.appendSlice(allocator, payload);
+        @memcpy(storage[pos..][0..mask.len], &mask);
+        pos += mask.len;
     }
+    return storage[0..pos];
 }
 
-const WriteFrameOptions = struct {
+pub const WriteFrameOptions = struct {
     fin: bool = true,
     mask_key: ?[4]u8 = null,
     rsv1: bool = false,
@@ -426,6 +497,62 @@ pub fn applyMask(payload: []u8, mask_key: [4]u8, offset: usize) void {
     }
 
     applyMaskScalar(data, rotated);
+}
+
+/// Copy and mask payload bytes in one pass while preserving caller input.
+///
+/// This is the safe client-send counterpart to in-place masking: RFC 6455
+/// requires a client mask, but public `[]const u8` application buffers must
+/// not be modified merely to avoid an allocation.
+pub fn applyMaskCopy(
+    output: []u8,
+    payload: []const u8,
+    mask_key: [4]u8,
+    offset: usize,
+) Error!void {
+    if (output.len < payload.len) return error.BufferTooShort;
+    applyMaskCopyAssumeCapacity(
+        output[0..payload.len],
+        payload,
+        mask_key,
+        offset,
+    );
+}
+
+fn applyMaskCopyAssumeCapacity(
+    output: []u8,
+    payload: []const u8,
+    mask_key: [4]u8,
+    offset: usize,
+) void {
+    std.debug.assert(output.len == payload.len);
+    if (payload.len == 0) return;
+    const rotated = rotatedMask(mask_key, offset);
+    var out = output;
+    var data = payload;
+
+    if (comptime backend_supports_vectors) {
+        const vector_size =
+            std.simd.suggestVectorLength(u8) orelse @sizeOf(usize);
+        if (comptime vector_size % mask_key.len == 0) {
+            const mask_vector = std.simd.repeat(
+                vector_size,
+                @as(@Vector(4, u8), rotated),
+            );
+            while (data.len >= vector_size) {
+                const in: @Vector(vector_size, u8) =
+                    data[0..vector_size].*;
+                out[0..vector_size].* = in ^ mask_vector;
+                data = data[vector_size..];
+                out = out[vector_size..];
+            }
+        }
+    }
+
+    @setRuntimeSafety(false);
+    for (data, 0..) |byte, index| {
+        out[index] = byte ^ rotated[index & 3];
+    }
 }
 
 fn rotatedMask(mask_key: [4]u8, offset: usize) [4]u8 {
@@ -810,6 +937,99 @@ test "WebSocket frame masked roundtrip" {
     for (&expected, 0..) |*byte, i| byte.* ^= mask_key[(offset + i) & 3];
     applyMask(&payload, mask_key, offset);
     try std.testing.expectEqualSlices(u8, &expected, &payload);
+}
+
+test "WebSocket caller-buffer frame encoding matches allocating writer" {
+    const allocator = std.testing.allocator;
+    const payload_lengths = [_]usize{
+        0,
+        1,
+        125,
+        126,
+        std.math.maxInt(u16),
+        @as(usize, std.math.maxInt(u16)) + 1,
+    };
+
+    for (payload_lengths) |payload_len| {
+        const payload = try allocator.alloc(u8, payload_len);
+        defer allocator.free(payload);
+        for (payload, 0..) |*byte, index| byte.* = @truncate(index);
+
+        for ([_]?[4]u8{ null, .{ 0x12, 0x34, 0x56, 0x78 } }) |mask_key| {
+            var allocating: std.ArrayList(u8) = .empty;
+            defer allocating.deinit(allocator);
+            try writeFrameExtended(
+                &allocating,
+                allocator,
+                .binary,
+                payload,
+                .{ .mask_key = mask_key },
+            );
+
+            const storage = try allocator.alloc(
+                u8,
+                payload_len + max_frame_header_len,
+            );
+            defer allocator.free(storage);
+            const encoded = try writeFrameInto(
+                storage,
+                .binary,
+                payload,
+                .{ .mask_key = mask_key },
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                allocating.items,
+                encoded,
+            );
+
+            const header = try FrameHeader.parse(encoded);
+            try std.testing.expectEqual(
+                @as(u64, @intCast(payload_len)),
+                header.payload_len,
+            );
+            try std.testing.expectEqual(mask_key != null, header.masked);
+        }
+    }
+}
+
+test "WebSocket fixed frame encoder rejects short output transactionally" {
+    var storage = [_]u8{0xa5} ** max_frame_header_len;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        writeFrameInto(
+            &storage,
+            .binary,
+            "payload does not fit",
+            .{ .mask_key = .{ 1, 2, 3, 4 } },
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0xa5} ** max_frame_header_len),
+        &storage,
+    );
+}
+
+test "WebSocket mask copy preserves input and supports stream offsets" {
+    const payload = "0123456789abcdef";
+    var masked: [payload.len]u8 = undefined;
+    const key = [4]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const offset = 3;
+    try applyMaskCopy(&masked, payload, key, offset);
+    for (masked, 0..) |byte, index| {
+        try std.testing.expectEqual(
+            payload[index] ^ key[(offset + index) & 3],
+            byte,
+        );
+    }
+    try std.testing.expectEqualStrings("0123456789abcdef", payload);
+
+    var short: [payload.len - 1]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        applyMaskCopy(&short, payload, key, offset),
+    );
 }
 
 test "WebSocket handshake validation" {

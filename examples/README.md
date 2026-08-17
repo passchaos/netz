@@ -23,6 +23,7 @@ zig build run-quic-handshake-echo
 zig build run-quic-datagram-echo
 zig build run-quic-close
 zig build run-websocket-echo
+zig build bench-websocket-frame -Doptimize=ReleaseFast
 # Linux only: raw std.os.linux.IoUring connect/send/recv around HTTP/1 bytes
 zig build run-linux-io-uring-http1
 ```

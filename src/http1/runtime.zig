@@ -253,6 +253,24 @@ pub const TlsClientConnection = struct {
         try self.client.writer.flush();
         try self.net_writer.interface.flush();
     }
+
+    /// Write a protocol header and payload with one TLS/network flush.
+    ///
+    /// Framed protocols such as WebSocket commonly keep their fixed header on
+    /// the stack and borrow the application payload. Accepting both slices
+    /// avoids concatenating them into a temporary allocation while preserving
+    /// one TLS record flush boundary for the logical write.
+    pub fn writeAllParts(
+        self: *TlsClientConnection,
+        header: []const u8,
+        payload: []const u8,
+    ) Error!void {
+        if (header.len == 0 and payload.len == 0) return;
+        if (header.len != 0) try self.client.writer.writeAll(header);
+        if (payload.len != 0) try self.client.writer.writeAll(payload);
+        try self.client.writer.flush();
+        try self.net_writer.interface.flush();
+    }
 };
 
 const RuntimeTransport = union(enum) {

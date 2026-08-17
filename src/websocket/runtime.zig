@@ -7,6 +7,7 @@ const http2_runtime = http2.runtime;
 const wire = @import("../internal/wire.zig");
 
 const net = std.Io.net;
+const masked_write_scratch_len: usize = 16 * 1024;
 
 pub const Error = websocket.Error || http1_runtime.Error || http2_runtime.Error || error{
     HeadersTooLarge,
@@ -47,6 +48,28 @@ const RuntimeTransport = union(enum) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
             .tls => |conn| conn.writeAll(bytes),
             .linux_io_uring => |conn| conn.writeAll(bytes),
+        };
+    }
+
+    fn writeAllParts(
+        self: RuntimeTransport,
+        header: []const u8,
+        payload: []const u8,
+    ) Error!void {
+        return switch (self) {
+            .tcp => |tcp| writeAllHeaderPayload(
+                tcp.io,
+                tcp.stream,
+                header,
+                payload,
+            ),
+            .tls => |conn| conn.writeAllParts(header, payload),
+            // The raw io_uring adapter currently exposes one-slice sends.
+            // Two submissions still avoid a payload-sized temporary copy.
+            .linux_io_uring => |conn| {
+                try conn.writeAll(header);
+                try conn.writeAll(payload);
+            },
         };
     }
 };
@@ -669,19 +692,33 @@ pub const Connection = struct {
         fin: bool,
         options: struct { rsv1: bool = false },
     ) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
         const mask_key = if (self.role == .client) blk: {
             var key: [4]u8 = undefined;
             try std.Io.randomSecure(self.io, &key);
             break :blk key;
         } else null;
-        try websocket.writeFrameExtended(&encoded, self.allocator, opcode, payload, .{
-            .fin = fin,
-            .mask_key = mask_key,
-            .rsv1 = options.rsv1,
-        });
-        try self.transport().writeAll(encoded.items);
+
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+        const header = try websocket.writeFrameHeaderInto(
+            &header_storage,
+            opcode,
+            payload,
+            .{
+                .fin = fin,
+                .mask_key = mask_key,
+                .rsv1 = options.rsv1,
+            },
+        );
+        if (mask_key) |mask| {
+            try writeMaskedPayload(
+                self.transport(),
+                header,
+                payload,
+                mask,
+            );
+        } else {
+            try self.transport().writeAllParts(header, payload);
+        }
     }
 
     fn writeCompressedFragmentsLocked(
@@ -732,6 +769,7 @@ pub const H2Connection = struct {
     close_received: bool = false,
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
+    send_frame_buffer: std.ArrayList(u8) = .empty,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -754,6 +792,7 @@ pub const H2Connection = struct {
     pub fn close(self: *H2Connection) void {
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
         self.inbuf.deinit(self.allocator);
+        self.send_frame_buffer.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -925,22 +964,31 @@ pub const H2Connection = struct {
         fin: bool,
         options: struct { rsv1: bool = false },
     ) Error!void {
-        var encoded: std.ArrayList(u8) = .empty;
-        defer encoded.deinit(self.allocator);
         const mask_key = if (self.role == .client) blk: {
             var key: [4]u8 = undefined;
             try std.Io.randomSecure(self.tunnel.connection.io, &key);
             break :blk key;
         } else null;
-        try websocket.writeFrameExtended(&encoded, self.allocator, opcode, payload, .{
+        self.send_frame_buffer.clearRetainingCapacity();
+        const required = std.math.add(
+            usize,
+            websocket.max_frame_header_len,
+            payload.len,
+        ) catch return error.PayloadTooLarge;
+        const encoded = try self.send_frame_buffer.addManyAsSlice(
+            self.allocator,
+            required,
+        );
+        const frame = try websocket.writeFrameInto(encoded, opcode, payload, .{
             .fin = fin,
             .mask_key = mask_key,
             .rsv1 = options.rsv1,
         });
+        self.send_frame_buffer.shrinkRetainingCapacity(frame.len);
         // RFC 8441 maps the WebSocket byte stream onto an HTTP/2 stream.  Once
         // a Close frame is sent, this endpoint has no more WebSocket bytes to
         // write, so carry END_STREAM with the DATA frame that contains Close.
-        try self.tunnel.write(encoded.items, opcode == .close);
+        try self.tunnel.write(frame, opcode == .close);
     }
 
     fn writeCompressedFragmentsLocked(
@@ -1478,6 +1526,74 @@ fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Strea
     }
 }
 
+fn writeAllHeaderPayload(
+    io: std.Io,
+    stream: net.Stream,
+    header: []const u8,
+    payload: []const u8,
+) net.Stream.Writer.Error!void {
+    var header_written: usize = 0;
+    var payload_written: usize = 0;
+    while (header_written < header.len or payload_written < payload.len) {
+        const data = if (payload_written < payload.len)
+            &[_][]const u8{payload[payload_written..]}
+        else
+            &[_][]const u8{};
+        const n = if (header_written < header.len)
+            try io.vtable.netWrite(
+                io.userdata,
+                stream.socket.handle,
+                header[header_written..],
+                data,
+                0,
+            )
+        else
+            try io.vtable.netWrite(
+                io.userdata,
+                stream.socket.handle,
+                payload[payload_written..],
+                &.{""},
+                0,
+            );
+        if (n == 0) return error.SocketUnconnected;
+
+        const header_remaining = header.len - header_written;
+        const header_advance = @min(n, header_remaining);
+        header_written += header_advance;
+        payload_written += n - header_advance;
+    }
+}
+
+fn writeMaskedPayload(
+    transport: RuntimeTransport,
+    header: []const u8,
+    payload: []const u8,
+    mask_key: [4]u8,
+) Error!void {
+    if (payload.len == 0) {
+        try transport.writeAll(header);
+        return;
+    }
+
+    var scratch: [masked_write_scratch_len]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        const count = @min(scratch.len, payload.len - offset);
+        try websocket.applyMaskCopy(
+            scratch[0..count],
+            payload[offset..][0..count],
+            mask_key,
+            offset,
+        );
+        if (offset == 0) {
+            try transport.writeAllParts(header, scratch[0..count]);
+        } else {
+            try transport.writeAll(scratch[0..count]);
+        }
+        offset += count;
+    }
+}
+
 test "WebSocket client handshake accepts split Connection and rejects duplicate critical headers" {
     const allocator = std.testing.allocator;
     const client_key = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -1706,6 +1822,85 @@ test "WebSocket runtime client and server exchange over TCP" {
     try std.testing.expectEqualStrings("world", response.payload);
 
     try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket runtime streams large immutable payload without mutation" {
+    const allocator = std.testing.allocator;
+    const payload_len = masked_write_scratch_len + 257;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = payload_len,
+            .max_message_bytes = payload_len,
+        },
+    );
+    defer server.deinit();
+
+    const payload = try allocator.alloc(u8, payload_len);
+    defer allocator.free(payload);
+    for (payload, 0..) |*byte, index| byte.* = @truncate(index);
+    const expected = try allocator.dupe(u8, payload);
+    defer allocator.free(expected);
+
+    const Shared = struct {
+        server: *Server,
+        expected: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept(.{});
+            defer connection.close();
+            var message = try connection.receiveMessage();
+            defer message.deinit(connection.allocator);
+            try std.testing.expectEqual(websocket.Opcode.binary, message.opcode);
+            try std.testing.expectEqualSlices(
+                u8,
+                shared.expected,
+                message.payload,
+            );
+            try connection.sendBinary(message.payload);
+            var close = try connection.receiveFrame();
+            defer close.deinit(connection.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server, .expected = expected };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/immutable-large",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = payload_len,
+            .max_message_bytes = payload_len,
+        },
+    });
+    defer client.close();
+    try client.sendBinary(payload);
+    try std.testing.expectEqualSlices(u8, expected, payload);
+    var response = try client.receiveMessage();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, expected, response.payload);
+    try client.sendClose(.normal_closure, "");
 
     thread.join();
     if (shared.err) |err| return err;

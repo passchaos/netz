@@ -458,6 +458,7 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=4
 zig build bench-http3-capsule -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
+zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-padding-parse -Doptimize=ReleaseFast
@@ -482,6 +483,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 Capsule Protocol parsing/iteration and caller-buffer encoding for
   CONNECT-stream extension payloads,
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
+- WebSocket masked frame encoding with allocating, caller-buffer, and
+  header-only streaming paths,
 - MQTT subscription-router trie matching versus a linear filter scan,
 - QUIC AES-128-GCM and ChaCha20-Poly1305 short-packet sealing with
   caller-provided storage versus the allocating convenience wrapper,

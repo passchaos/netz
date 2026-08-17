@@ -410,6 +410,55 @@ the retained body, applications can borrow and incrementally consume
 contiguous STREAM data without allocation, and ACK-driven packet-threshold
 losses can be retransmitted in a bounded drain before waiting for PTO.
 
+## WebSocket frame encoding comparison
+
+Captured on 2026-08-17 in `ReleaseFast` with 200,000 masked 4 KiB binary
+frames. The payload length and first mask byte vary per iteration so the
+compiler cannot fold frame generation out of the loop.
+
+```sh
+zig build bench-websocket-frame -Doptimize=ReleaseFast
+```
+
+Representative netz samples:
+
+```text
+allocating masked frame:       85-97 ns/op
+caller-buffer masked frame:    71-82 ns/op
+header-only stream preparation: 0.54-0.56 ns/op
+```
+
+The caller-buffer path copies and masks in one SIMD pass and preserves the
+caller's `[]const u8`. The header-only path is what unmasked server sends use:
+the runtime emits the stack-resident header and borrowed payload with one
+vectored TCP write, so frame preparation neither allocates nor copies the
+payload. WSS similarly writes both slices before one TLS/network flush;
+client sends mask fixed stack chunks without modifying caller memory. The
+HTTP/2 extended-CONNECT adapter retains a per-connection encoding buffer
+because its DATA writer currently accepts one contiguous byte stream.
+
+A direct same-input reference was compiled against
+`~/Work/websocket.zig/src/proto.zig` using its stack `writeFrameHeader`, a
+payload copy (needed to preserve the same immutable-input contract), and
+`proto.mask`. Three same-host samples were:
+
+```sh
+zig build-exe -OReleaseFast -lc --dep proto \
+  -Mroot=benchmarks/reference/websocket_zig_frame.zig \
+  -Mproto=/home/passchaos/Work/websocket.zig/src/proto.zig \
+  -femit-bin=/tmp/bench-websocket-zig
+/tmp/bench-websocket-zig
+```
+
+```text
+websocket.zig header + payload copy/mask: 101, 103, 127 ns/op
+```
+
+Thus the current netz caller-buffer path is faster in the captured runs, while
+the normal unmasked server runtime avoids the payload copy entirely. This is a
+codec/send-hot-path comparison, not an end-to-end connection throughput claim;
+a full concurrent echo/load benchmark remains separate work.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is

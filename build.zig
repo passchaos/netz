@@ -78,6 +78,12 @@ pub fn build(b: *std.Build) void {
             .description = "Run the WebSocket local echo example",
         },
         .{
+            .exe_name = "netz-bench-websocket-frame",
+            .path = "examples/bench_websocket_frame.zig",
+            .run_step = "bench-websocket-frame",
+            .description = "Benchmark WebSocket caller-buffer and streaming frame encoding",
+        },
+        .{
             .exe_name = "netz-bench-mqtt-router",
             .path = "examples/bench_mqtt_router.zig",
             .run_step = "bench-mqtt-router",
