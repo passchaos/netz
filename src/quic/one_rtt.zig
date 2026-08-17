@@ -2907,6 +2907,43 @@ pub const Connection = struct {
         return entry.recv_state.complete();
     }
 
+    /// Copy known receive-stream IDs into caller storage without allocation.
+    ///
+    /// The returned prefix is a point-in-time view of stream identity only;
+    /// use `availableReceivedStream` and `recvStreamStats` for current data and
+    /// lifecycle state. Protocol adapters use this to discover streams whose
+    /// first packet was consumed while pumping ACK/flow-control progress.
+    pub fn receivedStreamIdsInto(
+        self: Connection,
+        out: []u62,
+    ) []u62 {
+        return self.receivedStreamIdsFromInto(0, out);
+    }
+
+    /// Continue `receivedStreamIdsInto` from a physical stream-table offset.
+    /// Returning fewer IDs than `out.len` means the current snapshot is fully
+    /// scanned. The offset is deliberately opaque and only valid until another
+    /// receive operation can append a stream.
+    pub fn receivedStreamIdsFromInto(
+        self: Connection,
+        start: usize,
+        out: []u62,
+    ) []u62 {
+        if (start >= self.stream_recv_flows.items.len) return out[0..0];
+        const remaining = self.stream_recv_flows.items.len - start;
+        const count = @min(out.len, remaining);
+        for (
+            out[0..count],
+            self.stream_recv_flows.items[start..][0..count],
+        ) |
+            *stream_id,
+            entry,
+        | {
+            stream_id.* = @intCast(entry.stream_id);
+        }
+        return out[0..count];
+    }
+
     /// Copy the currently assembled receive bytes for diagnostics and
     /// handshake-integrated early-data consumers. The returned slice is owned
     /// by the caller; consuming flow-control credit remains explicit.

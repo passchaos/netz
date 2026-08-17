@@ -2240,6 +2240,23 @@ pub const HandshakeServerSession = struct {
     peer_promised_push_ids: std.ArrayList(u64) = .empty,
     next_push_stream_id: u62 = first_server_push_stream_id,
 
+    /// Reserve one server-initiated unidirectional stream ID.
+    ///
+    /// HTTP/3 push streams and WebTransport unidirectional streams share this
+    /// QUIC ID space. Keeping allocation here prevents sibling protocol
+    /// adapters from independently selecting the same stream.
+    pub fn reserveServerUnidirectionalStreamId(
+        self: *HandshakeServerSession,
+    ) Error!u62 {
+        const stream_id = self.next_push_stream_id;
+        self.next_push_stream_id = std.math.add(
+            u62,
+            stream_id,
+            4,
+        ) catch return error.StreamCreationError;
+        return stream_id;
+    }
+
     pub fn deinit(self: *HandshakeServerSession) void {
         self.outbound_bodies.deinit();
         self.sent_push_ids.deinit(
@@ -2793,6 +2810,23 @@ pub const HandshakeClient = struct {
     outbound_bodies: OutboundBodySet,
     next_stream_id: u62 = 0,
 
+    /// Reserve one client-initiated bidirectional stream ID.
+    ///
+    /// Request streams and WebTransport bidirectional streams share this QUIC
+    /// ID space. Protocol adapters must reserve through this method rather than
+    /// maintaining an independent counter.
+    pub fn reserveClientBidirectionalStreamId(
+        self: *HandshakeClient,
+    ) Error!u62 {
+        const stream_id = self.next_stream_id;
+        self.next_stream_id = std.math.add(
+            u62,
+            stream_id,
+            4,
+        ) catch return error.StreamCreationError;
+        return stream_id;
+    }
+
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, local_address: net.IpAddress, server: net.IpAddress, limits: Limits, options: HandshakeClientOptions) Error!HandshakeClient {
         try validateBlockedStreamLimit(
             options.session.local_settings,
@@ -3102,7 +3136,8 @@ pub const HandshakeClient = struct {
         if (!self.control.acceptsRequestStream(stream_id)) return error.GoAwayReceived;
         try self.request_lifecycle.open(stream_id);
         errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
-        self.next_stream_id += 4;
+        const reserved = try self.reserveClientBidirectionalStreamId();
+        std.debug.assert(reserved == stream_id);
 
         try sendConnectionSettings(
             &self.established.connection,
@@ -3139,7 +3174,8 @@ pub const HandshakeClient = struct {
         }
         try self.request_lifecycle.open(stream_id);
         errdefer _ = self.request_lifecycle.finish(stream_id) catch false;
-        self.next_stream_id += 4;
+        const reserved = try self.reserveClientBidirectionalStreamId();
+        std.debug.assert(reserved == stream_id);
         try sendConnectionSettings(
             &self.established.connection,
             &self.control,

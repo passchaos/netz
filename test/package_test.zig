@@ -740,6 +740,11 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.connection_router.Router, "routeDatagramFrom"));
     try std.testing.expect(netz.webtransport.SessionId.init(0).isClientInitiatedBidirectional());
     try std.testing.expect(@hasDecl(netz.webtransport, "SessionState"));
+    try std.testing.expect(@hasDecl(netz.webtransport, "StreamRegistry"));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport,
+        "BidirectionalStreamHeader",
+    ));
     try std.testing.expect(@hasDecl(netz.webtransport, "defaultSettings"));
     try std.testing.expect(@hasDecl(netz.webtransport, "ensureDatagramsNegotiated"));
     try std.testing.expectEqual(@as(?usize, 1199), netz.webtransport.maxDatagramPayloadSize(1200, .init(0)));
@@ -751,6 +756,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "maxDatagramPayloadSize"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "datagramsNegotiated"));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.HandshakeClientSession, "getStats"));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "openBidirectionalStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "openUnidirectionalStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "sendStream",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "receiveStream",
+    ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.AcceptedHandshakeSession, "getStats"));
     try std.testing.expectEqual(@as(u32, 0x2112A442), netz.webrtc.stun.magic_cookie);
     try std.testing.expect(@hasDecl(netz.webrtc.stun, "writeIceBindingRequest"));

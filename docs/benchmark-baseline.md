@@ -490,6 +490,34 @@ checkout, so these numbers are recorded as a netz baseline rather than a direct
 whole-broker throughput ratio. See `docs/rumqtt_parity.md` for the feature and
 remaining-work audit.
 
+## WebTransport runtime smoke and DATAGRAM baseline
+
+Validated on 2026-08-17:
+
+```sh
+zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
+zig build bench-webtransport-datagram -Doptimize=ReleaseFast
+```
+
+```text
+WebTransport handshake streams ok: bidi=4, uni=14, server_uni=15
+
+WebTransport datagram runtime benchmark
+  iterations: 10000
+  datagrams: 20000
+  payload bytes: 27
+  ns/roundtrip: 13242
+  ns/datagram: 6621
+  datagrams/s: 151031
+```
+
+The stream smoke uses real QUIC/TLS and HTTP/3 CONNECT rather than the
+cleartext development transport. It validates modern bidirectional association
+(`0x41 + Session ID`), both unidirectional directions, reverse-direction bidi
+data, >1-packet stream fragmentation, per-session stream credit and shared
+HTTP/3/WebTransport stream-ID allocation. The DATAGRAM number remains a netz
+baseline; no equivalent same-command quicz/wtransport result was captured.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is

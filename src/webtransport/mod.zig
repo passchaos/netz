@@ -10,6 +10,10 @@ pub const Error = wire.Error || error{
     InvalidSessionId,
     InvalidCapsule,
     InvalidStreamType,
+    InvalidStreamState,
+    DuplicateStream,
+    UnknownStream,
+    StreamLimitExceeded,
     WebTransportNotNegotiated,
     DatagramsNotNegotiated,
     IntegerOverflow,
@@ -20,6 +24,15 @@ pub const CapsuleType = struct {
     pub const close_webtransport_session: u64 = 0x2843;
     pub const drain_webtransport_session: u64 = 0x78ae;
 };
+
+pub const stream = @import("stream.zig");
+pub const FrameType = stream.FrameType;
+pub const BidirectionalStreamHeader = stream.BidirectionalStreamHeader;
+pub const EndpointRole = stream.EndpointRole;
+pub const StreamDirection = stream.StreamDirection;
+pub const StreamLifecycle = stream.StreamLifecycle;
+pub const StreamState = stream.StreamState;
+pub const StreamRegistry = stream.StreamRegistry;
 
 pub const Setting = struct {
     pub const enable_webtransport: http3.Setting = .{ .id = @intFromEnum(http3.SettingId.webtransport_max_sessions), .value = 1 };
@@ -39,8 +52,9 @@ pub const SessionId = struct {
     }
 
     pub fn isClientInitiatedBidirectional(self: SessionId) bool {
-        const stream = quic.StreamId.init(self.value);
-        return stream.initiator() == .client and stream.direction() == .bidirectional;
+        const stream_id = quic.StreamId.init(self.value);
+        return stream_id.initiator() == .client and
+            stream_id.direction() == .bidirectional;
     }
 
     pub fn quarterStreamId(self: SessionId) u60 {
@@ -269,23 +283,129 @@ test "WebTransport capsule and stream headers" {
     try encoded.append(allocator, 0xff);
     try std.testing.expectError(error.InvalidCapsule, Capsule.parse(encoded.items));
 
-    var stream: std.ArrayList(u8) = .empty;
-    defer stream.deinit(allocator);
-    try UnidirectionalStreamHeader.writeWebTransport(&stream, allocator, SessionId.init(0));
-    const header = try UnidirectionalStreamHeader.parse(stream.items);
+    var stream_bytes: std.ArrayList(u8) = .empty;
+    defer stream_bytes.deinit(allocator);
+    try UnidirectionalStreamHeader.writeWebTransport(
+        &stream_bytes,
+        allocator,
+        SessionId.init(0),
+    );
+    const header = try UnidirectionalStreamHeader.parse(stream_bytes.items);
     try std.testing.expectEqual(http3.StreamType.webtransport_unidirectional, header.stream_type);
     try std.testing.expect(header.session_id.?.isClientInitiatedBidirectional());
 
-    stream.clearRetainingCapacity();
-    try std.testing.expectError(error.InvalidSessionId, UnidirectionalStreamHeader.writeWebTransport(&stream, allocator, SessionId.init(1)));
-    try quic.varint.encode(&stream, allocator, @intFromEnum(http3.StreamType.webtransport_unidirectional));
-    try quic.varint.encode(&stream, allocator, 1);
-    try std.testing.expectError(error.InvalidSessionId, UnidirectionalStreamHeader.parse(stream.items));
+    var bidi_storage: [16]u8 = undefined;
+    const bidi = try BidirectionalStreamHeader.writeInto(
+        &bidi_storage,
+        .init(256),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x40, 0x41, 0x41, 0x00 },
+        bidi,
+    );
+    const bidi_header = try BidirectionalStreamHeader.parse(bidi);
+    try std.testing.expectEqual(@as(u62, 256), bidi_header.session_id.value);
+    try std.testing.expectEqual(bidi.len, bidi_header.consumed);
+    try std.testing.expectError(
+        error.InvalidStreamType,
+        BidirectionalStreamHeader.parse(&.{0}),
+    );
+
+    stream_bytes.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidSessionId,
+        UnidirectionalStreamHeader.writeWebTransport(
+            &stream_bytes,
+            allocator,
+            SessionId.init(1),
+        ),
+    );
+    try quic.varint.encode(
+        &stream_bytes,
+        allocator,
+        @intFromEnum(http3.StreamType.webtransport_unidirectional),
+    );
+    try quic.varint.encode(&stream_bytes, allocator, 1);
+    try std.testing.expectError(
+        error.InvalidSessionId,
+        UnidirectionalStreamHeader.parse(stream_bytes.items),
+    );
 
     const headers = connectHeaders("example.com", "/wt", "https://example.com");
     try std.testing.expectEqual(@as(usize, 6), headers.len);
     try std.testing.expectEqualStrings("capsule-protocol", headers[5].name);
     try std.testing.expect(try http3.capsule.protocolEnabled(&headers));
+}
+
+test "WebTransport stream registry enforces IDs limits and lifecycle" {
+    const allocator = std.testing.allocator;
+    var client = try StreamRegistry.init(
+        allocator,
+        .init(0),
+        .client,
+        .{
+            .max_local_bidi = 2,
+            .max_local_uni = 1,
+            .max_peer_bidi = 1,
+            .max_peer_uni = 1,
+        },
+    );
+    defer client.deinit();
+
+    const first = try client.openLocal(.bidirectional);
+    try std.testing.expectEqual(@as(u62, 4), first.stream_id);
+    try std.testing.expect(first.locally_initiated);
+    const second = try client.openLocal(.bidirectional);
+    try std.testing.expectEqual(@as(u62, 8), second.stream_id);
+    try std.testing.expectError(
+        error.StreamLimitExceeded,
+        client.openLocal(.bidirectional),
+    );
+    const uni = try client.openLocal(.unidirectional);
+    try std.testing.expectEqual(@as(u62, 14), uni.stream_id);
+    try std.testing.expectError(
+        error.StreamLimitExceeded,
+        client.openLocal(.unidirectional),
+    );
+
+    const peer = try client.registerPeer(1, .bidirectional);
+    try std.testing.expect(!peer.locally_initiated);
+    try std.testing.expectError(
+        error.DuplicateStream,
+        client.registerPeer(1, .bidirectional),
+    );
+    try std.testing.expectError(
+        error.InvalidStreamType,
+        client.registerPeer(5, .unidirectional),
+    );
+
+    try client.recordSent(4, 5, true);
+    try std.testing.expectEqual(
+        StreamLifecycle.fin_sent,
+        client.get(4).?.lifecycle(),
+    );
+    try client.recordReceived(4, 7, true);
+    try std.testing.expectEqual(
+        StreamLifecycle.closed,
+        client.get(4).?.lifecycle(),
+    );
+    try std.testing.expectEqual(@as(u64, 5), client.get(4).?.bytes_sent);
+    try std.testing.expectEqual(@as(u64, 7), client.get(4).?.bytes_received);
+    try std.testing.expectError(
+        error.InvalidStreamState,
+        client.recordSent(4, 1, false),
+    );
+
+    try client.markReset(8);
+    try std.testing.expectEqual(
+        StreamLifecycle.reset,
+        client.get(8).?.lifecycle(),
+    );
+    try std.testing.expectError(
+        error.UnknownStream,
+        client.recordReceived(100, 1, false),
+    );
 }
 
 test "WebTransport datagram maps quarter stream id" {

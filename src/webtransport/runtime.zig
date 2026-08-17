@@ -13,6 +13,7 @@ pub const Error = webtransport.Error || http3.runtime.Error || error{
 
 pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
+    max_session_streams: usize = 128,
 };
 
 pub const Server = struct {
@@ -110,6 +111,7 @@ pub const ProtectedServer = struct {
 
 pub const HandshakeServer = struct {
     h3: http3.runtime.HandshakeServer,
+    limits: Limits,
 
     pub fn bind(
         allocator: std.mem.Allocator,
@@ -118,7 +120,16 @@ pub const HandshakeServer = struct {
         limits: Limits,
         options: http3.runtime.HandshakeServerOptions,
     ) Error!HandshakeServer {
-        return .{ .h3 = try .bind(allocator, io, bind_address, limits.http3, webTransportHandshakeServerOptions(options)) };
+        return .{
+            .h3 = try .bind(
+                allocator,
+                io,
+                bind_address,
+                limits.http3,
+                webTransportHandshakeServerOptions(options),
+            ),
+            .limits = limits,
+        };
     }
 
     pub fn deinit(self: *HandshakeServer) void {
@@ -141,7 +152,23 @@ pub const HandshakeServer = struct {
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
         try session.sendResponse(request.stream_id, connectResponse());
-        return .{ .h3 = session, .request = request, .session_id = session_id };
+        var streams = try initHandshakeStreamRegistry(
+            session.established.connection.endpoint.allocator,
+            session_id,
+            .server,
+            session.options.local_settings,
+            session.control.settings.peer,
+            self.limits.max_session_streams,
+            null,
+            null,
+        );
+        errdefer streams.deinit();
+        return .{
+            .h3 = session,
+            .request = request,
+            .session_id = session_id,
+            .streams = streams,
+        };
     }
 };
 
@@ -169,10 +196,12 @@ pub const AcceptedHandshakeSession = struct {
     h3: http3.runtime.HandshakeServerSession,
     request: http3.runtime.OwnedHandshakeRequest,
     session_id: webtransport.SessionId,
+    streams: webtransport.StreamRegistry,
 
     pub fn deinit(self: *AcceptedHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
         self.request.deinit(allocator);
+        self.streams.deinit();
         self.h3.deinit();
         self.* = undefined;
     }
@@ -207,6 +236,62 @@ pub const AcceptedHandshakeSession = struct {
 
     pub fn getStats(self: AcceptedHandshakeSession) quic.one_rtt.ConnectionStats {
         return self.stats();
+    }
+
+    pub fn openBidirectionalStream(
+        self: *AcceptedHandshakeSession,
+    ) Error!u62 {
+        try webtransport.ensureNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return (try self.streams.openLocal(.bidirectional)).stream_id;
+    }
+
+    pub fn openUnidirectionalStream(
+        self: *AcceptedHandshakeSession,
+    ) Error!u62 {
+        try webtransport.ensureNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        // Server push and WebTransport uni streams share the server-initiated
+        // QUIC stream-ID space. Consume the HTTP/3 session's allocator so a
+        // later push cannot reuse this ID.
+        const stream_id =
+            try self.h3.reserveServerUnidirectionalStreamId();
+        const stream = try self.streams.registerLocal(
+            stream_id,
+            .unidirectional,
+        );
+        return stream.stream_id;
+    }
+
+    pub fn sendStream(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+    ) Error!void {
+        try sendHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            payload,
+            fin,
+        );
+    }
+
+    pub fn receiveStream(
+        self: *AcceptedHandshakeSession,
+    ) Error!OwnedHandshakeStream {
+        return receiveHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            self.h3.options.max_stream_buffer,
+        );
     }
 };
 
@@ -260,6 +345,7 @@ pub const ClientSession = struct {
 pub const HandshakeClientSession = struct {
     h3: http3.runtime.HandshakeClient,
     session_id: webtransport.SessionId,
+    streams: webtransport.StreamRegistry,
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -282,10 +368,27 @@ pub const HandshakeClientSession = struct {
         defer response.deinit(allocator);
         try validateConnectResponse(response.response);
         try webtransport.ensureDatagramsNegotiated(h3_client.options.local_settings, h3_client.control.settings.peer);
-        return .{ .h3 = h3_client, .session_id = .init(0) };
+        const session_id = webtransport.SessionId.init(0);
+        var streams = try initHandshakeStreamRegistry(
+            allocator,
+            session_id,
+            .client,
+            h3_client.options.local_settings,
+            h3_client.control.settings.peer,
+            options.limits.max_session_streams,
+            null,
+            null,
+        );
+        errdefer streams.deinit();
+        return .{
+            .h3 = h3_client,
+            .session_id = session_id,
+            .streams = streams,
+        };
     }
 
     pub fn deinit(self: *HandshakeClientSession) void {
+        self.streams.deinit();
         self.h3.deinit();
         self.* = undefined;
     }
@@ -320,6 +423,61 @@ pub const HandshakeClientSession = struct {
 
     pub fn getStats(self: HandshakeClientSession) quic.one_rtt.ConnectionStats {
         return self.stats();
+    }
+
+    pub fn openBidirectionalStream(
+        self: *HandshakeClientSession,
+    ) Error!u62 {
+        try webtransport.ensureNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        // HTTP requests and WebTransport bidi streams share client-initiated
+        // QUIC IDs. Advance the HTTP/3 allocator transactionally.
+        const stream_id =
+            try self.h3.reserveClientBidirectionalStreamId();
+        const stream = try self.streams.registerLocal(
+            stream_id,
+            .bidirectional,
+        );
+        return stream.stream_id;
+    }
+
+    pub fn openUnidirectionalStream(
+        self: *HandshakeClientSession,
+    ) Error!u62 {
+        try webtransport.ensureNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return (try self.streams.openLocal(.unidirectional)).stream_id;
+    }
+
+    pub fn sendStream(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        payload: []const u8,
+        fin: bool,
+    ) Error!void {
+        try sendHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            payload,
+            fin,
+        );
+    }
+
+    pub fn receiveStream(
+        self: *HandshakeClientSession,
+    ) Error!OwnedHandshakeStream {
+        return receiveHandshakeSessionStream(
+            &self.h3.established.connection,
+            &self.streams,
+            self.session_id,
+            self.h3.options.max_stream_buffer,
+        );
     }
 };
 
@@ -523,6 +681,12 @@ pub const OwnedHandshakeDatagramBatch = struct {
         return count;
     }
 };
+
+const handshake_stream = @import("runtime/stream.zig");
+pub const OwnedHandshakeStream = handshake_stream.OwnedHandshakeStream;
+const initHandshakeStreamRegistry = handshake_stream.initRegistry;
+const sendHandshakeSessionStream = handshake_stream.send;
+const receiveHandshakeSessionStream = handshake_stream.receive;
 
 fn sendDatagramFromEndpoint(
     endpoint: *quic.runtime.Endpoint,
@@ -866,6 +1030,11 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
     const original_dcid = [_]u8{ 0xea, 0xce, 0x10, 0x01, 0xea, 0xce, 0x10, 0x02 };
     const client_cid = [_]u8{ 0xea, 0xce, 0x10, 0x03 };
     const server_cid = [_]u8{ 0xea, 0xce, 0x10, 0x04 };
+    const large_stream_payload = try allocator.alloc(u8, 12 * 1024);
+    defer allocator.free(large_stream_payload);
+    for (large_stream_payload, 0..) |*byte, index| {
+        byte.* = @truncate(index);
+    }
 
     var server = try HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{
         .http3 = .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } },
@@ -880,18 +1049,68 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
 
     const Shared = struct {
         server: *HandshakeServer,
+        large_stream_payload: []const u8,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
+            runFallible(shared) catch |err| {
                 shared.err = err;
             };
         }
 
-        fn runFallible(server_ptr: *HandshakeServer) !void {
+        fn runFallible(shared: *@This()) !void {
+            const server_ptr = shared.server;
             var accepted = try server_ptr.accept();
             defer accepted.deinit();
             try std.testing.expect(accepted.session_id.isClientInitiatedBidirectional());
+
+            var client_bidi = try accepted.receiveStream();
+            defer client_bidi.deinit();
+            try std.testing.expectEqual(
+                webtransport.StreamDirection.bidirectional,
+                client_bidi.direction,
+            );
+            try std.testing.expect(!client_bidi.locally_initiated);
+            try std.testing.expectEqualStrings(
+                "client-bidi",
+                client_bidi.payload,
+            );
+            try accepted.sendStream(
+                client_bidi.stream_id,
+                "server-bidi",
+                true,
+            );
+
+            var client_uni = try accepted.receiveStream();
+            defer client_uni.deinit();
+            try std.testing.expectEqual(
+                webtransport.StreamDirection.unidirectional,
+                client_uni.direction,
+            );
+            try std.testing.expectEqualStrings(
+                "client-uni",
+                client_uni.payload,
+            );
+
+            var large_bidi = try accepted.receiveStream();
+            defer large_bidi.deinit();
+            try std.testing.expectEqual(
+                webtransport.StreamDirection.bidirectional,
+                large_bidi.direction,
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                shared.large_stream_payload,
+                large_bidi.payload,
+            );
+
+            const server_uni_id =
+                try accepted.openUnidirectionalStream();
+            try accepted.sendStream(
+                server_uni_id,
+                "server-uni",
+                true,
+            );
 
             var datagram = try accepted.receiveDatagram();
             defer datagram.deinit(accepted.h3.established.connection.endpoint.allocator);
@@ -906,7 +1125,10 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
         }
     };
 
-    var shared = Shared{ .server = &server };
+    var shared = Shared{
+        .server = &server,
+        .large_stream_payload = large_stream_payload,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
     var client = try HandshakeClientSession.connect(allocator, io, .{ .ip4 = .loopback(0) }, server.address(), .{
@@ -924,6 +1146,28 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
         },
     });
     defer client.deinit();
+
+    const client_bidi_id = try client.openBidirectionalStream();
+    try client.sendStream(client_bidi_id, "client-bidi", true);
+    const client_uni_id = try client.openUnidirectionalStream();
+    try client.sendStream(client_uni_id, "client-uni", true);
+    const large_bidi_id = try client.openBidirectionalStream();
+    try client.sendStream(large_bidi_id, large_stream_payload, true);
+
+    var server_bidi = try client.receiveStream();
+    defer server_bidi.deinit();
+    try std.testing.expectEqual(client_bidi_id, server_bidi.stream_id);
+    try std.testing.expect(server_bidi.locally_initiated);
+    try std.testing.expectEqualStrings("server-bidi", server_bidi.payload);
+
+    var server_uni = try client.receiveStream();
+    defer server_uni.deinit();
+    try std.testing.expectEqual(
+        webtransport.StreamDirection.unidirectional,
+        server_uni.direction,
+    );
+    try std.testing.expect(!server_uni.locally_initiated);
+    try std.testing.expectEqualStrings("server-uni", server_uni.payload);
 
     try client.sendDatagram("handshake-client-dgram");
     var response = try client.receiveDatagram();

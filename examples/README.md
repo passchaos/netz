@@ -24,6 +24,7 @@ zig build run-quic-datagram-echo
 zig build run-quic-close
 zig build run-websocket-echo
 zig build bench-websocket-frame -Doptimize=ReleaseFast
+zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 # Linux only: raw std.os.linux.IoUring connect/send/recv around HTTP/1 bytes
 zig build run-linux-io-uring-http1
 ```
@@ -60,6 +61,12 @@ certificate validation, `--discover` performs best-effort Alt-Svc discovery
 using an HTTP/3 HEAD probe before issuing the final request, and
 `--alt-svc='h3=":443"; ma=2592000'` lets interop tests provide a known
 HTTP/3 alternative service explicitly.
+
+`run-webtransport-handshake-stream` performs a real QUIC/TLS + HTTP/3
+WebTransport CONNECT, then exercises a client-opened bidirectional echo,
+client-to-server unidirectional data, and a server-to-client unidirectional
+stream. It uses the modern `0x41 + Session ID` bidirectional association prefix
+implemented by wtransport.
 
 ## I/O backend note
 

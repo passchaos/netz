@@ -375,7 +375,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   runtime over protected HTTP/3 with automatic WebTransport/H3 DATAGRAM
   SETTINGS advertisement and negotiation checks, and a handshake-backed
   protected runtime that uses QUIC 1-RTT DATAGRAM send/receive queues with
-  WebTransport payload-size accounting, batch receive helpers, and
+  WebTransport payload-size accounting, batch receive helpers, modern
+  `0x41 + Session ID` bidirectional and `0x54 + Session ID` unidirectional
+  stream association, real-handshake bidi/uni open/send/receive with
+  per-session limits and shared HTTP/3/WT stream-ID allocation, and
   WebTransport-style `stats`/`getStats` access to the underlying QUIC 1-RTT
   counters
 - WebRTC building blocks: STUN, ICE connectivity-check helpers with priority encode/decode,
@@ -424,6 +427,7 @@ zig build examples
 zig build run-http1-hello
 zig build run-http2-h2c
 zig build run-http3-handshake
+zig build run-webtransport-handshake-stream
 zig build run-websocket-echo
 zig build run-http3-fetch
 zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify
