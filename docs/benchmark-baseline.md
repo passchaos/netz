@@ -710,6 +710,36 @@ zig build-exe -OReleaseFast -lc --dep websocket \
 taskset -c 0 /tmp/bench-websocket-zig-echo --tcp-nodelay
 ```
 
+Four-connection mode uses one start barrier after every client finishes warmup
+and reports aggregate latency across 800 measured round trips. Twenty
+alternating samples on CPUs 0-7:
+
+```text
+netz:
+  3.788-4.802 us aggregate/roundtrip
+  median 4.150 us, trimmed mean 4.173 us
+  median 240,993 roundtrips/s, 1,885.51 wire MiB/s
+
+websocket.zig:
+  4.912-5.653 us aggregate/roundtrip
+  median 5.212 us, trimmed mean 5.221 us
+  median 191,883 roundtrips/s, 1,501.28 wire MiB/s
+
+netz advantage:
+  1.256x by median, 1.251x by trimmed mean
+```
+
+```sh
+taskset -c 0-7 zig build bench-websocket-echo \
+  -Doptimize=ReleaseFast -- --connections=4
+taskset -c 0-7 /tmp/bench-websocket-zig-echo \
+  --tcp-nodelay --connections=4
+```
+
+One traced run showed approximately 1,768 netz `sendmsg` calls, versus 1,772
+reference `sendmsg` plus 892 `writev` calls. These counts include warmup and
+handshake/shutdown traffic; tracing overhead is excluded from timing evidence.
+
 ## MQTT shared-subscription router
 
 Captured on 2026-08-17 with:

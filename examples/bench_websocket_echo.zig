@@ -9,9 +9,12 @@ const payload_bytes: usize = 4096;
 const warmup_iterations: usize = 20;
 const iterations: usize = 200;
 const max_message_bytes: usize = payload_bytes;
+const default_connections: usize = 1;
+const max_connections: usize = 16;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    const connections = try parseConnections(init);
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -30,21 +33,31 @@ pub fn main() !void {
 
     const Shared = struct {
         server: *netz.websocket.runtime.Server,
-        err: ?anyerror = null,
+        result: ?netz.websocket.runtime.ConcurrentServeResult = null,
+        errors: [max_connections]?anyerror =
+            .{null} ** max_connections,
+        expected_exchanges: usize,
+        connection_count: usize,
 
         fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
-                shared.err = err;
+            shared.result = shared.server.serveConcurrent(
+                @This(),
+                shared,
+                handle,
+                shared.connection_count,
+                .{},
+            ) catch |err| {
+                shared.errors[0] = err;
+                return;
             };
         }
 
-        fn runFallible(
-            server_ptr: *netz.websocket.runtime.Server,
-        ) !void {
-            var connection = try server_ptr.accept(.{});
-            defer connection.close();
+        fn handle(
+            shared: *@This(),
+            connection: *netz.websocket.runtime.Connection,
+        ) netz.websocket.runtime.Error!void {
             var storage: [max_message_bytes]u8 align(64) = undefined;
-            for (0..warmup_iterations + iterations) |_| {
+            for (0..shared.expected_exchanges) |_| {
                 const message = try connection.receiveMessageInto(&storage);
                 if (message.opcode != .binary or
                     message.payload.len != payload_bytes)
@@ -55,74 +68,200 @@ pub fn main() !void {
             }
         }
     };
-    var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-
-    var client = try netz.websocket.runtime.Client.connect(
-        allocator,
-        io,
-        server.address(),
-        .{
-            .host = "127.0.0.1",
-            .target = "/echo-bench",
-            .limits = .{
-                .max_head_bytes = 4096,
-                .max_frame_bytes = max_message_bytes,
-                .max_message_bytes = max_message_bytes,
-            },
-        },
+    var shared = Shared{
+        .server = &server,
+        .expected_exchanges = warmup_iterations + iterations,
+        .connection_count = connections,
+    };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        Shared.run,
+        .{&shared},
     );
-    defer client.close();
 
-    var payload: [payload_bytes]u8 align(64) = undefined;
-    var response: [payload_bytes]u8 align(64) = undefined;
-    for (&payload, 0..) |*byte, index| byte.* = @truncate(index);
+    const clients = try allocator.alloc(
+        netz.websocket.runtime.Connection,
+        connections,
+    );
+    defer allocator.free(clients);
+    var connected: usize = 0;
+    defer for (clients[0..connected]) |*client| client.close();
+    for (clients) |*client| {
+        client.* = try netz.websocket.runtime.Client.connect(
+            allocator,
+            io,
+            server.address(),
+            .{
+                .host = "127.0.0.1",
+                .target = "/echo-bench",
+                .limits = .{
+                    .max_head_bytes = 4096,
+                    .max_frame_bytes = max_message_bytes,
+                    .max_message_bytes = max_message_bytes,
+                },
+            },
+        );
+        connected += 1;
+    }
 
-    for (0..warmup_iterations) |_| {
-        _ = try exchange(&client, &payload, &response);
+    var ready = std.atomic.Value(usize).init(0);
+    var failed = std.atomic.Value(bool).init(false);
+    var start: std.Io.Event = .unset;
+    var worker_errors: [max_connections]?anyerror =
+        .{null} ** max_connections;
+    var finished_ns: [max_connections]u64 =
+        .{0} ** max_connections;
+    var checksums: [max_connections]u64 =
+        .{0} ** max_connections;
+    var workers: [max_connections]std.Thread = undefined;
+    const Worker = struct {
+        client: *netz.websocket.runtime.Connection,
+        io: std.Io,
+        ready: *std.atomic.Value(usize),
+        failed: *std.atomic.Value(bool),
+        start: *std.Io.Event,
+        err: *?anyerror,
+        finished_ns: *u64,
+        checksum: *u64,
+        seed: u8,
+
+        fn run(worker: *@This()) void {
+            runFallible(worker) catch |err| {
+                worker.err.* = err;
+                worker.failed.store(true, .release);
+            };
+        }
+
+        fn runFallible(worker: *@This()) !void {
+            var payload: [payload_bytes]u8 align(64) = undefined;
+            var response: [payload_bytes]u8 align(64) = undefined;
+            for (&payload, 0..) |*byte, index| {
+                byte.* = worker.seed +% @as(u8, @truncate(index));
+            }
+            for (0..warmup_iterations) |_| {
+                _ = try exchange(worker.client, &payload, &response);
+            }
+            _ = worker.ready.fetchAdd(1, .release);
+            worker.start.waitUncancelable(worker.io);
+            var checksum: u64 = 0;
+            for (0..iterations) |_| {
+                checksum +%= try exchange(
+                    worker.client,
+                    &payload,
+                    &response,
+                );
+            }
+            worker.checksum.* = checksum;
+            worker.finished_ns.* = nowNs(worker.io);
+        }
+    };
+    var worker_contexts: [max_connections]Worker = undefined;
+    for (0..connections) |index| {
+        worker_contexts[index] = .{
+            .client = &clients[index],
+            .io = io,
+            .ready = &ready,
+            .failed = &failed,
+            .start = &start,
+            .err = &worker_errors[index],
+            .finished_ns = &finished_ns[index],
+            .checksum = &checksums[index],
+            .seed = @truncate(index * 17),
+        };
+        workers[index] = try std.Thread.spawn(
+            .{},
+            Worker.run,
+            .{&worker_contexts[index]},
+        );
+    }
+    while (ready.load(.acquire) != connections) {
+        if (failed.load(.acquire)) break;
+        std.Thread.yield() catch {};
     }
     const started = nowNs(io);
-    var checksum: u64 = 0;
-    for (0..iterations) |_| {
-        checksum +%= try exchange(&client, &payload, &response);
+    start.set(io);
+    for (workers[0..connections]) |worker| worker.join();
+    for (worker_errors[0..connections]) |maybe_err| {
+        if (maybe_err) |err| return err;
     }
-    const elapsed = nowNs(io) -| started;
+    var finished = started;
+    var checksum: u64 = 0;
+    for (finished_ns[0..connections], checksums[0..connections]) |
+        worker_finished,
+        worker_checksum,
+    | {
+        finished = @max(finished, worker_finished);
+        checksum +%= worker_checksum;
+    }
+    const elapsed = finished -| started;
 
-    thread.join();
-    if (shared.err) |err| return err;
+    server_thread.join();
+    if (shared.errors[0]) |err| return err;
+    var serve_result = shared.result orelse return error.ServerFailed;
+    defer serve_result.deinit();
+    if (serve_result.firstError()) |err| return err;
     const roundtrip_wire_bytes =
         // Client frame: 2-byte base + 2-byte extended length + 4-byte mask.
         (2 + 2 + 4 + payload_bytes) +
         // Server frame: 2-byte base + 2-byte extended length.
         (2 + 2 + payload_bytes);
+    const measured_roundtrips = iterations * connections;
     const roundtrips_per_second: u128 = if (elapsed == 0)
         0
     else
-        (@as(u128, iterations) * std.time.ns_per_s) / elapsed;
+        (@as(u128, measured_roundtrips) * std.time.ns_per_s) /
+            elapsed;
     const wire_bytes_per_second =
         roundtrips_per_second * roundtrip_wire_bytes;
     std.debug.print(
         \\WebSocket persistent echo benchmark
+        \\  connections: {d}
         \\  warmup iterations: {d}
         \\  measured iterations: {d}
         \\  payload bytes: {d}
         \\  wire bytes/roundtrip: {d}
-        \\  ns/roundtrip: {d}
+        \\  aggregate ns/roundtrip: {d}
         \\  roundtrips/s: {d}
         \\  wire MiB/s: {d:.2}
         \\  checksum: {d}
         \\
     , .{
+        connections,
         warmup_iterations,
         iterations,
         payload_bytes,
         roundtrip_wire_bytes,
-        elapsed / iterations,
+        elapsed / measured_roundtrips,
         roundtrips_per_second,
         @as(f64, @floatFromInt(wire_bytes_per_second)) /
             (1024.0 * 1024.0),
         checksum,
     });
+}
+
+fn parseConnections(init: std.process.Init) !usize {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        std.heap.smp_allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var connections = default_connections;
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--connections=")) {
+            connections = try std.fmt.parseInt(
+                usize,
+                arg["--connections=".len..],
+                10,
+            );
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+    if (connections == 0 or connections > max_connections) {
+        return error.InvalidArgument;
+    }
+    return connections;
 }
 
 fn exchange(

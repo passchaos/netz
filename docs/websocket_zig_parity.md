@@ -103,10 +103,47 @@ recorded about 442 netz sendmsg calls versus 443 reference sendmsg plus 228
 writev calls for 220 total exchanges. The tuned TCP_NODELAY comparison above is
 the primary implementation result.
 
+### Four concurrent persistent connections
+
+The same benchmark accepts `--connections=4`. All clients finish 20 warmup
+exchanges, wait on one start event, then execute 200 measured round trips each.
+Aggregate latency divides wall time to the slowest client by all 800 measured
+round trips; handshake, warmup, shutdown, and joins remain outside the timed
+interval. Both processes were restricted to CPUs 0-7.
+
+```sh
+taskset -c 0-7 zig build bench-websocket-echo \
+  -Doptimize=ReleaseFast -- --connections=4
+taskset -c 0-7 /tmp/bench-websocket-zig-echo \
+  --tcp-nodelay --connections=4
+```
+
+Twenty alternating samples:
+
+```text
+netz:
+  3.788-4.802 us aggregate/roundtrip
+  median 4.150 us, trimmed mean 4.173 us
+  median 240,993 roundtrips/s, 1,885.51 wire MiB/s
+
+websocket.zig:
+  4.912-5.653 us aggregate/roundtrip
+  median 5.212 us, trimmed mean 5.221 us
+  median 191,883 roundtrips/s, 1,501.28 wire MiB/s
+
+netz aggregate-latency advantage:
+  1.256x by median, 1.251x by trimmed mean
+```
+
+One `strace -f -c` run recorded about 1,768 netz `sendmsg` calls. The
+reference recorded about 1,772 `sendmsg` plus 892 `writev` calls: its client
+still sends mask/header separately from payload. Tracing perturbs latency, so
+these counts explain submission shape but are not timing samples.
+
 ## Remaining evidence before a broad completion claim
 
-1. Extend the now-equal-shape single-connection echo benchmark to multiple
-   concurrent connections and payload distributions.
+1. Extend the now-equal-shape 1/4-connection benchmark to mixed payload
+   distributions and higher connection counts.
 2. Compare buffer-pool behavior and peak memory under many mostly-idle
    connections; the reference exposes explicit small/large buffer pools.
 3. Add Autobahn/WebSocket protocol-suite evidence for both implementations
