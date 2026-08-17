@@ -50,8 +50,13 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "send_mutex"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "OwnedMessage"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime, "Message"));
+    try std.testing.expect(@hasDecl(netz.websocket, "BorrowedFrame"));
+    try std.testing.expect(@hasDecl(netz.websocket, "parseFrameInto"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessage"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "receiveMessageInto"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendMessage"));
+    try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendBinaryInPlace"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Connection, "sendFragmented"));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "close_sent"));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "close_received"));
@@ -59,8 +64,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "permessage_deflate"));
     try std.testing.expect(@hasField(netz.websocket.runtime.AcceptOptions, "protocols"));
     try std.testing.expect(@hasField(netz.websocket.runtime.AcceptOptions, "enable_permessage_deflate"));
+    try std.testing.expect(@hasField(netz.websocket.runtime.Limits, "tcp_nodelay"));
     try std.testing.expect(@hasField(netz.websocket.runtime.ConnectOptions, "protocols"));
     try std.testing.expect(@hasField(netz.websocket.runtime.ConnectOptions, "enable_permessage_deflate"));
+    try std.testing.expect(@hasField(netz.websocket.runtime.ConnectOptions, "tcp_nodelay"));
     try std.testing.expect(@hasDecl(netz.websocket, "ExtensionNegotiation"));
     try std.testing.expect(@hasDecl(netz.websocket, "compressMessage"));
     try std.testing.expect(@hasDecl(netz.websocket, "decompressMessage"));

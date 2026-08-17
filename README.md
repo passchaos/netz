@@ -357,6 +357,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
 - WebSocket handshakes with Host authority, body-framing rejection, duplicate-subprotocol and nonce validation, frame masking, strict frame/control
   validation including control/continuation RSV rejection, typed close-frame parse/write helpers and close payload checks, fragmented message assembly with aggregate
   message-size limits, automatic active-state PING→PONG and close echo/completed-close short-circuit handling plus tungstenite-style data-send/read suppression after receiving Close,
+  caller-buffer frame/message receive for allocation-free persistent echo
+  loops, plus explicit mutable-buffer in-place client masking for applications
+  that accept the same post-send mutation contract as websocket.zig,
   outbound text/close/control-frame validation plus codec-level invalid-frame write rejection,
   subprotocol token validation with strict client response selection, split-header subprotocol and extension-offer negotiation, optional permessage-deflate negotiation with
   no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode plus quoted window-bit parsing and rejection of
@@ -511,6 +514,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - HTTP/3 QPACK field-section encoding against a populated dynamic table,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
   header-only streaming paths,
+- WebSocket persistent 4 KiB binary echo over one real upgraded connection,
+  using caller-buffer receive and explicit in-place client masking,
 - MQTT subscription-router trie matching versus a linear filter scan,
 - QUIC AES-128-GCM and ChaCha20-Poly1305 short-packet sealing with
   caller-provided storage versus the allocating convenience wrapper,

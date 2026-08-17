@@ -222,6 +222,12 @@ pub const Frame = struct {
     }
 };
 
+pub const BorrowedFrame = struct {
+    header: FrameHeader,
+    payload: []u8,
+    consumed: usize,
+};
+
 pub const max_frame_header_len: usize = 14;
 
 pub fn parseFrame(allocator: std.mem.Allocator, bytes: []const u8) Error!Frame {
@@ -238,6 +244,42 @@ pub fn parseFrameOptions(allocator: std.mem.Allocator, bytes: []const u8, option
     if (header.mask_key) |mask| applyMask(payload, mask, 0);
     try validatePayload(header, payload, options);
     return .{ .header = header, .payload = payload, .consumed = header.header_len + payload_len };
+}
+
+/// Decode one frame into caller-owned payload storage.
+///
+/// The input frame may be discarded as soon as this returns. Masking copies
+/// and transforms in one pass, matching the owned parser's validation without
+/// a payload allocation.
+pub fn parseFrameInto(
+    out: []u8,
+    bytes: []const u8,
+    options: ParseFrameOptions,
+) Error!BorrowedFrame {
+    const header = try FrameHeader.parse(bytes);
+    try validateFrameHeader(header, options);
+    const payload_len = std.math.cast(usize, header.payload_len) orelse
+        return error.PayloadTooLarge;
+    const consumed = std.math.add(
+        usize,
+        header.header_len,
+        payload_len,
+    ) catch return error.PayloadTooLarge;
+    if (bytes.len < consumed) return error.BufferTooShort;
+    if (out.len < payload_len) return error.BufferTooShort;
+    const payload = out[0..payload_len];
+    const encoded = bytes[header.header_len..consumed];
+    if (header.mask_key) |mask| {
+        try applyMaskCopy(payload, encoded, mask, 0);
+    } else {
+        @memcpy(payload, encoded);
+    }
+    try validatePayload(header, payload, options);
+    return .{
+        .header = header,
+        .payload = payload,
+        .consumed = consumed,
+    };
 }
 
 fn validateFrameHeader(header: FrameHeader, options: ParseFrameOptions) Error!void {
@@ -937,6 +979,37 @@ test "WebSocket frame masked roundtrip" {
     for (&expected, 0..) |*byte, i| byte.* ^= mask_key[(offset + i) & 3];
     applyMask(&payload, mask_key, offset);
     try std.testing.expectEqualSlices(u8, &expected, &payload);
+}
+
+test "WebSocket frame decodes masked payload into caller storage" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeFrame(
+        &encoded,
+        allocator,
+        .binary,
+        "caller-owned",
+        .{ .mask_key = .{ 1, 2, 3, 4 } },
+    );
+
+    var storage: [32]u8 = undefined;
+    const frame = try parseFrameInto(
+        &storage,
+        encoded.items,
+        .{ .expect_mask = .masked },
+    );
+    try std.testing.expectEqual(Opcode.binary, frame.header.opcode);
+    try std.testing.expectEqualStrings("caller-owned", frame.payload);
+    try std.testing.expectEqual(encoded.items.len, frame.consumed);
+    try std.testing.expectError(
+        error.BufferTooShort,
+        parseFrameInto(
+            storage[0..4],
+            encoded.items,
+            .{ .expect_mask = .masked },
+        ),
+    );
 }
 
 test "WebSocket caller-buffer frame encoding matches allocating writer" {

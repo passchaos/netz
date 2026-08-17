@@ -14,8 +14,10 @@ superiority.
 | HTTP/2 WebSocket (RFC 8441) | Covered through extended CONNECT client/server adapters | Not present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover | Server-side support exists; the audited 0.16 client explicitly rejects compression configuration |
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
+| Receive/send ownership | `parseFrameInto` and `receiveMessageInto` use caller storage; `sendBinaryInPlace` explicitly offers the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads; client send APIs require mutable payloads and leave them masked |
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies | Handler callbacks and automatic default control replies |
 | Concurrent sends | Serialized by per-connection `std.Io.Mutex` and covered by a runtime test | Documented thread-safe connection writes |
+| TCP latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
 | Linux io_uring experiment | Cleartext client helper | Custom epoll/kqueue/Windows server backends |
 
 The reference has a richer callback-oriented standalone server surface and
@@ -50,10 +52,61 @@ and uses one vectored network write for header + borrowed payload. Masked
 clients copy and mask in one SIMD pass through a fixed 16 KiB stack scratch,
 so payload size no longer drives heap allocation.
 
+## Persistent echo evidence
+
+The end-to-end benchmark uses one real HTTP/1 upgraded connection, 20 untimed
+warmup exchanges, then 200 measured 4 KiB binary echo round trips. Client
+requests are masked, server replies are unmasked, both wire frames use minimal
+16-bit extended lengths, and both clients copy the echoed application payload
+back into their mutable send buffer before the next round. Handshake time is
+excluded. This evidence covers the ordinary TCP runtime, not the separate
+io_uring adapter.
+
+Netz uses `sendBinaryInPlace` and `receiveMessageInto`; the former deliberately
+leaves caller storage masked, matching websocket.zig's mutable-input contract,
+while the latter assembles fragments and handles control frames without a
+message allocation.
+
+```sh
+taskset -c 0 zig build bench-websocket-echo -Doptimize=ReleaseFast
+
+zig build-exe -OReleaseFast -lc --dep websocket \
+  -Mroot=benchmarks/reference/websocket_zig_echo.zig \
+  --dep build \
+  -Mwebsocket=/home/passchaos/Work/websocket.zig/src/websocket.zig \
+  -Mbuild=benchmarks/reference/websocket_zig_build_options.zig \
+  -femit-bin=/tmp/bench-websocket-zig-echo
+taskset -c 0 /tmp/bench-websocket-zig-echo --tcp-nodelay
+```
+
+Twenty alternating CPU-0 samples with TCP_NODELAY enabled on both clients:
+
+```text
+netz:
+  9.146-10.537 us/roundtrip
+  median 9.501 us, trimmed mean 9.539 us
+
+websocket.zig:
+  13.231-14.406 us/roundtrip
+  median 13.630 us, trimmed mean 13.702 us
+
+netz latency advantage:
+  1.435x by median, 1.436x by trimmed mean
+```
+
+The websocket.zig public client defaults to Nagle enabled and writes its masked
+header then payload separately. Five default-socket samples were about
+41.09-41.38 ms/roundtrip, while netz's vectored header+payload submission was
+10.26-10.71 us in that run. This roughly 3,915x cliff is specifically Linux
+Nagle/delayed-ACK interaction, not a broad library ratio. `strace -f -c`
+recorded about 442 netz sendmsg calls versus 443 reference sendmsg plus 228
+writev calls for 220 total exchanges. The tuned TCP_NODELAY comparison above is
+the primary implementation result.
+
 ## Remaining evidence before a broad completion claim
 
-1. Add an end-to-end concurrent echo/load benchmark with the same payload mix,
-   connection count, socket settings and client driver for both projects.
+1. Extend the now-equal-shape single-connection echo benchmark to multiple
+   concurrent connections and payload distributions.
 2. Compare buffer-pool behavior and peak memory under many mostly-idle
    connections; the reference exposes explicit small/large buffer pools.
 3. Add Autobahn/WebSocket protocol-suite evidence for both implementations

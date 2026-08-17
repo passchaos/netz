@@ -668,8 +668,47 @@ websocket.zig header + payload copy/mask: 101, 103, 127 ns/op
 
 Thus the current netz caller-buffer path is faster in the captured runs, while
 the normal unmasked server runtime avoids the payload copy entirely. This is a
-codec/send-hot-path comparison, not an end-to-end connection throughput claim;
-a full concurrent echo/load benchmark remains separate work.
+codec/send-hot-path comparison; end-to-end evidence follows.
+
+### WebSocket persistent 4 KiB echo
+
+One real HTTP/1 upgraded connection performs 20 warmup and 200 measured binary
+echoes. Both implementations use mutable client input, masked requests,
+unmasked responses, caller/reader-owned receive storage, and copy each echo
+back to the next send buffer. Handshake time is excluded; this comparison uses
+the ordinary TCP runtime rather than the io_uring adapter.
+
+Twenty alternating CPU-0 samples with TCP_NODELAY enabled on both clients:
+
+```text
+netz:
+  9.146-10.537 us, median 9.501 us, trimmed mean 9.539 us
+websocket.zig:
+  13.231-14.406 us, median 13.630 us, trimmed mean 13.702 us
+netz advantage:
+  1.435x by median, 1.436x by trimmed mean
+```
+
+Without TCP_NODELAY, websocket.zig's two-write masked client path measured
+about 41.09-41.38 ms/roundtrip, versus 10.26-10.71 us for netz. That exceptional
+~3,915x gap is a Linux Nagle/delayed-ACK cliff and is not generalized beyond
+this socket/write shape. `strace -f -c` showed about 442 netz sendmsg calls,
+while the reference used 443 sendmsg plus 228 writev calls for the same 220
+exchanges.
+
+Commands:
+
+```sh
+taskset -c 0 zig build bench-websocket-echo -Doptimize=ReleaseFast
+
+zig build-exe -OReleaseFast -lc --dep websocket \
+  -Mroot=benchmarks/reference/websocket_zig_echo.zig \
+  --dep build \
+  -Mwebsocket=/home/passchaos/Work/websocket.zig/src/websocket.zig \
+  -Mbuild=benchmarks/reference/websocket_zig_build_options.zig \
+  -femit-bin=/tmp/bench-websocket-zig-echo
+taskset -c 0 /tmp/bench-websocket-zig-echo --tcp-nodelay
+```
 
 ## MQTT shared-subscription router
 

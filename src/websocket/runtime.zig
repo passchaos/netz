@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const websocket = @import("mod.zig");
 const http1 = @import("../http1/mod.zig");
 const http2 = @import("../http2/mod.zig");
@@ -9,6 +10,11 @@ const wire = @import("../internal/wire.zig");
 
 const net = std.Io.net;
 const masked_write_scratch_len: usize = 16 * 1024;
+// A 4 KiB application payload occupies 4104 bytes on the masked wire. The old
+// 4096-byte read scratch therefore forced two socket reads for this common
+// frame size. Keep the burst on the call stack (rather than 16 KiB resident per
+// connection) while covering typical WebSocket/TLS records in one read.
+const transport_read_scratch_len: usize = 16 * 1024;
 
 pub const Error = websocket.Error || http1_runtime.Error || http2_runtime.Error || error{
     HeadersTooLarge,
@@ -18,12 +24,16 @@ pub const Error = websocket.Error || http1_runtime.Error || http2_runtime.Error 
     InvalidUri,
     UnsupportedScheme,
     MessageTooLarge,
-} || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error;
+} || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.posix.SetSockOptError;
 
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
     max_frame_bytes: usize = 16 * 1024 * 1024,
     max_message_bytes: usize = 16 * 1024 * 1024,
+    /// Disable Nagle for latency-sensitive frame boundaries. WebSocket
+    /// messages are already application-framed and control replies should not
+    /// wait behind delayed ACK merely because a peer uses split writes.
+    tcp_nodelay: bool = true,
 };
 
 pub const Role = enum {
@@ -101,6 +111,7 @@ pub const Server = struct {
     pub fn accept(self: *Server, options: AcceptOptions) Error!Connection {
         var http_conn = try self.http.accept();
         errdefer http_conn.close();
+        if (self.limits.tcp_nodelay) try setTcpNoDelay(http_conn.stream);
 
         var head = try readHttpHead(self.http.allocator, http_conn.io, http_conn.stream, self.limits.max_head_bytes);
         defer head.deinit(self.http.allocator);
@@ -352,6 +363,9 @@ pub const Client = struct {
 
         var uring_stream = try http1_runtime.connectIpLinuxIoUring(ring, address);
         errdefer uring_stream.close();
+        if (connect_options.tcp_nodelay) {
+            try setLinuxTcpNoDelay(uring_stream.fd);
+        }
         return connectTransport(
             allocator,
             io,
@@ -370,6 +384,9 @@ pub const Client = struct {
         tls_conn: ?*http1_runtime.TlsClientConnection,
         options: ConnectOptions,
     ) Error!Connection {
+        if (options.tcp_nodelay) {
+            try setTcpNoDelay(stream);
+        }
         const transport: RuntimeTransport = if (tls_conn) |conn| .{ .tls = conn } else .{ .tcp = .{ .io = io, .stream = stream } };
         return connectTransport(allocator, io, transport, stream, tls_conn, null, options);
     }
@@ -469,6 +486,7 @@ pub const ConnectOptions = struct {
     target: []const u8 = "/",
     protocols: []const []const u8 = &.{},
     enable_permessage_deflate: bool = false,
+    tcp_nodelay: bool = true,
     limits: Limits = .{},
 };
 
@@ -480,6 +498,11 @@ pub const OwnedMessage = struct {
         allocator.free(self.payload);
         self.* = undefined;
     }
+};
+
+pub const Message = struct {
+    opcode: websocket.Opcode,
+    payload: []u8,
 };
 
 pub const Connection = struct {
@@ -526,6 +549,38 @@ pub const Connection = struct {
 
     pub fn sendBinary(self: *Connection, payload: []const u8) Error!void {
         try self.sendMessage(.binary, payload);
+    }
+
+    /// Send one binary message by masking the caller buffer in place.
+    ///
+    /// This opt-in API matches mutable-buffer WebSocket clients such as
+    /// websocket.zig. The payload remains masked after return; callers that
+    /// need immutable input should continue using `sendBinary`.
+    pub fn sendBinaryInPlace(
+        self: *Connection,
+        payload: []u8,
+    ) Error!void {
+        if (self.role != .client or self.permessage_deflate) {
+            return error.InvalidFrame;
+        }
+        if (!canSendOpcode(.binary, self.close_sent, self.close_received)) {
+            return error.ConnectionClosed;
+        }
+        try validateOutgoingMessagePayload(.binary, payload);
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+
+        var mask_key: [4]u8 = undefined;
+        try std.Io.randomSecure(self.io, &mask_key);
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+        const header = try websocket.writeFrameHeaderInto(
+            &header_storage,
+            .binary,
+            payload,
+            .{ .mask_key = mask_key },
+        );
+        websocket.applyMask(payload, mask_key, 0);
+        try self.transport().writeAllParts(header, payload);
     }
 
     pub fn sendPing(self: *Connection, payload: []const u8) Error!void {
@@ -682,6 +737,127 @@ pub const Connection = struct {
         }
     }
 
+    /// Receive one complete uncompressed message into caller-owned storage.
+    ///
+    /// `out` must be at least `limits.max_message_bytes`; this lets the method
+    /// consume arbitrarily fragmented messages transactionally without finding
+    /// a later fragment that no longer fits after earlier frames were removed
+    /// from the transport buffer. Control frames retain the same automatic
+    /// Pong/Close behavior as `receiveMessage`.
+    pub fn receiveMessageInto(
+        self: *Connection,
+        out: []u8,
+    ) Error!Message {
+        if (self.permessage_deflate) return error.InvalidFrame;
+        if (out.len < self.limits.max_message_bytes) {
+            return error.BufferTooShort;
+        }
+
+        var opcode: ?websocket.Opcode = null;
+        var written: usize = 0;
+        var control_storage: [125]u8 = undefined;
+        while (true) {
+            const frame = try self.receiveFrameInto(
+                out[written..],
+                &control_storage,
+            );
+            switch (frame.header.opcode) {
+                .ping => {
+                    if (!self.close_sent) try self.sendPong(frame.payload);
+                    continue;
+                },
+                .pong => continue,
+                .close => {
+                    self.close_received = true;
+                    if (!self.close_sent) {
+                        try self.sendFrame(.close, frame.payload);
+                    }
+                    return error.ConnectionClosed;
+                },
+                .text, .binary => {
+                    if (opcode != null) return error.InvalidFrame;
+                    opcode = frame.header.opcode;
+                },
+                .continuation => {
+                    if (opcode == null) return error.InvalidFrame;
+                },
+                _ => return error.InvalidFrame,
+            }
+            written = std.math.add(
+                usize,
+                written,
+                frame.payload.len,
+            ) catch return error.PayloadTooLarge;
+            if (written > self.limits.max_message_bytes) {
+                return error.PayloadTooLarge;
+            }
+            if (!frame.header.fin) continue;
+            const message_opcode = opcode orelse return error.InvalidFrame;
+            const payload = out[0..written];
+            if (message_opcode == .text and
+                !std.unicode.utf8ValidateSlice(payload))
+            {
+                return error.InvalidUtf8;
+            }
+            return .{ .opcode = message_opcode, .payload = payload };
+        }
+    }
+
+    fn receiveFrameInto(
+        self: *Connection,
+        out: []u8,
+        control_out: *[125]u8,
+    ) Error!websocket.BorrowedFrame {
+        if (self.close_sent and self.close_received) {
+            return error.ConnectionClosed;
+        }
+        try self.ensureBuffered(2);
+        const second = self.inbuf.items[1];
+        var header_len: usize = 2;
+        const len_code = second & 0x7f;
+        if (len_code == 126) {
+            header_len += 2;
+        } else if (len_code == 127) {
+            header_len += 8;
+        }
+        if ((second & 0x80) != 0) header_len += 4;
+        try self.ensureBuffered(header_len);
+
+        const header = try websocket.FrameHeader.parse(self.inbuf.items);
+        const payload_len = std.math.cast(
+            usize,
+            header.payload_len,
+        ) orelse return error.PayloadTooLarge;
+        if (payload_len > self.limits.max_frame_bytes) {
+            return error.MessageTooLarge;
+        }
+        const payload_out = if (header.opcode.isControl())
+            control_out[0..]
+        else
+            out;
+        if (payload_len > payload_out.len) return error.PayloadTooLarge;
+        const total_len = std.math.add(
+            usize,
+            header.header_len,
+            payload_len,
+        ) catch return error.PayloadTooLarge;
+        try self.ensureBuffered(total_len);
+        const parse_options: websocket.ParseFrameOptions = switch (self.role) {
+            .client => .{ .expect_mask = .unmasked },
+            .server => .{ .expect_mask = .masked },
+        };
+        const frame = try websocket.parseFrameInto(
+            payload_out,
+            self.inbuf.items[0..total_len],
+            parse_options,
+        );
+        self.discardBuffered(frame.consumed);
+        if (self.close_received and frame.header.opcode != .close) {
+            return error.ConnectionClosed;
+        }
+        return frame;
+    }
+
     fn writeFrameLocked(self: *Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
         try self.writeFrameLockedExtended(opcode, payload, fin, .{});
     }
@@ -740,7 +916,7 @@ pub const Connection = struct {
     }
 
     fn ensureBuffered(self: *Connection, len: usize) Error!void {
-        var scratch: [4096]u8 = undefined;
+        var scratch: [transport_read_scratch_len]u8 = undefined;
         while (self.inbuf.items.len < len) {
             const n = try self.transport().read(&scratch);
             if (n == 0) return error.ConnectionClosed;
@@ -1516,6 +1692,36 @@ fn considerSubprotocolHeader(
 fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
     var bufs = [_][]u8{buffer};
     return io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
+}
+
+fn setTcpNoDelay(stream: net.Stream) std.posix.SetSockOptError!void {
+    if (comptime builtin.os.tag == .windows) return;
+    const enabled: c_int = 1;
+    try std.posix.setsockopt(
+        stream.socket.handle,
+        std.posix.IPPROTO.TCP,
+        std.posix.TCP.NODELAY,
+        std.mem.asBytes(&enabled),
+    );
+}
+
+fn setLinuxTcpNoDelay(fd: std.os.linux.fd_t) Error!void {
+    if (comptime builtin.os.tag != .linux) return;
+    const enabled: c_int = 1;
+    const bytes = std.mem.asBytes(&enabled);
+    const result = std.os.linux.setsockopt(
+        fd,
+        std.os.linux.IPPROTO.TCP,
+        std.os.linux.TCP.NODELAY,
+        bytes.ptr,
+        @intCast(bytes.len),
+    );
+    return switch (std.os.linux.errno(result)) {
+        .SUCCESS => {},
+        .NOMEM, .NOBUFS => error.SystemResources,
+        .NOPROTOOPT => error.ProtocolUnsupportedBySystem,
+        else => error.IoUringOperationFailed,
+    };
 }
 
 fn writeAllToStream(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer.Error!void {
@@ -3247,4 +3453,8 @@ test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
     const incomplete = "GET /chat HTTP/1.1\r\nHost: example";
     try std.testing.expectEqual(@as(?usize, null), try findHttpHeadEndWithinLimit(incomplete, incomplete.len + 1));
     try std.testing.expectError(error.HeadersTooLarge, findHttpHeadEndWithinLimit(incomplete, incomplete.len));
+}
+
+test {
+    _ = @import("runtime/message_io_tests.zig");
 }
