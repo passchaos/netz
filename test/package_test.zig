@@ -360,6 +360,31 @@ test "public modules are reachable" {
         netz.mqtt.runtime.Connection,
         "establishClient",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "initTls",
+    ));
+    try std.testing.expect(@hasDecl(netz.mqtt, "tls_runtime"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "Client",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectHost",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectAddress",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime.Client,
+        "connectUri",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ConnectOptions,
+        "tcp_nodelay",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt, "websocket_runtime"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime,

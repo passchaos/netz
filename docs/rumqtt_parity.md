@@ -14,7 +14,7 @@ whole-broker throughput claims.
 | MQTT 5 capabilities | Properties, topic aliases, maximum packet/QoS, retain/wildcard/shared/subscription-ID capability enforcement | Rich v5 client packet/state support |
 | Shared subscriptions | Trie-indexed `{group, filter}` routing with allocation-free match, RoundRobin/Random/Sticky and stable Rendezvous hashing | RoundRobin/Random/Sticky broker strategies |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local and shared groups | Hash maps, logs and broker scheduler |
-| Runtime transports | Blocking TCP client/server plus `std.Io.async` concurrent server helper; MQTT 3.1.1/5 WebSocket client/server over WS and client-side WSS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
+| Runtime transports | Blocking TCP client/server plus `std.Io.async` concurrent server helper; verified native TLS client; MQTT 3.1.1/5 WebSocket client/server over WS and client-side WSS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
 | Broker persistence | Not yet a full broker session/log store | Datalog, retained messages, graveyard/persistent sessions and reconnect state |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
@@ -93,14 +93,48 @@ subprotocol rejection. Client `wss://` uses the existing HTTP/1 TLS transport;
 the netz WebSocket server currently expects cleartext WS or an external TLS
 terminator.
 
+## Native MQTT-over-TLS transport
+
+`mqtt.tls_runtime.Client` accepts host names, literal addresses with an explicit
+TLS identity, and `mqtts://`/`ssl://` URIs (default port 8883). It reuses the
+same Zig 0.16 TLS client as HTTPS/WSS, including operating-system roots,
+caller-managed CA bundles, hostname verification, and explicit truncation
+policy. TCP_NODELAY defaults on for latency-sensitive MQTT control packets and
+can be disabled for batching-oriented deployments.
+
+The in-repository TLS 1.3 peer uses project-local vail primitives and performs a
+real encrypted handshake and application-record exchange. End-to-end tests
+cover MQTT 5 CONNECT, verified localhost CA/SAN, QoS 1 PUBLISH/PUBACK, and MQTT
+3.1.1 through `mqtts://`; no OpenSSL process or public network endpoint is
+required.
+
+Run the steady-state 1 KiB QoS 1 baseline with:
+
+```sh
+zig build bench-mqtt-tls -Doptimize=ReleaseFast
+```
+
+2026-08-18 same-host `ReleaseFast` smoke result after 100 warmups and 2,000
+measured PUBLISH/PUBACK exchanges:
+
+```text
+ns/publish+PUBACK: 13,674
+operations/s:      73,126
+```
+
+This is a reproducible netz baseline rather than an equal-wire rumqtt speed
+claim. Unlike rumqtt's feature-gated rustls/native-tls split, the netz API is
+available through one built-in Zig TLS transport; rumqtt still has broader
+client-certificate/mTLS configuration.
+
 ## Remaining work before broad superiority
 
 1. Add retained-message storage and delivery rules, including retain-handling
    behavior for new/replaced/shared subscriptions.
 2. Add persistent broker sessions, offline queues, Will Delay processing and
    reconnect retransmission equivalent to rumqttd's graveyard/log machinery.
-3. Add a native TLS MQTT server/client transport and server-side WSS
-   termination; client-side WSS is already available.
+3. Add native MQTT TLS server and server-side WSS termination, plus client
+   certificate/mTLS support; verified native TLS and WSS clients are available.
 4. Build one identical multi-client publish/subscribe load driver for both
    brokers and capture throughput, tail latency, allocation and peak memory.
 5. Add MQTT protocol conformance/interoperability suites beyond in-repository

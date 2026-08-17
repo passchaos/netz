@@ -2,6 +2,7 @@ const std = @import("std");
 const mqtt = @import("mod.zig");
 const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
+const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
 
 const net = std.Io.net;
@@ -393,6 +394,32 @@ pub const Connection = struct {
             .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(
                 topic_alias_maximum,
             ),
+        };
+    }
+
+    /// Wrap a TLS client connection in the shared MQTT session state.
+    ///
+    /// The TLS object owns and closes the underlying TCP stream. As with the
+    /// WebSocket adapter, MQTT negotiation and QoS state remain transport
+    /// independent after construction.
+    pub fn initTls(
+        allocator: std.mem.Allocator,
+        tls_connection: *http1_runtime.TlsClientConnection,
+        options: ConnectOptions,
+    ) Connection {
+        return .{
+            .allocator = allocator,
+            .transport = .initTls(tls_connection),
+            .protocol = options.protocol,
+            .limits = options.limits,
+            .max_outgoing_inflight = options.max_outgoing_inflight,
+            .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse
+                options.max_outgoing_inflight,
+            .incoming_topic_alias_maximum = effectiveTopicAliasMaximum(
+                options.topic_alias_maximum,
+            ),
+            .peer_maximum_qos = options.peer_maximum_qos,
+            .peer_retain_available = options.peer_retain_available,
         };
     }
 

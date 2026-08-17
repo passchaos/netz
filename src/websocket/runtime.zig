@@ -6,6 +6,7 @@ const http2 = @import("../http2/mod.zig");
 const http1_runtime = http1.runtime;
 const http2_runtime = http2.runtime;
 const stream_io = @import("../internal/stream_io.zig");
+const socket_options = @import("../internal/socket_options.zig");
 const wire = @import("../internal/wire.zig");
 
 const net = std.Io.net;
@@ -111,7 +112,9 @@ pub const Server = struct {
     pub fn accept(self: *Server, options: AcceptOptions) Error!Connection {
         var http_conn = try self.http.accept();
         errdefer http_conn.close();
-        if (self.limits.tcp_nodelay) try setTcpNoDelay(http_conn.stream);
+        if (self.limits.tcp_nodelay) {
+            try socket_options.setTcpNoDelay(http_conn.stream);
+        }
 
         var head = try readHttpHead(self.http.allocator, http_conn.io, http_conn.stream, self.limits.max_head_bytes);
         defer head.deinit(self.http.allocator);
@@ -395,7 +398,7 @@ pub const Client = struct {
         options: ConnectOptions,
     ) Error!Connection {
         if (options.tcp_nodelay) {
-            try setTcpNoDelay(stream);
+            try socket_options.setTcpNoDelay(stream);
         }
         const transport: RuntimeTransport = if (tls_conn) |conn| .{ .tls = conn } else .{ .tcp = .{ .io = io, .stream = stream } };
         return connectTransport(allocator, io, transport, stream, tls_conn, null, options);
@@ -1702,17 +1705,6 @@ fn considerSubprotocolHeader(
 fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
     var bufs = [_][]u8{buffer};
     return io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
-}
-
-fn setTcpNoDelay(stream: net.Stream) std.posix.SetSockOptError!void {
-    if (comptime builtin.os.tag == .windows) return;
-    const enabled: c_int = 1;
-    try std.posix.setsockopt(
-        stream.socket.handle,
-        std.posix.IPPROTO.TCP,
-        std.posix.TCP.NODELAY,
-        std.mem.asBytes(&enabled),
-    );
 }
 
 fn setLinuxTcpNoDelay(fd: std.os.linux.fd_t) Error!void {

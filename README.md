@@ -381,8 +381,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   subscription-option replacement, publisher-aware No Local filtering, and
   per-group/filter shared-subscription RoundRobin/Random/Sticky selection plus
   stable low-remapping Rendezvous hashing, plus a blocking TCP client/server runtime with a
-  `std.Io.async` concurrent server helper and MQTT-over-WebSocket client/server
-  adapters for MQTT 3.1.1 and MQTT 5, with strict `mqtt` subprotocol
+  `std.Io.async` concurrent server helper, native MQTT-over-TLS clients with
+  system or caller-provided CA roots and hostname verification, and
+  MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with
+  strict `mqtt` subprotocol
   negotiation, `ws://` plus client-side `wss://`, MQTT byte-stream
   reassembly across binary-message boundaries, and in-place client masking,
   MQTT v5 Server Keep Alive, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
@@ -417,10 +419,11 @@ client transport; QUIC has Initial
 protection primitives plus a blocking UDP endpoint runtime for datagram/frame
 transport with endpoint-level Version Negotiation responses for unsupported
 long-header versions; MQTT has blocking TCP and WebSocket client/server
-runtimes for CONNECT/SUBSCRIBE/PUBLISH/PING/DISCONNECT flows, including QoS 1
-and QoS 2 publish acknowledgements. The WebSocket client supports WSS through
-the shared TLS client transport. Server-side TLS termination, event loops,
-congestion control,
+runtimes plus a native TLS client for CONNECT/SUBSCRIBE/PUBLISH/PING/DISCONNECT
+flows, including QoS 1 and QoS 2 publish acknowledgements. The TLS and
+WebSocket clients support `mqtts://`/`ssl://` and `wss://` respectively through
+the shared verified TLS client transport. Server-side TLS termination, event
+loops, congestion control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on
 the same byte-level pieces.
 

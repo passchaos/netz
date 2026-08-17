@@ -1,6 +1,7 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
 const websocket_runtime = @import("../../websocket/mod.zig").runtime;
+const http1_runtime = @import("../../http1/mod.zig").runtime;
 
 const net = std.Io.net;
 
@@ -25,6 +26,7 @@ pub const Transport = union(enum) {
         io: std.Io,
         stream: net.Stream,
     },
+    tls: *http1_runtime.TlsClientConnection,
     websocket: WebSocketTransport,
 
     pub fn initTcp(io: std.Io, stream: net.Stream) Transport {
@@ -37,12 +39,19 @@ pub const Transport = union(enum) {
         return .{ .websocket = .{ .connection = connection } };
     }
 
+    pub fn initTls(
+        connection: *http1_runtime.TlsClientConnection,
+    ) Transport {
+        return .{ .tls = connection };
+    }
+
     pub fn close(
         self: *Transport,
         allocator: std.mem.Allocator,
     ) void {
         switch (self.*) {
             .tcp => |tcp| tcp.stream.close(tcp.io),
+            .tls => |connection| connection.deinit(),
             .websocket => |*ws| {
                 ws.input.deinit(allocator);
                 ws.connection.close();
@@ -57,6 +66,7 @@ pub const Transport = union(enum) {
     ) Error!void {
         switch (self.*) {
             .tcp => |tcp| try writeAll(tcp.io, tcp.stream, bytes),
+            .tls => |connection| try connection.writeAll(bytes),
             // One packet per write matches rumqtt's WsStream behavior. The
             // reader intentionally does not depend on that optimization.
             // Client MQTT encoders relinquish their temporary bytes after the
@@ -80,6 +90,11 @@ pub const Transport = union(enum) {
                 tcp.stream,
                 max_packet_size,
             ),
+            .tls => |connection| readStreamPacket(
+                allocator,
+                connection,
+                max_packet_size,
+            ),
             .websocket => |*ws| readWebSocketPacket(
                 allocator,
                 ws,
@@ -88,6 +103,57 @@ pub const Transport = union(enum) {
         };
     }
 };
+
+fn readStreamPacket(
+    allocator: std.mem.Allocator,
+    connection: *http1_runtime.TlsClientConnection,
+    max_packet_size: usize,
+) Error!OwnedPacket {
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(allocator);
+
+    var first: [1]u8 = undefined;
+    try readExactTls(connection, &first);
+    try encoded.append(allocator, first[0]);
+
+    var remaining_bytes: [4]u8 = undefined;
+    var remaining_len_len: usize = 0;
+    while (remaining_len_len < remaining_bytes.len) : (remaining_len_len += 1) {
+        try readExactTls(
+            connection,
+            remaining_bytes[remaining_len_len .. remaining_len_len + 1],
+        );
+        try encoded.append(
+            allocator,
+            remaining_bytes[remaining_len_len],
+        );
+        if ((remaining_bytes[remaining_len_len] & 0x80) == 0) {
+            break;
+        }
+    } else {
+        return error.MalformedRemainingLength;
+    }
+
+    const decoded = try mqtt.decodeRemainingLength(
+        remaining_bytes[0 .. remaining_len_len + 1],
+    );
+    const payload_start = encoded.items.len;
+    const packet_len = std.math.add(
+        usize,
+        payload_start,
+        decoded.value,
+    ) catch return error.PacketTooLarge;
+    if (packet_len > max_packet_size) return error.PacketTooLarge;
+    try encoded.resize(allocator, packet_len);
+    try readExactTls(connection, encoded.items[payload_start..]);
+
+    const bytes = try encoded.toOwnedSlice(allocator);
+    errdefer allocator.free(bytes);
+    return .{
+        .bytes = bytes,
+        .fixed = try mqtt.FixedHeader.parse(bytes),
+    };
+}
 
 pub const OwnedPacket = struct {
     bytes: []u8,
@@ -249,6 +315,18 @@ fn readExact(
             stream.socket.handle,
             &bufs,
         );
+        if (n == 0) return error.ConnectionClosed;
+        offset += n;
+    }
+}
+
+fn readExactTls(
+    connection: *http1_runtime.TlsClientConnection,
+    buffer: []u8,
+) Error!void {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        const n = try connection.read(buffer[offset..]);
         if (n == 0) return error.ConnectionClosed;
         offset += n;
     }

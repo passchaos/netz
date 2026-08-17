@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const http2 = @import("mod.zig");
 const http1 = @import("../http1/mod.zig");
 const http1_runtime = http1.runtime;
@@ -7,22 +6,9 @@ const frame_io = @import("runtime/frame_io.zig");
 const push = @import("runtime/push.zig");
 const priority_runtime = @import("runtime/priority.zig");
 const stream_io = @import("../internal/stream_io.zig");
+const socket_options = @import("../internal/socket_options.zig");
 
 const net = std.Io.net;
-
-fn setTcpNoDelay(stream: net.Stream) std.posix.SetSockOptError!void {
-    if (comptime builtin.os.tag == .windows) {
-        // std.Io 0.16 exposes no portable socket-option operation yet.
-        return;
-    }
-    const enabled: c_int = 1;
-    try std.posix.setsockopt(
-        stream.socket.handle,
-        std.posix.IPPROTO.TCP,
-        std.posix.TCP.NODELAY,
-        std.mem.asBytes(&enabled),
-    );
-}
 
 pub const Error = http2.Error || http1_runtime.Error || error{
     ConnectionClosed,
@@ -131,7 +117,9 @@ pub const Server = struct {
     pub fn accept(self: *Server) Error!Connection {
         const stream = try self.listener.accept(self.io);
         errdefer stream.close(self.io);
-        if (self.limits.tcp_nodelay) try setTcpNoDelay(stream);
+        if (self.limits.tcp_nodelay) {
+            try socket_options.setTcpNoDelay(stream);
+        }
 
         var preface_buf: [http2.connection_preface.len]u8 = undefined;
         try readExact(self.io, stream, &preface_buf);
@@ -171,7 +159,9 @@ pub const Server = struct {
         const stream = try self.listener.accept(self.io);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
-        if (self.limits.tcp_nodelay) try setTcpNoDelay(stream);
+        if (self.limits.tcp_nodelay) {
+            try socket_options.setTcpNoDelay(stream);
+        }
 
         var request = try http1_runtime.readRequestFromStream(self.allocator, self.io, stream, limitsToHttp1(self.limits), .{});
         errdefer request.deinit(self.allocator);
@@ -434,7 +424,9 @@ pub const Client = struct {
         request_options: RequestOptions,
     ) Error!H2cUpgradeResult {
         try validateLocalLimits(limits);
-        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        if (limits.tcp_nodelay) {
+            try socket_options.setTcpNoDelay(stream);
+        }
         var connection = Connection{
             .io = io,
             .allocator = allocator,
@@ -506,7 +498,9 @@ pub const Client = struct {
     }
 
     fn connectStream(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error!Connection {
-        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        if (limits.tcp_nodelay) {
+            try socket_options.setTcpNoDelay(stream);
+        }
         try writeAll(io, stream, http2.connection_preface);
         try writeInitialSettings(allocator, io, stream, limits, .client);
         try writeInitialConnectionWindow(allocator, io, stream, limits);

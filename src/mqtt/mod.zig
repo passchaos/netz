@@ -3,7 +3,9 @@ const wire = @import("../internal/wire.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const websocket_runtime = @import("websocket_runtime.zig");
+pub const tls_runtime = @import("tls_runtime.zig");
 pub const router = @import("router.zig");
+pub const testing = @import("testing/mod.zig");
 
 pub const Error = wire.Error || error{
     BufferTooShort,
@@ -2568,7 +2570,9 @@ test "MQTT v5 AUTH control" {
 test {
     _ = runtime;
     _ = websocket_runtime;
+    _ = tls_runtime;
     _ = router;
     _ = @import("runtime/packet_transport.zig");
+    _ = @import("tls_runtime_tests.zig");
     _ = @import("websocket_runtime_tests.zig");
 }
