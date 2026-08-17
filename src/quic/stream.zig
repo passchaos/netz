@@ -299,6 +299,184 @@ pub const RecvState = struct {
         self.received.items.len = remaining;
         self.storage_offset = self.read_offset;
     }
+
+    /// Transactional, non-owning validation state for the STREAM frames in
+    /// one packet.
+    ///
+    /// QUIC packets are validated before any frame mutates connection state.
+    /// Cloning the full receive buffer to provide that guarantee makes a GRO
+    /// batch quadratic in buffered STREAM bytes. This shadow instead borrows
+    /// the existing bytes and retains only the packet's small frame metadata;
+    /// overlap checks consult both sources without copying payload data.
+    pub const Preflight = struct {
+        allocator: std.mem.Allocator,
+        stream_id: u64,
+        storage_offset: usize,
+        buffer: []const u8,
+        received: []const bool,
+        final_size: ?usize,
+        received_total: u64,
+        highest_received_end: usize,
+        max_buffered: usize,
+        pending: std.ArrayList(quic.StreamFrame) = .empty,
+
+        pub fn init(state: *const RecvState) Preflight {
+            return .{
+                .allocator = state.allocator,
+                .stream_id = state.stream_id,
+                .storage_offset = state.storage_offset,
+                .buffer = state.buffer.items,
+                .received = state.received.items,
+                .final_size = state.final_size,
+                .received_total = state.received_total,
+                .highest_received_end = state.highest_received_end,
+                .max_buffered = state.max_buffered,
+            };
+        }
+
+        pub fn initEmpty(
+            allocator: std.mem.Allocator,
+            stream_id: u64,
+            max_buffered: usize,
+        ) Preflight {
+            return .{
+                .allocator = allocator,
+                .stream_id = stream_id,
+                .storage_offset = 0,
+                .buffer = &.{},
+                .received = &.{},
+                .final_size = null,
+                .received_total = 0,
+                .highest_received_end = 0,
+                .max_buffered = max_buffered,
+            };
+        }
+
+        pub fn deinit(self: *Preflight) void {
+            self.pending.deinit(self.allocator);
+            self.* = undefined;
+        }
+
+        pub fn receivedByteCount(self: Preflight) u64 {
+            return self.received_total;
+        }
+
+        pub fn applyFinalSize(
+            self: *Preflight,
+            final_size: u64,
+            final: bool,
+        ) Error!void {
+            const size = std.math.cast(usize, final_size) orelse
+                return error.InvalidStreamRange;
+            if (final and size < self.highest_received_end) {
+                return error.FinalSizeMismatch;
+            }
+            if (self.final_size) |known| {
+                if (size > known) return error.FinalSizeMismatch;
+                if (final and size != known) {
+                    return error.FinalSizeMismatch;
+                }
+                return;
+            }
+            if (final) self.final_size = size;
+        }
+
+        pub fn insertTracked(
+            self: *Preflight,
+            frame: quic.StreamFrame,
+        ) Error!u64 {
+            if (frame.stream_id != self.stream_id) return error.WrongStream;
+            const absolute_offset = std.math.cast(
+                usize,
+                frame.offset,
+            ) orelse return error.InvalidStreamRange;
+            const absolute_end = std.math.add(
+                usize,
+                absolute_offset,
+                frame.data.len,
+            ) catch return error.InvalidStreamRange;
+            if (self.final_size) |known| {
+                if (absolute_end > known) return error.FinalSizeMismatch;
+                if (frame.fin and absolute_end != known) {
+                    return error.FinalSizeMismatch;
+                }
+            }
+            if (absolute_end <= self.storage_offset) {
+                if (frame.fin and
+                    absolute_end < self.highest_received_end)
+                {
+                    return error.FinalSizeMismatch;
+                }
+                if (frame.fin) self.final_size = absolute_end;
+                return 0;
+            }
+
+            const retained_offset = @max(
+                absolute_offset,
+                self.storage_offset,
+            );
+            const relative_end = absolute_end - self.storage_offset;
+            if (relative_end > self.max_buffered) {
+                return error.StreamBufferTooLarge;
+            }
+
+            var newly_received: u64 = 0;
+            var absolute = retained_offset;
+            while (absolute < absolute_end) : (absolute += 1) {
+                const incoming = frame.data[absolute - absolute_offset];
+                const relative = absolute - self.storage_offset;
+                if (relative < self.received.len and
+                    self.received[relative])
+                {
+                    if (self.buffer[relative] != incoming) {
+                        return error.ConflictingStreamData;
+                    }
+                    continue;
+                }
+
+                var covered_by_pending = false;
+                for (self.pending.items) |prior| {
+                    const prior_offset = std.math.cast(
+                        usize,
+                        prior.offset,
+                    ) orelse return error.InvalidStreamRange;
+                    const prior_end = std.math.add(
+                        usize,
+                        prior_offset,
+                        prior.data.len,
+                    ) catch return error.InvalidStreamRange;
+                    if (absolute < prior_offset or absolute >= prior_end) {
+                        continue;
+                    }
+                    if (prior.data[absolute - prior_offset] != incoming) {
+                        return error.ConflictingStreamData;
+                    }
+                    covered_by_pending = true;
+                    break;
+                }
+                if (!covered_by_pending) newly_received += 1;
+            }
+
+            // Match RecvState's conflict-first classification: an overlapping
+            // bad retransmission remains ConflictingStreamData even when that
+            // frame also carries an inconsistent FIN.
+            if (frame.fin and absolute_end < self.highest_received_end) {
+                return error.FinalSizeMismatch;
+            }
+            try self.pending.append(self.allocator, frame);
+            self.received_total = std.math.add(
+                u64,
+                self.received_total,
+                newly_received,
+            ) catch std.math.maxInt(u64);
+            self.highest_received_end = @max(
+                self.highest_received_end,
+                absolute_end,
+            );
+            if (frame.fin) self.final_size = absolute_end;
+            return newly_received;
+        }
+    };
 };
 
 test "QUIC send stream state writes offset STREAM frames" {
@@ -492,6 +670,76 @@ test "QUIC receive stream clips overlap at sliding window boundary" {
     );
     try std.testing.expectEqualStrings("ijkl", recv.available());
     try std.testing.expectEqual(@as(u64, 12), recv.receivedByteCount());
+}
+
+test "QUIC receive stream preflight validates without copying retained body" {
+    const allocator = std.testing.allocator;
+    var recv = RecvState.init(allocator, 0, 32);
+    defer recv.deinit();
+    try recv.insert(.{
+        .stream_id = 0,
+        .offset = 0,
+        .data = "abcdefgh",
+    });
+    try recv.consume(4);
+
+    var preflight = RecvState.Preflight.init(&recv);
+    defer preflight.deinit();
+    try std.testing.expectEqual(
+        @intFromPtr(recv.buffer.items.ptr),
+        @intFromPtr(preflight.buffer.ptr),
+    );
+    try std.testing.expectEqual(@as(u64, 4), try preflight.insertTracked(.{
+        .stream_id = 0,
+        .offset = 4,
+        .data = "efghijkl",
+    }));
+    try std.testing.expectEqual(@as(u64, 12), preflight.receivedByteCount());
+    // Validation never mutates the borrowed receive state.
+    try std.testing.expectEqualStrings("efgh", recv.available());
+    try std.testing.expectEqual(@as(u64, 8), recv.receivedByteCount());
+}
+
+test "QUIC receive stream preflight checks packet-local overlap and FIN" {
+    const allocator = std.testing.allocator;
+    var preflight = RecvState.Preflight.initEmpty(allocator, 4, 32);
+    defer preflight.deinit();
+
+    try std.testing.expectEqual(@as(u64, 6), try preflight.insertTracked(.{
+        .stream_id = 4,
+        .offset = 0,
+        .data = "abcdef",
+    }));
+    try std.testing.expectEqual(@as(u64, 2), try preflight.insertTracked(.{
+        .stream_id = 4,
+        .offset = 4,
+        .data = "efgh",
+        .fin = true,
+    }));
+    try std.testing.expectEqual(@as(?usize, 8), preflight.final_size);
+    try std.testing.expectEqual(@as(u64, 8), preflight.receivedByteCount());
+
+    try std.testing.expectEqual(@as(u64, 0), try preflight.insertTracked(.{
+        .stream_id = 4,
+        .offset = 2,
+        .data = "cdef",
+    }));
+    try std.testing.expectError(
+        error.ConflictingStreamData,
+        preflight.insertTracked(.{
+            .stream_id = 4,
+            .offset = 3,
+            .data = "XYZ",
+        }),
+    );
+    try std.testing.expectError(
+        error.FinalSizeMismatch,
+        preflight.insertTracked(.{
+            .stream_id = 4,
+            .offset = 8,
+            .data = "i",
+        }),
+    );
 }
 
 test "QUIC receive stream advances through sparse tail after gap fill" {

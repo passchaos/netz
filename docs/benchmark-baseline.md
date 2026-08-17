@@ -370,6 +370,46 @@ Future multi-stream payload-buffer work needs per-send or per-stream lifetime
 isolation, not one shared mutable buffer or a change that increases the
 multi-stream send/receive critical section.
 
+## Raw QUIC real-handshake STREAM comparison
+
+Captured on 2026-08-17 with a fresh TLS 1.3/QUIC handshake per iteration:
+
+```sh
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --iterations=3 --transfer-bytes=67108864 --streams=1 --verbose
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- \
+  --iterations=3 --transfer-bytes=67108864 --streams=4 --verbose
+```
+
+```text
+netz single stream:
+  samples: 298.21, 318.45, 318.43 MiB/s
+  mean: 311.69 MiB/s, stddev: 3.06%
+  payload bytes received: 201326592
+
+netz four streams:
+  samples: 317.32, 313.78, 312.95 MiB/s
+  mean: 314.68 MiB/s, stddev: 0.60%
+  payload bytes received: 201326592
+```
+
+The latest same-host quicz run recorded above produced 228.77 MB/s
+single-stream and 244.85 MB/s four-stream means. The current netz samples are
+therefore about 1.36x and 1.29x those references, respectively.
+
+This comparison intentionally disables GSO/GRO. The host clamps
+`net.core.rmem_max` to 212,992 bytes, so a same-process multi-packet burst can
+overflow the effective UDP receive queue and create artificial loss. The
+benchmark defaults to one submitted packet per userspace batch while retaining
+`--batch-packets` for tuned hosts. Dedicated GSO/GRO benchmarks remain the
+evidence for coalesced I/O performance.
+
+The transport changes supporting this run are not benchmark-only shortcuts:
+STREAM packet validation now borrows existing receive state instead of cloning
+the retained body, applications can borrow and incrementally consume
+contiguous STREAM data without allocation, and ACK-driven packet-threshold
+losses can be retransmitted in a bounded drain before waiting for PTO.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is
@@ -386,16 +426,15 @@ different benchmark definitions, but they define the comparison target shape:
 - quicz documentation also highlights platform effects: Linux GSO/GRO can
   dominate throughput comparisons and must be recorded separately.
 
-For netz, the current results above are microbenchmarks plus paced
-real-handshake 16 MiB upload/download benchmarks with single-stream and
-4-stream shapes.  These now match the transfer size and aggregate-stream shape
-used by the quicz benchmark family, but they still lack the same-host reference
-run and memory/allocation evidence required before claiming performance parity
-or superiority.
+For netz, raw QUIC STREAM and DATAGRAM throughput now have same-host reference
+runs where the captured samples exceed quicz. HTTP/3 transfer results remain a
+separate comparison because they include H3 framing, QPACK, and session
+bookkeeping.
 
 ## Gaps before a completion audit can pass
 
-- Close the same-host large-transfer throughput gap against `~/Work/quicz`.
+- Extend the same-host raw QUIC matrix to echo latency, handshake rate,
+  loss/reordering, stream churn, and multi-connection aggregate throughput.
 - Record allocation/peak-memory metrics for the benchmark processes.
 - Add loss/reordering benchmark cases or interop-runner style scenarios for
   handshake loss, transfer loss, and corruption.

@@ -670,6 +670,8 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     try std.testing.expect(client.getSendStreamStats(0) == null);
     try std.testing.expect(client.streamStopped(0) == null);
     try std.testing.expect(server.getRecvStreamStats(0) == null);
+    try std.testing.expect(server.availableReceivedStream(0) == null);
+    try std.testing.expect(!server.receivedStreamComplete(0));
     try std.testing.expect((try server.copyReceivedStream(allocator, 0)) == null);
     try std.testing.expect(server.streamResetReceived(0) == null);
 
@@ -728,6 +730,13 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
         recv_stream_stats.receive_window_available,
     );
     try std.testing.expect(server.getRecvStreamStats(4) == null);
+    try std.testing.expectEqualStrings(
+        "stats",
+        server.availableReceivedStream(0).?,
+    );
+    try std.testing.expect(!server.receivedStreamComplete(0));
+    try std.testing.expect(server.availableReceivedStream(4) == null);
+    try std.testing.expect(!server.receivedStreamComplete(4));
     const copied = (try server.copyReceivedStream(allocator, 0)).?;
     defer allocator.free(copied);
     try std.testing.expectEqualStrings("stats", copied);
@@ -737,6 +746,8 @@ test "QUIC 1-RTT connection exposes stable stats counters" {
     recv_stream_stats = server.getRecvStreamStats(0).?;
     try std.testing.expectEqual(@as(u64, 5), recv_stream_stats.bytes_read);
     try std.testing.expectEqual(@as(usize, 0), recv_stream_stats.available_bytes);
+    try std.testing.expectEqual(@as(usize, 0), server.availableReceivedStream(0).?.len);
+    try std.testing.expect(server.receivedStreamComplete(0));
     try std.testing.expectEqual(
         recv_stream_stats.receive_limit - 5,
         recv_stream_stats.receive_window_available,

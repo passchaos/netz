@@ -463,6 +463,8 @@ zig build bench-quic-short-packet -Doptimize=ReleaseFast
 zig build bench-quic-padding-parse -Doptimize=ReleaseFast
 zig build bench-quic-lb -Doptimize=ReleaseFast
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 --transfer-bytes=67108864 --streams=1 --verbose
+zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --iterations=3 --transfer-bytes=67108864 --streams=4 --verbose
 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 zig build bench-quic-ack-ranges -Doptimize=ReleaseFast
@@ -486,6 +488,10 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - QUIC long PADDING run parsing for Initial padding and PMTUD/probe payloads,
 - QUIC-LB encrypted server-ID extraction with the draft's three-pass
   load-balancer optimization,
+- real-handshake raw QUIC STREAM upload throughput with configurable aggregate
+  bytes, one or multiple streams, iteration count, and userspace packet batch
+  size, including ACK-driven packet-threshold retransmission and
+  allocation-free receive consumption,
 - QUIC Linux `UDP_SEGMENT` batching versus `sendmmsg`, plus `UDP_GRO`
   coalesced receive versus plain per-datagram receive,
 - QUIC 1-RTT stateful sequential send versus stateful batched protection with

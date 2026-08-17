@@ -251,7 +251,7 @@ const StreamRecvFlowEntry = struct {
 const RecvStreamPreflightEntry = struct {
     stream_id: u64,
     flow_limit: u64,
-    recv_state: quic.stream_state.RecvState,
+    recv_state: quic.stream_state.RecvState.Preflight,
     highest_received_end: u64 = 0,
     final_size: ?u64 = null,
 
@@ -2338,6 +2338,43 @@ pub const Connection = struct {
     }
 
     pub fn retransmitPacketThresholdLoss(self: *Connection) Error!bool {
+        return self.retransmitSinglePacketThresholdLoss();
+    }
+
+    /// Retransmit multiple payload groups already declared lost by ACK-driven
+    /// packet-threshold detection.
+    ///
+    /// `applyReceivedFrames` marks all eligible sent packets lost in one pass,
+    /// so event loops should drain more than one recovery candidate before
+    /// waiting for PTO. Stopping cleanly when the reduced congestion window is
+    /// full lets the next ACK resume the same queue without turning ordinary
+    /// loss recovery into an application-visible send failure.
+    pub fn retransmitPacketThresholdLosses(
+        self: *Connection,
+        max_retransmissions: usize,
+    ) Error!usize {
+        var retransmitted: usize = 0;
+        while (retransmitted < max_retransmissions) {
+            const largest = self.sent.largestAcknowledged() orelse break;
+            const candidate = self.recovery.packetThresholdCandidate(
+                largest,
+                quic.packet_space.default_packet_threshold,
+            ) orelse break;
+            self.retransmitCandidate(
+                candidate,
+                .congestion_controlled,
+            ) catch |err| switch (err) {
+                error.CongestionLimited => break,
+                else => return err,
+            };
+            retransmitted += 1;
+        }
+        return retransmitted;
+    }
+
+    fn retransmitSinglePacketThresholdLoss(
+        self: *Connection,
+    ) Error!bool {
         const largest = self.sent.largestAcknowledged() orelse return false;
         const candidate = self.recovery.packetThresholdCandidate(largest, quic.packet_space.default_packet_threshold) orelse return false;
         try self.retransmitCandidate(candidate, .congestion_controlled);
@@ -2843,6 +2880,31 @@ pub const Connection = struct {
         const entry = self.stream_recv_flows.items[index];
         if (entry.stream_id != stream_id) return null;
         return entry.reset;
+    }
+
+    /// Borrow the contiguous, not-yet-consumed bytes available on a stream.
+    ///
+    /// The slice is invalidated by the next operation that can receive or
+    /// consume stream data on this connection. This is the allocation-free
+    /// application read path; call `releaseReceivedCapacity` after processing
+    /// a prefix so the receive buffer can compact and the peer can regain
+    /// connection- and stream-level flow-control credit.
+    pub fn availableReceivedStream(
+        self: *Connection,
+        stream_id: u64,
+    ) ?[]const u8 {
+        const entry = self.findRecvStreamEntry(stream_id) orelse return null;
+        return entry.recv_state.available();
+    }
+
+    /// Whether FIN has been received contiguously and all stream bytes have
+    /// been consumed through `releaseReceivedCapacity`.
+    pub fn receivedStreamComplete(
+        self: *Connection,
+        stream_id: u64,
+    ) bool {
+        const entry = self.findRecvStreamEntry(stream_id) orelse return false;
+        return entry.recv_state.complete();
     }
 
     /// Copy the currently assembled receive bytes for diagnostics and
@@ -4579,7 +4641,9 @@ pub const Connection = struct {
         }
 
         if (self.findRecvStreamEntry(stream_id)) |existing| {
-            var recv_state = try existing.recv_state.clone(self.endpoint.allocator);
+            var recv_state = quic.stream_state.RecvState.Preflight.init(
+                &existing.recv_state,
+            );
             var appended = false;
             errdefer if (!appended) recv_state.deinit();
             try recv_streams.append(self.endpoint.allocator, .{
@@ -4601,7 +4665,7 @@ pub const Connection = struct {
             try recv_streams.append(self.endpoint.allocator, .{
                 .stream_id = stream_id,
                 .flow_limit = flow_limit,
-                .recv_state = quic.stream_state.RecvState.init(
+                .recv_state = quic.stream_state.RecvState.Preflight.initEmpty(
                     self.endpoint.allocator,
                     stream_id,
                     maxBufferedForLimit(max_buffered),
@@ -4624,13 +4688,11 @@ pub const Connection = struct {
     }
 
     fn preflightApplyFinalSize(recv_stream: *RecvStreamPreflightEntry, final_size: u64, final: bool) Error!void {
-        if (final and final_size < recv_stream.highest_received_end) return error.FinalSizeMismatch;
-        if (recv_stream.final_size) |known| {
-            if (final_size > known) return error.FinalSizeMismatch;
-            if (final and final_size != known) return error.FinalSizeMismatch;
-            return;
-        }
-        if (final) recv_stream.final_size = final_size;
+        try recv_stream.recv_state.applyFinalSize(final_size, final);
+        recv_stream.final_size = if (recv_stream.recv_state.final_size) |size|
+            std.math.cast(u64, size) orelse return error.InvalidStreamRange
+        else
+            null;
     }
 
     fn receiveMaxStreams(self: *Connection, maximum_streams: u64, direction: StreamDirection) Error!void {

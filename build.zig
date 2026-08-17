@@ -144,6 +144,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark raw QUIC DATAGRAM throughput",
         },
         .{
+            .exe_name = "netz-bench-quic-handshake-stream",
+            .path = "examples/bench_quic_handshake_stream.zig",
+            .run_step = "bench-quic-handshake-stream",
+            .description = "Benchmark real-handshake raw QUIC STREAM throughput",
+        },
+        .{
             .exe_name = "netz-quic-close",
             .path = "examples/quic_close.zig",
             .run_step = "run-quic-close",

@@ -597,6 +597,83 @@ test "QUIC 1-RTT connection retransmits packet-threshold losses" {
     try std.testing.expectEqual(@as(u64, 2), client.recovery.pending.items[0].packetNumberAt(0).?);
 }
 
+test "QUIC 1-RTT connection drains packet-threshold retransmissions" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x42, 0x43, 0x44, 0x45 };
+    const server_cid = [_]u8{ 0x46, 0x47, 0x48, 0x49 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xad} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xae} ** quic.protection.secret_len,
+    );
+
+    var client = try one_rtt.Connection.init(&client_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = server_keys,
+        .send_keys = client_keys,
+        .local_connection_id = &client_cid,
+        .peer_connection_id = &server_cid,
+    });
+    defer client.deinit();
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+    });
+    defer server.deinit();
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    for (0..5) |_| try client.send(&ping);
+    for (0..4) |_| {
+        var dropped = try server_endpoint.receiveBytes();
+        dropped.deinit(allocator);
+    }
+    var fifth = try server.receivePacket();
+    defer fifth.deinit(allocator);
+    try server.sendAck(0);
+    var ack_packet = try client.receivePacket();
+    defer ack_packet.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try client.retransmitPacketThresholdLosses(8),
+    );
+    var first = try server.receivePacket();
+    defer first.deinit(allocator);
+    var second = try server.receivePacket();
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 5), first.packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 6), second.packet.packet_number);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try client.retransmitPacketThresholdLosses(8),
+    );
+}
+
 test "QUIC 1-RTT connection applies persistent congestion response" {
     const allocator = std.testing.allocator;
 

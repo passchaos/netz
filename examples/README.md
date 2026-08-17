@@ -44,6 +44,10 @@ so individual 1-RTT features are easy to inspect:
 - `run-quic-handshake-echo` performs the same STREAM exchange after a real
   local QUIC/TLS handshake, covering raw handshake-backed transport without
   HTTP/3 framing.
+- `bench-quic-handshake-stream` performs fresh real handshakes and measures raw
+  one- or multi-stream upload throughput. Its defaults match the 5 × 64 MiB
+  shape of `~/Work/quicz/examples/quic_bench_hs.zig`; `--streams=4`,
+  `--iterations`, `--transfer-bytes`, and `--batch-packets` tune the comparison.
 - `run-quic-datagram-echo` exercises RFC 9221 DATAGRAM send, receive queueing,
   and echo.
 - `run-quic-close` sends an application close frame and verifies that the peer
