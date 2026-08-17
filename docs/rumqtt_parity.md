@@ -17,6 +17,7 @@ whole-broker throughput claims.
 | Retained messages | Bounded owned store, O(1) exact lookup, wildcard delivery, MQTT 5 expiry countdown and full subscription-time rules | HashMap store with expiry; audited routing has Retain Forward Rules/re-subscribe TODOs |
 | Runtime transports | Blocking TCP client/server plus `std.Io.async` concurrent server helper; verified native TLS client; MQTT 3.1.1/5 WebSocket client/server over WS and client-side WSS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
 | Broker sessions | Bounded Session Store with Session Expiry, full subscription options/identifiers, offline QoS 1/2 queue, incoming/outgoing QoS 2 and reconnect retransmission | Graveyard restores filter names, tracker cursors and PUBREL IDs; no Session Expiry cleanup |
+| Will lifecycle | Owned indexed min-heap scheduler for Will Delay, Session-end deadline, reconnect cancellation, Clean Start/takeover and DISCONNECT actions | Per-link Tokio timeout/channel plus router Last Will map |
 | Broker log persistence | In-memory retained/session stores; no disk commitlog yet | Datalog, segments and graveyard state |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
@@ -226,10 +227,56 @@ reconnect drain (4 msgs): 494 ns/session
 The benchmark measures in-memory state operations and does not include socket
 or disk I/O.
 
+## Will Delay scheduler
+
+`mqtt.will_scheduler.Scheduler` deep-owns the Will Message and MQTT 5 Will
+Properties, indexes entries by ClientID, and orders deadlines with an indexed
+binary min-heap. Accepted CONNECT reserves heap capacity so subsequent network
+close/reconnect/Session-end transitions do not allocate.
+
+Covered lifecycle rules include:
+
+- normal DISCONNECT 0x00 cancels the Will,
+- ungraceful close schedules at `min(Will Delay, Session Expiry)`,
+- DISCONNECT 0x04 requests the Will while still honoring Will Delay,
+- a DISCONNECT Session Expiry override can shorten that deadline,
+- Session end or Clean Start=1 makes the old Will immediately due,
+- Clean Start=0 reconnect before the deadline cancels the delayed Will,
+- reconnect at/after the deadline cannot suppress it,
+- a live duplicate ClientID follows the same positive-delay/clean-start rules,
+- accepted CONNECT replacement is transactional on validation/allocation failure,
+- Will Delay is stripped when encoding the resulting PUBLISH, while Message
+  Expiry starts at publication and is forwarded unchanged.
+
+Rumqttd computes the same minimum delay but spreads lifecycle ownership across
+a per-link Tokio timeout/channel, a global `will_handlers` mutex map, and a
+router `last_wills` map. The netz scheduler provides one bounded transactional
+state machine, deterministic caller-buffer polling, deadline introspection, and
+generation-safe release handles.
+
+Run:
+
+```sh
+zig build bench-mqtt-will -Doptimize=ReleaseFast
+```
+
+2026-08-18 same-host `ReleaseFast`, 4,096 Wills over 50 cycles:
+
+```text
+set:          158 ns/op
+schedule:       8 ns/op
+poll+release: 209 ns/op
+```
+
+These are the median values from three consecutive runs of the in-process
+scheduler benchmark. It measures owned-state installation, deadline scheduling,
+polling and release; it is not an equal-wire broker throughput comparison with
+rumqttd.
+
 ## Remaining work before broad superiority
 
-1. Add Will Delay scheduling and a durable disk/replicated commitlog for
-   retained/session/offline state.
+1. Add a durable disk/replicated commitlog for retained/session/offline/Will
+   state.
 2. Add native MQTT TLS server and server-side WSS termination, plus client
    certificate/mTLS support; verified native TLS and WSS clients are available.
 3. Build one identical multi-client publish/subscribe load driver for both

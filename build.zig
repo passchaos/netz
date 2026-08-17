@@ -120,6 +120,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark MQTT persistent-session resume, queue and drain",
         },
         .{
+            .exe_name = "netz-bench-mqtt-will",
+            .path = "examples/bench_mqtt_will.zig",
+            .run_step = "bench-mqtt-will",
+            .description = "Benchmark MQTT Will Delay scheduling and polling",
+        },
+        .{
             .exe_name = "netz-bench-http1-parse",
             .path = "examples/bench_http1_parse.zig",
             .run_step = "bench-http1-parse",

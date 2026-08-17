@@ -7,6 +7,7 @@ pub const tls_runtime = @import("tls_runtime.zig");
 pub const router = @import("router.zig");
 pub const retained = @import("retained/mod.zig");
 pub const session = @import("session/mod.zig");
+pub const will_scheduler = @import("will/mod.zig");
 pub const testing = @import("testing/mod.zig");
 
 pub const Error = wire.Error || error{
@@ -445,10 +446,29 @@ pub fn sessionExpiryInterval(properties: []const Property) ?u32 {
     return null;
 }
 
+pub fn willDelayInterval(properties: []const Property) ?u32 {
+    for (properties) |property| {
+        if (property == .four_byte and
+            property.four_byte.id == .will_delay_interval)
+        {
+            return property.four_byte.value;
+        }
+    }
+    return null;
+}
+
 pub fn validatePublishProperties(
     properties: []const Property,
 ) Error!void {
     return validatePropertiesFor(.publish, properties);
+}
+
+pub fn validateWillProperties(
+    properties: []const Property,
+    payload: []const u8,
+) Error!void {
+    try validatePropertiesFor(.will, properties);
+    try validatePayloadFormat(properties, payload);
 }
 
 pub fn maximumQoS(properties: []const Property) ?QoS {
@@ -2604,6 +2624,7 @@ test {
     _ = router;
     _ = retained;
     _ = session;
+    _ = will_scheduler;
     _ = @import("runtime/packet_transport.zig");
     _ = @import("tls_runtime_tests.zig");
     _ = @import("websocket_runtime_tests.zig");

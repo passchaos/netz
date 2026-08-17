@@ -381,6 +381,39 @@ test "public modules are reachable" {
         netz.mqtt.session.Store,
         "find",
     ));
+    try std.testing.expect(@hasDecl(netz.mqtt, "will_scheduler"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.will_scheduler,
+        "Scheduler",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.will_scheduler.Scheduler,
+        "setConnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.will_scheduler.Scheduler,
+        "acceptConnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.will_scheduler.Scheduler,
+        "onReconnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.will_scheduler.Scheduler,
+        "closeDisconnect",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.will_scheduler.Scheduler,
+        "pollDue",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.will_scheduler.Due,
+        "writePublish",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt,
+        "willDelayInterval",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt,
         "sessionExpiryInterval",
