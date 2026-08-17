@@ -632,6 +632,7 @@ pub const Connection = struct {
     response_semantics_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
+    write_batch: std.ArrayList(u8) = .empty,
     peer_initial_stream_window: i64 = default_flow_window,
     peer_max_frame_size: usize = default_max_frame_size,
     peer_max_header_list_size: usize = std.math.maxInt(usize),
@@ -685,11 +686,30 @@ pub const Connection = struct {
         self.alternative_service_index.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
+        self.write_batch.deinit(self.allocator);
         self.stream.close(self.io);
         self.* = undefined;
     }
 
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
+        const pending = try self.startRequest(options);
+        return self.readResponse(
+            pending.stream_id,
+            pending.request_method,
+            pending.extended_connect,
+        );
+    }
+
+    const PendingResponse = struct {
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+    };
+
+    fn startRequest(
+        self: *Connection,
+        options: RequestOptions,
+    ) Error!PendingResponse {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
         if (request_options.authority == null) request_options.authority = self.default_authority;
@@ -793,7 +813,419 @@ pub const Connection = struct {
             }
         }
         if (request_options.trailers.len != 0) try self.writeHeaders(stream_id, request_options.trailers, true);
-        return self.readResponse(stream_id, request_options.method, extended_connect);
+        return .{
+            .stream_id = stream_id,
+            .request_method = request_options.method,
+            .extended_connect = extended_connect,
+        };
+    }
+
+    /// Send several bodyless requests before waiting for their responses.
+    ///
+    /// Responses are returned in request order even when peer frames arrive in
+    /// a different stream order. Request bodies/trailers are intentionally
+    /// rejected for now: a body can exhaust flow-control credit while earlier
+    /// responses are already arriving, which requires a fully duplex scheduler
+    /// rather than this blocking connection's bounded batch pump.
+    ///
+    /// On success every `responses` element is initialized and owned by the
+    /// caller. Deinitialize each with the connection allocator.
+    pub fn requestBatchInto(
+        self: *Connection,
+        requests: []const RequestOptions,
+        responses: []OwnedResponse,
+    ) Error!void {
+        if (self.role != .client) return error.UnexpectedFrame;
+        if (requests.len != responses.len) return error.InvalidResponse;
+        if (requests.len == 0) return;
+        if (self.active_local_streams.items.len != 0) {
+            return error.UnexpectedFrame;
+        }
+        for (requests) |request_options| {
+            if (request_options.body.len != 0 or
+                request_options.trailers.len != 0)
+            {
+                return error.InvalidContentLength;
+            }
+            // CONNECT transitions the stream into a tunnel whose lifetime
+            // cannot be represented by an owned, completed batch response.
+            // Use openConnectTunnel/openExtendedConnect for those streams.
+            if (methodIsConnect(request_options.method)) {
+                return error.InvalidHeader;
+            }
+        }
+
+        var states_stack: [16]BatchResponseState = undefined;
+        const states = if (requests.len <= states_stack.len)
+            states_stack[0..requests.len]
+        else
+            try self.allocator.alloc(BatchResponseState, requests.len);
+        defer if (states.ptr != states_stack[0..].ptr) {
+            self.allocator.free(states);
+        };
+
+        const batch = &self.write_batch;
+        batch.clearRetainingCapacity();
+        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
+        var staged_encoder_owned = true;
+        defer if (staged_encoder_owned) {
+            staged_encoder.deinit(self.allocator);
+        };
+        var started: usize = 0;
+        errdefer {
+            for (states[0..started]) |*state| {
+                self.releaseLocalStream(state.stream_id);
+                state.deinit(self.allocator);
+            }
+        }
+        for (requests, states) |request_options, *state| {
+            const pending = try self.appendBodylessRequestToBatch(
+                request_options,
+                batch,
+                &staged_encoder,
+            );
+            state.* = .{
+                .stream_id = pending.stream_id,
+                .request_method = pending.request_method,
+                .extended_connect = pending.extended_connect,
+            };
+            started += 1;
+        }
+        try writeAll(self.io, self.stream, batch.items);
+        self.hpack_encoder.deinit(self.allocator);
+        self.hpack_encoder = staged_encoder;
+        staged_encoder_owned = false;
+
+        try self.readResponseBatch(states);
+        for (states, responses) |*state, *response| {
+            response.* = .{
+                .headers = state.headers.?,
+                .status = state.status.?,
+                .body = state.body_owned.?,
+                .trailers = state.trailers,
+            };
+            state.headers = null;
+            state.body_owned = null;
+            state.trailers = &.{};
+            self.releaseLocalStream(state.stream_id);
+        }
+    }
+
+    fn appendBodylessRequestToBatch(
+        self: *Connection,
+        options: RequestOptions,
+        batch: *std.ArrayList(u8),
+        encoder: *http2.Hpack.Encoder,
+    ) Error!PendingResponse {
+        var request_options = options;
+        if (request_options.authority == null) {
+            request_options.authority = self.default_authority;
+        }
+        const scheme =
+            request_options.scheme orelse self.default_scheme orelse "https";
+
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            request_options.headers.len,
+            7,
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = if (fields_capacity <= fields_stack.len)
+            fields_stack[0..fields_capacity]
+        else
+            try self.allocator.alloc(
+                http2.Hpack.HeaderField,
+                fields_capacity,
+            );
+        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
+            self.allocator.free(fields_buffer);
+        };
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
+
+        const method_is_connect = methodIsConnect(request_options.method);
+        const extended_connect = request_options.protocol != null;
+        fields.appendAssumeCapacity(.{
+            .name = ":method",
+            .value = request_options.method,
+        });
+        if (!method_is_connect or extended_connect) {
+            fields.appendAssumeCapacity(.{
+                .name = ":path",
+                .value = request_options.path,
+            });
+            fields.appendAssumeCapacity(.{
+                .name = ":scheme",
+                .value = scheme,
+            });
+        }
+        if (request_options.protocol) |protocol| {
+            if (!self.peer_enable_connect_protocol) {
+                return error.ExtendedConnectDisabled;
+            }
+            fields.appendAssumeCapacity(.{
+                .name = ":protocol",
+                .value = protocol,
+            });
+        }
+        if (request_options.authority) |authority| {
+            fields.appendAssumeCapacity(.{
+                .name = ":authority",
+                .value = authority,
+            });
+        }
+        var priority_buf: [16]u8 = undefined;
+        if (request_options.priority) |value| {
+            fields.appendAssumeCapacity(.{
+                .name = "priority",
+                .value = value.serialize(&priority_buf),
+            });
+        }
+        fields.appendSliceAssumeCapacity(request_options.headers);
+        stripConnectionHeaders(&fields, .request);
+        var content_length_buf: [32]u8 = undefined;
+        if (requestShouldDefaultContentLength(
+            request_options.method,
+            fields.items,
+            0,
+        )) {
+            const content_length = std.fmt.bufPrint(
+                &content_length_buf,
+                "{}",
+                .{0},
+            ) catch unreachable;
+            fields.appendAssumeCapacity(.{
+                .name = "content-length",
+                .value = content_length,
+            });
+        }
+        try validateHeaderBlock(fields.items, .request);
+        try validateDeclaredRequestLength(fields.items, 0);
+        try validateHeaderListSize(
+            fields.items,
+            self.peer_max_header_list_size,
+        );
+
+        const stream_id = try self.reserveNextClientStreamId();
+        errdefer self.releaseLocalStream(stream_id);
+        const block = try encoder.encodeBlockRetained(
+            self.allocator,
+            fields.items,
+        );
+        try appendHeaderBlockBytes(
+            batch,
+            self.allocator,
+            stream_id,
+            block,
+            true,
+            self.outboundFramePayloadLimit(),
+        );
+        return .{
+            .stream_id = stream_id,
+            .request_method = request_options.method,
+            .extended_connect = extended_connect,
+        };
+    }
+
+    const BatchResponseState = struct {
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        headers: ?[]http2.Hpack.HeaderField = null,
+        status: ?u16 = null,
+        content_length: ?usize = null,
+        body: std.ArrayList(u8) = .empty,
+        body_owned: ?[]u8 = null,
+        trailers: []http2.Hpack.HeaderField = &.{},
+        forbids_body: bool = false,
+        done: bool = false,
+
+        fn deinit(
+            self: *BatchResponseState,
+            allocator: std.mem.Allocator,
+        ) void {
+            if (self.headers) |headers| freeHeaders(allocator, headers);
+            freeHeaders(allocator, self.trailers);
+            if (self.body_owned) |body| {
+                allocator.free(body);
+            } else {
+                self.body.deinit(allocator);
+            }
+            self.* = undefined;
+        }
+    };
+
+    fn readResponseBatch(
+        self: *Connection,
+        states: []BatchResponseState,
+    ) Error!void {
+        var remaining = states.len;
+        while (remaining != 0) {
+            var frame = try readFrame(
+                self.allocator,
+                self.io,
+                self.stream,
+                self.limits,
+            );
+            defer frame.deinit(self.allocator);
+            if (try self.handleConnectionFrame(frame.frame)) continue;
+            if (frame.frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame.frame);
+                try self.recordPeerGoAway(goaway);
+                for (states) |state| {
+                    if (!state.done and state.stream_id > goaway.last_stream_id) {
+                        return error.ConnectionGoAway;
+                    }
+                }
+                continue;
+            }
+
+            const state = findBatchResponseState(
+                states,
+                frame.frame.header.stream_id,
+            ) orelse return error.UnexpectedFrame;
+            if (state.done) return error.UnexpectedFrame;
+            switch (frame.frame.header.frame_type) {
+                .push_promise => {
+                    if (!self.limits.enable_push) {
+                        _ = try self.validatePushPromiseForClientStream(
+                            frame.frame,
+                        );
+                        return error.InvalidFrame;
+                    }
+                    try self.receivePushPromise(frame.frame);
+                },
+                .headers => {
+                    if (state.headers != null) {
+                        if (state.forbids_body) {
+                            return error.InvalidContentLength;
+                        }
+                        if ((frame.frame.header.flags & flag_end_stream) == 0) {
+                            return error.UnexpectedFrame;
+                        }
+                        state.trailers = try self.readHeaderBlock(frame.frame);
+                        try validateHeaderBlock(
+                            state.trailers,
+                            .response_trailers,
+                        );
+                        try validateExpectedContentLength(
+                            state.content_length,
+                            state.body.items.len,
+                        );
+                        state.done = true;
+                        remaining -= 1;
+                        continue;
+                    }
+
+                    const headers = try self.readHeaderBlock(frame.frame);
+                    var headers_owned_by_state = false;
+                    errdefer if (!headers_owned_by_state) {
+                        freeHeaders(self.allocator, headers);
+                    };
+                    try validateHeaderBlock(headers, .response);
+                    const lookup = try responseHeaderLookup(headers);
+                    const status_text = lookup.status orelse
+                        return error.MissingPseudoHeader;
+                    const status = std.fmt.parseInt(
+                        u16,
+                        status_text,
+                        10,
+                    ) catch return error.InvalidStatus;
+                    if (informationalResponseToSkip(status)) {
+                        if ((frame.frame.header.flags & flag_end_stream) != 0 or
+                            lookup.content_length != null)
+                        {
+                            return error.InvalidContentLength;
+                        }
+                        freeHeaders(self.allocator, headers);
+                        continue;
+                    }
+
+                    state.headers = headers;
+                    headers_owned_by_state = true;
+                    state.status = status;
+                    state.content_length = lookup.content_length;
+                    state.forbids_body = responseForbidsBody(
+                        status,
+                        state.request_method,
+                        state.extended_connect,
+                    );
+                    if (state.forbids_body) {
+                        const traditional_connect =
+                            methodIsConnect(state.request_method) and
+                            !state.extended_connect;
+                        if (traditional_connect and
+                            (lookup.content_length orelse 0) != 0)
+                        {
+                            return error.InvalidContentLength;
+                        }
+                        if ((statusIsInformational(status) or status == 204) and
+                            lookup.content_length != null)
+                        {
+                            return error.InvalidContentLength;
+                        }
+                    }
+                    if ((frame.frame.header.flags & flag_end_stream) != 0) {
+                        try validateExpectedContentLength(
+                            lookup.content_length,
+                            0,
+                        );
+                        state.done = true;
+                        remaining -= 1;
+                    }
+                },
+                .data => {
+                    if (state.headers == null) return error.UnexpectedFrame;
+                    const data = try self.receiveDataPayload(
+                        state.stream_id,
+                        frame.frame,
+                    );
+                    if (state.forbids_body and data.data.len != 0) {
+                        return error.InvalidContentLength;
+                    }
+                    const body_len = std.math.add(
+                        usize,
+                        state.body.items.len,
+                        data.data.len,
+                    ) catch return error.MessageTooLarge;
+                    if (body_len > self.limits.max_body_bytes) {
+                        return error.MessageTooLarge;
+                    }
+                    try state.body.appendSlice(self.allocator, data.data);
+                    try self.maybeReleaseReceivedCapacity(state.stream_id);
+                    if ((frame.frame.header.flags & flag_end_stream) != 0) {
+                        try validateExpectedContentLength(
+                            state.content_length,
+                            state.body.items.len,
+                        );
+                        state.done = true;
+                        remaining -= 1;
+                    }
+                },
+                .rst_stream => return error.StreamReset,
+                else => return error.UnexpectedFrame,
+            }
+        }
+
+        // Acquire all body ownership before exposing any output element, so an
+        // allocation failure leaves cleanup entirely inside the state array.
+        for (states) |*state| {
+            state.body_owned = try state.body.toOwnedSlice(self.allocator);
+        }
+    }
+
+    fn findBatchResponseState(
+        states: []BatchResponseState,
+        stream_id: u31,
+    ) ?*BatchResponseState {
+        if (states.len == 0 or stream_id < states[0].stream_id) return null;
+        const delta = stream_id - states[0].stream_id;
+        if ((delta & 1) != 0) return null;
+        const index: usize = delta / 2;
+        if (index >= states.len or states[index].stream_id != stream_id) {
+            return null;
+        }
+        return &states[index];
     }
 
     pub fn takePromisedRequest(
@@ -1402,6 +1834,131 @@ pub const Connection = struct {
             if (options.trailers.len != 0) try self.writeHeaders(stream_id, options.trailers, true);
         }
         self.releasePeerStream(stream_id);
+    }
+
+    /// Validate, HPACK-encode, and submit bodyless responses as one TCP write.
+    ///
+    /// This is the server counterpart to `requestBatchInto`: the logical HTTP/2
+    /// frames remain separate and ordered, while one syscall avoids creating a
+    /// train of tiny TCP segments. Every stream must already be active. On
+    /// success the streams are released; on validation/encoding failure no
+    /// bytes are written and the caller can close or retry the connection.
+    pub fn writeResponseBatch(
+        self: *Connection,
+        stream_ids: []const u31,
+        responses: []const ResponseOptions,
+    ) Error!void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (stream_ids.len != responses.len) return error.InvalidResponse;
+        if (stream_ids.len == 0) return;
+        for (stream_ids, 0..) |stream_id, index| {
+            if (!self.outboundStreamIsActive(stream_id)) {
+                return error.InvalidStreamId;
+            }
+            for (stream_ids[0..index]) |prior| {
+                if (prior == stream_id) return error.InvalidStreamId;
+            }
+        }
+
+        const batch = &self.write_batch;
+        batch.clearRetainingCapacity();
+        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
+        var staged_encoder_owned = true;
+        defer if (staged_encoder_owned) {
+            staged_encoder.deinit(self.allocator);
+        };
+        for (stream_ids, responses) |stream_id, options| {
+            if (options.body.len != 0 or options.trailers.len != 0) {
+                return error.InvalidContentLength;
+            }
+            if (options.status < 100 or options.status > 999 or
+                statusIsInformational(options.status))
+            {
+                return error.InvalidStatus;
+            }
+
+            var status_buf: [3]u8 = undefined;
+            const status = std.fmt.bufPrint(
+                &status_buf,
+                "{}",
+                .{options.status},
+            ) catch return error.InvalidStatus;
+            const semantics = self.responseSemanticsFor(stream_id, options);
+
+            var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+            const fields_capacity = std.math.add(
+                usize,
+                options.headers.len,
+                1,
+            ) catch return error.MessageTooLarge;
+            const fields_buffer = if (fields_capacity <= fields_stack.len)
+                fields_stack[0..fields_capacity]
+            else
+                try self.allocator.alloc(
+                    http2.Hpack.HeaderField,
+                    fields_capacity,
+                );
+            defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
+                self.allocator.free(fields_buffer);
+            };
+            var fields: std.ArrayList(http2.Hpack.HeaderField) =
+                .initBuffer(fields_buffer);
+            fields.appendAssumeCapacity(.{
+                .name = ":status",
+                .value = status,
+            });
+            fields.appendSliceAssumeCapacity(options.headers);
+            stripConnectionHeaders(&fields, .response);
+            if (semantics.traditional_connect and
+                options.status >= 200 and options.status < 300)
+            {
+                try stripSuccessfulConnectContentLength(&fields);
+            }
+            const declared_length = try contentLength(fields.items);
+            try validateResponseBodyForStatusWithLength(
+                options.status,
+                declared_length,
+                &.{},
+                &.{},
+            );
+            try validateResponseBodyForRequestSemanticsWithLength(
+                options.status,
+                semantics,
+                declared_length,
+                &.{},
+                &.{},
+            );
+            try validateDeclaredResponseLengthValue(
+                options.status,
+                semantics,
+                declared_length,
+                0,
+            );
+            try validateHeaderBlock(fields.items, .response);
+            try validateHeaderListSize(
+                fields.items,
+                self.peer_max_header_list_size,
+            );
+
+            const block = try staged_encoder.encodeBlockRetained(
+                self.allocator,
+                fields.items,
+            );
+            try appendHeaderBlockBytes(
+                batch,
+                self.allocator,
+                stream_id,
+                block,
+                true,
+                self.outboundFramePayloadLimit(),
+            );
+        }
+
+        try writeAll(self.io, self.stream, batch.items);
+        self.hpack_encoder.deinit(self.allocator);
+        self.hpack_encoder = staged_encoder;
+        staged_encoder_owned = false;
+        for (stream_ids) |stream_id| self.releasePeerStream(stream_id);
     }
 
     pub fn promisePush(
@@ -3327,6 +3884,72 @@ fn encodeFrameHeader(
     header[3] = @intFromEnum(frame_type);
     header[4] = flags;
     std.mem.writeInt(u32, header[5..9], @as(u32, stream_id), .big);
+}
+
+fn appendFrameBytes(
+    batch: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    frame_type: http2.FrameType,
+    flags: u8,
+    stream_id: u31,
+    payload: []const u8,
+) Error!void {
+    const total_len = std.math.add(
+        usize,
+        http2.FrameHeader.encoded_len,
+        payload.len,
+    ) catch return error.InvalidFrameSize;
+    const start = batch.items.len;
+    try batch.ensureUnusedCapacity(allocator, total_len);
+    batch.items.len = start + total_len;
+    const header = batch.items[start..][0..http2.FrameHeader.encoded_len];
+    const header_array: *[http2.FrameHeader.encoded_len]u8 =
+        @ptrCast(header.ptr);
+    try encodeFrameHeader(
+        header_array,
+        frame_type,
+        flags,
+        stream_id,
+        payload.len,
+    );
+    @memcpy(
+        batch.items[start + http2.FrameHeader.encoded_len ..][0..payload.len],
+        payload,
+    );
+}
+
+fn appendHeaderBlockBytes(
+    batch: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    stream_id: u31,
+    block: []const u8,
+    end_stream: bool,
+    chunk_size: usize,
+) Error!void {
+    std.debug.assert(chunk_size != 0);
+    const first_len = @min(block.len, chunk_size);
+    try appendFrameBytes(
+        batch,
+        allocator,
+        .headers,
+        (if (first_len == block.len) flag_end_headers else 0) |
+            (if (end_stream) flag_end_stream else 0),
+        stream_id,
+        block[0..first_len],
+    );
+    var offset = first_len;
+    while (offset < block.len) {
+        const end = @min(block.len, offset + chunk_size);
+        try appendFrameBytes(
+            batch,
+            allocator,
+            .continuation,
+            if (end == block.len) flag_end_headers else 0,
+            stream_id,
+            block[offset..end],
+        );
+        offset = end;
+    }
 }
 
 fn validateLocalLimits(limits: Limits) Error!void {
@@ -9131,6 +9754,205 @@ test "HTTP/2 DATA send waits for WINDOW_UPDATE capacity" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+test "HTTP/2 request batch reorders out-of-order responses" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var requests: [3]OwnedRequest = undefined;
+            var initialized: usize = 0;
+            defer for (requests[0..initialized]) |*request| {
+                request.deinit(server_ptr.allocator);
+            };
+            for (&requests) |*request| {
+                request.* = try connection.readRequest();
+                initialized += 1;
+            }
+
+            var stream_ids: [requests.len]u31 = undefined;
+            var response_headers: [requests.len]http2.Hpack.HeaderField =
+                undefined;
+            var responses: [requests.len]ResponseOptions = undefined;
+            var index = requests.len;
+            while (index != 0) {
+                index -= 1;
+                const output_index = requests.len - 1 - index;
+                stream_ids[output_index] = requests[index].stream_id;
+                response_headers[output_index] = .{
+                    .name = "x-path",
+                    .value = requests[index].path,
+                };
+                responses[output_index] = .{
+                    .headers = response_headers[output_index..][0..1],
+                };
+            }
+            try connection.writeResponseBatch(&stream_ids, &responses);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+
+    const requests = [_]RequestOptions{
+        .{ .path = "/one", .authority = "localhost" },
+        .{ .path = "/two", .authority = "localhost" },
+        .{ .path = "/three", .authority = "localhost" },
+    };
+    var responses: [requests.len]OwnedResponse = undefined;
+    try client.requestBatchInto(&requests, &responses);
+    defer for (&responses) |*response| response.deinit(allocator);
+
+    try std.testing.expectEqualStrings(
+        "/one",
+        findHeader(responses[0].headers, "x-path").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/two",
+        findHeader(responses[1].headers, "x-path").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/three",
+        findHeader(responses[2].headers, "x-path").?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.active_local_streams.items.len);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 request batch rolls back staged HPACK state" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+    };
+    defer {
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    const requests = [_]RequestOptions{
+        .{
+            .authority = "localhost",
+            .headers = &.{.{
+                .name = "x-transactional",
+                .value = "first",
+            }},
+        },
+        .{
+            .authority = "localhost",
+            .headers = &.{.{
+                .name = "Uppercase-Invalid",
+                .value = "second",
+            }},
+        },
+    };
+    var responses: [requests.len]OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.InvalidHeader,
+        connection.requestBatchInto(&requests, &responses),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.hpack_encoder.dynamic_table.entries.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.active_local_streams.items.len,
+    );
+}
+
+test "HTTP/2 response batch validates transactionally" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+    };
+    defer {
+        connection.active_peer_streams.deinit(allocator);
+        connection.active_peer_index.deinit(allocator);
+        connection.response_semantics.deinit(allocator);
+        connection.response_semantics_index.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+    try connection.addActivePeerStream(1);
+    try connection.addActivePeerStream(3);
+
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        connection.writeResponseBatch(
+            &.{ 1, 3 },
+            &.{
+                .{ .headers = &.{.{
+                    .name = "x-transactional",
+                    .value = "first",
+                }} },
+                .{ .body = "not bodyless" },
+            },
+        ),
+    );
+    try std.testing.expect(connection.outboundStreamIsActive(1));
+    try std.testing.expect(connection.outboundStreamIsActive(3));
+    try std.testing.expect(connection.write_batch.items.len != 0);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.hpack_encoder.dynamic_table.entries.items.len,
+    );
+
+    try std.testing.expectError(
+        error.InvalidStreamId,
+        connection.writeResponseBatch(
+            &.{ 1, 1 },
+            &.{ .{}, .{} },
+        ),
+    );
+    try std.testing.expect(connection.outboundStreamIsActive(1));
+    try std.testing.expect(connection.outboundStreamIsActive(3));
 }
 
 test "HTTP/2 DATA receive releases WINDOW_UPDATE capacity" {

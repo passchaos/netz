@@ -81,25 +81,6 @@ pub fn writeAllSlices(
     }
 }
 
-fn writeAll(
-    io: std.Io,
-    stream: net.Stream,
-    bytes: []const u8,
-) net.Stream.Writer.Error!void {
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const n = try io.vtable.netWrite(
-            io.userdata,
-            stream.socket.handle,
-            bytes[written..],
-            &.{""},
-            0,
-        );
-        if (n == 0) return error.SocketUnconnected;
-        written += n;
-    }
-}
-
 test "stream vector write includes all slices in the first netWrite" {
     const Observer = struct {
         bytes: [64]u8 = undefined,

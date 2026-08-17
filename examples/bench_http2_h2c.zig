@@ -1,7 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const warmup_iterations: usize = 200;
+const warmup_iterations: usize = 1_000;
 const iterations: usize = 2_000;
 // Hyper's server inserts Date and then references it from the HPACK dynamic
 // table. Supplying the same-length field makes steady-state responses 11 wire
@@ -15,6 +15,7 @@ const request_body = "ssssssssss";
 const Scenario = struct {
     name: []const u8,
     request: netz.http2.runtime.RequestOptions,
+    parallel: usize = 1,
 };
 
 pub fn main() !void {
@@ -44,18 +45,58 @@ pub fn main() !void {
 
         fn runFallible(shared: *@This()) !void {
             const scenario_iterations = warmup_iterations + iterations;
-            for ([_][]const u8{ "", request_body }) |expected_body| {
+            const ScenarioServer = struct {
+                body: []const u8,
+                parallel: usize,
+            };
+            const scenarios = [_]ScenarioServer{
+                .{ .body = "", .parallel = 1 },
+                .{ .body = request_body, .parallel = 1 },
+                .{ .body = "", .parallel = 10 },
+            };
+            for (scenarios) |scenario| {
                 var connection = try shared.server.accept();
                 defer connection.close();
-                for (0..scenario_iterations) |_| {
-                    var request = try connection.readRequest();
-                    defer request.deinit(shared.server.allocator);
-                    if (!std.mem.eql(u8, request.body, expected_body)) {
-                        return error.UnexpectedRequestBody;
+                if (scenario.parallel == 1) {
+                    for (0..scenario_iterations) |_| {
+                        var request = try connection.readRequest();
+                        defer request.deinit(shared.server.allocator);
+                        if (!std.mem.eql(u8, request.body, scenario.body)) {
+                            return error.UnexpectedRequestBody;
+                        }
+                        try connection.writeResponse(request.stream_id, .{
+                            .headers = &response_headers,
+                        });
                     }
-                    try connection.writeResponse(request.stream_id, .{
-                        .headers = &response_headers,
-                    });
+                } else {
+                    var requests: [10]netz.http2.runtime.OwnedRequest =
+                        undefined;
+                    var stream_ids: [10]u31 = undefined;
+                    const responses = [_]netz.http2.runtime.ResponseOptions{
+                        .{ .headers = &response_headers },
+                    } ** 10;
+                    for (0..scenario_iterations) |_| {
+                        var initialized: usize = 0;
+                        defer for (requests[0..initialized]) |*request| {
+                            request.deinit(shared.server.allocator);
+                        };
+                        for (&requests, &stream_ids) |*request, *stream_id| {
+                            request.* = try connection.readRequest();
+                            initialized += 1;
+                            stream_id.* = request.stream_id;
+                            if (!std.mem.eql(
+                                u8,
+                                request.body,
+                                scenario.body,
+                            )) {
+                                return error.UnexpectedRequestBody;
+                            }
+                        }
+                        try connection.writeResponseBatch(
+                            &stream_ids,
+                            &responses,
+                        );
+                    }
                 }
             }
         }
@@ -89,6 +130,15 @@ pub fn main() !void {
                 .body = request_body,
             },
         },
+        .{
+            .name = "http2_parallel_x10_empty",
+            .request = .{
+                .path = "/hello",
+                .scheme = "http",
+                .authority = authority,
+            },
+            .parallel = 10,
+        },
     };
     for (scenarios) |scenario| {
         var client = try netz.http2.runtime.Client.connect(
@@ -99,19 +149,28 @@ pub fn main() !void {
         );
         defer client.close();
 
+        var requests: [10]netz.http2.runtime.RequestOptions = undefined;
+        @memset(requests[0..scenario.parallel], scenario.request);
+        var responses: [10]netz.http2.runtime.OwnedResponse = undefined;
         for (0..warmup_iterations) |_| {
-            var response = try client.request(scenario.request);
-            try validateResponse(response);
-            response.deinit(allocator);
+            try exchangeScenario(
+                &client,
+                requests[0..scenario.parallel],
+                responses[0..scenario.parallel],
+                allocator,
+            );
         }
 
         const start = nowNs(io);
         var status_total: usize = 0;
         for (0..iterations) |_| {
-            var response = try client.request(scenario.request);
-            try validateResponse(response);
-            status_total += response.status;
-            response.deinit(allocator);
+            try exchangeScenario(
+                &client,
+                requests[0..scenario.parallel],
+                responses[0..scenario.parallel],
+                allocator,
+            );
+            status_total += 200 * scenario.parallel;
         }
         const elapsed = nowNs(io) -| start;
         const requests_per_second = if (elapsed == 0)
@@ -122,19 +181,23 @@ pub fn main() !void {
         std.debug.print(
             \\HTTP/2 h2c runtime benchmark
             \\  shape: Hyper {s}
+            \\  parallel requests: {d}
             \\  warmup iterations: {d}
             \\  iterations: {d}
             \\  status total: {d}
             \\  ns/op: {d}
+            \\  ns/request: {d}
             \\  requests/s: {d}
             \\
         , .{
             scenario.name,
+            scenario.parallel,
             warmup_iterations,
             iterations,
             status_total,
             elapsed / iterations,
-            requests_per_second,
+            elapsed / (iterations * scenario.parallel),
+            requests_per_second * scenario.parallel,
         });
     }
 
@@ -146,6 +209,21 @@ fn validateResponse(response: netz.http2.runtime.OwnedResponse) !void {
     if (response.status != 200 or response.body.len != 0) {
         return error.UnexpectedResponse;
     }
+}
+
+fn exchangeScenario(
+    client: *netz.http2.runtime.Connection,
+    requests: []const netz.http2.runtime.RequestOptions,
+    responses: []netz.http2.runtime.OwnedResponse,
+    allocator: std.mem.Allocator,
+) !void {
+    if (requests.len == 1) {
+        responses[0] = try client.request(requests[0]);
+    } else {
+        try client.requestBatchInto(requests, responses);
+    }
+    defer for (responses) |*response| response.deinit(allocator);
+    for (responses) |response| try validateResponse(response);
 }
 
 fn nowNs(io: std.Io) u64 {

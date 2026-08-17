@@ -43,10 +43,11 @@ measurement. Pin both reference executables to the same CPU when collecting
 comparison evidence; see `docs/hyper_parity.md` for exact commands and captured
 same-host results.
 
-`bench-http2-h2c` mirrors Hyper's `http2_consecutive_x1_empty` and
-`http2_consecutive_x1_req_10b` on one persistent prior-knowledge connection.
-It includes a same-length Date field so steady-state request/response wire
-sizes match the reference, and performs untimed warmup before each scenario.
+`bench-http2-h2c` mirrors Hyper's `http2_consecutive_x1_empty`,
+`http2_consecutive_x1_req_10b`, and `http2_parallel_x10_empty` on persistent
+prior-knowledge connections. It includes a same-length Date field so
+steady-state request/response wire sizes match the reference, and performs
+untimed warmup before each scenario.
 
 `run-http3-handshake` is the protected-loopback counterpart to the public
 HTTP/3 fetcher: it starts a local QUIC/H3 server, performs a full client

@@ -962,6 +962,22 @@ pub const Hpack = struct {
             self.head = 0;
         }
 
+        fn clone(
+            self: DynamicTable,
+            allocator: std.mem.Allocator,
+        ) !DynamicTable {
+            var copy = DynamicTable{ .size_limit = self.size_limit };
+            errdefer copy.deinit(allocator);
+            try copy.entries.ensureTotalCapacity(
+                allocator,
+                self.entryCount(),
+            );
+            for (self.entries.items[self.head..]) |entry| {
+                try copy.add(allocator, entry.name, entry.value);
+            }
+            return copy;
+        }
+
         pub fn setLimit(self: *DynamicTable, allocator: std.mem.Allocator, new_limit: usize) void {
             self.size_limit = new_limit;
             self.evictToLimit(allocator);
@@ -1154,6 +1170,21 @@ pub const Hpack = struct {
             self.dynamic_table.deinit(allocator);
             self.encoded_scratch.deinit(allocator);
             self.* = undefined;
+        }
+
+        /// Deep-copy compression state for transactional multi-frame encoding.
+        ///
+        /// The encoded scratch itself is deliberately not copied; it carries no
+        /// protocol state and the clone will populate it on its first encode.
+        pub fn clone(
+            self: Encoder,
+            allocator: std.mem.Allocator,
+        ) !Encoder {
+            return .{
+                .dynamic_table = try self.dynamic_table.clone(allocator),
+                .pending_size_update = self.pending_size_update,
+                .last_emitted_dynamic_table_size = self.last_emitted_dynamic_table_size,
+            };
         }
 
         pub fn setMaxDynamicTableSize(self: *Encoder, allocator: std.mem.Allocator, max_size: usize) void {
@@ -2614,6 +2645,35 @@ test "HTTP/2 HPACK retained encoder scratch reuses capacity" {
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(first_ptr, second.ptr);
     try std.testing.expectEqualSlices(u8, &.{0x89}, second);
+}
+
+test "HTTP/2 HPACK encoder clone isolates transactional state" {
+    const allocator = std.testing.allocator;
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+
+    _ = try encoder.encodeBlockRetained(
+        allocator,
+        &.{.{ .name = "x-original", .value = "one" }},
+    );
+    var staged = try encoder.clone(allocator);
+    defer staged.deinit(allocator);
+
+    const staged_existing = try staged.encodeBlockRetained(
+        allocator,
+        &.{.{ .name = "x-original", .value = "one" }},
+    );
+    try std.testing.expect((staged_existing[0] & 0x80) != 0);
+    _ = try staged.encodeBlockRetained(
+        allocator,
+        &.{.{ .name = "x-staged", .value = "two" }},
+    );
+
+    const original_new = try encoder.encodeBlockRetained(
+        allocator,
+        &.{.{ .name = "x-staged", .value = "two" }},
+    );
+    try std.testing.expect((original_new[0] & 0x80) == 0);
 }
 
 test "HTTP/2 HPACK decoder writes into caller storage" {

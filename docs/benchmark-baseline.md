@@ -82,13 +82,14 @@ a focused HTTP/1 pipeline result, not a whole-library superiority claim. The
 implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 `docs/hyper_parity.md`.
 
-### HTTP/2 persistent consecutive round trips
+### HTTP/2 persistent consecutive and parallel round trips
 
 Captured on 2026-08-17 against Hyper's
-`http2_consecutive_x1_empty` and `http2_consecutive_x1_req_10b` benchmarks.
-Both sides use one persistent prior-knowledge connection and were pinned to CPU
-0. Netz supplies Hyper's same-length Date value and uses untimed warmup so
-steady-state wire sizes and calibration intent match.
+`http2_consecutive_x1_empty`, `http2_consecutive_x1_req_10b`, and
+`http2_parallel_x10_empty` benchmarks. Each scenario uses a persistent
+prior-knowledge connection and both processes were pinned to CPU 0. Netz
+supplies Hyper's same-length Date value and uses 1,000 untimed warmup
+iterations so steady-state wire sizes and calibration intent match.
 
 ```sh
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
@@ -102,17 +103,23 @@ HYPER_H2_BENCH=$(
 )
 taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_empty
 taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_req_10b
+taskset -c 0 "$HYPER_H2_BENCH" --bench http2_parallel_x10_empty
 ```
 
 ```text
 empty GET (five samples):
-  netz:  10.35-11.28 us/op
+  netz:  10.39-10.48 us/op
   hyper: 12.51-12.54 us/op
-  netz latency advantage: 1.11-1.21x
+  netz latency advantage: 1.19-1.21x
 
 10-byte POST (five samples):
-  netz:  11.60-12.08 us/op
+  netz:  11.71-11.86 us/op
   hyper: 41.15-41.37 ms/op
+
+parallel x10 empty GET (five samples):
+  netz:  39.48-40.21 us/batch, 3.95-4.02 us/request
+  hyper: 47.50-48.46 us/batch, 4.75-4.85 us/request
+  netz batch-latency advantage: 1.18-1.23x
 ```
 
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
@@ -121,7 +128,9 @@ requests and 11-byte responses; POST exchanges use 43-byte requests and
 HEADERS/DATA path hitting Linux's Nagle/delayed-ACK interaction on this host,
 not a general whole-library ratio. Netz preserves both HTTP/2 frames but submits
 their four slices in one `sendmsg`; larger, fragmented or flow-blocked messages
-fall back to ordinary frame writes. See `docs/hyper_parity.md` for the
+fall back to ordinary frame writes. Bodyless parallel batches use transactional
+HPACK staging, one request/response submission in each direction, and
+stream-ID-based response reordering. See `docs/hyper_parity.md` for the
 implementation audit and remaining H2 comparison work.
 
 ### HTTP/3 QPACK dynamic encode
