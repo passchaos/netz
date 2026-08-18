@@ -76,14 +76,31 @@ pub const ProtectedServer = struct {
     }
 
     pub fn accept(self: *ProtectedServer) Error!AcceptedProtectedSession {
-        var request = try self.h3.receiveRequest();
-        errdefer request.deinit(self.h3.quic_server.endpoint.allocator);
-        try validateConnectRequest(request.request);
+        const request = try receiveProtectedConnectRequest(&self.h3);
+        var request_head = request.head;
+        errdefer request_head.deinit(
+            self.h3.quic_server.endpoint.allocator,
+        );
         try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         const session_id = webtransport.SessionId.init(request.stream_id);
         if (!session_id.isClientInitiatedBidirectional()) return error.InvalidConnect;
-        try self.h3.sendResponse(request.from, request.stream_id, connectResponse());
-        return .{ .request = request, .session_id = session_id };
+        // Extended CONNECT is the session control stream. Keep both directions
+        // open; aggregate sendResponse would set FIN and terminate the
+        // WebTransport Session immediately after the handshake.
+        try self.h3.startResponse(
+            request.from,
+            request.stream_id,
+            connectResponse(),
+            null,
+        );
+        return .{
+            .request = .{
+                .from = request.from,
+                .stream_id = request.stream_id,
+                .request = request_head,
+            },
+            .session_id = session_id,
+        };
     }
 
     pub fn receiveDatagram(self: *ProtectedServer) Error!OwnedProtectedDatagram {
@@ -108,6 +125,54 @@ pub const ProtectedServer = struct {
             session_id,
             payload,
         );
+    }
+
+    /// Send Capsule Protocol bytes on the long-lived Extended CONNECT stream.
+    pub fn sendSessionData(
+        self: *ProtectedServer,
+        to: net.IpAddress,
+        session_id: webtransport.SessionId,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.h3.sendResponseBody(
+            to,
+            session_id.value,
+            data,
+            fin,
+        );
+    }
+
+    pub fn receiveSessionData(
+        self: *ProtectedServer,
+        session_id: webtransport.SessionId,
+        out: []u8,
+    ) Error!ProtectedSessionRead {
+        while (true) {
+            var event = try self.h3.receiveRequestEvent();
+            defer event.deinit(self.h3.quic_server.endpoint.allocator);
+            switch (event) {
+                .reset => return error.InvalidSessionState,
+                .message => |message| {
+                    if (message.stream_id != session_id.value) {
+                        return error.InvalidSessionState;
+                    }
+                    switch (message.value) {
+                        .data_available => {
+                            const count = try self.h3.readRequestData(
+                                session_id.value,
+                                out,
+                            );
+                            if (count != 0) {
+                                return .{ .bytes = count };
+                            }
+                        },
+                        .finished => return .{ .fin = true },
+                        else => return error.InvalidSessionState,
+                    }
+                },
+            }
+        }
     }
 };
 
@@ -197,10 +262,24 @@ pub const AcceptedSession = struct {
 };
 
 pub const AcceptedProtectedSession = struct {
-    request: http3.runtime.OwnedProtectedRequest,
+    request: OwnedProtectedConnectRequest,
     session_id: webtransport.SessionId,
 
     pub fn deinit(self: *AcceptedProtectedSession, allocator: std.mem.Allocator) void {
+        self.request.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const OwnedProtectedConnectRequest = struct {
+    from: net.IpAddress,
+    stream_id: u62,
+    request: http3.DecodedRequestHead,
+
+    pub fn deinit(
+        self: *OwnedProtectedConnectRequest,
+        allocator: std.mem.Allocator,
+    ) void {
         self.request.deinit(allocator);
         self.* = undefined;
     }
@@ -838,17 +917,23 @@ pub const ProtectedClientSession = struct {
         errdefer h3_client.deinit();
         var header_buf: [3]http3.Qpack.HeaderField = undefined;
         const headers = connectRequestHeaders(options.origin, &header_buf);
-        var response = try h3_client.request(.{
+        const session_stream_id = try h3_client.startRequest(.{
             .method = "CONNECT",
             .path = options.path,
             .scheme = "https",
             .authority = options.authority,
             .headers = headers,
-        });
-        defer response.deinit(allocator);
-        try validateConnectResponse(response.response);
+        }, null);
+        var response_head = try receiveProtectedConnectResponse(
+            &h3_client,
+            session_stream_id,
+        );
+        defer response_head.deinit(allocator);
         try webtransport.ensureDatagramsNegotiated(h3_client.config.local_settings, h3_client.control.settings.peer);
-        return .{ .h3 = h3_client, .session_id = .init(0) };
+        return .{
+            .h3 = h3_client,
+            .session_id = .init(session_stream_id),
+        };
     }
 
     pub fn deinit(self: *ProtectedClientSession) void {
@@ -884,6 +969,47 @@ pub const ProtectedClientSession = struct {
         webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer) catch return false;
         return true;
     }
+
+    /// Send Capsule Protocol bytes on this Session's Extended CONNECT stream.
+    pub fn sendSessionData(
+        self: *ProtectedClientSession,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.h3.sendRequestBody(
+            self.session_id.value,
+            data,
+            fin,
+        );
+    }
+
+    pub fn receiveSessionData(
+        self: *ProtectedClientSession,
+        out: []u8,
+    ) Error!ProtectedSessionRead {
+        while (true) {
+            var event = (try self.h3.receiveResponseEvent(
+                self.session_id.value,
+            )) orelse continue;
+            defer event.deinit(self.h3.quic_client.endpoint.allocator);
+            switch (event) {
+                .data_available => {
+                    const count = try self.h3.readResponseData(
+                        self.session_id.value,
+                        out,
+                    );
+                    if (count != 0) return .{ .bytes = count };
+                },
+                .finished => return .{ .fin = true },
+                else => return error.InvalidSessionState,
+            }
+        }
+    }
+};
+
+pub const ProtectedSessionRead = struct {
+    bytes: usize = 0,
+    fin: bool = false,
 };
 
 pub const ConnectOptions = struct {
@@ -957,6 +1083,36 @@ fn receiveHandshakeConnectRequest(
     }
 }
 
+fn receiveProtectedConnectRequest(
+    server: *http3.runtime.ProtectedServer,
+) Error!struct {
+    from: net.IpAddress,
+    stream_id: u62,
+    head: http3.DecodedRequestHead,
+} {
+    while (true) {
+        var event = try server.receiveRequestEvent();
+        defer event.deinit(server.quic_server.endpoint.allocator);
+        switch (event) {
+            .reset => return error.InvalidConnect,
+            .message => |*message| switch (message.value) {
+                .head => |*head| {
+                    if (head.* != .request) return error.InvalidConnect;
+                    try validateConnectRequest(head.request);
+                    const owned = head.request;
+                    message.value = .finished;
+                    return .{
+                        .from = message.from,
+                        .stream_id = message.stream_id,
+                        .head = owned,
+                    };
+                },
+                else => return error.InvalidConnect,
+            },
+        }
+    }
+}
+
 fn receiveHandshakeConnectResponse(
     client: *http3.runtime.HandshakeClient,
     stream_id: u62,
@@ -965,6 +1121,27 @@ fn receiveHandshakeConnectResponse(
         var event = (try client.receiveResponseEvent(stream_id)) orelse
             continue;
         defer event.deinit(client.allocator);
+        switch (event) {
+            .head => |*head| {
+                if (head.* != .response) return error.InvalidConnect;
+                try validateConnectResponse(head.response);
+                const owned = head.response;
+                event = .finished;
+                return owned;
+            },
+            else => return error.InvalidConnect,
+        }
+    }
+}
+
+fn receiveProtectedConnectResponse(
+    client: *http3.runtime.ProtectedClient,
+    stream_id: u62,
+) Error!http3.DecodedResponseHead {
+    while (true) {
+        var event = (try client.receiveResponseEvent(stream_id)) orelse
+            continue;
+        defer event.deinit(client.quic_client.endpoint.allocator);
         switch (event) {
             .head => |*head| {
                 if (head.* != .response) return error.InvalidConnect;
@@ -1369,6 +1546,7 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         .send_keys = server_keys,
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
+        .max_stream_frame_data = 5,
     });
     defer server.deinit();
 
@@ -1385,11 +1563,44 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         fn runFallible(server_ptr: *ProtectedServer) !void {
             var accepted = try server_ptr.accept();
             defer accepted.deinit(server_ptr.h3.quic_server.endpoint.allocator);
+            var control_buffer: [64]u8 = undefined;
+            const expected_control = "protected-client-control";
+            var control_len: usize = 0;
+            while (control_len < expected_control.len) {
+                const control = try server_ptr.receiveSessionData(
+                    accepted.session_id,
+                    control_buffer[control_len..],
+                );
+                try std.testing.expect(!control.fin);
+                control_len += control.bytes;
+            }
+            try std.testing.expectEqualStrings(
+                expected_control,
+                control_buffer[0..control_len],
+            );
+            try server_ptr.sendSessionData(
+                accepted.request.from,
+                accepted.session_id,
+                "protected-server-control",
+                false,
+            );
             var datagram = try server_ptr.receiveDatagram();
             defer datagram.deinit(server_ptr.h3.quic_server.endpoint.allocator);
             try std.testing.expectEqual(accepted.session_id.value, datagram.datagram.session_id.value);
             try std.testing.expectEqualStrings("protected-client-dgram", datagram.datagram.payload);
             try server_ptr.sendDatagram(datagram.packet.from, accepted.session_id, "protected-server-dgram");
+            const client_fin = try server_ptr.receiveSessionData(
+                accepted.session_id,
+                &control_buffer,
+            );
+            try std.testing.expect(client_fin.fin);
+            try std.testing.expectEqual(@as(usize, 0), client_fin.bytes);
+            try server_ptr.sendSessionData(
+                accepted.request.from,
+                accepted.session_id,
+                &.{},
+                true,
+            );
         }
     };
 
@@ -1405,15 +1616,35 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
             .send_keys = client_keys,
             .local_connection_id = &client_cid,
             .peer_connection_id = &server_cid,
+            .max_stream_frame_data = 5,
         },
     });
     defer client.deinit();
 
+    try client.sendSessionData("protected-client-control", false);
+    var control_buffer: [64]u8 = undefined;
+    const expected_control = "protected-server-control";
+    var control_len: usize = 0;
+    while (control_len < expected_control.len) {
+        const control = try client.receiveSessionData(
+            control_buffer[control_len..],
+        );
+        try std.testing.expect(!control.fin);
+        control_len += control.bytes;
+    }
+    try std.testing.expectEqualStrings(
+        expected_control,
+        control_buffer[0..control_len],
+    );
     try client.sendDatagram("protected-client-dgram");
     var response = try client.receiveDatagram();
     defer response.deinit(allocator);
     try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
     try std.testing.expectEqualStrings("protected-server-dgram", response.datagram.payload);
+    try client.sendSessionData(&.{}, true);
+    const server_fin = try client.receiveSessionData(&control_buffer);
+    try std.testing.expect(server_fin.fin);
+    try std.testing.expectEqual(@as(usize, 0), server_fin.bytes);
 
     thread.join();
     if (shared.err) |err| return err;
