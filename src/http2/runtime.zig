@@ -3603,16 +3603,18 @@ pub const Connection = struct {
         for (stream_ids) |stream_id| self.releasePeerStream(stream_id);
     }
 
-    /// Send complete response bodies round-robin when all DATA fits current
-    /// peer flow-control credit.
+    /// Send complete response bodies round-robin with flow-control backpressure.
     ///
     /// HEADERS are HPACK-staged transactionally, body slices stay borrowed, and
     /// `body_chunk_size` controls each stream's contribution per round. The
     /// method rejects trailers and body-suppressed response semantics because
-    /// those require a different completion lifecycle. Validation, encoding,
-    /// allocation, and credit errors happen before wire I/O and are retryable.
-    /// A transport error after submission begins may leave a partial response
-    /// set on the wire; close the connection instead of retrying that batch.
+    /// those require a different completion lifecycle. DATA consumes only
+    /// currently available connection/per-stream credit; when every unfinished
+    /// stream is blocked, the connection pumps WINDOW_UPDATE and cancellation
+    /// frames before resuming. Validation, encoding, and allocation errors
+    /// happen before wire I/O and are retryable. A transport or protocol error
+    /// after submission begins may leave a partial response set on the wire;
+    /// close the connection instead of retrying that batch.
     pub fn writeResponseBodyBatch(
         self: *Connection,
         stream_ids: []const u31,
@@ -3624,7 +3626,6 @@ pub const Connection = struct {
         if (stream_ids.len == 0) return;
         if (body_chunk_size == 0) return error.InvalidFrameSize;
 
-        var total_body_bytes: usize = 0;
         for (stream_ids, responses, 0..) |stream_id, options, index| {
             if (!self.outboundStreamIsActive(stream_id)) {
                 return error.InvalidStreamId;
@@ -3642,17 +3643,6 @@ pub const Connection = struct {
             )) {
                 return error.InvalidContentLength;
             }
-            total_body_bytes = std.math.add(
-                usize,
-                total_body_bytes,
-                options.body.len,
-            ) catch return error.MessageTooLarge;
-            if (options.body.len > self.sendStreamWindowAvailable(stream_id)) {
-                return error.FlowControlBlocked;
-            }
-        }
-        if (total_body_bytes > self.send_connection_window.available()) {
-            return error.FlowControlBlocked;
         }
 
         var views_stack: [16]BatchDataView = undefined;
@@ -3672,21 +3662,25 @@ pub const Connection = struct {
             self.allocator.free(offsets);
         };
         @memset(offsets, 0);
+        var round_reserved_stack: [16]usize = undefined;
+        const round_reserved =
+            if (responses.len <= round_reserved_stack.len)
+                round_reserved_stack[0..responses.len]
+            else
+                try self.allocator.alloc(usize, responses.len);
+        defer if (round_reserved.ptr != round_reserved_stack[0..].ptr) {
+            self.allocator.free(round_reserved);
+        };
         for (views, stream_ids, responses) |*view, stream_id, response| {
             view.* = .{ .stream_id = stream_id, .body = response.body };
         }
         try self.prepareBodyBatchData(views, body_chunk_size);
 
-        var credit_reserved_stack: [16]bool = undefined;
-        const credit_reserved =
-            if (responses.len <= credit_reserved_stack.len)
-                credit_reserved_stack[0..responses.len]
-            else
-                try self.allocator.alloc(bool, responses.len);
-        defer if (credit_reserved.ptr != credit_reserved_stack[0..].ptr) {
-            self.allocator.free(credit_reserved);
-        };
-        @memset(credit_reserved, false);
+        // Materialize stream windows before HEADERS are visible so DATA
+        // scheduling cannot fail with a local allocation after wire commit.
+        for (stream_ids) |stream_id| {
+            _ = try self.sendStreamWindow(stream_id);
+        }
 
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
@@ -3704,35 +3698,6 @@ pub const Connection = struct {
             );
         }
 
-        var reserved_connection_bytes: usize = 0;
-        errdefer if (reserved_connection_bytes != 0) {
-            self.send_connection_window.update(
-                @intCast(reserved_connection_bytes),
-            ) catch unreachable;
-            for (stream_ids, responses, credit_reserved) |
-                stream_id,
-                options,
-                stream_credit_reserved,
-            | {
-                if (!stream_credit_reserved) continue;
-                (self.sendStreamWindow(stream_id) catch continue)
-                    .update(@intCast(options.body.len)) catch unreachable;
-            }
-        };
-        try self.send_connection_window.reserve(total_body_bytes);
-        reserved_connection_bytes = total_body_bytes;
-        for (stream_ids, responses, credit_reserved) |
-            stream_id,
-            options,
-            *stream_credit_reserved,
-        | {
-            if (options.body.len == 0) continue;
-            try (try self.sendStreamWindow(stream_id)).reserve(
-                options.body.len,
-            );
-            stream_credit_reserved.* = true;
-        }
-
         writeAll(self.io, self.stream, batch.items) catch |err| {
             // A transport failure may expose only a prefix of the staged HPACK
             // sequence. It cannot be retried or rolled back; commit encoder
@@ -3745,17 +3710,208 @@ pub const Connection = struct {
         self.hpack_encoder.deinit(self.allocator);
         self.hpack_encoder = staged_encoder;
         staged_encoder_owned = false;
-        var body_write_succeeded = false;
-        errdefer if (!body_write_succeeded) {
-            // A failed wide write may have emitted an unknown DATA prefix.
-            // Retain the full reservation conservatively; callers must close
-            // this connection rather than retrying the response batch.
-            reserved_connection_bytes = 0;
-        };
-        try self.writeBodyBatchData(views, offsets, body_chunk_size);
-        body_write_succeeded = true;
-        reserved_connection_bytes = 0;
+        try self.writeResponseBodyBatchData(
+            views,
+            offsets,
+            round_reserved,
+            body_chunk_size,
+        );
         for (stream_ids) |stream_id| self.releasePeerStream(stream_id);
+    }
+
+    fn writeResponseBodyBatchData(
+        self: *Connection,
+        views: []const BatchDataView,
+        offsets: []usize,
+        round_reserved: []usize,
+        application_chunk_size: usize,
+    ) Error!void {
+        std.debug.assert(views.len == offsets.len);
+        std.debug.assert(views.len == round_reserved.len);
+        const frame_limit = self.outboundFramePayloadLimit();
+        var remaining_streams = views.len;
+        for (views) |view| {
+            if (view.body.len == 0) remaining_streams -= 1;
+        }
+        var next_stream: usize = 0;
+
+        while (remaining_streams != 0) {
+            self.batch_data_headers.clearRetainingCapacity();
+            self.batch_data_parts.clearRetainingCapacity();
+            @memset(round_reserved, 0);
+            var made_progress = false;
+            var reserved_connection_bytes: usize = 0;
+            var wire_write_started = false;
+            errdefer if (!wire_write_started) {
+                // Before the wide write starts, every reserved byte can be
+                // restored exactly. The successful write clears these counts;
+                // any transport error thereafter retains conservative credit
+                // because the emitted prefix is unknowable.
+                self.send_connection_window.update(
+                    @intCast(reserved_connection_bytes),
+                ) catch unreachable;
+                for (views, round_reserved) |rollback_view, bytes| {
+                    if (bytes == 0) continue;
+                    (self.sendStreamWindow(
+                        rollback_view.stream_id,
+                    ) catch unreachable).update(
+                        @intCast(bytes),
+                    ) catch unreachable;
+                }
+            };
+            const pass_start = next_stream;
+            var scanned: usize = 0;
+            while (scanned < views.len) : (scanned += 1) {
+                const index = (pass_start + scanned) % views.len;
+                const view = views[index];
+                const offset = &offsets[index];
+                if (offset.* == view.body.len) continue;
+                if (self.send_connection_window.available() == 0) break;
+
+                const stream_window = try self.sendStreamWindow(
+                    view.stream_id,
+                );
+                const contribution_len = @min(
+                    application_chunk_size,
+                    view.body.len - offset.*,
+                    self.send_connection_window.available(),
+                    stream_window.available(),
+                );
+                if (contribution_len == 0) continue;
+
+                try self.appendResponseBatchContribution(
+                    view,
+                    offset,
+                    contribution_len,
+                    frame_limit,
+                    stream_window,
+                );
+                reserved_connection_bytes += contribution_len;
+                round_reserved[index] = contribution_len;
+                if (offset.* == view.body.len) remaining_streams -= 1;
+                made_progress = true;
+                // Continue the next scheduler pass after the last stream that
+                // made progress. A small connection WINDOW_UPDATE therefore
+                // cannot repeatedly feed stream zero while peers starve.
+                next_stream = (index + 1) % views.len;
+            }
+
+            if (made_progress) {
+                // A partial wide write consumes an unknown prefix of reserved
+                // credit. Keep the conservative reservation and require the
+                // caller to close rather than retry this response batch.
+                wire_write_started = true;
+                try stream_io.writeAllSlicesWide(
+                    self.io,
+                    self.stream,
+                    self.batch_data_parts.items,
+                );
+                continue;
+            }
+            try self.waitForResponseBatchCapacity(views, offsets);
+        }
+    }
+
+    fn appendResponseBatchContribution(
+        self: *Connection,
+        view: BatchDataView,
+        offset: *usize,
+        contribution_len: usize,
+        frame_limit: usize,
+        stream_window: *FlowWindow,
+    ) Error!void {
+        try self.send_connection_window.reserve(contribution_len);
+        errdefer self.send_connection_window.update(
+            @intCast(contribution_len),
+        ) catch unreachable;
+        try stream_window.reserve(contribution_len);
+        errdefer stream_window.update(
+            @intCast(contribution_len),
+        ) catch unreachable;
+
+        const contribution_end = offset.* + contribution_len;
+        while (offset.* < contribution_end) {
+            const end = @min(
+                contribution_end,
+                offset.* + frame_limit,
+            );
+            const header_index = self.batch_data_headers.items.len;
+            self.batch_data_headers.appendAssumeCapacity(undefined);
+            try encodeFrameHeader(
+                &self.batch_data_headers.items[header_index],
+                .data,
+                if (end == view.body.len) flag_end_stream else 0,
+                view.stream_id,
+                end - offset.*,
+            );
+            self.batch_data_parts.appendAssumeCapacity(
+                &self.batch_data_headers.items[header_index],
+            );
+            self.batch_data_parts.appendAssumeCapacity(
+                view.body[offset.*..end],
+            );
+            offset.* = end;
+        }
+    }
+
+    fn waitForResponseBatchCapacity(
+        self: *Connection,
+        views: []const BatchDataView,
+        offsets: []const usize,
+    ) Error!void {
+        std.debug.assert(views.len == offsets.len);
+        while (!self.responseBatchHasSendCapacity(views, offsets)) {
+            var frame = try self.readOwnedFrame();
+            defer frame.deinit(self.allocator);
+            if (try self.handleConnectionFrame(frame.frame)) continue;
+            switch (frame.frame.header.frame_type) {
+                .goaway => {
+                    try self.recordPeerGoAway(
+                        try http2.GoAwayPayload.parse(frame.frame),
+                    );
+                    return error.ConnectionGoAway;
+                },
+                .rst_stream => {
+                    const reset =
+                        try http2.ResetStreamPayload.parse(frame.frame);
+                    if (findBatchDataViewIndex(
+                        views,
+                        reset.stream_id,
+                    ) != null) {
+                        self.recordResetStream(reset);
+                        return error.StreamReset;
+                    }
+                    return error.UnexpectedFrame;
+                },
+                else => return error.UnexpectedFrame,
+            }
+        }
+    }
+
+    fn responseBatchHasSendCapacity(
+        self: *const Connection,
+        views: []const BatchDataView,
+        offsets: []const usize,
+    ) bool {
+        if (self.send_connection_window.available() == 0) return false;
+        for (views, offsets) |view, offset| {
+            if (offset < view.body.len and
+                self.sendStreamWindowAvailable(view.stream_id) != 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn findBatchDataViewIndex(
+        views: []const BatchDataView,
+        stream_id: u31,
+    ) ?usize {
+        for (views, 0..) |view, index| {
+            if (view.stream_id == stream_id) return index;
+        }
+        return null;
     }
 
     fn appendResponseHeadToBatch(

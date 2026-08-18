@@ -165,9 +165,9 @@ parallel x10, 100 x 10-KiB request chunks/stream, max windows:
   netz batch-latency advantage: 1.93-2.07x
 
 parallel x10, 1-MiB response/stream, max windows (2026-08-19):
-  netz:  1.681-1.805 ms/batch, 168.1-180.5 us/request
+  netz:  1.663-1.671 ms/batch, 166.3-167.1 us/request
   hyper: 2.957-3.035 ms/batch, 295.7-303.5 us/request
-  netz batch-latency advantage: 1.64-1.81x
+  netz batch-latency advantage: 1.77-1.82x
 ```
 
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
@@ -195,15 +195,45 @@ Bodyless parallel batches use
 transactional HPACK staging, one request/response submission in each direction,
 and stream-ID-based response reordering. See `docs/hyper_parity.md` for the
 implementation audit and additional H2 comparison work.
-Body-bearing max-window batches add transactional credit preflight, staged
-HEADERS, round-robin borrowed DATA contributions, and server-side interleaved
-streaming request demultiplexing without body aggregation.
+Body-bearing request batches add transactional credit preflight, staged HEADERS,
+round-robin borrowed DATA contributions, and server-side interleaved streaming
+request demultiplexing without body aggregation.
 The response-body batch uses the symmetric server scheduler and client
 stream-ID demultiplexer: ten borrowed 1-MiB payloads are framed round-robin,
 using the same 16-KiB per-stream turn as Hyper's locked h2 0.4.15 scheduler,
 and callbacks account response DATA without retaining a 10-MiB aggregate.
 These ranges establish advantages for the named loopback workloads only; they
 do not establish whole-library HTTP/2 superiority.
+
+### HTTP/2 flow-controlled parallel responses
+
+Captured on 2026-08-19 with ten bodyless requests and one 1-MiB response per
+stream. Both implementations use a persistent h2c connection, a 16-KiB maximum
+DATA frame size, an 8-KiB initial stream window, the RFC default 65,535-byte
+connection window, a barrier before response creation, 5 warmups and 20
+measured batches. Both clients consume all streams concurrently and return
+WINDOW_UPDATE while DATA is arriving.
+
+```sh
+taskset -c 0 zig build bench-http2-flow -Doptimize=ReleaseFast -- \
+  --warmup=5 --iterations=20
+taskset -c 0 tools/bench_hyper_http2_flow.sh \
+  --warmup=5 --iterations=20
+```
+
+```text
+five CPU-0-pinned samples:
+  netz:  7.367-7.447 ms/batch, 1,342-1,357 body MiB/s
+  hyper: 10.192-10.379 ms/batch, 963-981 body MiB/s
+  netz batch-latency advantage: 1.37-1.41x
+```
+
+The reusable change is a blocking-runtime multi-stream DATA scheduler: it
+reserves only bytes being emitted in the current round, rotates the starting
+stream after progress, and pumps SETTINGS/PING/WINDOW_UPDATE plus member-stream
+RST_STREAM while blocked. Payloads remain borrowed and HPACK/scratch validation
+still completes before HEADERS are written. This is focused backpressure and
+fairness evidence, not a whole-stack superiority claim.
 
 ### HTTP/3 QPACK dynamic encode
 

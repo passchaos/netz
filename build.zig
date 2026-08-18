@@ -202,6 +202,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark HTTP/2 h2c persistent request/response round trips",
         },
         .{
+            .exe_name = "netz-bench-http2-flow",
+            .path = "examples/bench_http2_flow.zig",
+            .run_step = "bench-http2-flow",
+            .description = "Benchmark flow-controlled parallel HTTP/2 responses",
+        },
+        .{
             .exe_name = "netz-bench-http3-dev",
             .path = "examples/bench_http3_dev.zig",
             .run_step = "bench-http3-dev",

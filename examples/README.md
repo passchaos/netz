@@ -71,6 +71,17 @@ benchmark includes a same-length Date field and Hyper-style receive windows so
 steady-state wire sizes and flow-control shape match the reference. The 100-KiB
 server path consumes DATA through `readRequestStreaming` without aggregation.
 
+`bench-http2-flow` exercises the same ten 1-MiB responses with an 8-KiB stream
+window and the RFC default 65,535-byte connection window. The server's batch
+scheduler advances streams round-robin, waits for WINDOW_UPDATE only when every
+unfinished stream is blocked, and the client continuously returns credit while
+streaming DATA. Its same-shape Hyper harness is run with:
+
+```sh
+taskset -c 0 tools/bench_hyper_http2_flow.sh \
+  --warmup=5 --iterations=20
+```
+
 `run-http3-handshake` is the protected-loopback counterpart to the public
 HTTP/3 fetcher: it starts a local QUIC/H3 server, performs a full client
 handshake, exchanges one POST/200 response, and exits without relying on

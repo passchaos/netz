@@ -195,11 +195,11 @@ http2_parallel_x10_req_10kb_100_chunks_max_window:
   netz is about 1.93-2.07x faster per batch
 
 http2_parallel_x10_res_1mb (2026-08-19):
-  netz:  1.681-1.805 ms/10-stream batch
-         168.1-180.5 us/request
+  netz:  1.663-1.671 ms/10-stream batch
+         166.3-167.1 us/request
   hyper: 2.957-3.035 ms/10-stream batch
          295.7-303.5 us/request
-  netz is about 1.64-1.81x faster per batch
+  netz is about 1.77-1.82x faster per batch
 ```
 
 For the response case, Hyper supplies one `Full<Bytes>` per stream. The locked
@@ -297,14 +297,49 @@ Reusable implementation changes behind these H2 results:
   submission; a deep-cloned HPACK encoder is committed only after the wire
   write succeeds, so a failed batch cannot desynchronize compression state;
 - `writeResponseBodyBatch` extends the server boundary to complete bodies that
-  fit current connection and per-stream credit. It stages all HPACK state,
-  borrows payloads, and submits each stream's application contribution
-  round-robin while retaining normal DATA frame limits. The corresponding
-  `requestBatchStreamingInto` client path demultiplexes interleaved DATA by
-  request index, continuously returns flow credit, validates each declared
-  length, and retains only owned response metadata rather than a batch-sized
-  body aggregate;
+  need not fit current connection and per-stream credit. It stages all HPACK
+  state and allocation before wire I/O, borrows payloads, submits each stream's
+  application contribution round-robin, and pumps WINDOW_UPDATE while every
+  unfinished stream is blocked. The scheduler rotates its starting stream so a
+  small connection update cannot repeatedly favor stream zero. The
+  corresponding `requestBatchStreamingInto` client path demultiplexes
+  interleaved DATA by request index, continuously returns flow credit,
+  validates each declared length, and retains only owned response metadata
+  rather than a batch-sized body aggregate;
 - large batch header blocks retain normal HEADERS/CONTINUATION framing.
+
+### HTTP/2 constrained-window parallel responses
+
+The max-window Hyper workload does not exercise response backpressure. A
+checked-in companion harness therefore uses the same Hyper revision through a
+local path dependency without modifying `~/Work/hyper`. Both peers run ten
+bodyless requests, wait until all ten handlers exist, then concurrently stream
+1 MiB per response with a 16-KiB maximum DATA frame size, an 8-KiB stream
+window and the RFC default 65,535-byte connection window. Both clients drain
+all response bodies concurrently.
+
+```sh
+taskset -c 0 zig build bench-http2-flow -Doptimize=ReleaseFast -- \
+  --warmup=5 --iterations=20
+taskset -c 0 tools/bench_hyper_http2_flow.sh \
+  --warmup=5 --iterations=20
+```
+
+2026-08-19 ranges, each from five CPU-0-pinned process runs:
+
+```text
+netz:  7.367-7.447 ms/10-stream batch
+       1,342-1,357 body MiB/s
+hyper: 10.192-10.379 ms/10-stream batch
+       963-981 body MiB/s
+netz is about 1.37-1.41x faster per batch
+```
+
+This evidence covers normal WINDOW_UPDATE-driven completion and round-robin
+progress. End-to-end tests separately verify a member-stream reset is observed
+while the server is blocked on response credit. It remains one synchronous
+loopback shape, not a claim about all priorities, cancellation races or network
+conditions.
 
 ## Current feature comparison
 
@@ -321,12 +356,13 @@ Reusable implementation changes behind these H2 results:
 | HTTP/2 consecutive 100-KiB POST | 23.52-23.57 us/op pinned, streaming receive | 37.24-38.68 us/op pinned |
 | HTTP/2 parallel x10 empty | 26.35-26.60 us/batch pinned | 47.50-48.46 us/batch pinned |
 | HTTP/2 parallel x10 × 100 × 10-KiB request chunks | 1.64-1.74 ms/batch pinned | 3.36-3.40 ms/batch pinned |
-| HTTP/2 parallel x10 × 1-MiB responses | 1.681-1.805 ms/batch pinned | 2.957-3.035 ms/batch pinned |
+| HTTP/2 parallel x10 × 1-MiB responses | 1.663-1.671 ms/batch pinned | 2.957-3.035 ms/batch pinned |
+| HTTP/2 parallel x10 × 1-MiB responses, 8-KiB stream window | 7.367-7.447 ms/batch pinned | 10.192-10.379 ms/batch pinned |
 
 ## Remaining evidence
 
-1. Extend parallel H2 response evidence to flow-control-blocked and
-   cancellation-heavy workloads.
+1. Extend parallel H2 response evidence to priority-weighted and
+   cancellation-race workloads.
 2. Measure allocation count and peak memory, not only elapsed time.
 3. Add external h2spec and broad HTTP conformance/interoperability evidence.
 4. Compare cancellation, backpressure and fairness under concurrent streams;

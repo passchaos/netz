@@ -130,64 +130,128 @@ test "HTTP/2 response body batch streams interleaved DATA" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/2 response body batch rejects insufficient credit" {
+test "HTTP/2 response body batch resumes fairly under small windows" {
     const allocator = std.testing.allocator;
-    var connection = Connection{
-        .io = undefined,
-        .allocator = allocator,
-        .stream = undefined,
-        .role = .server,
-        .send_connection_window = .{ .value = 7 },
-        .peer_initial_stream_window = 4,
+    const parallel = 5;
+    const chunk_size = 16 * 1024;
+    const response_body = "flow-controlled-response-" ** 2048;
+    const limits: Limits = .{
+        .max_body_bytes = response_body.len,
+        .initial_window_size = 32 * 1024,
+        .initial_connection_window_size = 65_535,
+        .max_frame_payload = chunk_size,
     };
-    defer {
-        connection.active_peer_streams.deinit(allocator);
-        connection.active_peer_index.deinit(allocator);
-        connection.response_semantics.deinit(allocator);
-        connection.response_semantics_index.deinit(allocator);
-        connection.priority_state.deinit(allocator);
-        connection.write_batch.deinit(allocator);
-        connection.batch_data_headers.deinit(allocator);
-        connection.batch_data_parts.deinit(allocator);
-        connection.hpack_decoder.deinit(allocator);
-        connection.hpack_encoder.deinit(allocator);
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var requests: [parallel]OwnedRequest = undefined;
+            var initialized: usize = 0;
+            defer for (requests[0..initialized]) |*request| {
+                request.deinit(server_ptr.allocator);
+            };
+            var stream_ids: [parallel]u31 = undefined;
+            for (&requests, &stream_ids) |*request, *stream_id| {
+                request.* = try connection.readRequest();
+                initialized += 1;
+                stream_id.* = request.stream_id;
+            }
+            const responses = [_]ResponseOptions{
+                .{ .body = response_body },
+            } ** parallel;
+            try connection.writeResponseBodyBatch(
+                &stream_ids,
+                &responses,
+                chunk_size,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{ .path = "/one", .authority = "localhost" },
+        .{ .path = "/two", .authority = "localhost" },
+        .{ .path = "/three", .authority = "localhost" },
+        .{ .path = "/four", .authority = "localhost" },
+        .{ .path = "/five", .authority = "localhost" },
+    };
+    var responses: [parallel]StreamingResponse = undefined;
+    const Context = struct {
+        bytes: [parallel]usize = @splat(0),
+        first_round: [parallel]usize = undefined,
+        first_round_count: usize = 0,
+
+        fn consume(
+            self: *@This(),
+            index: usize,
+            data: []const u8,
+        ) !void {
+            if (self.first_round_count < parallel) {
+                self.first_round[self.first_round_count] = index;
+                self.first_round_count += 1;
+            }
+            self.bytes[index] += data.len;
+        }
+    };
+    var context: Context = .{};
+    try client.requestBatchStreamingInto(
+        &requests,
+        &responses,
+        &context,
+        Context.consume,
+    );
+    defer for (&responses) |*response| response.deinit(allocator);
+    for (responses, context.bytes) |response, bytes| {
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+        try std.testing.expectEqual(response_body.len, response.body_bytes);
+        try std.testing.expectEqual(response_body.len, bytes);
     }
-    try runtime.testing.addActivePeerStream(&connection, 1);
-    try runtime.testing.addActivePeerStream(&connection, 3);
-    try std.testing.expectError(
-        error.FlowControlBlocked,
-        connection.writeResponseBodyBatch(
-            &.{ 1, 3 },
-            &.{
-                .{ .body = "1234" },
-                .{ .body = "5678" },
-            },
-            4,
-        ),
+    try std.testing.expectEqual(parallel, context.first_round_count);
+    try std.testing.expectEqualSlices(
+        usize,
+        &.{ 0, 1, 2, 3, 4 },
+        &context.first_round,
     );
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        connection.write_batch.items.len,
-    );
-    try std.testing.expectEqual(
-        @as(i64, 7),
-        connection.send_connection_window.value,
-    );
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        connection.active_peer_streams.items.len,
-    );
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
-test "HTTP/2 response body batch honors existing stream credit" {
+test "HTTP/2 response body batch validation is transactional" {
     const allocator = std.testing.allocator;
     var connection = Connection{
         .io = undefined,
         .allocator = allocator,
         .stream = undefined,
         .role = .server,
-        .send_connection_window = .{ .value = 32 },
-        .peer_initial_stream_window = 16,
     };
     defer {
         connection.active_peer_streams.deinit(allocator);
@@ -204,22 +268,133 @@ test "HTTP/2 response body batch honors existing stream credit" {
         connection.hpack_encoder.deinit(allocator);
     }
     try runtime.testing.addActivePeerStream(&connection, 1);
-    const stream_window =
-        try runtime.testing.sendStreamWindow(&connection, 1);
-    try stream_window.reserve(12);
+    try runtime.testing.addActivePeerStream(&connection, 3);
     try std.testing.expectError(
-        error.FlowControlBlocked,
+        error.InvalidContentLength,
         connection.writeResponseBodyBatch(
-            &.{1},
-            &.{.{ .body = "12345" }},
-            5,
+            &.{ 1, 3 },
+            &.{
+                .{ .body = "valid" },
+                .{
+                    .headers = &.{.{
+                        .name = "content-length",
+                        .value = "9",
+                    }},
+                    .body = "short",
+                },
+            },
+            4096,
         ),
     );
-    try std.testing.expectEqual(@as(i64, 4), stream_window.value);
     try std.testing.expectEqual(
-        @as(usize, 0),
-        connection.write_batch.items.len,
+        @as(i64, 65_535),
+        connection.send_connection_window.value,
     );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        connection.active_peer_streams.items.len,
+    );
+}
+
+test "HTTP/2 response body batch observes reset while flow blocked" {
+    const allocator = std.testing.allocator;
+    const parallel = 2;
+    const response_body = "cancel-flow-controlled-response-" ** 4096;
+    const limits: Limits = .{
+        .max_body_bytes = response_body.len,
+        .initial_window_size = 4096,
+        .initial_connection_window_size = 65_535,
+        .max_frame_payload = 4096,
+    };
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        saw_reset: bool = false,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept();
+            defer connection.close();
+            var requests: [parallel]OwnedRequest = undefined;
+            var initialized: usize = 0;
+            defer for (requests[0..initialized]) |*request| {
+                request.deinit(shared.server.allocator);
+            };
+            var stream_ids: [parallel]u31 = undefined;
+            for (&requests, &stream_ids) |*request, *stream_id| {
+                request.* = try connection.readRequest();
+                initialized += 1;
+                stream_id.* = request.stream_id;
+            }
+            const responses = [_]ResponseOptions{
+                .{ .body = response_body },
+            } ** parallel;
+            try std.testing.expectError(
+                error.StreamReset,
+                connection.writeResponseBodyBatch(
+                    &stream_ids,
+                    &responses,
+                    4096,
+                ),
+            );
+            shared.saw_reset = true;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{ .path = "/cancel", .authority = "localhost" },
+        .{ .path = "/peer", .authority = "localhost" },
+    };
+    var responses: [parallel]StreamingResponse = undefined;
+    var callback_calls: usize = 0;
+    try std.testing.expectError(
+        error.CancelBatch,
+        client.requestBatchStreamingInto(
+            &requests,
+            &responses,
+            &callback_calls,
+            struct {
+                fn consume(
+                    calls: *usize,
+                    _: usize,
+                    _: []const u8,
+                ) !void {
+                    calls.* += 1;
+                    return error.CancelBatch;
+                }
+            }.consume,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), callback_calls);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.saw_reset);
 }
 
 test "HTTP/2 streaming response batch callback failure cancels every stream" {
