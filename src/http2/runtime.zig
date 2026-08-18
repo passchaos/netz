@@ -6226,6 +6226,13 @@ fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]con
 }
 
 pub const testing = struct {
+    pub fn setSendConnectionWindow(
+        connection: *Connection,
+        value: i64,
+    ) void {
+        connection.send_connection_window.value = value;
+    }
+
     pub fn findHeader(
         headers: []const http2.Hpack.HeaderField,
         name: []const u8,

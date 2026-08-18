@@ -50,7 +50,11 @@ existing HTTP/2 runtime:
   allocation only when a message spans callbacks,
 - independent gzip/deflate context per streamed message, terminal
   `grpc-status`/trailer parsing, and HTTP/2 stream reset for a truncated request
-  message at END_STREAM.
+  message at END_STREAM,
+- `writeMessageOrReadResponse`, which turns HTTP/2 `ResponseAvailable` into an
+  owned typed gRPC response when a server returns before a flow-control-blocked
+  client upload finishes; the request direction is half-closed, partial-write
+  accounting is retained, and trailers-only OK/error status remains visible.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -81,17 +85,20 @@ HTTP 503 response without `grpc-status`. Stream tests sweep every byte split
 across three coalesced messages, split a prefix across separate HTTP/2 writes,
 force large gzip/deflate messages across small DATA frames in both directions,
 verify independent compressed members, and require RST_STREAM(INTERNAL_ERROR)
-for an incomplete request message.
+for an incomplete request message. The early-return test gives exactly one
+framed message send credit, then verifies that the next write receives a
+trailers-only CANCELLED response with decoded `grpc-message` and without
+sending the second message, matching the request-stream behavior covered by
+upstream gRPC Core's `ServerEarlyReturnTest`.
 
 ## Remaining work before broad gRPC parity
 
 1. Add an interleaved full-duplex scheduler. The current blocking API supports
    multiple client-streamed messages followed by multiple server-streamed
    messages on one call, but deliberately finishes the request half before
-   reading the response half. The HTTP/2 RequestWriter already preserves an
-   early server status while an upload is flow-control blocked; the next layer
-   must expose that early response as gRPC status and allow simultaneous bidi
-   message progress.
+   reading the response half. Early server status during a flow-control-blocked
+   upload is now exposed as typed gRPC response; the remaining gap is
+   simultaneous bidi message progress rather than early-return correctness.
 2. Add TLS/ALPN HTTP/2 transport and interoperate with upstream grpc clients
    and servers, not only netz's h2c runtime.
 3. Build generated service/client bindings on `pbz`, including unary and all

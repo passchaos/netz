@@ -71,6 +71,10 @@ test "public modules are reachable" {
         "finishAndRead",
     ));
     try std.testing.expect(@hasDecl(
+        netz.grpc.StreamingClientWriter,
+        "writeMessageOrReadResponse",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.grpc.StreamingServerWriter,
         "finishOk",
     ));

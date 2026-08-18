@@ -390,6 +390,121 @@ test "gRPC request and response message streams cross HTTP2 DATA frames" {
     );
 }
 
+test "gRPC streaming upload returns early cancelled status while flow blocked" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const limits: http2.runtime.Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    };
+    var server = try http2.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            runFallible(self) catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            const stream_id = try readRequestHeadersStreamId(&connection);
+            // A trailers-only response is legal gRPC and may arrive before
+            // the client finishes uploading request messages.
+            try http2.runtime.testing.writeHeaders(
+                &connection,
+                stream_id,
+                &.{
+                    .{ .name = ":status", .value = "200" },
+                    .{
+                        .name = "content-type",
+                        .value = "application/grpc+proto",
+                    },
+                    .{ .name = "grpc-status", .value = "1" },
+                    .{
+                        .name = "grpc-message",
+                        .value = "stop%20uploading",
+                    },
+                    .{ .name = "x-early", .value = "cancelled" },
+                },
+                true,
+            );
+        }
+    };
+
+    const Consumer = struct {
+        fn consume(_: void, _: codec.DecodedMessage) !void {
+            return error.UnexpectedMessage;
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var connection = try http2.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer connection.close();
+    var client = try runtime.startClient(&connection, allocator, .{
+        .path = "/demo.Stream/EarlyCancel",
+        .authority = "localhost",
+    });
+    defer client.deinit();
+
+    // Allow the first framed message, then force the second call to pump peer
+    // input while waiting for WINDOW_UPDATE. It must surface typed gRPC status
+    // rather than require callers to interpret ResponseAvailable themselves.
+    const first_wire_len = try wire.encodedMessageLen("first".len);
+    http2.runtime.testing.setSendConnectionWindow(
+        &connection,
+        @intCast(first_wire_len),
+    );
+    (try http2.runtime.testing.sendStreamWindow(
+        &connection,
+        client.transport.stream_id,
+    )).value = @intCast(first_wire_len);
+    try std.testing.expect((try client.writeMessageOrReadResponse(
+        "first",
+        {},
+        Consumer.consume,
+    )) == null);
+    var early = (try client.writeMessageOrReadResponse(
+        "second",
+        {},
+        Consumer.consume,
+    )).?;
+    defer early.deinit();
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(wire.Status.cancelled, early.status);
+    try std.testing.expectEqualStrings(
+        "stop uploading",
+        early.status_message,
+    );
+    try std.testing.expectEqualStrings(
+        "cancelled",
+        headerValue(early.transport.headers, "x-early").?,
+    );
+    try std.testing.expect(client.transport.body_finished);
+    try std.testing.expect(client.transport.completed);
+    try std.testing.expectEqual(first_wire_len, client.transport.written);
+}
+
 test "gRPC streaming request rejects a truncated message and resets HTTP2" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -465,6 +580,24 @@ test "gRPC streaming request rejects a truncated message and resets HTTP2" {
     );
     thread.join();
     if (shared.err) |err| return err;
+}
+
+fn readRequestHeadersStreamId(
+    connection: *http2.runtime.Connection,
+) !u31 {
+    while (true) {
+        var frame = try http2.runtime.testing.readOwnedFrame(connection);
+        defer frame.deinit(connection.allocator);
+        if (try http2.runtime.testing.handleConnectionFrame(
+            connection,
+            frame.frame,
+        )) continue;
+        try std.testing.expectEqual(
+            http2.FrameType.headers,
+            frame.frame.header.frame_type,
+        );
+        return frame.frame.header.stream_id;
+    }
 }
 
 fn headerValue(

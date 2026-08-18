@@ -53,6 +53,28 @@ pub const ClientWriter = struct {
         try self.encoder.writeMessage(&self.transport, payload);
     }
 
+    /// Write one message, or consume a response that ended the upload early.
+    ///
+    /// A non-null result means the HTTP/2 writer encountered response HEADERS
+    /// while waiting for flow-control credit. The transport has already
+    /// half-closed the request direction and retained that frame, so callers
+    /// can inspect typed gRPC status instead of losing it behind
+    /// `ResponseAvailable`. Normal progress returns null.
+    pub fn writeMessageOrReadResponse(
+        self: *ClientWriter,
+        payload: []const u8,
+        context: anytype,
+        comptime consume: anytype,
+    ) !?Response {
+        self.writeMessage(payload) catch |err| switch (err) {
+            error.ResponseAvailable => {
+                return try self.readResponse(context, consume);
+            },
+            else => return err,
+        };
+        return null;
+    }
+
     pub fn finish(self: *ClientWriter) Error!void {
         try self.transport.finish();
     }
