@@ -32,10 +32,12 @@ pub fn main() !void {
             defer connection.close();
             var request = try connection.readRequest();
             defer request.deinit(server_ptr.allocator);
-            const call = try netz.grpc.parseUnaryRequest(
+            var call = try netz.grpc.parseUnaryRequest(
+                server_ptr.allocator,
                 &request,
                 4096,
             );
+            defer call.deinit();
             std.debug.print(
                 "gRPC server received {s}/{s}: {x}\n",
                 .{ call.service, call.method, call.message.payload },

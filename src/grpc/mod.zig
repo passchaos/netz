@@ -6,6 +6,7 @@
 
 pub const wire = @import("wire.zig");
 pub const metadata = @import("metadata.zig");
+pub const compression = @import("compression.zig");
 pub const call = @import("call.zig");
 
 pub const Error = call.Error;
@@ -29,6 +30,14 @@ pub const encodeBinaryMetadataAlloc = metadata.encodeFieldsAlloc;
 pub const binaryMetadataDecodedUpperBound = metadata.decodedUpperBound;
 pub const binaryMetadataFieldsDecodedUpperBound =
     metadata.decodedFieldsUpperBound;
+pub const CompressionAlgorithm = compression.Algorithm;
+pub const CompressionAlgorithmSet = compression.AlgorithmSet;
+pub const parseCompressionAcceptEncoding =
+    compression.parseAcceptEncoding;
+pub const formatCompressionAcceptEncodingInto =
+    compression.formatAcceptEncodingInto;
+pub const compressMessageAlloc = compression.compressAlloc;
+pub const decompressMessageAlloc = compression.decompressAlloc;
 
 pub const UnaryRequest = call.UnaryRequest;
 pub const UnaryCallOptions = call.UnaryCallOptions;

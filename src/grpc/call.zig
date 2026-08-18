@@ -2,10 +2,12 @@
 
 const std = @import("std");
 const http2 = @import("../http2/mod.zig");
+const compression_mod = @import("compression.zig");
 const metadata_mod = @import("metadata.zig");
 const wire = @import("wire.zig");
 
 pub const Error = wire.Error || metadata_mod.Error ||
+    compression_mod.Error ||
     http2.runtime.Error || error{
     CompressionNotNegotiated,
     InvalidContentType,
@@ -18,23 +20,36 @@ const Status = wire.Status;
 const Message = wire.Message;
 const MessageIterator = wire.MessageIterator;
 const Timeout = wire.Timeout;
+const Algorithm = compression_mod.Algorithm;
+const AlgorithmSet = compression_mod.AlgorithmSet;
 const writeMessage = wire.writeMessage;
 const encodeStatusMessageAlloc = wire.encodeStatusMessageAlloc;
 const decodeStatusMessageAlloc = wire.decodeStatusMessageAlloc;
 const isContentType = wire.isContentType;
 
 pub const UnaryRequest = struct {
+    allocator: std.mem.Allocator,
     stream_id: u31,
     path: []const u8,
     service: []const u8,
     method: []const u8,
+    /// The application payload after any per-message decompression.
     message: Message,
+    was_compressed: bool,
     timeout: ?Timeout,
     encoding: ?[]const u8,
+    accepted_encodings: AlgorithmSet,
     headers: []const http2.Hpack.HeaderField,
+    owned_message: ?[]u8,
+
+    pub fn deinit(self: *UnaryRequest) void {
+        if (self.owned_message) |owned| self.allocator.free(owned);
+        self.* = undefined;
+    }
 };
 
 pub fn parseUnaryRequest(
+    allocator: std.mem.Allocator,
     request: *const http2.runtime.OwnedRequest,
     max_message_size: usize,
 ) Error!UnaryRequest {
@@ -70,15 +85,32 @@ pub fn parseUnaryRequest(
         return error.InvalidMessageCount;
     }
     try validateMessageEncoding(message, encoding);
+    var decoded = try decodeReceivedMessage(
+        allocator,
+        message,
+        encoding,
+        AlgorithmSet.supported,
+        max_message_size,
+    );
+    errdefer decoded.deinit(allocator);
     return .{
+        .allocator = allocator,
         .stream_id = request.stream_id,
         .path = request.path,
         .service = path.service,
         .method = path.method,
-        .message = message,
+        .message = .{
+            .compressed = false,
+            .payload = decoded.bytes,
+        },
+        .was_compressed = message.compressed,
         .timeout = timeout,
         .encoding = encoding,
+        .accepted_encodings = compression_mod.parseAcceptEncoding(
+            findHeader(request.headers, "grpc-accept-encoding"),
+        ),
         .headers = request.headers,
+        .owned_message = decoded.owned,
     };
 }
 
@@ -87,8 +119,12 @@ pub const UnaryCallOptions = struct {
     authority: ?[]const u8 = null,
     scheme: ?[]const u8 = null,
     message: []const u8,
-    compressed: bool = false,
-    encoding: ?[]const u8 = null,
+    /// Requested per-message encoding. Compression is skipped when it cannot
+    /// make this particular message smaller.
+    compression: Algorithm = .identity,
+    compression_level: u4 = 6,
+    /// Decoders advertised to the server for response messages.
+    accepted_encodings: AlgorithmSet = .supported,
     timeout: ?Timeout = null,
     /// ASCII application metadata already suitable for HTTP/2.
     metadata: []const http2.Hpack.HeaderField = &.{},
@@ -103,9 +139,12 @@ pub const UnaryResponse = struct {
     status: Status,
     status_message: []u8,
     message: ?Message,
+    was_compressed: bool,
     encoding: ?[]const u8,
+    owned_message: ?[]u8,
 
     pub fn deinit(self: *UnaryResponse) void {
+        if (self.owned_message) |owned| self.allocator.free(owned);
         self.allocator.free(self.status_message);
         self.transport.deinit(self.allocator);
         self.* = undefined;
@@ -120,13 +159,13 @@ pub fn unaryCall(
     if (options.message.len > options.max_message_size) {
         return error.GrpcMessageTooLarge;
     }
-    try validateMessageEncoding(
-        .{
-            .compressed = options.compressed,
-            .payload = options.message,
-        },
-        options.encoding,
+    var encoded = try compression_mod.compressAlloc(
+        allocator,
+        options.compression,
+        options.message,
+        options.compression_level,
     );
+    defer encoded.deinit(allocator);
     _ = try splitMethodPath(options.path);
     try validateCustomMetadata(options.metadata);
     try validateCustomBinaryMetadata(options.binary_metadata);
@@ -141,8 +180,8 @@ pub fn unaryCall(
     try writeMessage(
         &framed,
         allocator,
-        options.message,
-        options.compressed,
+        encoded.bytes,
+        encoded.compressed,
     );
 
     var header_storage: [16]http2.Hpack.HeaderField = undefined;
@@ -152,7 +191,7 @@ pub fn unaryCall(
         std.math.add(
             usize,
             binary_metadata.fields.len,
-            4,
+            5,
         ) catch return error.MessageTooLarge,
     ) catch return error.MessageTooLarge;
     const buffer = if (header_count <= header_storage.len)
@@ -179,12 +218,20 @@ pub fn unaryCall(
             .value = try timeout.formatInto(&timeout_buffer),
         });
     }
-    if (options.encoding) |encoding| {
+    if (options.compression != .identity) {
         headers.appendAssumeCapacity(.{
             .name = "grpc-encoding",
-            .value = encoding,
+            .value = options.compression.name(),
         });
     }
+    var accept_encoding_buffer: [32]u8 = undefined;
+    headers.appendAssumeCapacity(.{
+        .name = "grpc-accept-encoding",
+        .value = try compression_mod.formatAcceptEncodingInto(
+            &accept_encoding_buffer,
+            options.accepted_encodings,
+        ),
+    });
     headers.appendSliceAssumeCapacity(options.metadata);
     headers.appendSliceAssumeCapacity(binary_metadata.fields);
 
@@ -200,14 +247,20 @@ pub fn unaryCall(
         allocator,
         response,
         options.max_message_size,
+        options.accepted_encodings,
     );
 }
 
 pub const UnaryResponseOptions = struct {
     status: Status = .ok,
     message: ?[]const u8 = null,
-    compressed: bool = false,
-    encoding: ?[]const u8 = null,
+    /// Requested response encoding. The message remains uncompressed unless
+    /// the request advertised support for this algorithm.
+    compression: Algorithm = .identity,
+    compression_level: u4 = 6,
+    request_accepted_encodings: AlgorithmSet = .{},
+    /// Decoders advertised by this server for future request messages.
+    accepted_encodings: AlgorithmSet = .supported,
     status_message: ?[]const u8 = null,
     initial_metadata: []const http2.Hpack.HeaderField = &.{},
     trailing_metadata: []const http2.Hpack.HeaderField = &.{},
@@ -248,24 +301,34 @@ pub fn writeUnaryResponse(
     if (options.trailers_only and options.message != null) {
         return error.InvalidMessageCount;
     }
-    if (options.message) |message| {
-        try validateMessageEncoding(
-            .{
-                .compressed = options.compressed,
-                .payload = message,
-            },
-            options.encoding,
-        );
-    }
 
     var framed: std.ArrayList(u8) = .empty;
     defer framed.deinit(allocator);
+    var encoded_message: ?compression_mod.EncodedPayload = null;
+    defer if (encoded_message) |*encoded| encoded.deinit(allocator);
+    const response_algorithm: Algorithm =
+        if (options.message != null and
+        options.request_accepted_encodings.contains(
+            options.compression,
+        ))
+            options.compression
+        else
+            .identity;
     if (options.message) |message| {
+        // A server must not use a response encoding absent from the client's
+        // last grpc-accept-encoding advertisement. Falling back to identity
+        // is required even when the application requested compression.
+        encoded_message = try compression_mod.compressAlloc(
+            allocator,
+            response_algorithm,
+            message,
+            options.compression_level,
+        );
         try writeMessage(
             &framed,
             allocator,
-            message,
-            options.compressed,
+            encoded_message.?.bytes,
+            encoded_message.?.compressed,
         );
     }
     var status_buffer: [2]u8 = undefined;
@@ -293,8 +356,8 @@ pub fn writeUnaryResponse(
     var initial_storage: [16]http2.Hpack.HeaderField = undefined;
     const initial_base = std.math.add(
         usize,
-        1,
-        @intFromBool(options.encoding != null),
+        2,
+        @intFromBool(response_algorithm != .identity),
     ) catch return error.MessageTooLarge;
     const initial_extra = std.math.add(
         usize,
@@ -323,12 +386,20 @@ pub fn writeUnaryResponse(
         .name = "content-type",
         .value = "application/grpc+proto",
     });
-    if (options.encoding) |encoding| {
+    if (response_algorithm != .identity) {
         initial.appendAssumeCapacity(.{
             .name = "grpc-encoding",
-            .value = encoding,
+            .value = response_algorithm.name(),
         });
     }
+    var accept_encoding_buffer: [32]u8 = undefined;
+    initial.appendAssumeCapacity(.{
+        .name = "grpc-accept-encoding",
+        .value = try compression_mod.formatAcceptEncodingInto(
+            &accept_encoding_buffer,
+            options.accepted_encodings,
+        ),
+    });
     initial.appendSliceAssumeCapacity(options.initial_metadata);
     initial.appendSliceAssumeCapacity(initial_binary.fields);
 
@@ -372,6 +443,7 @@ fn parseUnaryResponse(
     allocator: std.mem.Allocator,
     transport: http2.runtime.OwnedResponse,
     max_message_size: usize,
+    accepted_encodings: AlgorithmSet,
 ) Error!UnaryResponse {
     var owned = transport;
     errdefer owned.deinit(allocator);
@@ -413,6 +485,9 @@ fn parseUnaryResponse(
 
     const encoding = findHeader(owned.headers, "grpc-encoding");
     var message: ?Message = null;
+    var owned_message: ?[]u8 = null;
+    errdefer if (owned_message) |payload| allocator.free(payload);
+    var was_compressed = false;
     const parse_grpc_body =
         grpc_content_type and
         (status_raw != null or owned.status == 200);
@@ -426,6 +501,24 @@ fn parseUnaryResponse(
             return error.InvalidMessageCount;
         }
         try validateMessageEncoding(message.?, encoding);
+        var decoded = try decodeReceivedMessage(
+            allocator,
+            message.?,
+            encoding,
+            accepted_encodings,
+            max_message_size,
+        );
+        errdefer decoded.deinit(allocator);
+        was_compressed = message.?.compressed;
+        owned_message = decoded.owned;
+        // From this point UnaryResponse owns the decoded allocation. Clear
+        // the temporary guard so a later status-validation error cannot free
+        // the same payload through two errdefers.
+        decoded.owned = null;
+        message = .{
+            .compressed = false,
+            .payload = decoded.bytes,
+        };
     }
     if (status == .ok and message == null) {
         return error.InvalidMessageCount;
@@ -436,8 +529,36 @@ fn parseUnaryResponse(
         .status = status,
         .status_message = status_message,
         .message = message,
+        .was_compressed = was_compressed,
         .encoding = encoding,
+        .owned_message = owned_message,
     };
+}
+
+fn decodeReceivedMessage(
+    allocator: std.mem.Allocator,
+    message: Message,
+    encoding: ?[]const u8,
+    accepted_encodings: AlgorithmSet,
+    max_message_size: usize,
+) Error!compression_mod.DecodedPayload {
+    if (!message.compressed) {
+        return .{ .bytes = message.payload };
+    }
+    const raw_encoding = encoding orelse
+        return error.CompressionNotNegotiated;
+    const algorithm = Algorithm.parse(raw_encoding) orelse
+        return error.UnsupportedCompression;
+    if (algorithm == .identity) return error.CompressionNotNegotiated;
+    if (!accepted_encodings.contains(algorithm)) {
+        return error.UnsupportedCompression;
+    }
+    return compression_mod.decompressAlloc(
+        allocator,
+        algorithm,
+        message.payload,
+        max_message_size,
+    );
 }
 
 fn splitMethodPath(
@@ -482,10 +603,13 @@ pub fn validateMessageEncoding(
     message: Message,
     encoding: ?[]const u8,
 ) Error!void {
-    if (!message.compressed) return;
-    const value = encoding orelse
-        return error.CompressionNotNegotiated;
-    if (std.ascii.eqlIgnoreCase(value, "identity")) {
+    const value = encoding orelse {
+        if (message.compressed) return error.CompressionNotNegotiated;
+        return;
+    };
+    const algorithm = Algorithm.parse(value) orelse
+        return error.UnsupportedCompression;
+    if (message.compressed and algorithm == .identity) {
         return error.CompressionNotNegotiated;
     }
 }

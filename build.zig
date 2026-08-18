@@ -16,12 +16,19 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const vort_dep = b.dependency("vort", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const netz_mod = b.addModule("netz", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "vail", .module = vail_dep.module("vail") }},
+        .imports = &.{
+            .{ .name = "vail", .module = vail_dep.module("vail") },
+            .{ .name = "vort", .module = vort_dep.module("vort") },
+        },
     });
 
     const lib = b.addLibrary(.{

@@ -141,10 +141,14 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   fallback mapping, tolerant percent-encoded `grpc-message` handling,
   content-type/TE/method-path/custom-metadata validation, unpadded binary
   metadata Base64 sending with padded/unpadded/comma-joined receive support,
-  and unary h2c
+  strict per-message gzip and RFC 1950 zlib-wrapped `deflate` codecs backed by
+  `~/project-z/vort`, bounded decompression, typed
+  `grpc-accept-encoding` negotiation, asymmetric request/response algorithms,
+  and gRPC Core-compatible fallback when compression does not shrink a message,
+  plus unary h2c
   client/server helpers with opaque protobuf payloads, initial/trailing
-  metadata, trailers-only errors, compression negotiation guards, and
-  `grpc-status` enforcement; protobuf codecs remain an application-layer
+  metadata, trailers-only errors, decoded-message ownership, and `grpc-status`
+  enforcement; protobuf codecs remain an application-layer
   choice so the transport can integrate with `~/project-z/pbz` without a hard
   dependency
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core

@@ -27,8 +27,18 @@ existing HTTP/2 runtime:
 - tolerant `grpc-message` percent decoding that preserves malformed percent
   sequences as required by the protocol,
 - HTTP status fallback mapping when a broken intermediary omits `grpc-status`,
+- typed `identity`, `deflate`, and `gzip` algorithms plus
+  `grpc-accept-encoding` parsing/formatting that ignores unknown extensions,
+- per-message gzip and RFC 1950 zlib-wrapped `deflate` compression using the
+  user-owned `~/project-z/vort` library, with no cross-message codec state,
+- strict single-stream decompression with checksum/trailer validation,
+  decompressed-size limits, raw-deflate and trailing-data rejection,
+- gRPC Core-compatible compression fallback when an encoded message is not
+  smaller, and server response fallback when the client did not advertise the
+  requested response encoding,
 - unary HTTP/2 client/server helpers with initial metadata, trailing metadata,
-  trailers-only errors, and configurable message-size limits.
+  trailers-only errors, configurable message-size limits, and explicit
+  ownership for decoded request and response messages.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -51,21 +61,21 @@ zig build test
 
 The test suite covers message truncation/limits, invalid compressed flags,
 timeout/status parsing, non-shortening timeout rounding, status-message
-encoding, successful unary calls with trailers, trailers-only errors with
-custom metadata, and a real HTTP 503 response without `grpc-status`.
+encoding, gzip/deflate round trips, decompression limits, raw-deflate and
+trailing-data rejection, tiny-message compression fallback, asymmetric
+request/response negotiation, unaccepted-response fallback, successful unary
+calls with trailers, trailers-only errors with custom metadata, and a real
+HTTP 503 response without `grpc-status`.
 
 ## Remaining work before broad gRPC parity
 
 1. Add streaming-call APIs that consume HTTP/2 streaming events incrementally
    instead of aggregating an entire request/response body.
-2. Integrate gzip/deflate message compression and accepted-encoding
-   negotiation; current helpers validate but do not transform compressed
-   payloads.
-3. Add TLS/ALPN HTTP/2 transport and interoperate with upstream grpc clients
+2. Add TLS/ALPN HTTP/2 transport and interoperate with upstream grpc clients
    and servers, not only netz's h2c runtime.
-4. Build generated service/client bindings on `pbz`, including unary and all
+3. Build generated service/client bindings on `pbz`, including unary and all
    streaming method shapes.
-5. Add cancellation/deadline enforcement, RST_STREAM status mapping, retry
+4. Add cancellation/deadline enforcement, RST_STREAM status mapping, retry
    policy, health checking, reflection, and conformance/interop runners.
 
 The current tests establish the first real gRPC wire and unary transport

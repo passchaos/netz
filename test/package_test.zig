@@ -19,6 +19,26 @@ test "public modules are reachable" {
         netz.grpc,
         "binaryMetadataFieldsDecodedUpperBound",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "CompressionAlgorithm",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "CompressionAlgorithmSet",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "parseCompressionAcceptEncoding",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "compressMessageAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "decompressMessageAlloc",
+    ));
     try std.testing.expect(@hasDecl(netz.grpc, "unaryCall"));
     try std.testing.expect(@hasDecl(netz.grpc, "parseUnaryRequest"));
     try std.testing.expect(@hasDecl(netz.grpc, "writeUnaryResponse"));
