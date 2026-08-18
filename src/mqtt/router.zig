@@ -233,6 +233,29 @@ pub const Router = struct {
         self.entries.items[entry_index] = null;
     }
 
+    /// Remove every subscription owned by one live network connection.
+    ///
+    /// Broker disconnect cleanup uses this instead of retaining a parallel
+    /// filter list. Entries are tombstoned rather than compacted, preserving
+    /// stable shared-group and route indices for concurrent connection slots.
+    pub fn removeSubscriber(
+        self: *Router,
+        subscriber_id: SubscriberId,
+    ) Error!usize {
+        var removed: usize = 0;
+        var index: usize = 0;
+        while (index < self.entries.items.len) : (index += 1) {
+            const entry = self.entries.items[index] orelse continue;
+            if (entry.subscriber_id != subscriber_id) continue;
+            try self.unsubscribe(
+                subscriber_id,
+                entry.subscription.topic_filter,
+            );
+            removed += 1;
+        }
+        return removed;
+    }
+
     /// Match into caller storage without allocation. Shared-group cursors only
     /// advance after all output capacity checks succeed.
     pub fn matchInto(self: *Router, topic: []const u8, out: []Match) Error![]Match {
@@ -273,10 +296,29 @@ pub const Router = struct {
     }
 
     pub fn matchAlloc(self: *Router, allocator: std.mem.Allocator, topic: []const u8) Error![]Match {
+        return self.matchAllocForPublisher(allocator, topic, null);
+    }
+
+    /// Allocate the exact route set for a publisher-aware match.
+    ///
+    /// Passing the publisher identity lets the router apply MQTT No Local
+    /// while shared-subscription selection is still performed exactly once.
+    /// Broker callers should prefer this over filtering `matchAlloc` results:
+    /// repeating a match could advance a shared group's cursor twice.
+    pub fn matchAllocForPublisher(
+        self: *Router,
+        allocator: std.mem.Allocator,
+        topic: []const u8,
+        publisher_id: ?SubscriberId,
+    ) Error![]Match {
         const upper_bound = self.subscriptionCount();
         const matches = try allocator.alloc(Match, upper_bound);
         errdefer allocator.free(matches);
-        const written = try self.matchInto(topic, matches);
+        const written = try self.matchIntoForPublisher(
+            topic,
+            publisher_id,
+            matches,
+        );
         if (written.len == matches.len) return matches;
         if (written.len == 0) {
             allocator.free(matches);

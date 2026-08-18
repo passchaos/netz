@@ -117,6 +117,18 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark MQTT router trie matching against a linear scan",
         },
         .{
+            .exe_name = "netz-mqtt-broker",
+            .path = "examples/mqtt_broker.zig",
+            .run_step = "run-mqtt-broker",
+            .description = "Run the bounded MQTT 5 TCP broker",
+        },
+        .{
+            .exe_name = "netz-bench-mqtt-broker",
+            .path = "examples/bench_mqtt_broker.zig",
+            .run_step = "bench-mqtt-broker",
+            .description = "Run the external MQTT 5 TCP broker fanout workload",
+        },
+        .{
             .exe_name = "netz-bench-mqtt-websocket",
             .path = "examples/bench_mqtt_websocket.zig",
             .run_step = "bench-mqtt-websocket",

@@ -447,8 +447,30 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.mqtt.runtime.ConnectOptions, "password"));
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.mqtt.runtime.Limits{}).max_packet_size);
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Server, "serveConcurrent"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "broker"));
+    try std.testing.expect(@hasDecl(netz.mqtt.broker, "Broker"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "listen",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "serve",
+    ));
+    try std.testing.expectEqual(
+        @as(usize, 1024),
+        (netz.mqtt.broker.Limits{}).max_connections,
+    );
     try std.testing.expect(@hasField(netz.mqtt.runtime.Connection, "max_outgoing_inflight"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubAck"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "readBrokerEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "applyPubAck",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.AckPacket, "accepted"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubAckWithProperties"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubRecWithProperties"));

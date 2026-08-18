@@ -1,30 +1,79 @@
-# netz vs `~/Work/rumqtt` MQTT parity audit
+# netz vs rumqtt and Mosquitto MQTT parity audit
 
 This audit records evidence for the MQTT portion of the netz improvement goal.
-Rumqtt contains both a production broker (`rumqttd`) and clients
-(`rumqttc`), so feature and microbenchmark comparisons are kept separate from
-whole-broker throughput claims.
+The source references are `~/Work/rumqtt` at `e886a78` and
+`~/Work/mosquitto` at `5cd25465`. Rumqtt contains both a production broker
+(`rumqttd`) and clients (`rumqttc`); Mosquitto supplies a mature broker,
+persistence format, and conformance suite. Feature, internal microbenchmark,
+and equal-wire broker results are kept separate.
 
 ## Current feature comparison
 
-| Area | netz | rumqtt reference |
+| Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
-| MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime support | `rumqttc`: MQTT 3.1.1/5; audited `rumqttd` README still lists MQTT 5 unchecked |
-| QoS | QoS 0/1/2 connection state, out-of-order acknowledgements, negative acknowledgements and Receive Maximum | Broker/client QoS 0/1/2 and reconnect retransmission |
-| MQTT 5 capabilities | Properties, topic aliases, maximum packet/QoS, retain/wildcard/shared/subscription-ID capability enforcement | Rich v5 client packet/state support |
-| Shared subscriptions | Trie-indexed `{group, filter}` routing with allocation-free match, RoundRobin/Random/Sticky and stable Rendezvous hashing | RoundRobin/Random/Sticky broker strategies |
-| Topic routing | Exact, `+`, `#`, `$SYS`, No Local and shared groups | Hash maps, logs and broker scheduler |
-| Retained messages | Bounded owned store, O(1) exact lookup, wildcard delivery, MQTT 5 expiry countdown and full subscription-time rules | HashMap store with expiry; audited routing has Retain Forward Rules/re-subscribe TODOs |
-| Runtime transports | Blocking TCP and native TLS client/server plus `std.Io.async` concurrent server helpers; MQTT 3.1.1/5 WebSocket client/server over WS/WSS with optional WSS mTLS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
-| Broker sessions | Bounded Session Store with Session Expiry, full subscription options/identifiers, offline QoS 1/2 queue, incoming/outgoing QoS 2 and reconnect retransmission | Graveyard restores filter names, tracker cursors and PUBREL IDs; no Session Expiry cleanup |
-| Will lifecycle | Owned indexed min-heap scheduler for Will Delay, Session-end deadline, reconnect cancellation, Clean Start/takeover and DISCONNECT actions | Per-link Tokio timeout/channel plus router Last Will map |
-| Broker log persistence | In-memory retained/session stores; no disk commitlog yet | Datalog, segments and graveyard state |
+| MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; live broker currently MQTT 5 TCP | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
+| Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
+| QoS | Runtime QoS 0/1/2; live broker QoS 0/1 only | Both brokers support QoS 0/1/2 |
+| Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
+| Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
+| Fanout ownership | One ref-counted topic/payload allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
+| Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no live match | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
+| Retained messages | Separate bounded Store with full MQTT 5 rules; not yet composed into live Broker | Both production brokers integrate retained delivery |
+| Broker sessions | Separate bounded Session Store; not yet composed into live Broker | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
+| Will lifecycle | Separate indexed scheduler; not yet composed into live Broker | Both production brokers integrate Will publication |
+| Broker persistence | No disk commitlog yet | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, inflight/queued messages and retained base-message store |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
 important low-remapping invariant: when one member joins, only topics that
 select that new member move. It does not replace rumqttd's broader durable
-broker architecture.
+broker architecture or Mosquitto's integrated persistence and protocol
+surface.
+
+## Equal-wire live broker comparison
+
+`examples/bench_mqtt_broker.zig` is one external MQTT 5 TCP client workload,
+not a broker-specific adapter. It connects subscribers first, verifies every
+SUBACK, then connects publishers. Each measured input is a QoS 1 PUBLISH and
+each subscriber receives and PUBACKs one QoS 1 delivery. The timer starts only
+after warmup deliveries have drained and ends when the last measured
+subscriber delivery is acknowledged. The checksum catches missing or
+mis-sized payloads.
+
+The netz broker is a finite process for deterministic teardown:
+
+```sh
+zig build run-mqtt-broker -Doptimize=ReleaseFast -- \
+  --bind=127.0.0.1:18883 --connections=8 \
+  --max-queued-deliveries=1024 --max-outgoing-inflight=64
+```
+
+Run the same driver against any broker address:
+
+```sh
+zig build bench-mqtt-broker -Doptimize=ReleaseFast -- \
+  --address=127.0.0.1:PORT --publishers=4 --subscribers=4 \
+  --warmup-messages=1000 --messages=20000 --payload-bytes=256
+```
+
+2026-08-18 same-host `ReleaseFast` validation:
+
+```text
+broker      publishes/s   deliveries/s   checksum
+netz             46,375        185,501   20,580,000
+Mosquitto        27,745        110,982   20,580,000
+rumqttd          15,490         61,962   20,580,000
+```
+
+Mosquitto was built from the audited checkout in Release mode with TLS,
+WebSocket, HTTP API, clients, plugins and tests disabled, then configured with
+64 inflight and 1,024 queued messages. Rumqttd used its release binary and
+MQTT 5 listener from `rumqttd.toml`. The workload shape and payload bytes were
+identical; equal checksums prove all 80,000 measured deliveries completed.
+This result is evidence for this bounded live QoS 1 fanout shape only. It does
+not claim netz exceeds Mosquitto or rumqttd in QoS 2, persistence, offline
+sessions, retained/Will integration, tail latency, memory use, or broader
+conformance.
 
 ## Shared router benchmark
 
@@ -315,7 +364,10 @@ rumqttd.
    state.
 2. Add a native client-identity option for WSS; native MQTT TLS client/server
    mTLS and WS/WSS server transports are available.
-3. Build one identical multi-client publish/subscribe load driver for both
-   brokers and capture throughput, tail latency, allocation and peak memory.
-4. Add MQTT protocol conformance/interoperability suites beyond in-repository
-   codec and runtime tests.
+3. Compose the existing retained/session/Will stores into the live Broker and
+   add QoS 2 broker dispatch.
+4. Extend the equal-wire driver with concurrent publisher windows, latency
+   percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
+   comparison.
+5. Run Mosquitto's protocol/conformance and interoperability suites against
+   netz in addition to in-repository codec/runtime tests.

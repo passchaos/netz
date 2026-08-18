@@ -1,0 +1,329 @@
+const std = @import("std");
+const mqtt = @import("mod.zig");
+const broker_mod = @import("broker.zig");
+const runtime = @import("runtime.zig");
+
+const Broker = broker_mod.Broker;
+
+const ServeState = struct {
+    broker: *Broker,
+    connection_count: usize,
+    err: ?anyerror = null,
+
+    fn run(self: *@This()) void {
+        self.broker.serve(self.connection_count) catch |err| {
+            self.err = err;
+        };
+    }
+};
+
+fn testBroker(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    connection_count: usize,
+    max_outgoing_inflight: u16,
+) !Broker {
+    return Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = connection_count,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{
+                .protocol = .v5,
+                .max_outgoing_inflight = max_outgoing_inflight,
+            },
+        },
+    );
+}
+
+fn connect(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    broker: Broker,
+    client_id: []const u8,
+    properties: []const mqtt.Property,
+) !runtime.Connection {
+    return runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = client_id,
+            .properties = properties,
+        },
+    );
+}
+
+fn disconnectAll(connections: []const *runtime.Connection) !void {
+    for (connections) |connection| try connection.disconnect(0);
+}
+
+fn joinServer(
+    thread: std.Thread,
+    joined: *bool,
+    state: *const ServeState,
+) !void {
+    thread.join();
+    joined.* = true;
+    if (state.err) |err| return err;
+}
+
+test "broker routes QoS 1 across live TCP clients" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "publisher",
+        &.{},
+    );
+    defer publisher.close();
+
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "bench/+", .qos = .at_least_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    try publisher.publish(
+        "bench/value",
+        "payload",
+        .{ .qos = .at_least_once },
+    );
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "payload",
+        delivered.publish.payload,
+    );
+    try subscriber.writePubAck(delivered.publish.packet_id.?, 0);
+
+    try disconnectAll(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker applies No Local and returns MQTT 5 no-match PUBACK" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 1, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try connect(allocator, io, broker, "self", &.{});
+    defer client.close();
+    var suback = try client.subscribe(
+        &.{.{
+            .topic_filter = "self/#",
+            .qos = .at_least_once,
+            .no_local = true,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    const packet_id = (try client.writePublish(
+        "self/value",
+        "not-looped-back",
+        .{ .qos = .at_least_once },
+    )).?;
+    var puback = try client.readPubAck();
+    defer puback.deinit(allocator);
+    try std.testing.expectEqual(packet_id, puback.ack.packet_id);
+    try std.testing.expectEqual(@as(u8, 0x10), puback.ack.reason_code);
+    try client.applyPubAck(puback.ack);
+
+    try disconnectAll(&.{&client});
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker rotates shared subscriptions across live clients" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 3, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 3,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var first = try connect(allocator, io, broker, "worker-a", &.{});
+    defer first.close();
+    var second = try connect(allocator, io, broker, "worker-b", &.{});
+    defer second.close();
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "shared-publisher",
+        &.{},
+    );
+    defer publisher.close();
+
+    var first_suback = try first.subscribe(
+        &.{.{
+            .topic_filter = "$share/work/jobs/+",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer first_suback.deinit(allocator);
+    var second_suback = try second.subscribe(
+        &.{.{
+            .topic_filter = "$share/work/jobs/+",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer second_suback.deinit(allocator);
+
+    try publisher.publish(
+        "jobs/one",
+        "first",
+        .{ .qos = .at_least_once },
+    );
+    var first_delivery = try first.readPublish();
+    defer first_delivery.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "first",
+        first_delivery.publish.payload,
+    );
+    try first.writePubAck(first_delivery.publish.packet_id.?, 0);
+
+    try publisher.publish(
+        "jobs/two",
+        "second",
+        .{ .qos = .at_least_once },
+    );
+    var second_delivery = try second.readPublish();
+    defer second_delivery.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "second",
+        second_delivery.publish.payload,
+    );
+    try second.writePubAck(second_delivery.publish.packet_id.?, 0);
+
+    try disconnectAll(&.{ &first, &second, &publisher });
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker queues QoS 1 delivery until Receive Maximum credit returns" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "slow-subscriber",
+        &.{.{ .two_byte = .{
+            .id = .receive_maximum,
+            .value = 1,
+        } }},
+    );
+    defer subscriber.close();
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "queue-publisher",
+        &.{},
+    );
+    defer publisher.close();
+    var suback = try subscriber.subscribe(
+        &.{.{
+            .topic_filter = "queue",
+            .qos = .at_least_once,
+        }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    // Both publisher acknowledgements arrive even though the subscriber has
+    // only one outgoing slot. The second delivery remains broker-owned until
+    // the first PUBACK returns credit.
+    try publisher.publish(
+        "queue",
+        "one",
+        .{ .qos = .at_least_once },
+    );
+    try publisher.publish(
+        "queue",
+        "two",
+        .{ .qos = .at_least_once },
+    );
+
+    var first = try subscriber.readPublish();
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("one", first.publish.payload);
+    try subscriber.writePubAck(first.publish.packet_id.?, 0);
+
+    var second = try subscriber.readPublish();
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("two", second.publish.payload);
+    try subscriber.writePubAck(second.publish.packet_id.?, 0);
+
+    try disconnectAll(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+}

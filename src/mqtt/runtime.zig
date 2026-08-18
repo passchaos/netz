@@ -788,6 +788,27 @@ pub const Connection = struct {
         return self.readAck(.puback);
     }
 
+    /// Apply a PUBACK that was parsed by `readBrokerEvent`.
+    ///
+    /// Broker readers must demultiplex inbound packets before knowing which
+    /// typed operation to invoke. Keeping state mutation here preserves the
+    /// same unsolicited/negative-ack checks as the synchronous client path.
+    pub fn applyPubAck(
+        self: *Connection,
+        ack: mqtt.AckPacket,
+    ) Error!void {
+        if (ack.packet_type != .puback or
+            !self.outgoing_qos1.isSet(@as(usize, ack.packet_id)))
+        {
+            return error.UnexpectedPacket;
+        }
+        self.releaseOutgoingPublish(
+            ack.packet_id,
+            .at_least_once,
+        );
+        if (!ack.accepted()) return error.PublishRefused;
+    }
+
     pub fn writePubRec(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
         try self.writeAckPacket(.pubrec, packet_id, reason_code, &.{});
         self.completeIncomingPubRec(packet_id, reason_code);
@@ -978,6 +999,87 @@ pub const Connection = struct {
         var auth_packet = try mqtt.Auth.parse(self.allocator, self.protocol, packet.bytes);
         errdefer auth_packet.deinit(self.allocator);
         return .{ .packet = packet, .auth = auth_packet };
+    }
+
+    /// Read one broker-facing packet while preserving transport-independent
+    /// connection validation and inflight state.
+    pub fn readBrokerEvent(self: *Connection) Error!BrokerEvent {
+        var packet = try self.readPacket();
+        errdefer packet.deinit(self.allocator);
+        return switch (packet.fixed.packet_type) {
+            .publish => blk: {
+                var value = try mqtt.Publish.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                try self.validateIncomingPublishCapabilities(value);
+                try self.applyIncomingTopicAlias(&value);
+                try self.recordIncomingPublish(value);
+                break :blk .{ .publish = .{
+                    .packet = packet,
+                    .publish = value,
+                } };
+            },
+            .subscribe => blk: {
+                var value = try mqtt.Subscribe.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                try self.validateIncomingSubscribe(
+                    value.subscriptions,
+                    value.properties,
+                );
+                break :blk .{ .subscribe = .{
+                    .packet = packet,
+                    .subscribe = value,
+                } };
+            },
+            .unsubscribe => blk: {
+                var value = try mqtt.Unsubscribe.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                break :blk .{ .unsubscribe = .{
+                    .packet = packet,
+                    .unsubscribe = value,
+                } };
+            },
+            .puback => blk: {
+                var value = try mqtt.AckPacket.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                break :blk .{ .puback = .{
+                    .packet = packet,
+                    .ack = value,
+                } };
+            },
+            .pingreq => blk: {
+                try mqtt.validatePing(packet.bytes, false);
+                break :blk .{ .pingreq = packet };
+            },
+            .disconnect => blk: {
+                var value = try mqtt.Disconnect.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                break :blk .{ .disconnect = .{
+                    .packet = packet,
+                    .disconnect = value,
+                } };
+            },
+            else => error.UnexpectedPacket,
+        };
     }
 
     fn validateOutgoingTopicAlias(self: *Connection, topic: []const u8, properties: []const mqtt.Property) Error!void {
@@ -1314,6 +1416,30 @@ pub const OwnedAuth = struct {
     pub fn deinit(self: *OwnedAuth, allocator: std.mem.Allocator) void {
         self.auth.deinit(allocator);
         self.packet.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const BrokerEvent = union(enum) {
+    publish: OwnedPublish,
+    subscribe: OwnedSubscribe,
+    unsubscribe: OwnedUnsubscribe,
+    puback: OwnedAck,
+    pingreq: OwnedPacket,
+    disconnect: OwnedDisconnect,
+
+    pub fn deinit(
+        self: *BrokerEvent,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .publish => |*value| value.deinit(allocator),
+            .subscribe => |*value| value.deinit(allocator),
+            .unsubscribe => |*value| value.deinit(allocator),
+            .puback => |*value| value.deinit(allocator),
+            .pingreq => |*value| value.deinit(allocator),
+            .disconnect => |*value| value.deinit(allocator),
+        }
         self.* = undefined;
     }
 };
