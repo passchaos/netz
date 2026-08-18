@@ -6,6 +6,7 @@ pub const State = struct {
     phase: Phase = .idle,
     generation: u64 = 0,
     written: usize = 0,
+    reading: bool = false,
 
     pub const Phase = enum {
         idle,
@@ -38,11 +39,48 @@ pub const State = struct {
         ConnectionBusy,
         ConnectionUnusable,
     }!void {
+        if (self.reading) return error.ConnectionBusy;
         return switch (self.phase) {
             .idle => {},
             .writing, .awaiting_peer => error.ConnectionBusy,
             .unusable => error.ConnectionUnusable,
         };
+    }
+
+    pub fn beginRead(self: *State) error{
+        ConnectionBusy,
+        ConnectionUnusable,
+    }!void {
+        switch (self.phase) {
+            .idle => {},
+            .writing, .awaiting_peer => return error.ConnectionBusy,
+            .unusable => return error.ConnectionUnusable,
+        }
+        if (self.reading) return error.ConnectionBusy;
+        self.generation +%= 1;
+        self.written = 0;
+        self.reading = true;
+    }
+
+    pub fn ensureReadable(self: State) error{
+        ConnectionBusy,
+        ConnectionUnusable,
+    }!void {
+        if (self.reading) return error.ConnectionBusy;
+        switch (self.phase) {
+            .idle => {},
+            .writing, .awaiting_peer => return error.ConnectionBusy,
+            .unusable => return error.ConnectionUnusable,
+        }
+    }
+
+    pub fn finishRead(self: *State) void {
+        self.reading = false;
+    }
+
+    pub fn failRead(self: *State) void {
+        self.reading = false;
+        self.phase = .unusable;
     }
 };
 

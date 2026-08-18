@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const http1 = @import("mod.zig");
 const runtime_write = @import("runtime/write.zig");
 const body_writer = @import("runtime/body_writer.zig");
+const body_reader = @import("runtime/body_reader.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const wire = @import("../internal/wire.zig");
 
@@ -367,6 +368,7 @@ const RuntimeTransport = union(enum) {
 
 const WriteScratch = runtime_write.Scratch;
 const StreamingBodyWriter = body_writer.Writer(Error);
+const StreamingBodyReader = body_reader.Reader(Error);
 
 pub const LinuxIoUringStream = if (builtin.os.tag == .linux) struct {
     ring: *linux.IoUring,
@@ -887,6 +889,69 @@ pub const Client = struct {
         return readResponseFromTransportBufferedForRequest(self.allocator, self.transport(), self.limits, .{}, &self.inbuf, request_options.method);
     }
 
+    /// Send a complete request and receive response body slices incrementally.
+    ///
+    /// The returned head/trailers are owned. Each body slice borrows reusable
+    /// connection storage and is valid only until `consume` returns.
+    pub fn requestStreaming(
+        self: *Client,
+        request_options: RequestOptions,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.requestStreamingWithHead(
+            request_options,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn requestStreamingWithHead(
+        self: *Client,
+        request_options: RequestOptions,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        const generation = try self.writer_state.begin();
+        _ = generation;
+        errdefer if (self.writer_state.phase == .writing) {
+            self.writer_state.phase = .idle;
+        };
+        var options = request_options;
+        if (options.host == null) options.host = self.default_host;
+        const parts = try runtime_write.prepareRequest(
+            self.allocator,
+            options,
+            &self.write_scratch,
+        );
+        self.transport().writeAllParts(
+            parts.header,
+            parts.body,
+        ) catch |err| {
+            self.writer_state.phase = .unusable;
+            return err;
+        };
+        self.writer_state.phase = .awaiting_peer;
+        const response = try self.readStreamingResponse(
+            request_options.method,
+            context,
+            begin,
+            consume,
+        );
+        self.writer_state.phase =
+            if (requestOptionsKeepAlive(options) and
+            streamingResponseIsReusable(
+                response,
+                request_options.method,
+            ))
+                .idle
+            else
+                .unusable;
+        return response;
+    }
+
     /// Start a request whose body is supplied incrementally.
     ///
     /// HTTP/1 serializes exchanges on a connection. The returned writer owns
@@ -1065,6 +1130,36 @@ pub const Client = struct {
             .inbuf = &self.inbuf,
         };
     }
+
+    fn readStreamingResponse(
+        self: *Client,
+        request_method: http1.Method,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        var reader = StreamingBodyReader{
+            .allocator = self.allocator,
+            .context = self,
+            .read_some = clientReadSome,
+            .inbuf = &self.inbuf,
+            .limits = .{
+                .max_head_bytes = self.limits.max_head_bytes,
+                .max_body_bytes = self.limits.max_body_bytes,
+            },
+            .options = .{},
+        };
+        const result = reader.readResponse(
+            request_method,
+            context,
+            begin,
+            consume,
+        ) catch |err| {
+            self.writer_state.phase = .unusable;
+            return err;
+        };
+        return streamingResponseFromReader(result);
+    }
 };
 
 pub const Connection = struct {
@@ -1084,8 +1179,52 @@ pub const Connection = struct {
     }
 
     pub fn readRequest(self: *Connection, options: http1.ParseOptions) Error!OwnedRequest {
-        try self.writer_state.ensureAvailable();
+        try self.writer_state.ensureReadable();
         return readRequestFromStreamBuffered(self.allocator, self.io, self.stream, self.limits, options, &self.inbuf);
+    }
+
+    /// Read a request while delivering body bytes without aggregation.
+    pub fn readRequestStreaming(
+        self: *Connection,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
+        return self.readRequestStreamingWithHead(
+            context,
+            ignoreStreamingRequestHead,
+            consume,
+        );
+    }
+
+    pub fn readRequestStreamingWithHead(
+        self: *Connection,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
+        try self.writer_state.beginRead();
+        var reader = StreamingBodyReader{
+            .allocator = self.allocator,
+            .context = self,
+            .read_some = connectionReadSome,
+            .before_request_body = connectionMaybeWriteContinue,
+            .inbuf = &self.inbuf,
+            .limits = .{
+                .max_head_bytes = self.limits.max_head_bytes,
+                .max_body_bytes = self.limits.max_body_bytes,
+            },
+            .options = .{},
+        };
+        const result = reader.readRequest(
+            context,
+            begin,
+            consume,
+        ) catch |err| {
+            self.writer_state.failRead();
+            return err;
+        };
+        self.writer_state.finishRead();
+        return streamingRequestFromReader(result);
     }
 
     /// Read and parse an exact batch of pipelined request heads without
@@ -1102,7 +1241,7 @@ pub const Connection = struct {
         bodies: [][]const u8,
         options: http1.ParseOptions,
     ) Error!usize {
-        try self.writer_state.ensureAvailable();
+        try self.writer_state.ensureReadable();
         if (heads.len == 0 or heads.len != bodies.len) {
             return error.InvalidResponse;
         }
@@ -1381,6 +1520,39 @@ pub const StreamingRequestOptions =
 pub const StreamingResponseOptions =
     runtime_write.streaming.ResponseOptions;
 
+pub const StreamingRequest = StreamingBodyReader.Request;
+pub const StreamingRequestHead = StreamingBodyReader.RequestHead;
+pub const StreamingResponse = StreamingBodyReader.Response;
+pub const StreamingResponseHead = StreamingBodyReader.ResponseHead;
+
+fn ignoreStreamingRequestHead(
+    context: anytype,
+    head: StreamingRequestHead,
+) !void {
+    _ = context;
+    _ = head;
+}
+
+fn ignoreStreamingResponseHead(
+    context: anytype,
+    head: StreamingResponseHead,
+) !void {
+    _ = context;
+    _ = head;
+}
+
+fn streamingRequestFromReader(
+    request: StreamingBodyReader.Request,
+) StreamingRequest {
+    return request;
+}
+
+fn streamingResponseFromReader(
+    response: StreamingBodyReader.Response,
+) StreamingResponse {
+    return response;
+}
+
 pub const RequestWriter = struct {
     client: *Client,
     method: http1.Method,
@@ -1427,6 +1599,44 @@ pub const RequestWriter = struct {
         self.body.release(responseIsReusable(response.response));
         return response;
     }
+
+    pub fn readResponseStreaming(
+        self: *RequestWriter,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        return self.readResponseStreamingWithHead(
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithHead(
+        self: *RequestWriter,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        try self.body.ensureExchangeActive();
+        if (!self.body.isBodyFinished()) {
+            return error.InvalidWriterState;
+        }
+        const response = self.client.readStreamingResponse(
+            self.method,
+            context,
+            begin,
+            consume,
+        ) catch |err| {
+            self.body.fail();
+            return err;
+        };
+        self.body.release(streamingResponseIsReusable(
+            response,
+            self.method,
+        ));
+        return response;
+    }
 };
 
 pub const ResponseWriter = struct {
@@ -1463,6 +1673,38 @@ fn clientWriteSlices(
     try client.transport().writeAllSlices(parts);
 }
 
+fn clientReadSome(
+    context: ?*anyopaque,
+    buffer: []u8,
+) Error!usize {
+    const client: *Client = @ptrCast(@alignCast(context.?));
+    return client.transport().read(buffer);
+}
+
+fn connectionReadSome(
+    context: ?*anyopaque,
+    buffer: []u8,
+) Error!usize {
+    const connection: *Connection = @ptrCast(@alignCast(context.?));
+    return readSome(connection.io, connection.stream, buffer);
+}
+
+fn connectionMaybeWriteContinue(
+    context: ?*anyopaque,
+    head: []const u8,
+) Error!void {
+    const connection: *Connection = @ptrCast(@alignCast(context.?));
+    try maybeWriteContinue(
+        .{ .tcp = .{
+            .io = connection.io,
+            .stream = connection.stream,
+        } },
+        head,
+        connection.inbuf.items.len,
+        true,
+    );
+}
+
 fn connectionWriteSlices(
     context: ?*anyopaque,
     parts: []const []const u8,
@@ -1483,6 +1725,17 @@ fn responseIsReusable(response: http1.Response) bool {
     return response.keepAlive() and
         response.body_framing != .close_delimited and
         response.status != 101;
+}
+
+fn streamingResponseIsReusable(
+    response: StreamingResponse,
+    request_method: http1.Method,
+) bool {
+    return response.keepAlive() and
+        response.body_framing != .close_delimited and
+        response.status != 101 and
+        !(request_method == .CONNECT and
+            response.status >= 200 and response.status < 300);
 }
 
 fn uriTargetAlloc(allocator: std.mem.Allocator, uri: std.Uri) Error![]u8 {
@@ -1896,6 +2149,15 @@ fn responseOptionsKeepAlive(response: ResponseOptions) bool {
         if (wire.containsToken(header.value, "keep-alive")) return true;
     }
     return response.version == .http_1_1;
+}
+
+fn requestOptionsKeepAlive(request: RequestOptions) bool {
+    for (request.headers) |header| {
+        if (!header.eqlName("connection")) continue;
+        if (wire.containsToken(header.value, "close")) return false;
+        if (wire.containsToken(header.value, "keep-alive")) return true;
+    }
+    return request.version == .http_1_1;
 }
 
 fn readMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
@@ -4615,5 +4877,6 @@ test "HTTP/1 non-buffered chunked reader preserves pipelined bytes on socket" {
 }
 
 test {
+    _ = @import("runtime/body_reader_tests.zig");
     _ = @import("runtime/body_writer_tests.zig");
 }

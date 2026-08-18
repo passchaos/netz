@@ -150,6 +150,14 @@ available for HTTP/2:
   response writer releases it only after a complete fixed body or terminating
   chunk. Abandonment marks the HTTP/1 connection unusable because, unlike
   HTTP/2 RST_STREAM, HTTP/1 has no per-message reset that can restore framing.
+- `Connection.readRequestStreaming` and `Client.requestStreaming` provide the
+  receive-side counterpart. Fixed-length, chunked, trailer-bearing and
+  close-delimited bodies are delivered as borrowed callback slices without a
+  body-sized allocation; returned start-line/header/trailer metadata remains
+  owned, and bytes already read from the next pipelined message stay buffered.
+  `RequestWriter.readResponseStreaming` performs the same one-time response
+  handoff after an incremental upload. Callback or framing failure poisons the
+  HTTP/1 connection rather than risking reuse at an unknown message boundary.
 
 Reusable implementation changes behind all four H2 results:
 
@@ -205,7 +213,7 @@ Reusable implementation changes behind all four H2 results:
 
 | Area | netz | hyper |
 | --- | --- | --- |
-| HTTP/1 client/server | Blocking std.Io, TLS client, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked request and response writers | Async runtime integration, mature ecosystem and generic Body polling |
+| HTTP/1 client/server | Blocking std.Io, TLS client, io_uring experiments, persistent/pipelined serving, stateful fixed/chunked writers and callback-streaming fixed/chunked/close-delimited readers | Async runtime integration, mature ecosystem and generic Body polling |
 | HTTP/1 strictness | Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue | Mature RFC behavior and broad production use |
 | HTTP/2 | h2c client/server, Upgrade, HPACK, push, priorities, flow control, tunnels/RFC 8441 | Tokio h2 integration and production client/server |
 | HTTP/1 direct pipeline sample | 0.711-0.752 us/request pinned | 0.836-0.866 us/request pinned |
