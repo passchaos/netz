@@ -244,9 +244,15 @@ pub const TlsClientConnection = struct {
 
     pub fn read(self: *TlsClientConnection, buffer: []u8) Error!usize {
         if (buffer.len == 0) return 0;
-        return self.client.reader.readSliceShort(buffer) catch |err| switch (err) {
-            error.ReadFailed => return error.ReadFailed,
-        };
+        const available = self.client.reader.peekGreedy(1) catch |err|
+            switch (err) {
+                error.EndOfStream => return 0,
+                error.ReadFailed => return error.ReadFailed,
+            };
+        const count = @min(buffer.len, available.len);
+        @memcpy(buffer[0..count], available[0..count]);
+        self.client.reader.toss(count);
+        return count;
     }
 
     pub fn writeAll(self: *TlsClientConnection, bytes: []const u8) Error!void {

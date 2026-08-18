@@ -2,13 +2,12 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const websocket_runtime = @import("../../websocket/mod.zig").runtime;
 const http1_runtime = @import("../../http1/mod.zig").runtime;
-const tls_client = @import("../tls/client_connection.zig");
-const tls_server = @import("../tls/server_connection.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 
 const net = std.Io.net;
 
 pub const Error = mqtt.Error || websocket_runtime.Error ||
-    tls_client.Error || tls_server.Error || error{
+    tls_stream.Error || error{
     ConnectionClosed,
     InvalidWebSocketMessage,
     PacketTooLarge,
@@ -30,8 +29,8 @@ pub const Transport = union(enum) {
         stream: net.Stream,
     },
     tls: *http1_runtime.TlsClientConnection,
-    tls_vail: *tls_client.Connection,
-    tls_server: *tls_server.Connection,
+    tls_vail: *tls_stream.ClientConnection,
+    tls_server: *tls_stream.ServerConnection,
     websocket: WebSocketTransport,
 
     pub fn initTcp(io: std.Io, stream: net.Stream) Transport {
@@ -51,13 +50,13 @@ pub const Transport = union(enum) {
     }
 
     pub fn initTlsServer(
-        connection: *tls_server.Connection,
+        connection: *tls_stream.ServerConnection,
     ) Transport {
         return .{ .tls_server = connection };
     }
 
     pub fn initVailTls(
-        connection: *tls_client.Connection,
+        connection: *tls_stream.ClientConnection,
     ) Transport {
         return .{ .tls_vail = connection };
     }
@@ -67,9 +66,10 @@ pub const Transport = union(enum) {
     ) ?[]const []const u8 {
         return switch (self.*) {
             .tls_server => |connection| connection.peerCertificates(),
+            .websocket => |*ws| ws.connection.peerCertificates(),
             // Client-side TLS peer inspection and non-TLS transports do not
             // expose a client-authenticated identity through this broker API.
-            .tcp, .tls, .tls_vail, .websocket => null,
+            .tcp, .tls, .tls_vail => null,
         };
     }
 

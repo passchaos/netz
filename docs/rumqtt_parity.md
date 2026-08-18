@@ -15,7 +15,7 @@ whole-broker throughput claims.
 | Shared subscriptions | Trie-indexed `{group, filter}` routing with allocation-free match, RoundRobin/Random/Sticky and stable Rendezvous hashing | RoundRobin/Random/Sticky broker strategies |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local and shared groups | Hash maps, logs and broker scheduler |
 | Retained messages | Bounded owned store, O(1) exact lookup, wildcard delivery, MQTT 5 expiry countdown and full subscription-time rules | HashMap store with expiry; audited routing has Retain Forward Rules/re-subscribe TODOs |
-| Runtime transports | Blocking TCP and native TLS client/server plus `std.Io.async` concurrent server helpers; MQTT 3.1.1/5 WebSocket client/server over WS and client-side WSS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
+| Runtime transports | Blocking TCP and native TLS client/server plus `std.Io.async` concurrent server helpers; MQTT 3.1.1/5 WebSocket client/server over WS/WSS with optional WSS mTLS | Tokio client networking over TCP/TLS/WebSocket/proxy; audited rumqttd WebSocket path has an MQTT 5 TODO |
 | Broker sessions | Bounded Session Store with Session Expiry, full subscription options/identifiers, offline QoS 1/2 queue, incoming/outgoing QoS 2 and reconnect retransmission | Graveyard restores filter names, tracker cursors and PUBREL IDs; no Session Expiry cleanup |
 | Will lifecycle | Owned indexed min-heap scheduler for Will Delay, Session-end deadline, reconnect cancellation, Clean Start/takeover and DISCONNECT actions | Per-link Tokio timeout/channel plus router Last Will map |
 | Broker log persistence | In-memory retained/session stores; no disk commitlog yet | Datalog, segments and graveyard state |
@@ -92,9 +92,11 @@ The audited rumqtt client supports MQTT 3.1.1 and MQTT 5 over WebSocket, while
 the rumqttd server path still contains `TODO: Add support for V5 protocol with
 websockets`. Netz tests both versions end to end on its client and server and
 also covers cross-message packet reassembly, QoS 1, QoS 2, and strict
-subprotocol rejection. Client `wss://` uses the existing HTTP/1 TLS transport;
-the netz WebSocket server currently expects cleartext WS or an external TLS
-terminator.
+subprotocol rejection. Client `wss://` uses the existing HTTP/1 TLS transport.
+Netz additionally terminates WSS natively with the same strict `mqtt`
+subprotocol and MQTT 3.1.1/5 state machine as WS. The TLS listener supports
+concurrent serving and optional/required client certificates; verified peer
+chains remain visible through `Connection.peerCertificates()`.
 
 ## Native MQTT-over-TLS transport
 
@@ -311,8 +313,8 @@ rumqttd.
 
 1. Add a durable disk/replicated commitlog for retained/session/offline/Will
    state.
-2. Add server-side WSS termination; native MQTT client/server mTLS and WSS
-   clients are available.
+2. Add a native client-identity option for WSS; native MQTT TLS client/server
+   mTLS and WS/WSS server transports are available.
 3. Build one identical multi-client publish/subscribe load driver for both
    brokers and capture throughput, tail latency, allocation and peak memory.
 4. Add MQTT protocol conformance/interoperability suites beyond in-repository

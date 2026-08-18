@@ -5,9 +5,11 @@ const http1 = @import("../http1/mod.zig");
 const http2 = @import("../http2/mod.zig");
 const http1_runtime = http1.runtime;
 const http2_runtime = http2.runtime;
+const tls_stream = @import("../tls/mod.zig").stream;
 const stream_io = @import("../internal/stream_io.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const wire = @import("../internal/wire.zig");
+const vail = @import("vail");
 
 const net = std.Io.net;
 const masked_write_scratch_len: usize = 16 * 1024;
@@ -17,7 +19,8 @@ const masked_write_scratch_len: usize = 16 * 1024;
 // connection) while covering typical WebSocket/TLS records in one read.
 const transport_read_scratch_len: usize = 16 * 1024;
 
-pub const Error = websocket.Error || http1_runtime.Error || http2_runtime.Error || error{
+pub const Error = websocket.Error || http1_runtime.Error ||
+    http2_runtime.Error || tls_stream.Error || error{
     HeadersTooLarge,
     ConnectionClosed,
     InvalidResponse,
@@ -45,12 +48,14 @@ pub const Role = enum {
 const RuntimeTransport = union(enum) {
     tcp: struct { io: std.Io, stream: net.Stream },
     tls: *http1_runtime.TlsClientConnection,
+    tls_server: *tls_stream.ServerConnection,
     linux_io_uring: http1_runtime.LinuxIoUringStream,
 
     fn read(self: RuntimeTransport, buffer: []u8) Error!usize {
         return switch (self) {
             .tcp => |tcp| readSome(tcp.io, tcp.stream, buffer),
             .tls => |conn| conn.read(buffer),
+            .tls_server => |conn| conn.read(buffer),
             .linux_io_uring => |conn| conn.read(buffer),
         };
     }
@@ -59,6 +64,7 @@ const RuntimeTransport = union(enum) {
         return switch (self) {
             .tcp => |tcp| writeAllToStream(tcp.io, tcp.stream, bytes),
             .tls => |conn| conn.writeAll(bytes),
+            .tls_server => |conn| conn.writeAll(bytes),
             .linux_io_uring => |conn| conn.writeAll(bytes),
         };
     }
@@ -76,6 +82,7 @@ const RuntimeTransport = union(enum) {
                 payload,
             ),
             .tls => |conn| conn.writeAllParts(header, payload),
+            .tls_server => |conn| conn.writeAllParts(header, payload),
             // The raw io_uring adapter currently exposes one-slice sends.
             // Two submissions still avoid a payload-sized temporary copy.
             .linux_io_uring => |conn| {
@@ -83,6 +90,15 @@ const RuntimeTransport = union(enum) {
                 try conn.writeAll(payload);
             },
         };
+    }
+
+    fn close(self: RuntimeTransport) void {
+        switch (self) {
+            .tcp => |tcp| tcp.stream.close(tcp.io),
+            .tls => |conn| conn.deinit(),
+            .tls_server => |conn| conn.deinit(),
+            .linux_io_uring => |conn| conn.close(),
+        }
     }
 };
 
@@ -116,51 +132,16 @@ pub const Server = struct {
             try socket_options.setTcpNoDelay(http_conn.stream);
         }
 
-        var head = try readHttpHead(self.http.allocator, http_conn.io, http_conn.stream, self.limits.max_head_bytes);
-        defer head.deinit(self.http.allocator);
-
-        var request = try http1.parseRequest(self.http.allocator, head.head, .{});
-        defer request.deinit(self.http.allocator);
-        try websocket.validateClientHandshake(request);
-        // Match tungstenite's server handshake behavior: bytes after the HTTP
-        // request are ambiguous before the upgrade response is committed and
-        // may be request smuggling/junk.  Clients must wait for 101 before
-        // sending WebSocket frames.
-        if (head.extra.len != 0) return error.InvalidHandshake;
-
-        const key = request.header("sec-websocket-key") orelse return error.MissingHeader;
-        const selected_protocol = try selectHttp1Subprotocol(self.http.allocator, request.headers, options.protocols);
-        errdefer if (selected_protocol) |protocol| self.http.allocator.free(protocol);
-        if (options.require_subprotocol and selected_protocol == null) {
-            return error.InvalidSubprotocol;
-        }
-        const selected_extension = try websocket.ExtensionNegotiation.acceptClientHeaders(
+        return acceptTransport(
             self.http.allocator,
-            request.headers,
-            options.enable_permessage_deflate,
+            http_conn.io,
+            .{ .tcp = .{
+                .io = http_conn.io,
+                .stream = http_conn.stream,
+            } },
+            self.limits,
+            options,
         );
-        defer if (selected_extension) |extension| self.http.allocator.free(extension);
-        var response: std.ArrayList(u8) = .empty;
-        defer response.deinit(self.http.allocator);
-        var headers: std.ArrayList(http1.Header) = .empty;
-        defer headers.deinit(self.http.allocator);
-        if (selected_protocol) |protocol| try headers.append(self.http.allocator, .{ .name = "Sec-WebSocket-Protocol", .value = protocol });
-        if (selected_extension) |extension| try headers.append(self.http.allocator, .{ .name = "Sec-WebSocket-Extensions", .value = extension });
-        try headers.appendSlice(self.http.allocator, options.extra_headers);
-        try websocket.writeServerHandshake(&response, self.http.allocator, key, headers.items);
-        try writeAllToStream(http_conn.io, http_conn.stream, response.items);
-
-        const connection = Connection{
-            .io = http_conn.io,
-            .allocator = self.http.allocator,
-            .stream = http_conn.stream,
-            .role = .server,
-            .limits = self.limits,
-            .selected_protocol = selected_protocol,
-            .permessage_deflate = selected_extension != null,
-            .inbuf = .empty,
-        };
-        return connection;
     }
 
     pub fn serveConcurrent(
@@ -192,6 +173,215 @@ pub const Server = struct {
         return .{ .allocator = self.http.allocator, .errors = results };
     }
 };
+
+/// TLS 1.3 WebSocket listener.
+///
+/// TLS termination is performed before the same strict HTTP/1 Upgrade parser
+/// used by `Server`, so WSS inherits subprotocol, extension, smuggling and
+/// frame-validation behavior rather than maintaining a second handshake path.
+pub const TlsServer = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    listener: net.Server,
+    limits: Limits,
+    tls: tls_stream.ServerOptions,
+    tcp_nodelay: bool,
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        options: TlsListenOptions,
+    ) Error!TlsServer {
+        try options.identity.validate();
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .listener = try bind_address.listen(
+                io,
+                .{ .reuse_address = true },
+            ),
+            .limits = options.limits,
+            .tls = .{
+                .identity = options.identity,
+                .cipher_suites = options.cipher_suites,
+                .max_client_hello_size = options.max_client_hello_size,
+                .max_client_handshake_size = options.max_client_handshake_size,
+                .client_auth = options.client_auth,
+            },
+            .tcp_nodelay = options.tcp_nodelay,
+        };
+    }
+
+    pub fn deinit(self: *TlsServer) void {
+        self.listener.deinit(self.io);
+        self.* = undefined;
+    }
+
+    pub fn address(self: TlsServer) net.IpAddress {
+        return self.listener.socket.address;
+    }
+
+    pub fn accept(
+        self: *TlsServer,
+        options: AcceptOptions,
+    ) Error!Connection {
+        const stream = try self.listener.accept(self.io);
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(self.io);
+        if (self.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
+        const tls_connection = try tls_stream.ServerConnection.init(
+            self.allocator,
+            self.io,
+            stream,
+            self.tls,
+        );
+        stream_owned = false;
+        errdefer tls_connection.deinit();
+        return acceptTransport(
+            self.allocator,
+            self.io,
+            .{ .tls_server = tls_connection },
+            self.limits,
+            options,
+        );
+    }
+
+    pub fn serveConcurrent(
+        self: *TlsServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *Connection,
+        ) Error!void,
+        max_connections: usize,
+        options: AcceptOptions,
+    ) AsyncServeError!ConcurrentServeResult {
+        var group: std.Io.Group = .init;
+        const results = try self.allocator.alloc(
+            ?anyerror,
+            max_connections,
+        );
+        errdefer self.allocator.free(results);
+        @memset(results, null);
+        for (results) |*result| {
+            var connection = try self.accept(options);
+            errdefer connection.close();
+            group.async(
+                self.io,
+                ServeTask(HandlerContext).run,
+                .{ServeTask(HandlerContext){
+                    .connection = connection,
+                    .context = context,
+                    .handler = handler,
+                    .result = result,
+                }},
+            );
+        }
+        try group.await(self.io);
+        return .{
+            .allocator = self.allocator,
+            .errors = results,
+        };
+    }
+};
+
+pub const TlsListenOptions = struct {
+    identity: vail.tls.auth.ServerIdentity,
+    limits: Limits = .{},
+    cipher_suites: []const vail.tls.cipher_suite.Suite =
+        &vail.tls.cipher_suite.default_preference,
+    max_client_hello_size: usize = 64 * 1024,
+    max_client_handshake_size: usize = 256 * 1024,
+    client_auth: ?vail.tls.client_auth.ServerPolicy = null,
+    tcp_nodelay: bool = true,
+};
+
+fn acceptTransport(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    transport: RuntimeTransport,
+    limits: Limits,
+    options: AcceptOptions,
+) Error!Connection {
+    var head = try readHttpHeadFromTransport(
+        allocator,
+        transport,
+        limits.max_head_bytes,
+    );
+    defer head.deinit(allocator);
+
+    var request = try http1.parseRequest(allocator, head.head, .{});
+    defer request.deinit(allocator);
+    try websocket.validateClientHandshake(request);
+    // Bytes sent before the 101 response are ambiguous HTTP smuggling/junk,
+    // regardless of whether the carrier is TCP or TLS.
+    if (head.extra.len != 0) return error.InvalidHandshake;
+
+    const key = request.header("sec-websocket-key") orelse
+        return error.MissingHeader;
+    const selected_protocol = try selectHttp1Subprotocol(
+        allocator,
+        request.headers,
+        options.protocols,
+    );
+    errdefer if (selected_protocol) |protocol| allocator.free(protocol);
+    if (options.require_subprotocol and selected_protocol == null) {
+        return error.InvalidSubprotocol;
+    }
+    const selected_extension =
+        try websocket.ExtensionNegotiation.acceptClientHeaders(
+            allocator,
+            request.headers,
+            options.enable_permessage_deflate,
+        );
+    defer if (selected_extension) |extension| allocator.free(extension);
+
+    var response: std.ArrayList(u8) = .empty;
+    defer response.deinit(allocator);
+    var headers: std.ArrayList(http1.Header) = .empty;
+    defer headers.deinit(allocator);
+    if (selected_protocol) |protocol| {
+        try headers.append(allocator, .{
+            .name = "Sec-WebSocket-Protocol",
+            .value = protocol,
+        });
+    }
+    if (selected_extension) |extension| {
+        try headers.append(allocator, .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = extension,
+        });
+    }
+    try headers.appendSlice(allocator, options.extra_headers);
+    try websocket.writeServerHandshake(
+        &response,
+        allocator,
+        key,
+        headers.items,
+    );
+    try transport.writeAll(response.items);
+
+    return .{
+        .io = io,
+        .allocator = allocator,
+        .stream = switch (transport) {
+            .tcp => |tcp| tcp.stream,
+            .tls_server => |connection| connection.stream,
+            .tls => |connection| connection.stream,
+            .linux_io_uring => undefined,
+        },
+        .tls_server_conn = switch (transport) {
+            .tls_server => |connection| connection,
+            else => null,
+        },
+        .role = .server,
+        .limits = limits,
+        .selected_protocol = selected_protocol,
+        .permessage_deflate = selected_extension != null,
+    };
+}
 
 pub const AsyncServeError = Error || std.Io.Cancelable;
 
@@ -523,6 +713,7 @@ pub const Connection = struct {
     allocator: std.mem.Allocator,
     stream: net.Stream,
     tls_conn: ?*http1_runtime.TlsClientConnection = null,
+    tls_server_conn: ?*tls_stream.ServerConnection = null,
     linux_io_uring: ?http1_runtime.LinuxIoUringStream = null,
     role: Role,
     limits: Limits = .{},
@@ -533,12 +724,22 @@ pub const Connection = struct {
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
 
+    /// Verified TLS client chain for WSS server connections. Anonymous,
+    /// cleartext, and client-side connections return null.
+    pub fn peerCertificates(
+        self: *const Connection,
+    ) ?[]const []const u8 {
+        const tls_connection = self.tls_server_conn orelse return null;
+        return tls_connection.peerCertificates();
+    }
+
     fn bufferInitial(self: *Connection, bytes: []const u8) Error!void {
         try self.inbuf.appendSlice(self.allocator, bytes);
     }
 
     fn transport(self: *Connection) RuntimeTransport {
         if (self.linux_io_uring) |conn| return .{ .linux_io_uring = conn };
+        if (self.tls_server_conn) |conn| return .{ .tls_server = conn };
         if (self.tls_conn) |conn| return .{ .tls = conn };
         return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
     }
@@ -546,13 +747,7 @@ pub const Connection = struct {
     pub fn close(self: *Connection) void {
         if (self.selected_protocol) |protocol| self.allocator.free(protocol);
         self.inbuf.deinit(self.allocator);
-        if (self.tls_conn) |conn| {
-            conn.deinit();
-        } else if (self.linux_io_uring) |conn| {
-            conn.close();
-        } else {
-            self.stream.close(self.io);
-        }
+        self.transport().close();
         self.* = undefined;
     }
 
@@ -3459,4 +3654,5 @@ test "WebSocket HTTP upgrade reader enforces header byte limit at delimiter" {
 
 test {
     _ = @import("runtime/message_io_tests.zig");
+    _ = @import("runtime/wss_tests.zig");
 }

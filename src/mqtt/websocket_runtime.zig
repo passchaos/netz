@@ -76,6 +76,154 @@ pub const ListenOptions = struct {
     max_head_bytes: usize = 64 * 1024,
 };
 
+/// MQTT-over-WSS listener.
+///
+/// TLS 1.3 termination and optional client authentication are delegated to the
+/// generic WebSocket TLS listener. MQTT still requires the registered `mqtt`
+/// subprotocol and enters the same broker-side state machine as WS/TCP/TLS.
+pub const TlsServer = struct {
+    allocator: std.mem.Allocator,
+    websocket_server: websocket_runtime.TlsServer,
+    limits: runtime.Limits,
+
+    pub fn listen(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        options: TlsListenOptions,
+    ) runtime.Error!TlsServer {
+        return .{
+            .allocator = allocator,
+            .websocket_server = try .listen(
+                allocator,
+                io,
+                bind_address,
+                .{
+                    .identity = options.identity,
+                    .limits = websocketLimits(
+                        options.limits,
+                        options.max_head_bytes,
+                    ),
+                    .cipher_suites = options.cipher_suites,
+                    .max_client_hello_size = options.max_client_hello_size,
+                    .max_client_handshake_size = options.max_client_handshake_size,
+                    .client_auth = options.client_auth,
+                    .tcp_nodelay = options.tcp_nodelay,
+                },
+            ),
+            .limits = options.limits,
+        };
+    }
+
+    pub fn deinit(self: *TlsServer) void {
+        self.websocket_server.deinit();
+        self.* = undefined;
+    }
+
+    pub fn address(self: TlsServer) net.IpAddress {
+        return self.websocket_server.address();
+    }
+
+    pub fn accept(
+        self: *TlsServer,
+        options: runtime.AcceptOptions,
+    ) runtime.Error!runtime.AcceptedClient {
+        var ws = try self.websocket_server.accept(.{
+            .protocols = &.{mqtt_subprotocol},
+            .require_subprotocol = true,
+        });
+        var ws_owned = true;
+        errdefer if (ws_owned) ws.close();
+
+        var connection = runtime.Connection.initWebSocket(
+            self.allocator,
+            ws,
+            options.protocol,
+            self.limits,
+            options.max_outgoing_inflight,
+            options.topic_alias_maximum,
+        );
+        ws_owned = false;
+        errdefer connection.close();
+        return connection.accept(options);
+    }
+
+    pub fn serveConcurrent(
+        self: *TlsServer,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *runtime.AcceptedClient,
+        ) runtime.Error!void,
+        max_connections: usize,
+        options: runtime.AcceptOptions,
+    ) runtime.AsyncServeError!runtime.ConcurrentServeResult {
+        var group: std.Io.Group = .init;
+        const results = try self.allocator.alloc(
+            ?anyerror,
+            max_connections,
+        );
+        errdefer self.allocator.free(results);
+        @memset(results, null);
+        for (results) |*result| {
+            var accepted = try self.accept(options);
+            errdefer accepted.deinit(self.allocator);
+            group.async(
+                self.websocket_server.io,
+                TlsServeTask(HandlerContext).run,
+                .{TlsServeTask(HandlerContext){
+                    .accepted = accepted,
+                    .context = context,
+                    .handler = handler,
+                    .result = result,
+                    .allocator = self.allocator,
+                }},
+            );
+        }
+        try group.await(self.websocket_server.io);
+        return .{
+            .allocator = self.allocator,
+            .errors = results,
+        };
+    }
+};
+
+pub const TlsListenOptions = struct {
+    identity: @import("vail").tls.auth.ServerIdentity,
+    limits: runtime.Limits = .{},
+    max_head_bytes: usize = 64 * 1024,
+    cipher_suites: []const @import("vail").tls.cipher_suite.Suite =
+        &@import("vail").tls.cipher_suite.default_preference,
+    max_client_hello_size: usize = 64 * 1024,
+    max_client_handshake_size: usize = 256 * 1024,
+    client_auth: ?@import("vail").tls.client_auth.ServerPolicy = null,
+    tcp_nodelay: bool = true,
+};
+
+fn TlsServeTask(comptime HandlerContext: type) type {
+    return struct {
+        accepted: runtime.AcceptedClient,
+        context: *HandlerContext,
+        handler: *const fn (
+            *HandlerContext,
+            *runtime.AcceptedClient,
+        ) runtime.Error!void,
+        result: *?anyerror,
+        allocator: std.mem.Allocator,
+
+        fn run(task: @This()) std.Io.Cancelable!void {
+            var accepted = task.accepted;
+            defer accepted.deinit(task.allocator);
+            task.handler(task.context, &accepted) catch |err| {
+                task.result.* = err;
+                return;
+            };
+            task.result.* = null;
+        }
+    };
+}
+
 /// MQTT-over-WebSocket client with strict `Sec-WebSocket-Protocol: mqtt`
 /// negotiation. `connectUri*` supports both `ws://` and `wss://` through the
 /// existing WebSocket TLS client.

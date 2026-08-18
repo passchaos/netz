@@ -1,8 +1,8 @@
 //! Blocking TLS 1.3 server handshake over a connected TCP stream.
 //!
 //! Keeping transcript construction and handshake-key processing separate from
-//! the established record stream provides the natural insertion point for
-//! future client-certificate authentication without coupling MQTT state to TLS.
+//! the established record stream keeps client-certificate authentication and
+//! application protocol state independent.
 
 const std = @import("std");
 const vail = @import("vail");

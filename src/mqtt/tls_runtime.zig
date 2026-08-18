@@ -2,8 +2,7 @@ const std = @import("std");
 const mqtt_runtime = @import("runtime.zig");
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const socket_options = @import("../internal/socket_options.zig");
-const tls_client = @import("tls/client_connection.zig");
-const tls_server = @import("tls/server_connection.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
 
 const net = std.Io.net;
@@ -27,7 +26,7 @@ pub const Server = struct {
     io: std.Io,
     listener: net.Server,
     limits: mqtt_runtime.Limits,
-    tls: tls_server.Options,
+    tls: tls_stream.ServerOptions,
     tcp_nodelay: bool,
 
     pub fn listen(
@@ -75,7 +74,7 @@ pub const Server = struct {
         if (self.tcp_nodelay) {
             try socket_options.setTcpNoDelay(stream);
         }
-        const tls_connection = try tls_server.Connection.init(
+        const tls_connection = try tls_stream.ServerConnection.init(
             self.allocator,
             self.io,
             stream,
@@ -455,7 +454,7 @@ fn connectVailStreamAttempt(
         break :blk bundle_verifier.clientVerifier();
     };
 
-    const connection = try tls_client.Connection.init(
+    const connection = try tls_stream.ClientConnection.init(
         allocator,
         io,
         stream,

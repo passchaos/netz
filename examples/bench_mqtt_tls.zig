@@ -13,14 +13,14 @@ pub fn main(_: std.process.Init) !void {
     const io = threaded.io();
 
     var certificate_der: [
-        netz.mqtt.testing.tls13_server.certificate_der_len
+        netz.tls.testing.certificate_der_len
     ]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
-        netz.mqtt.testing.tls13_server.certificate_base64,
+        netz.tls.testing.certificate_base64,
     );
     const key_pair =
-        try netz.mqtt.testing.tls13_server.serverKeyPair();
+        try netz.tls.testing.serverKeyPair();
     var server = try netz.mqtt.tls_runtime.Server.listen(
         allocator,
         io,

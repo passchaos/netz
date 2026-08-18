@@ -1,7 +1,7 @@
 //! Established TLS 1.3 application-record byte stream.
 //!
 //! Client and server handshakes produce opposite traffic-key directions, but
-//! application record sequencing, MQTT byte-stream buffering, fragmentation,
+//! application record sequencing, byte-stream buffering, fragmentation,
 //! alerts, and close_notify are identical. This state deliberately owns only
 //! traffic keys and plaintext buffers; socket lifetime remains with the role-
 //! specific connection wrapper.
@@ -136,6 +136,52 @@ pub const Stream = struct {
                 bytes[offset .. offset + chunk_len],
             );
             offset += chunk_len;
+        }
+    }
+
+    /// Write two logical slices while filling each TLS record before starting
+    /// the next. WebSocket headers therefore share a record/network write with
+    /// the first payload bytes instead of paying a tiny standalone record.
+    pub fn writeAllParts(
+        self: *Stream,
+        io: std.Io,
+        stream: net.Stream,
+        first: []const u8,
+        second: []const u8,
+    ) Error!void {
+        if (self.closed) return error.ConnectionClosed;
+        var first_offset: usize = 0;
+        var second_offset: usize = 0;
+        var plaintext: [record_io.max_plaintext_len]u8 = undefined;
+        while (first_offset < first.len or second_offset < second.len) {
+            var len: usize = 0;
+            const first_count = @min(
+                plaintext.len,
+                first.len - first_offset,
+            );
+            @memcpy(
+                plaintext[0..first_count],
+                first[first_offset..][0..first_count],
+            );
+            first_offset += first_count;
+            len += first_count;
+
+            const second_count = @min(
+                plaintext.len - len,
+                second.len - second_offset,
+            );
+            @memcpy(
+                plaintext[len..][0..second_count],
+                second[second_offset..][0..second_count],
+            );
+            second_offset += second_count;
+            len += second_count;
+            try self.writeRecord(
+                io,
+                stream,
+                tls_record.content_type_application_data,
+                plaintext[0..len],
+            );
         }
     }
 

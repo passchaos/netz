@@ -366,7 +366,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   unsupported extension parameters/window sizes, framed 101 upgrade responses, and compressed fragmented sends, serialized connection writes, a blocking TCP
   client/server runtime over HTTP/1 Upgrade with a `std.Io.async` concurrent
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
-  Host/port synthesis, TLS client transport shared with HTTP/1, and RFC 8441
+  Host/port synthesis, shared TLS client transport plus native TLS 1.3 WSS
+  listeners with optional client authentication and concurrent serving, and RFC 8441
   WebSocket-over-HTTP/2 adapters that negotiate `:protocol = websocket`,
   subprotocols, permessage-deflate, reject duplicate/legacy critical handshake
   fields, and use transport-derived `:scheme` over an h2 DATA tunnel
@@ -398,7 +399,7 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   pluggable trust verification, and verified peer-chain access, and
   MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with
   strict `mqtt` subprotocol
-  negotiation, `ws://` plus client-side `wss://`, MQTT byte-stream
+  negotiation, `ws://`/`wss://` client and server transports, MQTT byte-stream
   reassembly across binary-message boundaries, and in-place client masking,
   MQTT v5 Server Keep Alive, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
@@ -442,8 +443,8 @@ TLS 1.3 client certificates with application-visible verified DER chains.
 Configuring a native client's `client_identity` selects the vail TLS 1.3
 stream transport, while clients without an identity retain Zig's standard TLS
 implementation.
-Server-side WSS termination remains separate work. Event loops, congestion
-control,
+WSS servers reuse the cleartext HTTP Upgrade/frame state machine and may expose
+verified TLS client chains. Event loops, congestion control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on
 the same byte-level pieces.
 

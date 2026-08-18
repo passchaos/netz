@@ -3,7 +3,7 @@
 const std = @import("std");
 const netz = @import("netz");
 
-const tls_test = netz.mqtt.testing.tls13_server;
+const tls_test = netz.tls.testing;
 
 const Mode = enum {
     required,

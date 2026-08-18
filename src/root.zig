@@ -6,6 +6,7 @@
 //! with different runtimes.
 
 pub const runtime = @import("runtime.zig");
+pub const tls = @import("tls/mod.zig");
 pub const http1 = @import("http1/mod.zig");
 pub const http2 = @import("http2/mod.zig");
 pub const http3 = @import("http3/mod.zig");
@@ -17,6 +18,7 @@ pub const webrtc = @import("webrtc/mod.zig");
 
 comptime {
     _ = runtime;
+    _ = tls;
     _ = http1;
     _ = http2;
     _ = http3;

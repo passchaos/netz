@@ -1,9 +1,8 @@
 //! Blocking vail-backed TLS 1.3 client connection.
 //!
 //! This transport exists alongside Zig's standard TLS client because Zig 0.16
-//! cannot send a client identity. Callers opt into it by configuring
-//! `mqtt.tls_runtime.ConnectOptions.client_identity`; ordinary verified MQTT
-//! TLS clients retain the mature standard-library path.
+//! cannot send a client identity. Application protocols can opt into it while
+//! retaining the mature standard-library path for ordinary verified clients.
 
 const std = @import("std");
 const vail = @import("vail");

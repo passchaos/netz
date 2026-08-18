@@ -2,6 +2,13 @@ const std = @import("std");
 const netz = @import("netz");
 
 test "public modules are reachable" {
+    try std.testing.expect(@hasDecl(netz, "tls"));
+    try std.testing.expect(@hasDecl(netz.tls, "stream"));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream,
+        "ServerConnection",
+    ));
+    try std.testing.expect(@hasDecl(netz.tls, "testing"));
     try std.testing.expectEqualStrings("258EAFA5-E914-47DA-95CA-C5AB0DC85B11", netz.websocket.handshake_guid);
     try std.testing.expectEqual(@as(usize, 64 * 1024), (netz.http1.runtime.Limits{}).max_head_bytes);
     try std.testing.expect(@hasDecl(netz.http1.runtime.Server, "serveConcurrent"));
@@ -48,6 +55,18 @@ test "public modules are reachable" {
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.websocket.runtime.Limits{}).max_frame_bytes);
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), (netz.websocket.runtime.Limits{}).max_message_bytes);
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Server, "serveConcurrent"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "TlsServer",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.TlsServer,
+        "serveConcurrent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
+        "peerCertificates",
+    ));
     try std.testing.expect(@hasField(netz.websocket.runtime.Connection, "send_mutex"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "OwnedMessage"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "Message"));
@@ -550,6 +569,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime,
         "Server",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime,
+        "TlsServer",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.websocket_runtime.TlsServer,
+        "serveConcurrent",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.websocket_runtime.Server,

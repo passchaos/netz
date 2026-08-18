@@ -3,6 +3,7 @@ const mqtt = @import("mod.zig");
 const runtime = @import("runtime.zig");
 const mqtt_ws = @import("websocket_runtime.zig");
 const websocket_runtime = @import("../websocket/mod.zig").runtime;
+const tls_testing = @import("../tls/testing.zig");
 
 const max_packet_size: usize = 4096;
 
@@ -92,6 +93,117 @@ test "MQTT 5 WebSocket runtime negotiates mqtt and completes QoS 1 and 2" {
     try client.disconnect(0);
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "MQTT WSS server negotiates mqtt and completes QoS 1" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 =
+        undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try mqtt_ws.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = .{ .max_packet_size = max_packet_size },
+            .max_head_bytes = max_packet_size,
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_ws.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var accepted = shared.server.accept(.{
+                .protocol = .v5,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer accepted.deinit(shared.server.allocator);
+            if (accepted.connection.peerCertificates() != null) {
+                shared.err = error.UnexpectedPeerCertificate;
+                return;
+            }
+            var publish = accepted.connection.readPublish() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer publish.deinit(shared.server.allocator);
+            if (!std.mem.eql(
+                u8,
+                publish.publish.topic,
+                "wss/qos1",
+            )) {
+                shared.err = error.UnexpectedPacket;
+                return;
+            }
+            accepted.connection.writePubAck(
+                publish.publish.packet_id.?,
+                0,
+            ) catch |err| {
+                shared.err = err;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "wss://localhost:{d}/mqtt",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var client = try mqtt_ws.Client.connectUri(
+        allocator,
+        io,
+        uri,
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "mqtt-wss-v5",
+                .limits = .{ .max_packet_size = max_packet_size },
+            },
+            .tls = .{ .ca_bundle = .{
+                .bundle = &ca_bundle,
+                .lock = &ca_lock,
+            } },
+            .max_head_bytes = max_packet_size,
+        },
+    );
+    defer client.close();
+    try client.publish(
+        "wss/qos1",
+        "encrypted websocket mqtt",
+        .{ .qos = .at_least_once },
+    );
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
@@ -432,4 +544,46 @@ test "MQTT WebSocket adapter rejects text messages" {
 
     thread.join();
     if (shared.err) |err| return err;
+}
+
+fn localCaBundle(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) !struct { std.crypto.Certificate.Bundle, std.Io.RwLock } {
+    var certificate_der: [tls_testing.certificate_der_len]u8 =
+        undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    var pem_storage: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&pem_storage);
+    try writer.writeAll("-----BEGIN CERTIFICATE-----\n");
+    const encoded_len = std.base64.standard.Encoder.calcSize(
+        certificate_der.len,
+    );
+    const encoded = try writer.writableSliceGreedy(encoded_len);
+    _ = std.base64.standard.Encoder.encode(
+        encoded[0..encoded_len],
+        &certificate_der,
+    );
+    writer.advance(encoded_len);
+    try writer.writeAll("\n-----END CERTIFICATE-----\n");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "ca.pem",
+        .data = writer.buffered(),
+    });
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    errdefer bundle.deinit(allocator);
+    try bundle.addCertsFromFilePath(
+        allocator,
+        io,
+        std.Io.Timestamp.now(io, .real),
+        tmp.dir,
+        "ca.pem",
+    );
+    return .{ bundle, .init };
 }

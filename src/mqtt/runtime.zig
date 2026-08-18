@@ -4,8 +4,7 @@ const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
-const tls_client = @import("tls/client_connection.zig");
-const tls_server = @import("tls/server_connection.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
 
 const net = std.Io.net;
 
@@ -439,7 +438,7 @@ pub const Connection = struct {
     /// TLS client cannot answer CertificateRequest.
     pub fn initVailTls(
         allocator: std.mem.Allocator,
-        tls_connection: *tls_client.Connection,
+        tls_connection: *tls_stream.ClientConnection,
         options: ConnectOptions,
     ) Connection {
         var connection = initTlsState(allocator, options);
@@ -454,7 +453,7 @@ pub const Connection = struct {
     /// and WebSocket listeners.
     pub fn initTlsServer(
         allocator: std.mem.Allocator,
-        tls_connection: *tls_server.Connection,
+        tls_connection: *tls_stream.ServerConnection,
         protocol: mqtt.ProtocolVersion,
         limits: Limits,
         max_outgoing_inflight: u16,

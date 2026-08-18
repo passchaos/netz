@@ -10,15 +10,22 @@ superiority.
 | Area | netz | `websocket.zig` reference |
 | --- | --- | --- |
 | HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, strict duplicate critical-header checks and upgrade-body rejection | Covered with configurable handshake parsing and handler callbacks |
-| WSS client | Covered through the shared TLS transport with host verification and CA policy | Covered; 0.16 README labels the branch experimental |
+| WSS client/server | Covered through shared TLS transports with host/CA verification, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
 | HTTP/2 WebSocket (RFC 8441) | Covered through extended CONNECT client/server adapters | Not present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover | Server-side support exists; the audited 0.16 client explicitly rejects compression configuration |
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
 | Receive/send ownership | `parseFrameInto` and `receiveMessageInto` use caller storage; `sendBinaryInPlace` explicitly offers the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads; client send APIs require mutable payloads and leave them masked |
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies | Handler callbacks and automatic default control replies |
 | Concurrent sends | Serialized by per-connection `std.Io.Mutex` and covered by a runtime test | Documented thread-safe connection writes |
-| TCP latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
+| TCP/TLS latency policy | TCP_NODELAY defaults on for ordinary accepted and client TCP/WSS sockets; WSS header + first payload bytes fill one TLS record/network write; configurable in runtime limits/connect options | Server enables NODELAY, audited client leaves Nagle enabled unless the embedding application changes the socket |
 | Linux io_uring experiment | Cleartext client helper | Custom epoll/kqueue/Windows server backends |
+
+`websocket.runtime.TlsServer` performs TLS 1.3 before the same transport-neutral
+HTTP Upgrade parser and frame state machine used by cleartext `Server`.
+End-to-end tests cover verified localhost CA/SAN, strict subprotocol selection,
+encrypted binary echo, and the shared close/ownership path. TLS client reads are
+true short reads, so a small Upgrade response no longer waits for a caller's
+larger scratch buffer to fill.
 
 The reference has a richer callback-oriented standalone server surface and
 pooled-buffer/thread-pool configuration. Netz has broader protocol integration

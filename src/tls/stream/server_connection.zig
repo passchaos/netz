@@ -1,9 +1,9 @@
-//! Blocking TLS 1.3 server connection for native MQTT listeners.
+//! Blocking TLS 1.3 server connection for application protocols.
 //!
 //! The MQTT runtime consumes this type as an ordinary byte stream. TLS
 //! handshake ownership, record framing, traffic-key sequencing, and orderly
-//! shutdown stay here so the MQTT CONNECT/QoS state machine remains shared
-//! with TCP and WebSocket transports.
+//! shutdown stay here so HTTP/WebSocket/MQTT state machines remain transport
+//! independent.
 
 const std = @import("std");
 const record_stream = @import("record_stream.zig");
@@ -87,6 +87,22 @@ pub const Connection = struct {
             self.io,
             self.stream,
             bytes,
+        );
+    }
+
+    /// Write a protocol header and borrowed payload without concatenating them
+    /// in application memory. TLS record framing may still split at 16 KiB,
+    /// while callers such as WebSocket preserve their two-slice API.
+    pub fn writeAllParts(
+        self: *Connection,
+        header: []const u8,
+        payload: []const u8,
+    ) Error!void {
+        try self.records.writeAllParts(
+            self.io,
+            self.stream,
+            header,
+            payload,
         );
     }
 };
