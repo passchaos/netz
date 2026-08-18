@@ -86,6 +86,7 @@ test "session duplicate ClientID takeover invalidates prior handle" {
     defer store.deinit();
     const first = try store.open("duplicate", false, 60, .zero);
     const second = try store.open("duplicate", false, 60, .zero);
+    try std.testing.expectEqual(first.route_id, second.route_id);
     try std.testing.expect(second.session_present);
     try std.testing.expect(second.replaced_connection);
     try std.testing.expectError(
@@ -94,6 +95,71 @@ test "session duplicate ClientID takeover invalidates prior handle" {
     );
     const stats = try store.stats(second.handle);
     try std.testing.expect(stats.connected);
+}
+
+test "session route identity changes only after Session deletion" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const first = try store.open("route-id", false, 60, .zero);
+    try std.testing.expectEqual(
+        first.handle,
+        store.handleForRouteId(first.route_id).?,
+    );
+    try store.disconnect(first.handle, 0, .zero);
+    try std.testing.expectEqual(
+        @as(?session.Handle, null),
+        store.handleForRouteId(first.route_id),
+    );
+    const replacement = try store.open("route-id", false, 60, .zero);
+    try std.testing.expect(replacement.route_id != first.route_id);
+}
+
+test "session due-expiry gate repairs stale reconnect deadline" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const first = try store.open("expiry-gate", false, 1, .zero);
+    try store.disconnect(first.handle, null, .zero);
+    const resumed = try store.open(
+        "expiry-gate",
+        false,
+        10,
+        std.Io.Timestamp.fromNanoseconds(second_ns),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        store.dueExpiryCount(
+            std.Io.Timestamp.fromNanoseconds(second_ns),
+        ),
+    );
+    try store.disconnect(
+        resumed.handle,
+        null,
+        std.Io.Timestamp.fromNanoseconds(second_ns),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        store.dueExpiryCount(
+            std.Io.Timestamp.fromNanoseconds(10 * second_ns),
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        store.dueExpiryCount(
+            std.Io.Timestamp.fromNanoseconds(11 * second_ns),
+        ),
+    );
+    var route_ids: [1]u64 = undefined;
+    const removed = try store.pruneExpiredInto(
+        std.Io.Timestamp.fromNanoseconds(11 * second_ns),
+        &route_ids,
+    );
+    try std.testing.expectEqualSlices(
+        u64,
+        &.{resumed.route_id},
+        removed,
+    );
 }
 
 test "session openConnect and disconnectPacket apply MQTT 5 properties" {
@@ -488,6 +554,53 @@ test "session persists incoming QoS2 packet identifiers" {
         42,
     ));
     try store.completeIncomingQoS2(resumed.handle, 42);
+}
+
+test "session drops oversized PUBLISH without dropping PUBREL" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("oversized", false, 60, .zero);
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "oversized/qos1",
+        "payload",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "oversized/qos2",
+        "payload",
+        .{ .qos = .exactly_once, .now = .zero },
+    );
+    var output: [2]Transmission = undefined;
+    const sent = try store.drainInto(
+        opened.handle,
+        .zero,
+        2,
+        &output,
+    );
+    const qos1_id = sent[0].publish.packet_id;
+    const qos2_id = sent[1].publish.packet_id;
+    try std.testing.expectEqual(
+        session.DropAction.dropped,
+        try store.dropOversizedPublish(opened.handle, qos1_id),
+    );
+    try std.testing.expectEqual(
+        session.AckAction.send_pubrel,
+        try store.handleAck(
+            opened.handle,
+            .pubrec,
+            qos2_id,
+            0,
+        ),
+    );
+    try std.testing.expectEqual(
+        session.DropAction.ignored,
+        try store.dropOversizedPublish(opened.handle, qos2_id),
+    );
+    const stats = try store.stats(opened.handle);
+    try std.testing.expectEqual(@as(usize, 1), stats.inflight_count);
 }
 
 test "session limits preserve existing state" {

@@ -17,9 +17,9 @@ and equal-wire broker results are kept separate.
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
-| Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no live match | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
+| Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no matching subscription | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
-| Broker sessions | Live Session Present, Clean Start, Session Expiry, takeover and persistent subscription restore; offline QoS drain remains next | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
+| Broker sessions | Live Session Present/Clean Start/Expiry/takeover, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
 | Broker persistence | No disk commitlog yet | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, inflight/queued messages and retained base-message store |
 
@@ -179,8 +179,32 @@ continuity loop:
 
 This mirrors the audited Mosquitto ordering: restore Session State, set Session
 Present, send CONNACK, then make queued/inflight state writable. The Session
-Store already models offline QoS 1/2 queues and retransmission; wiring those
-transmissions into the broker network path remains the next Session increment.
+Store's transmission state is now wired into the broker network path as
+described below.
+
+### Offline QoS and reconnect transmission
+
+- Every persistent Session has a stable route identity independent of its
+  generation-checked connection handle. The topic router therefore keeps
+  offline subscriptions indexed without stale slot identities.
+- Online and offline persistent QoS 1/2 fanout, including retained replay,
+  enters the Session Store; it is the sole owner of those Packet Identifiers.
+  QoS 0 remains on the lightweight live queue and, like Mosquitto's default
+  `queue_qos0_messages=false`, is dropped while the Session is offline.
+- CONNACK is written before the first Session transmission, then drain obeys
+  the peer's current Receive Maximum.
+- PUBACK/PUBREC/PUBCOMP are dispatched to Session State when it owns that
+  Packet Identifier; unrelated transient deliveries continue using the
+  connection runtime.
+- Reconnect retransmits QoS 1/2 PUBLISH with DUP and the original Packet
+  Identifier. An await-PUBCOMP transaction resumes directly with PUBREL.
+- Negative PUBREC, out-of-order valid ACKs, Message Expiry and a lower
+  reconnect Receive Maximum retain the Store's existing bounded semantics.
+- Session deletion/expiry removes the stable router identity before future
+  matching, including shared-subscription selection.
+
+This follows Mosquitto's queued/inflight split and reconnect reset while
+avoiding the audited rumqttd limitation that rejects valid out-of-order ACKs.
 
 ## Shared router benchmark
 
@@ -471,8 +495,8 @@ rumqttd.
    state.
 2. Add a native client-identity option for WSS; native MQTT TLS client/server
    mTLS and WS/WSS server transports are available.
-3. Complete Session Store network integration for offline QoS 1/2 queueing,
-   reconnect drain and durable QoS 2 continuation.
+3. Add durable disk/replicated persistence beneath the now-integrated live
+   retained/Session/Will state.
 4. Extend the equal-wire driver with concurrent publisher windows, latency
    percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
    comparison.

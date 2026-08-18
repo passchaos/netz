@@ -38,6 +38,7 @@ pub const Handle = struct {
 
 pub const OpenResult = struct {
     handle: Handle,
+    route_id: u64,
     session_present: bool,
     /// True when another live Network Connection owned this ClientID.
     /// Broker integration must disconnect the previous connection.
@@ -154,6 +155,11 @@ pub const AckAction = enum {
     send_pubrel,
 };
 
+pub const DropAction = enum {
+    dropped,
+    ignored,
+};
+
 const OwnedSubscription = struct {
     topic_filter: []u8,
     qos: mqtt.QoS,
@@ -216,6 +222,7 @@ const Inflight = struct {
 
 const Session = struct {
     generation: u64,
+    route_id: u64,
     client_id: []u8,
     connected: bool,
     expiry_interval: u32,
@@ -260,9 +267,17 @@ pub const Store = struct {
     options: Options,
     sessions: std.ArrayList(?Session) = .empty,
     client_index: std.StringHashMapUnmanaged(usize) = .empty,
+    route_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     session_count: usize = 0,
     total_bytes: usize = 0,
     next_generation: u64 = 1,
+    next_route_id: u64 = 1,
+    /// Conservative lower bound for the next offline Session expiry.
+    ///
+    /// Disconnect can lower this value in O(1). Reconnect/removal may leave a
+    /// stale early value, which is safe: the next due check rescans and repairs
+    /// it. This keeps the normal broker publish path allocation-free.
+    next_expiry_ns: ?i96 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -279,6 +294,7 @@ pub const Store = struct {
         }
         self.sessions.deinit(self.allocator);
         self.client_index.deinit(self.allocator);
+        self.route_index.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -346,6 +362,7 @@ pub const Store = struct {
                     .index = index,
                     .generation = session.generation,
                 },
+                .route_id = session.route_id,
                 .session_present = true,
                 .replaced_connection = replaced_connection,
             };
@@ -363,6 +380,7 @@ pub const Store = struct {
             return error.SessionByteLimitExceeded;
         }
         try self.client_index.ensureUnusedCapacity(self.allocator, 1);
+        try self.route_index.ensureUnusedCapacity(self.allocator, 1);
         var appended_slot = false;
         const index = for (self.sessions.items, 0..) |
             maybe_session,
@@ -380,8 +398,10 @@ pub const Store = struct {
             _ = self.sessions.pop();
         };
         const generation = self.nextGeneration();
+        const route_id = self.nextRouteId();
         self.sessions.items[index] = .{
             .generation = generation,
+            .route_id = route_id,
             .client_id = client_owned,
             .connected = true,
             .expiry_interval = expiry_interval,
@@ -392,10 +412,12 @@ pub const Store = struct {
             client_owned,
             index,
         );
+        self.route_index.putAssumeCapacityNoClobber(route_id, index);
         self.session_count += 1;
         self.total_bytes += client_owned.len;
         return .{
             .handle = .{ .index = index, .generation = generation },
+            .route_id = route_id,
             .session_present = false,
             .replaced_connection = replaced_connection,
         };
@@ -440,6 +462,13 @@ pub const Store = struct {
             now.nanoseconds,
             session.expiry_interval,
         );
+        if (session.expires_at_ns) |deadline| {
+            if (self.next_expiry_ns == null or
+                deadline < self.next_expiry_ns.?)
+            {
+                self.next_expiry_ns = deadline;
+            }
+        }
         for (session.inflight.items) |*maybe_inflight| {
             if (maybe_inflight.*) |*inflight| {
                 inflight.needs_send = true;
@@ -497,6 +526,81 @@ pub const Store = struct {
             removed += 1;
         }
         return removed;
+    }
+
+    /// Remove expired Sessions and return their stable route identities.
+    ///
+    /// Returning route IDs lets broker routing remove corresponding entries
+    /// before matching another publication, so an expired shared member cannot
+    /// consume one selection and drop that message.
+    pub fn pruneExpiredInto(
+        self: *Store,
+        now: std.Io.Timestamp,
+        out: []u64,
+    ) Error![]u64 {
+        const due = self.next_expiry_ns orelse return out[0..0];
+        if (now.nanoseconds < due) return out[0..0];
+
+        var required: usize = 0;
+        for (self.sessions.items) |maybe_session| {
+            const session = maybe_session orelse continue;
+            required += @intFromBool(self.isExpired(session, now));
+        }
+        if (out.len < required) return error.BufferTooSmall;
+
+        var written: usize = 0;
+        var next_expiry_ns: ?i96 = null;
+        var index: usize = 0;
+        while (index < self.sessions.items.len) : (index += 1) {
+            const session = self.sessions.items[index] orelse continue;
+            if (self.isExpired(session, now)) {
+                out[written] = session.route_id;
+                written += 1;
+                self.removeAt(index);
+            } else if (!session.connected) {
+                if (session.expires_at_ns) |deadline| {
+                    if (next_expiry_ns == null or
+                        deadline < next_expiry_ns.?)
+                    {
+                        next_expiry_ns = deadline;
+                    }
+                }
+            }
+        }
+        self.next_expiry_ns = next_expiry_ns;
+        return out[0..written];
+    }
+
+    /// Return the exact output capacity needed by a due expiry sweep.
+    ///
+    /// The common not-due path is O(1), allowing broker routing to avoid both a
+    /// Session scan and a temporary allocation for every published message.
+    pub fn dueExpiryCount(
+        self: *Store,
+        now: std.Io.Timestamp,
+    ) usize {
+        const due = self.next_expiry_ns orelse return 0;
+        if (now.nanoseconds < due) return 0;
+        var due_count: usize = 0;
+        var next_expiry_ns: ?i96 = null;
+        for (self.sessions.items) |maybe_session| {
+            const session = maybe_session orelse continue;
+            due_count += @intFromBool(self.isExpired(session, now));
+            if (!session.connected) {
+                if (session.expires_at_ns) |deadline| {
+                    if (deadline > now.nanoseconds and
+                        (next_expiry_ns == null or
+                            deadline < next_expiry_ns.?))
+                    {
+                        next_expiry_ns = deadline;
+                    }
+                }
+            }
+        }
+        // A stale lower bound is common after reconnect or explicit removal.
+        // Repair it when no removal sweep will follow this call.
+        if (due_count == 0) self.next_expiry_ns = next_expiry_ns;
+        return due_count;
     }
 
     pub fn setSubscription(
@@ -626,6 +730,34 @@ pub const Store = struct {
             .incoming_qos2_count = session.incoming_qos2.count(),
             .owned_wire_bytes = session.allocation_bytes,
         };
+    }
+
+    pub fn routeId(
+        self: *Store,
+        handle: Handle,
+    ) Error!u64 {
+        return (try self.getSession(handle)).route_id;
+    }
+
+    pub fn handleForRouteId(
+        self: Store,
+        route_id: u64,
+    ) ?Handle {
+        const index = self.route_index.get(route_id) orelse return null;
+        const session = self.sessions.items[index] orelse return null;
+        return .{
+            .index = index,
+            .generation = session.generation,
+        };
+    }
+
+    pub fn ownsPacketId(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) bool {
+        const session = self.getSession(handle) catch return false;
+        return session.packet_index.contains(packet_id);
     }
 
     /// Return a currently usable handle for a known ClientID.
@@ -849,6 +981,27 @@ pub const Store = struct {
         }
     }
 
+    /// Drop one outgoing PUBLISH that cannot be represented for this peer.
+    ///
+    /// MQTT 5 Maximum Packet Size can shrink across reconnects. Mosquitto
+    /// removes an oversized queued/inflight message instead of retrying it
+    /// forever and blocking the Session Receive Maximum window. PUBREL is
+    /// intentionally not droppable because it is the continuation of an
+    /// already accepted QoS 2 transaction.
+    pub fn dropOversizedPublish(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!DropAction {
+        const session = try self.getSession(handle);
+        const index = session.packet_index.get(packet_id) orelse
+            return .ignored;
+        const inflight = &session.inflight.items[index].?;
+        if (inflight.state == .await_pubcomp) return .ignored;
+        self.removeInflight(session, index);
+        return .dropped;
+    }
+
     pub fn recordIncomingQoS2(
         self: *Store,
         handle: Handle,
@@ -910,6 +1063,7 @@ pub const Store = struct {
     fn removeAt(self: *Store, index: usize) void {
         var session = self.sessions.items[index].?;
         _ = self.client_index.fetchRemove(session.client_id).?;
+        _ = self.route_index.fetchRemove(session.route_id).?;
         self.sessions.items[index] = null;
         self.session_count -= 1;
         self.total_bytes -= session.allocation_bytes;
@@ -931,6 +1085,23 @@ pub const Store = struct {
         self.next_generation +%= 1;
         if (self.next_generation == 0) self.next_generation = 1;
         return generation;
+    }
+
+    fn nextRouteId(self: *Store) u64 {
+        const first = self.next_route_id;
+        while (true) {
+            const route_id = self.next_route_id;
+            self.next_route_id +%= 1;
+            if (self.next_route_id == 0 or
+                self.next_route_id >= (@as(u64, 1) << 63))
+            {
+                self.next_route_id = 1;
+            }
+            if (!self.route_index.contains(route_id)) return route_id;
+            // Reaching this assertion requires all 2^63-1 route IDs to be
+            // simultaneously live, which is impossible under `max_sessions`.
+            std.debug.assert(self.next_route_id != first);
+        }
     }
 
     fn pruneExpiredPublishes(

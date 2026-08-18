@@ -507,6 +507,14 @@ test "public modules are reachable" {
         netz.mqtt.runtime.Connection,
         "shutdown",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "writeEncodedSessionPacket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "readSessionPubRel",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.AckPacket, "accepted"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubAckWithProperties"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubRecWithProperties"));

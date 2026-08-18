@@ -775,6 +775,17 @@ pub const Connection = struct {
         return packet_id;
     }
 
+    /// Write one Session packet encoded under the broker state lock.
+    ///
+    /// The byte slice is detached from Session Store ownership, allowing the
+    /// broker to release its global lock before transport I/O.
+    pub fn writeEncodedSessionPacket(
+        self: *Connection,
+        bytes: []u8,
+    ) Error!void {
+        try self.writePacket(bytes);
+    }
+
     pub fn completePublish(self: *Connection, packet_id: u16, qos: mqtt.QoS) Error!void {
         switch (qos) {
             .at_most_once => return,
@@ -931,6 +942,15 @@ pub const Connection = struct {
         errdefer pubrel.deinit(self.allocator);
         try self.validateIncomingPubRel(pubrel.ack.packet_id);
         return pubrel;
+    }
+
+    /// Parse PUBREL without connection-local receive-state validation.
+    ///
+    /// Persistent broker Sessions may resume directly in await-PUBCOMP state
+    /// after reconnect, where the new transport's fixed bitset cannot know the
+    /// original Packet Identifier.
+    pub fn readSessionPubRel(self: *Connection) Error!OwnedAck {
+        return self.readAck(.pubrel);
     }
 
     pub fn writePubComp(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
