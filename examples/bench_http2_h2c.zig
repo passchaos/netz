@@ -12,9 +12,12 @@ const response_headers = [_]netz.http2.Hpack.HeaderField{.{
 }};
 const request_body = "ssssssssss";
 const request_body_100kb = "x" ** (100 * 1024);
-const h2_window: u32 = 1024 * 1024;
+const parallel_chunk = "x" ** (10 * 1024);
+const parallel_chunk_count: usize = 100;
+const parallel_body = parallel_chunk ** parallel_chunk_count;
+const h2_window: u32 = std.math.maxInt(i31);
 const limits: netz.http2.runtime.Limits = .{
-    .max_body_bytes = 128 * 1024,
+    .max_body_bytes = parallel_body.len,
     .initial_window_size = h2_window,
     .initial_connection_window_size = h2_window,
 };
@@ -24,6 +27,7 @@ const Scenario = struct {
     request: netz.http2.runtime.RequestOptions,
     parallel: usize = 1,
     warmups: usize = warmup_iterations,
+    measured: usize = iterations,
 };
 
 pub fn main() !void {
@@ -56,6 +60,7 @@ pub fn main() !void {
                 body: []const u8,
                 parallel: usize,
                 warmups: usize = warmup_iterations,
+                measured: usize = iterations,
                 streaming: bool = false,
             };
             const scenarios = [_]ScenarioServer{
@@ -68,11 +73,18 @@ pub fn main() !void {
                     .streaming = true,
                 },
                 .{ .body = "", .parallel = 10 },
+                .{
+                    .body = parallel_body,
+                    .parallel = 10,
+                    .warmups = 5,
+                    .measured = 20,
+                },
             };
             for (scenarios) |scenario| {
                 var connection = try shared.server.accept();
                 defer connection.close();
-                const scenario_iterations = scenario.warmups + iterations;
+                const scenario_iterations =
+                    scenario.warmups + scenario.measured;
                 if (scenario.parallel == 1) {
                     for (0..scenario_iterations) |_| {
                         const stream_id = if (scenario.streaming) stream: {
@@ -112,26 +124,59 @@ pub fn main() !void {
                         });
                     }
                 } else {
-                    var requests: [10]netz.http2.runtime.OwnedRequest =
-                        undefined;
                     var stream_ids: [10]u31 = undefined;
                     const responses = [_]netz.http2.runtime.ResponseOptions{
                         .{ .headers = &response_headers },
                     } ** 10;
                     for (0..scenario_iterations) |_| {
-                        var initialized: usize = 0;
-                        defer for (requests[0..initialized]) |*request| {
-                            request.deinit(shared.server.allocator);
-                        };
-                        for (&requests, &stream_ids) |*request, *stream_id| {
-                            request.* = try connection.readRequest();
-                            initialized += 1;
-                            stream_id.* = request.stream_id;
-                            if (!std.mem.eql(
-                                u8,
-                                request.body,
-                                scenario.body,
-                            )) {
+                        if (scenario.body.len == 0) {
+                            var requests: [10]netz.http2.runtime.OwnedRequest =
+                                undefined;
+                            var initialized: usize = 0;
+                            defer for (requests[0..initialized]) |*request| {
+                                request.deinit(shared.server.allocator);
+                            };
+                            for (&requests, &stream_ids) |
+                                *request,
+                                *stream_id,
+                            | {
+                                request.* = try connection.readRequest();
+                                initialized += 1;
+                                stream_id.* = request.stream_id;
+                            }
+                        } else {
+                            var requests: [10]netz.http2.runtime.StreamingRequest = undefined;
+                            var initialized = false;
+                            defer if (initialized) for (&requests) |*request| {
+                                request.deinit(shared.server.allocator);
+                            };
+                            var body_bytes: usize = 0;
+                            try connection.readRequestBatchStreamingInto(
+                                &requests,
+                                &body_bytes,
+                                struct {
+                                    fn consume(
+                                        total: *usize,
+                                        _: u31,
+                                        data: []const u8,
+                                    ) !void {
+                                        total.* += data.len;
+                                    }
+                                }.consume,
+                            );
+                            initialized = true;
+                            for (&requests, &stream_ids) |
+                                *request,
+                                *stream_id,
+                            | {
+                                stream_id.* = request.stream_id;
+                                if (request.body_bytes != scenario.body.len) {
+                                    return error.UnexpectedRequestBody;
+                                }
+                            }
+                            if (body_bytes !=
+                                scenario.body.len * scenario.parallel)
+                            {
                                 return error.UnexpectedRequestBody;
                             }
                         }
@@ -193,6 +238,19 @@ pub fn main() !void {
             },
             .parallel = 10,
         },
+        .{
+            .name = "http2_parallel_x10_req_10kb_100_chunks_max_window",
+            .request = .{
+                .method = "POST",
+                .path = "/hello",
+                .scheme = "http",
+                .authority = authority,
+                .body = parallel_body,
+            },
+            .parallel = 10,
+            .warmups = 5,
+            .measured = 20,
+        },
     };
     for (scenarios) |scenario| {
         var client = try netz.http2.runtime.Client.connect(
@@ -217,7 +275,7 @@ pub fn main() !void {
 
         const start = nowNs(io);
         var status_total: usize = 0;
-        for (0..iterations) |_| {
+        for (0..scenario.measured) |_| {
             try exchangeScenario(
                 &client,
                 requests[0..scenario.parallel],
@@ -230,7 +288,7 @@ pub fn main() !void {
         const requests_per_second = if (elapsed == 0)
             0
         else
-            (@as(u64, iterations) *| std.time.ns_per_s) / elapsed;
+            (@as(u64, scenario.measured) *| std.time.ns_per_s) / elapsed;
 
         std.debug.print(
             \\HTTP/2 h2c runtime benchmark
@@ -247,10 +305,10 @@ pub fn main() !void {
             scenario.name,
             scenario.parallel,
             scenario.warmups,
-            iterations,
+            scenario.measured,
             status_total,
-            elapsed / iterations,
-            elapsed / (iterations * scenario.parallel),
+            elapsed / scenario.measured,
+            elapsed / (scenario.measured * scenario.parallel),
             requests_per_second * scenario.parallel,
         });
     }
@@ -273,6 +331,12 @@ fn exchangeScenario(
 ) !void {
     if (requests.len == 1) {
         responses[0] = try client.request(requests[0]);
+    } else if (requests[0].body.len != 0) {
+        try client.requestBodyBatchInto(
+            requests,
+            parallel_chunk.len,
+            responses,
+        );
     } else {
         try client.requestBatchInto(requests, responses);
     }

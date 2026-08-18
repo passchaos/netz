@@ -131,6 +131,7 @@ taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_empty
 taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_req_10b
 taskset -c 0 "$HYPER_H2_BENCH" --bench http2_consecutive_x1_req_100kb
 taskset -c 0 "$HYPER_H2_BENCH" --bench http2_parallel_x10_empty
+taskset -c 0 "$HYPER_H2_BENCH" --bench http2_parallel_x10_req_10kb_100_chunks_max_window
 ```
 
 ```text
@@ -152,6 +153,11 @@ parallel x10 empty GET (five samples):
   netz:  26.35-26.60 us/batch, 2.63-2.66 us/request
   hyper: 47.50-48.46 us/batch, 4.75-4.85 us/request
   netz batch-latency advantage: 1.79-1.84x
+
+parallel x10, 100 x 10-KiB request chunks/stream, max windows:
+  netz:  1.64-1.74 ms/batch, 164-174 us/request
+  hyper: 3.36-3.40 ms/batch, 336-340 us/request
+  netz batch-latency advantage: 1.93-2.07x
 ```
 
 `strace` confirmed equal steady-state wire sizes: empty exchanges use 19-byte
@@ -179,6 +185,9 @@ Bodyless parallel batches use
 transactional HPACK staging, one request/response submission in each direction,
 and stream-ID-based response reordering. See `docs/hyper_parity.md` for the
 implementation audit and remaining H2 comparison work.
+Body-bearing max-window batches add transactional credit preflight, staged
+HEADERS, round-robin borrowed DATA contributions, and server-side interleaved
+streaming request demultiplexing without body aggregation.
 
 ### HTTP/3 QPACK dynamic encode
 

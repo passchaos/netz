@@ -61,7 +61,10 @@ reference checkout at `~/Work/hyper`.
 
 `bench-http2-h2c` mirrors Hyper's `http2_consecutive_x1_empty`,
 `http2_consecutive_x1_req_10b`, `http2_consecutive_x1_req_100kb`, and
-`http2_parallel_x10_empty` on persistent prior-knowledge connections. It
+`http2_parallel_x10_empty` on persistent prior-knowledge connections. It also
+includes Hyper's `http2_parallel_x10_req_10kb_100_chunks_max_window`: ten
+concurrent streams each carry 100 round-robin 10-KiB contributions under max
+connection/stream windows. It
 includes a same-length Date field and Hyper-style receive windows so
 steady-state wire sizes and flow-control shape match the reference. The 100-KiB
 server path consumes DATA through `readRequestStreaming` without aggregation.

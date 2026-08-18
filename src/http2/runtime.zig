@@ -681,6 +681,10 @@ pub const Connection = struct {
     hpack_decoder: http2.Hpack.Decoder = .{},
     hpack_encoder: http2.Hpack.Encoder = .{},
     write_batch: std.ArrayList(u8) = .empty,
+    batch_data_headers: std.ArrayList(
+        [http2.FrameHeader.encoded_len]u8,
+    ) = .empty,
+    batch_data_parts: std.ArrayList([]const u8) = .empty,
     frame_reader: frame_io.Reader = .{},
     /// One application frame encountered while a RequestWriter is blocked on
     /// send credit. Returning to the caller immediately keeps this naturally
@@ -740,6 +744,8 @@ pub const Connection = struct {
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
         self.write_batch.deinit(self.allocator);
+        self.batch_data_headers.deinit(self.allocator);
+        self.batch_data_parts.deinit(self.allocator);
         if (self.pending_client_frame) |*frame| {
             frame.deinit(self.allocator);
         }
@@ -1064,7 +1070,6 @@ pub const Connection = struct {
         defer if (states.ptr != states_stack[0..].ptr) {
             self.allocator.free(states);
         };
-
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
         var staged_encoder = try self.hpack_encoder.clone(self.allocator);
@@ -1109,6 +1114,376 @@ pub const Connection = struct {
             state.body_owned = null;
             state.trailers = &.{};
             self.releaseLocalStream(state.stream_id);
+        }
+    }
+
+    /// Send a batch whose complete bodies fit current flow-control credit.
+    ///
+    /// Unlike `requestBatchInto`, this accepts DATA but never pumps incoming
+    /// frames while opening the batch. The whole batch is rejected before any
+    /// wire write unless every body fits one peer stream window and their sum
+    /// fits the current connection window. That bounded contract is sufficient
+    /// for max-window parallel workloads and avoids the deadlock ambiguity of
+    /// a general blocking full-duplex scheduler. `body_chunk_size` preserves
+    /// the caller's application contribution size while HTTP/2 frame splitting
+    /// still obeys the negotiated maximum frame size.
+    pub fn requestBodyBatchInto(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        responses: []OwnedResponse,
+    ) Error!void {
+        if (self.role != .client) return error.UnexpectedFrame;
+        if (requests.len != responses.len) return error.InvalidResponse;
+        if (requests.len == 0) return;
+        if (body_chunk_size == 0) return error.InvalidFrameSize;
+        if (self.active_local_streams.items.len != 0) {
+            return error.UnexpectedFrame;
+        }
+
+        var total_body_bytes: usize = 0;
+        for (requests) |request_options| {
+            if (request_options.trailers.len != 0) {
+                return error.InvalidContentLength;
+            }
+            if (methodIsConnect(request_options.method)) {
+                return error.InvalidHeader;
+            }
+            total_body_bytes = std.math.add(
+                usize,
+                total_body_bytes,
+                request_options.body.len,
+            ) catch return error.MessageTooLarge;
+            if (request_options.body.len >
+                @as(usize, @intCast(@max(
+                    self.peer_initial_stream_window,
+                    0,
+                ))))
+            {
+                return error.FlowControlBlocked;
+            }
+        }
+        if (total_body_bytes > self.send_connection_window.available()) {
+            return error.FlowControlBlocked;
+        }
+
+        var states_stack: [16]BatchResponseState = undefined;
+        const states = if (requests.len <= states_stack.len)
+            states_stack[0..requests.len]
+        else
+            try self.allocator.alloc(BatchResponseState, requests.len);
+        defer if (states.ptr != states_stack[0..].ptr) {
+            self.allocator.free(states);
+        };
+        var credit_reserved_stack: [16]bool = undefined;
+        const credit_reserved =
+            if (requests.len <= credit_reserved_stack.len)
+                credit_reserved_stack[0..requests.len]
+            else
+                try self.allocator.alloc(bool, requests.len);
+        defer if (credit_reserved.ptr != credit_reserved_stack[0..].ptr) {
+            self.allocator.free(credit_reserved);
+        };
+        @memset(credit_reserved, false);
+
+        const batch = &self.write_batch;
+        batch.clearRetainingCapacity();
+        const original_next_stream_id = self.next_client_stream_id;
+        var staged_encoder = try self.hpack_encoder.clone(self.allocator);
+        var staged_encoder_owned = true;
+        defer if (staged_encoder_owned) {
+            staged_encoder.deinit(self.allocator);
+        };
+        var started: usize = 0;
+        errdefer {
+            // Before staged HPACK state is committed no HEADERS were written,
+            // so local stream IDs roll back with the transaction. Once the
+            // write succeeds, IDs remain consumed on later I/O failures.
+            if (staged_encoder_owned) {
+                self.next_client_stream_id = original_next_stream_id;
+            }
+            for (states[0..started]) |*state| {
+                self.releaseLocalStream(state.stream_id);
+                state.deinit(self.allocator);
+            }
+        }
+        for (requests, states) |request_options, *state| {
+            const pending = try self.appendRequestHeadToBatch(
+                request_options,
+                batch,
+                &staged_encoder,
+            );
+            state.* = .{
+                .stream_id = pending.stream_id,
+                .request_method = pending.request_method,
+                .extended_connect = pending.extended_connect,
+            };
+            started += 1;
+        }
+
+        var reserved_connection_bytes: usize = 0;
+        errdefer if (reserved_connection_bytes != 0) {
+            self.send_connection_window.update(
+                @intCast(reserved_connection_bytes),
+            ) catch unreachable;
+            for (requests, states, credit_reserved) |
+                request_options,
+                state,
+                stream_credit_reserved,
+            | {
+                if (!stream_credit_reserved) continue;
+                (self.sendStreamWindow(state.stream_id) catch continue)
+                    .update(@intCast(request_options.body.len)) catch
+                    unreachable;
+            }
+        };
+        try self.send_connection_window.reserve(total_body_bytes);
+        reserved_connection_bytes = total_body_bytes;
+        for (requests, states, credit_reserved) |
+            request_options,
+            state,
+            *stream_credit_reserved,
+        | {
+            if (request_options.body.len == 0) continue;
+            try (try self.sendStreamWindow(state.stream_id)).reserve(
+                request_options.body.len,
+            );
+            stream_credit_reserved.* = true;
+        }
+
+        writeAll(self.io, self.stream, batch.items) catch |err| {
+            // A transport failure may expose only a prefix of the staged HPACK
+            // sequence. It cannot be retried or rolled back; commit encoder
+            // state and stream IDs so any accidental reuse fails closed.
+            self.hpack_encoder.deinit(self.allocator);
+            self.hpack_encoder = staged_encoder;
+            staged_encoder_owned = false;
+            return err;
+        };
+        self.hpack_encoder.deinit(self.allocator);
+        self.hpack_encoder = staged_encoder;
+        staged_encoder_owned = false;
+        var body_write_succeeded = false;
+        errdefer if (!body_write_succeeded) {
+            // A partial DATA submission has consumed an unknown wire prefix.
+            // Keep flow-control accounting conservative; this connection must
+            // be closed rather than retried.
+            reserved_connection_bytes = 0;
+        };
+        try self.writeRequestBodyBatchData(
+            requests,
+            states,
+            body_chunk_size,
+        );
+        body_write_succeeded = true;
+        reserved_connection_bytes = 0;
+
+        try self.readResponseBatch(states);
+        for (states, responses) |*state, *response| {
+            response.* = .{
+                .headers = state.headers.?,
+                .status = state.status.?,
+                .body = state.body_owned.?,
+                .trailers = state.trailers,
+            };
+            state.headers = null;
+            state.body_owned = null;
+            state.trailers = &.{};
+            self.releaseLocalStream(state.stream_id);
+        }
+    }
+
+    fn appendRequestHeadToBatch(
+        self: *Connection,
+        options: RequestOptions,
+        batch: *std.ArrayList(u8),
+        encoder: *http2.Hpack.Encoder,
+    ) Error!PendingResponse {
+        var request_options = options;
+        if (request_options.authority == null) {
+            request_options.authority = self.default_authority;
+        }
+        const scheme =
+            request_options.scheme orelse self.default_scheme orelse "https";
+
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            request_options.headers.len,
+            7,
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = if (fields_capacity <= fields_stack.len)
+            fields_stack[0..fields_capacity]
+        else
+            try self.allocator.alloc(
+                http2.Hpack.HeaderField,
+                fields_capacity,
+            );
+        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
+            self.allocator.free(fields_buffer);
+        };
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
+        fields.appendAssumeCapacity(.{
+            .name = ":method",
+            .value = request_options.method,
+        });
+        fields.appendAssumeCapacity(.{
+            .name = ":path",
+            .value = request_options.path,
+        });
+        fields.appendAssumeCapacity(.{
+            .name = ":scheme",
+            .value = scheme,
+        });
+        if (request_options.authority) |authority| {
+            fields.appendAssumeCapacity(.{
+                .name = ":authority",
+                .value = authority,
+            });
+        }
+        var priority_buf: [16]u8 = undefined;
+        if (request_options.priority) |value| {
+            fields.appendAssumeCapacity(.{
+                .name = "priority",
+                .value = value.serialize(&priority_buf),
+            });
+        }
+        fields.appendSliceAssumeCapacity(request_options.headers);
+        stripConnectionHeaders(&fields, .request);
+        var content_length_buf: [32]u8 = undefined;
+        if (requestShouldDefaultContentLength(
+            request_options.method,
+            fields.items,
+            request_options.body.len,
+        )) {
+            const content_length = std.fmt.bufPrint(
+                &content_length_buf,
+                "{}",
+                .{request_options.body.len},
+            ) catch unreachable;
+            fields.appendAssumeCapacity(.{
+                .name = "content-length",
+                .value = content_length,
+            });
+        }
+        try validateHeaderBlock(fields.items, .request);
+        try validateDeclaredRequestLength(
+            fields.items,
+            request_options.body.len,
+        );
+        try validateHeaderListSize(
+            fields.items,
+            self.peer_max_header_list_size,
+        );
+
+        const stream_id = try self.reserveNextClientStreamId();
+        errdefer self.releaseLocalStream(stream_id);
+        const block = try encoder.encodeBlockRetained(
+            self.allocator,
+            fields.items,
+        );
+        try appendHeaderBlockBytes(
+            batch,
+            self.allocator,
+            stream_id,
+            block,
+            request_options.body.len == 0,
+            self.outboundFramePayloadLimit(),
+        );
+        return .{
+            .stream_id = stream_id,
+            .request_method = request_options.method,
+            .extended_connect = false,
+        };
+    }
+
+    fn writeRequestBodyBatchData(
+        self: *Connection,
+        requests: []const RequestOptions,
+        states: []const BatchResponseState,
+        application_chunk_size: usize,
+    ) Error!void {
+        const frame_limit = self.outboundFramePayloadLimit();
+        var offsets_stack: [16]usize = undefined;
+        const offsets = if (requests.len <= offsets_stack.len)
+            offsets_stack[0..requests.len]
+        else
+            try self.allocator.alloc(usize, requests.len);
+        defer if (offsets.ptr != offsets_stack[0..].ptr) {
+            self.allocator.free(offsets);
+        };
+        @memset(offsets, 0);
+
+        self.batch_data_headers.clearRetainingCapacity();
+        self.batch_data_parts.clearRetainingCapacity();
+        const per_round_frames = std.math.divCeil(
+            usize,
+            application_chunk_size,
+            frame_limit,
+        ) catch return error.MessageTooLarge;
+        const header_capacity = std.math.mul(
+            usize,
+            requests.len,
+            per_round_frames,
+        ) catch return error.MessageTooLarge;
+        try self.batch_data_headers.ensureTotalCapacity(
+            self.allocator,
+            header_capacity,
+        );
+        try self.batch_data_parts.ensureTotalCapacity(
+            self.allocator,
+            header_capacity * 2,
+        );
+
+        while (true) {
+            self.batch_data_headers.clearRetainingCapacity();
+            self.batch_data_parts.clearRetainingCapacity();
+            var has_data = false;
+            for (requests, states, offsets) |
+                request_options,
+                state,
+                *offset,
+            | {
+                if (offset.* == request_options.body.len) continue;
+                has_data = true;
+                const contribution_end = @min(
+                    request_options.body.len,
+                    offset.* + application_chunk_size,
+                );
+                while (offset.* < contribution_end) {
+                    const end = @min(
+                        contribution_end,
+                        offset.* + frame_limit,
+                    );
+                    const header_index =
+                        self.batch_data_headers.items.len;
+                    self.batch_data_headers.appendAssumeCapacity(undefined);
+                    try encodeFrameHeader(
+                        &self.batch_data_headers.items[header_index],
+                        .data,
+                        if (end == request_options.body.len)
+                            flag_end_stream
+                        else
+                            0,
+                        state.stream_id,
+                        end - offset.*,
+                    );
+                    self.batch_data_parts.appendAssumeCapacity(
+                        &self.batch_data_headers.items[header_index],
+                    );
+                    self.batch_data_parts.appendAssumeCapacity(
+                        request_options.body[offset.*..end],
+                    );
+                    offset.* = end;
+                }
+            }
+            if (!has_data) return;
+            try stream_io.writeAllSlicesWide(
+                self.io,
+                self.stream,
+                self.batch_data_parts.items,
+            );
         }
     }
 
@@ -2136,6 +2511,245 @@ pub const Connection = struct {
                     ),
             };
         }
+    }
+
+    /// Read an exact batch of interleaved request streams without aggregating
+    /// DATA bodies.
+    ///
+    /// Requests are returned in peer HEADERS order. Each callback receives the
+    /// stream ID so one application context can keep independent per-stream
+    /// parsers/checksums while DATA frames arrive round-robin. Initial headers
+    /// and trailers are owned by each `StreamingRequest`; DATA remains borrowed
+    /// for the callback duration. Traditional CONNECT is intentionally rejected
+    /// because a completed request batch cannot represent tunnel lifetime.
+    pub fn readRequestBatchStreamingInto(
+        self: *Connection,
+        requests: []StreamingRequest,
+        context: anytype,
+        comptime consume: anytype,
+    ) !void {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (requests.len == 0) return;
+
+        var expected_stack: [16]?usize = undefined;
+        var done_stack: [16]bool = undefined;
+        const expected = if (requests.len <= expected_stack.len)
+            expected_stack[0..requests.len]
+        else
+            try self.allocator.alloc(?usize, requests.len);
+        defer if (expected.ptr != expected_stack[0..].ptr) {
+            self.allocator.free(expected);
+        };
+        const done = if (requests.len <= done_stack.len)
+            done_stack[0..requests.len]
+        else
+            try self.allocator.alloc(bool, requests.len);
+        defer if (done.ptr != done_stack[0..].ptr) {
+            self.allocator.free(done);
+        };
+        @memset(done, false);
+
+        var initialized: usize = 0;
+        var completed: usize = 0;
+        errdefer {
+            for (requests[0..initialized]) |*streaming_request| {
+                // Every request still owns an open response half even when its
+                // inbound DATA already ended. Cancel the whole batch so a
+                // callback/framing failure cannot strand clients waiting for
+                // responses that this API will never produce.
+                self.writeResetStreamFrame(
+                    streaming_request.stream_id,
+                    .cancel,
+                ) catch {};
+                self.releasePeerStream(streaming_request.stream_id);
+                streaming_request.deinit(self.allocator);
+            }
+        }
+
+        while (completed < requests.len) {
+            const frame = try self.readFrameScratch();
+            if (try self.handleConnectionFrame(frame)) continue;
+            if (frame.header.frame_type == .goaway) {
+                try self.recordPeerGoAway(
+                    try http2.GoAwayPayload.parse(frame),
+                );
+                return error.ConnectionGoAway;
+            }
+
+            switch (frame.header.frame_type) {
+                .headers => {
+                    if (findStreamingRequestIndex(
+                        requests[0..initialized],
+                        frame.header.stream_id,
+                    )) |index| {
+                        if (done[index] or
+                            (frame.header.flags & flag_end_stream) == 0)
+                        {
+                            return error.UnexpectedFrame;
+                        }
+                        requests[index].trailers =
+                            try self.readHeaderBlock(frame);
+                        var trailers_owned = true;
+                        errdefer if (trailers_owned) {
+                            freeHeaders(
+                                self.allocator,
+                                requests[index].trailers,
+                            );
+                            requests[index].trailers = &.{};
+                        };
+                        try validateHeaderBlock(
+                            requests[index].trailers,
+                            .request_trailers,
+                        );
+                        try self.finishBatchStreamingRequest(
+                            &requests[index],
+                            expected[index],
+                        );
+                        done[index] = true;
+                        completed += 1;
+                        trailers_owned = false;
+                        continue;
+                    }
+
+                    if (initialized == requests.len) {
+                        return error.UnexpectedFrame;
+                    }
+                    const stream_id = frame.header.stream_id;
+                    if (!clientInitiatedStreamId(stream_id) or
+                        stream_id <= self.last_peer_client_stream_id)
+                    {
+                        return error.InvalidFrame;
+                    }
+                    try self.reservePeerStream(stream_id);
+                    var stream_reserved = true;
+                    errdefer if (stream_reserved) {
+                        self.releasePeerStream(stream_id);
+                    };
+                    self.last_peer_client_stream_id = stream_id;
+
+                    const headers = try self.readHeaderBlock(frame);
+                    var headers_owned = true;
+                    errdefer if (headers_owned) {
+                        freeHeaders(self.allocator, headers);
+                    };
+                    try validateHeaderBlock(headers, .request);
+                    const lookup = try requestHeaderLookup(headers);
+                    const method = lookup.method orelse
+                        return error.MissingPseudoHeader;
+                    if (methodIsConnect(method)) return error.InvalidHeader;
+                    if (lookup.protocol != null) {
+                        return error.InvalidHeader;
+                    }
+                    if ((lookup.content_length orelse 0) >
+                        self.limits.max_body_bytes)
+                    {
+                        return error.MessageTooLarge;
+                    }
+
+                    const index = initialized;
+                    requests[index] = .{
+                        .stream_id = stream_id,
+                        .headers = headers,
+                        .method = method,
+                        .path = lookup.path orelse "",
+                        .scheme = lookup.scheme orelse "",
+                        .authority = lookup.requestAuthority(),
+                        .body_bytes = 0,
+                        .priority = if (self.peerPriority(stream_id)) |value|
+                            value
+                        else
+                            http2.ExtensiblePriority.parse(
+                                lookup.priority orelse "",
+                            ),
+                    };
+                    expected[index] = lookup.content_length;
+                    initialized += 1;
+                    headers_owned = false;
+                    stream_reserved = false;
+                    if ((frame.header.flags & flag_end_stream) != 0) {
+                        try self.finishBatchStreamingRequest(
+                            &requests[index],
+                            expected[index],
+                        );
+                        done[index] = true;
+                        completed += 1;
+                    }
+                },
+                .data => {
+                    const index = findStreamingRequestIndex(
+                        requests[0..initialized],
+                        frame.header.stream_id,
+                    ) orelse return error.UnexpectedFrame;
+                    if (done[index]) return error.UnexpectedFrame;
+                    const data = try self.receiveDataPayload(
+                        frame.header.stream_id,
+                        frame,
+                    );
+                    requests[index].body_bytes = std.math.add(
+                        usize,
+                        requests[index].body_bytes,
+                        data.data.len,
+                    ) catch return error.MessageTooLarge;
+                    if (requests[index].body_bytes >
+                        self.limits.max_body_bytes)
+                    {
+                        return error.MessageTooLarge;
+                    }
+                    if (data.data.len != 0) {
+                        consume(
+                            context,
+                            frame.header.stream_id,
+                            data.data,
+                        ) catch |err| {
+                            self.releaseReceivedCapacity(
+                                frame.header.stream_id,
+                                frame.payload.len,
+                            ) catch {};
+                            return err;
+                        };
+                    }
+                    try self.maybeReleaseReceivedCapacity(
+                        frame.header.stream_id,
+                    );
+                    if ((frame.header.flags & flag_end_stream) != 0) {
+                        try self.finishBatchStreamingRequest(
+                            &requests[index],
+                            expected[index],
+                        );
+                        done[index] = true;
+                        completed += 1;
+                    }
+                },
+                .rst_stream => return error.StreamReset,
+                else => return error.UnexpectedFrame,
+            }
+        }
+    }
+
+    fn finishBatchStreamingRequest(
+        self: *Connection,
+        streaming_request: *StreamingRequest,
+        expected_length: ?usize,
+    ) Error!void {
+        try validateExpectedContentLength(
+            expected_length,
+            streaming_request.body_bytes,
+        );
+        try self.rememberResponseSemantics(
+            streaming_request.stream_id,
+            streaming_request.method,
+            streaming_request.protocol,
+        );
+    }
+
+    fn findStreamingRequestIndex(
+        requests: []const StreamingRequest,
+        stream_id: u31,
+    ) ?usize {
+        for (requests, 0..) |streaming_request, index| {
+            if (streaming_request.stream_id == stream_id) return index;
+        }
+        return null;
     }
 
     fn readFrameScratch(self: *Connection) Error!http2.Frame {
@@ -11450,6 +12064,212 @@ test "HTTP/2 request batch reorders out-of-order responses" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 request body batch sends bounded parallel bodies" {
+    const allocator = std.testing.allocator;
+    const request_body = "batch-body-" ** 1024;
+    const parallel = 3;
+    const total_body_bytes = request_body.len * parallel;
+    const limits: Limits = .{
+        .max_body_bytes = request_body.len,
+        .initial_window_size = @max(
+            total_body_bytes,
+            @as(usize, @intCast(default_flow_window)),
+        ),
+        .initial_connection_window_size = @max(
+            total_body_bytes,
+            @as(usize, @intCast(default_flow_window)),
+        ),
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var requests: [parallel]StreamingRequest = undefined;
+            var initialized = false;
+            defer if (initialized) for (&requests) |*request| {
+                request.deinit(server_ptr.allocator);
+            };
+            const Context = struct {
+                bytes: usize = 0,
+                fn consume(
+                    self: *@This(),
+                    _: u31,
+                    data: []const u8,
+                ) !void {
+                    self.bytes += data.len;
+                }
+            };
+            var context: Context = .{};
+            try connection.readRequestBatchStreamingInto(
+                &requests,
+                &context,
+                Context.consume,
+            );
+            initialized = true;
+            for (&requests) |*request| {
+                try std.testing.expectEqualStrings(
+                    "POST",
+                    request.method,
+                );
+                try std.testing.expectEqual(
+                    request_body.len,
+                    request.body_bytes,
+                );
+            }
+            try std.testing.expectEqual(
+                total_body_bytes,
+                context.bytes,
+            );
+            var stream_ids: [parallel]u31 = undefined;
+            var response_headers: [parallel]http2.Hpack.HeaderField =
+                undefined;
+            var responses: [parallel]ResponseOptions = undefined;
+            for (&stream_ids, &response_headers, &responses, 0..) |
+                *stream_id,
+                *response_header,
+                *response,
+                index,
+            | {
+                const reverse = parallel - 1 - index;
+                stream_id.* = requests[reverse].stream_id;
+                response_header.* = .{
+                    .name = "x-path",
+                    .value = requests[reverse].path,
+                };
+                response.* = .{
+                    .headers = response_headers[index..][0..1],
+                };
+            }
+            try connection.writeResponseBatch(
+                &stream_ids,
+                &responses,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{
+            .method = "POST",
+            .path = "/one",
+            .authority = "localhost",
+            .body = request_body,
+        },
+        .{
+            .method = "POST",
+            .path = "/two",
+            .authority = "localhost",
+            .body = request_body,
+        },
+        .{
+            .method = "POST",
+            .path = "/three",
+            .authority = "localhost",
+            .body = request_body,
+        },
+    };
+    var responses: [parallel]OwnedResponse = undefined;
+    try client.requestBodyBatchInto(
+        &requests,
+        request_body.len,
+        &responses,
+    );
+    defer for (&responses) |*response| response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "/one",
+        findHeader(responses[0].headers, "x-path").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/two",
+        findHeader(responses[1].headers, "x-path").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/three",
+        findHeader(responses[2].headers, "x-path").?,
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 request body batch rejects insufficient credit before write" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+    };
+    defer {
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.batch_data_headers.deinit(allocator);
+        connection.batch_data_parts.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+    connection.send_connection_window.value = 7;
+    connection.peer_initial_stream_window = 4;
+    const requests = [_]RequestOptions{
+        .{
+            .method = "POST",
+            .authority = "localhost",
+            .body = "1234",
+        },
+        .{
+            .method = "POST",
+            .authority = "localhost",
+            .body = "5678",
+        },
+    };
+    var responses: [requests.len]OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.FlowControlBlocked,
+        connection.requestBodyBatchInto(&requests, 4, &responses),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.write_batch.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.active_local_streams.items.len,
+    );
+    try std.testing.expectEqual(@as(i64, 7), connection.send_connection_window.value);
+}
+
 test "HTTP/2 streaming request consumes body without aggregation" {
     const allocator = std.testing.allocator;
     const body = "streaming-data-" ** 8192;
@@ -11668,6 +12488,74 @@ test "HTTP/2 request batch rolls back staged HPACK state" {
     try std.testing.expectEqual(
         @as(usize, 0),
         connection.active_local_streams.items.len,
+    );
+}
+
+test "HTTP/2 request body batch rolls back staged HPACK state" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+        .default_scheme = "http",
+        .send_connection_window = .{ .value = 1024 },
+        .peer_initial_stream_window = 1024,
+    };
+    defer {
+        connection.send_stream_windows.deinit(allocator);
+        connection.send_stream_window_index.deinit(allocator);
+        connection.active_local_streams.deinit(allocator);
+        connection.active_local_index.deinit(allocator);
+        connection.priority_state.deinit(allocator);
+        connection.write_batch.deinit(allocator);
+        connection.batch_data_headers.deinit(allocator);
+        connection.batch_data_parts.deinit(allocator);
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    const requests = [_]RequestOptions{
+        .{
+            .method = "POST",
+            .authority = "localhost",
+            .body = "first",
+            .headers = &.{.{
+                .name = "x-transactional",
+                .value = "first",
+            }},
+        },
+        .{
+            .method = "POST",
+            .authority = "localhost",
+            .body = "second",
+            .headers = &.{.{
+                .name = "Uppercase-Invalid",
+                .value = "second",
+            }},
+        },
+    };
+    var responses: [requests.len]OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.InvalidHeader,
+        connection.requestBodyBatchInto(
+            &requests,
+            4,
+            &responses,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.hpack_encoder.dynamic_table.entries.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.active_local_streams.items.len,
+    );
+    try std.testing.expectEqual(@as(u31, 1), connection.next_client_stream_id);
+    try std.testing.expectEqual(
+        @as(i64, 1024),
+        connection.send_connection_window.value,
     );
 }
 
