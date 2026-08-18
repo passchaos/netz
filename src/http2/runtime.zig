@@ -2195,6 +2195,108 @@ pub const Connection = struct {
         self.releasePeerStream(stream_id);
     }
 
+    /// Start a response whose DATA is supplied incrementally.
+    ///
+    /// Unlike `writeResponse`, this sends only the final response HEADERS and
+    /// returns a stateful writer. The writer enforces the declared
+    /// Content-Length across calls, applies HTTP body-forbidden semantics, and
+    /// releases the request stream only after DATA FIN, trailers, or reset.
+    pub fn startResponse(
+        self: *Connection,
+        stream_id: u31,
+        options: StreamingResponseOptions,
+    ) Error!ResponseWriter {
+        if (self.role != .server) return error.UnexpectedFrame;
+        if (!self.outboundStreamIsActive(stream_id)) {
+            return error.InvalidStreamId;
+        }
+        if (options.status < 100 or options.status > 999 or
+            statusIsInformational(options.status))
+        {
+            return error.InvalidStatus;
+        }
+        const semantics = self.responseSemanticsFor(stream_id, .{
+            .status = options.status,
+            .request_method = options.request_method,
+            .extended_connect = options.extended_connect,
+        });
+        const suppress_body =
+            responseWriteSuppressesBodySemantics(options.status, semantics);
+        var status_buffer: [3]u8 = undefined;
+        const status = std.fmt.bufPrint(
+            &status_buffer,
+            "{}",
+            .{options.status},
+        ) catch return error.InvalidStatus;
+
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            options.headers.len,
+            2,
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = if (fields_capacity <= fields_stack.len)
+            fields_stack[0..fields_capacity]
+        else
+            try self.allocator.alloc(
+                http2.Hpack.HeaderField,
+                fields_capacity,
+            );
+        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
+            self.allocator.free(fields_buffer);
+        };
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
+        fields.appendAssumeCapacity(.{
+            .name = ":status",
+            .value = status,
+        });
+        fields.appendSliceAssumeCapacity(options.headers);
+        stripConnectionHeaders(&fields, .response);
+        if (semantics.traditional_connect and
+            options.status >= 200 and options.status < 300)
+        {
+            try stripSuccessfulConnectContentLength(&fields);
+        }
+        const declared_length = try contentLength(fields.items);
+        if ((statusIsInformational(options.status) or
+            options.status == 204) and declared_length != null)
+        {
+            return error.InvalidContentLength;
+        }
+        if (semantics.traditional_connect and
+            options.status >= 200 and options.status < 300 and
+            (declared_length orelse 0) != 0)
+        {
+            return error.InvalidContentLength;
+        }
+        try validateHeaderBlock(fields.items, .response);
+
+        // HEAD/204/304 and successful traditional CONNECT end at HEADERS.
+        // An ordinary zero-length response stays open so the writer may choose
+        // either an empty END_STREAM DATA frame or response trailers.
+        const ends_at_headers = suppress_body;
+        self.writeHeaders(
+            stream_id,
+            fields.items,
+            ends_at_headers,
+        ) catch |err| {
+            // HPACK state has already advanced once the block is encoded.
+            // Callers cannot safely retry `startResponse` on this connection
+            // after a transport write failure, so release the stream rather
+            // than leaving a half-started writer hidden in connection state.
+            self.releasePeerStream(stream_id);
+            return err;
+        };
+        if (ends_at_headers) self.releasePeerStream(stream_id);
+        return .{
+            .connection = self,
+            .stream_id = stream_id,
+            .expected_length = declared_length,
+            .finished = ends_at_headers,
+        };
+    }
+
     /// Validate, HPACK-encode, and submit bodyless responses as one TCP write.
     ///
     /// This is the server counterpart to `requestBatchInto`: the logical HTTP/2
@@ -4223,6 +4325,15 @@ pub const ResponseOptions = struct {
     extended_connect: bool = false,
 };
 
+pub const StreamingResponseOptions = struct {
+    status: u16 = 200,
+    headers: []const http2.Hpack.HeaderField = &.{},
+    /// Optional request method when the response is not started directly from
+    /// a request reader. It controls HEAD and CONNECT body semantics.
+    request_method: ?[]const u8 = null,
+    extended_connect: bool = false,
+};
+
 const StreamResponseSemantics = struct {
     stream_id: u31,
     head: bool = false,
@@ -4335,6 +4446,120 @@ pub const StreamingResponse = struct {
         freeHeaders(allocator, self.headers);
         freeHeaders(allocator, self.trailers);
         self.* = undefined;
+    }
+};
+
+pub const ResponseWriter = struct {
+    connection: *Connection,
+    stream_id: u31,
+    expected_length: ?usize,
+    written: usize = 0,
+    finished: bool = false,
+
+    /// Cancel an unfinished response and release its stream.
+    ///
+    /// Callers should normally `defer writer.deinit()` immediately after
+    /// `startResponse`. Successful finish/reset methods make this a no-op.
+    pub fn deinit(self: *ResponseWriter) void {
+        if (self.finished) return;
+        self.connection.sendResetStream(
+            self.stream_id,
+            .cancel,
+        ) catch {
+            // A transport failure may prevent emitting RST_STREAM, but local
+            // ownership must still be released so connection teardown does not
+            // retain stale response semantics.
+            self.connection.releasePeerStream(self.stream_id);
+        };
+        self.finished = true;
+    }
+
+    /// Write one DATA chunk while keeping the response open.
+    ///
+    /// The call blocks only when HTTP/2 send windows are exhausted and pumps
+    /// WINDOW_UPDATE/SETTINGS/PING using the connection's existing send path.
+    pub fn write(
+        self: *ResponseWriter,
+        data: []const u8,
+    ) Error!void {
+        try self.ensureWritable();
+        try self.reserveLength(data.len, false);
+        try self.connection.writeData(self.stream_id, data, false);
+        self.written += data.len;
+    }
+
+    /// Write the final DATA chunk with END_STREAM.
+    pub fn finishData(
+        self: *ResponseWriter,
+        data: []const u8,
+    ) Error!void {
+        try self.ensureWritable();
+        try self.reserveLength(data.len, true);
+        try self.connection.writeData(self.stream_id, data, true);
+        self.written += data.len;
+        self.finishState();
+    }
+
+    /// Finish a response with an empty END_STREAM DATA frame.
+    pub fn finish(self: *ResponseWriter) Error!void {
+        return self.finishData(&.{});
+    }
+
+    /// Finish with response trailers. Trailers carry END_STREAM themselves.
+    pub fn finishTrailers(
+        self: *ResponseWriter,
+        trailers: []const http2.Hpack.HeaderField,
+    ) Error!void {
+        try self.ensureWritable();
+        try self.reserveLength(0, true);
+        try validateHeaderBlock(trailers, .response_trailers);
+        try self.connection.writeHeaders(
+            self.stream_id,
+            trailers,
+            true,
+        );
+        self.finishState();
+    }
+
+    pub fn reset(
+        self: *ResponseWriter,
+        error_code: http2.ErrorCode,
+    ) Error!void {
+        try self.ensureWritable();
+        try self.connection.sendResetStream(
+            self.stream_id,
+            error_code,
+        );
+        self.finished = true;
+    }
+
+    fn ensureWritable(self: ResponseWriter) Error!void {
+        if (self.finished) return error.ConnectionClosed;
+        if (!self.connection.outboundStreamIsActive(self.stream_id)) {
+            return error.StreamReset;
+        }
+    }
+
+    fn reserveLength(
+        self: ResponseWriter,
+        additional: usize,
+        finishing: bool,
+    ) Error!void {
+        const total = std.math.add(
+            usize,
+            self.written,
+            additional,
+        ) catch return error.MessageTooLarge;
+        if (self.expected_length) |expected| {
+            if (total > expected or (finishing and total != expected)) {
+                return error.InvalidContentLength;
+            }
+        }
+    }
+
+    fn finishState(self: *ResponseWriter) void {
+        self.connection.releasePeerStream(self.stream_id);
+        self.finished = true;
     }
 };
 
@@ -12042,4 +12267,5 @@ test {
     _ = @import("runtime/push_tests.zig");
     _ = @import("runtime/priority_tests.zig");
     _ = @import("runtime/streaming_response_tests.zig");
+    _ = @import("runtime/response_writer_tests.zig");
 }

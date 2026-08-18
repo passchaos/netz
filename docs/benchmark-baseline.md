@@ -140,7 +140,10 @@ receive windows, vectored DATA bursts, a connection-level multi-frame receive
 buffer and callback-based streaming request consumption. The client now has a
 symmetric callback-based response API with owned initial/trailing headers,
 strict streamed Content-Length accounting, continuous flow-credit return, and
-RST_STREAM cancellation on consumer failure. Bodyless parallel batches use
+RST_STREAM cancellation on consumer failure. The server-side `ResponseWriter`
+provides the corresponding multi-call body producer with flow-control waiting,
+transactional cumulative length validation, trailer/FIN completion and
+unfinished-writer cancellation. Bodyless parallel batches use
 transactional HPACK staging, one request/response submission in each direction,
 and stream-ID-based response reordering. See `docs/hyper_parity.md` for the
 implementation audit and remaining H2 comparison work.

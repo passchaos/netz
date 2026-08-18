@@ -160,6 +160,12 @@ Reusable implementation changes behind all four H2 results:
   arriving, and sends RST_STREAM(CANCEL) when the callback fails, matching
   Hyper's `Incoming` frame-stream lifecycle without requiring an async body
   object;
+- `startResponse` returns a stateful `ResponseWriter` for server-side streaming
+  bodies. Separate writes preserve flow-control backpressure, cumulative
+  Content-Length is validated before each frame is sent, DATA FIN and trailers
+  terminate exactly once, and dropping an unfinished writer sends
+  RST_STREAM(CANCEL). This mirrors Hyper/h2's `SendStream` lifecycle in the
+  blocking runtime rather than requiring callers to reach private frame APIs;
 - `requestBatchInto` opens bodyless streams together, accepts response frames in
   any stream order, and returns owned responses in request order;
 - `writeResponseBatch` validates and encodes a bodyless response set before one
