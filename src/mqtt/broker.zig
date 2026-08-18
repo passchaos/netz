@@ -56,6 +56,25 @@ pub const Options = struct {
         .protocol = .v5,
         .max_outgoing_inflight = 64,
     },
+    /// Optional policy for MQTT 5 re-authentication AUTH packets received by
+    /// the live broker event loop.
+    authentication: ?AuthenticationHandler = null,
+};
+
+pub const AuthenticationHandler = struct {
+    context: *anyopaque,
+    /// Complete any CONNECT-before-CONNACK exchange and call
+    /// `pending.authorizeAuthentication()` only after policy success.
+    start: *const fn (
+        context: *anyopaque,
+        pending: *runtime.PendingAcceptedClient,
+    ) Error!void,
+    handle: *const fn (
+        context: *anyopaque,
+        connection: *runtime.Connection,
+        auth: mqtt.Auth,
+        complete: bool,
+    ) Error!void,
 };
 
 const Publication = publication_mod.Publication;
@@ -377,6 +396,19 @@ pub const Broker = struct {
                 self.options.accept,
             );
             errdefer pending.deinit(self.allocator);
+            if (pending.connection.authentication.phase ==
+                .authenticating)
+            {
+                const handler = self.options.authentication orelse
+                    return error.AuthenticationNotConfigured;
+                try handler.start(
+                    handler.context,
+                    &pending,
+                );
+                if (!pending.authentication_authorized) {
+                    return error.AuthenticationInProgress;
+                }
+            }
             const subscriber_id = try self.register(
                 index,
                 pending.connect.connect,
@@ -1884,6 +1916,20 @@ const ClientTask = struct {
             };
             defer event.deinit(task.broker.allocator);
             switch (event) {
+                .auth => |*owned| {
+                    const handler = task.broker.options.authentication orelse
+                        return error.AuthenticationNotConfigured;
+                    const complete =
+                        try connection.applyAuthenticationEvent(
+                            owned.auth,
+                        );
+                    try handler.handle(
+                        handler.context,
+                        connection,
+                        owned.auth,
+                        complete,
+                    );
+                },
                 .subscribe => |*owned| {
                     try task.broker.handleSubscribe(
                         task.subscriber_id,

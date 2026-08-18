@@ -442,6 +442,32 @@ pub fn assignedClientIdentifier(
     return null;
 }
 
+pub fn authenticationMethod(
+    properties: []const Property,
+) ?[]const u8 {
+    for (properties) |property| {
+        if (property == .utf8 and
+            property.utf8.id == .authentication_method)
+        {
+            return property.utf8.value;
+        }
+    }
+    return null;
+}
+
+pub fn authenticationData(
+    properties: []const Property,
+) ?[]const u8 {
+    for (properties) |property| {
+        if (property == .binary and
+            property.binary.id == .authentication_data)
+        {
+            return property.binary.value;
+        }
+    }
+    return null;
+}
+
 pub fn messageExpiryInterval(properties: []const Property) ?u32 {
     for (properties) |property| {
         if (property == .four_byte and
@@ -2659,6 +2685,8 @@ test {
     _ = session;
     _ = will_scheduler;
     _ = @import("runtime/packet_transport.zig");
+    _ = @import("runtime/auth.zig");
+    _ = @import("runtime/auth_tests.zig");
     _ = @import("tls_runtime_tests.zig");
     _ = @import("websocket_runtime_tests.zig");
 }

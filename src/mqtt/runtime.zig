@@ -4,6 +4,7 @@ const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
+const auth_runtime = @import("runtime/auth.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 
 const net = std.Io.net;
@@ -17,7 +18,7 @@ pub const Error = packet_transport.Error || error{
     OutgoingPacketTooLarge,
     PublishRefused,
     SubscriptionRefused,
-} || websocket_runtime.Error || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
+} || auth_runtime.Error || websocket_runtime.Error || net.IpAddress.ListenError || net.IpAddress.ConnectError || net.Server.AcceptError || net.Stream.Reader.Error || net.Stream.Writer.Error || std.Thread.SpawnError;
 
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
@@ -189,25 +190,47 @@ pub const AcceptedClient = struct {
 pub const PendingAcceptedClient = struct {
     connection: Connection,
     connect: OwnedConnect,
+    authentication_authorized: bool = false,
+    authentication_data: ?[]u8 = null,
 
     pub fn finish(
         self: *PendingAcceptedClient,
         options: AcceptOptions,
     ) Error!AcceptedClient {
-        var properties: [1]mqtt.Property = undefined;
-        const connack_properties = if (self.connection.protocol == .v5 and
+        var properties: [3]mqtt.Property = undefined;
+        var property_count: usize = 0;
+        if (self.connection.protocol == .v5 and
             options.assigned_client_identifier != null)
-        blk: {
-            properties[0] = .{ .utf8 = .{
+        {
+            properties[property_count] = .{ .utf8 = .{
                 .id = .assigned_client_identifier,
                 .value = options.assigned_client_identifier.?,
             } };
-            break :blk properties[0..1];
-        } else properties[0..0];
+            property_count += 1;
+        }
+        if (self.connection.authentication.method) |method| {
+            if (options.reason_code == 0 and
+                !self.authentication_authorized)
+            {
+                return error.AuthenticationInProgress;
+            }
+            properties[property_count] = .{ .utf8 = .{
+                .id = .authentication_method,
+                .value = method,
+            } };
+            property_count += 1;
+            if (self.authentication_data) |data| {
+                properties[property_count] = .{ .binary = .{
+                    .id = .authentication_data,
+                    .value = data,
+                } };
+                property_count += 1;
+            }
+        }
         try self.connection.writeConnAck(.{
             .session_present = options.session_present,
             .reason_code = options.reason_code,
-            .properties = connack_properties,
+            .properties = properties[0..property_count],
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .topic_alias_maximum = options.topic_alias_maximum,
             .server_keep_alive_seconds = options.server_keep_alive_seconds,
@@ -217,6 +240,15 @@ pub const PendingAcceptedClient = struct {
             .subscription_identifier_available = options.subscription_identifier_available,
             .shared_subscription_available = options.shared_subscription_available,
         });
+        if (options.reason_code == 0 and
+            self.connection.authentication.phase == .authenticating)
+        {
+            try self.connection.authentication.finishServerInitial();
+        }
+        if (self.authentication_data) |data| {
+            self.connection.allocator.free(data);
+            self.authentication_data = null;
+        }
         const accepted = AcceptedClient{
             .connection = self.connection,
             .connect = self.connect,
@@ -225,10 +257,70 @@ pub const PendingAcceptedClient = struct {
         return accepted;
     }
 
+    /// Send one pre-CONNACK Enhanced Authentication challenge.
+    pub fn challengeAuthentication(
+        self: *PendingAcceptedClient,
+        data: []const u8,
+    ) Error!void {
+        const method = self.connection.authentication.method orelse
+            return error.AuthenticationNotConfigured;
+        try self.connection.writeAuth(0x18, &.{
+            .{ .utf8 = .{
+                .id = .authentication_method,
+                .value = method,
+            } },
+            .{ .binary = .{
+                .id = .authentication_data,
+                .value = data,
+            } },
+        });
+    }
+
+    /// Receive and validate one client Continue Authentication packet.
+    pub fn receiveAuthentication(
+        self: *PendingAcceptedClient,
+    ) Error!OwnedAuth {
+        var auth = try self.connection.readAuth();
+        errdefer auth.deinit(self.connection.allocator);
+        try self.connection.authentication.receiveInitialAuth(
+            auth.auth,
+        );
+        return auth;
+    }
+
+    /// Commit application approval before sending the successful CONNACK.
+    pub fn authorizeAuthentication(
+        self: *PendingAcceptedClient,
+    ) Error!void {
+        try self.authorizeAuthenticationWithData(null);
+    }
+
+    /// Commit approval and attach optional final Authentication Data to
+    /// CONNACK. The bytes are copied because broker policies may return before
+    /// Session setup and CONNACK emission complete.
+    pub fn authorizeAuthenticationWithData(
+        self: *PendingAcceptedClient,
+        data: ?[]const u8,
+    ) Error!void {
+        if (self.connection.authentication.phase != .authenticating) {
+            return error.InvalidAuthenticationState;
+        }
+        const owned = if (data) |value|
+            try self.connection.allocator.dupe(u8, value)
+        else
+            null;
+        if (self.authentication_data) |old| {
+            self.connection.allocator.free(old);
+        }
+        self.authentication_data = owned;
+        self.authentication_authorized = true;
+    }
+
     pub fn deinit(
         self: *PendingAcceptedClient,
         allocator: std.mem.Allocator,
     ) void {
+        if (self.authentication_data) |data| allocator.free(data);
         self.connect.deinit(allocator);
         self.connection.close();
         self.* = undefined;
@@ -320,6 +412,23 @@ pub const ConnectOptions = struct {
     limits: Limits = .{},
     max_outgoing_inflight: u16 = 16,
     topic_alias_maximum: u16 = 16,
+    /// Required when CONNECT requests MQTT 5 Enhanced Authentication and the
+    /// broker may send one or more AUTH challenges before CONNACK.
+    authentication: ?ClientAuthHandler = null,
+};
+
+/// One client step for initial MQTT 5 enhanced authentication.
+///
+/// The callback receives the broker AUTH packet and returns properties for a
+/// client Continue Authentication response. Returned slices must remain valid
+/// until the runtime synchronously validates and encodes that response; they
+/// may be reused when `respond` is called again or connect returns.
+pub const ClientAuthHandler = struct {
+    context: *anyopaque,
+    respond: *const fn (
+        context: *anyopaque,
+        challenge: mqtt.Auth,
+    ) Error![]const mqtt.Property,
 };
 
 fn applyConnAckNegotiation(
@@ -439,6 +548,7 @@ pub const Connection = struct {
     incoming_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
     outgoing_topic_aliases: [topic_alias_slots]?[]u8 = [_]?[]u8{null} ** topic_alias_slots,
     assigned_client_id: ?[]u8 = null,
+    authentication: auth_runtime.State = .{},
 
     /// Wrap an already-negotiated WebSocket connection in the shared MQTT
     /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
@@ -546,6 +656,7 @@ pub const Connection = struct {
         if (self.assigned_client_id) |client_id| {
             self.allocator.free(client_id);
         }
+        self.authentication.deinit(self.allocator);
         self.transport.close(self.allocator);
         self.* = undefined;
     }
@@ -608,6 +719,10 @@ pub const Connection = struct {
         if (mqtt.topicAliasMaximum(connect.connect.properties)) |topic_alias_maximum| {
             self.peer_topic_alias_maximum = topic_alias_maximum;
         }
+        try self.authentication.beginConnect(
+            self.allocator,
+            connect.connect.properties,
+        );
         const owned_connection = self.*;
         self.* = undefined;
         return .{
@@ -684,9 +799,82 @@ pub const Connection = struct {
                 .password = options.password,
             },
         );
+        try self.authentication.beginConnect(
+            allocator,
+            connect_properties.items,
+        );
         try self.writePacket(encoded.items);
-
-        var connack = try self.readConnAck();
+        const auth_handler = options.authentication;
+        var auth_rounds: usize = 0;
+        var connack: OwnedConnAck = while (true) {
+            var packet = try self.readPacket();
+            errdefer packet.deinit(allocator);
+            switch (packet.fixed.packet_type) {
+                .auth => {
+                    if (auth_handler == null) {
+                        return error.AuthenticationNotConfigured;
+                    }
+                    auth_rounds += 1;
+                    if (auth_rounds > 64) {
+                        return error.AuthenticationInProgress;
+                    }
+                    var auth = try mqtt.Auth.parse(
+                        allocator,
+                        self.protocol,
+                        packet.bytes,
+                    );
+                    defer auth.deinit(allocator);
+                    self.authentication.receiveInitialAuth(auth) catch |err| {
+                        if (err == error.AuthenticationMethodMismatch or
+                            err == error.InvalidAuthenticationState)
+                        {
+                            self.sendAuthenticationProtocolError();
+                        }
+                        return err;
+                    };
+                    const response = try auth_handler.?.respond(
+                        auth_handler.?.context,
+                        auth,
+                    );
+                    self.authentication.validatePeerProperties(
+                        response,
+                    ) catch |err| {
+                        if (err == error.AuthenticationMethodMismatch) {
+                            self.sendAuthenticationProtocolError();
+                        }
+                        return err;
+                    };
+                    try self.writeAuth(0x18, response);
+                    packet.deinit(allocator);
+                },
+                .connack => {
+                    var value = try mqtt.ConnAck.parse(
+                        allocator,
+                        self.protocol,
+                        packet.bytes,
+                    );
+                    errdefer value.deinit(allocator);
+                    if (self.authentication.phase ==
+                        .authenticating)
+                    {
+                        self.authentication
+                            .receiveInitialConnAck(value) catch |err| {
+                            if (err ==
+                                error.AuthenticationMethodMismatch)
+                            {
+                                self.sendAuthenticationProtocolError();
+                            }
+                            return err;
+                        };
+                    }
+                    break OwnedConnAck{
+                        .packet = packet,
+                        .connack = value,
+                    };
+                },
+                else => return error.UnexpectedPacket,
+            }
+        };
         errdefer connack.deinit(allocator);
         if (connack.connack.reason_code != 0) {
             self.close();
@@ -1128,9 +1316,23 @@ pub const Connection = struct {
     }
 
     pub fn disconnect(self: *Connection, reason_code: u8) Error!void {
+        try self.writeDisconnectWithProperties(reason_code, &.{});
+    }
+
+    pub fn writeDisconnectWithProperties(
+        self: *Connection,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+    ) Error!void {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(self.allocator);
-        try mqtt.Disconnect.write(&encoded, self.allocator, self.protocol, reason_code, &.{});
+        try mqtt.Disconnect.write(
+            &encoded,
+            self.allocator,
+            self.protocol,
+            reason_code,
+            properties,
+        );
         try self.writePacket(encoded.items);
     }
 
@@ -1150,6 +1352,153 @@ pub const Connection = struct {
         try self.writePacket(encoded.items);
     }
 
+    /// Start MQTT 5 re-authentication with the CONNECT-negotiated method.
+    pub fn beginReauthentication(
+        self: *Connection,
+        data: []const u8,
+    ) Error!void {
+        const method = self.authentication.method orelse
+            return error.AuthenticationNotConfigured;
+        const properties = [_]mqtt.Property{
+            .{ .utf8 = .{
+                .id = .authentication_method,
+                .value = method,
+            } },
+            .{ .binary = .{
+                .id = .authentication_data,
+                .value = data,
+            } },
+        };
+        const previous_phase = self.authentication.phase;
+        try self.authentication.beginReauthentication(
+            &properties,
+        );
+        self.writeAuth(0x19, &properties) catch |err| {
+            self.authentication.phase = previous_phase;
+            return err;
+        };
+    }
+
+    /// Receive one re-authentication continuation/completion packet.
+    pub fn receiveReauthentication(
+        self: *Connection,
+    ) Error!struct {
+        auth: OwnedAuth,
+        complete: bool,
+    } {
+        var auth = try self.readAuth();
+        errdefer auth.deinit(self.allocator);
+        const complete = try self.authentication.receiveReauth(
+            auth.auth,
+        );
+        return .{ .auth = auth, .complete = complete };
+    }
+
+    /// Apply an AUTH packet returned by `readBrokerEvent`.
+    ///
+    /// A peer may start re-authentication while the broker event loop is
+    /// multiplexing PUBLISH/ACK traffic. This method transitions Active to
+    /// Reauthenticating for reason 0x19, or advances an existing exchange.
+    pub fn applyAuthenticationEvent(
+        self: *Connection,
+        auth: mqtt.Auth,
+    ) Error!bool {
+        if (auth.reason_code == 0x19) {
+            self.authentication.beginReauthentication(
+                auth.properties,
+            ) catch |err| {
+                if (err == error.AuthenticationMethodMismatch or
+                    err == error.InvalidAuthenticationState)
+                {
+                    self.sendAuthenticationProtocolError();
+                }
+                return err;
+            };
+            return false;
+        }
+        return self.authentication.receiveReauth(auth) catch |err| {
+            if (err == error.AuthenticationMethodMismatch or
+                err == error.InvalidAuthenticationState)
+            {
+                self.sendAuthenticationProtocolError();
+            }
+            return err;
+        };
+    }
+
+    /// Continue a peer-initiated re-authentication exchange.
+    pub fn continueReauthentication(
+        self: *Connection,
+        reason_code: u8,
+        data: []const u8,
+    ) Error!void {
+        if (self.authentication.phase != .reauthenticating) {
+            return error.InvalidAuthenticationState;
+        }
+        const method = self.authentication.method orelse
+            return error.AuthenticationNotConfigured;
+        const properties = [_]mqtt.Property{
+            .{ .utf8 = .{
+                .id = .authentication_method,
+                .value = method,
+            } },
+            .{ .binary = .{
+                .id = .authentication_data,
+                .value = data,
+            } },
+        };
+        if (reason_code != 0 and reason_code != 0x18) {
+            return error.InvalidAuthenticationState;
+        }
+        try self.writeAuth(reason_code, &properties);
+        if (reason_code == 0) {
+            try self.authentication.finishReauthentication();
+        }
+    }
+
+    /// Respond to an initial pre-CONNACK authentication challenge.
+    pub fn continueInitialAuthentication(
+        self: *Connection,
+        data: []const u8,
+    ) Error!void {
+        if (self.authentication.phase != .authenticating) {
+            return error.InvalidAuthenticationState;
+        }
+        const method = self.authentication.method orelse
+            return error.AuthenticationNotConfigured;
+        try self.writeAuth(0x18, &.{
+            .{ .utf8 = .{
+                .id = .authentication_method,
+                .value = method,
+            } },
+            .{ .binary = .{
+                .id = .authentication_data,
+                .value = data,
+            } },
+        });
+    }
+
+    /// Accept a peer's Re-authenticate request and enter the traffic gate.
+    pub fn acceptReauthentication(
+        self: *Connection,
+    ) Error!OwnedAuth {
+        var auth = try self.readAuth();
+        errdefer auth.deinit(self.allocator);
+        if (auth.auth.reason_code != 0x19) {
+            self.sendAuthenticationProtocolError();
+            return error.InvalidAuthenticationState;
+        }
+        self.authentication.beginReauthentication(
+            auth.auth.properties,
+        ) catch |err| {
+            if (err == error.AuthenticationMethodMismatch) {
+                self.sendAuthenticationProtocolError();
+            }
+            return err;
+        };
+        return auth;
+    }
+
     pub fn readAuth(self: *Connection) Error!OwnedAuth {
         var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
@@ -1165,6 +1514,18 @@ pub const Connection = struct {
         var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         return switch (packet.fixed.packet_type) {
+            .auth => blk: {
+                var value = try mqtt.Auth.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                break :blk .{ .auth = .{
+                    .packet = packet,
+                    .auth = value,
+                } };
+            },
             .publish => blk: {
                 var value = try mqtt.Publish.parse(
                     self.allocator,
@@ -1404,6 +1765,10 @@ pub const Connection = struct {
     }
 
     fn writePacket(self: *Connection, bytes: []u8) Error!void {
+        const fixed = try mqtt.FixedHeader.parse(bytes);
+        try self.authentication.ensurePacketAllowed(
+            fixed.packet_type,
+        );
         if (bytes.len > self.peer_max_packet_size) return error.OutgoingPacketTooLarge;
         try self.transport.writePacket(bytes);
     }
@@ -1413,10 +1778,25 @@ pub const Connection = struct {
             self.allocator,
             self.limits.max_packet_size,
         );
+        errdefer self.allocator.free(packet.bytes);
+        self.authentication.ensurePacketAllowed(
+            packet.fixed.packet_type,
+        ) catch |err| {
+            if (err == error.AuthenticationInProgress) {
+                self.sendAuthenticationProtocolError();
+            }
+            return err;
+        };
         return .{
             .bytes = packet.bytes,
             .fixed = packet.fixed,
         };
+    }
+
+    fn sendAuthenticationProtocolError(self: *Connection) void {
+        if (self.protocol == .v5) {
+            self.writeDisconnectWithProperties(0x82, &.{}) catch {};
+        }
     }
 
     fn readAck(self: *Connection, packet_type: mqtt.PacketType) Error!OwnedAck {
@@ -1619,6 +1999,7 @@ pub const OwnedAuth = struct {
 };
 
 pub const BrokerEvent = union(enum) {
+    auth: OwnedAuth,
     publish: OwnedPublish,
     subscribe: OwnedSubscribe,
     unsubscribe: OwnedUnsubscribe,
@@ -1634,6 +2015,7 @@ pub const BrokerEvent = union(enum) {
         allocator: std.mem.Allocator,
     ) void {
         switch (self.*) {
+            .auth => |*value| value.deinit(allocator),
             .publish => |*value| value.deinit(allocator),
             .subscribe => |*value| value.deinit(allocator),
             .unsubscribe => |*value| value.deinit(allocator),

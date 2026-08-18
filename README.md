@@ -399,7 +399,14 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   version-scoped username/password flag validation and payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
   UNSUBSCRIBE/UNSUBACK, PING,
-  DISCONNECT with MQTT v5 minimal reason-only encoding, AUTH enhanced-authentication exchanges, properties, exact packet bounds, minimal remaining length, MQTT UTF-8 string validation, response-topic/topic-name/filter validation, clean-session empty-client-id checks, version-specific MQTT 3.1.1/v5 property and SUBSCRIBE option validation, payload-format UTF-8 validation, and
+  DISCONNECT with MQTT v5 minimal reason-only encoding, AUTH
+  enhanced-authentication exchanges with CONNECT-before-CONNACK multi-step
+  challenges, owned method binding, active re-authentication and ordinary
+  traffic gating, broker event-loop policy hooks, Protocol Error on method
+  mismatch, properties, exact packet bounds, minimal remaining length, MQTT
+  UTF-8 string validation, response-topic/topic-name/filter validation,
+  clean-session empty-client-id checks, version-specific MQTT 3.1.1/v5
+  property and SUBSCRIBE option validation, payload-format UTF-8 validation, and
   wildcard and shared-subscription matching with MQTT 5 No Local/shared-subscription combination rejection,
   a broker-grade topic-level subscription trie with hashed literal edges,
   allocation-free caller-buffer matching, exact linear overflow fallback,

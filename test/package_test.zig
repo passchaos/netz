@@ -687,6 +687,58 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writeAuth"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readAuth"));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime,
+        "ClientAuthHandler",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "challengeAuthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "receiveAuthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "authorizeAuthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "authorizeAuthenticationWithData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "beginReauthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "receiveReauthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "acceptReauthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "applyAuthenticationEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt,
+        "authenticationMethod",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt,
+        "authenticationData",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.runtime.BrokerEvent,
+        "auth",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker,
+        "AuthenticationHandler",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "initWebSocket",
     ));

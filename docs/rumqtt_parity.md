@@ -21,6 +21,7 @@ and equal-wire broker results are kept separate.
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
 | Broker sessions | Live Session Present/Clean Start/Expiry/takeover, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
+| MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | Broker persistence | No disk commitlog yet | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, inflight/queued messages and retained base-message store |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
@@ -102,6 +103,38 @@ MQTT 3.1.1 or MQTT 5 independently for every accepted socket.
 
 These paths are covered with mixed-version, multi-filter UNSUBACK, persistent
 Session/offline QoS 1, and QoS 2 end-to-end tests.
+
+## MQTT 5 Enhanced Authentication
+
+The shared runtime now implements the state ownership that previously existed
+only as raw AUTH packet helpers:
+
+- CONNECT Authentication Method is deep-owned by the connection and remains
+  fixed for every AUTH and successful CONNACK packet.
+- A client `ClientAuthHandler` can answer multiple server AUTH Continue
+  Authentication challenges before CONNACK.
+- Server `acceptPending` exposes typed challenge/response helpers so an
+  application authentication mechanism can finish before Session acceptance;
+  successful CONNACK is blocked until explicit application authorization and
+  can carry copied final Authentication Data.
+- Active clients or servers can start/accept re-authentication; normal
+  PUBLISH/SUBSCRIBE/PING traffic is rejected in both directions until AUTH
+  Success, and a peer that sends such traffic receives DISCONNECT Protocol
+  Error.
+- `readBrokerEvent` exposes AUTH and the live broker has an optional policy
+  callback for re-authentication rather than treating AUTH as an unexpected
+  packet.
+- a missing or changed Authentication Method is rejected; peer-initiated
+  mismatch emits DISCONNECT Protocol Error as Mosquitto does.
+- send-side phase transitions are committed transactionally around network
+  writes, and rejected inbound packets release their owned packet buffers.
+
+End-to-end tests mirror Mosquitto's
+`09-extended-auth-multistep-reauth.py`: a mirror-method initial challenge,
+successful CONNACK, active multi-step re-authentication, traffic gating, return
+to PING, plus bad-method Protocol Error. The runtime deliberately supplies
+protocol orchestration and policy hooks, not a built-in SCRAM or credential
+database.
 
 ## Live retained-message integration
 
