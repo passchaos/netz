@@ -21,6 +21,30 @@ fn createBroker(
     );
 }
 
+fn delayedWill(
+    delay_seconds: u32,
+    retain: bool,
+) mqtt.LastWill {
+    const Properties = struct {
+        var values: [2]mqtt.Property = undefined;
+    };
+    Properties.values[0] = .{ .four_byte = .{
+        .id = .will_delay_interval,
+        .value = delay_seconds,
+    } };
+    Properties.values[1] = .{ .utf8 = .{
+        .id = .content_type,
+        .value = "text/plain",
+    } };
+    return .{
+        .topic = "persist/will",
+        .payload = "offline",
+        .qos = .at_least_once,
+        .retain = retain,
+        .properties = &Properties.values,
+    };
+}
+
 test "MQTT broker snapshot restores retained and durable Session state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -180,6 +204,10 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
     defer retained.deinit();
     var sessions = mqtt.session.Store.init(allocator, .{});
     defer sessions.deinit();
+    var wills = mqtt.will_scheduler.Scheduler.init(allocator, .{});
+    defer wills.deinit();
+    var will_publishers: mqtt.will_scheduler.PublisherMap = .empty;
+    defer will_publishers.deinit(allocator);
     const saved_monotonic = std.Io.Timestamp.fromNanoseconds(
         100 * std.time.ns_per_s,
     );
@@ -209,7 +237,12 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
 
     const encoded = try mqtt.persistence.encode(
         allocator,
-        .{ .retained = &retained, .sessions = &sessions },
+        .{
+            .retained = &retained,
+            .sessions = &sessions,
+            .wills = &wills,
+            .will_publishers = &will_publishers,
+        },
         saved_monotonic,
         saved_realtime,
     );
@@ -219,11 +252,14 @@ test "MQTT snapshot deducts downtime from message and Session expiry" {
         encoded,
         .{},
         .{},
+        .{},
         std.Io.Timestamp.fromNanoseconds(10 * std.time.ns_per_s),
         std.Io.Timestamp.fromNanoseconds(1_006 * std.time.ns_per_s),
     );
     defer restored.retained.deinit();
     defer restored.sessions.deinit();
+    defer restored.wills.deinit();
+    defer restored.will_publishers.deinit(allocator);
 
     var out: [1]mqtt.retained.Match = undefined;
     const matches = try restored.retained.matchInto(
@@ -402,6 +438,10 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
     defer retained.deinit();
     var sessions = mqtt.session.Store.init(allocator, .{});
     defer sessions.deinit();
+    var wills = mqtt.will_scheduler.Scheduler.init(allocator, .{});
+    defer wills.deinit();
+    var will_publishers: mqtt.will_scheduler.PublisherMap = .empty;
+    defer will_publishers.deinit(allocator);
     const saved_monotonic = std.Io.Timestamp.zero;
     const saved_realtime = std.Io.Timestamp.fromNanoseconds(
         1_000 * std.time.ns_per_s,
@@ -447,7 +487,12 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
 
     const encoded = try mqtt.persistence.encode(
         allocator,
-        .{ .retained = &retained, .sessions = &sessions },
+        .{
+            .retained = &retained,
+            .sessions = &sessions,
+            .wills = &wills,
+            .will_publishers = &will_publishers,
+        },
         saved_monotonic,
         saved_realtime,
     );
@@ -457,11 +502,14 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
         encoded,
         .{},
         .{},
+        .{},
         std.Io.Timestamp.fromNanoseconds(10 * std.time.ns_per_s),
         std.Io.Timestamp.fromNanoseconds(1_010 * std.time.ns_per_s),
     );
     defer restored.retained.deinit();
     defer restored.sessions.deinit();
+    defer restored.wills.deinit();
+    defer restored.will_publishers.deinit(allocator);
     const handle = restored.sessions.find(
         "qos2-pubrel",
         std.Io.Timestamp.fromNanoseconds(10 * std.time.ns_per_s),
@@ -474,4 +522,216 @@ test "MQTT snapshot preserves PUBREL after message expiry" {
     );
     try std.testing.expectEqual(@as(usize, 1), resumed.len);
     try std.testing.expectEqual(packet_id, resumed[0].pubrel.packet_id);
+}
+
+test "MQTT scheduled Will snapshot deducts downtime and restores publisher" {
+    const allocator = std.testing.allocator;
+    var retained = mqtt.retained.Store.init(allocator, .{});
+    defer retained.deinit();
+    var sessions = mqtt.session.Store.init(allocator, .{});
+    defer sessions.deinit();
+    var wills = mqtt.will_scheduler.Scheduler.init(allocator, .{});
+    defer wills.deinit();
+    var publishers: mqtt.will_scheduler.PublisherMap = .empty;
+    defer publishers.deinit(allocator);
+    const saved_monotonic = std.Io.Timestamp.fromNanoseconds(
+        100 * std.time.ns_per_s,
+    );
+    const saved_realtime = std.Io.Timestamp.fromNanoseconds(
+        1_000 * std.time.ns_per_s,
+    );
+    const handle = try wills.set(
+        "will-source",
+        delayedWill(10, true),
+        60,
+    );
+    _ = try wills.close(handle, .ungraceful, saved_monotonic);
+    try publishers.put(allocator, handle, 77);
+
+    const encoded = try mqtt.persistence.encode(
+        allocator,
+        .{
+            .retained = &retained,
+            .sessions = &sessions,
+            .wills = &wills,
+            .will_publishers = &publishers,
+        },
+        saved_monotonic,
+        saved_realtime,
+    );
+    defer allocator.free(encoded);
+    const restored_now = std.Io.Timestamp.fromNanoseconds(
+        50 * std.time.ns_per_s,
+    );
+    var restored = try mqtt.persistence.decode(
+        allocator,
+        encoded,
+        .{},
+        .{},
+        .{},
+        restored_now,
+        std.Io.Timestamp.fromNanoseconds(1_004 * std.time.ns_per_s),
+    );
+    defer restored.retained.deinit();
+    defer restored.sessions.deinit();
+    defer restored.wills.deinit();
+    defer restored.will_publishers.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(i96, restored_now.nanoseconds + 6 * std.time.ns_per_s),
+        restored.wills.nextDeadline().?.nanoseconds,
+    );
+    var due_storage: [1]mqtt.will_scheduler.Handle = undefined;
+    const due = try restored.wills.pollDue(
+        std.Io.Timestamp.fromNanoseconds(
+            restored_now.nanoseconds + 6 * std.time.ns_per_s,
+        ),
+        &due_storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), due.len);
+    try std.testing.expectEqual(
+        @as(?u64, 77),
+        restored.will_publishers.get(due[0]).?,
+    );
+    const publish = try restored.wills.view(due[0]);
+    try std.testing.expectEqualStrings("offline", publish.payload);
+    try std.testing.expect(publish.retain);
+}
+
+test "MQTT restored scheduled Will is canceled by continued Session" {
+    const allocator = std.testing.allocator;
+    var retained = mqtt.retained.Store.init(allocator, .{});
+    defer retained.deinit();
+    var sessions = mqtt.session.Store.init(allocator, .{});
+    defer sessions.deinit();
+    var wills = mqtt.will_scheduler.Scheduler.init(allocator, .{});
+    defer wills.deinit();
+    var publishers: mqtt.will_scheduler.PublisherMap = .empty;
+    defer publishers.deinit(allocator);
+    const handle = try wills.set(
+        "resume-will",
+        delayedWill(30, false),
+        60,
+    );
+    _ = try wills.close(handle, .ungraceful, .zero);
+    try publishers.put(allocator, handle, null);
+    const encoded = try mqtt.persistence.encode(
+        allocator,
+        .{
+            .retained = &retained,
+            .sessions = &sessions,
+            .wills = &wills,
+            .will_publishers = &publishers,
+        },
+        .zero,
+        std.Io.Timestamp.fromNanoseconds(1_000 * std.time.ns_per_s),
+    );
+    defer allocator.free(encoded);
+    var restored = try mqtt.persistence.decode(
+        allocator,
+        encoded,
+        .{},
+        .{},
+        .{},
+        .zero,
+        std.Io.Timestamp.fromNanoseconds(1_001 * std.time.ns_per_s),
+    );
+    defer restored.retained.deinit();
+    defer restored.sessions.deinit();
+    defer restored.wills.deinit();
+    defer restored.will_publishers.deinit(allocator);
+
+    const restored_handle =
+        restored.wills.handleForClient("resume-will").?;
+    try std.testing.expectEqual(
+        mqtt.will_scheduler.CloseResult.canceled,
+        restored.wills.onReconnect("resume-will", false, .zero),
+    );
+    _ = restored.will_publishers.remove(restored_handle);
+    try std.testing.expectEqual(@as(usize, 0), restored.wills.count());
+}
+
+test "MQTT broker restart publishes due retained Will" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var source = try createBroker(allocator, io);
+    const scheduled = try source.wills.set(
+        "broker-will-source",
+        delayedWill(1, true),
+        60,
+    );
+    _ = try source.wills.close(
+        scheduled,
+        .ungraceful,
+        std.Io.Clock.awake.now(io),
+    );
+    try source.will_publishers.put(
+        allocator,
+        scheduled,
+        null,
+    );
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try source.saveSnapshot(tmp.dir, "broker.db");
+    source.deinit();
+
+    var broker = try createBroker(allocator, io);
+    defer broker.deinit();
+    try broker.restoreSnapshot(tmp.dir, "broker.db");
+    const Serve = struct {
+        broker: *Broker,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serve(1) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var serve = Serve{ .broker = &broker };
+    const thread = try std.Thread.spawn(.{}, Serve.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try mqtt.runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "will-after-restart",
+        },
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "persist/#", .qos = .at_least_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+    var publish = try subscriber.readPublish();
+    defer publish.deinit(allocator);
+    try std.testing.expectEqualStrings("persist/will", publish.publish.topic);
+    try std.testing.expectEqualStrings("offline", publish.publish.payload);
+    // Live fanout follows the subscription's default
+    // Retain-As-Published=false. The retained store assertion below proves the
+    // source Will's RETAIN=1 effect was nevertheless committed.
+    try std.testing.expect(!publish.publish.retain);
+    try subscriber.writePubAck(publish.publish.packet_id.?, 0);
+    try subscriber.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (serve.err) |err| return err;
+    var retained_match: [1]mqtt.retained.Match = undefined;
+    const retained = try broker.retained.matchInto(
+        "persist/will",
+        std.Io.Clock.awake.now(io),
+        &retained_match,
+    );
+    try std.testing.expectEqual(@as(usize, 1), retained.len);
+    try std.testing.expectEqualStrings("offline", retained[0].payload);
 }

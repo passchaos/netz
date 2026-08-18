@@ -7,6 +7,7 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
 const owned_properties = @import("../owned_properties.zig");
+const persistence = @import("../persistence/codec.zig");
 const indexed_heap = @import("indexed_heap.zig");
 
 pub const Error = mqtt.Error || error{
@@ -15,6 +16,7 @@ pub const Error = mqtt.Error || error{
     WillLimitExceeded,
     WillByteLimitExceeded,
     DueBufferTooSmall,
+    SnapshotBusy,
 };
 
 pub const Options = struct {
@@ -27,6 +29,8 @@ pub const Handle = struct {
     index: usize,
     generation: u64,
 };
+
+pub const PublisherMap = std.AutoHashMapUnmanaged(Handle, ?u64);
 
 pub const CloseReason = enum {
     /// DISCONNECT 0x00; remove the Will without publishing.
@@ -173,6 +177,175 @@ pub const Scheduler = struct {
 
     pub fn totalBytes(self: Scheduler) usize {
         return self.total_bytes;
+    }
+
+    /// Persist scheduled Wills and their exact remaining delay.
+    ///
+    /// Connected and already-claimed entries are transient broker state and
+    /// make a quiescent snapshot invalid. Publisher identity is stored by the
+    /// broker beside each scheduler record because it belongs to routing, not
+    /// to the MQTT Will itself.
+    pub fn writeSnapshot(
+        self: *Scheduler,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        now: std.Io.Timestamp,
+        publishers: *const PublisherMap,
+    ) (Error || persistence.Error)!void {
+        var snapshot_count: u32 = 0;
+        for (self.entries.items) |maybe_entry| {
+            const entry = maybe_entry orelse continue;
+            if (entry.state != .scheduled or entry.heap_index == null) {
+                return error.SnapshotBusy;
+            }
+            snapshot_count = std.math.add(
+                u32,
+                snapshot_count,
+                1,
+            ) catch return error.SnapshotLimitExceeded;
+        }
+        try persistence.appendInt(out, allocator, u32, snapshot_count);
+        for (self.entries.items, 0..) |maybe_entry, index| {
+            const entry = maybe_entry orelse continue;
+            const handle = Handle{
+                .index = index,
+                .generation = entry.generation,
+            };
+            const publisher_id = publishers.get(handle) orelse
+                return error.CorruptSnapshot;
+            try persistence.appendBlob(out, allocator, entry.client_id);
+            try persistence.appendBlob(out, allocator, entry.topic);
+            try persistence.appendBlob(out, allocator, entry.payload);
+            try persistence.appendInt(
+                out,
+                allocator,
+                u8,
+                @intFromEnum(entry.qos),
+            );
+            try persistence.appendBool(out, allocator, entry.retain);
+            try persistence.appendProperties(
+                out,
+                allocator,
+                entry.properties,
+            );
+            try persistence.appendInt(
+                out,
+                allocator,
+                u32,
+                entry.will_delay_interval,
+            );
+            try persistence.appendOptionalInt(
+                out,
+                allocator,
+                u32,
+                entry.message_expiry_interval,
+            );
+            try persistence.appendInt(
+                out,
+                allocator,
+                u32,
+                entry.session_expiry_interval,
+            );
+            try persistence.appendInt(
+                out,
+                allocator,
+                u64,
+                @intCast(@max(entry.deadline_ns - now.nanoseconds, 0)),
+            );
+            try persistence.appendOptionalInt(
+                out,
+                allocator,
+                u64,
+                publisher_id,
+            );
+        }
+    }
+
+    pub fn restoreSnapshot(
+        self: *Scheduler,
+        cursor: *persistence.Cursor,
+        restore_now: std.Io.Timestamp,
+        downtime_ns: i96,
+        restored_publishers: *PublisherMap,
+    ) (Error || persistence.Error)!void {
+        const snapshot_count = try cursor.readInt(u32);
+        if (snapshot_count > self.options.max_wills) {
+            return error.WillLimitExceeded;
+        }
+        const map_capacity = std.math.cast(
+            u32,
+            self.options.max_wills,
+        ) orelse return error.WillLimitExceeded;
+        try restored_publishers.ensureTotalCapacity(
+            self.allocator,
+            map_capacity,
+        );
+        for (0..snapshot_count) |_| {
+            const client_id = try cursor.readBlob();
+            const topic = try cursor.readBlob();
+            const payload = try cursor.readBlob();
+            const qos = try persistence.qosFromByte(
+                try cursor.readInt(u8),
+            );
+            const retain = try cursor.readBool();
+            const properties = try cursor.readProperties(self.allocator);
+            defer self.allocator.free(properties);
+            const will_delay_interval = try cursor.readInt(u32);
+            const message_expiry_interval =
+                try cursor.readOptionalInt(u32);
+            const session_expiry_interval = try cursor.readInt(u32);
+            const saved_remaining_ns = try cursor.readInt(u64);
+            const maximum_delay_ns = @as(u64, effectiveDelay(
+                will_delay_interval,
+                session_expiry_interval,
+            )) * std.time.ns_per_s;
+            if (saved_remaining_ns > maximum_delay_ns) {
+                return error.CorruptSnapshot;
+            }
+            const remaining_ns = saved_remaining_ns -|
+                @as(u64, @intCast(@min(
+                    @max(downtime_ns, 0),
+                    std.math.maxInt(u64),
+                )));
+            const publisher_id = try cursor.readOptionalInt(u64);
+            if (self.client_index.contains(client_id) or
+                mqtt.willDelayInterval(properties) !=
+                    will_delay_interval or
+                mqtt.messageExpiryInterval(properties) !=
+                    message_expiry_interval)
+            {
+                return error.CorruptSnapshot;
+            }
+            const handle = try self.set(
+                client_id,
+                .{
+                    .topic = topic,
+                    .payload = payload,
+                    .qos = qos,
+                    .retain = retain,
+                    .properties = properties,
+                },
+                session_expiry_interval,
+            );
+            const entry = try self.getEntry(handle);
+            entry.state = .scheduled;
+            entry.deadline_ns = std.math.add(
+                i96,
+                restore_now.nanoseconds,
+                remaining_ns,
+            ) catch std.math.maxInt(i96);
+            self.heap.appendAssumeCapacity(self, handle.index);
+            restored_publishers.putAssumeCapacityNoClobber(
+                handle,
+                publisher_id,
+            );
+        }
+    }
+
+    pub fn swap(self: *Scheduler, other: *Scheduler) void {
+        const value = self.*;
+        self.* = other.*;
+        other.* = value;
     }
 
     /// Install the Will associated with a newly accepted CONNECT.

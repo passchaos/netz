@@ -221,10 +221,7 @@ pub const Broker = struct {
         u64,
         router_mod.SubscriberId,
     ) = .empty,
-    will_publishers: std.AutoHashMapUnmanaged(
-        will_mod.Handle,
-        ?router_mod.SubscriberId,
-    ) = .empty,
+    will_publishers: will_mod.PublisherMap = .empty,
     slots: []ClientSlot,
     state_mutex: std.Io.Mutex = .init,
 
@@ -243,6 +240,7 @@ pub const Broker = struct {
             options.limits.max_pending_incoming_qos2 == 0 or
             options.limits.max_pending_incoming_qos2 >
                 std.math.maxInt(u32) or
+            std.math.cast(u32, options.will.max_wills) == null or
             options.auto_client_id_prefix.len >
                 client_id_mod.max_prefix_len)
         {
@@ -296,10 +294,7 @@ pub const Broker = struct {
             allocator,
             @intCast(options.limits.max_connections),
         );
-        var will_publishers: std.AutoHashMapUnmanaged(
-            will_mod.Handle,
-            ?router_mod.SubscriberId,
-        ) = .empty;
+        var will_publishers: will_mod.PublisherMap = .empty;
         errdefer will_publishers.deinit(allocator);
         try will_publishers.ensureTotalCapacity(
             allocator,
@@ -372,9 +367,8 @@ pub const Broker = struct {
             }
         }
         if (self.pending_qos2.count() != 0 or
-            self.wills.count() != 0 or
             self.session_owners.count() != 0 or
-            self.will_publishers.count() != 0)
+            self.will_publishers.count() != self.wills.count())
         {
             return error.SnapshotBusy;
         }
@@ -386,6 +380,8 @@ pub const Broker = struct {
             .{
                 .retained = &self.retained,
                 .sessions = &self.sessions,
+                .wills = &self.wills,
+                .will_publishers = &self.will_publishers,
             },
             std.Io.Clock.awake.now(self.io),
             std.Io.Clock.real.now(self.io),
@@ -409,7 +405,6 @@ pub const Broker = struct {
         }
         if (self.router.subscriptionCount() != 0 or
             self.pending_qos2.count() != 0 or
-            self.wills.count() != 0 or
             self.session_owners.count() != 0 or
             self.will_publishers.count() != 0)
         {
@@ -422,12 +417,15 @@ pub const Broker = struct {
             sub_path,
             self.options.retained,
             self.options.session,
+            self.options.will,
             std.Io.Clock.awake.now(self.io),
             std.Io.Clock.real.now(self.io),
         );
         errdefer {
             restored.retained.deinit();
             restored.sessions.deinit();
+            restored.wills.deinit();
+            restored.will_publishers.deinit(self.allocator);
         }
         var staged_router = try router_mod.Router.initWithOptions(
             self.allocator,
@@ -454,10 +452,19 @@ pub const Broker = struct {
         }
         self.retained.swap(&restored.retained);
         self.sessions.swap(&restored.sessions);
+        self.wills.swap(&restored.wills);
+        std.mem.swap(
+            will_mod.PublisherMap,
+            &self.will_publishers,
+            &restored.will_publishers,
+        );
         self.router.deinit();
         self.router = staged_router;
         restored.retained.deinit();
         restored.sessions.deinit();
+        restored.wills.deinit();
+        restored.will_publishers.deinit(self.allocator);
+        self.will_driver.notify(self.io);
     }
 
     /// Accept exactly `connection_count` clients and serve them concurrently.

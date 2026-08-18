@@ -8,14 +8,15 @@
 const std = @import("std");
 const retained = @import("../retained/mod.zig");
 const session = @import("../session/mod.zig");
+const will = @import("../will/mod.zig");
 pub const codec = @import("codec.zig");
 
 const magic = "netz-mqtt-db\x00\x01";
-const version: u32 = 1;
+const version: u32 = 2;
 const max_section_bytes: usize = 1024 * 1024 * 1024;
-const max_snapshot_bytes: usize = 2 * max_section_bytes + 128;
+const max_snapshot_bytes: usize = 3 * max_section_bytes + 160;
 
-pub const Error = codec.Error || retained.Error || session.Error || error{
+pub const Error = codec.Error || retained.Error || session.Error || will.Error || error{
     SnapshotNotFound,
     SnapshotBusy,
     CorruptSnapshot,
@@ -26,11 +27,15 @@ pub const Error = codec.Error || retained.Error || session.Error || error{
 pub const State = struct {
     retained: *retained.Store,
     sessions: *session.Store,
+    wills: *will.Scheduler,
+    will_publishers: *const will.PublisherMap,
 };
 
 pub const RestoredState = struct {
     retained: retained.Store,
     sessions: session.Store,
+    wills: will.Scheduler,
+    will_publishers: will.PublisherMap,
 };
 
 pub fn saveAtomic(
@@ -67,6 +72,7 @@ pub fn load(
     sub_path: []const u8,
     retained_options: retained.Options,
     session_options: session.Options,
+    will_options: will.Options,
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error!RestoredState {
@@ -85,6 +91,7 @@ pub fn load(
         bytes,
         retained_options,
         session_options,
+        will_options,
         monotonic_now,
         realtime_now,
     );
@@ -110,6 +117,14 @@ pub fn encode(
         allocator,
         monotonic_now,
     );
+    var will_bytes: std.ArrayList(u8) = .empty;
+    defer will_bytes.deinit(allocator);
+    try state.wills.writeSnapshot(
+        &will_bytes,
+        allocator,
+        monotonic_now,
+        state.will_publishers,
+    );
 
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);
@@ -123,6 +138,7 @@ pub fn encode(
     );
     try appendSection(&encoded, allocator, 1, retained_bytes.items);
     try appendSection(&encoded, allocator, 2, session_bytes.items);
+    try appendSection(&encoded, allocator, 3, will_bytes.items);
     try codec.appendInt(
         &encoded,
         allocator,
@@ -137,6 +153,7 @@ pub fn decode(
     bytes: []const u8,
     retained_options: retained.Options,
     session_options: session.Options,
+    will_options: will.Options,
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,
 ) Error!RestoredState {
@@ -171,6 +188,7 @@ pub fn decode(
 
     const retained_section = try readSection(&cursor, 1);
     const session_section = try readSection(&cursor, 2);
+    const will_section = try readSection(&cursor, 3);
     try cursor.finish();
 
     var staged_retained = retained.Store.init(
@@ -199,9 +217,24 @@ pub fn decode(
     );
     try session_cursor.finish();
 
+    var staged_wills = will.Scheduler.init(allocator, will_options);
+    errdefer staged_wills.deinit();
+    var staged_publishers: will.PublisherMap = .empty;
+    errdefer staged_publishers.deinit(allocator);
+    var will_cursor = codec.Cursor.init(will_section);
+    try staged_wills.restoreSnapshot(
+        &will_cursor,
+        monotonic_now,
+        downtime_ns,
+        &staged_publishers,
+    );
+    try will_cursor.finish();
+
     return .{
         .retained = staged_retained,
         .sessions = staged_sessions,
+        .wills = staged_wills,
+        .will_publishers = staged_publishers,
     };
 }
 
