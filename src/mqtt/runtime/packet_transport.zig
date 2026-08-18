@@ -2,12 +2,13 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const websocket_runtime = @import("../../websocket/mod.zig").runtime;
 const http1_runtime = @import("../../http1/mod.zig").runtime;
+const tls_client = @import("../tls/client_connection.zig");
 const tls_server = @import("../tls/server_connection.zig");
 
 const net = std.Io.net;
 
 pub const Error = mqtt.Error || websocket_runtime.Error ||
-    tls_server.Error || error{
+    tls_client.Error || tls_server.Error || error{
     ConnectionClosed,
     InvalidWebSocketMessage,
     PacketTooLarge,
@@ -29,6 +30,7 @@ pub const Transport = union(enum) {
         stream: net.Stream,
     },
     tls: *http1_runtime.TlsClientConnection,
+    tls_vail: *tls_client.Connection,
     tls_server: *tls_server.Connection,
     websocket: WebSocketTransport,
 
@@ -54,6 +56,12 @@ pub const Transport = union(enum) {
         return .{ .tls_server = connection };
     }
 
+    pub fn initVailTls(
+        connection: *tls_client.Connection,
+    ) Transport {
+        return .{ .tls_vail = connection };
+    }
+
     pub fn peerCertificates(
         self: *const Transport,
     ) ?[]const []const u8 {
@@ -61,7 +69,7 @@ pub const Transport = union(enum) {
             .tls_server => |connection| connection.peerCertificates(),
             // Client-side TLS peer inspection and non-TLS transports do not
             // expose a client-authenticated identity through this broker API.
-            .tcp, .tls, .websocket => null,
+            .tcp, .tls, .tls_vail, .websocket => null,
         };
     }
 
@@ -72,6 +80,7 @@ pub const Transport = union(enum) {
         switch (self.*) {
             .tcp => |tcp| tcp.stream.close(tcp.io),
             .tls => |connection| connection.deinit(),
+            .tls_vail => |connection| connection.deinit(),
             .tls_server => |connection| connection.deinit(),
             .websocket => |*ws| {
                 ws.input.deinit(allocator);
@@ -88,6 +97,7 @@ pub const Transport = union(enum) {
         switch (self.*) {
             .tcp => |tcp| try writeAll(tcp.io, tcp.stream, bytes),
             .tls => |connection| try connection.writeAll(bytes),
+            .tls_vail => |connection| try connection.writeAll(bytes),
             .tls_server => |connection| try connection.writeAll(bytes),
             // One packet per write matches rumqtt's WsStream behavior. The
             // reader intentionally does not depend on that optimization.
@@ -113,6 +123,11 @@ pub const Transport = union(enum) {
                 max_packet_size,
             ),
             .tls => |connection| readStreamPacket(
+                allocator,
+                connection,
+                max_packet_size,
+            ),
+            .tls_vail => |connection| readStreamPacket(
                 allocator,
                 connection,
                 max_packet_size,

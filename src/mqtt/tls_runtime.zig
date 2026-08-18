@@ -2,6 +2,7 @@ const std = @import("std");
 const mqtt_runtime = @import("runtime.zig");
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const socket_options = @import("../internal/socket_options.zig");
+const tls_client = @import("tls/client_connection.zig");
 const tls_server = @import("tls/server_connection.zig");
 const vail = @import("vail");
 
@@ -13,6 +14,7 @@ pub const CipherSuite = vail.tls.cipher_suite.Suite;
 pub const ClientCertificateVerifier = vail.tls.auth.ClientVerifier;
 pub const ClientAuthPolicy = vail.tls.client_auth.ServerPolicy;
 pub const ClientAuthRequirement = vail.tls.client_auth.Requirement;
+pub const ClientIdentity = vail.tls.client_auth.ClientIdentity;
 
 /// Native MQTT-over-TLS listener using vail's TLS 1.3 primitives.
 ///
@@ -356,6 +358,16 @@ pub const Client = struct {
 pub const ConnectOptions = struct {
     mqtt: mqtt_runtime.ConnectOptions,
     tls: http1_runtime.TlsClientOptions = .{},
+    /// Select the vail TLS 1.3 stream client and answer CertificateRequest.
+    /// The identity storage only needs to outlive the synchronous connect call.
+    client_identity: ?ClientIdentity = null,
+    /// Server trust policy for the vail path. When omitted, the runtime maps
+    /// `tls.ca_bundle`/system roots and hostname verification to vail's X.509
+    /// verifier, preserving the ordinary client defaults.
+    server_verifier: ?ClientCertificateVerifier = null,
+    cipher_suites: []const CipherSuite =
+        &vail.tls.cipher_suite.default_preference,
+    max_server_handshake_size: usize = 256 * 1024,
     /// MQTT control packets are small latency-sensitive records by default.
     /// Set false to retain Nagle when batching throughput matters more.
     tcp_nodelay: bool = true,
@@ -372,6 +384,19 @@ fn connectStreamAttempt(
     errdefer if (stream_owned) stream.close(io);
     if (options.tcp_nodelay) {
         try socket_options.setTcpNoDelay(stream);
+    }
+    if (options.client_identity) |client_identity| {
+        // The vail helper owns teardown from this point, including handshake
+        // failures before a Connection object exists.
+        stream_owned = false;
+        return connectVailStreamAttempt(
+            allocator,
+            io,
+            stream,
+            tls_host,
+            options,
+            client_identity,
+        );
     }
     const tls_connection = try http1_runtime.TlsClientConnection.init(
         allocator,
@@ -392,4 +417,62 @@ fn connectStreamAttempt(
     );
     errdefer connection.close();
     return connection.establishClient(options.mqtt);
+}
+
+fn connectVailStreamAttempt(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    tls_host: []const u8,
+    options: ConnectOptions,
+    client_identity: ClientIdentity,
+) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+    var stream_owned = true;
+    errdefer if (stream_owned) stream.close(io);
+    var local_store: ?vail.x509.trust.SystemStore = null;
+    defer if (local_store) |*store| store.deinit();
+    var caller_bundle_locked = false;
+    defer if (caller_bundle_locked) {
+        options.tls.ca_bundle.?.lock.unlockShared(io);
+    };
+    var bundle_verifier: vail.x509.trust.BundleVerifier = undefined;
+    const server_verifier = options.server_verifier orelse blk: {
+        if (!options.tls.verify_host) {
+            return error.CertificateUntrusted;
+        }
+        const now = std.Io.Timestamp.now(io, .real);
+        if (options.tls.ca_bundle) |ca_bundle| {
+            try ca_bundle.lock.lockShared(io);
+            caller_bundle_locked = true;
+            bundle_verifier = .{
+                .bundle = ca_bundle.bundle,
+                .now_seconds = now.toSeconds(),
+            };
+        } else {
+            local_store = try .init(allocator, io, now);
+            bundle_verifier = local_store.?.verifier(now.toSeconds());
+        }
+        break :blk bundle_verifier.clientVerifier();
+    };
+
+    const connection = try tls_client.Connection.init(
+        allocator,
+        io,
+        stream,
+        .{
+            .server_name = tls_host,
+            .server_verifier = server_verifier,
+            .client_identity = client_identity,
+            .cipher_suites = options.cipher_suites,
+            .max_server_handshake_size = options.max_server_handshake_size,
+        },
+    );
+    stream_owned = false;
+    var mqtt_connection = mqtt_runtime.Connection.initVailTls(
+        allocator,
+        connection,
+        options.mqtt,
+    );
+    errdefer mqtt_connection.close();
+    return mqtt_connection.establishClient(options.mqtt);
 }

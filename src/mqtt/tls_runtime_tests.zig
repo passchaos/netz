@@ -166,6 +166,298 @@ test "MQTT TLS server completes verified MQTT 5 QoS 1" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT native TLS client identity completes required mTLS" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 =
+        undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .client_auth = .{
+                .verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+            },
+            .limits = .{ .max_packet_size = max_packet_size },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        certificate: *const [tls_test.certificate_der_len]u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var accepted = try shared.server.accept(.{
+                .protocol = .v5,
+            });
+            defer accepted.deinit(shared.server.allocator);
+            try std.testing.expectEqualStrings(
+                "native-mtls-client",
+                accepted.connect.connect.client_id,
+            );
+            const chain = accepted.connection.peerCertificates() orelse
+                return error.MissingPeerCertificate;
+            try std.testing.expectEqual(@as(usize, 1), chain.len);
+            try std.testing.expectEqualSlices(
+                u8,
+                shared.certificate,
+                chain[0],
+            );
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(shared.server.allocator);
+            try std.testing.expectEqualStrings(
+                "native/mtls",
+                publish.publish.topic,
+            );
+            try accepted.connection.writePubAck(
+                publish.publish.packet_id.?,
+                0,
+            );
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .certificate = &certificate_der,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try mqtt_tls.Client.connectAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "native-mtls-client",
+                .limits = .{ .max_packet_size = max_packet_size },
+            },
+            .client_identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer client.close();
+    try client.publish(
+        "native/mtls",
+        "authenticated",
+        .{ .qos = .at_least_once },
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT native TLS client identity verifies CA and hostname" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 =
+        undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .client_auth = .{
+                .verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var accepted = shared.server.accept(.{
+                .protocol = .v5,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            accepted.deinit(shared.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    var client = try mqtt_tls.Client.connectAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "native-mtls-ca",
+            },
+            .tls = .{ .ca_bundle = .{
+                .bundle = &ca_bundle,
+                .lock = &ca_lock,
+            } },
+            .client_identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    client.close();
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT native TLS client identity rejects wrong server pin" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 =
+        undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var wrong_key = public_key;
+    wrong_key[1] ^= 1;
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .client_auth = .{
+                .verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+            },
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            _ = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            shared.err = error.ExpectedClientFailure;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.CertificateUntrusted,
+        mqtt_tls.Client.connectAddress(
+            allocator,
+            io,
+            server.address(),
+            "localhost",
+            .{
+                .mqtt = .{
+                    .protocol = .v5,
+                    .client_id = "native-mtls-wrong-pin",
+                },
+                .client_identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = wrong_key,
+                },
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+            },
+        ),
+    );
+    thread.join();
+    joined = true;
+    try std.testing.expect(shared.err != null);
+}
+
 fn fillLargePayload(payload: []u8) void {
     for (payload, 0..) |*byte, index| {
         byte.* = @truncate(index *% 29 +% 7);

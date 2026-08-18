@@ -507,6 +507,10 @@ test "public modules are reachable" {
         "ClientAuthRequirement",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "ClientIdentity",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.tls_runtime.Client,
         "connectHost",
     ));
@@ -521,6 +525,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.tls_runtime.ConnectOptions,
         "tcp_nodelay",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ConnectOptions,
+        "client_identity",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ConnectOptions,
+        "server_verifier",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.tls_runtime.ListenOptions,

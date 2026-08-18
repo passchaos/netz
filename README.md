@@ -391,7 +391,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   Start takeover and DISCONNECT 0x00/0x04 handling, plus a blocking TCP
   client/server runtime with a
   `std.Io.async` concurrent server helper, native MQTT-over-TLS clients with
-  system or caller-provided CA roots and hostname verification plus TLS 1.3
+  system or caller-provided CA roots, hostname verification, and optional
+  client identities, plus TLS 1.3
   servers with caller-provided certificate chains/signers and concurrent
   serving, including optional/required client-certificate authentication,
   pluggable trust verification, and verified peer-chain access, and
@@ -438,6 +439,9 @@ WebSocket clients support `mqtts://`/`ssl://` and `wss://` respectively through
 the shared verified TLS client transport. The TLS server reuses the same MQTT
 broker-side state machine as TCP/WebSocket and supports optional or required
 TLS 1.3 client certificates with application-visible verified DER chains.
+Configuring a native client's `client_identity` selects the vail TLS 1.3
+stream transport, while clients without an identity retain Zig's standard TLS
+implementation.
 Server-side WSS termination remains separate work. Event loops, congestion
 control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on

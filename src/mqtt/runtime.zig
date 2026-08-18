@@ -4,6 +4,7 @@ const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
+const tls_client = @import("tls/client_connection.zig");
 const tls_server = @import("tls/server_connection.zig");
 
 const net = std.Io.net;
@@ -408,9 +409,18 @@ pub const Connection = struct {
         tls_connection: *http1_runtime.TlsClientConnection,
         options: ConnectOptions,
     ) Connection {
+        var connection = initTlsState(allocator, options);
+        connection.transport = .initTls(tls_connection);
+        return connection;
+    }
+
+    fn initTlsState(
+        allocator: std.mem.Allocator,
+        options: ConnectOptions,
+    ) Connection {
         return .{
             .allocator = allocator,
-            .transport = .initTls(tls_connection),
+            .transport = undefined,
             .protocol = options.protocol,
             .limits = options.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
@@ -422,6 +432,19 @@ pub const Connection = struct {
             .peer_maximum_qos = options.peer_maximum_qos,
             .peer_retain_available = options.peer_retain_available,
         };
+    }
+
+    /// Wrap a vail-backed TLS 1.3 client connection. This variant is selected
+    /// when the caller configures a client identity because Zig 0.16's standard
+    /// TLS client cannot answer CertificateRequest.
+    pub fn initVailTls(
+        allocator: std.mem.Allocator,
+        tls_connection: *tls_client.Connection,
+        options: ConnectOptions,
+    ) Connection {
+        var connection = initTlsState(allocator, options);
+        connection.transport = .initVailTls(tls_connection);
+        return connection;
     }
 
     /// Wrap an established server-side TLS stream in shared MQTT state.

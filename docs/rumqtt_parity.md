@@ -102,7 +102,11 @@ terminator.
 TLS identity, and `mqtts://`/`ssl://` URIs (default port 8883). It reuses the
 same Zig 0.16 TLS client as HTTPS/WSS, including operating-system roots,
 caller-managed CA bundles, hostname verification, and explicit truncation
-policy.
+policy. Setting `ConnectOptions.client_identity` selects the vail TLS 1.3
+stream client so it can answer CertificateRequest with Ed25519, ECDSA, or SM2
+identity material. The vail path maps the same system/caller CA and hostname
+policy by default, or accepts a pinned/custom `server_verifier`; clients
+without an identity keep the standard-library TLS path.
 
 `mqtt.tls_runtime.Server` is a native TLS 1.3 listener backed by project-local
 vail primitives. It accepts caller-provided DER certificate chains and
@@ -126,7 +130,9 @@ mode rejects it.
 
 End-to-end tests cover a real production-listener handshake with verified
 localhost CA/SAN, MQTT 5 CONNECT and QoS 1 PUBLISH/PUBACK, plus MQTT 3.1.1
-through `mqtts://`. The explicit
+through `mqtts://`. Native Zig client/server mTLS tests prove client
+CertificateVerify, peer-chain exposure, CA/SAN verification, and bad server-pin
+rejection. The explicit
 `zig build interop-mqtt-mtls-openssl` gate additionally proves authenticated,
 ECDSA and RSA-PSS client identities, anonymous-rejected, untrusted-rejected,
 and optional-anonymous TLS 1.3 paths against OpenSSL's real
@@ -154,10 +160,9 @@ available through one built-in Zig TLS transport.
 The audited rumqttd rustls path can require a client certificate only when
 built with `verify-client-cert`; its native-tls path cannot authenticate
 clients. Netz exposes optional/required policy per listener without a feature
-split and returns verified peer chains to the application. Zig 0.16's standard
-TLS client still has no client-identity option, so netz's native client cannot
-yet initiate mTLS; external clients such as OpenSSL interoperate with the
-server today.
+split, returns verified peer chains to the application, and provides a native
+vail-backed client-identity path. External clients such as OpenSSL also
+interoperate with the server.
 
 ## Retained-message store
 
@@ -306,8 +311,8 @@ rumqttd.
 
 1. Add a durable disk/replicated commitlog for retained/session/offline/Will
    state.
-2. Add server-side WSS termination and native MQTT client-identity support;
-   native TLS server mTLS and WSS clients are available.
+2. Add server-side WSS termination; native MQTT client/server mTLS and WSS
+   clients are available.
 3. Build one identical multi-client publish/subscribe load driver for both
    brokers and capture throughput, tail latency, allocation and peak memory.
 4. Add MQTT protocol conformance/interoperability suites beyond in-repository
