@@ -69,8 +69,9 @@ HTTP 503 response without `grpc-status`.
 
 ## Remaining work before broad gRPC parity
 
-1. Add streaming-call APIs that consume HTTP/2 streaming events incrementally
-   instead of aggregating an entire request/response body.
+1. Build gRPC message-stream APIs on the now-symmetric HTTP/2 streaming
+   primitives (`readRequestStreaming` and `requestStreaming`), including frame
+   reassembly when a 5-byte gRPC prefix or payload spans DATA callbacks.
 2. Add TLS/ALPN HTTP/2 transport and interoperate with upstream grpc clients
    and servers, not only netz's h2c runtime.
 3. Build generated service/client bindings on `pbz`, including unary and all

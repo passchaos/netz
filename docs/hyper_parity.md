@@ -153,6 +153,13 @@ Reusable implementation changes behind all four H2 results:
   ordinary owning APIs still receive independent frame copies;
 - `readRequestStreaming` returns an owned request head/trailers and delivers
   borrowed DATA slices to a callback without body-sized aggregation;
+- `requestStreaming` provides the symmetric client path: response DATA is
+  delivered as borrowed callback slices while the returned status, initial
+  headers and trailers remain owned. It skips valid informational responses,
+  strictly accounts Content-Length, returns flow credit while the body is
+  arriving, and sends RST_STREAM(CANCEL) when the callback fails, matching
+  Hyper's `Incoming` frame-stream lifecycle without requiring an async body
+  object;
 - `requestBatchInto` opens bodyless streams together, accepts response frames in
   any stream order, and returns owned responses in request order;
 - `writeResponseBatch` validates and encodes a bodyless response set before one

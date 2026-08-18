@@ -137,7 +137,10 @@ not a general whole-library ratio. Netz preserves both HTTP/2 frames but submits
 their four slices in one `sendmsg`; larger, fragmented or flow-blocked messages
 fall back to ordinary frame writes. The 100-KiB case uses TCP_NODELAY, matched
 receive windows, vectored DATA bursts, a connection-level multi-frame receive
-buffer and callback-based streaming consumption. Bodyless parallel batches use
+buffer and callback-based streaming request consumption. The client now has a
+symmetric callback-based response API with owned initial/trailing headers,
+strict streamed Content-Length accounting, continuous flow-credit return, and
+RST_STREAM cancellation on consumer failure. Bodyless parallel batches use
 transactional HPACK staging, one request/response submission in each direction,
 and stream-ID-based response reordering. See `docs/hyper_parity.md` for the
 implementation audit and remaining H2 comparison work.

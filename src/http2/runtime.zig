@@ -749,6 +749,27 @@ pub const Connection = struct {
         );
     }
 
+    /// Send a request and deliver response DATA without body aggregation.
+    ///
+    /// Initial headers and trailers in the returned value are owned until
+    /// `StreamingResponse.deinit`. Each DATA slice borrows the connection frame
+    /// reader and is valid only for the duration of `consume`. The callback
+    /// must not retain it. A callback error cancels a still-open stream with
+    /// RST_STREAM(CANCEL) before returning the original callback error.
+    pub fn requestStreaming(
+        self: *Connection,
+        options: RequestOptions,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        const pending = try self.startRequest(options);
+        return self.readResponseStreaming(
+            pending,
+            context,
+            consume,
+        );
+    }
+
     const PendingResponse = struct {
         stream_id: u31,
         request_method: []const u8,
@@ -3023,6 +3044,194 @@ pub const Connection = struct {
         };
     }
 
+    /// Consume one active client response as borrowed DATA events.
+    ///
+    /// This method is intentionally kept next to the aggregate reader because
+    /// both enforce the same informational/status/body/trailer semantics. The
+    /// difference is ownership: this path never appends DATA to an ArrayList.
+    fn readResponseStreaming(
+        self: *Connection,
+        pending: PendingResponse,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        const stream_id = pending.stream_id;
+        defer self.releaseLocalStream(stream_id);
+        var headers: ?[]http2.Hpack.HeaderField = null;
+        errdefer if (headers) |value| {
+            freeHeaders(self.allocator, value);
+        };
+        var trailers: []http2.Hpack.HeaderField = &.{};
+        errdefer freeHeaders(self.allocator, trailers);
+        var status_value: ?u16 = null;
+        var expected_body_len: ?usize = null;
+        var body_bytes: usize = 0;
+
+        while (true) {
+            const frame = try self.readFrameScratch();
+            if (try self.handleConnectionFrame(frame)) continue;
+            if (frame.header.frame_type == .goaway) {
+                const goaway = try http2.GoAwayPayload.parse(frame);
+                try self.handleGoAwayForStream(stream_id, goaway);
+                continue;
+            }
+            if (frame.header.stream_id != stream_id) {
+                return error.UnexpectedFrame;
+            }
+            switch (frame.header.frame_type) {
+                .push_promise => {
+                    if (!self.limits.enable_push) {
+                        _ = try self.validatePushPromiseForClientStream(
+                            frame,
+                        );
+                        return error.InvalidFrame;
+                    }
+                    try self.receivePushPromise(frame);
+                },
+                .headers => {
+                    if (headers != null) {
+                        if ((frame.header.flags & flag_end_stream) == 0) {
+                            return error.UnexpectedFrame;
+                        }
+                        trailers = try self.readHeaderBlock(frame);
+                        try validateHeaderBlock(
+                            trailers,
+                            .response_trailers,
+                        );
+                        try validateExpectedContentLength(
+                            expected_body_len,
+                            body_bytes,
+                        );
+                        break;
+                    }
+
+                    const decoded = try self.readHeaderBlock(frame);
+                    var decoded_owned = true;
+                    errdefer if (decoded_owned) {
+                        freeHeaders(self.allocator, decoded);
+                    };
+                    try validateHeaderBlock(decoded, .response);
+                    const lookup = try responseHeaderLookup(decoded);
+                    const status_text = lookup.status orelse
+                        return error.MissingPseudoHeader;
+                    const status = std.fmt.parseInt(
+                        u16,
+                        status_text,
+                        10,
+                    ) catch return error.InvalidStatus;
+                    if (informationalResponseToSkip(status)) {
+                        if ((frame.header.flags & flag_end_stream) != 0) {
+                            return error.UnexpectedFrame;
+                        }
+                        if (lookup.content_length != null) {
+                            return error.InvalidContentLength;
+                        }
+                        freeHeaders(self.allocator, decoded);
+                        decoded_owned = false;
+                        continue;
+                    }
+
+                    headers = decoded;
+                    decoded_owned = false;
+                    status_value = status;
+                    expected_body_len = lookup.content_length;
+                    if (responseForbidsBody(
+                        status,
+                        pending.request_method,
+                        pending.extended_connect,
+                    )) {
+                        const traditional_connect =
+                            methodIsConnect(pending.request_method) and
+                            !pending.extended_connect;
+                        if (traditional_connect and
+                            (lookup.content_length orelse 0) != 0)
+                        {
+                            return error.InvalidContentLength;
+                        }
+                        if ((statusIsInformational(status) or
+                            status == 204) and
+                            lookup.content_length != null)
+                        {
+                            return error.InvalidContentLength;
+                        }
+                        if (!traditional_connect and
+                            (frame.header.flags & flag_end_stream) == 0)
+                        {
+                            try self.consumeForbiddenResponseBody(stream_id);
+                        }
+                        break;
+                    }
+                    if ((expected_body_len orelse 0) >
+                        self.limits.max_body_bytes)
+                    {
+                        return error.MessageTooLarge;
+                    }
+                    if ((frame.header.flags & flag_end_stream) != 0) {
+                        try validateExpectedContentLength(
+                            expected_body_len,
+                            body_bytes,
+                        );
+                        break;
+                    }
+                },
+                .data => {
+                    if (headers == null) return error.UnexpectedFrame;
+                    const data = try self.receiveDataPayload(
+                        stream_id,
+                        frame,
+                    );
+                    body_bytes = std.math.add(
+                        usize,
+                        body_bytes,
+                        data.data.len,
+                    ) catch return error.MessageTooLarge;
+                    if (body_bytes > self.limits.max_body_bytes) {
+                        return error.MessageTooLarge;
+                    }
+                    if (data.data.len != 0) {
+                        consume(context, data.data) catch |err| {
+                            // DATA already consumed connection credit before
+                            // application delivery. Restore its exact charged
+                            // payload before canceling; a low-watermark-only
+                            // update would let repeated small callback failures
+                            // gradually starve unrelated streams.
+                            self.releaseReceivedCapacity(
+                                stream_id,
+                                frame.payload.len,
+                            ) catch {};
+                            if ((frame.header.flags &
+                                flag_end_stream) == 0)
+                            {
+                                self.writeResetStreamFrame(
+                                    stream_id,
+                                    .cancel,
+                                ) catch {};
+                            }
+                            return err;
+                        };
+                    }
+                    try self.maybeReleaseReceivedCapacity(stream_id);
+                    if ((frame.header.flags & flag_end_stream) != 0) {
+                        try validateExpectedContentLength(
+                            expected_body_len,
+                            body_bytes,
+                        );
+                        break;
+                    }
+                },
+                .rst_stream => return error.StreamReset,
+                else => return error.UnexpectedFrame,
+            }
+        }
+
+        return .{
+            .headers = headers orelse return error.MissingPseudoHeader,
+            .status = status_value orelse return error.MissingPseudoHeader,
+            .body_bytes = body_bytes,
+            .trailers = trailers,
+        };
+    }
+
     fn readResponseOnPeerStream(
         self: *Connection,
         stream_id: u31,
@@ -4109,6 +4318,22 @@ pub const OwnedResponse = struct {
         freeHeaders(allocator, self.headers);
         freeHeaders(allocator, self.trailers);
         allocator.free(self.body);
+        self.* = undefined;
+    }
+};
+
+pub const StreamingResponse = struct {
+    headers: []http2.Hpack.HeaderField,
+    status: u16,
+    body_bytes: usize,
+    trailers: []http2.Hpack.HeaderField = &.{},
+
+    pub fn deinit(
+        self: *StreamingResponse,
+        allocator: std.mem.Allocator,
+    ) void {
+        freeHeaders(allocator, self.headers);
+        freeHeaders(allocator, self.trailers);
         self.* = undefined;
     }
 };
@@ -5283,6 +5508,28 @@ pub const testing = struct {
         stream_id: u31,
     ) Error!void {
         return connection.addActivePeerStream(stream_id);
+    }
+
+    pub fn writeHeaders(
+        connection: *Connection,
+        stream_id: u31,
+        headers: []const http2.Hpack.HeaderField,
+        end_stream: bool,
+    ) Error!void {
+        return connection.writeHeaders(
+            stream_id,
+            headers,
+            end_stream,
+        );
+    }
+
+    pub fn writeData(
+        connection: *Connection,
+        stream_id: u31,
+        data: []const u8,
+        end_stream: bool,
+    ) Error!void {
+        return connection.writeData(stream_id, data, end_stream);
     }
 };
 
@@ -11794,4 +12041,5 @@ test "HTTP/2 runtime advertises configured initial SETTINGS" {
 test {
     _ = @import("runtime/push_tests.zig");
     _ = @import("runtime/priority_tests.zig");
+    _ = @import("runtime/streaming_response_tests.zig");
 }
