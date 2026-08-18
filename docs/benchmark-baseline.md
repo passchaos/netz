@@ -143,7 +143,10 @@ strict streamed Content-Length accounting, continuous flow-credit return, and
 RST_STREAM cancellation on consumer failure. The server-side `ResponseWriter`
 provides the corresponding multi-call body producer with flow-control waiting,
 transactional cumulative length validation, trailer/FIN completion and
-unfinished-writer cancellation. Bodyless parallel batches use
+unfinished-writer cancellation. The client-side `RequestWriter` adds the same
+multi-call upload and trailer lifecycle, then hands the live stream to owned or
+callback-streaming response receive without first aggregating request bytes.
+Bodyless parallel batches use
 transactional HPACK staging, one request/response submission in each direction,
 and stream-ID-based response reordering. See `docs/hyper_parity.md` for the
 implementation audit and remaining H2 comparison work.

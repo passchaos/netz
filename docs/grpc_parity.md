@@ -70,7 +70,8 @@ HTTP 503 response without `grpc-status`.
 ## Remaining work before broad gRPC parity
 
 1. Build gRPC message-stream APIs on the HTTP/2 streaming primitives
-   (`readRequestStreaming`, `requestStreaming`, and `ResponseWriter`),
+   (`RequestWriter`, `readRequestStreaming`, `requestStreaming`, and
+   `ResponseWriter`),
    including frame reassembly when a 5-byte gRPC prefix or payload spans DATA
    callbacks and per-message compression without cross-message context.
 2. Add TLS/ALPN HTTP/2 transport and interoperate with upstream grpc clients

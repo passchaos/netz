@@ -741,7 +741,7 @@ pub const Connection = struct {
     }
 
     pub fn request(self: *Connection, options: RequestOptions) Error!OwnedResponse {
-        const pending = try self.startRequest(options);
+        const pending = try self.sendCompleteRequest(options);
         return self.readResponse(
             pending.stream_id,
             pending.request_method,
@@ -762,7 +762,7 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
-        const pending = try self.startRequest(options);
+        const pending = try self.sendCompleteRequest(options);
         return self.readResponseStreaming(
             pending,
             context,
@@ -776,7 +776,7 @@ pub const Connection = struct {
         extended_connect: bool,
     };
 
-    fn startRequest(
+    fn sendCompleteRequest(
         self: *Connection,
         options: RequestOptions,
     ) Error!PendingResponse {
@@ -887,6 +887,108 @@ pub const Connection = struct {
             .stream_id = stream_id,
             .request_method = request_options.method,
             .extended_connect = extended_connect,
+        };
+    }
+
+    /// Start a client request whose DATA is supplied incrementally.
+    ///
+    /// `body_length` adds Content-Length when the caller did not provide one;
+    /// an explicit header must agree. CONNECT uses a dedicated tunnel API and
+    /// is rejected here so DATA cannot be confused with tunnel bytes.
+    pub fn startRequest(
+        self: *Connection,
+        options: StreamingRequestOptions,
+    ) Error!RequestWriter {
+        if (self.role != .client) return error.UnexpectedFrame;
+        if (methodIsConnect(options.method)) {
+            return error.InvalidContentLength;
+        }
+        var request_options = options;
+        if (request_options.authority == null) {
+            request_options.authority = self.default_authority;
+        }
+        const scheme = request_options.scheme orelse
+            self.default_scheme orelse "https";
+
+        var fields_stack: [16]http2.Hpack.HeaderField = undefined;
+        const fields_capacity = std.math.add(
+            usize,
+            request_options.headers.len,
+            7,
+        ) catch return error.MessageTooLarge;
+        const fields_buffer = if (fields_capacity <= fields_stack.len)
+            fields_stack[0..fields_capacity]
+        else
+            try self.allocator.alloc(
+                http2.Hpack.HeaderField,
+                fields_capacity,
+            );
+        defer if (fields_buffer.ptr != fields_stack[0..].ptr) {
+            self.allocator.free(fields_buffer);
+        };
+        var fields: std.ArrayList(http2.Hpack.HeaderField) =
+            .initBuffer(fields_buffer);
+        fields.appendAssumeCapacity(.{
+            .name = ":method",
+            .value = request_options.method,
+        });
+        fields.appendAssumeCapacity(.{
+            .name = ":path",
+            .value = request_options.path,
+        });
+        fields.appendAssumeCapacity(.{
+            .name = ":scheme",
+            .value = scheme,
+        });
+        if (request_options.authority) |authority| {
+            fields.appendAssumeCapacity(.{
+                .name = ":authority",
+                .value = authority,
+            });
+        }
+        var priority_buffer: [16]u8 = undefined;
+        if (request_options.priority) |priority| {
+            fields.appendAssumeCapacity(.{
+                .name = "priority",
+                .value = priority.serialize(&priority_buffer),
+            });
+        }
+        fields.appendSliceAssumeCapacity(request_options.headers);
+        stripConnectionHeaders(&fields, .request);
+
+        const declared_length = try contentLength(fields.items);
+        const expected_length = request_options.body_length orelse
+            declared_length;
+        if (request_options.body_length) |body_length| {
+            if (declared_length) |declared| {
+                if (declared != body_length) {
+                    return error.InvalidContentLength;
+                }
+            } else {
+                var content_length_buffer: [32]u8 = undefined;
+                const value = std.fmt.bufPrint(
+                    &content_length_buffer,
+                    "{}",
+                    .{body_length},
+                ) catch unreachable;
+                fields.appendAssumeCapacity(.{
+                    .name = "content-length",
+                    .value = value,
+                });
+            }
+        }
+        try validateHeaderBlock(fields.items, .request);
+
+        const stream_id = try self.reserveNextClientStreamId();
+        var stream_owned = true;
+        errdefer if (stream_owned) self.releaseLocalStream(stream_id);
+        try self.writeHeaders(stream_id, fields.items, false);
+        stream_owned = false;
+        return .{
+            .connection = self,
+            .stream_id = stream_id,
+            .expected_length = expected_length,
+            .head_request = methodIsHead(request_options.method),
         };
     }
 
@@ -4311,6 +4413,18 @@ pub const RequestOptions = struct {
     trailers: []const http2.Hpack.HeaderField = &.{},
 };
 
+pub const StreamingRequestOptions = struct {
+    method: []const u8 = "POST",
+    path: []const u8 = "/",
+    scheme: ?[]const u8 = null,
+    authority: ?[]const u8 = null,
+    priority: ?http2.ExtensiblePriority = null,
+    headers: []const http2.Hpack.HeaderField = &.{},
+    /// Exact request body size. When null, the request is length-unbounded and
+    /// ends only through RequestWriter FIN or trailers.
+    body_length: ?usize = null,
+};
+
 pub const ResponseOptions = struct {
     status: u16 = 200,
     headers: []const http2.Hpack.HeaderField = &.{},
@@ -4446,6 +4560,158 @@ pub const StreamingResponse = struct {
         freeHeaders(allocator, self.headers);
         freeHeaders(allocator, self.trailers);
         self.* = undefined;
+    }
+};
+
+pub const RequestWriter = struct {
+    connection: *Connection,
+    stream_id: u31,
+    expected_length: ?usize,
+    head_request: bool,
+    written: usize = 0,
+    body_finished: bool = false,
+    completed: bool = false,
+
+    /// Cancel a request whose response has not been consumed.
+    ///
+    /// This remains active after request-body FIN because the peer still owns
+    /// the response half. Successful response reads and explicit reset make it
+    /// a no-op.
+    pub fn deinit(self: *RequestWriter) void {
+        if (self.completed) return;
+        self.connection.sendResetStream(
+            self.stream_id,
+            .cancel,
+        ) catch {
+            self.connection.releaseLocalStream(self.stream_id);
+        };
+        self.completed = true;
+    }
+
+    pub fn write(
+        self: *RequestWriter,
+        data: []const u8,
+    ) Error!void {
+        try self.ensureWritable();
+        try self.reserveLength(data.len, false);
+        try self.connection.writeData(self.stream_id, data, false);
+        self.written += data.len;
+    }
+
+    pub fn finishData(
+        self: *RequestWriter,
+        data: []const u8,
+    ) Error!void {
+        try self.ensureWritable();
+        try self.reserveLength(data.len, true);
+        try self.connection.writeData(self.stream_id, data, true);
+        self.written += data.len;
+        self.body_finished = true;
+    }
+
+    pub fn finish(self: *RequestWriter) Error!void {
+        return self.finishData(&.{});
+    }
+
+    pub fn finishTrailers(
+        self: *RequestWriter,
+        trailers: []const http2.Hpack.HeaderField,
+    ) Error!void {
+        try self.ensureWritable();
+        try self.reserveLength(0, true);
+        try validateHeaderBlock(trailers, .request_trailers);
+        try self.connection.writeHeaders(
+            self.stream_id,
+            trailers,
+            true,
+        );
+        self.body_finished = true;
+    }
+
+    /// Receive the response after the request body has ended.
+    pub fn readResponse(
+        self: *RequestWriter,
+    ) Error!OwnedResponse {
+        if (!self.body_finished or self.completed) {
+            return error.UnexpectedFrame;
+        }
+        const connection = self.connection;
+        const stream_id = self.stream_id;
+        const request_method = if (self.head_request) "HEAD" else "POST";
+        const response = connection.readResponse(
+            stream_id,
+            request_method,
+            false,
+        ) catch |err| {
+            // readResponse releases the stream on every exit path.
+            self.completed = true;
+            return err;
+        };
+        self.completed = true;
+        return response;
+    }
+
+    pub fn readResponseStreaming(
+        self: *RequestWriter,
+        context: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (!self.body_finished or self.completed) {
+            return error.UnexpectedFrame;
+        }
+        const connection = self.connection;
+        const pending = Connection.PendingResponse{
+            .stream_id = self.stream_id,
+            .request_method = if (self.head_request) "HEAD" else "POST",
+            .extended_connect = false,
+        };
+        const response = connection.readResponseStreaming(
+            pending,
+            context,
+            consume,
+        ) catch |err| {
+            // The streaming reader also releases on every exit path.
+            self.completed = true;
+            return err;
+        };
+        self.completed = true;
+        return response;
+    }
+
+    pub fn reset(
+        self: *RequestWriter,
+        error_code: http2.ErrorCode,
+    ) Error!void {
+        try self.ensureWritable();
+        try self.connection.sendResetStream(self.stream_id, error_code);
+        self.body_finished = true;
+        self.completed = true;
+    }
+
+    fn ensureWritable(self: RequestWriter) Error!void {
+        if (self.body_finished or self.completed) {
+            return error.ConnectionClosed;
+        }
+        if (!self.connection.outboundStreamIsActive(self.stream_id)) {
+            return error.StreamReset;
+        }
+    }
+
+    fn reserveLength(
+        self: RequestWriter,
+        additional: usize,
+        finishing: bool,
+    ) Error!void {
+        const total = std.math.add(
+            usize,
+            self.written,
+            additional,
+        ) catch return error.MessageTooLarge;
+        if (self.expected_length) |expected| {
+            if (total > expected or (finishing and total != expected)) {
+                return error.InvalidContentLength;
+            }
+        }
     }
 };
 
@@ -12268,4 +12534,5 @@ test {
     _ = @import("runtime/priority_tests.zig");
     _ = @import("runtime/streaming_response_tests.zig");
     _ = @import("runtime/response_writer_tests.zig");
+    _ = @import("runtime/request_writer_tests.zig");
 }

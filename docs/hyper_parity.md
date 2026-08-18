@@ -166,6 +166,12 @@ Reusable implementation changes behind all four H2 results:
   terminate exactly once, and dropping an unfinished writer sends
   RST_STREAM(CANCEL). This mirrors Hyper/h2's `SendStream` lifecycle in the
   blocking runtime rather than requiring callers to reach private frame APIs;
+- `startRequest` provides the client-side counterpart. `RequestWriter` accepts
+  bounded or length-unbounded DATA chunks, request trailers and transactional
+  length retries, remains responsible for cancellation after request-body FIN,
+  and hands off exactly once to either aggregate or callback-streaming response
+  receive. This matches Hyper's request `Body` → h2 `SendStream` ownership
+  boundary without aggregating the upload first;
 - `requestBatchInto` opens bodyless streams together, accepts response frames in
   any stream order, and returns owned responses in request order;
 - `writeResponseBatch` validates and encodes a bodyless response set before one
