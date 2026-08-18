@@ -116,6 +116,7 @@ pub const Publication = struct {
         self: Publication,
         out: *std.ArrayList(mqtt.Property),
         allocator: std.mem.Allocator,
+        protocol: mqtt.ProtocolVersion,
         subscription_identifier: ?usize,
         now: std.Io.Timestamp,
     ) Error!bool {
@@ -125,6 +126,7 @@ pub const Publication = struct {
             now.nanoseconds,
         );
         if (remaining == 0) return false;
+        if (protocol == .v3_1_1) return true;
         try out.ensureTotalCapacity(
             allocator,
             self.properties.len +
@@ -219,6 +221,7 @@ test "publication strips aliases and decrements expiry at queue write" {
     try std.testing.expect(try publication.appendDeliveryProperties(
         &properties,
         allocator,
+        .v5,
         7,
         std.Io.Timestamp.fromNanoseconds(5 * std.time.ns_per_s),
     ));
@@ -231,4 +234,14 @@ test "publication strips aliases and decrements expiry at queue write" {
         @as(?usize, 7),
         mqtt.subscriptionIdentifier(properties.items),
     );
+
+    properties.clearRetainingCapacity();
+    try std.testing.expect(try publication.appendDeliveryProperties(
+        &properties,
+        allocator,
+        .v3_1_1,
+        7,
+        std.Io.Timestamp.fromNanoseconds(5 * std.time.ns_per_s),
+    ));
+    try std.testing.expectEqual(@as(usize, 0), properties.items.len);
 }

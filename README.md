@@ -387,7 +387,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   connection-scoped property stripping, plus a bounded persistent Session
   Store with full subscription restoration, Session Expiry, offline QoS 1/2
   queues, Receive Maximum scheduling, DUP/PUBREL reconnect retransmission,
-  out-of-order ACKs and incoming QoS 2 deduplication, plus an indexed Will
+  out-of-order ACKs and incoming QoS 2 deduplication, integrated into one live
+  TCP broker listener that auto-detects MQTT 3.1.1/5 per connection and
+  performs version-correct property/ACK downgrades, plus an indexed Will
   Delay scheduler with Session-end deadlines, reconnect cancellation, Clean
   Start takeover and DISCONNECT 0x00/0x04 handling, plus a blocking TCP
   client/server runtime with a

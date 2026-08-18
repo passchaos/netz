@@ -27,7 +27,6 @@ pub fn main(init: std.process.Init) !void {
                 .max_queued_deliveries_per_connection = config.max_queued_deliveries,
             },
             .accept = .{
-                .protocol = .v5,
                 .max_outgoing_inflight = config.max_outgoing_inflight,
             },
         },
@@ -35,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     defer broker.deinit();
 
     std.debug.print(
-        "netz MQTT 5 broker listening on {f} for {d} clients\n",
+        "netz MQTT 3.1.1/5 broker listening on {f} for {d} clients\n",
         .{ broker.address(), config.connections },
     );
     try broker.serve(config.connections);

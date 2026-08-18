@@ -11,7 +11,7 @@ and equal-wire broker results are kept separate.
 
 | Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
-| MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; live broker currently MQTT 5 TCP | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
+| MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; one live TCP broker listener auto-detects both versions | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL | Both brokers support QoS 0/1/2 |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
@@ -74,6 +74,27 @@ This result is evidence for this bounded live QoS 1 fanout shape only. It does
 not benchmark the QoS 2 path or claim netz exceeds Mosquitto or rumqttd in
 persistence, offline sessions, Will integration, tail latency, memory use, or
 broader conformance.
+
+## MQTT 3.1.1/5 broker interoperability
+
+The live TCP listener now follows Mosquitto's version negotiation model: the
+configured protocol is only an initial parser default, while CONNECT selects
+MQTT 3.1.1 or MQTT 5 independently for every accepted socket.
+
+- MQTT 3.1.1 and MQTT 5 publishers/subscribers can share one listener and route
+  between versions.
+- MQTT 5 Application Message properties are preserved for MQTT 5 destinations
+  and omitted when encoding the same fanout for an MQTT 3.1.1 destination.
+- MQTT 3.1.1 CleanSession=0 resumes subscriptions and offline QoS 1/2 state
+  indefinitely, while CleanSession=1 discards that Session.
+- CONNACK Session Present, SUBACK, UNSUBACK and QoS ACK packets use each
+  connection's wire format. MQTT 5-only reason codes are downgraded to the
+  success-only MQTT 3.1.1 ACK representation.
+- QoS 2 still routes only at PUBREL and completes PUBREC/PUBREL/PUBCOMP across
+  both versions.
+
+These paths are covered with mixed-version, multi-filter UNSUBACK, persistent
+Session/offline QoS 1, and QoS 2 end-to-end tests.
 
 ## Live retained-message integration
 

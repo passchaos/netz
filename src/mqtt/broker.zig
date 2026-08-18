@@ -213,8 +213,7 @@ pub const Broker = struct {
             options.limits.max_queued_deliveries_per_connection == 0 or
             options.limits.max_pending_incoming_qos2 == 0 or
             options.limits.max_pending_incoming_qos2 >
-                std.math.maxInt(u32) or
-            options.accept.protocol != .v5)
+                std.math.maxInt(u32))
         {
             return error.InvalidProperty;
         }
@@ -995,7 +994,7 @@ pub const Broker = struct {
         defer slot.writer_mutex.unlock(self.io);
         try connection.writeUnsubAck(
             unsubscribe.packet_id,
-            reasons,
+            if (connection.protocol == .v5) reasons else &.{},
             &.{},
         );
     }
@@ -1048,7 +1047,14 @@ pub const Broker = struct {
             const publisher_slot = try self.slotForSubscriber(publisher_id);
             publisher_slot.writer_mutex.lockUncancelable(self.io);
             defer publisher_slot.writer_mutex.unlock(self.io);
-            try publisher.writePubRec(publish.packet_id.?, 0x97);
+            // MQTT 3.1.1 has no PUBREC reason field. Mosquitto emits the same
+            // control packet but its wire helper omits the negative reason,
+            // completing the QoS handshake without routing the rejected
+            // Application Message.
+            try publisher.writePubRec(
+                publish.packet_id.?,
+                protocolReason(publisher.protocol, 0x97),
+            );
             return;
         };
         self.state_mutex.unlock(self.io);
@@ -1134,7 +1140,10 @@ pub const Broker = struct {
             publisher_slot.writer_mutex.lockUncancelable(self.io);
             publisher.writePubAck(
                 packet_id,
-                if (plan.has_matching_subscriber) 0 else 0x10,
+                protocolReason(
+                    publisher.protocol,
+                    if (plan.has_matching_subscriber) 0 else 0x10,
+                ),
             ) catch |err| {
                 publisher_slot.writer_mutex.unlock(self.io);
                 return err;
@@ -1612,6 +1621,7 @@ pub const Broker = struct {
             if (!try delivery.publication.appendDeliveryProperties(
                 &properties,
                 self.allocator,
+                connection.protocol,
                 delivery.subscription_identifier,
                 std.Io.Clock.awake.now(self.io),
             )) {
@@ -1973,6 +1983,15 @@ fn ungracefulTransportClose(err: anyerror) bool {
 
 fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
     return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
+}
+
+fn protocolReason(
+    protocol: mqtt.ProtocolVersion,
+    reason_code: u8,
+) u8 {
+    // MQTT 3.1.1 ACK packets have no reason-code field. Success is the only
+    // representable response; MQTT 5 keeps the broker's richer result.
+    return if (protocol == .v5) reason_code else 0;
 }
 
 test {
