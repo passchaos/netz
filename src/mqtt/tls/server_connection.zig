@@ -34,6 +34,7 @@ pub const Connection = struct {
     stream: net.Stream,
     read_keys: tls_record.Keys,
     write_keys: tls_record.Keys,
+    peer_certificate_chain: ?server_handshake.PeerCertificateChain = null,
     read_sequence: u64 = 0,
     write_sequence: u64 = 0,
     buffered_plaintext: [record_io.max_plaintext_len]u8 = undefined,
@@ -62,6 +63,7 @@ pub const Connection = struct {
             .stream = stream,
             .read_keys = keys.read,
             .write_keys = keys.write,
+            .peer_certificate_chain = keys.peer_certificate_chain,
         };
         return connection;
     }
@@ -70,11 +72,20 @@ pub const Connection = struct {
         if (!self.closed) self.sendCloseNotify() catch {};
         self.read_keys.deinit();
         self.write_keys.deinit();
+        if (self.peer_certificate_chain) |*chain| chain.deinit();
         self.stream.close(self.io);
         const allocator = self.allocator;
         std.crypto.secureZero(u8, &self.buffered_plaintext);
         self.* = undefined;
         allocator.destroy(self);
+    }
+
+    /// Returns the owned peer chain after a successful authenticated
+    /// handshake. Optional client authentication returns null for anonymous
+    /// clients. The slices remain valid until `deinit`.
+    pub fn peerCertificates(self: *const Connection) ?[]const []const u8 {
+        const chain = self.peer_certificate_chain orelse return null;
+        return chain.certificates;
     }
 
     /// Read decrypted application bytes with stream semantics.

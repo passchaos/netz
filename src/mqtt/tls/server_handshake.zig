@@ -31,6 +31,7 @@ pub const Error = std.mem.Allocator.Error ||
         ExpectedHandshakeRecord,
         HandshakeMessageTooLarge,
         InvalidCompatibilityCcs,
+        InvalidClientFlight,
         InvalidServerFlight,
         MissingKeyShare,
         UnsupportedSignatureScheme,
@@ -42,15 +43,32 @@ pub const Options = struct {
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_client_hello_size: usize = 64 * 1024,
+    max_client_handshake_size: usize = 256 * 1024,
+    client_auth: ?vail.tls.client_auth.ServerPolicy = null,
+};
+
+pub const PeerCertificateChain = struct {
+    allocator: std.mem.Allocator,
+    certificates: []const []const u8,
+
+    pub fn deinit(self: *PeerCertificateChain) void {
+        for (self.certificates) |certificate| {
+            self.allocator.free(certificate);
+        }
+        self.allocator.free(self.certificates);
+        self.* = undefined;
+    }
 };
 
 pub const TrafficKeys = struct {
     read: tls_record.Keys,
     write: tls_record.Keys,
+    peer_certificate_chain: ?PeerCertificateChain = null,
 
     pub fn deinit(self: *TrafficKeys) void {
         self.read.deinit();
         self.write.deinit();
+        if (self.peer_certificate_chain) |*chain| chain.deinit();
         self.* = undefined;
     }
 };
@@ -121,6 +139,12 @@ pub fn perform(
                 .shared_secret = &shared_secret,
                 .certificate_chain = options.identity.certificate_chain,
                 .signer = signer,
+                .client_auth = if (options.client_auth) |client_auth|
+                    .{
+                        .certificate_authorities = client_auth.certificate_authorities,
+                    }
+                else
+                    null,
             },
         );
     defer handshake.handshake_secret.deinit();
@@ -134,17 +158,45 @@ pub fn perform(
         handshake.client_handshake_traffic_secret,
     );
     defer handshake_read_keys.deinit();
-    var client_finished: std.ArrayList(u8) = .empty;
-    defer client_finished.deinit(allocator);
-    try readEncryptedHandshake(
+    var client_flight: std.ArrayList(u8) = .empty;
+    defer client_flight.deinit(allocator);
+    try readEncryptedHandshakeFlight(
         allocator,
         io,
         stream,
         &handshake_read_keys,
-        &client_finished,
-        max_client_finished_len,
+        &client_flight,
+        if (options.client_auth == null)
+            max_client_finished_len
+        else
+            options.max_client_handshake_size,
     );
-    try verifyClientFinished(client_finished.items, &handshake);
+    var peer_certificate_chain: ?PeerCertificateChain = null;
+    errdefer if (peer_certificate_chain) |*chain| chain.deinit();
+    if (options.client_auth) |client_auth| {
+        const split = try splitAuthenticatedClientFlight(
+            client_flight.items,
+        );
+        var verification = try vail.tls.client_auth.verifyClientFlight(
+            allocator,
+            client_auth,
+            &.{},
+            handshake.transcript_state_after_server_finished,
+            handshake.client_handshake_traffic_secret,
+            split.certificate,
+            split.certificate_verify,
+            split.finished,
+        );
+        defer verification.deinit(allocator);
+        if (verification.authenticated()) {
+            peer_certificate_chain = try copyPeerCertificateChain(
+                allocator,
+                verification.certificate.entries,
+            );
+        }
+    } else {
+        try verifyClientFinished(client_flight.items, &handshake);
+    }
 
     var application = try vail.tls.key_schedule.deriveApplicationFor(
         handshake.handshake_secret,
@@ -165,6 +217,7 @@ pub fn perform(
             handshake.selection.suite,
             application.server_traffic_secret,
         ),
+        .peer_certificate_chain = peer_certificate_chain,
     };
 }
 
@@ -200,7 +253,7 @@ fn readCleartextHandshake(
     }
 }
 
-fn readEncryptedHandshake(
+fn readEncryptedHandshakeFlight(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,
@@ -244,13 +297,94 @@ fn readEncryptedHandshake(
             opened_storage[0..opened.len],
             max_message_size,
         );
-        if (try completeHandshakeLength(message.items)) |total_len| {
-            if (message.items.len != total_len) {
-                return error.ExpectedClientFinished;
-            }
-            return;
+        if (try flightEndsWithFinished(message.items)) return;
+    }
+}
+
+const AuthenticatedClientFlight = struct {
+    certificate: []const u8,
+    certificate_verify: ?[]const u8,
+    finished: []const u8,
+};
+
+fn splitAuthenticatedClientFlight(
+    bytes: []const u8,
+) Error!AuthenticatedClientFlight {
+    const certificate_len = try handshakeMessageLength(bytes);
+    if (bytes[0] != vail.tls.auth.handshake_type_certificate) {
+        return error.InvalidClientFlight;
+    }
+    var offset = certificate_len;
+    if (offset >= bytes.len) return error.InvalidClientFlight;
+
+    var certificate_verify: ?[]const u8 = null;
+    if (bytes[offset] == vail.tls.auth.handshake_type_certificate_verify) {
+        const verify_len = try handshakeMessageLength(bytes[offset..]);
+        certificate_verify = bytes[offset..][0..verify_len];
+        offset += verify_len;
+        if (offset >= bytes.len) return error.InvalidClientFlight;
+    }
+    const finished_len = try handshakeMessageLength(bytes[offset..]);
+    if (bytes[offset] !=
+        vail.tls.server_handshake.handshake_type_finished or
+        offset + finished_len != bytes.len)
+    {
+        return error.InvalidClientFlight;
+    }
+    return .{
+        .certificate = bytes[0..certificate_len],
+        .certificate_verify = certificate_verify,
+        .finished = bytes[offset..],
+    };
+}
+
+fn flightEndsWithFinished(bytes: []const u8) Error!bool {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        if (bytes.len - offset < 4) return false;
+        const message_len = try handshakeMessageLength(bytes[offset..]);
+        if (message_len > bytes.len - offset) return false;
+        const typ = bytes[offset];
+        offset += message_len;
+        if (typ == vail.tls.server_handshake.handshake_type_finished) {
+            if (offset != bytes.len) return error.InvalidClientFlight;
+            return true;
         }
     }
+    return false;
+}
+
+fn handshakeMessageLength(bytes: []const u8) Error!usize {
+    if (bytes.len < 4) return error.InvalidClientFlight;
+    const body_len =
+        (@as(usize, bytes[1]) << 16) |
+        (@as(usize, bytes[2]) << 8) |
+        bytes[3];
+    return std.math.add(usize, 4, body_len) catch
+        error.InvalidClientFlight;
+}
+
+fn copyPeerCertificateChain(
+    allocator: std.mem.Allocator,
+    certificates: []const []const u8,
+) Error!PeerCertificateChain {
+    var copies: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (copies.items) |certificate| allocator.free(certificate);
+        copies.deinit(allocator);
+    }
+    for (certificates) |certificate| {
+        const copy = try allocator.dupe(u8, certificate);
+        errdefer allocator.free(copy);
+        try copies.append(
+            allocator,
+            copy,
+        );
+    }
+    return .{
+        .allocator = allocator,
+        .certificates = try copies.toOwnedSlice(allocator),
+    };
 }
 
 fn verifyClientFinished(

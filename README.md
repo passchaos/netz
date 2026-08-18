@@ -393,7 +393,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   `std.Io.async` concurrent server helper, native MQTT-over-TLS clients with
   system or caller-provided CA roots and hostname verification plus TLS 1.3
   servers with caller-provided certificate chains/signers and concurrent
-  serving, and
+  serving, including optional/required client-certificate authentication,
+  pluggable trust verification, and verified peer-chain access, and
   MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with
   strict `mqtt` subprotocol
   negotiation, `ws://` plus client-side `wss://`, MQTT byte-stream
@@ -435,9 +436,10 @@ CONNECT/SUBSCRIBE/PUBLISH/PING/DISCONNECT flows, including QoS 1 and QoS 2
 publish acknowledgements. The TLS and
 WebSocket clients support `mqtts://`/`ssl://` and `wss://` respectively through
 the shared verified TLS client transport. The TLS server reuses the same MQTT
-broker-side state machine as TCP/WebSocket and currently performs server
-authentication only; client-certificate/mTLS and WSS termination remain
-separate work. Event loops, congestion control,
+broker-side state machine as TCP/WebSocket and supports optional or required
+TLS 1.3 client certificates with application-visible verified DER chains.
+Server-side WSS termination remains separate work. Event loops, congestion
+control,
 ICE/DTLS/SRTP state machines, and richer high-level clients/servers can layer on
 the same byte-level pieces.
 

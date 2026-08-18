@@ -495,6 +495,18 @@ test "public modules are reachable" {
         "CipherSuite",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "ClientAuthPolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "ClientCertificateVerifier",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.tls_runtime,
+        "ClientAuthRequirement",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.tls_runtime.Client,
         "connectHost",
     ));
@@ -513,6 +525,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.tls_runtime.ListenOptions,
         "identity",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ListenOptions,
+        "client_auth",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "peerCertificates",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt, "websocket_runtime"));
     try std.testing.expect(@hasDecl(

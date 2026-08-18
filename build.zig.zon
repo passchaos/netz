@@ -11,6 +11,7 @@
         "build.zig.zon",
         "src",
         "test",
+        "tools",
         "README.md",
         "LICENSE",
         ".gitignore",

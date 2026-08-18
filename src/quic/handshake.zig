@@ -1100,7 +1100,7 @@ fn connectAttempt(
         };
         if (!signer_supported) return error.UnsupportedSignatureScheme;
         try identity.validate();
-        try quic.tls.auth.writeCertificateWithContext(
+        try quic.tls.auth.writeClientCertificateWithContext(
             &client_certificate,
             endpoint.allocator,
             identity.certificate_chain,

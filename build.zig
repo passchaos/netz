@@ -47,6 +47,27 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_package_tests.step);
 
+    const mqtt_mtls_server = b.addExecutable(.{
+        .name = "netz-mqtt-mtls-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/mqtt_mtls_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const mqtt_mtls_openssl = b.addSystemCommand(
+        &.{"tools/interop/mqtt_mtls_openssl.sh"},
+    );
+    mqtt_mtls_openssl.addArtifactArg(mqtt_mtls_server);
+    const mqtt_mtls_interop_step = b.step(
+        "interop-mqtt-mtls-openssl",
+        "Exercise required and optional MQTT mTLS with OpenSSL",
+    );
+    mqtt_mtls_interop_step.dependOn(&mqtt_mtls_openssl.step);
+
     const example_specs = [_]struct {
         exe_name: []const u8,
         path: []const u8,

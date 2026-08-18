@@ -54,6 +54,17 @@ pub const Transport = union(enum) {
         return .{ .tls_server = connection };
     }
 
+    pub fn peerCertificates(
+        self: *const Transport,
+    ) ?[]const []const u8 {
+        return switch (self.*) {
+            .tls_server => |connection| connection.peerCertificates(),
+            // Client-side TLS peer inspection and non-TLS transports do not
+            // expose a client-authenticated identity through this broker API.
+            .tcp, .tls, .websocket => null,
+        };
+    }
+
     pub fn close(
         self: *Transport,
         allocator: std.mem.Allocator,

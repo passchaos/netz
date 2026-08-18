@@ -10,6 +10,9 @@ const net = std.Io.net;
 pub const ServerIdentity = vail.tls.auth.ServerIdentity;
 pub const ServerSigner = vail.tls.auth.Signer;
 pub const CipherSuite = vail.tls.cipher_suite.Suite;
+pub const ClientCertificateVerifier = vail.tls.auth.ClientVerifier;
+pub const ClientAuthPolicy = vail.tls.client_auth.ServerPolicy;
+pub const ClientAuthRequirement = vail.tls.client_auth.Requirement;
 
 /// Native MQTT-over-TLS listener using vail's TLS 1.3 primitives.
 ///
@@ -44,6 +47,8 @@ pub const Server = struct {
                 .identity = options.identity,
                 .cipher_suites = options.cipher_suites,
                 .max_client_hello_size = options.max_client_hello_size,
+                .max_client_handshake_size = options.max_client_handshake_size,
+                .client_auth = options.client_auth,
             },
             .tcp_nodelay = options.tcp_nodelay,
         };
@@ -140,6 +145,10 @@ pub const ListenOptions = struct {
     cipher_suites: []const CipherSuite =
         &vail.tls.cipher_suite.default_preference,
     max_client_hello_size: usize = 64 * 1024,
+    max_client_handshake_size: usize = 256 * 1024,
+    /// Request and verify a TLS 1.3 client certificate. `required` is the
+    /// default within the policy; use `.optional` to retain anonymous clients.
+    client_auth: ?ClientAuthPolicy = null,
     /// MQTT control packets are latency sensitive, matching the client
     /// default. Disable this when deliberate TCP batching is preferred.
     tcp_nodelay: bool = true,

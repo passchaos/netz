@@ -460,6 +460,15 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    /// Return the verified client certificate chain for an mTLS server
+    /// connection. The DER slices are owned by the transport and remain valid
+    /// until `close`; anonymous or non-mTLS transports return null.
+    pub fn peerCertificates(
+        self: *const Connection,
+    ) ?[]const []const u8 {
+        return self.transport.peerCertificates();
+    }
+
     /// Complete the broker side of MQTT CONNECT on an already-open transport.
     ///
     /// Transport adapters call this after their own opening handshake, which
