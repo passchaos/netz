@@ -48,20 +48,33 @@ pub const UnaryRequest = struct {
     }
 };
 
-pub fn parseUnaryRequest(
-    allocator: std.mem.Allocator,
-    request: *const http2.runtime.OwnedRequest,
-    max_message_size: usize,
-) Error!UnaryRequest {
-    if (!std.mem.eql(u8, request.method, "POST")) {
+/// Validated gRPC request metadata shared by unary and streaming calls.
+///
+/// Every slice borrows the HTTP/2 request headers/head that was supplied to
+/// `parseRequestMetadata`.
+pub const RequestMetadata = struct {
+    path: []const u8,
+    service: []const u8,
+    method: []const u8,
+    timeout: ?Timeout,
+    encoding: ?[]const u8,
+    accepted_encodings: AlgorithmSet,
+};
+
+pub fn parseRequestMetadata(
+    method: []const u8,
+    path_value: []const u8,
+    headers: []const http2.Hpack.HeaderField,
+) Error!RequestMetadata {
+    if (!std.mem.eql(u8, method, "POST")) {
         return error.InvalidGrpcRequest;
     }
     const content_type = findHeader(
-        request.headers,
+        headers,
         "content-type",
     ) orelse return error.InvalidContentType;
     if (!isContentType(content_type)) return error.InvalidContentType;
-    const te = findHeader(request.headers, "te") orelse
+    const te = findHeader(headers, "te") orelse
         return error.InvalidGrpcRequest;
     if (!std.ascii.eqlIgnoreCase(
         std.mem.trim(u8, te, " \t"),
@@ -69,12 +82,32 @@ pub fn parseUnaryRequest(
     )) {
         return error.InvalidGrpcRequest;
     }
-    const path = try splitMethodPath(request.path);
-    const timeout = if (findHeader(request.headers, "grpc-timeout")) |raw|
-        try Timeout.parse(raw)
-    else
-        null;
-    const encoding = findHeader(request.headers, "grpc-encoding");
+    const path = try splitMethodPath(path_value);
+    return .{
+        .path = path_value,
+        .service = path.service,
+        .method = path.method,
+        .timeout = if (findHeader(headers, "grpc-timeout")) |raw|
+            try Timeout.parse(raw)
+        else
+            null,
+        .encoding = findHeader(headers, "grpc-encoding"),
+        .accepted_encodings = compression_mod.parseAcceptEncoding(
+            findHeader(headers, "grpc-accept-encoding"),
+        ),
+    };
+}
+
+pub fn parseUnaryRequest(
+    allocator: std.mem.Allocator,
+    request: *const http2.runtime.OwnedRequest,
+    max_message_size: usize,
+) Error!UnaryRequest {
+    const metadata = try parseRequestMetadata(
+        request.method,
+        request.path,
+        request.headers,
+    );
     var iterator = MessageIterator.init(
         request.body,
         max_message_size,
@@ -84,11 +117,11 @@ pub fn parseUnaryRequest(
     if (try iterator.next() != null) {
         return error.InvalidMessageCount;
     }
-    try validateMessageEncoding(message, encoding);
+    try validateMessageEncoding(message, metadata.encoding);
     var decoded = try decodeReceivedMessage(
         allocator,
         message,
-        encoding,
+        metadata.encoding,
         AlgorithmSet.supported,
         max_message_size,
     );
@@ -96,19 +129,17 @@ pub fn parseUnaryRequest(
     return .{
         .allocator = allocator,
         .stream_id = request.stream_id,
-        .path = request.path,
-        .service = path.service,
-        .method = path.method,
+        .path = metadata.path,
+        .service = metadata.service,
+        .method = metadata.method,
         .message = .{
             .compressed = false,
             .payload = decoded.bytes,
         },
         .was_compressed = message.compressed,
-        .timeout = timeout,
-        .encoding = encoding,
-        .accepted_encodings = compression_mod.parseAcceptEncoding(
-            findHeader(request.headers, "grpc-accept-encoding"),
-        ),
+        .timeout = metadata.timeout,
+        .encoding = metadata.encoding,
+        .accepted_encodings = metadata.accepted_encodings,
         .headers = request.headers,
         .owned_message = decoded.owned,
     };
@@ -612,6 +643,13 @@ pub fn validateMessageEncoding(
     if (message.compressed and algorithm == .identity) {
         return error.CompressionNotNegotiated;
     }
+}
+
+pub fn headerValue(
+    headers: []const http2.Hpack.HeaderField,
+    name: []const u8,
+) ?[]const u8 {
+    return findHeader(headers, name);
 }
 
 pub fn statusFromHttp(status: u16) Status {

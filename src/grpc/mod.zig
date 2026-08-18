@@ -1,4 +1,5 @@
-//! gRPC wire semantics and unary calls over the netz HTTP/2 runtime.
+//! gRPC wire semantics plus unary and sequential message streams over the
+//! netz HTTP/2 runtime.
 //!
 //! Protobuf payloads remain opaque bytes at this layer. Applications can use
 //! `pbz` or another codec without coupling HTTP/2 transport state to a schema
@@ -7,9 +8,10 @@
 pub const wire = @import("wire.zig");
 pub const metadata = @import("metadata.zig");
 pub const compression = @import("compression.zig");
+pub const stream = @import("stream/mod.zig");
 pub const call = @import("call.zig");
 
-pub const Error = call.Error;
+pub const Error = stream.Error;
 pub const Status = wire.Status;
 pub const Message = wire.Message;
 pub const MessageIterator = wire.MessageIterator;
@@ -38,6 +40,18 @@ pub const formatCompressionAcceptEncodingInto =
     compression.formatAcceptEncodingInto;
 pub const compressMessageAlloc = compression.compressAlloc;
 pub const decompressMessageAlloc = compression.decompressAlloc;
+pub const StreamingMessage = stream.DecodedMessage;
+pub const MessageStreamDecoder = stream.Decoder;
+pub const MessageStreamEncoder = stream.Encoder;
+pub const StreamingRequestOptions = stream.RequestOptions;
+pub const StreamingClientWriter = stream.ClientWriter;
+pub const startStreamingCall = stream.startClient;
+pub const StreamingResponse = stream.Response;
+pub const StreamingRequest = stream.Request;
+pub const readStreamingRequest = stream.readRequest;
+pub const StreamingResponseOptions = stream.ResponseOptions;
+pub const StreamingServerWriter = stream.ServerWriter;
+pub const startStreamingResponse = stream.startResponse;
 
 pub const UnaryRequest = call.UnaryRequest;
 pub const UnaryCallOptions = call.UnaryCallOptions;
@@ -54,4 +68,5 @@ pub const validateMessageEncoding = call.validateMessageEncoding;
 
 test {
     _ = @import("tests.zig");
+    _ = stream;
 }

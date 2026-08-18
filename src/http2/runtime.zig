@@ -770,10 +770,31 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.requestStreamingWithHead(
+            options,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    /// Send a request and report final response HEADERS before any DATA.
+    ///
+    /// Protocol adapters such as gRPC need the selected content/message
+    /// encoding before decoding the first body bytes. The head borrows the
+    /// eventual `StreamingResponse` allocation and must not be retained.
+    pub fn requestStreamingWithHead(
+        self: *Connection,
+        options: RequestOptions,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         const pending = try self.sendCompleteRequest(options);
-        return self.readResponseStreaming(
+        return self.readResponseStreamingWithHead(
             pending,
             context,
+            begin,
             consume,
         );
     }
@@ -1903,13 +1924,47 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingRequest {
+        return self.readRequestStreamingWithHead(
+            context,
+            ignoreStreamingRequestHead,
+            consume,
+        );
+    }
+
+    /// Read a request while reporting its validated HEADERS before any DATA.
+    ///
+    /// `begin` and `consume` share `context`. The head and DATA slices are
+    /// borrowed for their callback duration; owned headers/trailers are
+    /// returned in `StreamingRequest`.
+    pub fn readRequestStreamingWithHead(
+        self: *Connection,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingRequest {
         if (self.role != .server) return error.UnexpectedFrame;
         if (self.popPendingRequest()) |pending_value| {
             var pending = pending_value;
             var pending_owned = true;
             errdefer if (pending_owned) pending.deinit(self.allocator);
+            begin(
+                context,
+                StreamingRequestHead.fromOwned(pending),
+            ) catch |err| {
+                self.sendResetStream(
+                    pending.stream_id,
+                    .cancel,
+                ) catch {};
+                return err;
+            };
             if (pending.body.len != 0) {
-                try consume(context, pending.body);
+                consume(context, pending.body) catch |err| {
+                    self.sendResetStream(
+                        pending.stream_id,
+                        .cancel,
+                    ) catch {};
+                    return err;
+                };
             }
             const result = streamingRequestFromOwned(pending);
             self.allocator.free(pending.body);
@@ -1959,6 +2014,24 @@ pub const Connection = struct {
                     return error.MessageTooLarge;
                 }
             }
+            begin(context, .{
+                .stream_id = stream_id,
+                .headers = headers,
+                .method = method,
+                .path = lookup.path orelse "",
+                .scheme = lookup.scheme orelse "",
+                .authority = lookup.requestAuthority(),
+                .protocol = protocol,
+            }) catch |err| {
+                // The peer's request half may already carry END_STREAM, but
+                // this server still owns the response half. Cancel the whole
+                // stream so a rejected head cannot leave the client waiting.
+                self.writeResetStreamFrame(
+                    stream_id,
+                    .cancel,
+                ) catch {};
+                return err;
+            };
 
             var trailers: []http2.Hpack.HeaderField = &.{};
             var trailers_owned = false;
@@ -1991,7 +2064,25 @@ pub const Connection = struct {
                                 return error.MessageTooLarge;
                             }
                             if (data.data.len != 0) {
-                                try consume(context, data.data);
+                                consume(context, data.data) catch |err| {
+                                    // Mirror the response-side callback
+                                    // contract: once DATA has been consumed
+                                    // from the receive window, restore exact
+                                    // credit and cancel this stream before
+                                    // surfacing the application error.
+                                    self.releaseReceivedCapacity(
+                                        stream_id,
+                                        frame.payload.len,
+                                    ) catch {};
+                                    // Even final request DATA leaves the
+                                    // server response half open; terminate it
+                                    // when the application rejects the body.
+                                    self.writeResetStreamFrame(
+                                        stream_id,
+                                        .cancel,
+                                    ) catch {};
+                                    return err;
+                                };
                             }
                             try self.maybeReleaseReceivedCapacity(stream_id);
                             if ((frame.header.flags & flag_end_stream) != 0) {
@@ -3271,6 +3362,21 @@ pub const Connection = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.readResponseStreamingWithHead(
+            pending,
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    fn readResponseStreamingWithHead(
+        self: *Connection,
+        pending: PendingResponse,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         const stream_id = pending.stream_id;
         defer self.releaseLocalStream(stream_id);
         var headers: ?[]http2.Hpack.HeaderField = null;
@@ -3358,6 +3464,18 @@ pub const Connection = struct {
                     decoded_owned = false;
                     status_value = status;
                     expected_body_len = lookup.content_length;
+                    begin(context, StreamingResponseHead{
+                        .headers = decoded,
+                        .status = status,
+                    }) catch |err| {
+                        if ((frame.header.flags & flag_end_stream) == 0) {
+                            self.writeResetStreamFrame(
+                                stream_id,
+                                .cancel,
+                            ) catch {};
+                        }
+                        return err;
+                    };
                     if (responseForbidsBody(
                         status,
                         pending.request_method,
@@ -4573,6 +4691,29 @@ pub const StreamingRequest = struct {
     }
 };
 
+/// Validated request metadata delivered before streaming DATA.
+pub const StreamingRequestHead = struct {
+    stream_id: u31,
+    headers: []const http2.Hpack.HeaderField,
+    method: []const u8,
+    path: []const u8,
+    scheme: []const u8,
+    authority: ?[]const u8,
+    protocol: ?[]const u8 = null,
+
+    fn fromOwned(request: OwnedRequest) StreamingRequestHead {
+        return .{
+            .stream_id = request.stream_id,
+            .headers = request.headers,
+            .method = request.method,
+            .path = request.path,
+            .scheme = request.scheme,
+            .authority = request.authority,
+            .protocol = request.protocol,
+        };
+    }
+};
+
 fn streamingRequestFromOwned(request: OwnedRequest) StreamingRequest {
     return .{
         .stream_id = request.stream_id,
@@ -4617,6 +4758,28 @@ pub const StreamingResponse = struct {
         self.* = undefined;
     }
 };
+
+/// Final (non-informational) response metadata delivered before DATA.
+pub const StreamingResponseHead = struct {
+    headers: []const http2.Hpack.HeaderField,
+    status: u16,
+};
+
+fn ignoreStreamingRequestHead(
+    context: anytype,
+    head: StreamingRequestHead,
+) !void {
+    _ = context;
+    _ = head;
+}
+
+fn ignoreStreamingResponseHead(
+    context: anytype,
+    head: StreamingResponseHead,
+) !void {
+    _ = context;
+    _ = head;
+}
 
 pub const RequestWriter = struct {
     connection: *Connection,
@@ -4759,6 +4922,19 @@ pub const RequestWriter = struct {
         context: anytype,
         comptime consume: anytype,
     ) !StreamingResponse {
+        return self.readResponseStreamingWithHead(
+            context,
+            ignoreStreamingResponseHead,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithHead(
+        self: *RequestWriter,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
         if (!self.body_finished or self.completed) {
             return error.UnexpectedFrame;
         }
@@ -4768,9 +4944,10 @@ pub const RequestWriter = struct {
             .request_method = if (self.head_request) "HEAD" else "POST",
             .extended_connect = false,
         };
-        const response = connection.readResponseStreaming(
+        const response = connection.readResponseStreamingWithHead(
             pending,
             context,
+            begin,
             consume,
         ) catch |err| {
             // The streaming reader also releases on every exit path.

@@ -42,6 +42,38 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "unaryCall"));
     try std.testing.expect(@hasDecl(netz.grpc, "parseUnaryRequest"));
     try std.testing.expect(@hasDecl(netz.grpc, "writeUnaryResponse"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "MessageStreamDecoder",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "MessageStreamEncoder",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "startStreamingCall",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "readStreamingRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "startStreamingResponse",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.StreamingClientWriter,
+        "writeMessage",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.StreamingClientWriter,
+        "finishAndRead",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.StreamingServerWriter,
+        "finishOk",
+    ));
     try std.testing.expect(@hasDecl(netz, "tls"));
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
     try std.testing.expect(@hasDecl(
@@ -112,6 +144,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "requestStreaming",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestStreamingWithHead",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "readRequestStreamingWithHead",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.RequestWriter,
+        "readResponseStreamingWithHead",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "StreamingRequestHead",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "StreamingResponseHead",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime,

@@ -38,7 +38,19 @@ existing HTTP/2 runtime:
   requested response encoding,
 - unary HTTP/2 client/server helpers with initial metadata, trailing metadata,
   trailers-only errors, configurable message-size limits, and explicit
-  ownership for decoded request and response messages.
+  ownership for decoded request and response messages,
+- sequential request/response message-stream helpers over HTTP/2
+  `RequestWriter`, `ResponseWriter`, and borrowed DATA callbacks,
+- validated final request/response HEADERS callbacks before the first DATA
+  bytes, so message encoding is known before incremental decoding,
+- bounded incremental reassembly when the five-byte gRPC prefix or payload
+  crosses any callback, while several messages in one callback are delivered
+  immediately,
+- a zero-copy path for complete uncompressed messages and one exact-size
+  allocation only when a message spans callbacks,
+- independent gzip/deflate context per streamed message, terminal
+  `grpc-status`/trailer parsing, and HTTP/2 stream reset for a truncated request
+  message at END_STREAM.
 
 Payloads intentionally remain opaque. This keeps gRPC transport reusable with
 generated or dynamic protobuf implementations; the user-owned
@@ -65,18 +77,21 @@ encoding, gzip/deflate round trips, decompression limits, raw-deflate and
 trailing-data rejection, tiny-message compression fallback, asymmetric
 request/response negotiation, unaccepted-response fallback, successful unary
 calls with trailers, trailers-only errors with custom metadata, and a real
-HTTP 503 response without `grpc-status`.
+HTTP 503 response without `grpc-status`. Stream tests sweep every byte split
+across three coalesced messages, split a prefix across separate HTTP/2 writes,
+force large gzip/deflate messages across small DATA frames in both directions,
+verify independent compressed members, and require RST_STREAM(INTERNAL_ERROR)
+for an incomplete request message.
 
 ## Remaining work before broad gRPC parity
 
-1. Build gRPC message-stream APIs on the HTTP/2 streaming primitives
-   (`RequestWriter`, `readRequestStreaming`, `requestStreaming`, and
-   `ResponseWriter`),
-   including frame reassembly when a 5-byte gRPC prefix or payload spans DATA
-   callbacks and per-message compression without cross-message context. The
-   HTTP/2 RequestWriter already preserves an early server status while a client
-   upload is flow-control blocked, matching the cancellation edge exercised by
-   upstream gRPC Core's client-streaming tests.
+1. Add an interleaved full-duplex scheduler. The current blocking API supports
+   multiple client-streamed messages followed by multiple server-streamed
+   messages on one call, but deliberately finishes the request half before
+   reading the response half. The HTTP/2 RequestWriter already preserves an
+   early server status while an upload is flow-control blocked; the next layer
+   must expose that early response as gRPC status and allow simultaneous bidi
+   message progress.
 2. Add TLS/ALPN HTTP/2 transport and interoperate with upstream grpc clients
    and servers, not only netz's h2c runtime.
 3. Build generated service/client bindings on `pbz`, including unary and all
@@ -84,5 +99,5 @@ HTTP 503 response without `grpc-status`.
 4. Add cancellation/deadline enforcement, RST_STREAM status mapping, retry
    policy, health checking, reflection, and conformance/interop runners.
 
-The current tests establish the first real gRPC wire and unary transport
-increment; they are not evidence of full gRPC Core feature parity.
+The current tests establish unary plus sequential client/server message
+streaming, not full gRPC Core feature parity.

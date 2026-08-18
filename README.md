@@ -145,9 +145,13 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   `~/project-z/vort`, bounded decompression, typed
   `grpc-accept-encoding` negotiation, asymmetric request/response algorithms,
   and gRPC Core-compatible fallback when compression does not shrink a message,
-  plus unary h2c
-  client/server helpers with opaque protobuf payloads, initial/trailing
-  metadata, trailers-only errors, decoded-message ownership, and `grpc-status`
+  plus unary and sequential request/response message-stream h2c client/server
+  helpers with opaque protobuf payloads, initial/trailing metadata,
+  final HEADERS-before-DATA callbacks, arbitrary prefix/payload split
+  reassembly, several messages per DATA callback, zero-copy complete
+  uncompressed messages, exact allocation for split messages, independent
+  per-message compression, trailers-only errors, decoded-message ownership,
+  truncated-message stream reset, and `grpc-status`
   enforcement; protobuf codecs remain an application-layer
   choice so the transport can integrate with `~/project-z/pbz` without a hard
   dependency
