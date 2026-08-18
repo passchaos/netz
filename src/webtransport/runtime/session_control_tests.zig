@@ -284,3 +284,95 @@ test "WebTransport session control parses split framed capsules and skips unknow
         try std.testing.expect(second.? == .draining);
     }
 }
+
+test "Protected session control retains close after drain event" {
+    const protected =
+        @import("protected_session_control.zig");
+    const control_module = @import("session_control.zig");
+
+    var drain_storage: [16]u8 = undefined;
+    const drain = try control_module.writeDrainInto(&drain_storage);
+    var close_storage: [64]u8 = undefined;
+    const close = try control_module.writeCloseInto(
+        &close_storage,
+        17,
+        "after drain",
+    );
+    var joined: [80]u8 = undefined;
+    @memcpy(joined[0..drain.len], drain);
+    @memcpy(joined[drain.len..][0..close.len], close);
+
+    var reader = protected.Reader.init(
+        try control_module.Control.init(.init(0)),
+    );
+    const first = (try reader.consume(
+        joined[0 .. drain.len + close.len],
+    )).?;
+    try std.testing.expect(first == .draining);
+    const second = (try reader.pollPending()).?;
+    try std.testing.expect(second == .closed);
+    try std.testing.expectEqual(@as(u32, 17), second.closed.code);
+    try std.testing.expectEqualStrings(
+        "after drain",
+        second.closed.reason,
+    );
+}
+
+test "Protected session control retains maximum close after drain event" {
+    const protected =
+        @import("protected_session_control.zig");
+    const control_module = @import("session_control.zig");
+
+    var reason: [control_module.max_close_reason]u8 = undefined;
+    @memset(&reason, 'x');
+    var drain_storage: [16]u8 = undefined;
+    const drain = try control_module.writeDrainInto(&drain_storage);
+    var close_storage: [4 + control_module.max_close_reason + 16]u8 = undefined;
+    const close = try control_module.writeCloseInto(
+        &close_storage,
+        29,
+        &reason,
+    );
+    var joined: [protected.buffer_capacity]u8 = undefined;
+    try std.testing.expect(drain.len + close.len <= joined.len);
+    @memcpy(joined[0..drain.len], drain);
+    @memcpy(joined[drain.len..][0..close.len], close);
+
+    var reader = protected.Reader.init(
+        try control_module.Control.init(.init(0)),
+    );
+    const first = (try reader.consume(
+        joined[0 .. drain.len + close.len],
+    )).?;
+    try std.testing.expect(first == .draining);
+    const second = (try reader.pollPending()).?;
+    try std.testing.expect(second == .closed);
+    try std.testing.expectEqual(@as(u32, 29), second.closed.code);
+    try std.testing.expectEqualSlices(u8, &reason, second.closed.reason);
+}
+
+test "Protected session control clean FIN closes only at capsule boundary" {
+    const protected =
+        @import("protected_session_control.zig");
+    const control_module = @import("session_control.zig");
+
+    var clean = protected.Reader.init(
+        try control_module.Control.init(.init(0)),
+    );
+    const closed = (try clean.finish()).?;
+    try std.testing.expect(closed == .closed);
+    try std.testing.expectEqual(@as(u32, 0), closed.closed.code);
+    try std.testing.expectEqualStrings("", closed.closed.reason);
+
+    var partial = protected.Reader.init(
+        try control_module.Control.init(.init(0)),
+    );
+    var close_storage: [64]u8 = undefined;
+    const close = try control_module.writeCloseInto(
+        &close_storage,
+        31,
+        "partial",
+    );
+    try std.testing.expect((try partial.consume(close[0..3])) == null);
+    try std.testing.expectError(error.InvalidCapsule, partial.finish());
+}

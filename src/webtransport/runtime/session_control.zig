@@ -235,6 +235,48 @@ pub const Control = struct {
         return (try self.consume(bytes)).event;
     }
 
+    /// Feed Capsule Protocol payload bytes after HTTP/3 DATA framing has
+    /// already been removed by a higher-level streaming reader.
+    ///
+    /// `consumed` lets adapters retain any bytes after the first event in a
+    /// fixed pending buffer and replay them on the next poll.
+    pub fn feedCapsulePayload(
+        self: *Control,
+        bytes: []const u8,
+    ) Error!struct {
+        consumed: usize,
+        event: ?Event,
+    } {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            if (self.terminal_reported) return error.InvalidCapsule;
+            const event = try self.feedCapsuleByte(bytes[offset]);
+            offset += 1;
+            if (event) |value| {
+                return .{ .consumed = offset, .event = value };
+            }
+        }
+        return .{ .consumed = offset, .event = null };
+    }
+
+    /// Interpret clean Extended CONNECT FIN after the H3 layer consumed all
+    /// DATA frames. A partial capsule at FIN is a protocol error.
+    pub fn finishCapsulePayload(self: *Control) Error!?Event {
+        if (self.terminal_reported) return null;
+        if (self.capsule_stage != .capsule_type or
+            self.capsule_varint.len != 0)
+        {
+            return error.InvalidCapsule;
+        }
+        self.close_reason_len = 0;
+        self.terminal_reported = true;
+        self.state.close(0);
+        return .{ .closed = .{
+            .code = 0,
+            .reason = self.close_reason[0..0],
+        } };
+    }
+
     fn finishH3Frame(self: *Control) void {
         self.h3_stage = .frame_type;
         self.h3_frame_type = 0;

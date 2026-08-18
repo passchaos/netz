@@ -40,7 +40,7 @@ WebTransport DATAGRAM round trip and transport statistics.
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
 | Bidirectional streams | Real-handshake open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental reads, reset/stop and lifecycle/limits | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop |
 | Unidirectional streams | Real-handshake both directions, incremental reads, reset/stop and lifecycle/limits | Session registry and header codec | Production async uni streams with read/reset/stop |
-| Close/drain capsule codec | Real-handshake runtime send/receive, split frame/capsule parsing, clean-FIN close, UTF-8/1024-byte validation and SESSION_GONE stream cleanup | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver handles close while drain support is absent |
+| Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver handles close while drain support is absent |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
 ## Important interoperability correction
@@ -118,24 +118,34 @@ Focused tests sweep every split point around an unknown capsule followed by
 WT_DRAIN_SESSION, while real-handshake tests cover drain, post-drain stream
 traffic, detailed close, clean-FIN close and post-close rejection.
 
-The lightweight preconfigured-key protected runtime now also establishes
+The lightweight preconfigured-key protected runtime also establishes
 WebTransport with incremental HTTP/3 request/response HEADERS rather than the
 aggregate helpers that set QUIC FIN. `sendSessionData` and
 `receiveSessionData` expose bounded caller-buffer DATA on that long-lived
-Extended CONNECT stream in both directions. Its end-to-end test exchanges
-client/server control bytes and then a DATAGRAM on the same Session, so a pass
-cannot be explained by a CONNECT stream that ended immediately after status
-200. Full WT_DRAIN_SESSION/WT_CLOSE_SESSION state remains on the
-production-oriented handshake runtime until the lightweight protected runtime
-owns a stateful recovery connection.
+Extended CONNECT stream in both directions. Its typed `drain`, `close`, and
+`receiveSessionEvent` APIs now reuse the shared incremental Capsule state
+machine after HTTP/3 removes DATA framing. A fixed reader buffer is sized for a
+maximum legal CLOSE capsule and retains bytes after the first event, including
+DRAIN and a 1024-byte-reason CLOSE in one DATA payload. Clean FIN maps to
+close code zero; partial capsules at FIN fail, malformed capsules cancel the
+request with H3_MESSAGE_ERROR, and operations after local close fail.
+
+The protected end-to-end test fragments HTTP/3 across five-byte QUIC STREAM
+payloads, receives DRAIN, exchanges a DATAGRAM after that advisory event,
+receives a detailed client CLOSE, and completes the opposite CONNECT direction
+with FIN. Thus a pass cannot be explained by a CONNECT stream that ended
+immediately after status 200. Associated bidi/uni streams and SESSION_GONE
+cleanup remain on the production-oriented handshake runtime because the
+lightweight protected transport does not own a stateful recovery connection.
 
 ## Remaining gaps
 
 1. Expose associated bidi/uni stream APIs on preconfigured protected and
-   development runtimes. Protected CONNECT/Capsule DATA is now long-lived, but
-   the lightweight protected HTTP/3 runtime deliberately lacks a full
-   `one_rtt.Connection`; association streams must not be advertised until ACK,
-   recovery, flow control and reset/stop state share one connection owner.
+   development runtimes. Protected CONNECT/Capsule lifecycle is now
+   long-lived, but the lightweight protected HTTP/3 runtime deliberately lacks
+   a full `one_rtt.Connection`; association streams must not be advertised
+   until ACK, recovery, flow control and reset/stop state share one connection
+   owner.
 2. Add external `wtransport` client/server interoperability runs and browser
    WebTransport evidence.
 3. Add larger concurrent stream, stream-churn and cancellation-under-loss

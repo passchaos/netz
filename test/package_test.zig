@@ -1241,8 +1241,32 @@ test "public modules are reachable" {
         "receiveSessionData",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "receiveSessionEvent",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "close",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.ProtectedClientSession,
+        "drain",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.ProtectedServer,
         "sendSessionData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedProtectedSession,
+        "drain",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedProtectedSession,
+        "close",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedProtectedSession,
+        "receiveSessionEvent",
     ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime, "HandshakeClientSession"));
     try std.testing.expect(@hasField(netz.webtransport.runtime.OwnedHandshakeDatagram, "bytes"));

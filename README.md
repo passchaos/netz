@@ -429,7 +429,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
 - WebTransport capsules, unidirectional stream headers, CONNECT metadata with client-bidi session-id validation and `Capsule-Protocol` request/response advertisement, and
   datagram mapping, session lifecycle/counter state, protected-runtime
   long-lived Extended CONNECT setup with bidirectional caller-buffer Capsule
-  DATA followed by same-Session DATAGRAM traffic, plus a cleartext
+  DATA, incremental WT_DRAIN_SESSION/WT_CLOSE_SESSION events, detailed and
+  clean-FIN close, post-drain same-Session DATAGRAM traffic, and post-close
+  operation rejection, plus a cleartext
   development runtime over the HTTP/3 dev transport, a protected QUIC 1-RTT
   runtime over protected HTTP/3 with automatic WebTransport/H3 DATAGRAM
   SETTINGS advertisement and negotiation checks, and a handshake-backed
@@ -492,7 +494,10 @@ scheduling, with independent FIN and blocking write-all compatibility. Their
 Extended CONNECT streams remain open for bounded incremental Capsule Protocol
 control, including advisory drain, detailed/clean close, split DATA/capsule
 parsing, UTF-8 reason validation and WT_SESSION_GONE cleanup of associated
-streams.
+streams. The lightweight preconfigured-key protected runtime shares the same
+incremental Capsule parser and drain/close semantics, including same-chunk
+event retention through the largest valid 1024-byte close reason; associated
+stream cleanup remains specific to the stateful real-handshake runtime.
 
 ## Build
 

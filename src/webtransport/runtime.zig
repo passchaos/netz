@@ -6,12 +6,14 @@ const quic = @import("../quic/mod.zig");
 const net = std.Io.net;
 const datagram_stack_capacity: usize = 4096;
 const session_control = @import("runtime/session_control.zig");
+const protected_control =
+    @import("runtime/protected_session_control.zig");
 
 pub const Error = webtransport.Error || http3.runtime.Error || error{
     InvalidConnect,
     MissingDatagram,
     InvalidSessionState,
-};
+} || protected_control.Error;
 
 pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
@@ -100,6 +102,9 @@ pub const ProtectedServer = struct {
                 .request = request_head,
             },
             .session_id = session_id,
+            .control = protected_control.Reader.init(
+                try session_control.Control.init(session_id),
+            ),
         };
     }
 
@@ -264,10 +269,69 @@ pub const AcceptedSession = struct {
 pub const AcceptedProtectedSession = struct {
     request: OwnedProtectedConnectRequest,
     session_id: webtransport.SessionId,
+    control: protected_control.Reader,
 
     pub fn deinit(self: *AcceptedProtectedSession, allocator: std.mem.Allocator) void {
         self.request.deinit(allocator);
         self.* = undefined;
+    }
+
+    pub fn drain(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+    ) Error!void {
+        if (self.control.control.local_drain_sent) return;
+        try self.control.control.ensureOpen();
+        var encoded: [16]u8 = undefined;
+        const capsule = try session_control.writeDrainInto(&encoded);
+        try server.sendSessionData(
+            self.request.from,
+            self.session_id,
+            capsule,
+            false,
+        );
+        try self.control.control.recordLocalDrain();
+    }
+
+    pub fn close(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.control.control.local_close_sent) return;
+        try self.control.control.ensureOpen();
+        var encoded: [4 + session_control.max_close_reason + 16]u8 =
+            undefined;
+        const capsule = try session_control.writeCloseInto(
+            &encoded,
+            code,
+            reason,
+        );
+        try server.sendSessionData(
+            self.request.from,
+            self.session_id,
+            capsule,
+            true,
+        );
+        try self.control.control.recordLocalClose(code);
+    }
+
+    pub fn receiveSessionEvent(
+        self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
+    ) Error!SessionEvent {
+        return receiveProtectedServerEvent(server, self) catch |err| switch (err) {
+            error.InvalidCapsule => {
+                try server.h3.cancelRequest(
+                    self.request.from,
+                    self.session_id.value,
+                    http3.ApplicationErrorCode.message_error,
+                );
+                return err;
+            },
+            else => return err,
+        };
     }
 };
 
@@ -905,6 +969,7 @@ pub const HandshakeClientSession = struct {
 pub const ProtectedClientSession = struct {
     h3: http3.runtime.ProtectedClient,
     session_id: webtransport.SessionId,
+    control: protected_control.Reader,
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -933,6 +998,11 @@ pub const ProtectedClientSession = struct {
         return .{
             .h3 = h3_client,
             .session_id = .init(session_stream_id),
+            .control = protected_control.Reader.init(
+                try session_control.Control.init(
+                    .init(session_stream_id),
+                ),
+            ),
         };
     }
 
@@ -942,6 +1012,7 @@ pub const ProtectedClientSession = struct {
     }
 
     pub fn sendDatagram(self: *ProtectedClientSession, payload: []const u8) Error!void {
+        try self.control.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         try sendProtectedDatagramFromEndpoint(
             &self.h3.quic_client.endpoint,
@@ -955,6 +1026,7 @@ pub const ProtectedClientSession = struct {
     }
 
     pub fn receiveDatagram(self: *ProtectedClientSession) Error!OwnedProtectedDatagram {
+        try self.control.control.ensureOpen();
         try webtransport.ensureDatagramsNegotiated(self.h3.config.local_settings, self.h3.control.settings.peer);
         return receiveProtectedDatagramFromEndpoint(
             &self.h3.quic_client.endpoint,
@@ -976,6 +1048,7 @@ pub const ProtectedClientSession = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        try self.control.control.ensureOpen();
         try self.h3.sendRequestBody(
             self.session_id.value,
             data,
@@ -1005,12 +1078,137 @@ pub const ProtectedClientSession = struct {
             }
         }
     }
+
+    pub fn drain(self: *ProtectedClientSession) Error!void {
+        if (self.control.control.local_drain_sent) return;
+        var encoded: [16]u8 = undefined;
+        const capsule = try session_control.writeDrainInto(&encoded);
+        try self.sendSessionData(capsule, false);
+        try self.control.control.recordLocalDrain();
+    }
+
+    pub fn close(
+        self: *ProtectedClientSession,
+        code: u32,
+        reason: []const u8,
+    ) Error!void {
+        if (self.control.control.local_close_sent) return;
+        var encoded: [4 + session_control.max_close_reason + 16]u8 =
+            undefined;
+        const capsule = try session_control.writeCloseInto(
+            &encoded,
+            code,
+            reason,
+        );
+        try self.sendSessionData(capsule, true);
+        try self.control.control.recordLocalClose(code);
+    }
+
+    pub fn receiveSessionEvent(
+        self: *ProtectedClientSession,
+    ) Error!SessionEvent {
+        return receiveProtectedClientEvent(self) catch |err| switch (err) {
+            error.InvalidCapsule => {
+                try self.h3.cancelRequest(
+                    self.session_id.value,
+                    http3.ApplicationErrorCode.message_error,
+                );
+                return err;
+            },
+            else => return err,
+        };
+    }
 };
 
 pub const ProtectedSessionRead = struct {
     bytes: usize = 0,
     fin: bool = false,
 };
+
+fn receiveProtectedServerEvent(
+    server: *ProtectedServer,
+    session: *AcceptedProtectedSession,
+) Error!SessionEvent {
+    if (try session.control.pollPending()) |event| {
+        return completeProtectedServerEvent(server, session, event);
+    }
+    var buffer: [protected_control.buffer_capacity]u8 = undefined;
+    while (true) {
+        const read = try server.receiveSessionData(
+            session.session_id,
+            &buffer,
+        );
+        if (read.fin) {
+            const event = (try session.control.finish()) orelse
+                return error.InvalidSessionState;
+            return completeProtectedServerEvent(server, session, event);
+        }
+        if (try session.control.consume(buffer[0..read.bytes])) |event| {
+            return completeProtectedServerEvent(server, session, event);
+        }
+    }
+}
+
+fn completeProtectedServerEvent(
+    server: *ProtectedServer,
+    session: *AcceptedProtectedSession,
+    event: SessionEvent,
+) Error!SessionEvent {
+    if (event == .closed and
+        !session.control.control.local_close_sent)
+    {
+        // CLOSE (or a clean peer FIN) terminates only the peer's CONNECT
+        // direction. Finish our direction as well without synthesizing a
+        // second CLOSE capsule.
+        try server.sendSessionData(
+            session.request.from,
+            session.session_id,
+            &.{},
+            true,
+        );
+        session.control.control.local_close_sent = true;
+    }
+    return event;
+}
+
+fn receiveProtectedClientEvent(
+    session: *ProtectedClientSession,
+) Error!SessionEvent {
+    if (try session.control.pollPending()) |event| {
+        return completeProtectedClientEvent(session, event);
+    }
+    var buffer: [protected_control.buffer_capacity]u8 = undefined;
+    while (true) {
+        const read = try session.receiveSessionData(&buffer);
+        if (read.fin) {
+            const event = (try session.control.finish()) orelse
+                return error.InvalidSessionState;
+            return completeProtectedClientEvent(session, event);
+        }
+        if (try session.control.consume(buffer[0..read.bytes])) |event| {
+            return completeProtectedClientEvent(session, event);
+        }
+    }
+}
+
+fn completeProtectedClientEvent(
+    session: *ProtectedClientSession,
+    event: SessionEvent,
+) Error!SessionEvent {
+    if (event == .closed and
+        !session.control.control.local_close_sent)
+    {
+        // The parser has already closed the public Session state, so bypass
+        // sendSessionData's open-state guard for this mandatory FIN reply.
+        try session.h3.sendRequestBody(
+            session.session_id.value,
+            &.{},
+            true,
+        );
+        session.control.control.local_close_sent = true;
+    }
+    return event;
+}
 
 pub const ConnectOptions = struct {
     authority: []const u8,
@@ -1578,28 +1776,23 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
                 expected_control,
                 control_buffer[0..control_len],
             );
-            try server_ptr.sendSessionData(
-                accepted.request.from,
-                accepted.session_id,
-                "protected-server-control",
-                false,
-            );
+            try accepted.drain(server_ptr);
             var datagram = try server_ptr.receiveDatagram();
             defer datagram.deinit(server_ptr.h3.quic_server.endpoint.allocator);
             try std.testing.expectEqual(accepted.session_id.value, datagram.datagram.session_id.value);
             try std.testing.expectEqualStrings("protected-client-dgram", datagram.datagram.payload);
             try server_ptr.sendDatagram(datagram.packet.from, accepted.session_id, "protected-server-dgram");
-            const client_fin = try server_ptr.receiveSessionData(
-                accepted.session_id,
-                &control_buffer,
+            const close_event = try accepted.receiveSessionEvent(
+                server_ptr,
             );
-            try std.testing.expect(client_fin.fin);
-            try std.testing.expectEqual(@as(usize, 0), client_fin.bytes);
-            try server_ptr.sendSessionData(
-                accepted.request.from,
-                accepted.session_id,
-                &.{},
-                true,
+            try std.testing.expect(close_event == .closed);
+            try std.testing.expectEqual(
+                @as(u32, 91),
+                close_event.closed.code,
+            );
+            try std.testing.expectEqualStrings(
+                "protected done",
+                close_event.closed.reason,
             );
         }
     };
@@ -1622,29 +1815,22 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     defer client.deinit();
 
     try client.sendSessionData("protected-client-control", false);
-    var control_buffer: [64]u8 = undefined;
-    const expected_control = "protected-server-control";
-    var control_len: usize = 0;
-    while (control_len < expected_control.len) {
-        const control = try client.receiveSessionData(
-            control_buffer[control_len..],
-        );
-        try std.testing.expect(!control.fin);
-        control_len += control.bytes;
-    }
-    try std.testing.expectEqualStrings(
-        expected_control,
-        control_buffer[0..control_len],
-    );
+    const drain = try client.receiveSessionEvent();
+    try std.testing.expect(drain == .draining);
     try client.sendDatagram("protected-client-dgram");
     var response = try client.receiveDatagram();
     defer response.deinit(allocator);
     try std.testing.expectEqual(client.session_id.value, response.datagram.session_id.value);
     try std.testing.expectEqualStrings("protected-server-dgram", response.datagram.payload);
-    try client.sendSessionData(&.{}, true);
-    const server_fin = try client.receiveSessionData(&control_buffer);
-    try std.testing.expect(server_fin.fin);
-    try std.testing.expectEqual(@as(usize, 0), server_fin.bytes);
+    try client.close(91, "protected done");
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        client.sendDatagram("protected-late"),
+    );
+    const peer_fin = try client.receiveSessionEvent();
+    try std.testing.expect(peer_fin == .closed);
+    try std.testing.expectEqual(@as(u32, 0), peer_fin.closed.code);
+    try std.testing.expectEqualStrings("", peer_fin.closed.reason);
 
     thread.join();
     if (shared.err) |err| return err;
