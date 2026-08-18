@@ -8,6 +8,7 @@ pub const tls_runtime = @import("tls_runtime.zig");
 pub const router = @import("router.zig");
 pub const retained = @import("retained/mod.zig");
 pub const session = @import("session/mod.zig");
+pub const persistence = @import("persistence/mod.zig");
 pub const will_scheduler = @import("will/mod.zig");
 pub const testing = @import("testing/mod.zig");
 

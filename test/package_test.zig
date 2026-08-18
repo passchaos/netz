@@ -493,6 +493,19 @@ test "public modules are reachable" {
         "messageExpiryInterval",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt, "retained"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "persistence"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.persistence,
+        "saveAtomic",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "saveSnapshot",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker.Broker,
+        "restoreSnapshot",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.retained, "Store"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.retained.Store,

@@ -22,14 +22,55 @@ and equal-wire broker results are kept separate.
 | Broker sessions | Live Session Present/Clean Start/Expiry/takeover, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
-| Broker persistence | No disk commitlog yet | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, inflight/queued messages and retained base-message store |
+| Broker persistence | Atomic versioned snapshots for retained messages and durable Session subscriptions plus queued/inflight outgoing QoS 1/2 state | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, inflight/queued messages and retained base-message store |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the
 important low-remapping invariant: when one member joins, only topics that
 select that new member move. It does not replace rumqttd's broader durable
-broker architecture or Mosquitto's integrated persistence and protocol
+broker architecture or Mosquitto's full persistence plugin and protocol
 surface.
+
+## Atomic broker snapshots
+
+The live broker now follows the durability shape audited in Mosquitto
+`persist_write.c` and `mosquitto_write_file`: serialize a coherent in-memory
+view, write a restricted temporary file, `fsync` it, then atomically replace
+the destination. Netz uses Zig 0.16 `std.Io.File.Atomic` rather than hand-written
+temporary-name logic.
+
+The versioned binary format has whole-file and per-section CRC32 checks and
+persists:
+
+- unexpired retained messages, forwarding properties and publisher identity,
+- durable ClientID Session metadata and stable router identity,
+- complete subscription options and Subscription Identifier,
+- offline queued QoS 1/2 messages,
+- outgoing inflight QoS 1/2 state, Packet Identifier and PUBREL continuation,
+
+`Broker.saveSnapshot` is a quiescent shutdown/admin operation: it holds the
+broker state lock and rejects live clients, pending broker QoS 2 transactions
+or Wills rather than racing a network writer that has emitted but not yet
+acknowledged a frame. `Broker.restoreSnapshot` has the same transient-state
+gate and is intended for startup; it decodes retained and Session sections into
+temporary stores, rebuilds a temporary router, and commits all three only after
+every validation/allocation succeeds.
+Corrupt CRC, unsupported version, duplicate identity and configured bound
+failures therefore leave current broker state unchanged.
+
+The snapshot records wall-clock save time plus exact remaining nanoseconds for
+Session and Message Expiry. Restore deducts broker downtime instead of
+extending lifetimes across a new monotonic-clock epoch. Sessions that were
+online at save are restored offline; outgoing inflight PUBLISH packets resume
+with DUP, while QoS 2 transactions already awaiting PUBCOMP resume directly at
+PUBREL even after Application Message expiry.
+
+Tests cover atomic replacement, CRC corruption rollback, downtime expiry,
+retained state, subscriptions, offline queue, outgoing inflight retransmission,
+and a real new-broker reconnect with Session Present plus restored live
+routing. This first snapshot surface intentionally excludes scheduled Wills and
+broker-local inbound QoS 2 transactions; Mosquitto's full database and plugin
+persistence surface remains broader in those areas.
 
 ## Equal-wire live broker comparison
 
@@ -46,8 +87,13 @@ The netz broker is a finite process for deterministic teardown:
 ```sh
 zig build run-mqtt-broker -Doptimize=ReleaseFast -- \
   --bind=127.0.0.1:18883 --connections=8 \
-  --max-queued-deliveries=1024 --max-outgoing-inflight=64
+  --max-queued-deliveries=1024 --max-outgoing-inflight=64 \
+  --persistence=netz-mqtt.db
 ```
+
+The finite example restores that snapshot before accepting clients and saves
+again after all configured connections exit. `--no-restore` starts from an
+empty in-memory state but still writes the final snapshot.
 
 Run the same driver against any broker address:
 
@@ -564,8 +610,8 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
-1. Add a durable disk/replicated commitlog for retained/session/offline/Will
-   state.
+1. Extend quiescent snapshots with scheduled Will state, then add incremental
+   autosave or a replicated commitlog for crash windows between snapshots.
 2. Extend the equal-wire driver with concurrent publisher windows, latency
    percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
    comparison.

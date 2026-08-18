@@ -7,6 +7,7 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
 const owned_properties = @import("../owned_properties.zig");
+const persistence = @import("../persistence/codec.zig");
 
 pub const Error = mqtt.Error || error{
     RetainedLimitExceeded,
@@ -159,6 +160,127 @@ pub const Store = struct {
 
     pub fn totalBytes(self: Store) usize {
         return self.total_bytes;
+    }
+
+    /// Encode all unexpired retained Application Messages.
+    ///
+    /// Expiry is persisted as remaining seconds so restoring on a different
+    /// process monotonic epoch cannot extend message lifetime.
+    pub fn writeSnapshot(
+        self: *Store,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        now: std.Io.Timestamp,
+    ) (Error || persistence.Error)!void {
+        var snapshot_count: u32 = 0;
+        for (self.entries.items) |maybe_entry| {
+            const entry = maybe_entry orelse continue;
+            if (remainingExpiryNs(entry, now.nanoseconds) == 0) continue;
+            snapshot_count = std.math.add(u32, snapshot_count, 1) catch
+                return error.SnapshotLimitExceeded;
+        }
+        try persistence.appendInt(out, allocator, u32, snapshot_count);
+        for (self.entries.items) |maybe_entry| {
+            const entry = maybe_entry orelse continue;
+            const remaining_ns = remainingExpiryNs(
+                entry,
+                now.nanoseconds,
+            );
+            if (remaining_ns == 0) continue;
+            try persistence.appendBlob(out, allocator, entry.topic);
+            try persistence.appendBlob(out, allocator, entry.payload);
+            try persistence.appendInt(
+                out,
+                allocator,
+                u8,
+                @intFromEnum(entry.qos),
+            );
+            try persistence.appendOptionalInt(
+                out,
+                allocator,
+                u64,
+                entry.publisher_id,
+            );
+            try persistence.appendOptionalInt(
+                out,
+                allocator,
+                u64,
+                remaining_ns,
+            );
+            try persistence.appendProperties(
+                out,
+                allocator,
+                entry.properties,
+            );
+        }
+    }
+
+    pub fn restoreSnapshot(
+        self: *Store,
+        cursor: *persistence.Cursor,
+        restore_now: std.Io.Timestamp,
+        downtime_ns: i96,
+    ) (Error || persistence.Error)!void {
+        const snapshot_count = try cursor.readInt(u32);
+        if (snapshot_count > self.options.max_messages) {
+            return error.RetainedLimitExceeded;
+        }
+        for (0..snapshot_count) |_| {
+            const topic = try cursor.readBlob();
+            const payload = try cursor.readBlob();
+            const qos = try persistence.qosFromByte(
+                try cursor.readInt(u8),
+            );
+            const publisher_id = try cursor.readOptionalInt(u64);
+            const saved_remaining_ns = try cursor.readOptionalInt(u64);
+            const properties = try cursor.readProperties(self.allocator);
+            defer self.allocator.free(properties);
+            if ((mqtt.messageExpiryInterval(properties) == null) !=
+                (saved_remaining_ns == null))
+            {
+                return error.CorruptSnapshot;
+            }
+
+            const remaining_ns = remainingAfterDowntimeNs(
+                saved_remaining_ns,
+                downtime_ns,
+            );
+            if (remaining_ns == 0) continue;
+            if (self.index.contains(topic)) {
+                return error.CorruptSnapshot;
+            }
+            _ = try self.applyPublish(
+                topic,
+                payload,
+                .{
+                    .retain = true,
+                    .qos = qos,
+                    .properties = properties,
+                    .publisher_id = publisher_id,
+                    .now = restore_now,
+                },
+            );
+            if (remaining_ns) |remaining| {
+                const entry_index = self.index.get(topic) orelse
+                    return error.CorruptSnapshot;
+                const entry = &self.entries.items[entry_index].?;
+                const interval = entry.expiry_interval orelse
+                    return error.CorruptSnapshot;
+                const lifetime_ns = @as(u64, interval) *
+                    std.time.ns_per_s;
+                if (remaining > lifetime_ns) {
+                    return error.CorruptSnapshot;
+                }
+                entry.stored_at_ns = restore_now.nanoseconds -
+                    @as(i96, lifetime_ns - remaining);
+            }
+        }
+    }
+
+    pub fn swap(self: *Store, other: *Store) void {
+        const value = self.*;
+        self.* = other.*;
+        other.* = value;
     }
 
     /// Apply the retained state effect of a PUBLISH packet.
@@ -562,6 +684,28 @@ fn remainingExpiry(entry: Entry, now_ns: i96) ?u32 {
         @divTrunc(elapsed_ns, std.time.ns_per_s),
     );
     return interval - elapsed_seconds;
+}
+
+fn remainingExpiryNs(entry: Entry, now_ns: i96) ?u64 {
+    const interval = entry.expiry_interval orelse return null;
+    const lifetime_ns = @as(u64, interval) * std.time.ns_per_s;
+    const elapsed_ns: u64 = @intCast(@max(
+        now_ns - entry.stored_at_ns,
+        0,
+    ));
+    return lifetime_ns -| elapsed_ns;
+}
+
+fn remainingAfterDowntimeNs(
+    remaining: ?u64,
+    downtime_ns: i96,
+) ?u64 {
+    const value = remaining orelse return null;
+    const elapsed: u64 = @intCast(@min(
+        @max(downtime_ns, 0),
+        std.math.maxInt(u64),
+    ));
+    return value -| elapsed;
 }
 
 fn matchForEntry(entry: Entry, remaining: ?u32) Match {

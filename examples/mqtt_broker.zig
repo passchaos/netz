@@ -6,11 +6,13 @@ const Config = struct {
     connections: usize = 16,
     max_queued_deliveries: usize = 1024,
     max_outgoing_inflight: u16 = 64,
+    persistence_path: ?[]const u8 = null,
+    restore: bool = true,
 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    const config = try parseArgs(init, allocator);
+    const config = try parseArgs(init);
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
     });
@@ -32,27 +34,30 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer broker.deinit();
+    if (config.persistence_path) |path| {
+        if (config.restore) {
+            broker.restoreSnapshot(std.Io.Dir.cwd(), path) catch |err| {
+                if (err != error.SnapshotNotFound) return err;
+            };
+        }
+    }
 
     std.debug.print(
         "netz MQTT 3.1.1/5 broker listening on {f} for {d} clients\n",
         .{ broker.address(), config.connections },
     );
     try broker.serve(config.connections);
+    if (config.persistence_path) |path| {
+        try broker.saveSnapshot(std.Io.Dir.cwd(), path);
+    }
 }
 
 fn parseArgs(
     init: std.process.Init,
-    allocator: std.mem.Allocator,
 ) !Config {
-    var args = try std.process.Args.Iterator.initAllocator(
-        init.minimal.args,
-        allocator,
-    );
-    defer args.deinit();
-    _ = args.next();
-
     var config: Config = .{};
-    while (args.next()) |arg| {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--bind=")) {
             config.bind = try std.Io.net.IpAddress.parseLiteral(
                 arg["--bind=".len..],
@@ -89,6 +94,16 @@ fn parseArgs(
             if (config.max_outgoing_inflight == 0) {
                 return error.InvalidArgument;
             }
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--persistence=",
+        )) {
+            const path = arg["--persistence=".len..];
+            if (path.len == 0) return error.InvalidArgument;
+            config.persistence_path = path;
+        } else if (std.mem.eql(u8, arg, "--no-restore")) {
+            config.restore = false;
         } else {
             return error.InvalidArgument;
         }

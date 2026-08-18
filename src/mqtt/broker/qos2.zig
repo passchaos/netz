@@ -138,6 +138,10 @@ pub const Store = struct {
         self.* = undefined;
     }
 
+    pub fn count(self: Store) usize {
+        return self.entries.count();
+    }
+
     /// Store a new transaction, or validate an MQTT retransmission.
     ///
     /// MQTT permits a DUP=1 PUBLISH to repeat an unacknowledged transaction.

@@ -11,6 +11,7 @@ const mqtt = @import("mod.zig");
 const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
 const client_id_mod = @import("broker/client_id.zig");
+const persistence_mod = @import("persistence/mod.zig");
 const qos2_mod = @import("broker/qos2.zig");
 const publication_mod = @import("broker/publication.zig");
 const session_route = @import("broker/session_route.zig");
@@ -23,7 +24,8 @@ const net = std.Io.net;
 
 pub const Error = runtime.Error || router_mod.Error ||
     retained_mod.Error || publication_mod.Error || qos2_mod.Error ||
-    session_mod.Error || will_mod.Error || std.Io.RandomSecureError || error{
+    session_mod.Error || will_mod.Error || persistence_mod.Error ||
+    std.Io.RandomSecureError || error{
     BrokerFull,
     ClientNotRegistered,
     ClientOffline,
@@ -345,6 +347,117 @@ pub const Broker = struct {
 
     pub fn address(self: Broker) net.IpAddress {
         return self.server.address();
+    }
+
+    /// Atomically persist retained messages and durable Session State.
+    ///
+    /// The state mutex gives the snapshot one coherent routing/persistence
+    /// point. Saving is intentionally restricted to a quiescent broker because
+    /// a live writer may already own an outgoing frame that has not yet been
+    /// reflected by its acknowledgement state. File I/O is synchronous:
+    /// callers choose the autosave/shutdown cadence, just as Mosquitto's broker
+    /// loop chooses when to run its database backup.
+    pub fn saveSnapshot(
+        self: *Broker,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+    ) Error!void {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        for (self.slots) |slot| {
+            if (slot.active or slot.connection != null or
+                slot.queuedCount() != 0)
+            {
+                return error.SnapshotBusy;
+            }
+        }
+        if (self.pending_qos2.count() != 0 or
+            self.wills.count() != 0 or
+            self.session_owners.count() != 0 or
+            self.will_publishers.count() != 0)
+        {
+            return error.SnapshotBusy;
+        }
+        try persistence_mod.saveAtomic(
+            self.allocator,
+            self.io,
+            dir,
+            sub_path,
+            .{
+                .retained = &self.retained,
+                .sessions = &self.sessions,
+            },
+            std.Io.Clock.awake.now(self.io),
+            std.Io.Clock.real.now(self.io),
+        );
+    }
+
+    /// Restore a snapshot before accepting clients and rebuild Session routes.
+    ///
+    /// Live connection, pending inbound QoS 2, and Will state cannot be merged
+    /// safely with a database from another process generation, so restore is
+    /// rejected unless those transient sets and the router are empty.
+    pub fn restoreSnapshot(
+        self: *Broker,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+    ) Error!void {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        for (self.slots) |slot| {
+            if (slot.active) return error.SnapshotBusy;
+        }
+        if (self.router.subscriptionCount() != 0 or
+            self.pending_qos2.count() != 0 or
+            self.wills.count() != 0 or
+            self.session_owners.count() != 0 or
+            self.will_publishers.count() != 0)
+        {
+            return error.SnapshotBusy;
+        }
+        var restored = try persistence_mod.load(
+            self.allocator,
+            self.io,
+            dir,
+            sub_path,
+            self.options.retained,
+            self.options.session,
+            std.Io.Clock.awake.now(self.io),
+            std.Io.Clock.real.now(self.io),
+        );
+        errdefer {
+            restored.retained.deinit();
+            restored.sessions.deinit();
+        }
+        var staged_router = try router_mod.Router.initWithOptions(
+            self.allocator,
+            self.options.router,
+        );
+        errdefer staged_router.deinit();
+        const route_ids = try self.allocator.alloc(
+            u64,
+            restored.sessions.count(),
+        );
+        defer self.allocator.free(route_ids);
+        const restored_routes = try restored.sessions.routeIdsInto(route_ids);
+        for (restored_routes) |route_id| {
+            const handle = restored.sessions.handleForRouteId(
+                route_id,
+            ) orelse return error.CorruptSnapshot;
+            try restoreSessionSubscriptionsFrom(
+                self.allocator,
+                &staged_router,
+                &restored.sessions,
+                handle,
+                route_id,
+            );
+        }
+        self.retained.swap(&restored.retained);
+        self.sessions.swap(&restored.sessions);
+        self.router.deinit();
+        self.router = staged_router;
+        restored.retained.deinit();
+        restored.sessions.deinit();
     }
 
     /// Accept exactly `connection_count` clients and serve them concurrently.
@@ -721,6 +834,19 @@ pub const Broker = struct {
         handle: session_mod.Handle,
         route_id: u64,
     ) Error!void {
+        return self.restoreSessionSubscriptionsTo(
+            &self.router,
+            handle,
+            route_id,
+        );
+    }
+
+    fn restoreSessionSubscriptionsTo(
+        self: *Broker,
+        target_router: *router_mod.Router,
+        handle: session_mod.Handle,
+        route_id: u64,
+    ) Error!void {
         const stats = try self.sessions.stats(handle);
         const subscriptions = try self.allocator.alloc(
             session_mod.Subscription,
@@ -732,7 +858,39 @@ pub const Broker = struct {
             subscriptions,
         );
         for (restored) |subscription| {
-            _ = try self.router.subscribeWithIdentifierStatus(
+            _ = try target_router.subscribeWithIdentifierStatus(
+                sessionSubscriberId(route_id),
+                .{
+                    .topic_filter = subscription.topic_filter,
+                    .qos = subscription.qos,
+                    .no_local = subscription.no_local,
+                    .retain_as_published = subscription.retain_as_published,
+                    .retain_handling = subscription.retain_handling,
+                },
+                subscription.subscription_identifier,
+            );
+        }
+    }
+
+    fn restoreSessionSubscriptionsFrom(
+        allocator: std.mem.Allocator,
+        target_router: *router_mod.Router,
+        sessions: *session_mod.Store,
+        handle: session_mod.Handle,
+        route_id: u64,
+    ) Error!void {
+        const stats = try sessions.stats(handle);
+        const subscriptions = try allocator.alloc(
+            session_mod.Subscription,
+            stats.subscription_count,
+        );
+        defer allocator.free(subscriptions);
+        const restored = try sessions.subscriptionsInto(
+            handle,
+            subscriptions,
+        );
+        for (restored) |subscription| {
+            _ = try target_router.subscribeWithIdentifierStatus(
                 sessionSubscriberId(route_id),
                 .{
                     .topic_filter = subscription.topic_filter,
@@ -2093,4 +2251,5 @@ fn protocolReason(
 
 test {
     _ = @import("broker_tests.zig");
+    _ = @import("broker/persistence_tests.zig");
 }

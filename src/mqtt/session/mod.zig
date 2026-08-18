@@ -8,6 +8,7 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
 const owned_properties = @import("../owned_properties.zig");
+const persistence = @import("../persistence/codec.zig");
 
 pub const Error = mqtt.Error || error{
     SessionNotFound,
@@ -304,6 +305,435 @@ pub const Store = struct {
 
     pub fn totalBytes(self: Store) usize {
         return self.total_bytes;
+    }
+
+    /// Encode durable Session State without exposing private slot layouts.
+    ///
+    /// Connected sessions are serialized as offline: network descriptors and
+    /// short-lived generation capabilities never cross a process boundary.
+    /// Outgoing inflight messages are restored with DUP/retransmit semantics.
+    pub fn writeSnapshot(
+        self: *Store,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        now: std.Io.Timestamp,
+    ) (Error || persistence.Error)!void {
+        var snapshot_count: u32 = 0;
+        for (self.sessions.items) |maybe_session| {
+            const session = maybe_session orelse continue;
+            if (session.expiry_interval == 0 or
+                self.isExpired(session, now))
+            {
+                continue;
+            }
+            snapshot_count = std.math.add(u32, snapshot_count, 1) catch
+                return error.SnapshotLimitExceeded;
+        }
+        try persistence.appendInt(out, allocator, u32, snapshot_count);
+        for (self.sessions.items) |maybe_session| {
+            const session = maybe_session orelse continue;
+            if (session.expiry_interval == 0 or
+                self.isExpired(session, now))
+            {
+                continue;
+            }
+            try persistence.appendBlob(
+                out,
+                allocator,
+                session.client_id,
+            );
+            try persistence.appendInt(
+                out,
+                allocator,
+                u64,
+                session.route_id,
+            );
+            try persistence.appendInt(
+                out,
+                allocator,
+                u32,
+                session.expiry_interval,
+            );
+            try persistence.appendBool(
+                out,
+                allocator,
+                session.connected,
+            );
+            try persistence.appendOptionalInt(
+                out,
+                allocator,
+                u64,
+                if (session.connected)
+                    null
+                else
+                    sessionRemainingExpiryNs(session, now.nanoseconds),
+            );
+            try persistence.appendInt(
+                out,
+                allocator,
+                u16,
+                session.next_packet_id,
+            );
+
+            try persistence.appendInt(
+                out,
+                allocator,
+                u32,
+                try snapshotCount(session.subscription_count),
+            );
+            for (session.subscriptions.items) |maybe_subscription| {
+                const subscription = maybe_subscription orelse continue;
+                try writeSubscription(
+                    out,
+                    allocator,
+                    subscription,
+                );
+            }
+
+            var queued_count: u32 = 0;
+            for (session.queued.items) |maybe_publish| {
+                const publish = maybe_publish orelse continue;
+                if (publishRemainingExpiryNs(
+                    publish,
+                    now.nanoseconds,
+                ) == 0) continue;
+                queued_count = std.math.add(u32, queued_count, 1) catch
+                    return error.SnapshotLimitExceeded;
+            }
+            try persistence.appendInt(
+                out,
+                allocator,
+                u32,
+                queued_count,
+            );
+            for (session.queued.items) |maybe_publish| {
+                const publish = maybe_publish orelse continue;
+                const remaining_ns = publishRemainingExpiryNs(
+                    publish,
+                    now.nanoseconds,
+                );
+                if (remaining_ns == 0) continue;
+                try writePublishSnapshot(
+                    out,
+                    allocator,
+                    publish,
+                    remaining_ns,
+                );
+            }
+
+            var inflight_count: u32 = 0;
+            for (session.inflight.items) |maybe_inflight| {
+                const inflight = maybe_inflight orelse continue;
+                if (inflight.state != .await_pubcomp and
+                    publishRemainingExpiryNs(
+                        inflight.publish,
+                        now.nanoseconds,
+                    ) == 0)
+                {
+                    continue;
+                }
+                inflight_count = std.math.add(
+                    u32,
+                    inflight_count,
+                    1,
+                ) catch return error.SnapshotLimitExceeded;
+            }
+            try persistence.appendInt(
+                out,
+                allocator,
+                u32,
+                inflight_count,
+            );
+            for (session.inflight.items) |maybe_inflight| {
+                const inflight = maybe_inflight orelse continue;
+                const remaining_ns = publishRemainingExpiryNs(
+                    inflight.publish,
+                    now.nanoseconds,
+                );
+                if (inflight.state != .await_pubcomp and
+                    remaining_ns == 0)
+                {
+                    continue;
+                }
+                try persistence.appendInt(
+                    out,
+                    allocator,
+                    u16,
+                    inflight.packet_id,
+                );
+                try persistence.appendInt(
+                    out,
+                    allocator,
+                    u8,
+                    @intFromEnum(inflight.state),
+                );
+                try writePublishSnapshot(
+                    out,
+                    allocator,
+                    inflight.publish,
+                    // Once PUBREC has been accepted, MQTT requires the PUBREL /
+                    // PUBCOMP handshake to survive Message Expiry. Mark that
+                    // record as unbounded; its Application Message is no longer
+                    // delivered again, but the transaction must complete.
+                    if (inflight.state == .await_pubcomp)
+                        null
+                    else
+                        remaining_ns,
+                );
+            }
+        }
+    }
+
+    pub fn restoreSnapshot(
+        self: *Store,
+        cursor: *persistence.Cursor,
+        restore_now: std.Io.Timestamp,
+        downtime_ns: i96,
+    ) (Error || persistence.Error)!void {
+        const snapshot_count = try cursor.readInt(u32);
+        if (snapshot_count > self.options.max_sessions) {
+            return error.SessionLimitExceeded;
+        }
+        for (0..snapshot_count) |_| {
+            try self.restoreSession(
+                cursor,
+                restore_now,
+                downtime_ns,
+            );
+        }
+    }
+
+    pub fn swap(self: *Store, other: *Store) void {
+        const value = self.*;
+        self.* = other.*;
+        other.* = value;
+    }
+
+    fn restoreSession(
+        self: *Store,
+        cursor: *persistence.Cursor,
+        restore_now: std.Io.Timestamp,
+        downtime_ns: i96,
+    ) (Error || persistence.Error)!void {
+        const client_id = try cursor.readBlob();
+        if (self.client_index.contains(client_id)) {
+            return error.CorruptSnapshot;
+        }
+        const route_id = try cursor.readInt(u64);
+        if (route_id == 0 or route_id >= (@as(u64, 1) << 63) or
+            self.route_index.contains(route_id))
+        {
+            return error.CorruptSnapshot;
+        }
+        const expiry_interval = try cursor.readInt(u32);
+        if (expiry_interval == 0) return error.CorruptSnapshot;
+        const was_connected = try cursor.readBool();
+        const saved_expiry_ns = try cursor.readOptionalInt(u64);
+        if ((was_connected and saved_expiry_ns != null) or
+            (!was_connected and
+                (expiry_interval == std.math.maxInt(u32)) !=
+                    (saved_expiry_ns == null)))
+        {
+            return error.CorruptSnapshot;
+        }
+        const remaining_expiry_ns = if (was_connected)
+            if (expiry_interval == std.math.maxInt(u32))
+                null
+            else
+                remainingAfterDowntimeNs(
+                    @as(u64, expiry_interval) * std.time.ns_per_s,
+                    downtime_ns,
+                )
+        else
+            remainingAfterDowntimeNs(saved_expiry_ns, downtime_ns);
+        if (remaining_expiry_ns == 0) {
+            return self.skipExpiredSession(cursor);
+        }
+        const next_packet_id = try cursor.readInt(u16);
+        if (next_packet_id == 0) return error.CorruptSnapshot;
+
+        if (self.session_count >= self.options.max_sessions) {
+            return error.SessionLimitExceeded;
+        }
+        const client_owned = try self.allocator.dupe(u8, client_id);
+        errdefer self.allocator.free(client_owned);
+        if (client_owned.len > self.options.max_session_bytes or
+            client_owned.len > self.options.max_total_bytes -|
+                self.total_bytes)
+        {
+            return error.SessionByteLimitExceeded;
+        }
+        try self.client_index.ensureUnusedCapacity(self.allocator, 1);
+        try self.route_index.ensureUnusedCapacity(self.allocator, 1);
+        var appended_slot = false;
+        const index = for (self.sessions.items, 0..) |
+            maybe_session,
+            candidate,
+        | {
+            if (maybe_session == null) break candidate;
+        } else blk: {
+            try self.sessions.append(self.allocator, null);
+            appended_slot = true;
+            break :blk self.sessions.items.len - 1;
+        };
+        errdefer if (appended_slot and
+            self.sessions.items[index] == null)
+        {
+            _ = self.sessions.pop();
+        };
+        const generation = self.nextGeneration();
+        self.sessions.items[index] = .{
+            .generation = generation,
+            .route_id = route_id,
+            .client_id = client_owned,
+            .connected = false,
+            .expiry_interval = expiry_interval,
+            .expires_at_ns = if (remaining_expiry_ns) |remaining|
+                restore_now.nanoseconds + @as(i96, remaining)
+            else
+                null,
+            .next_packet_id = next_packet_id,
+            .allocation_bytes = client_owned.len,
+        };
+        self.client_index.putAssumeCapacityNoClobber(client_owned, index);
+        self.route_index.putAssumeCapacityNoClobber(route_id, index);
+        self.session_count += 1;
+        self.total_bytes += client_owned.len;
+        self.next_route_id = @max(self.next_route_id, route_id +| 1);
+        if (self.next_route_id == 0 or
+            self.next_route_id >= (@as(u64, 1) << 63))
+        {
+            self.next_route_id = 1;
+        }
+        const session = &self.sessions.items[index].?;
+        errdefer self.removeAt(index);
+
+        const subscription_count = try cursor.readInt(u32);
+        if (subscription_count >
+            self.options.max_subscriptions_per_session)
+        {
+            return error.SubscriptionLimitExceeded;
+        }
+        for (0..subscription_count) |_| {
+            const subscription = try readSubscription(cursor);
+            _ = try self.setSubscription(
+                .{ .index = index, .generation = generation },
+                subscription.subscription,
+                subscription.identifier,
+            );
+        }
+
+        const queued_count = try cursor.readInt(u32);
+        if (queued_count > self.options.max_queued_per_session) {
+            return error.QueueFull;
+        }
+        for (0..queued_count) |_| {
+            var restored = try readPublishSnapshot(
+                self.allocator,
+                cursor,
+                restore_now.nanoseconds,
+                downtime_ns,
+                false,
+            );
+            if (restored) |*publish| {
+                errdefer publish.deinit(self.allocator);
+                try self.ensureBytes(session, publish.allocation_bytes);
+                try session.queued.append(self.allocator, publish.*);
+                session.queued_count += 1;
+                session.allocation_bytes += publish.allocation_bytes;
+                self.total_bytes += publish.allocation_bytes;
+                restored = null;
+            }
+        }
+
+        const inflight_count = try cursor.readInt(u32);
+        if (inflight_count > self.options.max_inflight_per_session or
+            inflight_count > std.math.maxInt(u16))
+        {
+            return error.InflightFull;
+        }
+        try session.packet_index.ensureUnusedCapacity(
+            self.allocator,
+            @intCast(inflight_count),
+        );
+        try session.inflight.ensureUnusedCapacity(
+            self.allocator,
+            inflight_count,
+        );
+        for (0..inflight_count) |_| {
+            const packet_id = try cursor.readInt(u16);
+            const state = std.enums.fromInt(
+                InflightState,
+                try cursor.readInt(u8),
+            ) orelse return error.CorruptSnapshot;
+            var publish = (try readPublishSnapshot(
+                self.allocator,
+                cursor,
+                restore_now.nanoseconds,
+                downtime_ns,
+                state == .await_pubcomp,
+            )) orelse {
+                continue;
+            };
+            errdefer publish.deinit(self.allocator);
+            if (packet_id == 0 or
+                session.packet_index.contains(packet_id))
+            {
+                return error.CorruptSnapshot;
+            }
+            try self.ensureBytes(session, publish.allocation_bytes);
+            const inflight_index = appendOrReuseAssumeCapacity(
+                Inflight,
+                &session.inflight,
+                .{
+                    .publish = publish,
+                    .packet_id = packet_id,
+                    .state = state,
+                    .needs_send = true,
+                    .retransmission = state != .await_pubcomp,
+                },
+            );
+            session.packet_index.putAssumeCapacityNoClobber(
+                packet_id,
+                inflight_index,
+            );
+            session.inflight_count += 1;
+            session.allocation_bytes += publish.allocation_bytes;
+            self.total_bytes += publish.allocation_bytes;
+            publish = undefined;
+        }
+
+        if (session.expires_at_ns) |deadline| {
+            if (self.next_expiry_ns == null or
+                deadline < self.next_expiry_ns.?)
+            {
+                self.next_expiry_ns = deadline;
+            }
+        }
+    }
+
+    fn skipExpiredSession(
+        _: *Store,
+        cursor: *persistence.Cursor,
+    ) persistence.Error!void {
+        _ = try cursor.readInt(u16); // next packet identifier
+        const subscription_count = try cursor.readInt(u32);
+        for (0..subscription_count) |_| {
+            _ = try cursor.readBlob();
+            _ = try cursor.readInt(u8);
+            _ = try cursor.readBool();
+            _ = try cursor.readBool();
+            _ = try cursor.readInt(u8);
+            _ = try cursor.readOptionalInt(u32);
+        }
+        const queued_count = try cursor.readInt(u32);
+        for (0..queued_count) |_| try skipPublishSnapshot(cursor);
+        const inflight_count = try cursor.readInt(u32);
+        for (0..inflight_count) |_| {
+            _ = try cursor.readInt(u16);
+            _ = try cursor.readInt(u8);
+            try skipPublishSnapshot(cursor);
+        }
     }
 
     pub fn containsClientId(
@@ -758,6 +1188,20 @@ pub const Store = struct {
         };
     }
 
+    pub fn routeIdsInto(
+        self: Store,
+        out: []u64,
+    ) Error![]u64 {
+        if (out.len < self.session_count) return error.BufferTooSmall;
+        var written: usize = 0;
+        for (self.sessions.items) |maybe_session| {
+            const session = maybe_session orelse continue;
+            out[written] = session.route_id;
+            written += 1;
+        }
+        return out[0..written];
+    }
+
     pub fn ownsPacketId(
         self: *Store,
         handle: Handle,
@@ -1194,6 +1638,196 @@ fn clonePublish(
         .expiry_interval = mqtt.messageExpiryInterval(properties),
         .allocation_bytes = bytes,
     };
+}
+
+const RestoredSubscription = struct {
+    subscription: mqtt.Subscription,
+    identifier: ?usize,
+};
+
+fn writeSubscription(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    subscription: OwnedSubscription,
+) persistence.Error!void {
+    try persistence.appendBlob(
+        out,
+        allocator,
+        subscription.topic_filter,
+    );
+    try persistence.appendInt(
+        out,
+        allocator,
+        u8,
+        @intFromEnum(subscription.qos),
+    );
+    try persistence.appendBool(out, allocator, subscription.no_local);
+    try persistence.appendBool(
+        out,
+        allocator,
+        subscription.retain_as_published,
+    );
+    try persistence.appendInt(
+        out,
+        allocator,
+        u8,
+        subscription.retain_handling,
+    );
+    try persistence.appendOptionalInt(
+        out,
+        allocator,
+        u32,
+        if (subscription.subscription_identifier) |value|
+            @intCast(value)
+        else
+            null,
+    );
+}
+
+fn readSubscription(
+    cursor: *persistence.Cursor,
+) persistence.Error!RestoredSubscription {
+    const topic_filter = try cursor.readBlob();
+    const qos = try persistence.qosFromByte(try cursor.readInt(u8));
+    const no_local = try cursor.readBool();
+    const retain_as_published = try cursor.readBool();
+    const retain_handling_raw = try cursor.readInt(u8);
+    if (retain_handling_raw > 2) return error.CorruptSnapshot;
+    const identifier = try cursor.readOptionalInt(u32);
+    return .{
+        .subscription = .{
+            .topic_filter = topic_filter,
+            .qos = qos,
+            .no_local = no_local,
+            .retain_as_published = retain_as_published,
+            .retain_handling = @intCast(retain_handling_raw),
+        },
+        .identifier = if (identifier) |value| value else null,
+    };
+}
+
+fn writePublishSnapshot(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    publish: OwnedPublish,
+    remaining_expiry_ns: ?u64,
+) persistence.Error!void {
+    try persistence.appendBlob(out, allocator, publish.topic);
+    try persistence.appendBlob(out, allocator, publish.payload);
+    try persistence.appendInt(
+        out,
+        allocator,
+        u8,
+        @intFromEnum(publish.qos),
+    );
+    try persistence.appendBool(out, allocator, publish.retain);
+    try persistence.appendOptionalInt(
+        out,
+        allocator,
+        u64,
+        remaining_expiry_ns,
+    );
+    try persistence.appendProperties(
+        out,
+        allocator,
+        publish.properties,
+    );
+}
+
+fn readPublishSnapshot(
+    allocator: std.mem.Allocator,
+    cursor: *persistence.Cursor,
+    restore_now_ns: i96,
+    downtime_ns: i96,
+    ignore_expiry: bool,
+) (Error || persistence.Error)!?OwnedPublish {
+    const topic = try cursor.readBlob();
+    const payload = try cursor.readBlob();
+    const qos = try persistence.qosFromByte(try cursor.readInt(u8));
+    const retain = try cursor.readBool();
+    const saved_remaining_ns = try cursor.readOptionalInt(u64);
+    const remaining_ns = remainingAfterDowntimeNs(
+        saved_remaining_ns,
+        downtime_ns,
+    );
+    const properties = try cursor.readProperties(allocator);
+    defer allocator.free(properties);
+    if (!ignore_expiry and
+        (mqtt.messageExpiryInterval(properties) == null) !=
+            (saved_remaining_ns == null))
+    {
+        return error.CorruptSnapshot;
+    }
+    if (!ignore_expiry and remaining_ns == 0) return null;
+
+    var publish = try clonePublish(
+        allocator,
+        topic,
+        payload,
+        qos,
+        retain,
+        properties,
+        restore_now_ns,
+    );
+    if (!ignore_expiry) if (remaining_ns) |remaining| {
+        const interval = publish.expiry_interval orelse
+            return error.CorruptSnapshot;
+        const lifetime_ns = @as(u64, interval) * std.time.ns_per_s;
+        if (remaining > lifetime_ns) return error.CorruptSnapshot;
+        publish.stored_at_ns = restore_now_ns -
+            @as(i96, lifetime_ns - remaining);
+    };
+    return publish;
+}
+
+fn skipPublishSnapshot(
+    cursor: *persistence.Cursor,
+) persistence.Error!void {
+    _ = try cursor.readBlob();
+    _ = try cursor.readBlob();
+    _ = try cursor.readInt(u8);
+    _ = try cursor.readBool();
+    _ = try cursor.readOptionalInt(u64);
+    _ = try cursor.readBlob(); // encoded properties
+}
+
+fn sessionRemainingExpiryNs(
+    session: Session,
+    now_ns: i96,
+) ?u64 {
+    std.debug.assert(!session.connected);
+    const deadline = session.expires_at_ns orelse return null;
+    return @intCast(@max(deadline - now_ns, 0));
+}
+
+fn publishRemainingExpiryNs(
+    publish: OwnedPublish,
+    now_ns: i96,
+) ?u64 {
+    const interval = publish.expiry_interval orelse return null;
+    const lifetime_ns = @as(u64, interval) * std.time.ns_per_s;
+    const elapsed_ns: u64 = @intCast(@max(
+        now_ns - publish.stored_at_ns,
+        0,
+    ));
+    return lifetime_ns -| elapsed_ns;
+}
+
+fn remainingAfterDowntimeNs(
+    remaining: ?u64,
+    downtime_ns: i96,
+) ?u64 {
+    const value = remaining orelse return null;
+    const elapsed: u64 = @intCast(@min(
+        @max(downtime_ns, 0),
+        std.math.maxInt(u64),
+    ));
+    return value -| elapsed;
+}
+
+fn snapshotCount(value: usize) persistence.Error!u32 {
+    return std.math.cast(u32, value) orelse
+        error.SnapshotLimitExceeded;
 }
 
 fn keepQueuedProperty(property: mqtt.Property) bool {

@@ -33,6 +33,18 @@ zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 zig build run-linux-io-uring-http1
 ```
 
+The MQTT broker API exposes `Broker.saveSnapshot` and
+`Broker.restoreSnapshot`. Snapshots use restricted temporary files, fsync,
+atomic replacement, versioned sections and CRC validation. Save is a quiescent
+shutdown/admin operation; restore is intended for startup before accepting
+clients. See `docs/rumqtt_parity.md` for the persisted state surface and
+current exclusions.
+
+The finite `run-mqtt-broker` example enables this with
+`--persistence=netz-mqtt.db`; it restores on startup and snapshots after the
+configured connection batch exits. Pass `--no-restore` to replace an existing
+database with a fresh run.
+
 The URI helpers derive Host / `:authority` / `:scheme` from the URI. Host names,
 IPv4 literals, and bracketed IPv6 literals such as `http://[::1]:8080/` are
 supported by the HTTP/1, HTTP/2 h2c, and WebSocket client examples.
