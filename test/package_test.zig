@@ -469,6 +469,10 @@ test "public modules are reachable" {
         @as(usize, 4096),
         (netz.mqtt.broker.Limits{}).max_pending_incoming_qos2,
     );
+    try std.testing.expectEqual(
+        @as(usize, 65_536),
+        (netz.mqtt.broker.Options{}).will.max_wills,
+    );
     try std.testing.expect(@hasField(netz.mqtt.runtime.Connection, "max_outgoing_inflight"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubAck"));
     try std.testing.expect(@hasDecl(
@@ -486,6 +490,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "applyPubComp",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "shutdown",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.AckPacket, "accepted"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "writePubAckWithProperties"));

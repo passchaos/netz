@@ -18,6 +18,20 @@ pub const TestContext = struct {
     pub const writeDuplicatePublishFn = writeDuplicatePublish;
 };
 
+pub fn connectWithOptions(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    broker: Broker,
+    options: runtime.ConnectOptions,
+) !runtime.Connection {
+    return runtime.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        options,
+    );
+}
+
 const ServeState = struct {
     broker: *Broker,
     connection_count: usize,
@@ -381,4 +395,5 @@ test "broker queues QoS 1 delivery until Receive Maximum credit returns" {
 test {
     _ = @import("broker/qos2_tests.zig");
     _ = @import("broker/retained_tests.zig");
+    _ = @import("broker/will_tests.zig");
 }

@@ -482,6 +482,11 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    /// Wake a concurrent TCP reader while retaining connection ownership.
+    pub fn shutdown(self: *Connection) Error!void {
+        try self.transport.shutdown();
+    }
+
     /// Return the verified client certificate chain for an mTLS server
     /// connection. The DER slices are owned by the transport and remain valid
     /// until `close`; anonymous or non-mTLS transports return null.

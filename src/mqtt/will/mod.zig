@@ -397,14 +397,28 @@ pub const Scheduler = struct {
         }
         return self.close(
             handle,
-            if (packet.reason_code == 0)
-                .normal_disconnect
-            else if (packet.reason_code == 0x04)
+            if (packet.reason_code == 0x04)
                 .disconnect_with_will
             else
-                .ungraceful,
+                // Receipt of any valid DISCONNECT packet is graceful. MQTT 5
+                // reason 0x04 is the sole exception that asks for Will
+                // publication; Mosquitto likewise clears the Will for every
+                // other DISCONNECT reason.
+                .normal_disconnect,
             now,
         );
+    }
+
+    pub fn handleForClient(
+        self: Scheduler,
+        client_id: []const u8,
+    ) ?Handle {
+        const index = self.client_index.get(client_id) orelse return null;
+        const entry = self.entries.items[index] orelse return null;
+        return .{
+            .index = index,
+            .generation = entry.generation,
+        };
     }
 
     pub fn nextDeadline(self: Scheduler) ?std.Io.Timestamp {
@@ -434,6 +448,26 @@ pub const Scheduler = struct {
             written += 1;
         }
         return out[0..written];
+    }
+
+    /// Claim one due Will without requiring a batch-sized caller buffer.
+    ///
+    /// Deadline loops use this to drain a bounded scheduler without allocating
+    /// under their state lock. Callers that need transactional all-due
+    /// preflight should continue using `pollDue`.
+    pub fn pollOneDue(
+        self: *Scheduler,
+        now: std.Io.Timestamp,
+    ) ?Handle {
+        const entry_index = self.heap.root() orelse return null;
+        const entry = &self.entries.items[entry_index].?;
+        if (entry.deadline_ns > now.nanoseconds) return null;
+        _ = self.heap.popRoot(self);
+        entry.state = .due;
+        return .{
+            .index = entry_index,
+            .generation = entry.generation,
+        };
     }
 
     fn countDueFrom(

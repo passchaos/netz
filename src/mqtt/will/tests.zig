@@ -201,6 +201,26 @@ test "will DISCONNECT packet maps 0x00 and 0x04 actions" {
     );
 }
 
+test "will nonzero graceful DISCONNECT reasons also cancel" {
+    const allocator = std.testing.allocator;
+    var scheduler = Scheduler.init(allocator, .{});
+    defer scheduler.deinit();
+    const handle = try scheduler.set(
+        "graceful-reason",
+        sampleWill(0, null),
+        60,
+    );
+    try std.testing.expectEqual(
+        will.CloseResult.canceled,
+        try scheduler.closeDisconnect(
+            handle,
+            .{ .reason_code = 0x80 },
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), scheduler.count());
+}
+
 test "will DISCONNECT expiry override shortens publication deadline" {
     const allocator = std.testing.allocator;
     var scheduler = Scheduler.init(allocator, .{});

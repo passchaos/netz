@@ -13,12 +13,15 @@ const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
 const qos2_mod = @import("broker/qos2.zig");
 const publication_mod = @import("broker/publication.zig");
+const will_driver_mod = @import("broker/will_driver.zig");
 const retained_mod = @import("retained/mod.zig");
+const will_mod = @import("will/mod.zig");
 
 const net = std.Io.net;
 
 pub const Error = runtime.Error || router_mod.Error ||
-    retained_mod.Error || publication_mod.Error || qos2_mod.Error || error{
+    retained_mod.Error || publication_mod.Error || qos2_mod.Error ||
+    will_mod.Error || error{
     BrokerFull,
     ClientNotRegistered,
     ClientOffline,
@@ -40,6 +43,7 @@ pub const Options = struct {
     limits: Limits = .{},
     router: router_mod.Options = .{},
     retained: retained_mod.Options = .{},
+    will: will_mod.Options = .{},
     accept: runtime.AcceptOptions = .{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
@@ -60,10 +64,17 @@ const Delivery = struct {
     }
 };
 
+const RoutePlan = struct {
+    matches: []router_mod.Match,
+    has_live_match: bool,
+};
+
 const ClientSlot = struct {
     generation: u32 = 0,
     active: bool = false,
     connection: ?runtime.Connection = null,
+    will_handle: ?will_mod.Handle = null,
+    graceful_disconnect: bool = false,
     writer_mutex: std.Io.Mutex = .init,
     queue: std.ArrayList(Delivery) = .empty,
     queue_head: usize = 0,
@@ -161,6 +172,12 @@ pub const Broker = struct {
     router: router_mod.Router,
     pending_qos2: qos2_mod.Store,
     retained: retained_mod.Store,
+    wills: will_mod.Scheduler,
+    will_driver: will_driver_mod.Driver = .{},
+    will_publishers: std.AutoHashMapUnmanaged(
+        will_mod.Handle,
+        ?router_mod.SubscriberId,
+    ) = .empty,
     slots: []ClientSlot,
     state_mutex: std.Io.Mutex = .init,
 
@@ -200,6 +217,20 @@ pub const Broker = struct {
             options.retained,
         );
         errdefer retained.deinit();
+        var wills = will_mod.Scheduler.init(
+            allocator,
+            options.will,
+        );
+        errdefer wills.deinit();
+        var will_publishers: std.AutoHashMapUnmanaged(
+            will_mod.Handle,
+            ?router_mod.SubscriberId,
+        ) = .empty;
+        errdefer will_publishers.deinit(allocator);
+        try will_publishers.ensureTotalCapacity(
+            allocator,
+            @intCast(options.will.max_wills),
+        );
         return .{
             .allocator = allocator,
             .io = io,
@@ -213,6 +244,8 @@ pub const Broker = struct {
             .router = router,
             .pending_qos2 = pending_qos2,
             .retained = retained,
+            .wills = wills,
+            .will_publishers = will_publishers,
             .slots = slots,
         };
     }
@@ -224,6 +257,8 @@ pub const Broker = struct {
             if (slot.connection) |*connection| connection.close();
         }
         self.allocator.free(self.slots);
+        self.will_publishers.deinit(self.allocator);
+        self.wills.deinit();
         self.retained.deinit();
         self.pending_qos2.deinit();
         self.router.deinit();
@@ -245,7 +280,21 @@ pub const Broker = struct {
     ) anyerror!void {
         if (connection_count > self.slots.len) return error.BrokerFull;
         var group: std.Io.Group = .init;
-        errdefer group.cancel(self.io);
+        self.will_driver.start();
+        // Unlike `Io.async`, `concurrent` guarantees the deadline driver is
+        // assigned execution before we block in the client group. A merely
+        // lazy future could otherwise leave an immediate Will queued until all
+        // clients had already disconnected.
+        var will_future = try std.Io.concurrent(
+            self.io,
+            Broker.runWillDriver,
+            .{self},
+        );
+        var stop_driver = true;
+        defer if (stop_driver) {
+            self.will_driver.stop(self.io);
+            _ = will_future.cancel(self.io);
+        };
         const errors = try self.allocator.alloc(
             ?anyerror,
             connection_count,
@@ -259,6 +308,7 @@ pub const Broker = struct {
             const subscriber_id = try self.register(
                 index,
                 &accepted.connection,
+                accepted.connect.connect,
             );
             const task = ClientTask{
                 .broker = self,
@@ -270,6 +320,10 @@ pub const Broker = struct {
             group.async(self.io, ClientTask.run, .{task});
         }
         group.await(self.io) catch {};
+        self.will_driver.stop(self.io);
+        const will_result = will_future.await(self.io);
+        stop_driver = false;
+        if (will_result) |err| return err;
         for (errors) |maybe_error| {
             if (maybe_error) |err| return err;
         }
@@ -279,6 +333,7 @@ pub const Broker = struct {
         self: *Broker,
         slot_index: usize,
         connection: *runtime.Connection,
+        connect: mqtt.Connect,
     ) Error!router_mod.SubscriberId {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
@@ -288,6 +343,8 @@ pub const Broker = struct {
         if (slot.generation == 0) slot.generation = 1;
         slot.active = true;
         slot.connection = connection.*;
+        slot.will_handle = null;
+        slot.graceful_disconnect = false;
         connection.* = undefined;
         // The configured queue count is also the memory bound. Reserve it once
         // during setup so routing performs no destination queue allocation
@@ -302,25 +359,106 @@ pub const Broker = struct {
             slot.active = false;
             return err;
         };
-        return subscriberId(slot_index, slot.generation);
+        const id = subscriberId(slot_index, slot.generation);
+        const previous_handle = self.wills.handleForClient(
+            connect.client_id,
+        );
+        const accepted_will = self.wills.acceptConnect(
+            connect,
+            std.Io.Clock.awake.now(self.io),
+        ) catch |err| {
+            connection.* = slot.connection.?;
+            slot.connection = null;
+            slot.active = false;
+            return err;
+        };
+        if (accepted_will.previous == .canceled) {
+            if (previous_handle) |handle| {
+                _ = self.will_publishers.remove(handle);
+            }
+        }
+        if (accepted_will.previous == .due_now and
+            accepted_will.previous_due != null)
+        {
+            // A due prior Will keeps its existing publisher mapping. It is
+            // detached from the ClientID index by the scheduler and the timer
+            // will release both records after publication.
+            std.debug.assert(previous_handle != null);
+        }
+        slot.will_handle = accepted_will.current;
+        if (accepted_will.current) |handle| {
+            self.will_publishers.putAssumeCapacityNoClobber(
+                handle,
+                id,
+            );
+        }
+        self.will_driver.notify(self.io);
+        return id;
     }
 
     fn unregister(
         self: *Broker,
         slot_index: usize,
         id: router_mod.SubscriberId,
-    ) void {
+    ) Error!void {
         const slot = &self.slots[slot_index];
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
+        if (!slot.graceful_disconnect) {
+            if (slot.will_handle) |handle| {
+                _ = self.wills.close(
+                    handle,
+                    .ungraceful,
+                    std.Io.Clock.awake.now(self.io),
+                ) catch |err| {
+                    if (err == error.WillNotFound) {
+                        // A newer connection with the same ClientID already
+                        // canceled or committed this generation during
+                        // takeover. The stale transport close has no remaining
+                        // Will lifecycle work.
+                        slot.will_handle = null;
+                    } else {
+                        self.state_mutex.unlock(self.io);
+                        return err;
+                    }
+                };
+            }
+        }
         _ = self.router.removeSubscriber(id) catch {};
         _ = self.pending_qos2.removePublisher(id);
         slot.active = false;
         slot.clearQueue();
         self.state_mutex.unlock(self.io);
+        self.will_driver.notify(self.io);
         if (slot.connection) |*value| value.close();
         slot.connection = null;
+        slot.will_handle = null;
+    }
+
+    fn handleDisconnect(
+        self: *Broker,
+        slot: *ClientSlot,
+        disconnect: mqtt.Disconnect,
+    ) Error!void {
+        self.state_mutex.lockUncancelable(self.io);
+        if (slot.will_handle) |handle| {
+            const result = self.wills.closeDisconnect(
+                handle,
+                disconnect,
+                std.Io.Clock.awake.now(self.io),
+            ) catch |err| {
+                self.state_mutex.unlock(self.io);
+                return err;
+            };
+            if (result == .canceled) {
+                _ = self.will_publishers.remove(handle);
+                slot.will_handle = null;
+            }
+        }
+        slot.graceful_disconnect = true;
+        self.state_mutex.unlock(self.io);
+        self.will_driver.notify(self.io);
     }
 
     fn handleSubscribe(
@@ -580,23 +718,56 @@ pub const Broker = struct {
         acknowledge_qos1: bool,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
-        _ = self.retained.applyParsedPublish(
-            publish,
+        const plan = self.enqueuePublishLocked(
             publisher_id,
+            publish,
             std.Io.Clock.awake.now(self.io),
         ) catch |err| {
             self.state_mutex.unlock(self.io);
             return err;
         };
+        defer self.allocator.free(plan.matches);
+        self.state_mutex.unlock(self.io);
+
+        if (acknowledge_qos1) if (publish.packet_id) |packet_id| {
+            const publisher_slot = try self.slotForSubscriber(
+                publisher_id,
+            );
+            publisher_slot.writer_mutex.lockUncancelable(self.io);
+            publisher.writePubAck(
+                packet_id,
+                if (plan.has_live_match) 0 else 0x10,
+            ) catch |err| {
+                publisher_slot.writer_mutex.unlock(self.io);
+                return err;
+            };
+            publisher_slot.writer_mutex.unlock(self.io);
+        };
+        try self.flushPlan(plan.matches);
+    }
+
+    /// Apply retained state and enqueue live fanout while `state_mutex` is held.
+    ///
+    /// Will publication reuses this exact route without a publisher
+    /// Connection, while client PUBLISH adds its acknowledgement after the
+    /// lock is released.
+    fn enqueuePublishLocked(
+        self: *Broker,
+        publisher_id: ?router_mod.SubscriberId,
+        publish: mqtt.Publish,
+        now: std.Io.Timestamp,
+    ) Error!RoutePlan {
+        _ = self.retained.applyParsedPublish(
+            publish,
+            publisher_id,
+            now,
+        ) catch |err| return err;
         const matches = self.router.matchAllocForPublisher(
             self.allocator,
             publish.topic,
             publisher_id,
-        ) catch |err| {
-            self.state_mutex.unlock(self.io);
-            return err;
-        };
-        defer self.allocator.free(matches);
+        ) catch |err| return err;
+        errdefer self.allocator.free(matches);
 
         // Compact the router result in place into a stable enqueue plan. This
         // is important for shared subscriptions: running the match a second
@@ -644,10 +815,9 @@ pub const Broker = struct {
                 self.allocator,
                 publish,
                 plan.len,
-                std.Io.Clock.awake.now(self.io),
+                now,
             ) catch |err| {
                 self.releaseRouteReservations(plan);
-                self.state_mutex.unlock(self.io);
                 return err;
             };
         for (plan) |match| {
@@ -672,23 +842,32 @@ pub const Broker = struct {
             destination.appendDeliveryAssumeCapacity(delivery);
         }
         self.releaseRouteReservations(plan);
-        self.state_mutex.unlock(self.io);
-
-        if (acknowledge_qos1) if (publish.packet_id) |packet_id| {
-            const publisher_slot = try self.slotForSubscriber(
-                publisher_id,
-            );
-            publisher_slot.writer_mutex.lockUncancelable(self.io);
-            publisher.writePubAck(
-                packet_id,
-                if (has_live_match) 0 else 0x10,
-            ) catch |err| {
-                publisher_slot.writer_mutex.unlock(self.io);
-                return err;
-            };
-            publisher_slot.writer_mutex.unlock(self.io);
+        if (plan.len == matches.len) return .{
+            .matches = matches,
+            .has_live_match = has_live_match,
         };
-        try self.flushPlan(plan);
+        if (plan.len == 0) {
+            self.allocator.free(matches);
+            return .{
+                .matches = try self.allocator.alloc(
+                    router_mod.Match,
+                    0,
+                ),
+                .has_live_match = has_live_match,
+            };
+        }
+        if (self.allocator.resize(matches, plan.len)) {
+            return .{
+                .matches = matches[0..plan.len],
+                .has_live_match = has_live_match,
+            };
+        }
+        const exact = try self.allocator.dupe(router_mod.Match, plan);
+        self.allocator.free(matches);
+        return .{
+            .matches = exact,
+            .has_live_match = has_live_match,
+        };
     }
 
     fn releaseRouteReservations(
@@ -813,6 +992,107 @@ pub const Broker = struct {
             _ = packet_id;
         }
     }
+
+    fn runWillDriver(
+        self: *Broker,
+    ) ?anyerror {
+        while (!self.will_driver.stopped()) {
+            self.state_mutex.lockUncancelable(self.io);
+            const published_any = self.publishDueWillsLocked(
+                std.Io.Clock.awake.now(self.io),
+            ) catch |err| {
+                self.state_mutex.unlock(self.io);
+                return err;
+            };
+            const deadline = self.wills.nextDeadline();
+            const generation =
+                self.will_driver.currentGeneration();
+            self.state_mutex.unlock(self.io);
+
+            if (published_any) {
+                self.flushAllSlots() catch |err| return err;
+            }
+            self.will_driver.wait(
+                self.io,
+                generation,
+                deadline,
+            ) catch |err| switch (err) {
+                error.Canceled => return err,
+            };
+        }
+        return null;
+    }
+
+    /// Claim and route every Will whose deadline has passed.
+    ///
+    /// `state_mutex` stays held from scheduler claim through queue ownership
+    /// transfer and scheduler release. This makes reconnect cancellation race
+    /// against one atomic publication decision: a reconnect either removes the
+    /// scheduled Will first, or observes it already committed.
+    fn publishDueWillsLocked(
+        self: *Broker,
+        now: std.Io.Timestamp,
+    ) Error!bool {
+        var published_any = false;
+        while (self.wills.pollOneDue(now)) |handle| {
+            try self.publishWillLocked(handle, now);
+            published_any = true;
+        }
+        return published_any;
+    }
+
+    fn flushAllSlots(self: *Broker) Error!void {
+        for (self.slots, 0..) |*slot, index| {
+            try self.flushSlot(index, slot);
+        }
+    }
+
+    fn publishWillLocked(
+        self: *Broker,
+        handle: will_mod.Handle,
+        now: std.Io.Timestamp,
+    ) Error!void {
+        const will = try self.wills.view(handle);
+        const publisher_id = self.will_publishers.get(handle) orelse null;
+        var properties: std.ArrayList(mqtt.Property) = .empty;
+        defer properties.deinit(self.allocator);
+        try properties.ensureTotalCapacity(
+            self.allocator,
+            will.properties.len,
+        );
+        for (will.properties) |property| {
+            // Will Delay controls scheduling and is forbidden on a normal
+            // PUBLISH. Message Expiry and all other Will Application Message
+            // properties begin when the Will is actually published.
+            if (property == .four_byte and
+                property.four_byte.id == .will_delay_interval)
+            {
+                continue;
+            }
+            properties.appendAssumeCapacity(property);
+        }
+        const publish = mqtt.Publish{
+            .dup = false,
+            .qos = will.qos,
+            .retain = will.retain,
+            .topic = will.topic,
+            .packet_id = null,
+            .properties = properties.items,
+            .payload = will.payload,
+        };
+        const plan = try self.enqueuePublishLocked(
+            publisher_id,
+            publish,
+            now,
+        );
+        defer self.allocator.free(plan.matches);
+        try self.wills.releaseDue(handle);
+        _ = self.will_publishers.remove(handle);
+
+        // The state lock cannot be held across socket writes. Queue ownership
+        // is committed at this point; the timer loop releases the lock before
+        // flushing all active slots below.
+    }
 };
 
 const ClientTask = struct {
@@ -831,12 +1111,16 @@ const ClientTask = struct {
         const connection = &slot.connection.?;
 
         task.runLoop(slot, connection) catch |err| {
-            task.result.* = err;
+            if (!ungracefulTransportClose(err)) {
+                task.result.* = err;
+            }
         };
         task.broker.unregister(
             task.slot_index,
             task.subscriber_id,
-        );
+        ) catch |err| {
+            task.result.* = err;
+        };
     }
 
     fn runLoop(
@@ -918,13 +1202,28 @@ const ClientTask = struct {
                     };
                     slot.writer_mutex.unlock(task.broker.io);
                 },
-                .disconnect => {
+                .disconnect => |*owned| {
+                    try task.broker.handleDisconnect(
+                        slot,
+                        owned.disconnect,
+                    );
                     return;
                 },
             }
         }
     }
 };
+
+fn ungracefulTransportClose(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionClosed,
+        error.ConnectionResetByPeer,
+        error.ConnectionAborted,
+        error.SocketUnconnected,
+        => true,
+        else => false,
+    };
+}
 
 fn subscriberId(index: usize, generation: u32) router_mod.SubscriberId {
     return (@as(u64, generation) << 32) | @as(u32, @intCast(index));

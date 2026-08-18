@@ -90,6 +90,20 @@ pub const Transport = union(enum) {
         self.* = undefined;
     }
 
+    /// Stop both directions of a TCP transport without releasing ownership.
+    ///
+    /// Tests and broker shutdown paths use this to wake a concurrent reader;
+    /// the normal `close` owner still performs the eventual descriptor close.
+    pub fn shutdown(self: *Transport) Error!void {
+        switch (self.*) {
+            .tcp => |tcp| try tcp.stream.shutdown(tcp.io, .both),
+            // TLS/WebSocket transports currently expose only owning close
+            // operations. Their protocol-specific servers coordinate shutdown
+            // outside this raw packet transport.
+            .tls, .tls_vail, .tls_server, .websocket => {},
+        }
+    }
+
     pub fn writePacket(
         self: *Transport,
         bytes: []u8,

@@ -20,7 +20,7 @@ and equal-wire broker results are kept separate.
 | Publisher acknowledgement | Route before PUBACK; MQTT 5 reason `0x10` when no live match | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers | Both production brokers integrate retained delivery |
 | Broker sessions | Separate bounded Session Store; not yet composed into live Broker | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated |
-| Will lifecycle | Separate indexed scheduler; not yet composed into live Broker | Both production brokers integrate Will publication |
+| Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation and retained Will | Both production brokers integrate Will publication |
 | Broker persistence | No disk commitlog yet | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, inflight/queued messages and retained base-message store |
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
@@ -124,6 +124,34 @@ Rumqttd likewise records the QoS 2 PUBLISH in its ACK log and appends it to the
 commitlog only after PUBREL. Netz keeps this live store deliberately
 in-memory; durable Session continuation across reconnect remains separate
 work.
+
+## Live Will lifecycle
+
+`mqtt.will_scheduler.Scheduler` is now driven by the live broker rather than
+remaining an in-process planning utility:
+
+- accepted CONNECT atomically installs the owned Will and applies prior
+  ClientID reconnect/takeover semantics,
+- any valid graceful DISCONNECT cancels the Will except reason `0x04`, which
+  explicitly requests publication,
+- network EOF/reset schedules an ungraceful Will,
+- the deadline is `min(Will Delay Interval, Session Expiry Interval)`, including
+  a Session Expiry override on DISCONNECT,
+- reconnect with Clean Start=0 before the deadline cancels the pending Will,
+  while a due/clean-start takeover cannot suppress committed publication,
+- one concurrent generation-futex driver services every deadline; schedule,
+  cancellation and broker shutdown wake it without one sleeping task per
+  client,
+- Will Delay is stripped before creating the normal PUBLISH, while Content
+  Type, Correlation Data, User Properties and Message Expiry are forwarded,
+- Will routing reuses the exact bounded QoS/retained/fanout queue, so retained
+  Wills are replayable to later subscribers and downstream Receive Maximum
+  still applies.
+
+Mosquitto uses one ordered Will-delay list in its event loop; rumqttd instead
+spawns a Tokio timeout/channel per disconnected link. Netz keeps Mosquitto's
+single-driver ownership model while using the indexed heap's O(log n)
+reschedule/cancel operations and generation-safe handles.
 
 ## Shared router benchmark
 
@@ -414,8 +442,8 @@ rumqttd.
    state.
 2. Add a native client-identity option for WSS; native MQTT TLS client/server
    mTLS and WS/WSS server transports are available.
-3. Compose the existing session/Will stores into the live Broker, including
-   durable QoS 2 continuation across reconnect.
+3. Compose the existing Session Store into the live Broker, including durable
+   QoS 2 continuation across reconnect.
 4. Extend the equal-wire driver with concurrent publisher windows, latency
    percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
    comparison.
