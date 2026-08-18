@@ -5,12 +5,25 @@ const runtime = @import("runtime.zig");
 
 const Broker = broker_mod.Broker;
 
+pub const TestContext = struct {
+    pub const mqtt_mod = mqtt;
+    pub const BrokerType = Broker;
+    pub const runtime_mod = runtime;
+    pub const ServeStateType = ServeState;
+
+    pub const testBrokerFn = testBroker;
+    pub const connectFn = connect;
+    pub const disconnectAllFn = disconnectAll;
+    pub const joinServerFn = joinServer;
+    pub const writeDuplicatePublishFn = writeDuplicatePublish;
+};
+
 const ServeState = struct {
     broker: *Broker,
     connection_count: usize,
     err: ?anyerror = null,
 
-    fn run(self: *@This()) void {
+    pub fn run(self: *@This()) void {
         self.broker.serve(self.connection_count) catch |err| {
             self.err = err;
         };
@@ -72,6 +85,29 @@ fn joinServer(
     thread.join();
     joined.* = true;
     if (state.err) |err| return err;
+}
+
+fn writeDuplicatePublish(
+    connection: *runtime.Connection,
+    topic_name: []const u8,
+    payload: []const u8,
+    packet_id: u16,
+) !void {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try mqtt.writePublish(
+        &encoded,
+        std.testing.allocator,
+        .v5,
+        topic_name,
+        payload,
+        .{
+            .qos = .exactly_once,
+            .dup = true,
+            .packet_id = packet_id,
+        },
+    );
+    try connection.transport.writePacket(encoded.items);
 }
 
 test "broker routes QoS 1 across live TCP clients" {
@@ -326,4 +362,8 @@ test "broker queues QoS 1 delivery until Receive Maximum credit returns" {
 
     try disconnectAll(&.{ &subscriber, &publisher });
     try joinServer(thread, &joined, &serve);
+}
+
+test {
+    _ = @import("broker/qos2_tests.zig");
 }

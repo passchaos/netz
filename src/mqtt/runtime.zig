@@ -809,6 +809,54 @@ pub const Connection = struct {
         if (!ack.accepted()) return error.PublishRefused;
     }
 
+    /// Apply a downstream PUBREC parsed by `readBrokerEvent` and advance the
+    /// broker-side sender to PUBREL.
+    ///
+    /// The caller serializes this method with all other writes for the same
+    /// connection. State moves to the PUBREL set only after the packet is
+    /// written, so a transport error cannot leave a live connection claiming
+    /// progress that never reached its peer.
+    pub fn applyPubRec(
+        self: *Connection,
+        ack: mqtt.AckPacket,
+    ) Error!void {
+        const index = @as(usize, ack.packet_id);
+        if (ack.packet_type != .pubrec or
+            !self.outgoing_qos2.isSet(index))
+        {
+            return error.UnexpectedPacket;
+        }
+        if (!ack.accepted()) {
+            self.releaseOutgoingPublish(
+                ack.packet_id,
+                .exactly_once,
+            );
+            return error.PublishRefused;
+        }
+        try self.writePubRel(ack.packet_id, 0);
+        self.outgoing_qos2.setValue(index, false);
+        self.outgoing_qos2_pubrel.set(index);
+    }
+
+    /// Apply the final PUBCOMP of a broker-originated QoS 2 delivery.
+    pub fn applyPubComp(
+        self: *Connection,
+        ack: mqtt.AckPacket,
+    ) Error!void {
+        if (ack.packet_type != .pubcomp or
+            !self.outgoing_qos2_pubrel.isSet(
+                @as(usize, ack.packet_id),
+            ))
+        {
+            return error.UnexpectedPacket;
+        }
+        self.releaseOutgoingPublish(
+            ack.packet_id,
+            .exactly_once,
+        );
+        if (!ack.accepted()) return error.PublishRefused;
+    }
+
     pub fn writePubRec(self: *Connection, packet_id: u16, reason_code: u8) Error!void {
         try self.writeAckPacket(.pubrec, packet_id, reason_code, &.{});
         self.completeIncomingPubRec(packet_id, reason_code);
@@ -1058,6 +1106,46 @@ pub const Connection = struct {
                 );
                 errdefer value.deinit(self.allocator);
                 break :blk .{ .puback = .{
+                    .packet = packet,
+                    .ack = value,
+                } };
+            },
+            .pubrec => blk: {
+                var value = try mqtt.AckPacket.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                break :blk .{ .pubrec = .{
+                    .packet = packet,
+                    .ack = value,
+                } };
+            },
+            .pubrel => blk: {
+                var value = try mqtt.AckPacket.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                // Unlike the strict synchronous `readPubRel`, a broker must
+                // see unknown/repeated identifiers so it can answer PUBCOMP
+                // 0x92 rather than converting an idempotent control packet
+                // into an immediate transport failure.
+                break :blk .{ .pubrel = .{
+                    .packet = packet,
+                    .ack = value,
+                } };
+            },
+            .pubcomp => blk: {
+                var value = try mqtt.AckPacket.parse(
+                    self.allocator,
+                    self.protocol,
+                    packet.bytes,
+                );
+                errdefer value.deinit(self.allocator);
+                break :blk .{ .pubcomp = .{
                     .packet = packet,
                     .ack = value,
                 } };
@@ -1425,6 +1513,9 @@ pub const BrokerEvent = union(enum) {
     subscribe: OwnedSubscribe,
     unsubscribe: OwnedUnsubscribe,
     puback: OwnedAck,
+    pubrec: OwnedAck,
+    pubrel: OwnedAck,
+    pubcomp: OwnedAck,
     pingreq: OwnedPacket,
     disconnect: OwnedDisconnect,
 
@@ -1437,6 +1528,9 @@ pub const BrokerEvent = union(enum) {
             .subscribe => |*value| value.deinit(allocator),
             .unsubscribe => |*value| value.deinit(allocator),
             .puback => |*value| value.deinit(allocator),
+            .pubrec => |*value| value.deinit(allocator),
+            .pubrel => |*value| value.deinit(allocator),
+            .pubcomp => |*value| value.deinit(allocator),
             .pingreq => |*value| value.deinit(allocator),
             .disconnect => |*value| value.deinit(allocator),
         }

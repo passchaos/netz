@@ -12,8 +12,8 @@ and equal-wire broker results are kept separate.
 | Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
 | MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; live broker currently MQTT 5 TCP | rumqtt clients support 3.1.1/5; Mosquitto broker supports both |
-| Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
-| QoS | Runtime QoS 0/1/2; live broker QoS 0/1 only | Both brokers support QoS 0/1/2 |
+| Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
+| QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL | Both brokers support QoS 0/1/2 |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups | Both references provide production topic indexes |
 | Fanout ownership | One ref-counted topic/payload allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
@@ -71,9 +71,31 @@ WebSocket, HTTP API, clients, plugins and tests disabled, then configured with
 MQTT 5 listener from `rumqttd.toml`. The workload shape and payload bytes were
 identical; equal checksums prove all 80,000 measured deliveries completed.
 This result is evidence for this bounded live QoS 1 fanout shape only. It does
-not claim netz exceeds Mosquitto or rumqttd in QoS 2, persistence, offline
-sessions, retained/Will integration, tail latency, memory use, or broader
-conformance.
+not benchmark the QoS 2 path or claim netz exceeds Mosquitto or rumqttd in
+persistence, offline sessions, retained/Will integration, tail latency, memory
+use, or broader conformance.
+
+## Live QoS 2 dispatch
+
+The broker now follows the audited Mosquitto lifecycle rather than treating
+QoS 2 as QoS 1 with extra acknowledgements:
+
+- inbound PUBLISH bytes are deep-owned in a broker-wide bounded store,
+- PUBREC is written only after that transaction is stored,
+- a DUP=1 PUBLISH with the same Packet Identifier is validated and
+  acknowledged without creating another Application Message,
+- topic routing happens only when PUBREL arrives,
+- a repeated or unknown PUBREL receives PUBCOMP without routing again, matching
+  Mosquitto's lost-PUBCOMP recovery behavior,
+- downstream QoS remains `min(source QoS, subscription QoS)`,
+- downstream PUBREC/PUBREL/PUBCOMP state shares the runtime's fixed Packet
+  Identifier tables and Receive Maximum queue,
+- disconnect removes all pending transactions owned by that live connection.
+
+Rumqttd likewise records the QoS 2 PUBLISH in its ACK log and appends it to the
+commitlog only after PUBREL. Netz keeps this live store deliberately
+in-memory; durable Session continuation across reconnect remains separate
+work.
 
 ## Shared router benchmark
 
@@ -364,8 +386,8 @@ rumqttd.
    state.
 2. Add a native client-identity option for WSS; native MQTT TLS client/server
    mTLS and WS/WSS server transports are available.
-3. Compose the existing retained/session/Will stores into the live Broker and
-   add QoS 2 broker dispatch.
+3. Compose the existing retained/session/Will stores into the live Broker,
+   including durable QoS 2 continuation across reconnect.
 4. Extend the equal-wire driver with concurrent publisher windows, latency
    percentiles, allocations and peak RSS; keep Mosquitto and rumqttd in every
    comparison.

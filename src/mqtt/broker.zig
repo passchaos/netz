@@ -2,15 +2,16 @@
 //!
 //! This module composes the transport-independent connection runtime with the
 //! topic router. It intentionally focuses on the live broker hot path:
-//! SUBSCRIBE/UNSUBSCRIBE, QoS 0/1 PUBLISH routing, No Local/shared selection,
+//! SUBSCRIBE/UNSUBSCRIBE, QoS 0/1/2 PUBLISH routing, No Local/shared selection,
 //! downstream acknowledgements, and connection cleanup. Durable sessions,
-//! retained state, QoS 2, and Will scheduling remain explicit higher-level
-//! components rather than being silently approximated here.
+//! retained state, and Will scheduling remain explicit higher-level components
+//! rather than being silently approximated here.
 
 const std = @import("std");
 const mqtt = @import("mod.zig");
 const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
+const qos2_mod = @import("broker/qos2.zig");
 
 const net = std.Io.net;
 
@@ -18,12 +19,17 @@ pub const Error = runtime.Error || router_mod.Error || error{
     BrokerFull,
     ClientNotRegistered,
     ClientOffline,
-    UnsupportedBrokerPacket,
 };
 
 pub const Limits = struct {
     max_connections: usize = 1024,
     max_queued_deliveries_per_connection: usize = 256,
+    /// Aggregate cap for inbound QoS 2 Application Messages awaiting PUBREL.
+    ///
+    /// Per-connection Receive Maximum remains enforced by `runtime.Connection`;
+    /// this independent broker-wide bound prevents many clients from turning
+    /// valid-but-stalled handshakes into unbounded owned payload memory.
+    max_pending_incoming_qos2: usize = 4096,
     runtime: runtime.Limits = .{},
 };
 
@@ -196,6 +202,7 @@ pub const Broker = struct {
     server: runtime.Server,
     options: Options,
     router: router_mod.Router,
+    pending_qos2: qos2_mod.Store,
     slots: []ClientSlot,
     state_mutex: std.Io.Mutex = .init,
 
@@ -207,6 +214,9 @@ pub const Broker = struct {
     ) Error!Broker {
         if (options.limits.max_connections == 0 or
             options.limits.max_queued_deliveries_per_connection == 0 or
+            options.limits.max_pending_incoming_qos2 == 0 or
+            options.limits.max_pending_incoming_qos2 >
+                std.math.maxInt(u32) or
             options.accept.protocol != .v5)
         {
             return error.InvalidProperty;
@@ -222,6 +232,11 @@ pub const Broker = struct {
             options.router,
         );
         errdefer router.deinit();
+        var pending_qos2 = try qos2_mod.Store.init(
+            allocator,
+            options.limits.max_pending_incoming_qos2,
+        );
+        errdefer pending_qos2.deinit();
         return .{
             .allocator = allocator,
             .io = io,
@@ -233,6 +248,7 @@ pub const Broker = struct {
             ),
             .options = options,
             .router = router,
+            .pending_qos2 = pending_qos2,
             .slots = slots,
         };
     }
@@ -244,6 +260,7 @@ pub const Broker = struct {
             if (slot.connection) |*connection| connection.close();
         }
         self.allocator.free(self.slots);
+        self.pending_qos2.deinit();
         self.router.deinit();
         self.server.deinit();
         self.* = undefined;
@@ -333,6 +350,7 @@ pub const Broker = struct {
         defer slot.writer_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         _ = self.router.removeSubscriber(id) catch {};
+        _ = self.pending_qos2.removePublisher(id);
         slot.active = false;
         slot.clearQueue();
         self.state_mutex.unlock(self.io);
@@ -413,8 +431,101 @@ pub const Broker = struct {
         publish: mqtt.Publish,
     ) Error!void {
         if (publish.qos == .exactly_once) {
-            return error.UnsupportedBrokerPacket;
+            return self.recordQoS2Publish(
+                publisher_id,
+                publisher,
+                publish,
+            );
         }
+        return self.routeReleasedPublish(
+            publisher_id,
+            publisher,
+            publish,
+            true,
+        );
+    }
+
+    fn recordQoS2Publish(
+        self: *Broker,
+        publisher_id: router_mod.SubscriberId,
+        publisher: *runtime.Connection,
+        publish: mqtt.Publish,
+    ) Error!void {
+        self.state_mutex.lockUncancelable(self.io);
+        _ = self.pending_qos2.record(
+            publisher_id,
+            publish,
+        ) catch |err| {
+            self.state_mutex.unlock(self.io);
+            if (err != error.ReceiveMaximumExceeded) return err;
+
+            // A broker-wide pending-transaction cap is an MQTT quota failure,
+            // not malformed client behavior. Reject this transaction with the
+            // standard QoS 2 response and release the runtime receive slot so
+            // the connection can continue.
+            const publisher_slot = try self.slotForSubscriber(publisher_id);
+            publisher_slot.writer_mutex.lockUncancelable(self.io);
+            defer publisher_slot.writer_mutex.unlock(self.io);
+            try publisher.writePubRec(publish.packet_id.?, 0x97);
+            return;
+        };
+        self.state_mutex.unlock(self.io);
+
+        // Mosquitto stores the inbound QoS 2 base message before PUBREC and
+        // routes only when PUBREL arrives. A retransmitted PUBLISH receives the
+        // same PUBREC without replacing or duplicating the stored message.
+        const publisher_slot = try self.slotForSubscriber(publisher_id);
+        publisher_slot.writer_mutex.lockUncancelable(self.io);
+        defer publisher_slot.writer_mutex.unlock(self.io);
+        try publisher.writePubRec(publish.packet_id.?, 0);
+    }
+
+    fn handlePubRel(
+        self: *Broker,
+        publisher_id: router_mod.SubscriberId,
+        publisher: *runtime.Connection,
+        ack: mqtt.AckPacket,
+    ) Error!void {
+        self.state_mutex.lockUncancelable(self.io);
+        var pending = self.pending_qos2.take(
+            publisher_id,
+            ack.packet_id,
+        ) orelse {
+            self.state_mutex.unlock(self.io);
+            // Mosquitto deliberately acknowledges an unknown/repeated PUBREL:
+            // the original PUBCOMP may have been lost after the message was
+            // already released. MQTT 5 allows 0x92, but Success is maximally
+            // interoperable and keeps this path idempotent.
+            const publisher_slot = try self.slotForSubscriber(publisher_id);
+            publisher_slot.writer_mutex.lockUncancelable(self.io);
+            defer publisher_slot.writer_mutex.unlock(self.io);
+            try publisher.writePubComp(ack.packet_id, 0);
+            return;
+        };
+        self.state_mutex.unlock(self.io);
+        defer pending.deinit();
+
+        const publish = pending.asPublish(ack.packet_id);
+        try self.routeReleasedPublish(
+            publisher_id,
+            publisher,
+            publish,
+            false,
+        );
+
+        const publisher_slot = try self.slotForSubscriber(publisher_id);
+        publisher_slot.writer_mutex.lockUncancelable(self.io);
+        defer publisher_slot.writer_mutex.unlock(self.io);
+        try publisher.writePubComp(ack.packet_id, 0);
+    }
+
+    fn routeReleasedPublish(
+        self: *Broker,
+        publisher_id: router_mod.SubscriberId,
+        publisher: *runtime.Connection,
+        publish: mqtt.Publish,
+        acknowledge_qos1: bool,
+    ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
         const matches = self.router.matchAllocForPublisher(
             self.allocator,
@@ -500,7 +611,7 @@ pub const Broker = struct {
         self.releaseRouteReservations(plan);
         self.state_mutex.unlock(self.io);
 
-        if (publish.packet_id) |packet_id| {
+        if (acknowledge_qos1) if (publish.packet_id) |packet_id| {
             const publisher_slot = try self.slotForSubscriber(
                 publisher_id,
             );
@@ -513,7 +624,7 @@ pub const Broker = struct {
                 return err;
             };
             publisher_slot.writer_mutex.unlock(self.io);
-        }
+        };
         try self.flushPlan(plan);
     }
 
@@ -681,6 +792,33 @@ const ClientTask = struct {
                 .puback => |*owned| {
                     slot.writer_mutex.lockUncancelable(task.broker.io);
                     connection.applyPubAck(owned.ack) catch |err| {
+                        slot.writer_mutex.unlock(task.broker.io);
+                        return err;
+                    };
+                    slot.writer_mutex.unlock(task.broker.io);
+                    try task.broker.flushSlot(
+                        task.slot_index,
+                        slot,
+                    );
+                },
+                .pubrec => |*owned| {
+                    slot.writer_mutex.lockUncancelable(task.broker.io);
+                    connection.applyPubRec(owned.ack) catch |err| {
+                        slot.writer_mutex.unlock(task.broker.io);
+                        return err;
+                    };
+                    slot.writer_mutex.unlock(task.broker.io);
+                },
+                .pubrel => |*owned| {
+                    try task.broker.handlePubRel(
+                        task.subscriber_id,
+                        connection,
+                        owned.ack,
+                    );
+                },
+                .pubcomp => |*owned| {
+                    slot.writer_mutex.lockUncancelable(task.broker.io);
+                    connection.applyPubComp(owned.ack) catch |err| {
                         slot.writer_mutex.unlock(task.broker.io);
                         return err;
                     };
